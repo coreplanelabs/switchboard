@@ -17,6 +17,15 @@ import {
   snippetOf,
   tailCut,
   textOfStoredRow,
+  threadSessionKey,
+  workingSessionKey,
+  connectorRowId,
+  shipUnitRowId,
+  storedTurnRow,
+  silentOfStoredRow,
+  foldedOfStoredRow,
+  migrationOrder,
+  migrationRowId,
 } from "./sessionLog.js";
 
 // Feature: docs/reference/specs/session-log.md — the pure rules of the session
@@ -279,5 +288,108 @@ describe("actorOfStoredRow — the author's id, absent for bot turns and old row
   it("a compaction row and an unreadable row have no actor", () => {
     expect(actorOfStoredRow(JSON.stringify({ compaction: { summary: "s" } }))).toBeUndefined();
     expect(actorOfStoredRow("{")).toBeUndefined();
+  });
+});
+
+describe("threadSessionKey and workingSessionKey — the thread session and the working lanes (item 13)", () => {
+  it("the thread session is keyed by the thread alone and can never collide with a per-agent key", () => {
+    expect(threadSessionKey("slack:C1:1.0")).toBe("slack:C1:1.0:@thread");
+    expect(SESSION_KEY_PATTERN.test(threadSessionKey("slack:C1:1.0"))).toBe(true);
+    // No agent id starts with `@`, so `sessionKey` never produces the thread session's name.
+    expect(threadSessionKey("slack:C1:1.0")).not.toBe(sessionKey("slack:C1:1.0", "thread"));
+  });
+
+  it("a unit's lanes continue one working session across rounds: every coding round of the unit derives the same key, the review lane its own", () => {
+    const instance = { id: "plan-the-one-door" };
+    const round1 = workingSessionKey(instance, "U16", "coding");
+    const round2 = workingSessionKey(instance, "U16", "coding");
+    const round3 = workingSessionKey(instance, "U16", "coding");
+    expect(round1).toBe("plan-the-one-door:U16:coding");
+    expect(round2).toBe(round1);
+    expect(round3).toBe(round1);
+    expect(workingSessionKey(instance, "U16", "review")).toBe("plan-the-one-door:U16:review");
+    expect(SESSION_KEY_PATTERN.test(round1)).toBe(true);
+  });
+
+  it("a re-issue of the same plan continues the prior instance's lanes: the attempt suffix is stripped", () => {
+    const first = workingSessionKey({ id: "plan-x" }, "U16", "coding");
+    const reissue = workingSessionKey({ id: "plan-x-2", attempt: 2 }, "U16", "coding");
+    expect(reissue).toBe(first);
+    // An id that does not carry the attempt suffix (trimmed differently) is kept as it is.
+    expect(workingSessionKey({ id: "plan-y", attempt: 2 }, "U16", "review")).toBe("plan-y:U16:review");
+  });
+});
+
+describe("connectorRowId and shipUnitRowId — the keyed append's identities (item 13)", () => {
+  it("an edited message appends a second row: the edit stamp changes the id, a re-delivered unedited message does not", () => {
+    const original = connectorRowId("slack:C1:2.0");
+    expect(connectorRowId("slack:C1:2.0")).toBe(original);
+    const edited = connectorRowId("slack:C1:2.0", "3.0");
+    expect(edited).not.toBe(original);
+    expect(connectorRowId("slack:C1:2.0", "3.0")).toBe(edited);
+  });
+
+  it("a fold's row id is the ship_unit event's identity, so the same event read twice folds one row", () => {
+    const id = shipUnitRowId({ unit: "U16", state: "started", seq: 4 });
+    expect(id).toBe("ship-unit:U16:started:4");
+    expect(shipUnitRowId({ unit: "U16", state: "started", seq: 4 })).toBe(id);
+    expect(shipUnitRowId({ unit: "U16", state: "coded", seq: 9 })).not.toBe(id);
+    // A unit reopened at a second segment repeats a state under a new seq:
+    // two distinct events, two distinct ids — the second fold is not dropped.
+    expect(shipUnitRowId({ unit: "U16", state: "started", seq: 20 })).not.toBe(id);
+  });
+});
+
+describe("storedTurnRow — a thread-session row and its marks (item 13)", () => {
+  it("a silent reply is the person's turn marked silent; a fold is marked folded; an ordinary turn carries neither", () => {
+    const silent = storedTurnRow({ role: "user", text: "ship it", actor: "slack:UALICE", silent: true });
+    expect(silentOfStoredRow(silent)).toBe(true);
+    expect(foldedOfStoredRow(silent)).toBe(false);
+    expect(actorOfStoredRow(silent)).toBe("slack:UALICE");
+    expect(textOfStoredRow(silent)).toBe("ship it");
+    const fold = storedTurnRow({ role: "assistant", text: "the unit started", folded: true });
+    expect(foldedOfStoredRow(fold)).toBe(true);
+    expect(silentOfStoredRow(fold)).toBe(false);
+    const plain = storedTurnRow({ role: "user", text: "hello" });
+    expect(silentOfStoredRow(plain)).toBe(false);
+    expect(foldedOfStoredRow(plain)).toBe(false);
+    expect(silentOfStoredRow("not json")).toBe(false);
+  });
+});
+
+describe("migrationOrder — old per-agent logs read once into the thread session (item 13)", () => {
+  it("a thread with two agents' logs migrates in the order of their runs' start times, each run's rows in index order, rows outside any range after the runs before them", () => {
+    const runs = [
+      { key: "t:coding", startedAt: 1_000, range: { from: 0, to: 2 } },
+      { key: "t:review", startedAt: 2_000, range: { from: 0, to: 1 } },
+      { key: "t:coding", startedAt: 3_000, range: { from: 3, to: 4 } },
+    ];
+    const logs = [
+      { key: "t:coding", rows: [0, 1, 2, 3, 4, 5] }, // 5 is outside every range: after the runs before it
+      { key: "t:review", rows: [0, 1, 2] }, // 2 is outside: after the review run
+    ];
+    expect(migrationOrder(runs, logs)).toEqual([
+      { key: "t:coding", idx: 0 },
+      { key: "t:coding", idx: 1 },
+      { key: "t:coding", idx: 2 },
+      { key: "t:review", idx: 0 },
+      { key: "t:review", idx: 1 },
+      { key: "t:review", idx: 2 },
+      { key: "t:coding", idx: 3 },
+      { key: "t:coding", idx: 4 },
+      { key: "t:coding", idx: 5 },
+    ]);
+  });
+
+  it("a row before any run of its log comes first, and the migration's row ids are stable so the read-once replay appends nothing twice", () => {
+    const runs = [{ key: "t:coding", startedAt: 1_000, range: { from: 1, to: 1 } }];
+    const logs = [{ key: "t:coding", rows: [0, 1] }];
+    expect(migrationOrder(runs, logs)).toEqual([
+      { key: "t:coding", idx: 0 },
+      { key: "t:coding", idx: 1 },
+    ]);
+    expect(migrationRowId("t:coding", 0)).toBe(migrationRowId("t:coding", 0));
+    expect(migrationRowId("t:coding", 0)).not.toBe(migrationRowId("t:coding", 1));
+    expect(migrationRowId("t:coding", 0)).not.toBe(migrationRowId("t:review", 0));
   });
 });

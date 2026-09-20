@@ -679,3 +679,23 @@ describe("UnitPage — the Findings block: the pull request's ledger beside the 
     expect(none.findAll("#findings li.finding")).toHaveLength(0);
   });
 });
+
+it("the session search derives the unit's working keys <instance>:<unit>:coding and <instance>:<unit>:review when no run of a lane names its session (session-log item 13)", async () => {
+  const w = mountApp(UnitPage, {
+    seed: seed(
+      {
+        threads: { coding: "slack:C1:u1" },
+        sourceUrls: { coding: "https://example.slack.com/archives/C1/p10" },
+        ending: undefined,
+        pr: undefined,
+        rounds: [{ index: 0, agent: "coding", outcome: "started", at: T0 }],
+      },
+      [{ ...run("c0"), session: undefined }],
+    ),
+  });
+  answer({ "/api/runs.search": () => json({ session: "plan-p-1:U16:coding", hits: [], gaps: [] }) });
+  await w.find("#search-words").setValue("lockfile");
+  await w.find("#search form").trigger("submit");
+  await flush();
+  expect(fetchMock.mock.calls[0][0]).toBe("/api/runs.search?session=plan-p-1%3AU16%3Acoding&query=lockfile&limit=20");
+});

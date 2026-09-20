@@ -8,6 +8,15 @@ import { InMemoryRunLedger } from "./inMemory.js";
 import type { RunLedger } from "./ledger.js";
 import { GEN_PATTERN, TRANSCRIPT_PART_BYTES, type IntakeReceipt } from "./types.js";
 import {
+  actorOfStoredRow,
+  connectorRowId,
+  roleOfStoredRow,
+  shipUnitRowId,
+  silentOfStoredRow,
+  storedTurnRow,
+  threadSessionKey,
+} from "./sessionLog.js";
+import {
   createLedgerWriteThrough,
   LANDED_MAX,
   mintGeneration,
@@ -1919,5 +1928,59 @@ describe("intake receipts — the write-through's retry (run-history item 59)", 
   it("the null write-through records nothing and answers undefined", async () => {
     const wt = new NullLedgerWriteThrough("gen-A", { put: async () => ({}), abandoned: () => {} });
     expect(await wt.recordIntake("slack:C1:2.0", receipt())).toBeUndefined();
+  });
+});
+
+describe("appendSession — the thread session's idempotent keyed append (session-log item 13)", () => {
+  const KEY = threadSessionKey("slack:C1:1.0");
+
+  it("a fold that reads the same ship_unit event twice yields one row and never a second copy of the report", async () => {
+    const { ledger, wt } = harness();
+    const event = { unit: "U16", state: "ended", seq: 12 };
+    const rows = [{ part: 0, json: storedTurnRow({ role: "assistant", text: "U16 ended: the report", folded: true }) }];
+    expect(await wt.appendSession(KEY, shipUnitRowId(event), rows)).toEqual({ ok: true, appended: true });
+    expect(await wt.appendSession(KEY, shipUnitRowId(event), rows)).toEqual({ ok: true, appended: false });
+    const log = await ledger.readSession(KEY, 0);
+    expect(log.messages).toEqual([{ role: "assistant", content: [{ type: "text", text: "U16 ended: the report" }] }]);
+  });
+
+  it("two connector turns in one second keep the object's order, and an edited message appends a second row under its edit id", async () => {
+    const { ledger, wt } = harness();
+    const first = { part: 0, json: storedTurnRow({ role: "user", text: "first", actor: "slack:UALICE" }) };
+    const second = { part: 0, json: storedTurnRow({ role: "user", text: "second", actor: "slack:UBOB" }) };
+    await wt.appendSession(KEY, connectorRowId("slack:C1:2.0"), [first]);
+    await wt.appendSession(KEY, connectorRowId("slack:C1:2.1"), [second]);
+    // The unedited message re-delivered appends nothing; its edit appends a second row.
+    expect((await wt.appendSession(KEY, connectorRowId("slack:C1:2.0"), [first])).appended).toBe(false);
+    const edited = { part: 0, json: storedTurnRow({ role: "user", text: "first, edited", actor: "slack:UALICE" }) };
+    expect((await wt.appendSession(KEY, connectorRowId("slack:C1:2.0", "3.0"), [edited])).appended).toBe(true);
+    const log = await ledger.readSession(KEY, 0);
+    expect(log.messages.map((m) => m.content)).toEqual([
+      [{ type: "text", text: "first" }],
+      [{ type: "text", text: "second" }],
+      [{ type: "text", text: "first, edited" }],
+    ]);
+  });
+
+  it("two concurrent appends of one row id land one row: the seen-check and the append are one synchronous span", async () => {
+    const { ledger, wt } = harness();
+    const rows = [{ part: 0, json: storedTurnRow({ role: "user", text: "once", actor: "slack:UALICE" }) }];
+    const [a, b] = await Promise.all([
+      wt.appendSession(KEY, connectorRowId("slack:C1:5.0"), rows),
+      wt.appendSession(KEY, connectorRowId("slack:C1:5.0"), rows),
+    ]);
+    expect([a.appended, b.appended].sort()).toEqual([false, true]);
+    const log = await ledger.readSession(KEY, 0);
+    expect(log.messages).toHaveLength(1);
+  });
+
+  it("a reply the intake gate withheld as silent is appended as the person's turn marked silent", async () => {
+    const { ledger, wt } = harness();
+    const row = storedTurnRow({ role: "user", text: "noted in passing", actor: "slack:UALICE", silent: true });
+    await wt.appendSession(KEY, connectorRowId("slack:C1:4.0"), [{ part: 0, json: row }]);
+    const stored = ledger.sessions.get(KEY)!.rows[0]!;
+    expect(silentOfStoredRow(stored.json)).toBe(true);
+    expect(actorOfStoredRow(stored.json)).toBe("slack:UALICE");
+    expect(roleOfStoredRow(stored.json)).toBe("user");
   });
 });

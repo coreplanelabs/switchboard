@@ -72,6 +72,17 @@ export interface RunLedger {
   step(runId: string, gen: string, record: StepRecord, turns: TranscriptTurn[], session?: string): Promise<FenceResult>;
   /** The index a session log's next row lands at: 0 for a log no run has written. */
   sessionTail(key: string): Promise<number>;
+  /** An idempotent keyed append (docs/reference/specs/session-log.md item 13):
+   *  the parts of ONE turn appended at the log's tail under `rowId` — a fold of
+   *  a `ship_unit` event, a connector's turn, a migrated row. A row id the log
+   *  has seen appends nothing (`appended: false`), so the fold and the
+   *  migration replay safely. No owner fence: a thread session has no one
+   *  owning run — folds and connector turns land from whoever holds the event. */
+  appendSession(
+    key: string,
+    rowId: string,
+    rows: readonly { part: number; json: string }[],
+  ): Promise<{ ok: boolean; appended: boolean }>;
   /** Own the session log for the run: its writes land, every other generation's are fenced.
    *  Taken after the history claim, so a refused claim never steals a live run's log.
    *  `maxBytes` is the log's byte budget (session-log item 5); absent, the implementation's

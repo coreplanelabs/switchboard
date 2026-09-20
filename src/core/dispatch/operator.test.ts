@@ -540,3 +540,36 @@ describe("operatorThreadTail carries each turn's actor off the assembled transcr
     ]);
   });
 });
+
+describe("operatorThreadTail reads the thread session first (session-log item 13)", () => {
+  it("a thread session with rows is the tail — the per-agent logs are not read; an empty one falls back to the per-agent logs", async () => {
+    const asked: string[] = [];
+    const turn = (text: string) => ({
+      complete: true as const,
+      turns: 1,
+      messages: [{ role: "user" as const, content: [{ type: "text" as const, text }] }],
+      compactions: [],
+    });
+    const empty = { complete: true as const, turns: 0, messages: [], compactions: [] };
+    const ledger = {
+      readSessionTail: async (key: string) => {
+        asked.push(key);
+        return {
+          transcript: key.endsWith(":@thread") ? turn("from the thread session") : turn("from a per-agent log"),
+        };
+      },
+    };
+    expect(await operatorThreadTail(ledger, [{ agent: "general" }], "slack:C1:1.0")).toEqual([
+      { text: "user: from the thread session" },
+    ]);
+    expect(asked).toEqual(["slack:C1:1.0:@thread"]);
+    const fallback = {
+      readSessionTail: async (key: string) => ({
+        transcript: key.endsWith(":@thread") ? empty : turn("from a per-agent log"),
+      }),
+    };
+    expect(await operatorThreadTail(fallback, [{ agent: "general" }], "slack:C1:1.0")).toEqual([
+      { text: "user: from a per-agent log" },
+    ]);
+  });
+});

@@ -26,6 +26,7 @@
 //   POST /runs/session/tail        {key}                                 → {next}
 //   POST /runs/session/owner       {key, runId, gen, maxBytes}           → {ok}
 //   POST /runs/session/write       {key, gen, rows, attachments}         → {ok, bytes} | 409 fenced
+//   POST /runs/session/append      {key, rowId, rows}                    → {ok, appended}
 //   POST /runs/session/read        {key, from, to?}                      → {rows, attachments}
 //   POST /runs/session/read-tail   {key, maxBytes}                       → {rows, attachments, from}
 //   POST /runs/session/clear-owner {key, runId, gen}                     → {ok} | 409 fenced
@@ -269,6 +270,16 @@ export class WorkerRunLedger implements RunLedger {
     this.checkSessionKey(key);
     const r = await this.post("/runs/session/tail", { key });
     return typeof r.data.next === "number" ? r.data.next : 0;
+  }
+
+  async appendSession(
+    key: string,
+    rowId: string,
+    rows: readonly { part: number; json: string }[],
+  ): Promise<{ ok: boolean; appended: boolean }> {
+    this.checkSessionKey(key);
+    const r = await this.post("/runs/session/append", { key, rowId, rows });
+    return { ok: r.data.ok === true, appended: r.data.appended === true };
   }
 
   async claimSession(key: string, runId: string, gen: string, maxBytes?: number): Promise<void> {
