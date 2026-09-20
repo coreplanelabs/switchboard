@@ -2564,12 +2564,19 @@ export function renderUnitReport(
           ? reissue
           : `The approved work is on the branch: rebase or fix it, push, and merge it by hand. Then re-issue the plan naming the remaining units — a unit whose pull request has merged is recognized and not run again, and its dependents start from there.`,
       ]);
-    case "round_cap":
-      return join([
-        `🧢 Ship stopped at a cap: the ${e.maxRounds}-round cap — no approval after ${rounds}.${prLine}`,
-        splitReport(s),
-        reissue,
-      ]);
+    case "round_cap": {
+      // The cap bounds fix rounds, never the terminal steps (issue 2023): an
+      // approval in the last allowed round still runs the checks step and the
+      // merge, so a round_cap after an approve means the checks (or the merge
+      // queue) failed at the approved head with no fix round left — and the
+      // report names those findings instead of claiming no approval landed.
+      const failedChecks = checkFindingsOf(s.findingsByRound[s.reviewRounds]);
+      const headline =
+        failedChecks.length > 0
+          ? `🧢 Ship stopped at a cap: the ${e.maxRounds}-round cap — the review of round ${e.reviewRounds} approved, but ${failedChecks.map((f) => `\`${f.id}\``).join(", ")} failed at the approved head and no fix round remains.${prLine}`
+          : `🧢 Ship stopped at a cap: the ${e.maxRounds}-round cap — no approval after ${rounds}.${prLine}`;
+      return join([headline, splitReport(s), reissue]);
+    }
     case "wall_clock_cap":
       return join([
         `🧢 Ship stopped at a cap: the remaining pipeline time (~${Math.max(0, Math.round(e.remainingMs / MIN))} min of the ${s.input.caps.maxMinutes}-minute budget) cannot hold another round${e.refused ? ` (the ${e.refused.round} round would get ${e.refused.minutes} min, under its floor of ${e.refused.floor})` : ""} — no approval after ${rounds}.${prLine}`,

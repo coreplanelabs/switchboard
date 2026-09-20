@@ -2617,6 +2617,84 @@ describe("the round verdict — the checks step at the reviewed head (record 005
   });
 });
 
+describe("the round cap bounds fix rounds, never the terminal steps (issue 2023)", () => {
+  /** A posted, ungated approve in the LAST round the cap allows: maxRounds 1,
+   *  so round 1's review is the cap round. The machine must still run the
+   *  checks step and the merge — the cap refuses only another fix round. */
+  const approvedAtCap = (over: Partial<UnitPipelineInput> = {}): Driver => {
+    const d = fresh(input({ caps: { maxRounds: 1, maxMinutes: 240 }, ...over }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    return d;
+  };
+
+  it("an approval at the cap proceeds to the checks step and the merge exactly as an earlier round's does: green checks, then the merge door, and the unit ends merged by the runner — never round_cap", () => {
+    const d = approvedAtCap(); // merge: runner
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/1", prNumber: 7, headSha: HEAD_A });
+    greenChecks(d, T0 + 21 * MIN);
+    expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/1", prNumber: 7, headSha: HEAD_A });
+    d.answer({ type: "merge", outcome: "merged", sha: HEAD_A, at: T0 + 22 * MIN });
+    expect(d.state.ending).toMatchObject({ kind: "merged", by: "runner", reviewRounds: 1 });
+  });
+
+  it("an approval at the cap under merge: person ends merge_ready through the checks step, exactly as in an earlier round", () => {
+    const d = approvedAtCap({ merge: "person" });
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/1" });
+    greenChecks(d, T0 + 21 * MIN);
+    expect(d.state.ending).toMatchObject({ kind: "merge_ready", pr: { number: 7 }, reviewRounds: 1 });
+  });
+
+  it("an approval at the cap with a red check runs the checks step, notes checks_failed, and — since no fix round remains — ends round_cap with the report naming the red check, never a fix spawn and never an unended unit", () => {
+    const d = approvedAtCap();
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/1" });
+    d.answer({
+      type: "checks",
+      checks: {
+        total: 2,
+        pending: [],
+        failed: [{ name: "ci / bot", conclusion: "failure", url: "https://github.com/acme/api/runs/1" }],
+      },
+      at: T0 + 21 * MIN,
+    });
+    expect(d.rounds()).toContain("1 review checks_failed");
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "round_cap", maxRounds: 1, reviewRounds: 1 } });
+    const report = renderUnitReport(d.state);
+    // The report says what actually happened: the approval landed and the
+    // named check failed — never "no approval" over a round that approved.
+    expect(report).toContain("the review of round 1 approved, but `check:ci / bot` failed at the approved head");
+    expect(report).not.toContain("no approval after");
+    expect(report).toContain("Unaddressed (no disposition):\n  - [blocking] check:ci / bot");
+  });
+
+  it("only a findings verdict at the cap ends the unit round_cap, with the cap's own no-approval headline", () => {
+    const d = fresh(input({ caps: { maxRounds: 1, maxMinutes: 240 } }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "one nit", findings: [FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "round_cap", maxRounds: 1, reviewRounds: 1 } });
+    expect(renderUnitReport(d.state)).toContain("no approval after 1 review round");
+  });
+});
+
 describe("the severity gate — an approve's findings held to the level in force", () => {
   const F = (id: string, severity: "blocking" | "major" | "minor" | "nit", title = "t") => ({
     id,
