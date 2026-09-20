@@ -7,6 +7,7 @@ import {
   getAgent,
   IDENTITIES,
   machineNeedsRepo,
+  MODEL_TIERS,
   presetDoor,
   RUNAWAY_TURNS_PER_MINUTE,
   runawayTurnCap,
@@ -140,6 +141,18 @@ describe("agent registry matches the feature specs", () => {
     expect(presetDoor(AGENTS.coding)).toBe("directive");
     expect(AGENTS.ship.routable).not.toBe(false);
     expect(AGENTS[COMPOUND_PRESET].routable).toBe(false);
+  });
+
+  it("tiers: every preset declares a non-empty allowed set of model tiers, each a known tier", () => {
+    for (const def of Object.values(AGENTS)) {
+      expect(def.tiers.length, def.name).toBeGreaterThan(0);
+      for (const tier of def.tiers) expect(MODEL_TIERS).toContain(tier);
+    }
+  });
+
+  it("tiers: coding, ship and review never include the fast tier; explore and research may run fast", () => {
+    for (const name of ["coding", "ship", "review"]) expect(AGENTS[name].tiers, name).not.toContain("fast");
+    for (const name of ["explore", "research"]) expect(AGENTS[name].tiers, name).toContain("fast");
   });
 
   it("getAgent throws on unknown agents, naming the available ones", () => {

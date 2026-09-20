@@ -1,5 +1,6 @@
 import { AGENTS, machineNeedsRepo } from "../agents/registry.js";
 import { MIN_BOUNDARY_MINUTES } from "../config/validate.js";
+import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
 import { authorize } from "../core/authz/authorize.js";
 import { predicateFor } from "../core/authz/predicate.js";
 import type { Actor } from "../core/authz/types.js";
@@ -179,7 +180,9 @@ export const spawnRunTool: RunnableTool = {
     `\`prompt\`, its one new turn — so say what it should do. Presets a child can run: ${CHILD_PRESETS().join(", ")}; a preset that ` +
     `writes (${WRITE_PRESETS().join(", ")}) is refused \`spawn_identity\`. \`repo\` (owner/name) for a preset that works in a ` +
     `repository (${REPO_PRESETS().join(", ")}); ` +
-    "`budget` narrows the child's wall clock in whole minutes (at least 2; it is also capped by what is left of yours). Returns the " +
+    "`budget` narrows the child's wall clock in whole minutes (at least 2; it is also capped by what is left of yours); " +
+    "`model` (`<provider>/<model>`) and `effort` choose the child's tier, within the preset's allowed tiers — a model " +
+    "outside them is refused `spawn_tier`, and an escalation is a new spawn on the stronger tier. Returns the " +
     "child's run id, its thread and a link, or a refusal by name: a preset or repository the requester may not use, a boundary the " +
     "child's profile exceeds, the fan-out cap, or a channel that cannot open a thread. A child cannot spawn children.",
   inputSchema: {
@@ -195,6 +198,16 @@ export const spawnRunTool: RunnableTool = {
       },
       repo: { type: "string", description: "owner/name of the repository the child works in, for a repository preset" },
       budget: { type: "integer", description: "The child's wall clock in whole minutes, at least 2 (optional)" },
+      model: {
+        type: "string",
+        description:
+          "The child's model, `<provider>/<model>` (optional): the child's own `model:` directive, resolved ahead of " +
+          "every scope. Held to the child preset's allowed tiers — a model outside them is refused `spawn_tier`.",
+      },
+      effort: {
+        type: "string",
+        description: `The child's effort (optional): one of ${EFFORT_LEVELS_HINT}, the child's own \`effort:\` directive`,
+      },
     },
     required: ["preset", "prompt"],
   },
@@ -211,6 +224,15 @@ export const spawnRunTool: RunnableTool = {
       if (typeof budget !== "number" || !Number.isInteger(budget) || budget < MIN_BOUNDARY_MINUTES)
         return `error: budget takes a whole number of minutes, at least ${MIN_BOUNDARY_MINUTES}`;
       request.budget = budget;
+    }
+    if (input.model !== undefined) {
+      const model = String(input.model).trim();
+      if (!/^\S+\/\S+$/.test(model)) return "error: model takes a `<provider>/<model>` ref, e.g. `anthropic/claude-x`";
+      request.model = model;
+    }
+    if (input.effort !== undefined) {
+      if (!isEffort(input.effort)) return `error: effort takes one of ${EFFORT_LEVELS_HINT}`;
+      request.effort = input.effort;
     }
     const spawn = ctx.spawn ?? nullSpawnCapability;
     // The conversation at the call: the runner's array at once, the harness's

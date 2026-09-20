@@ -71,7 +71,8 @@ import { assembleRunRecord } from "../core/dispatch/record.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
-import { childRequestText } from "../core/dispatch/spawn.js";
+import { childRequestText, spawnTierRefusal } from "../core/dispatch/spawn.js";
+import { EFFORT_LEVELS_HINT, isEffort, type Effort } from "../effort.js";
 import {
   CHANGES_TOKEN,
   isAddressSeverity,
@@ -137,6 +138,10 @@ export interface AdminCoordinatorDeps {
   grantsFor: GrantsLookup;
   /** The parent ship records (run-history item 49). */
   instances: CoordinatorInstanceStore;
+  /** The app config the spawn's tier gate reads (`spawnTierRefusal`): which
+   *  model is the fast tier (`routing.model`). Absent — a test harness — no
+   *  ref reads `fast` and every model passes as `strong`. */
+  appConfig?: () => { routing?: { model?: string } };
   /** The runs page base (`<PUBLIC_BASE_URL>/runs`), answered to the plan
    *  runner so a unit-end report can link a child's write-up to its run page
    *  (agent-ship item 12); absent without PUBLIC_BASE_URL — the report names
@@ -260,6 +265,13 @@ export interface SpawnStepRequest {
   step: string;
   preset: string;
   budget?: number;
+  /** The decision's tier for the child, as `<provider>/<model>`: written into
+   *  the child's request as its own `model:` directive (`childRequestText`),
+   *  so the child resolves it ahead of every scope. Held to the child
+   *  preset's tier set (`spawnTierRefusal`) at the spawn. */
+  model?: string;
+  /** The decision's effort for the child: the child's own `effort:` directive. */
+  effort?: Effort;
   prompt?: string;
   brief?: Brief;
   unit?: string;
@@ -445,6 +457,10 @@ export function parseSpawnStep(body: Record<string, unknown>): Parsed<SpawnStepR
     (typeof body.budget !== "number" || !Number.isInteger(body.budget) || body.budget < 2)
   )
     return invalid("budget must be a whole number of minutes, at least 2");
+  if (body.model !== undefined && (typeof body.model !== "string" || !/^\S+\/\S+$/.test(body.model)))
+    return invalid("model must be a `<provider>/<model>` ref");
+  if (body.effort !== undefined && !isEffort(body.effort))
+    return invalid(`effort must be one of ${EFFORT_LEVELS_HINT}`);
   if (body.unit !== undefined && (typeof body.unit !== "string" || !UNIT_ID.test(body.unit)))
     return invalid("unit must be a unit id");
   const value: SpawnStepRequest = {
@@ -452,6 +468,8 @@ export function parseSpawnStep(body: Record<string, unknown>): Parsed<SpawnStepR
     step: body.step,
     preset: body.preset,
     ...(body.budget !== undefined ? { budget: body.budget as number } : {}),
+    ...(body.model !== undefined ? { model: body.model as string } : {}),
+    ...(body.effort !== undefined ? { effort: body.effort as Effort } : {}),
     ...(body.unit !== undefined ? { unit: body.unit as string } : {}),
   };
   // The child's turn: the caller's own prompt, or a brief the bot composes it
@@ -649,6 +667,11 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const parsed = parseSpawnStep(body);
   if (!parsed.ok) return json(400, { ok: false, error: parsed.error });
   const req = parsed.value;
+  // The tier gate (the one-door plan's tiers rule): the runner's children do
+  // not go through `spawnChild`, so the same gate holds here — a coding or
+  // review child on the fast tier is refused before any store is read.
+  const tierProblem = spawnTierRefusal(req, deps.appConfig?.() ?? {});
+  if (tierProblem !== undefined) return json(400, { ok: false, error: "spawn_tier", message: tierProblem });
   const log = deps.log ?? console.log;
   const instance = await deps.instances.get(req.parentInstanceId);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
@@ -737,6 +760,8 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       repo: instance.repo,
       ...(turn.ref !== undefined ? { ref: turn.ref } : {}),
       ...(req.budget !== undefined ? { budget: req.budget } : {}),
+      ...(req.model !== undefined ? { model: req.model } : {}),
+      ...(req.effort !== undefined ? { effort: req.effort } : {}),
     }),
     ...carried,
     receivedAt: at,

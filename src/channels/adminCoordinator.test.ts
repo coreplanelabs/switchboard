@@ -425,6 +425,46 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     expect(h.dispatched[0].opts).toEqual({ coordinator: TAG });
   });
 
+  it("the decision's tier rides the child's request: `model` and `effort` on the body become the child's own directives, ahead of every scope (the one-door plan's tiers rule)", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    const res = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, model: "anthropic/strong-model", effort: "high" }),
+      h.deps,
+    );
+    expect(res.status).toBe(200);
+    expect(h.dispatched[0].msg.text).toBe(
+      "agent:coding model:anthropic/strong-model effort:high in acme/api: do the unit",
+    );
+  });
+
+  it("a coding child on the fast tier is refused `spawn_tier` before any store is read, and a malformed model or effort is refused by name", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    const deps: AdminCoordinatorDeps = { ...h.deps, appConfig: () => ({ routing: { model: "anthropic/fast-model" } }) };
+    const res = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, model: "anthropic/fast-model" }),
+      deps,
+    );
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ ok: false, error: "spawn_tier" });
+    expect((res.body as { message: string }).message).toContain("fast tier");
+    expect(h.dispatched).toEqual([]);
+    const badModel = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, model: "no-slash" }),
+      deps,
+    );
+    expect(badModel).toEqual({ status: 400, body: { ok: false, error: "model must be a `<provider>/<model>` ref" } });
+    const badEffort = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, effort: "turbo" }),
+      deps,
+    );
+    expect(badEffort).toEqual({
+      status: 400,
+      body: { ok: false, error: "effort must be one of low, medium, high, xhigh, max" },
+    });
+  });
+
   it("the tag carries the instance's base — the branch the child's pull request targets — and no base field at all for an instance that knows none, so the post-step's own resolution runs", async () => {
     const h = harness();
     await h.instances.put(INSTANCE);
