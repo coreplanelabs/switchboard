@@ -80,7 +80,7 @@ describe("progressOf — progress is read off the row, never asked of the model"
     const none = progressOf({ branch: BRANCH, pushed: [], startHead: A });
     expect(none).toEqual({
       progressed: false,
-      why: `no head newer than the lease's start was pushed to \`${BRANCH}\``,
+      why: `no head newer than the budget's start was pushed to \`${BRANCH}\``,
     });
   });
 
@@ -97,7 +97,7 @@ describe("progressOf — progress is read off the row, never asked of the model"
     });
     expect(progressOf({ branch: BRANCH, pushed: [], handoff: { previous: handoff(2), current: handoff(2) } })).toEqual({
       progressed: false,
-      why: `no head newer than the lease's start was pushed to \`${BRANCH}\` and the handoff is unchanged`,
+      why: `no head newer than the budget's start was pushed to \`${BRANCH}\` and the write-up is unchanged`,
     });
     expect(
       progressOf({ branch: BRANCH, pushed: [], handoff: { previous: handoff(2), current: handoff(3) } }),
@@ -108,7 +108,7 @@ describe("progressOf — progress is read off the row, never asked of the model"
 });
 
 const progressed: Progress = { progressed: true, by: "push", sha: B };
-const stuck: Progress = { progressed: false, why: "no head newer than the lease's start was pushed to `x`" };
+const stuck: Progress = { progressed: false, why: "no head newer than the budget's start was pushed to `x`" };
 const PIPELINE = { maxRounds: 3, maxMinutes: 240 };
 
 describe("renewalDecision — renew only when progress, a renewal and the cap all hold, else name the clause that failed", () => {
@@ -149,7 +149,7 @@ describe("renewalDecision — renew only when progress, a renewal and the cap al
         progress: progressed,
         pipeline: PIPELINE,
       }),
-    ).toEqual({ renew: false, why: "grant_exhausted", detail: "the grant holds no renewals", renewalsLeft: 0 });
+    ).toEqual({ renew: false, why: "grant_exhausted", detail: "no renewals were granted", renewalsLeft: 0 });
     expect(
       renewalDecision({
         grant: { renewals: 2 },
@@ -158,8 +158,8 @@ describe("renewalDecision — renew only when progress, a renewal and the cap al
         progress: progressed,
         pipeline: PIPELINE,
       }),
-    ).toEqual({ renew: false, why: "grant_exhausted", detail: "the grant's 2 renewals are spent", renewalsLeft: 0 });
-    // A grant of one reads singular: "1 renewal is spent", never "are".
+    ).toEqual({ renew: false, why: "grant_exhausted", detail: "all 2 renewals granted are spent", renewalsLeft: 0 });
+    // A grant of one reads singular: "the 1 renewal granted is spent", never "are".
     expect(
       renewalDecision({
         grant: { renewals: 1 },
@@ -168,7 +168,7 @@ describe("renewalDecision — renew only when progress, a renewal and the cap al
         progress: progressed,
         pipeline: PIPELINE,
       }),
-    ).toEqual({ renew: false, why: "grant_exhausted", detail: "the grant's 1 renewal is spent", renewalsLeft: 0 });
+    ).toEqual({ renew: false, why: "grant_exhausted", detail: "the 1 renewal granted is spent", renewalsLeft: 0 });
   });
 
   it("spend at or over the cap stops, and an unknown spend under a cap stops too — a cap never trusts a total that left a model's tokens out", () => {
@@ -183,7 +183,7 @@ describe("renewalDecision — renew only when progress, a renewal and the cap al
     ).toEqual({
       renew: false,
       why: "cost_cap",
-      detail: "spend $50.00 reached the grant's cap of $50",
+      detail: "spend $50.00 reached the budget's cost cap of $50",
       renewalsLeft: 5,
     });
     expect(
@@ -197,7 +197,7 @@ describe("renewalDecision — renew only when progress, a renewal and the cap al
     ).toEqual({
       renew: false,
       why: "cost_cap",
-      detail: "spend is unknown (a model had no price) under the grant's cap of $50",
+      detail: "spend is unknown (a model had no price) under the budget's cost cap of $50",
       renewalsLeft: 5,
     });
     // No cap: spend never stops a renewal.
@@ -224,7 +224,7 @@ describe("renewalDecision — renew only when progress, a renewal and the cap al
     ).toEqual({
       renew: false,
       why: "unfit",
-      detail: "a 40-minute segment cannot hold the ship loop (3 review rounds need 163 min)",
+      detail: "a 40-minute budget cannot hold the ship loop (3 review rounds need 163 min)",
       renewalsLeft: 6,
     });
   });
@@ -233,19 +233,19 @@ describe("renewalDecision — renew only when progress, a renewal and the cap al
 describe("renderRenewal — the card's words, as the record's trace has them", () => {
   it("a renewal names its number of the grant's and the sha it continues from", () => {
     expect(renderRenewal({ renew: true, segment: 2, from: B, renewalsLeft: 5 }, { renewals: 6 })).toBe(
-      `renewal 1 of 6, continues ${B.slice(0, 7)}`,
+      `budget renewed, 1 of 6, continues ${B.slice(0, 7)}`,
     );
     expect(renderRenewal({ renew: true, segment: 3, renewalsLeft: 4 }, { renewals: 6 })).toBe(
-      "renewal 2 of 6, continues the branch's head",
+      "budget renewed, 2 of 6, continues the branch's head",
     );
   });
 
   it("a stop names the clause and, when renewals remain, what actually spends one — no keyword the router does not have", () => {
     expect(renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 5 }, { renewals: 6 })).toBe(
-      "no progress in the last lease; grant holds 5 renewals unspent — a renewal is spent only by a segment that pushed to the unit's branch or moved its handoff; re-issue the request to try again",
+      "no progress on the last budget; 5 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; re-issue the request to try again",
     );
     expect(renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 1 }, { renewals: 6 })).toBe(
-      "no progress in the last lease; grant holds 1 renewal unspent — a renewal is spent only by a segment that pushed to the unit's branch or moved its handoff; re-issue the request to try again",
+      "no progress on the last budget; 1 renewal left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; re-issue the request to try again",
     );
     // The line teaches no keyword: follow-ups route by thread context
     // (routing-and-config item 3), so no rendered stop may say "reply continue".
@@ -253,30 +253,30 @@ describe("renderRenewal — the card's words, as the record's trace has them", (
       renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 5 }, { renewals: 6 }),
     ).not.toContain("reply continue");
     expect(renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 0 }, { renewals: 0 })).toBe(
-      "no progress in the last lease; the grant holds no renewals",
+      "no progress on the last budget; no renewals left",
     );
     expect(
       renderRenewal(
-        { renew: false, why: "grant_exhausted", detail: "the grant's 2 renewals are spent", renewalsLeft: 0 },
+        { renew: false, why: "grant_exhausted", detail: "all 2 renewals granted are spent", renewalsLeft: 0 },
         { renewals: 2 },
       ),
-    ).toBe("the grant's 2 renewals are spent");
+    ).toBe("all 2 renewals granted are spent");
     expect(
       renderRenewal(
-        { renew: false, why: "cost_cap", detail: "spend $50.00 reached the grant's cap of $50", renewalsLeft: 5 },
+        { renew: false, why: "cost_cap", detail: "spend $50.00 reached the budget's cost cap of $50", renewalsLeft: 5 },
         { renewals: 6, costCapUsd: 50 },
       ),
-    ).toBe("spend $50.00 reached the grant's cap of $50; grant holds 5 renewals unspent");
+    ).toBe("spend $50.00 reached the budget's cost cap of $50; 5 renewals left unspent");
     expect(
       renderRenewal(
         {
           renew: false,
           why: "unfit",
-          detail: "a 40-minute segment cannot hold the ship loop (3 review rounds need 163 min)",
+          detail: "a 40-minute budget cannot hold the ship loop (3 review rounds need 163 min)",
           renewalsLeft: 6,
         },
         { renewals: 6 },
       ),
-    ).toBe("a 40-minute segment cannot hold the ship loop (3 review rounds need 163 min)");
+    ).toBe("a 40-minute budget cannot hold the ship loop (3 review rounds need 163 min)");
   });
 });

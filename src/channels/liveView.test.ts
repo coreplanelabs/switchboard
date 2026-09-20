@@ -1171,7 +1171,7 @@ describe("run control: POST /runs/:id/stop", () => {
       const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=${mode}`);
       handler(t.req, t.res);
       expect(t.status).toBe(409);
-      expect(t.body()).toContain("hosts a ship pipeline");
+      expect(t.body()).toContain("is a pipeline; its units run in their own threads");
     }
     expect(control.requested).toBeUndefined();
     expect(reg.getById(id)!.finished).toBe(false);
@@ -1191,7 +1191,7 @@ describe("run control: POST /runs/:id/stop", () => {
     handler(soft.req, soft.res);
     await soft.finished;
     expect(soft.status).toBe(409);
-    expect(soft.body()).toContain("hosts a ship pipeline");
+    expect(soft.body()).toContain("is a pipeline; its units run in their own threads");
     expect(reg.getById(id)!.finished).toBe(false);
     const hard = fakeReqRes("POST", `/runs/${id}/stop?mode=hard`);
     handler(hard.req, hard.res);

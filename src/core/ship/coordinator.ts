@@ -1906,7 +1906,7 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
         pr.unrecovered === "no_commits"
           ? `nothing heads \`${s.input.unit.branch}\`: no commits were pushed, so there was no work to recover`
           : pr.unrecovered === "no_base"
-            ? `\`${s.input.unit.branch}\` could not be given a pull request: the instance names no base branch to open it against, so whatever was pushed stays on the branch`
+            ? `\`${s.input.unit.branch}\` could not be given a pull request: the pipeline names no base branch to open it against, so whatever was pushed stays on the branch`
             : `the pr-check found no pull request heading \`${s.input.unit.branch}\`, so nothing was recovered`;
       return end(
         s,
@@ -2602,9 +2602,9 @@ export function renderUnitReport(
   switch (e.kind) {
     case "merged":
       if (e.by === "other")
-        return `✅ Already merged: ${e.pr.url} (merge commit \`${e.sha.slice(0, 7)}\`, merged ${e.mergedAt}) — the pull request heading \`${s.input.unit.branch}\` was merged before this attempt reached it, by a person or by an earlier attempt of this plan; the runner merged nothing. The unit is done and its dependents start on a base that carries it.`;
+        return `✅ Already merged: ${e.pr.url} (merge commit \`${e.sha.slice(0, 7)}\`, merged ${e.mergedAt}) — the pull request heading \`${s.input.unit.branch}\` was merged before this pipeline reached it, by a person or by an earlier pipeline of this plan; the pipeline merged nothing. The unit is done and its dependents start on a base that carries it.`;
       return [
-        `✅ Merged after ${rounds}: ${e.pr.url} (squash \`${e.sha.slice(0, 7)}\`) — merged by the plan runner under \`plan:merge\`: the review approved at this head and the guards were green.`,
+        `✅ Merged after ${rounds}: ${e.pr.url} (squash \`${e.sha.slice(0, 7)}\`) — merged by the pipeline under \`plan:merge\`: the review approved at this head and the guards were green.`,
         aside(verdictLine),
         aside(levelLine),
         aside(grantLine),
@@ -2616,7 +2616,7 @@ export function renderUnitReport(
     case "already_landed":
       // No compare link, no renewal line, no re-issue prompt: there was
       // nothing to ship, so none of them has a question to answer.
-      return `✅ Already on \`${s.input.base}\`: the unit's scope landed before this attempt — ${e.landed.map((l) => `${l.what} (${l.where})`).join("; ")}. The coding child (run ${e.runId}) found it there and pushed nothing of its own: \`${s.input.unit.branch}\` has no commits over \`${s.input.base}\`, so there is no pull request to open or review. The unit is done and its dependents start on a base that carries it.`;
+      return `✅ Already on \`${s.input.base}\`: the unit's scope landed before this pipeline — ${e.landed.map((l) => `${l.what} (${l.where})`).join("; ")}. The coding child (run ${e.runId}) found it there and pushed nothing of its own: \`${s.input.unit.branch}\` has no commits over \`${s.input.base}\`, so there is no pull request to open or review. The unit is done and its dependents start on a base that carries it.`;
     case "merge_ready":
       return [
         // A merge that already happened outranks the checks: there is no head left to gate.
@@ -2635,10 +2635,10 @@ export function renderUnitReport(
         // headline alone (record 0066).
         aside(
           facts?.merged
-            ? `Already merged: ${e.pr.url} (merge commit \`${facts.merged.sha.slice(0, 7)}\`, merged ${facts.merged.mergedAt}) — auto-merge or a person merged it after the approval; the runner merged nothing.`
+            ? `Already merged: ${e.pr.url} (merge commit \`${facts.merged.sha.slice(0, 7)}\`, merged ${facts.merged.mergedAt}) — auto-merge or a person merged it after the approval; the pipeline merged nothing.`
             : facts?.autoMergeEnabled
               ? "Auto-merge is on for this pull request: the approval merges it once checks pass."
-              : "Remaining gate: a person's merge — the runner merges only when the instance's `merge` field says runner, and ship never approves.",
+              : "Remaining gate: a person's merge — the pipeline merges only when the plan's `merge` setting says so, and ship never approves.",
         ),
       ]
         .filter(Boolean)
@@ -2662,7 +2662,7 @@ export function renderUnitReport(
       return join([
         `⏸️ ${e.verdict === "approve" ? "Approved but held" : "Changes requested but held"} after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — every finding of review round ${e.round.index} is human-gated, a receipt only a person can produce: ${rows}. No fix round was opened: a coding child cannot produce the receipt.`,
         levelLine,
-        `Next step: produce the receipt each finding names and post it on the pull request. ${heldReissue} The re-issued attempt resumes at the review round — no coding round runs first.`,
+        `Next step: produce the receipt each finding names and post it on the pull request. ${heldReissue} The re-issued pipeline resumes at the review round — no coding round runs first.`,
       ]);
     }
     case "merge_refused":
@@ -2676,7 +2676,7 @@ export function renderUnitReport(
       // remedy — the hand merge is what a person must act on (record 0066).
       if (!shows(verbosity, "verbose")) return `⚠️ Not merged: ${e.reason} — ${e.pr.url}`;
       return join([
-        `⚠️ The review approved ${e.pr.url} but the runner did not merge it: ${e.reason}. A person decides what becomes of the pull request.`,
+        `⚠️ The review approved ${e.pr.url} but the pipeline did not merge it: ${e.reason}. A person decides what becomes of the pull request.`,
         s.input.generated
           ? reissue
           : `The approved work is on the branch: rebase or fix it, push, and merge it by hand. Then re-issue the plan naming the remaining units — a unit whose pull request has merged is recognized and not run again, and its dependents start from there.`,
@@ -2710,7 +2710,7 @@ export function renderUnitReport(
       ]);
     case "review_pending":
       return join([
-        `⏳ Review pending: the coding child shipped ${e.pr.url}${e.headSha !== undefined ? ` (head \`${e.headSha.slice(0, 7)}\`)` : ""} but the remaining pipeline time cannot hold the review round — the work stands, only the review is missing. The next attempt starts at the review round while the pull request still heads at the child's own last push.`,
+        `⏳ Review pending: the coding child shipped ${e.pr.url}${e.headSha !== undefined ? ` (head \`${e.headSha.slice(0, 7)}\`)` : ""} but the remaining pipeline time cannot hold the review round — the work stands, only the review is missing. The next pipeline starts at the review round while the pull request still heads at the child's own last push.`,
         aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
         aside(reissue),
       ]);
@@ -2748,7 +2748,7 @@ export function renderUnitReport(
       if (!shows(verbosity, "verbose")) return "";
       return join([
         writeUpPointer(s, e.round.kind, e.runId),
-        `🔁 Segment ${e.segment - 1} ended at its lease with the unit unfinished — ${e.line}. Segment ${e.segment} opens in this thread${e.from !== undefined ? ` from \`${e.from.slice(0, 7)}\`` : ""} under a fresh ${s.input.caps.maxMinutes}-minute lease, with this segment's write-up as its request; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`,
+        `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. A fresh ${s.input.caps.maxMinutes}-minute budget opens in this thread${e.from !== undefined ? ` from \`${e.from.slice(0, 7)}\`` : ""}, with the last run's write-up as its request; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`,
         aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
       ]);
     case "transient":

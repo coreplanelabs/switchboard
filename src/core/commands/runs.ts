@@ -88,7 +88,7 @@ const idArg = { name: "id", schema: runId, describe: "run id" } as const;
  *  16), a 409 pointing at the units and the escape — the same sentence the
  *  tokenless stop route writes. */
 export const HOSTED_STOP_REFUSAL =
-  "this run hosts a ship pipeline — its units run elsewhere, so a soft stop ends nothing; `--mode hard` is the escape: it seals the run failed and releases the thread";
+  "this run is a pipeline; its units run in their own threads, so a soft stop ends nothing; `--mode hard` is the escape: it seals the run failed and releases the thread";
 
 function unwrap<T>(res: Result<T>, what: "run" | "unit" = "run"): T {
   if (res.ok) return res.value;
@@ -331,14 +331,14 @@ export const runsStop = defineCommand({
   options: z.object({
     mode: z
       .enum(["soft", "hard"])
-      .describe("soft = finish the current step; hard = abort now (and the escape that seals a hosted pipeline)"),
+      .describe("soft = finish the current step; hard = abort now (and the escape that seals a pipeline)"),
   }),
   action: "runs:write",
   effect: "write",
   // Ends someone's live run; nothing restarts it.
   annotations: { destructive: true, risk: () => "stops a live run; hard aborts it now" },
   describe:
-    "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). A hosted pipeline's parent refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the actor.",
+    "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). A pipeline refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the requester.",
   handler: async ({ args, options, caller, deps }) => {
     const runs = await deps.runs();
     await getVisibleRun(runs, args.id, caller, "runs:write", deps, "runs.stop");
@@ -381,7 +381,7 @@ const childrenHeader = (o: JsonObject): string => `children of ${String(o.parent
 const unitKeyArg = {
   name: "unit",
   schema: z.string().regex(UNIT_KEY_PATTERN),
-  describe: "unit key `<instance>:<unit>` — `plan-<plan>-<attempt>:U16`, `ship-<run id>:task`",
+  describe: "unit key — `plan-<plan>-<n>:U16` (`<n>`: the plan's nth pipeline), `ship-<run id>:task`",
 } as const;
 
 export const runsUnit = defineCommand({
@@ -389,8 +389,7 @@ export const runsUnit = defineCommand({
   args: [unitKeyArg],
   action: "runs:read",
   effect: "read",
-  describe:
-    "A ship unit's runs in round order — its coding thread's and its review thread's, live and finished, each with its round and thread — from one read.",
+  describe: "A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.",
   handler: async ({ args, caller, deps }) => {
     const visibleTo = predicateFor(caller.actor, "runs:read", "run");
     return asJson(unwrap(await (await deps.runs()).listUnitRuns(args.unit, visibleTo), "unit"));

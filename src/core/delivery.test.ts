@@ -602,7 +602,7 @@ describe("runFactsOf / pullRequestOfRun", () => {
 });
 
 describe("renderDeliveryReport", () => {
-  it("prints one block per week — the counts, the times, the shares — then the units, in single-spaced lines chat can carry", () => {
+  it("prints one block per week — the counts, the times, the shares — then the issues, in single-spaced lines chat can carry", () => {
     const text = renderDeliveryReport(report());
     expect(text).toContain(`acme/api · ${SINCE} → ${UNTIL} · 1 week`);
     expect(text).toContain(`Week of ${WEEK}: 6 merged (0 agent-authored)`);
@@ -611,7 +611,9 @@ describe("renderDeliveryReport", () => {
     expect(text).toContain("review rounds: 1.50 per PR (9 verdicts, 2 fix rounds)");
     expect(text).toContain("findings: 8 (2 blocking, 1 major, 2 minor, 3 nit) · 100% resolved with no human edit");
     expect(text).toContain("agent runs: 3 · 12.0 min");
-    expect(text).toContain("Units:");
+    // Record 0066: the label counts board issues, not plan units.
+    expect(text).toContain("Issues:");
+    expect(text).not.toContain("Units:");
     expect(text).toContain(
       "• 825 The durable mutex and idempotent step methods — PR 917 · 21.3 h · 2 rounds · 1 blocking",
     );

@@ -273,7 +273,7 @@ export function budgetClipLabel(
   // it — the directive on its request is the runner's, not a person's.
   const clippedBy =
     profile.boundedBy === "directive" && source.coordinator
-      ? "carved by the plan runner from the pipeline's remaining clock"
+      ? "carved from the pipeline's remaining clock"
       : clipSourceLabel(profile.boundedBy);
   const facts = [`${clippedBy}; preset asks ${agent.maxMinutes}`];
   if (idle) facts.push(`budget:${budgetDirective} narrowed nothing`);

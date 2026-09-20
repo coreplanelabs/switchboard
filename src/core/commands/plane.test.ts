@@ -137,6 +137,22 @@ describe("plane.show", () => {
     expect(chat).toContain("*Pull requests*\n• acme/api#10041 — pending · plan-x:U12");
   });
 
+  it("a unit whose health is owner-gap prints `merge-ready, unmerged` on chat, the CLI and MCP output — never the raw flag join (record 0066)", () => {
+    const table: PlaneTable = {
+      ...TABLE,
+      units: [{ ...TABLE.units[0], health: ["merge-ready", "owner-gap"] }],
+    };
+    // `render` is the CLI's and the MCP tool's one text shape; `renderChat` is chat's.
+    const text = renderText(planeCommands[0], table as unknown as Parameters<typeof renderPlaneTable>[0]);
+    const chat = renderPlaneTable(table as unknown as Parameters<typeof renderPlaneTable>[0], "chat");
+    for (const out of [text, chat]) {
+      expect(out).toContain("merge-ready, unmerged");
+      expect(out).not.toContain("owner-gap");
+      expect(out).not.toContain("merge-ready,owner-gap");
+    }
+    expect(chat).toContain("• plan-x:U12 — The table · merge-ready, unmerged · #10041");
+  });
+
   it("an empty table says so in every section", () => {
     const empty: PlaneTable = { at: NOW, runs: [], units: [], pullRequests: [], windows: [], findings: [] };
     const text = renderText(planeCommands[0], empty as unknown as Parameters<typeof renderPlaneTable>[0]);

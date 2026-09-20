@@ -404,7 +404,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     const ends = b.of("unit-end") as Array<{ ending: { kind: string; report: string }; segment?: unknown }>;
     expect(ends[0].ending.kind).toBe("continued");
     expect(ends[0].segment).toEqual({ index: 2, from: HEAD, runId: "run-c0" });
-    expect(ends[0].ending.report).toContain(`renewal 1 of 6, continues ${HEAD.slice(0, 7)}`);
+    expect(ends[0].ending.report).toContain(`budget renewed, 1 of 6, continues ${HEAD.slice(0, 7)}`);
     expect(ends[1].ending.kind).toBe("merge_ready");
     expect(ends[1].segment).toBeUndefined();
     expect(ends[1].ending.report).toContain("Renewals: 0 of 6 spent, cost cap $50 (granted by channel).");
@@ -464,7 +464,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       spendUsd: 12.5,
       handoff: lists,
     });
-    expect(end.ending.report).toContain("🔁 Segment 1 ended at its lease with the unit unfinished");
+    expect(end.ending.report).toContain("🔁 The unit's budget ran out with the unit unfinished");
     // An idle ending writes no segment row: no renewal is spent.
     expect(end.segment).toBeUndefined();
     expect(end.codingRunId).toBe("run-c0");
@@ -550,7 +550,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
     expect(end.ending.kind).toBe("merged");
     expect(end.ending.report).toContain(`✅ Already merged: ${PR_URL} (merge commit \`${MERGED.slice(0, 7)}\``);
-    expect(end.ending.report).toContain("the runner merged nothing");
+    expect(end.ending.report).toContain("the pipeline merged nothing");
   });
 
   it("a merge door answering enqueued keeps the unit live — the boundary rides the round route, every later ask carries `queued: true`, and the queue's merge ends the unit merged (issue 2011)", async () => {
@@ -1981,7 +1981,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     expect(end.ending.kind).toBe("merge_ready");
     expect(end.ending.report).toContain(`✅ Merge-ready after 1 review round: ${PR_URL}`);
     expect(end.ending.report).toContain(
-      `Already merged: ${PR_URL} (merge commit \`${MERGED.slice(0, 7)}\`, merged 2026-09-16T00:46:19Z) — auto-merge or a person merged it after the approval; the runner merged nothing.`,
+      `Already merged: ${PR_URL} (merge commit \`${MERGED.slice(0, 7)}\`, merged 2026-09-16T00:46:19Z) — auto-merge or a person merged it after the approval; the pipeline merged nothing.`,
     );
     expect(end.ending.report).not.toContain("Remaining gate");
     expect(end.ending.report).not.toContain("Auto-merge is on");
