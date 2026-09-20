@@ -1,7 +1,8 @@
 ---
 title: One agent does a unit of work; a run continues its thread's transcript; a child run is a reader; only a state machine sits between agents
-status: proposed
+status: superseded
 date: 2026-09-14
+superseded_by: 0068-one-agent-per-unit-a-run-continues-its-threads-transcript-and-the-unit-is-the-reading-unit.md
 pattern: Single-threaded agent per unit of work, the session as the unit of context; coordinator as a state machine, never a model; fan-out only to readers
 ---
 
