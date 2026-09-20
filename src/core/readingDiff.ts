@@ -24,8 +24,10 @@ export interface ReadingDiffConfig {
    *  durable (one Opus-class call per review). `off`: no artifact is produced,
    *  so there is nothing to abridge either. */
   provider?: "git" | "meat" | "off";
-  /** meat's `-model`. Default `claude-opus-5` — an Opus-class model is the
-   *  measured minimum for a diff that is actually abridged. */
+  /** meat's `-model`. Required with `provider: meat` (the validator refuses
+   *  the provider without it) — an Opus-class model is the measured minimum
+   *  for a diff that is actually abridged, and the choice is the operator's,
+   *  never a literal in the code. */
   meatModel?: string;
   /** meat's own runtime budget in seconds, enforced on the host process (the
    *  child is killed past it; a `failed` state, never a wait in a review). Default 240. */
@@ -34,24 +36,26 @@ export interface ReadingDiffConfig {
 
 export interface ResolvedReadingDiff {
   provider: ReadingDiffProviderName;
-  /** Set whenever `provider` is `meat`. */
+  /** Set only when `review.readingDiff.meatModel` names one. */
   meatModel?: string;
   meatTimeoutS: number;
 }
 
 export const MEAT_TIMEOUT_S_DEFAULT = 240;
 
-/** meat's `-model` when config names none. Measured on a real PR: Opus 4.8
- *  kept 45 % in 96 s with everything kept load-bearing; Sonnet 5 kept 87 % in
- *  240 s, barely abridging — an Opus-class model is the floor. */
-export const MEAT_MODEL_DEFAULT = "claude-opus-5";
+/** The sentence every meat path without a configured model fails with — the
+ *  missing key by name, never a model literal the code chose itself. */
+export const MEAT_MODEL_MISSING =
+  "review.readingDiff.meatModel is not set — name the model meat abridges with in config.yaml";
 
 /** Config + env → the effective choice, or null for off. The env override
  *  (`SWITCHBOARD_READING_DIFF=git|meat|off`) beats config so an operator can
  *  flip providers on a deployed bot without a config rebuild; an unrecognized
  *  env value is ignored. Absent everything → `git`: the artifact costs one git
- *  command and the panel can rely on it existing. With `meat`, `meatModel`
- *  falls back to `MEAT_MODEL_DEFAULT`. */
+ *  command and the panel can rely on it existing. `meatModel` is only ever the
+ *  configured value — the code never picks a model (`MEAT_MODEL_MISSING` is
+ *  what a meat production without one fails with, and the config validator
+ *  refuses `provider: meat` without the key at load). */
 export function resolveReadingDiff(
   cfg: ReadingDiffConfig | undefined,
   env: Record<string, string | undefined>,
@@ -64,8 +68,22 @@ export function resolveReadingDiff(
     typeof cfg?.meatTimeoutS === "number" && cfg.meatTimeoutS > 0
       ? Math.floor(cfg.meatTimeoutS)
       : MEAT_TIMEOUT_S_DEFAULT;
-  const meatModel = cfg?.meatModel || (choice === "meat" ? MEAT_MODEL_DEFAULT : undefined);
+  const meatModel = cfg?.meatModel || undefined;
   return { provider: choice, meatTimeoutS: timeout, ...(meatModel ? { meatModel } : {}) };
+}
+
+/** The env flip (`SWITCHBOARD_READING_DIFF=meat`) is applied at resolution,
+ *  after the load-time validator ran — so a deployment configured `git` with no
+ *  `meatModel`, flipped to `meat` by env, boots past `validateReview`. This is
+ *  that gap's startup check: the message to warn at boot when the resolved
+ *  choice is `meat` with no configured model, naming the key — each abridge
+ *  would otherwise only fail one review at a time with the same sentence. */
+export function readingDiffStartupWarning(
+  cfg: ReadingDiffConfig | undefined,
+  env: Record<string, string | undefined>,
+): string | undefined {
+  const resolved = resolveReadingDiff(cfg, env);
+  return resolved?.provider === "meat" && !resolved.meatModel ? `[reading-diff] ${MEAT_MODEL_MISSING}` : undefined;
 }
 
 /** The one shell command of the baseline. The range is `origin/<base>...HEAD`

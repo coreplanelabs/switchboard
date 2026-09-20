@@ -36,7 +36,7 @@ const defineCommand = commandDefiner<HelpCommandDeps>();
 export const COMMANDS_REFERENCE_URL = `${PROJECT_DOCS_URL}/reference/slack-commands`;
 
 export const DIRECTIVES_HELP =
-  "`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42` (effort: low | medium | high — lower = faster turns; budget: whole minutes — narrows this run's wall clock, never widens it; a budget too short for a turn plus the write-up is refused by name)";
+  "`agent:review model:<provider>/<model> effort:low budget:20 look at PR 42` (effort: low | medium | high — lower = faster turns; budget: whole minutes — narrows this run's wall clock, never widens it; a budget too short for a turn plus the write-up is refused by name)";
 
 interface HelpAgent {
   name: string;

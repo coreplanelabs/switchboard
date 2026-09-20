@@ -263,7 +263,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
 
 exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 "*Per-request directives* (anywhere in the message):
-\`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes — narrows this run's wall clock, never widens it; a budget too short for a turn plus the write-up is refused by name)
+\`agent:review model:<provider>/<model> effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes — narrows this run's wall clock, never widens it; a budget too short for a turn plus the write-up is refused by name)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
@@ -517,7 +517,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
 
 exports[`capability surfaces — local-full > help commands on chat 1`] = `
 "*Per-request directives* (anywhere in the message):
-\`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes — narrows this run's wall clock, never widens it; a budget too short for a turn plus the write-up is refused by name)
+\`agent:review model:<provider>/<model> effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes — narrows this run's wall clock, never widens it; a budget too short for a turn plus the write-up is refused by name)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
@@ -715,7 +715,7 @@ exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
 
 exports[`capability surfaces — minimal > help commands on chat 1`] = `
 "*Per-request directives* (anywhere in the message):
-\`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes — narrows this run's wall clock, never widens it; a budget too short for a turn plus the write-up is refused by name)
+\`agent:review model:<provider>/<model> effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes — narrows this run's wall clock, never widens it; a budget too short for a turn plus the write-up is refused by name)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*

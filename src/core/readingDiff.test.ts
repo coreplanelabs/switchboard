@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
-  MEAT_MODEL_DEFAULT,
+  MEAT_MODEL_MISSING,
   READING_DIFF_CAP,
   capDiff,
   parseMeatJson,
   produceReadingDiff,
   readingDiffCommand,
+  readingDiffStartupWarning,
   resolveReadingDiff,
   startReviewReadingDiff,
 } from "./readingDiff.js";
@@ -33,13 +34,12 @@ describe("resolveReadingDiff (config + env)", () => {
     expect(resolveReadingDiff({ provider: "off" }, {})).toBeNull();
   });
 
-  it("meat without a model is Opus — the measured floor for a diff that is actually abridged; git names no model", () => {
-    expect(MEAT_MODEL_DEFAULT).toBe("claude-opus-5");
+  it("meat without a configured model names none — the code carries no built-in model, and the missing-key sentence names review.readingDiff.meatModel", () => {
     expect(resolveReadingDiff({ provider: "meat", meatTimeoutS: -5 }, {})).toEqual({
       provider: "meat",
-      meatModel: "claude-opus-5",
       meatTimeoutS: 240,
     });
+    expect(MEAT_MODEL_MISSING).toContain("review.readingDiff.meatModel");
     expect(resolveReadingDiff({ provider: "git", meatModel: "claude-opus-4-8" }, {})).toEqual({
       provider: "git",
       meatModel: "claude-opus-4-8",
@@ -54,7 +54,6 @@ describe("resolveReadingDiff (config + env)", () => {
     });
     expect(resolveReadingDiff({ provider: "off" }, { SWITCHBOARD_READING_DIFF: "meat" })).toEqual({
       provider: "meat",
-      meatModel: "claude-opus-5",
       meatTimeoutS: 240,
     });
     expect(resolveReadingDiff({ provider: "git" }, { SWITCHBOARD_READING_DIFF: "off" })).toBeNull();
@@ -63,6 +62,22 @@ describe("resolveReadingDiff (config + env)", () => {
       provider: "git",
       meatTimeoutS: 240,
     });
+  });
+
+  it("env forcing meat with no configured model warns at startup, naming the key", () => {
+    // The env flip resolves past the load-time validator; the boot warning is
+    // the missing-key sentence, so the gap is named once, not once per review.
+    expect(readingDiffStartupWarning({ provider: "git" }, { SWITCHBOARD_READING_DIFF: "meat" })).toBe(
+      `[reading-diff] ${MEAT_MODEL_MISSING}`,
+    );
+    expect(
+      readingDiffStartupWarning(
+        { provider: "git", meatModel: "claude-opus-4-8" },
+        { SWITCHBOARD_READING_DIFF: "meat" },
+      ),
+    ).toBeUndefined();
+    expect(readingDiffStartupWarning({ provider: "git" }, {})).toBeUndefined();
+    expect(readingDiffStartupWarning(undefined, { SWITCHBOARD_READING_DIFF: "off" })).toBeUndefined();
   });
 });
 

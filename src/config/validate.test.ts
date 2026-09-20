@@ -4,6 +4,7 @@ import {
   boundaryProblem,
   validateBoundaries,
   validateProviders,
+  validateReview,
   validateScopeBlocks,
   validateSlack,
 } from "./validate.js";
@@ -144,6 +145,19 @@ const stored = (boundary: Record<string, unknown>): Scope => ({ boundary }) as u
 // on or beside the ladder that no scope may set yet, each refused with its own
 // reason; any other word is refused with the class list; a stored `never` or
 // `exec` stops the load exactly as a bad `maxMinutes` does.
+describe("validateReview — the reading-diff switch", () => {
+  it("provider: meat without meatModel is refused at load naming review.readingDiff.meatModel — the code carries no built-in model", () => {
+    expect(() => validateReview({ readingDiff: { provider: "meat" } })).toThrow(/review\.readingDiff\.meatModel/);
+  });
+
+  it("meat with a configured model, git and off without one all load", () => {
+    expect(() => validateReview({ readingDiff: { provider: "meat", meatModel: "m-1" } })).not.toThrow();
+    expect(() => validateReview({ readingDiff: { provider: "git" } })).not.toThrow();
+    expect(() => validateReview({ readingDiff: { provider: "off" } })).not.toThrow();
+    expect(() => validateReview({})).not.toThrow();
+  });
+});
+
 describe("boundaryProblem — the confirm axis", () => {
   it("accepts the two settable classes, `write` and `destructive`, alone or beside the run axes", () => {
     expect(boundaryProblem("defaults.boundary", { confirm: "write" })).toBeUndefined();

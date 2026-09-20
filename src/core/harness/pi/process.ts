@@ -207,8 +207,8 @@ export function piLaunchEnv(spec: PiLaunchSpec, bearer: string): Record<string, 
  *  `compat.forceAdaptiveThinking`, which its built-in Anthropic catalog sets
  *  per model along the same line; a model behind the proxy is not in that
  *  catalog, so the harness says it here. The generation is the id's first
- *  version number — `claude-fable-5` is 5, `claude-opus-4-6` 4.6,
- *  `claude-sonnet-4-5-20250929` 4.5 (a minor is one or two digits, so a
+ *  version number — a `<family>-5` id is 5, `<family>-4-6` 4.6, a dated
+ *  `<family>-4-5-<yyyymmdd>` 4.5 (a minor is one or two digits, so a
  *  date is never read as one) — and an id with none is taken for the current
  *  generation, since every model Anthropic ships now is adaptive. */
 export function takesAdaptiveThinking(modelId: string): boolean {

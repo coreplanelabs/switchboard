@@ -44,7 +44,7 @@ Every PR review already records its full `git diff`. `review abridge <run id>` (
 review:
   readingDiff:
     provider: meat # git (default): on demand only · off: no reading diff at all
-    meatModel: claude-opus-5 # the default; an Opus-class model is the floor that actually abridges
+    meatModel: claude-opus-5 # required with provider: meat (no built-in model); an Opus-class model is the floor that actually abridges
     meatTimeoutS: 240
 ```
 

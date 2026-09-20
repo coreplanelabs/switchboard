@@ -23,7 +23,7 @@ Placed right after the mention, before the request text:
 | `budget:<minutes>` | `budget:30` | cap this run's wall clock, in whole minutes (at least 2); it only ever narrows the agent's own budget or a boundary's, and the card says what it did |
 | `verbosity:<quiet\|verbose\|debug>` | `verbosity:verbose` | how much the bot says about its own doing: `quiet` (the default) is only what needs you — answers, verdicts, refusals, questions; `verbose` adds what it is doing for you (a follow-up folded in, a plan handed to the runner, the workspace on the card); `debug` adds the router's reason. Sticky in the thread; `config set me --verbosity <level>` sets it for good |
 
-Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix #42`.
+Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fix #42`.
 
 `model:`, `effort:` and `verbosity:` are sticky in a thread — a follow-up without them keeps the last ones used. The agent is sticky by transcript: a follow-up continues the agent whose conversation the thread holds — the thread's newest finished run's — and picks up where it left off ([session-log.md](specs/session-log.md) item 9); an `agent:` in an earlier message decides nothing by itself. `budget:` is not sticky: it bounds the one run it rides on; a lower budget on every turn is a boundary (`config set me --boundary.maxMinutes <n>`).
 

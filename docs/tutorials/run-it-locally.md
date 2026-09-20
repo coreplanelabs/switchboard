@@ -34,7 +34,7 @@ providers: anthropic
 ## Ask
 
 ```bash
-npm run cli -- ask "agent:review model:anthropic/claude-opus-5 what would you look for in a PR that touches auth middleware?"
+npm run cli -- ask "agent:review model:<provider>/<model> what would you look for in a PR that touches auth middleware?"
 ```
 
 `agent:` and `model:` are the directives a Slack mention takes; `--thread <key>` before the text makes the next `ask` a follow-up.

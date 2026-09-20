@@ -28,8 +28,8 @@ web/src/pages/scheduled.test.ts	traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
 web/src/pages/scheduled.test.ts	expect(w.find(".trace").attributes("title")).toBe("trace 4bf92f3577b34da6a3ce929d0e0e4736");
 
 # `#42` is an issue in the example repo `acme/api`, the fixture name the tests use.
-docs/how-to/configure-your-defaults.md	@switchboard agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix issue #42
-docs/reference/slack-commands.md	Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix #42`.
+docs/how-to/configure-your-defaults.md	@switchboard agent:ship model:<provider>/<model> effort:high in acme/api: fix issue #42
+docs/reference/slack-commands.md	Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fix #42`.
 
 # A made-up Slack user id in an example `grants` block; the root README and the config example use the same one.
 docs/how-to/restrict-who-can-do-what.md	slack:U0123ADMIN:

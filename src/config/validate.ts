@@ -898,10 +898,19 @@ function addressSeverityProblem(path: string, value: unknown): string | undefine
     : undefined;
 }
 
-/** The deployment's `review` block: the org's severity to address on the ladder. */
+/** The deployment's `review` block: the org's severity to address on the
+ *  ladder, and the reading-diff switch — `provider: meat` spends model calls,
+ *  so the model must be the operator's choice: the code carries no built-in
+ *  one, and a `meat` block without `meatModel` is refused at load by name. */
 export function validateReview(review: ReviewConfig): void {
   const problem = addressSeverityProblem("review.addressSeverity", review.addressSeverity);
   if (problem) throw new Error(`config.yaml: ${problem}`);
+  const readingDiff = review.readingDiff;
+  if (readingDiff?.provider === "meat" && !readingDiff.meatModel) {
+    throw new Error(
+      'config.yaml: review.readingDiff.provider is "meat" but review.readingDiff.meatModel is not set — name the model meat abridges with',
+    );
+  }
 }
 
 /** GitHub's login rule: 1 to 39 characters, alphanumerics and single hyphens,
