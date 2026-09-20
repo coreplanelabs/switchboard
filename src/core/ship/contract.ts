@@ -439,42 +439,32 @@ export const TIMEOUT_ON_LONG_COMMANDS =
   "State a timeout on any command you expect to run longer than a minute: a timeout that reaches past the loop's " +
   "end is refused before the command runs, never cut midway.";
 
-/** The fast gates a plan child runs before every push, named one by one and
- *  each scoped to the changed set (agent-ship item 13; agent-coding item 9).
- *  "Its cheapest proving checks" left the choice to the child, and children
- *  chose wrong in both directions: prettier was reported clean while
- *  `format:check` was red, hygiene imprints reached CI that `hygiene:check`
- *  would have caught locally — and children ran the whole suite and the whole
- *  typecheck on the shared resident, minutes each call, time-sliced against
- *  every other run. So the gates are the changed-set forms, the full runs are
- *  said to be CI's alone in the same breath, and each gate is a receipt — the
- *  exit line goes into the PR description's validation table as the row's proof
- *  (the handoff has no verified list; parseHandoff carries deviations, followUps,
- *  unproven and landed), and a gate the child could not run goes under the
- *  handoff's unproven list, never claimed clean. The test gate is the touched
- *  files by name, never a changed-set or directory run. */
-/** The test command the contract hands a child: the touched files by name, once.
- *  Never `--changed`: against a base that moves, it selects most of the suite, and on the
- *  shared resident that is the memory incident the coding contract exists to prevent. */
-export const TOUCHED_TESTS_COMMAND = "`npx vitest run` on the test files you touched, by name,";
+/** The fast gates a plan child runs before every push live in the coding
+ *  preset's own instructions (`FAST_GATES_BEFORE_PUSH`,
+ *  src/agents/registry.ts — agent-coding item 13; issue 1796): the changed-set
+ *  forms with their commands named, the full verification named as CI's gate.
+ *  The contract used to restate the whole paragraph, so every ask that was not
+ *  a plan unit had to repeat it by hand; now the first instruction points at
+ *  the preset's paragraph — the child reads the sentence once — and keeps only
+ *  what is the contract's own: the receipts. Each gate is a receipt — the exit
+ *  line goes into the PR description's validation table as the row's proof
+ *  (the handoff has no verified list; parseHandoff carries deviations,
+ *  followUps, unproven and landed), and a gate the child could not run goes
+ *  under the handoff's unproven list, never claimed clean — because only a
+ *  plan child has a handoff to route them to. */
+export const FAST_GATES_POINTER =
+  "The fast gates are the ones your preset instructions name (THE FAST GATES): the changed-set forms, " +
+  "never the whole project — the full suite, the full typecheck and the full verification are CI's, " +
+  "never yours to run.";
 
-export const FAST_GATES_BEFORE_PUSH =
-  "The fast gates, before every push — each scoped to the changed set, never the whole project: " +
-  `${TOUCHED_TESTS_COMMAND} once (never \`--changed\`, never a directory: on a moving base that is most of the suite), ` +
-  "`tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`, " +
-  "`npx prettier --check` on the changed files, `npm run hygiene:check` and `npm run specs:check` — " +
-  "then your judgement on what else this change needs, not a longer checklist. Every CI pipeline runs the " +
-  "tests, the types, the formatting and the full verification on your push, so you never run them again: " +
-  "you validate and fix your own change before pushing, at the changed-set scope. Passing the full test suite " +
-  "and the full typecheck is NOT part of your criteria: CI is that gate and the only place they run — on a " +
-  "shared resident they cost minutes that every other run pays for. " +
+export const GATE_RECEIPTS =
   "Paste each command's exit line into the PR description's validation table as the row's proof; a gate you " +
   "could not run goes under the handoff's unproven list and is never claimed clean.";
 
 function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
   const branch = rebase.branch ? `\`${rebase.branch}\`` : "the unit's branch";
   const onto = rebase.onto ? `\`${rebase.onto}\`` : "the merged parent";
-  const gates = FAST_GATES_BEFORE_PUSH;
+  const gates = `${FAST_GATES_POINTER} ${GATE_RECEIPTS}`;
   return (
     `Rebase ${branch} onto ${onto} before any other work — the parent unit has merged and the base has moved; ` +
     `the only writes are your own on that branch. A conflict ends the unit: report it as the handoff and stop. ` +
