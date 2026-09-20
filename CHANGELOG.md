@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.258.0](https://github.com/coreplanelabs/switchboard/compare/v1.257.0...v1.258.0) (2026-09-20)
+
+
+### Features
+
+* **agents:** the orchestrator preset answers from the plane's tables ([#2094](https://github.com/coreplanelabs/switchboard/issues/2094)) ([90a86e8](https://github.com/coreplanelabs/switchboard/commit/90a86e8699028ff090346c8121375c40cf30c3b5))
+* **dispatcher:** a write intent never executes as a read command ([#2095](https://github.com/coreplanelabs/switchboard/issues/2095)) ([e90fea1](https://github.com/coreplanelabs/switchboard/commit/e90fea176f5a6b6996a04546537cd53a3d4fce89))
+
+
+### Bug fixes
+
+* **harness:** a parked provider failure holds the turn for the reissue ([#2091](https://github.com/coreplanelabs/switchboard/issues/2091)) ([679ebd5](https://github.com/coreplanelabs/switchboard/commit/679ebd54faba5a81eb6354decf4d64e735801009))
+* **runs:** a dead restart dispatch ends its run record as interrupted ([#2092](https://github.com/coreplanelabs/switchboard/issues/2092)) ([dea8de9](https://github.com/coreplanelabs/switchboard/commit/dea8de9b98ee437a866478437eb3b45fcccfd4f4))
+* **ship:** a coding round concluded blocked ends held, never renewed ([#2089](https://github.com/coreplanelabs/switchboard/issues/2089)) ([e9df472](https://github.com/coreplanelabs/switchboard/commit/e9df472514e19f643b09c8f20c8a72054f6241ec))
+
 ## [1.257.0](https://github.com/coreplanelabs/switchboard/compare/v1.256.0...v1.257.0) (2026-09-20)
 
 
