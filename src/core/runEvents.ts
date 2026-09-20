@@ -543,15 +543,16 @@ export type RouteInputObject3 = { readonly [key: string]: RouteInputLeafOrList |
 export type RouteInputValue = RouteInputLeafOrList | RouteInputObject3;
 
 /** How a door decision about a state change ended (docs/decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md):
- *  `hand_back` — the router bound a state-changing command and the door answered
- *  the line to paste, nothing invoked; `offered` — the same decision on a
+ *  `hand_back` — the door held a state-changing command and ran nothing: a
+ *  typed surface's refusal naming the typed form, or a chat surface's refusal
+ *  naming why the click could not mint; `offered` — the same decision on a
  *  channel that can show a confirmation: the line, its risk and a button, a
  *  row stored in the config object, nothing invoked; `confirmed` — the stored
- *  input ran at the click, as the requester, through the typed line's path;
- *  `pasted` — the typed line that followed a hand-back in its thread, with the
- *  same receipt, ran. A routed read carries no outcome: it is not a decision
- *  about a state change. */
-export type RouteOutcome = "hand_back" | "offered" | "confirmed" | "pasted" | "refused";
+ *  input ran at the click, as the requester, through the typed line's path.
+ *  A routed read carries no outcome: it is not a decision about a state
+ *  change. (A record from before the hand-back retired from chat may carry
+ *  `pasted`; nothing writes or reads it now.) */
+export type RouteOutcome = "hand_back" | "offered" | "confirmed" | "refused";
 
 export type RunEvent =
   /** `callId` is the provider's tool_use id — the explicit pair key between a
@@ -1020,11 +1021,10 @@ export type RunEvent =
    *  how the invoke ended is the run's own status and `answer`. A door
    *  decision about a state change (record 0044) is a command run too, with
    *  `outcome` saying which: a hand-back invoked nothing and its `answer` is
-   *  the line to paste; an offer invoked nothing and its `answer` is the offer
-   *  as the channel shows it; a confirmation is the stored input run at the
-   *  click, its `answer` the command's own text as a routed read's is; a paste is
-   *  the typed line that followed a hand-back, whatever its command,
-   *  `handBackRunId` naming the hand-back's record. */
+   *  the refusal the surface was shown (the typed form on a typed surface);
+   *  an offer invoked nothing and its `answer` is the offer as the channel
+   *  shows it; a confirmation is the stored input run at the click, its
+   *  `answer` the command's own text as a routed read's is. */
   | {
       type: "route";
       preset: string;
@@ -1044,7 +1044,6 @@ export type RunEvent =
        *  (record 0054): a refusal after a command was bound is a run
        *  record, and the door report counts it by cause and code. */
       refusalCode?: string;
-      handBackRunId?: string;
       seq?: number;
       at?: number;
     }

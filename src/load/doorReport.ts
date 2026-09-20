@@ -1,11 +1,10 @@
-// The door report (docs/reference/specs/load-harness.md item 19; record 0044,
-// the counts before anything is built): how many routed writes the door
-// handed back as a line to paste, and how many of those lines were pasted, per
-// day and per command — read off the run store's records alone. A
-// hand-back is a command run whose `route` event carries `outcome: "hand_back"`;
-// a paste is one carrying `outcome: "pasted"` and `handBackRunId`, joined to
-// its hand-back by that id and counted under the hand-back's day and command,
-// whatever day the paste landed. Refusals are counted the same way (record
+// The door report (docs/reference/specs/load-harness.md item 19; record 0044):
+// how many routed writes the door held without running, per day and per
+// command — read off the run store's records alone. A hand-back is a command
+// run whose `route` event carries `outcome: "hand_back"` — a typed surface's
+// typed-form refusal, or a chat surface's refusal naming why the click could
+// not mint (the paste counters retired with the chat hand-back, record 0069's
+// plan). Refusals are counted the same way (record
 // 0054, as amended: every refusal is a run record): the `door` records the
 // dispatcher writes for every refusal — gate refusals before any command is
 // bound included — and the command records whose `route` carries `outcome:
@@ -28,8 +27,6 @@ export interface DoorRow {
   /** The command the door bound (`config.set`, …). */
   command: string;
   handBacks: number;
-  /** Pastes joined to this bucket's hand-backs by `handBackRunId`. */
-  pastes: number;
 }
 
 /** One day's refusal count for one code (record 0054): a `door` record's
@@ -52,11 +49,6 @@ export interface RefusalRow {
 
 export interface DoorReport {
   handBacks: number;
-  /** Pastes whose hand-back is among the hand-backs read. */
-  pastes: number;
-  /** Pastes whose `handBackRunId` names no hand-back read — one before
-   *  `sinceMs`, or a record the store no longer holds. Counted, joined to nothing. */
-  unmatchedPastes: number;
   /** Command runs whose events were read, door decisions or not. */
   commandRuns: number;
   /** Command runs whose record's status is `failed`: the command ran and its
@@ -139,7 +131,7 @@ async function refusalOf(runs: Pick<RunsService, "getRunEvents">, id: string): P
 /**
  * The report over one runs service: the window's command runs and `door`
  * records, each one's `route` or `refusal` event read, the hand-backs bucketed
- * by day and command, the pastes joined to them by `handBackRunId`, and every
+ * by day and command, and every
  * refusal — a `door` record's or a refused route's — bucketed by day, cause
  * and code. A routed read (a route with no outcome) and a typed inline run
  * (no route) are read and left out — except that a `failed` one is counted as
@@ -153,7 +145,6 @@ export async function doorReport(
   const listed = await runsOf(runs, COMMAND_RUN_AGENT, opts);
   const doorListed = await runsOf(runs, DOOR_RUN_AGENT, opts);
   const handBacks = new Map<string, { day: string; command: string }>();
-  const pastes: string[] = [];
   const refusalBuckets = new Map<string, RefusalRow>();
   // The record's cause comes from the one code→cause table; a code the
   // table does not know (a record from a newer bot) counts as `unknown`.
@@ -177,26 +168,18 @@ export async function doorReport(
     }
     if (route.command === undefined) continue;
     if (route.outcome === "hand_back") handBacks.set(run.id, { day: dayOf(run), command: route.command });
-    else if (route.outcome === "pasted" && route.handBackRunId !== undefined) pastes.push(route.handBackRunId);
   }
   const buckets = new Map<string, DoorRow>();
   const bucket = (key: { day: string; command: string }): DoorRow => {
     const id = `${key.day}/${key.command}`;
     let row = buckets.get(id);
     if (!row) {
-      row = { ...key, handBacks: 0, pastes: 0 };
+      row = { ...key, handBacks: 0 };
       buckets.set(id, row);
     }
     return row;
   };
   for (const key of handBacks.values()) bucket(key).handBacks++;
-  let joined = 0;
-  for (const handBackRunId of pastes) {
-    const key = handBacks.get(handBackRunId);
-    if (!key) continue;
-    bucket(key).pastes++;
-    joined++;
-  }
   const rows = [...buckets.values()].sort((a, b) =>
     a.day === b.day ? (a.command < b.command ? -1 : a.command > b.command ? 1 : 0) : a.day < b.day ? -1 : 1,
   );
@@ -206,8 +189,6 @@ export async function doorReport(
   return {
     refusals,
     handBacks: handBacks.size,
-    pastes: joined,
-    unmatchedPastes: pastes.length - joined,
     commandRuns: listed.runs.length,
     failedCommandRuns: listed.runs.filter((run) => run.status === "failed").length,
     doorRuns: doorListed.runs.length,
@@ -216,28 +197,18 @@ export async function doorReport(
   };
 }
 
-/** The paste-through rate as the report prints it: `pastes / handBacks`, a dash over no hand-backs. */
-export function pasteRate(handBacks: number, pastes: number): string {
-  if (handBacks === 0) return "—";
-  return `${Math.round((pastes / handBacks) * 1000) / 10}%`;
-}
-
-/** The report as lines: the totals with the rate, then each day with its
- *  commands under it, and a last line when the store could not be read. */
+/** The report as lines: the totals, then each day with its commands under it,
+ *  and a last line when the store could not be read. */
 export function renderDoor(report: DoorReport): string[] {
   const lines = [
-    `door: ${report.handBacks} hand-back(s), ${report.pastes} paste(s) joined (${pasteRate(report.handBacks, report.pastes)} pasted), ${report.unmatchedPastes} paste(s) whose hand-back is outside the window; ${report.commandRuns} command run(s) (${report.failedCommandRuns} failed) and ${report.doorRuns} door record(s) read`,
+    `door: ${report.handBacks} hand-back(s); ${report.commandRuns} command run(s) (${report.failedCommandRuns} failed) and ${report.doorRuns} door record(s) read`,
   ];
   const days = new Map<string, DoorRow[]>();
   for (const row of report.rows) days.set(row.day, [...(days.get(row.day) ?? []), row]);
   for (const [day, rows] of days) {
     const handBacks = rows.reduce((n, r) => n + r.handBacks, 0);
-    const pastes = rows.reduce((n, r) => n + r.pastes, 0);
-    lines.push(`- ${day}: hand-backs ${handBacks}, pastes ${pastes} (${pasteRate(handBacks, pastes)})`);
-    for (const r of rows)
-      lines.push(
-        `  - ${r.command}: hand-backs ${r.handBacks}, pastes ${r.pastes} (${pasteRate(r.handBacks, r.pastes)})`,
-      );
+    lines.push(`- ${day}: hand-backs ${handBacks}`);
+    for (const r of rows) lines.push(`  - ${r.command}: hand-backs ${r.handBacks}`);
   }
   // The refusals the store recorded (record 0054, as amended): per day, per
   // cause and per code — every refusal is a run record, gate refusals before a

@@ -126,17 +126,11 @@ export const ROUTE_RECEIPT_CAP = 300;
 /** The receipt line's prefix: `routed: <chat form>` — the same word the card's
  *  route line uses for a preset. */
 export const ROUTED_RECEIPT_PREFIX = "routed:";
-/** The hand-back's prefix for a state-changing write command (record 0039; the
- *  rule is `routedRunsAtOnce`): the line to paste follows it, and nothing runs.
- *  Defined in its own pure module so the web bundle can read it (the home page
- *  fills its composer with the command). */
+/** The typed-form refusal's prefix for a state-changing write command (record
+ *  0039 as amended; the rule is `routedRunsAtOnce`): on a typed surface the
+ *  refusal names the line to type, and nothing runs. Chat surfaces are offered
+ *  the click instead and never see it (record 0069). */
 export { HAND_BACK_PREFIX };
-/** The second line of a hand-back whose chat form was cut at the receipt cap:
- *  a line ending in `…` is not the line to paste (the grammar refuses it), so
- *  the reply says why and what to do. The first line stays exactly the capped
- *  hand-back — the web home page recognizes it by that line and the record
- *  keeps the same capped receipt. */
-export const HAND_BACK_CUT_NOTE = `(this line was cut at ${ROUTE_RECEIPT_CAP} characters because the bound input runs longer, so it will not run as pasted; spell the long option out by hand)`;
 
 /**
  * Whether a command the router bound runs at once or is handed back as the
@@ -171,10 +165,8 @@ export function routedRunsAtOnce(
 }
 
 /** The receipt of a bound command as the reply leads with it and the record
- *  keeps it: the chat form, redacted and cut at `ROUTE_RECEIPT_CAP`. One
- *  function for both sides of the paste check (record 0044): the hand-back
- *  records it, and stage A computes the typed line's the same way, so a line
- *  over the cap still matches its hand-back. */
+ *  keeps it: the chat form, redacted and cut at `ROUTE_RECEIPT_CAP` — one
+ *  function, so every record's receipt is the same shape (record 0044). */
 export function routeReceipt(def: CommandDef<unknown>, input: CommandInput): string {
   return redactAndCap(chatInvocation(def, input), ROUTE_RECEIPT_CAP);
 }
@@ -1595,10 +1587,8 @@ async function answerCommand(
  * invokes nothing and tells no surface of the run, its `route` event's
  * `outcome` saying which) and one reply second. A channel without `offer` is
  * a typed surface: the refusal names the typed form — `To run this: <chat
- * form>` exactly as before the store existed, plus the cut note as a second
- * line when the chat form was cut at `ROUTE_RECEIPT_CAP` (a line ending in
- * `…` is not the line to paste); the first line and the record's receipt
- * stay the capped form. On a chat surface the offer shows the FULL chat form
+ * form>`, the line and the record's receipt both the capped form
+ * (`ROUTE_RECEIPT_CAP`). On a chat surface the offer shows the FULL chat form
  * of the bound input — uncapped, because a line the person cannot read in
  * full is not a confirmation; the record keeps the capped receipt as today —
  * and a mint failure is a refusal naming why, never a line to retype: when
@@ -1693,11 +1683,7 @@ async function answerHandBack(
     );
     return { kind: "command", command: def.id, outcome };
   };
-  // A receipt over the cap was cut by `routeReceipt` (`redactAndCap` appends
-  // `…`, so a cut receipt is exactly one char past the cap and an uncut one
-  // never is): the hand-back gains the cut note as a second line.
-  const cut = receipt.length > ROUTE_RECEIPT_CAP;
-  const handBack = cut ? `${HAND_BACK_PREFIX} ${receipt}\n${HAND_BACK_CUT_NOTE}` : `${HAND_BACK_PREFIX} ${receipt}`;
+  const handBack = `${HAND_BACK_PREFIX} ${receipt}`;
   const mint = await mintConfirmationOffer({
     io,
     store: deps.confirmations,

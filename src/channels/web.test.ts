@@ -554,23 +554,23 @@ describe("POST /threads/<id>/send — the body into dispatch() as this session (
     expect(calls).toHaveLength(0);
   });
 
-  it("a request the pipeline answers without a run — a hand-back, a help answer, a steer acknowledgement — is 200 with the reply text and no view path", async () => {
+  it("a request the pipeline answers without a run — a help answer, a steer acknowledgement — is 200 with the reply text and no view path", async () => {
     const { handler } = setup({
       dispatch: async (_deps, _msg, io) => {
-        await io.reply("To run this: config set me --agent review");
+        await io.reply("**Commands** — `help commands` lists every one.");
       },
     });
     const res = await request(handler, {
       url: "/threads/conv-1/send",
       method: "POST",
-      body: JSON.stringify({ text: "use the review agent for me" }),
+      body: JSON.stringify({ text: "help" }),
     });
     expect(res.status).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({ reply: "To run this: config set me --agent review" });
+    expect(JSON.parse(res.body)).toEqual({ reply: "**Commands** — `help commands` lists every one." });
   });
 
-  it("a hand-back recorded through the real machinery (record 0044) is still 200 with the line — no view path, no run receipt — while the registry holds the record", async () => {
-    const line = "To run this: config set me --agent review";
+  it("a routed write offered through the real machinery (record 0069) is 200 with the click row — the offer's line and risk ride the response, no view path, no run receipt — while the registry holds the record", async () => {
+    const offerText = "config set me --agent review";
     const route: RouteEventFields = {
       preset: "command",
       reason: "command config.set",
@@ -578,12 +578,12 @@ describe("POST /threads/<id>/send — the body into dispatch() as this session (
       command: "config.set",
       input: { args: ["me"], options: { agent: "review" } },
       receipt: "config set me --agent review",
-      outcome: "hand_back",
+      outcome: "offered",
     };
     const { handler, registry } = setup({
-      // What the route stage does for a hand-back: the decision recorded
+      // What the route stage does for an offered write: the decision recorded
       // through the real inline-run machinery, told to announce nothing, then
-      // the line replied. The adapter's answer is judged against the real seam.
+      // the offer shown. The adapter's answer is judged against the real seam.
       dispatch: async (_deps, msg, io) => {
         const fastPath = {
           runRegistry: registry,
@@ -592,10 +592,10 @@ describe("POST /threads/<id>/send — the body into dispatch() as this session (
         } as unknown as FastPathDeps;
         const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf(msg.channelId), receivedAt: NOW });
         const ending = createRunEnding({ registry });
-        await recordRoutedDecision(fastPath, msg, io, { id: "config.set" }, route, line, ending, trace);
+        await recordRoutedDecision(fastPath, msg, io, { id: "config.set" }, route, offerText, ending, trace);
         await ending.sealAfterReply(
           async () => {},
-          () => io.reply(line),
+          () => io.offer!({ id: "c-1", line: offerText, risk: "changes your agent", expiresAt: NOW + 600_000 }),
         );
       },
     });
@@ -605,7 +605,7 @@ describe("POST /threads/<id>/send — the body into dispatch() as this session (
       body: JSON.stringify({ text: "use the review agent for me" }),
     });
     expect(res.status).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({ reply: line });
+    expect(JSON.parse(res.body)).toEqual({ reply: "", offer: { line: offerText, risk: "changes your agent" } });
     expect(registry.getById("id-1")).toMatchObject({ finished: true, status: "completed", agent: "command" });
   });
 

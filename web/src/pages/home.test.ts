@@ -11,9 +11,10 @@ import { mountApp } from "../testing/mount";
 
 // Feature: docs/reference/specs/web-chat.md — the home page draws a
 // conversation as the person's turns and the runs they started; a `202` mounts
-// a live turn on the run's own stream; a `200` is a hand-back (fills the
-// composer), a steer acknowledgement (the live turn's `input` event confirms
-// the turn already drawn) or an inline turn; the composer is one control with
+// a live turn on the run's own stream; a `200` carrying a click row fills the
+// composer with the offered line, a steer acknowledgement paints nothing (the
+// live turn's `input` event confirms the turn already drawn), anything else is
+// an inline turn; the composer is one control with
 // two states, focused on load, its hint laid out before it shows; the rail is
 // the recent list with a fuzzy filter and two shortcuts; a chip sends; nothing
 // the chat draws is a status word of its own.
@@ -595,10 +596,10 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     expect(es.closed).toBe(true);
   });
 
-  it("a hand-back fills the composer with the command and paints no turn (record 0039)", async () => {
+  it("a click row fills the composer with the offered line and paints no turn (record 0069)", async () => {
     fakeFetch({
       status: 200,
-      body: { reply: "To run this: config set me --models.coding anthropic/claude-opus-5" },
+      body: { reply: "", offer: { line: "config set me --models.coding anthropic/claude-opus-5" } },
     });
     const wrapper = mountApp(HomePage, { seed: seed() });
     await send(wrapper, "use opus for my coding runs");
@@ -612,16 +613,16 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     expect(wrapper.findAll(".turn.person")).toHaveLength(1);
   });
 
-  it("a hand-back's second line shows beside the composer, never inside the box (issue 1938)", async () => {
-    const note = "(the confirmation store could not be reached, so there is no button to press)";
+  it("a click row's risk shows beside the composer, never inside the box", async () => {
+    const risk = "tears the resident down";
     fakeFetch({
       status: 200,
-      body: { reply: `To run this: config set me --agent review\n${note}` },
+      body: { reply: "", offer: { line: "config set me --agent review", risk } },
     });
     const wrapper = mountApp(HomePage, { seed: seed() });
     await send(wrapper, "switch me to the review agent");
     expect((wrapper.find("textarea.box").element as HTMLTextAreaElement).value).toBe("config set me --agent review");
-    expect(wrapper.find("p.hint").text()).toBe(note);
+    expect(wrapper.find("p.hint").text()).toBe(risk);
     expect(wrapper.findAll(".turn.assistant")).toHaveLength(0);
   });
 
@@ -1030,7 +1031,7 @@ describe("HomePage — the / palette and the placeholder (item 8)", () => {
     expect(wrapper.find("[data-testid=palette]").text()).toContain('No command matches "/zzz"');
   });
 
-  it("the placeholder follows the state: what to ask, what the box does while a run is live, nothing after a hand-back", async () => {
+  it("the placeholder follows the state: what to ask, what the box does while a run is live, nothing once a click row filled the box", async () => {
     fakeFetch({ status: 202, body: { runId: "r-9", viewPath: "/runs/r-9?t=tok9" } });
     const { factory } = fakeEventSourceFactory();
     const wrapper = mountApp(HomePage, { seed: seed(), eventSource: factory });

@@ -11,7 +11,7 @@ import { startRequestRoot } from "../core/requestTrace.js";
 import type { RunRegistry } from "../core/runRegistry.js";
 import type { RunRecordView, RunsService, RunView } from "../core/runsService.js";
 import { systemClock } from "../core/trace/clock.js";
-import type { ChannelIO, HistoryItem, IncomingMessage, OpenedThread } from "../core/types.js";
+import type { ChannelIO, ConfirmationOffer, HistoryItem, IncomingMessage, OpenedThread } from "../core/types.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import { originAllowed } from "./commandHttp.js";
 import { HttpIO, MAX_BODY_BYTES, readBody, type DispatchFn } from "./http.js";
@@ -465,9 +465,9 @@ export function paletteCommands(list: readonly CommandDef<unknown>[], actor: Act
 /** What the empty state offers (web-chat.md item 2): what Switchboard does well,
  *  grounded in the viewer's own runs — the repository they last worked in, a
  *  run of theirs that failed — and what is on in this process. Every chip
- *  sends on click, so each is a read or a request the front door hands back
- *  (a write becomes `To run this: …` in the composer), never a change started
- *  blind. The last chip asks what it can do. */
+ *  sends on click, so each is a read or a request the door answers safely (a
+ *  write is offered as a click row that fills the composer), never a change
+ *  started blind. The last chip asks what it can do. */
 export function suggestionsFor(input: {
   repos: readonly string[];
   failed: boolean;
@@ -506,9 +506,14 @@ export interface WebLane {
  *  run's own turn is left out here. With a `lane` the handle can open a thread
  *  of its own — what admits the web to `agent:ship` (record 0060); a `resume`
  *  handle (rebuilt with no request behind it) logs its replies as
- *  undeliverable instead of collecting them for a response nobody awaits. */
+ *  undeliverable instead of collecting them for a response nobody awaits.
+ *  The web chat is a chat surface (record 0069): `offer` collects the
+ *  confirmation a routed write is offered as, the send response carries the
+ *  row's line and risk, and the page fills its composer from that click row —
+ *  never from a typed-form refusal, which no chat surface renders. */
 export class WebIO extends HttpIO {
   private runId: string | undefined;
+  private offerShown: ConfirmationOffer | undefined;
   /** Present when this handle can open a thread of its own (thread-admission item 6). */
   openThread?: (lead: string) => Promise<OpenedThread>;
   /** Set on a rebuilt handle: the seal reads it (`replyOk: false`). */
@@ -537,6 +542,20 @@ export class WebIO extends HttpIO {
       return;
     }
     return super.reply(text);
+  }
+  /** The click row as the browser shows it: the send response carries the
+   *  line (and its risk or question) and the composer is the affordance — the
+   *  person sends the filled line, which runs as typed. */
+  async offer(offer: ConfirmationOffer): Promise<void> {
+    if (this.resume) {
+      this.replyLog?.(offer.line);
+      return;
+    }
+    this.offerShown = offer;
+  }
+  /** The offer this request collected, when the door minted one. */
+  offered(): ConfirmationOffer | undefined {
+    return this.offerShown;
   }
   override runStarted(started: { id: string }): void {
     this.runId = started.id;
@@ -794,7 +813,20 @@ export function createWebChatHandler(
     // here; a live run always has its token, and takes the `202` above.
     await done;
     const run = io.run();
-    answer(200, { reply: io.collected(), ...(run ? { run } : {}) });
+    const offer = io.offered();
+    answer(200, {
+      reply: io.collected(),
+      ...(offer
+        ? {
+            offer: {
+              line: offer.line,
+              ...(offer.risk ? { risk: offer.risk } : {}),
+              ...(offer.question ? { question: offer.question.text } : {}),
+            },
+          }
+        : {}),
+      ...(run ? { run } : {}),
+    });
   }
 
   return (req, res, ctx) => {

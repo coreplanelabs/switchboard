@@ -1104,9 +1104,12 @@ export async function executeOperatorDecision(
     }
     if (!parsed || parsed.kind !== "invoke" || !def || !bound) {
       // A residue only a confirmed proposal from an older record can reach:
-      // the loop's schema renders no unparseable line. The typed form is
-      // named, as a typed surface's refusal would name it.
-      await io.reply(renderHandBackLine(bind.line));
+      // the loop's schema renders no unparseable line. A typed surface's
+      // refusal names the typed form; a chat surface is never handed a line
+      // to retype (record 0069), so it is asked to ask again.
+      await io.reply(
+        surface === "typed" ? renderHandBackLine(bind.line) : "this proposal can no longer run; ask again",
+      );
       await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
       return answered;
     }

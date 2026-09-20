@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  offerFill,
   clampRailWidth,
   classifyReply,
   compactAge,
@@ -34,25 +35,6 @@ describe("composerMode — one control, two states (rule 5)", () => {
 });
 
 describe("classifyReply — what a run-less reply means", () => {
-  it("a hand-back is the command to paste, without its prefix", () => {
-    expect(classifyReply("To run this: config set me --models.coding anthropic/claude-opus-5")).toEqual({
-      kind: "handBack",
-      command: "config set me --models.coding anthropic/claude-opus-5",
-    });
-  });
-  it("a one-line hand-back carries no note", () => {
-    const reply = classifyReply("To run this: mcp remove linear");
-    expect(reply).toEqual({ kind: "handBack", command: "mcp remove linear" });
-    expect("note" in reply).toBe(false);
-  });
-  it("a two-line hand-back keeps only the first line as the command; the rest is a note", () => {
-    const note = "(the confirmation store could not be reached, so there is no button to press)";
-    expect(classifyReply(`To run this: config set me --agent review\n${note}`)).toEqual({
-      kind: "handBack",
-      command: "config set me --agent review",
-      note,
-    });
-  });
   it("a steer acknowledgement paints nothing", () => {
     const text =
       "↪ Folded into the *review* run already in flight in this thread (40s in) — it picks this up at its next step.";
@@ -62,6 +44,27 @@ describe("classifyReply — what a run-less reply means", () => {
     expect(classifyReply("🚫 You're not on the allowlist for the `coding` agent.")).toEqual({
       kind: "inline",
       text: "🚫 You're not on the allowlist for the `coding` agent.",
+    });
+  });
+});
+
+describe("offerFill — the composer fills from a click row (record 0069)", () => {
+  it("the row's line is the command and the hint says Enter runs it", () => {
+    expect(offerFill({ line: "config set me --agent review" })).toEqual({
+      command: "config set me --agent review",
+      hint: "Enter runs it",
+    });
+  });
+  it("the risk line is the hint when the command declares one", () => {
+    expect(offerFill({ line: "repo offboard acme/api", risk: "tears the resident down" })).toEqual({
+      command: "repo offboard acme/api",
+      hint: "tears the resident down",
+    });
+  });
+  it("a question's sentence outranks the risk on a did-you-mean offer (record 0054)", () => {
+    expect(offerFill({ line: "mcp remove linear", risk: "disconnects it", question: "Did you mean:" })).toEqual({
+      command: "mcp remove linear",
+      hint: "Did you mean:",
     });
   });
 });

@@ -112,13 +112,7 @@ import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
 import { cliWords, mcpToolName } from "./commandSurface.js";
 import { parseChatCommand } from "./commandChat.js";
 import { presetBindOf } from "./dispatch/operator.js";
-import {
-  HAND_BACK_CUT_NOTE,
-  ROUTE_RECEIPT_CAP,
-  routablePresets,
-  type RouteModel,
-  type RoutePrompt,
-} from "./dispatch/route.js";
+import { ROUTE_RECEIPT_CAP, routablePresets, type RouteModel, type RoutePrompt } from "./dispatch/route.js";
 import { capabilitiesFrom } from "./capabilities.js";
 import { NO_FLEET } from "./residentFleet.js";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
@@ -16752,7 +16746,7 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     expect(deps.invoked).toEqual([]);
   });
 
-  it("a hand-back whose chat form was cut at the cap carries one second line: cut at the cap, not runnable as pasted, spell the long option by hand", async () => {
+  it("a hand-back whose chat form was cut at the cap is one line, the capped form — the cut note retired with the paste (record 0069's plan)", async () => {
     const { deps } = wired();
     const long = `anthropic/${"x".repeat(ROUTE_RECEIPT_CAP + 100)}`;
     deps.routeModel = call("config_set", { scope: "channel", models: { coding: long } });
@@ -16760,13 +16754,10 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     await dispatch(deps, msg("use that long model name for coding here", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
     const lines = replies[0]!.split("\n");
-    expect(lines).toHaveLength(2);
-    // The first line is exactly the capped hand-back — the web home page
-    // recognizes it and the record keeps the same capped receipt.
+    expect(lines).toHaveLength(1);
+    // The line is exactly the capped hand-back and the record keeps the same capped receipt.
     expect(lines[0]).toMatch(/^To run this: config set channel --models\.coding anthropic\/x+…$/);
     expect(lines[0]!.length).toBe("To run this: ".length + ROUTE_RECEIPT_CAP + 1);
-    expect(lines[1]).toBe(HAND_BACK_CUT_NOTE);
-    expect(HAND_BACK_CUT_NOTE).toContain(`cut at ${ROUTE_RECEIPT_CAP} characters`);
     expect(deps.invoked).toEqual([]);
   });
 
@@ -16819,12 +16810,12 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
 });
 
 // Feature: docs/reference/specs/run-history.md item 2 and
-// docs/reference/specs/routing-and-config.md item 21 (record 0044, the counts
-// before anything is built): a door decision about a state change is a run
-// record — the hand-back invokes nothing and tells no surface; the typed line
-// that follows it in the same thread is a second record naming the first;
-// every other typed no-work command, and every routed read, is as it was.
-describe("the door's counts through dispatch(): a hand-back and its paste are run records (record 0044)", () => {
+// docs/reference/specs/routing-and-config.md item 21 (record 0044; record
+// 0069's plan, the retirement unit): a door decision about a state change is a
+// run record — the hand-back invokes nothing and tells no surface. The paste
+// machinery retired with the chat hand-back: a typed line runs as typed with
+// no thread read and no second record, whatever came before it in the thread.
+describe("the door's counts through dispatch(): a hand-back is a run record and a typed line runs unrecorded (record 0044)", () => {
   const HAND_BACK_LINE = "To run this: config set channel --models.coding anthropic/claude-opus-5";
   const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
   const contentTypes = (events: readonly RunEvent[]) => events.filter((e) => !isSpanRecord(e)).map((e) => e.type);
@@ -16901,7 +16892,7 @@ describe("the door's counts through dispatch(): a hand-back and its paste are ru
     ).not.toBe("anthropic/claude-opus-5");
   });
 
-  it("the same thread's typed line — the paste — runs the command and leaves a second record with route.outcome pasted naming the hand-back, announced to no surface; the reply is the command's own", async () => {
+  it("the same thread's typed line runs the command with no second record — the paste machinery retired with the chat hand-back (record 0069's plan)", async () => {
     const { deps, registry } = wired();
     await handBack(deps);
     const { io, replies, started, finished } = spiedIO();
@@ -16912,24 +16903,10 @@ describe("the door's counts through dispatch(): a hand-back and its paste are ru
     expect(
       deps.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef,
     ).toBe("anthropic/claude-opus-5");
-    const snap = registry.snapshotById("r2");
-    expect(snap?.finished).toBe(true);
-    expect(registry.getById("r2")).toMatchObject({ status: "completed", agent: "command" });
-    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
-    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
-      preset: "command",
-      reason: "pasted after hand-back",
-      model: "anthropic/general-model",
-      command: "config.set",
-      input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
-      receipt: "config set channel --models.coding anthropic/claude-opus-5",
-      outcome: "pasted",
-      handBackRunId: "r1",
-    });
-    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: replies[0] });
+    // A no-work typed command leaves no record: nothing names the hand-back.
+    expect(registry.snapshotById("r2")).toBeNull();
     expect(started).not.toHaveBeenCalled();
     expect(finished).not.toHaveBeenCalled();
-    expect(registry.snapshotById("r3")).toBeNull();
   });
 
   it("a different typed line in the thread runs and leaves no record — today's rule for a no-work command", async () => {
@@ -16942,81 +16919,18 @@ describe("the door's counts through dispatch(): a hand-back and its paste are ru
     expect(registry.snapshotById("r2")).toBeNull();
   });
 
-  it("a line over the receipt cap matches through the same cap: the hand-back's receipt and the typed line's are cut by one function", async () => {
-    const { deps, registry } = wired();
-    const long = `anthropic/${"x".repeat(ROUTE_RECEIPT_CAP + 100)}`;
-    deps.routeModel = call("config_set", { scope: "channel", models: { coding: long } });
-    const first = fakeIO();
-    await dispatch(deps, msg("use that long model name for coding here", "slack:UADMIN"), first.io);
-    // The reply's first line is the capped hand-back; its second is the cut
-    // note (the receipt on the record stays the first line's, capped).
-    const handBackLine = first.replies[0]!.split("\n")[0]!;
-    expect(handBackLine).toMatch(/^To run this: config set channel --models\.coding anthropic\/x+…$/);
-    const { io } = fakeIO();
-    await dispatch(deps, msg(`config set channel --models.coding ${long}`, "slack:UADMIN"), io);
-    expect(deps.invoked).toEqual(["config.set"]);
-    expect(registry.snapshotById("r2")?.events.find((e) => e.type === "route")).toMatchObject({
-      outcome: "pasted",
-      handBackRunId: "r1",
-      receipt: handBackLine.slice("To run this: ".length),
-    });
-  });
-
-  it("the newest command record decides: a routed read that ran between the hand-back and the typed line means no paste is recorded", async () => {
-    const { deps, registry } = wired();
-    await handBack(deps);
-    deps.routeModel = call("friction_report", { limit: 5 });
-    await dispatch(deps, msg("what friction keeps coming back in the last five runs", "slack:UADMIN"), fakeIO().io);
-    expect(registry.getById("r2")).toMatchObject({ agent: "command", finished: true });
-    await dispatch(
-      deps,
-      msg("config set channel --models.coding anthropic/claude-opus-5", "slack:UADMIN"),
-      fakeIO().io,
-    );
-    expect(deps.invoked).toEqual(["friction.report", "config.set"]);
-    expect(registry.snapshotById("r3")).toBeNull();
-  });
-
-  it("a typed command in a thread with no command run costs one bounded read — the thread's newest finished command run — and records nothing new", async () => {
+  it("a typed command costs no thread read: the store is never asked about the thread's earlier runs", async () => {
     const { deps, registry, runs } = wired();
+    await handBack(deps);
     const listRuns = vi.fn(runs.listRuns.bind(runs));
     const getRunEvents = vi.fn(runs.getRunEvents.bind(runs));
     deps.runs = { ...runs, listRuns, getRunEvents };
     const { io } = fakeIO();
     await dispatch(deps, msg("config set channel --models.coding anthropic/claude-opus-5", "slack:UADMIN"), io);
     expect(deps.invoked).toEqual(["config.set"]);
-    expect(listRuns).toHaveBeenCalledTimes(1);
-    expect(listRuns.mock.calls[0]![0]).toEqual({
-      status: "finished",
-      visibleTo: { kind: "all" },
-      agent: "command",
-      threadKey: "slack:CX:1.0",
-      limit: 1,
-    });
+    expect(listRuns).not.toHaveBeenCalled();
     expect(getRunEvents).not.toHaveBeenCalled();
-    expect(registry.snapshotById("r1")).toBeNull();
-  });
-
-  it("a read the store refuses never blocks the command: the line runs, the reply is its own, and nothing is recorded", async () => {
-    const { deps, registry, runs } = wired();
-    await handBack(deps);
-    deps.runs = {
-      ...runs,
-      listRuns: async () => {
-        throw new Error("store down");
-      },
-    };
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const { io, replies } = fakeIO();
-      await dispatch(deps, msg("config set channel --models.coding anthropic/claude-opus-5", "slack:UADMIN"), io);
-      expect(deps.invoked).toEqual(["config.set"]);
-      expect(replies).toHaveLength(1);
-      expect(registry.snapshotById("r2")).toBeNull();
-      expect(warn.mock.calls.some((c) => String(c[0]).includes("store down"))).toBe(true);
-    } finally {
-      warn.mockRestore();
-    }
+    expect(registry.snapshotById("r2")).toBeNull();
   });
 
   it("a routed read records nothing new: its route carries no outcome, so a log-only command stays log-only", async () => {
