@@ -41,8 +41,11 @@ import {
   createAdminCoordinatorHandler,
   handleCoordinatorRequest,
   isCoordinatorAdminPath,
+  recoveredFallbackTitle,
   type AdminCoordinatorDeps,
 } from "./adminCoordinator.js";
+import { checkPrTitle, TITLE_MAX_LENGTH } from "../core/prTitle.mjs";
+import PR_TITLE_VOCABULARY from "../core/prTitleVocabulary.json" with { type: "json" };
 
 // Feature: docs/reference/specs/http-ingress.md item 9 — the bot steps a ship
 // coordinator calls behind the `coordinator` bearer whose actor holds
@@ -1075,6 +1078,83 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       plain.deps,
     );
     expect(plain.opens).toHaveLength(0);
+  });
+
+  it("the recovered pull request's title (issue 1877): a submitted description's title is used as is; without one the unit's title becomes a conventional line scoped with the plan's area and cut to the 72-character cap at a word boundary — never the unit heading verbatim", async () => {
+    const RUN = "11111111-1111-4111-8111-111111111111";
+    const row: CoordinatorUnit = {
+      instanceId: INSTANCE.id,
+      unit: "U12",
+      slug: "u12",
+      title:
+        "fix issue 1877 — when the plan runner opens a pull request from a pushed branch the unit title fails the required title check",
+      branch: INSTANCE.branch,
+      dependsOn: [],
+      rounds: [],
+    };
+    const recoverCheck = (deps: AdminCoordinatorDeps) =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: RUN },
+        }),
+        deps,
+      );
+
+    // No description on the record: the fallback — typed by the unit title's
+    // own leading word, scoped with the plan's area (the plan id's `web`
+    // segment names a code-map scope) and capped at a word boundary — a line
+    // the title gate accepts, never `U12: <title>` verbatim.
+    const h = harness();
+    await h.instances.put({ ...INSTANCE, plan: { id: "fix-web-run-cards" } });
+    await h.instances.putUnits([row]);
+    await recoverCheck(h.deps);
+    const title = h.opens[0]!.title;
+    expect(title).toBe("fix(web): issue 1877 — when the plan runner opens a pull request from a");
+    expect(title.length).toBeLessThanOrEqual(TITLE_MAX_LENGTH);
+    expect(checkPrTitle(title, PR_TITLE_VOCABULARY).ok).toBe(true);
+
+    // A submitted description's title is used AS IS — the submit tool's gate
+    // already judged it; the fallback never rewrites it.
+    const described = harness();
+    await described.instances.put({ ...INSTANCE, plan: { id: "fix-web-run-cards" } });
+    await described.instances.putUnits([row]);
+    await described.store.put(
+      record(RUN, {
+        agent: "coding",
+        threadKey: "slack:C1:2.0",
+        parentInstanceId: INSTANCE.id,
+        events: [
+          {
+            type: "pr_description",
+            description: { title: "fix(ship): the runner titles the recovered pull request", tldr: "T." },
+            seq: 1,
+          } as unknown as RunRecord["events"][number],
+        ],
+      }),
+    );
+    await recoverCheck(described.deps);
+    expect(described.opens[0]!.title).toBe("fix(ship): the runner titles the recovered pull request");
+
+    // The fallback's edges, on the pure helper: a unit title already reading
+    // as a conventional line the gate accepts is kept whole; a title with no
+    // known leading type falls to `chore`; no plan-id segment naming a
+    // code-map scope leaves the line unscoped (the gate allows that); and the
+    // cut lands on a word boundary with no dangling punctuation.
+    expect(recoveredFallbackTitle({ unit: "U12", title: "docs(web): tidy the map" }, "plan/p/u1", "fix-web-x")).toBe(
+      "docs(web): tidy the map",
+    );
+    expect(recoveredFallbackTitle({ unit: "U12", title: "Warm the cache on wake" }, "plan/p/u1", "orchestration")).toBe(
+      "chore: Warm the cache on wake",
+    );
+    const long = `retire ${"the alarm and ".repeat(6)}every clock`;
+    const cut = recoveredFallbackTitle({ unit: "U12", title: long }, "plan/p/u1", undefined);
+    expect(cut.length).toBeLessThanOrEqual(TITLE_MAX_LENGTH);
+    // Cut at a word boundary: what remains after the prefix is a whole-word
+    // prefix of the source title, and no dangling punctuation survives.
+    expect(`${long} `.startsWith(`${cut.slice("chore: ".length)} `)).toBe(true);
+    expect(checkPrTitle(cut, PR_TITLE_VOCABULARY).ok).toBe(true);
   });
 });
 

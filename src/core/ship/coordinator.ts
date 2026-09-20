@@ -473,9 +473,10 @@ export type CoordinatorAction =
        *  over an already-shipped pull request. */
       entry?: true;
       /** Set after a coding child died: the bot opens the pull request from the
-       *  pushed branch itself (title from the unit, body from this run's
-       *  submitted description when the record holds one) instead of answering
-       *  `none` over stranded work. */
+       *  pushed branch itself (title from this run's submitted description when
+       *  the record holds one, else a conventional fallback from the unit's
+       *  title — issue 1877; body from the description when the record holds
+       *  one) instead of answering `none` over stranded work. */
       recover?: { runId: string };
       /** The pull request the machine has adopted (`state.pr`), when it holds
        *  one: the child may have worked that pull request's own head branch,
