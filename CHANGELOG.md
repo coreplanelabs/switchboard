@@ -1,5 +1,52 @@
 # Changelog
 
+## [1.257.0](https://github.com/coreplanelabs/switchboard/compare/v1.256.0...v1.257.0) (2026-09-20)
+
+
+### Features
+
+* **core:** a held write is one click on chat, never a line to retype ([#2065](https://github.com/coreplanelabs/switchboard/issues/2065)) ([341072b](https://github.com/coreplanelabs/switchboard/commit/341072b3af4836ef1e4c4538c96b925e20eaf680))
+* **core:** bot surfaces speak the twelve user nouns ([#2073](https://github.com/coreplanelabs/switchboard/issues/2073)) ([9a8ca0c](https://github.com/coreplanelabs/switchboard/commit/9a8ca0c5d3c9e259f28978ac7c7b86acadec7ab3))
+* **core:** the one execution table — turn outcome × surface → one cell ([#2058](https://github.com/coreplanelabs/switchboard/issues/2058)) ([73d92ad](https://github.com/coreplanelabs/switchboard/commit/73d92ad3edab45a4d8fe6fba953dc7020eaf86e4))
+* **dispatcher:** the hand-back retires from chat surfaces ([#2076](https://github.com/coreplanelabs/switchboard/issues/2076)) ([9fdd0db](https://github.com/coreplanelabs/switchboard/commit/9fdd0dbf763503a45d10c354b8635a388848f264))
+* **dispatcher:** the operator is one loop with typed tools ([#2071](https://github.com/coreplanelabs/switchboard/issues/2071)) ([d2992c7](https://github.com/coreplanelabs/switchboard/commit/d2992c7af6308ab3ee1fff6893268fc0251dac94))
+* **docs:** a renamed carrying type fails typecheck at the vocabulary ([#2068](https://github.com/coreplanelabs/switchboard/issues/2068)) ([a8bc1f6](https://github.com/coreplanelabs/switchboard/commit/a8bc1f64b41712573ed0c31ca0b14e79e6e6c69c))
+* **load:** the door row scores the plan's eighteen defect fixtures ([#2062](https://github.com/coreplanelabs/switchboard/issues/2062)) ([a813290](https://github.com/coreplanelabs/switchboard/commit/a81329096dbe7c134aa899da16c3b82da101eb47))
+* **process:** vocabulary:check fails an internal word on a user surface ([#2070](https://github.com/coreplanelabs/switchboard/issues/2070)) ([c66c9c8](https://github.com/coreplanelabs/switchboard/commit/c66c9c8490779718cdd278f4f9db6d4059f89744))
+* **runs:** an ending's cause is the plane's fact, rendered by all ([#2080](https://github.com/coreplanelabs/switchboard/issues/2080)) ([2301d04](https://github.com/coreplanelabs/switchboard/commit/2301d0453743958062c98db2523bdce9561e4669))
+* **runs:** plane checkpoint steers and provider parks on heartbeats ([#2078](https://github.com/coreplanelabs/switchboard/issues/2078)) ([df1f358](https://github.com/coreplanelabs/switchboard/commit/df1f35873cfabb7b77a446e61051f7c961047475))
+* **runs:** the plane's moves recover stuck work and plane stop ends one ([#2082](https://github.com/coreplanelabs/switchboard/issues/2082)) ([078f769](https://github.com/coreplanelabs/switchboard/commit/078f769c78c4d62a1bfe6ead2f311287ffb3d4bb))
+* **ship:** a coding child rebases onto its base before every push ([#2059](https://github.com/coreplanelabs/switchboard/issues/2059)) ([2aae69d](https://github.com/coreplanelabs/switchboard/commit/2aae69d990b5eb3ea6bdd2352c9a3ce373344bc2))
+* **ship:** pulls rebase sweeps the pipeline's stale pull requests ([#2066](https://github.com/coreplanelabs/switchboard/issues/2066)) ([53a8fe3](https://github.com/coreplanelabs/switchboard/commit/53a8fe3389df736b208e3546c7cfeae82e11a1c8))
+* **ship:** watch until merge as a setting — book, intake and caps ([#2074](https://github.com/coreplanelabs/switchboard/issues/2074)) ([0aeec25](https://github.com/coreplanelabs/switchboard/commit/0aeec2547c16be514c49020b8afd52169dbd70fc))
+* **ship:** wire the pull sweep so pulls rebase runs in production ([#2069](https://github.com/coreplanelabs/switchboard/issues/2069)) ([c8ce8df](https://github.com/coreplanelabs/switchboard/commit/c8ce8dfd9ba1e4e341bf5623d4ff3dbc28196bec))
+* **web:** the plane page pins the orchestrator chat beside the panels ([#2057](https://github.com/coreplanelabs/switchboard/issues/2057)) ([b052447](https://github.com/coreplanelabs/switchboard/commit/b052447a38b9f8da1428efd12e9b7297bca74d10))
+
+
+### Bug fixes
+
+* **core:** a pending question's answer joins the ask and binds it ([#2056](https://github.com/coreplanelabs/switchboard/issues/2056)) ([500d8df](https://github.com/coreplanelabs/switchboard/commit/500d8df4bd7d86c7fe5ac2d70009c5b08ac06e11))
+* **core:** a run restarted after container replacement keeps its run id ([#2060](https://github.com/coreplanelabs/switchboard/issues/2060)) ([e77fcad](https://github.com/coreplanelabs/switchboard/commit/e77fcad0033dcfc37b776a4e0a53e510dea4dbcc))
+* **deploy:** a held drain reopens within the cycle bound, waits said ([#2054](https://github.com/coreplanelabs/switchboard/issues/2054)) ([0cbc37f](https://github.com/coreplanelabs/switchboard/commit/0cbc37f918bd65ce998f332c1b577780ab07c417))
+* **dispatcher:** a groundless policy refusal floors to the readers route ([#2052](https://github.com/coreplanelabs/switchboard/issues/2052)) ([4fb65fd](https://github.com/coreplanelabs/switchboard/commit/4fb65fd1a1d0b3a6093ba3751651863b9b004a43))
+* **sandbox:** the executors keep the git credential file fresh per exec ([#2042](https://github.com/coreplanelabs/switchboard/issues/2042)) ([92b3a9f](https://github.com/coreplanelabs/switchboard/commit/92b3a9fee8a49999963536066d7b6a874965c500))
+* **ship:** the checks step is one decision table and no exit is nameless ([#2077](https://github.com/coreplanelabs/switchboard/issues/2077)) ([5d0869c](https://github.com/coreplanelabs/switchboard/commit/5d0869c726c1af5253ff5ac50815ad42b84b8009))
+
+
+### Documentation
+
+* **core:** record 0069 is accepted for the one operator loop ([#2053](https://github.com/coreplanelabs/switchboard/issues/2053)) ([b0907ed](https://github.com/coreplanelabs/switchboard/commit/b0907ed08cd80b3e7b3a7f6ca7846e3ca75fb211))
+* **docs:** record 0070 accepted with the chat column layout decided ([#2047](https://github.com/coreplanelabs/switchboard/issues/2047)) ([a7373e5](https://github.com/coreplanelabs/switchboard/commit/a7373e54d03402e157275a639bf5ebada3cf7f2f))
+* **docs:** specs link the vocabulary rows at each noun's first use ([#2064](https://github.com/coreplanelabs/switchboard/issues/2064)) ([22b7dee](https://github.com/coreplanelabs/switchboard/commit/22b7dee146ad2fdbf24d42c5b972603ac964eacf))
+* **docs:** the non-spec docs trees speak the twelve user nouns ([#2075](https://github.com/coreplanelabs/switchboard/issues/2075)) ([09f31f7](https://github.com/coreplanelabs/switchboard/commit/09f31f769ba49ebe898a6b0e5320e889d362811d))
+* **ship:** record 0071 accepted with the three mechanisms and two calls ([#2055](https://github.com/coreplanelabs/switchboard/issues/2055)) ([c4c18e5](https://github.com/coreplanelabs/switchboard/commit/c4c18e5e120fe82b1597c7f269ed197bf8a700b1))
+* **ship:** record 0071 swaps the always-on rebase for three mechanisms ([#2048](https://github.com/coreplanelabs/switchboard/issues/2048)) ([20af29f](https://github.com/coreplanelabs/switchboard/commit/20af29f9ee97df70dbdb47794fe454b2f3a318be))
+
+
+### Refactoring
+
+* **ship:** one RoundKind spelling, the segment counter named ([#2072](https://github.com/coreplanelabs/switchboard/issues/2072)) ([01e024a](https://github.com/coreplanelabs/switchboard/commit/01e024aa5bf9d47f3cdb93604e29c40ec8cfb91c))
+
 ## [1.256.0](https://github.com/coreplanelabs/switchboard/compare/v1.255.0...v1.256.0) (2026-09-20)
 
 
