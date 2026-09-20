@@ -314,6 +314,50 @@ export function piReviewProfileScript(opts: ProfileOptions): Script {
   ];
 }
 
+/** A replay fixture of a coding child whose base moved during its round
+ *  (record 0071 mechanism one; docs/reference/specs/agent-coding.md item 13):
+ *  the change is written, the base branch is fetched — it moved while the
+ *  child worked — the unit branch is rebased onto it, the fast gates re-run on
+ *  the rebased tree, and only then does the push happen, in exactly that
+ *  order. Replayed by its unit test alone (`nextStep` walks it like any
+ *  script); it is wired into no load suite, because its last step is a real
+ *  push. */
+export function rebaseBeforePushScript(opts: ProfileOptions): Script {
+  return [
+    {
+      kind: "tool",
+      name: "write_file",
+      input: { path: `${HARNESS_DIR}/note.txt`, content: "the unit's change\n" },
+      text: "Implementing the unit's change.",
+    },
+    {
+      kind: "tool",
+      name: "bash",
+      input: { command: "git fetch origin main" },
+      text: "Immediately before the push: fetching the base branch — it moved during the round.",
+    },
+    {
+      kind: "tool",
+      name: "bash",
+      input: { command: "git rebase origin/main" },
+      text: "Rebasing the unit branch onto the fetched base.",
+    },
+    {
+      kind: "tool",
+      name: "bash",
+      input: { command: cpuBurnCommand(opts.cpuSeconds) },
+      text: "Re-running the fast gates on the rebased tree.",
+    },
+    {
+      kind: "tool",
+      name: "bash",
+      input: { command: "git push --force-with-lease -u origin HEAD" },
+      text: "The gates passed on the rebased tree: pushing.",
+    },
+    { kind: "text", text: "Pushed after the pre-push rebase: fetch, rebase, gates, push — in that order." },
+  ];
+}
+
 export interface ScriptedProviderServer {
   url: string;
   port: number;

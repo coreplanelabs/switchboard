@@ -7,6 +7,7 @@ import {
   GATE_RECEIPTS,
   GUARDS,
   PR_TITLE_GUARD,
+  REBASE_POINTER,
   TIMEOUT_ON_LONG_COMMANDS,
   contractFromPlan,
   generatedUnit,
@@ -20,7 +21,12 @@ import {
   unitTitleOf,
   type ChildContract,
 } from "./contract.js";
-import { CODING_SYSTEM_RESIDENT, FAST_GATES_BEFORE_PUSH, TOUCHED_TESTS_COMMAND } from "../../agents/registry.js";
+import {
+  CODING_SYSTEM_RESIDENT,
+  FAST_GATES_BEFORE_PUSH,
+  REBASE_BEFORE_PUSH,
+  TOUCHED_TESTS_COMMAND,
+} from "../../agents/registry.js";
 
 // Feature: docs/reference/specs/agent-ship.md item 13 — the child contract. A
 // coding child started for a plan unit is handed one typed object (the unit's
@@ -372,17 +378,14 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     // and the timeout clause the coding contract carries: a timeout past the loop's end is refused, not cut
     expect(text).toContain(TIMEOUT_ON_LONG_COMMANDS);
     // the first instruction orders the push once the fast gates pass, hands the full verification
-    // to CI (agent-coding item 13: an unpushed tree does not survive the run's end) and carries the
-    // pre-push re-fetch, so the pull request is not born conflicting when main moved while the child worked
+    // to CI (agent-coding item 13: an unpushed tree does not survive the run's end) and points at the
+    // preset's rebase-before-every-push rule (record 0071 mechanism one), never a conditional re-fetch
     expect(text).toContain(
       "Push the branch as soon as the change exists and the fast gates pass — the project's full verification " +
         "is CI's gate, run there after the push with any fix as a further commit; an unpushed tree does not " +
-        `survive the run's end. ${FAST_GATES_POINTER} ${GATE_RECEIPTS} Right before each push, fetch \`main\` again and rebase ` +
-        "once more if it moved while you worked, so the pull request is not born conflicting.",
+        `survive the run's end. ${FAST_GATES_POINTER} ${GATE_RECEIPTS} ${REBASE_POINTER}`,
     );
-    expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(
-      text.indexOf("Right before each push"),
-    );
+    expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(text.indexOf(REBASE_POINTER));
     // the unit: its id and title on the fixed heading, its bullets verbatim
     expect(text).toContain(`${CONTRACT_SECTION_HEADINGS.unit} U10 — Warm the cache on wake`);
     expect(text).toContain(
@@ -436,9 +439,28 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     );
     expect(GATE_RECEIPTS).not.toContain("verified list");
     expect(FAST_GATES_BEFORE_PUSH).not.toContain("handoff");
-    // the pointer and the receipts sit between the push order and the pre-push re-fetch
+    // the pointer and the receipts sit between the push order and the rebase pointer
     expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(text.indexOf(FAST_GATES_POINTER));
-    expect(text.indexOf(GATE_RECEIPTS)).toBeLessThan(text.indexOf("Right before each push"));
+    expect(text.indexOf(GATE_RECEIPTS)).toBeLessThan(text.indexOf(REBASE_POINTER));
+  });
+
+  it("the first instruction points at the preset's rebase-before-every-push rule instead of re-stating it — always, not configurable, with no conditional re-fetch left", () => {
+    const { text } = renderContract(u10(), {});
+    // the pointer names the preset's paragraph (REBASE BEFORE EVERY PUSH) and keeps its two facts
+    expect(text).toContain(REBASE_POINTER);
+    expect(REBASE_POINTER).toContain("REBASE BEFORE EVERY PUSH");
+    expect(REBASE_POINTER).toContain("not configurable");
+    expect(REBASE_POINTER).toContain("never born conflicting");
+    // the contract no longer re-states the rebase steps or carries the old conditional form:
+    // a plan child reads the paragraph once, in its preset instructions (record 0071 mechanism one)
+    expect(text).not.toContain(REBASE_BEFORE_PUSH);
+    expect(text).not.toContain("rebase once more if it moved");
+    expect(text).not.toContain("Right before each push");
+    // the preset prompt plus the rendered contract carry the paragraph exactly once, byte-identically
+    expect(`${CODING_SYSTEM_RESIDENT}\n${text}`.split(REBASE_BEFORE_PUSH)).toHaveLength(2);
+    // a contract that does not know its base renders the same pointer: it needs no base
+    const unknown = renderContract({ ...u10(), rebase: { branch: undefined, onto: undefined } }, {});
+    expect(unknown.text).toContain(REBASE_POINTER);
   });
 
   it("a unit with no spec rows and no rules says so under the same headings", () => {
