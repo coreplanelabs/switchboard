@@ -95,6 +95,15 @@ export function drainLiftedLine(
   tag = "deploy:all",
 ): string {
   const ok = !("error" in answer) && answer.status >= 200 && answer.status < 300;
+  // The gated lift (issue 1931): the registry kept the drain because a
+  // container still reports the pre-deploy image — the fleet reopens by itself
+  // on the LAST container's new-image report, never on this call's return.
+  const held =
+    !("error" in answer) && answer.body.cleared === false && Array.isArray(answer.body.held)
+      ? (answer.body.held as unknown[]).filter((h): h is string => typeof h === "string")
+      : [];
+  if (ok && held.length > 0)
+    return `[${tag}] ${step}: fleet stays closed — ${held.join(", ")} still report${held.length === 1 ? "s" : ""} the pre-deploy image; it reopens by itself on the last container's new-image report${drain.until ? ` (backstop ${drain.until})` : ""}`;
   if (drain.drained) {
     if (ok) return `[${tag}] ${step}: fleet reopened`;
     return `[${tag}] ${step}: fleet NOT reopened (${answerWords(answer)}) — it reopens by itself${drain.until ? ` at ${drain.until}` : " when the drain ends"}; \`POST /undrain\` with the drain or admin bearer reopens it now`;
@@ -109,25 +118,32 @@ export function drainLiftedLine(
 }
 
 /** One resident's word in a `/reconcile` answer, as the line prints it. */
-type ReconcileRow = { resource?: unknown; result?: unknown };
+type ReconcileRow = { resource?: unknown; result?: unknown; verified?: unknown };
 
 const reconcileWords = (rows: ReconcileRow[]): string =>
-  rows.map((r) => `${typeof r.resource === "string" ? r.resource : "?"} ${String(r.result ?? "?")}`).join(", ");
+  rows
+    .map(
+      (r) =>
+        `${typeof r.resource === "string" ? r.resource : "?"} ${String(r.result ?? "?")}${r.verified === true ? "" : " (unverified)"}`,
+    )
+    .join(", ");
 
 /** The line after the deploy landed and `/reconcile` answered: every touched
- *  resident's container reconciled onto the new image inside the drain window
- *  (resident-repos item 69's order), or which resident deferred or failed —
- *  those restart on their own next quiet attach or refresh — or the request's
- *  own failure; the drain is lifted right after, whatever this answered. */
+ *  resident's container cycled AND VERIFIED on the new image inside the drain
+ *  window (resident-repos item 69's order; issue 1931: "reconciled" is not
+ *  "swapped", so each row also says whether the fresh container was verified),
+ *  or which resident is not yet verified — the registry holds the drain for
+ *  those, and the fleet reopens on their reports — or the request's own
+ *  failure; the lift is asked right after, and the registry decides. */
 export function reconcileLine(step: string, answer: PostAnswer, tag = "deploy:all"): string {
   const ok = !("error" in answer) && answer.status >= 200 && answer.status < 300;
   if (!ok)
     return `[${tag}] ${step}: the fleet could NOT be reconciled onto the new image (${answerWords(answer)}) — a stale container restarts on its next quiet attach or refresh instead`;
   const rows: ReconcileRow[] = Array.isArray(answer.body.reconciled) ? (answer.body.reconciled as ReconcileRow[]) : [];
-  const incomplete = rows.filter((r) => r.result === "deferred" || r.result === "error");
-  if (incomplete.length > 0)
-    return `[${tag}] ${step}: fleet reconciled onto the new image with exceptions (${reconcileWords(rows)}) — a deferred or failed resident restarts on its next quiet attach or refresh`;
-  return `[${tag}] ${step}: fleet reconciled onto the new image (${reconcileWords(rows) || "no residents"})`;
+  const unverified = rows.filter((r) => r.verified !== true);
+  if (unverified.length > 0)
+    return `[${tag}] ${step}: fleet reconciled, but not every container is verified on the new image yet (${reconcileWords(rows)}) — the drain holds for the unverified until each reports`;
+  return `[${tag}] ${step}: fleet reconciled and every container verified on the new image (${reconcileWords(rows) || "no residents"})`;
 }
 
 /** Appended to the gave-up line when the fleet was drained for the whole wait:

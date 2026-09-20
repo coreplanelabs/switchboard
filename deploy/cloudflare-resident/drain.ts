@@ -23,6 +23,17 @@ export interface DrainRecord {
   by: string;
   /** Why, in the words the attach refusal repeats. */
   reason: string;
+  /** The residents whose containers still run the pre-deploy image (issue
+   *  1931): the deploy's reconcile marks the Durable Objects but the platform
+   *  replaces the container processes asynchronously, so "reconciled" is not
+   *  "swapped" — each hold stands until that resident reports its running
+   *  container on the deploy's image, and the fleet reopens on the LAST
+   *  report, a fact, never a wait. Absent or empty: no swap outstanding. */
+  holds?: string[];
+  /** Whether `POST /undrain` already asked for the lift while holds stood:
+   *  the record then clears itself on the last hold's report instead of
+   *  waiting for a second lift. */
+  liftAsked?: boolean;
 }
 
 /** The longest a drain may run, and the default, from the one clock table
@@ -88,7 +99,50 @@ export function liveDrain(stored: unknown, now: number): DrainRecord | null {
     return null;
   const until = Date.parse(r.until);
   if (!Number.isFinite(until) || until <= now) return null;
-  return { since: r.since, until: r.until, by: r.by, reason: r.reason };
+  const holds = Array.isArray(r.holds) ? r.holds.filter((h): h is string => typeof h === "string") : [];
+  return {
+    since: r.since,
+    until: r.until,
+    by: r.by,
+    reason: r.reason,
+    ...(holds.length > 0 ? { holds } : {}),
+    ...(r.liftAsked === true ? { liftAsked: true } : {}),
+  };
+}
+
+/** The record with the named residents held (issue 1931): the deploy's
+ *  reconcile could not verify their running containers on the new image, so
+ *  the fleet must not reopen onto them until each reports. Deduplicated;
+ *  an empty set changes nothing. */
+export function holdDrain(record: DrainRecord, resources: readonly string[]): DrainRecord {
+  const holds = [...new Set([...(record.holds ?? []), ...resources])];
+  if (holds.length === 0) return record;
+  return { ...record, holds };
+}
+
+/** `POST /undrain`'s decision over the stored record: with no holds the drain
+ *  clears; with holds outstanding the fleet STAYS closed — the record keeps
+ *  standing with `liftAsked`, so the last container's new-image report lifts
+ *  it (a fact, never a timer; `until` remains the backstop for a report that
+ *  never comes). */
+export function liftDrain(record: DrainRecord): { cleared: true } | { cleared: false; record: DrainRecord } {
+  const holds = record.holds ?? [];
+  if (holds.length === 0) return { cleared: true };
+  return { cleared: false, record: { ...record, liftAsked: true } };
+}
+
+/** One resident's word that its running container is on the deploy's image:
+ *  its hold drops; when it was the last hold and the lift was already asked,
+ *  the drain lifts here — the reopen fires on the last container's report. */
+export function reportImageCurrent(
+  record: DrainRecord,
+  resource: string,
+): { lifted: boolean; record: DrainRecord | null } {
+  const holds = (record.holds ?? []).filter((h) => h !== resource);
+  const next: DrainRecord = { ...record, ...(holds.length > 0 ? { holds } : {}) };
+  if (holds.length === 0) delete next.holds;
+  if (holds.length === 0 && record.liftAsked === true) return { lifted: true, record: null };
+  return { lifted: false, record: next };
 }
 
 /** The `/attach` answer while the fleet is drained: a 503 whose body carries

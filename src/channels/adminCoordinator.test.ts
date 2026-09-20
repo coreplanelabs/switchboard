@@ -793,6 +793,72 @@ describe("POST /admin/coordinator/read-record — a run of the instance, and no 
   });
 });
 
+describe("POST /admin/coordinator/read-record — an interrupted child (issues 1903/1876)", () => {
+  it("an interrupted child whose request restarted answers the LIVE successor as the child still running (`restartedAs`), so the machine keeps the wait and the pipeline continues — never an ending over a resume that succeeded", async () => {
+    const h = harness();
+    await h.store.put(
+      record("run-cut", {
+        ...TAG,
+        status: "interrupted",
+        events: [
+          { type: "input", messageId: "m1", text: "do the unit", seq: 1 },
+          {
+            type: "child_interrupted",
+            parentInstanceId: INSTANCE.id,
+            reason: "workspace lost with the replaced container; restarting from the request",
+            seq: 2,
+          },
+        ],
+      }),
+    );
+    // The restart: a new live run in the same thread under the same tag.
+    const successor = h.registry.create("coding · child", {
+      agent: "coding",
+      channelId: INSTANCE.channelId,
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      ...TAG,
+    });
+    const res = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-cut" }),
+      h.deps,
+    );
+    expect(res).toEqual({
+      status: 200,
+      body: { ok: true, run: { id: successor.id, finished: false }, restartedAs: successor.id, at: NOW },
+    });
+  });
+
+  it("an interrupted child with NO restarted successor answers its facts with the cause off its own events — the replaced container here — so the ending's sentence names what actually happened (issue 1876)", async () => {
+    const h = harness();
+    await h.store.put(
+      record("run-cut", {
+        ...TAG,
+        status: "interrupted",
+        events: [
+          { type: "input", messageId: "m1", text: "do the unit", seq: 1 },
+          {
+            type: "child_interrupted",
+            parentInstanceId: INSTANCE.id,
+            reason: "workspace lost with the replaced container; restarting from the request",
+            seq: 2,
+          },
+        ],
+      }),
+    );
+    const res = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-cut" }),
+      h.deps,
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as { run: unknown }).run).toMatchObject({
+      finished: true,
+      status: "interrupted",
+      interruption: "container_replaced",
+    });
+  });
+});
+
 describe("POST /admin/coordinator/read-record — the renewal's facts off the record (decision 0046)", () => {
   it("answers the heads the run pushed, when its lease began, what it cost through the operator's prices (null when a model has no price) and the handoff's lists — progress is read off these, never asked of the model", async () => {
     const h = harness({

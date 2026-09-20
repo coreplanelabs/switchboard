@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { DRAIN_DEFAULT_MINUTES, DRAIN_MAX_MINUTES, drainRefusal, liveDrain, parseDrainRequest } from "./drain";
+import {
+  DRAIN_DEFAULT_MINUTES,
+  DRAIN_MAX_MINUTES,
+  drainRefusal,
+  holdDrain,
+  liftDrain,
+  liveDrain,
+  parseDrainRequest,
+  reportImageCurrent,
+} from "./drain";
 import { readSource } from "./testing/sourceScan";
 
 // Feature: docs/reference/specs/resident-repos.md item 69 — the fleet drain: a
@@ -88,6 +97,56 @@ describe("liveDrain — the drain in force, or none", () => {
   });
 });
 
+describe("the reopen gate — the fleet reopens on the last container's new-image report, never on the reconcile's return (issue 1931)", () => {
+  const parsed = parseDrainRequest({ minutes: 60, reason: "deploy 62e4e9a", by: "deploy all" }, NOW);
+  if (!parsed.ok) throw new Error("fixture");
+  const record = parsed.record;
+
+  it("holdDrain marks the residents whose containers still report the pre-deploy image, deduplicated; an empty set changes nothing", () => {
+    expect(holdDrain(record, [])).toEqual(record);
+    const held = holdDrain(record, ["repo:a/x", "repo:a/y"]);
+    expect(held.holds).toEqual(["repo:a/x", "repo:a/y"]);
+    expect(holdDrain(held, ["repo:a/y", "repo:a/z"]).holds).toEqual(["repo:a/x", "repo:a/y", "repo:a/z"]);
+  });
+
+  it("the lift does NOT reopen while a container still reports the old image: the record stands with liftAsked, and liveDrain keeps refusing attaches", () => {
+    const held = holdDrain(record, ["repo:a/x"]);
+    const lift = liftDrain(held);
+    expect(lift.cleared).toBe(false);
+    if (lift.cleared) throw new Error("unreachable");
+    expect(lift.record).toEqual({ ...held, liftAsked: true });
+    // The gated record is still the drain in force — the fleet stays closed.
+    expect(liveDrain(lift.record, NOW + 60_000)).toEqual({ ...held, liftAsked: true });
+  });
+
+  it("the lift with no holds clears as before", () => {
+    expect(liftDrain(record)).toEqual({ cleared: true });
+  });
+
+  it("a report while another container is still old drops only that hold; the LAST container's new-image report lifts the asked drain", () => {
+    const gated = liftDrain(holdDrain(record, ["repo:a/x", "repo:a/y"]));
+    if (gated.cleared) throw new Error("fixture");
+    const first = reportImageCurrent(gated.record, "repo:a/x");
+    expect(first.lifted).toBe(false);
+    expect(first.record?.holds).toEqual(["repo:a/y"]);
+    const last = reportImageCurrent(first.record!, "repo:a/y");
+    expect(last).toEqual({ lifted: true, record: null });
+  });
+
+  it("the last report before any lift was asked keeps the drain standing without holds — the deploy's own lift still decides", () => {
+    const held = holdDrain(record, ["repo:a/x"]);
+    const reported = reportImageCurrent(held, "repo:a/x");
+    expect(reported.lifted).toBe(false);
+    expect(reported.record).toEqual(record);
+    expect(liftDrain(reported.record!)).toEqual({ cleared: true });
+  });
+
+  it("liveDrain carries holds and liftAsked through a stored record, and drops malformed holds", () => {
+    const gated = { ...record, holds: ["repo:a/x", 7], liftAsked: true };
+    expect(liveDrain(gated, NOW)).toEqual({ ...record, holds: ["repo:a/x"], liftAsked: true });
+  });
+});
+
 describe("drainRefusal — what /attach answers while drained", () => {
   it("is a 503 whose error opens with `draining:`, names the reason, who asked, when it ends, and says the run waits; the record rides beside it", () => {
     const record = parseDrainRequest({ minutes: 60, reason: "deploy 62e4e9a", by: "deploy all" }, NOW);
@@ -118,11 +177,27 @@ describe("the Worker's wiring (by scan)", () => {
     expect(hasScope).toMatch(/if \(have === "admin"\) return true;\s*return have === scope;/);
   });
 
-  it("the registry Durable Object stores the drain under its own key outside the `resident:` prefix and offers get, set and clear", () => {
+  it("the registry Durable Object stores the drain under its own key outside the `resident:` prefix and offers get, set, a gated clear, the deploy's holds and the per-container new-image report (issue 1931)", () => {
     expect(source).toMatch(/const DRAIN_KEY = "drain";/);
     expect(source).toMatch(/async getDrain\(\): Promise<unknown>/);
     expect(source).toMatch(/async setDrain\(record: DrainRecord\): Promise<DrainRecord>/);
-    expect(source).toMatch(/async clearDrain\(\): Promise<boolean>/);
+    expect(source).toMatch(/async clearDrain\(\): Promise<\{ cleared: boolean; held: string\[\] \}>/);
+    expect(source).toMatch(/async holdDrainFor\(resources: string\[\]\): Promise<void>/);
+    expect(source).toMatch(/async reportContainerImageCurrent\(resource: string\): Promise<\{ lifted: boolean \}>/);
+    // The lift with holds outstanding keeps the record standing (liftAsked);
+    // the last report deletes it and posts `below` — the fleet reopens on the
+    // container's own fact, never on the reconcile call's return.
+    const clear = source.slice(source.indexOf("async clearDrain("), source.indexOf("async holdDrainFor("));
+    expect(clear).toMatch(/const lift = liftDrain\(record\);/);
+    expect(clear).toMatch(/if \(!lift\.cleared\) \{\s*\n\s*await this\.ctx\.storage\.put\(DRAIN_KEY, lift\.record\);/);
+    const report = source.slice(
+      source.indexOf("async reportContainerImageCurrent("),
+      source.indexOf("/** The one alarm"),
+    );
+    expect(report).toMatch(/reportImageCurrent\(record, resource\)/);
+    expect(report).toMatch(
+      /await this\.ctx\.storage\.delete\(DRAIN_KEY\);\s*\n\s*await this\.pushDrainPost\("below"\);/,
+    );
   });
 
   it("the gate is the Durable Object's — after hydration, before the image reconcile — and refuses only a thread with NO run registration, so a run in flight re-attaches through; the Worker-level handler gates nothing; `/residents` carries `draining`", () => {
@@ -156,7 +231,7 @@ describe("the Worker's wiring (by scan)", () => {
     expect(residents).toMatch(/draining: liveDrain\(await registryStub\(env\)\.getDrain\(\), systemClock\(\)\)/);
   });
 
-  it("the reconcile route is a drain-scope POST dispatched to its handler, which asks every resident's Durable Object to reconcile its container onto the current image — the deploy runner posts it after its Worker deploy landed and before its lift, so a stale container restarts inside the drain window, never under a run the reopened fleet admits", () => {
+  it("the reconcile route is a drain-scope POST dispatched to its handler, which asks every resident's Durable Object to cycle its container onto the current image and VERIFY the fresh start (issue 1931: 'reconciled' is not 'swapped') — an unverified resident holds the drain until its own report", () => {
     expect(source).toMatch(/"\/reconcile": \{ scope: "drain", method: "POST" \}/);
     expect(source).toMatch(/case "\/reconcile":\s*\n\s*return await handleReconcile\(env\);/);
     const handler = source.slice(
@@ -164,13 +239,57 @@ describe("the Worker's wiring (by scan)", () => {
       source.indexOf("async function handleResidents("),
     );
     expect(handler).toMatch(/registryStub\(env\)\.list\(\)/);
-    expect(handler).toMatch(/residentStub\(env, record\.resource\)\.reconcileForDeploy\(\)/);
+    expect(handler).toMatch(/residentStub\(env, record\.resource\)\.reconcileForDeploy\(record\.resource\)/);
     // A failing resident degrades to its own error row, never its neighbors'.
     expect(handler).toMatch(/Promise\.allSettled/);
-    expect(handler).toMatch(/result: "error" as const, error: errMsg\(s\.reason\)/);
-    // The DO method is the one image reconcile, under the deploy's own name.
+    expect(handler).toMatch(/result: "error" as const, verified: false, error: errMsg\(s\.reason\)/);
+    // Every unverified resident becomes a hold on the drain, so the reopen
+    // waits for its report, never for the reconcile call's return.
+    expect(handler).toMatch(
+      /const unverified = reconciled\.filter\(\(r\) => !r\.verified\)\.map\(\(r\) => r\.resource\);/,
+    );
+    expect(handler).toMatch(/if \(unverified\.length > 0\) await registryStub\(env\)\.holdDrainFor\(unverified\);/);
+    // The DO method never trusts the pool-user probe on the deploy path (the
+    // pre-deploy image passes it when the pool did not change): the active
+    // container is cycled (force) and the fresh start probed as the fact.
     expect(source).toMatch(
-      /async reconcileForDeploy\(\): Promise<\{ result: ImageReconcileResult \}> \{\s*\n\s*return \{ result: await this\.reconcileImage\("deploy"\) \};/,
+      /async reconcileForDeploy\(resource: string\): Promise<\{ result: ImageReconcileResult; verified: boolean \}>/,
+    );
+    const forDeploy = source.slice(source.indexOf("async reconcileForDeploy("), source.indexOf("// -- watchdog"));
+    expect(forDeploy).toMatch(/this\.reconcileImage\("deploy", true\)/);
+    expect(forDeploy).toMatch(/IMAGE_REPORT_PENDING_KEY, \{ resource \}/);
+    // The hold lands at the registry BEFORE the marker that enables reports: a
+    // report that outruns its hold is a no-op that consumes the marker and
+    // leaves a hold nothing will report (the `until` backstop alone).
+    expect(forDeploy).toMatch(/registryStub\(this\.env\)\.holdDrainFor\(\[resource\]\)/);
+    expect(forDeploy.indexOf("holdDrainFor([resource])")).toBeLessThan(forDeploy.indexOf("IMAGE_REPORT_PENDING_KEY"));
+    // The later report stands on the post-deploy cycle's fresh start, never on
+    // the pool-user probe: the probe shortcut is gated on NO pending marker,
+    // and the fresh probe's report fires only after the stop.
+    const reconcile = source.slice(
+      source.indexOf("private async reconcileImage("),
+      source.indexOf("async reconcileForDeploy("),
+    );
+    expect(reconcile).toMatch(/if \(!force && pending === undefined\) \{/);
+    expect(reconcile.indexOf("this.stop()")).toBeLessThan(
+      reconcile.lastIndexOf("this.reportPendingImageCurrent(where)"),
+    );
+    // A held resident whose container went inactive has no other reporter left
+    // (the drain refuses new attaches), so the inactive early-return reports a
+    // pending marker before answering — else the fleet stays closed until the
+    // drain's `until` backstop.
+    const inactiveReturn = reconcile.slice(0, reconcile.indexOf('return "inactive"'));
+    expect(inactiveReturn).toContain("this.reportPendingImageCurrent(where)");
+    expect(source).toMatch(/private async reportPendingImageCurrent\(where: string\): Promise<boolean>/);
+    expect(source).toMatch(/registryStub\(this\.env\)\.reportContainerImageCurrent\(pending\.resource\)/);
+    // The marker is deleted only AFTER a successful report, so a transient
+    // report failure keeps the retry-on-next-reconcile behavior.
+    const report = source.slice(
+      source.indexOf("private async reportPendingImageCurrent("),
+      source.indexOf("async reconcileForDeploy("),
+    );
+    expect(report.indexOf("reportContainerImageCurrent(pending.resource)")).toBeLessThan(
+      report.indexOf("storage.delete(IMAGE_REPORT_PENDING_KEY)"),
     );
   });
 

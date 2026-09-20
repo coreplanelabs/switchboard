@@ -205,7 +205,7 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
     expect(w.puts[0]).toMatchObject({ id: "run-old", status: "interrupted" });
   });
 
-  it("a coordinator's child publishes child_interrupted on its record and sends child-interrupted-<runId> to its instance, so the parent's wait settles with the reason instead of walking out the budget (run-history item 47a)", async () => {
+  it("a coordinator's child whose request RESTARTS publishes child_resumed and sends child-resumed-<runId>: the resume succeeded, so the parent keeps waiting and the pipeline never ends over it (issues 1903/1876)", async () => {
     const sent: Array<{ instance: string; type: string; payload: unknown }> = [];
     const workflow: WorkflowSender = {
       get: (instance) =>
@@ -222,20 +222,21 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
       workflow,
     });
     expect(restart).toBeDefined();
-    const event = w.registry.snapshotById("run-old")!.events.find((e) => e.type === "child_interrupted") as {
+    expect(w.registry.snapshotById("run-old")!.events.some((e) => e.type === "child_interrupted")).toBe(false);
+    const event = w.registry.snapshotById("run-old")!.events.find((e) => e.type === "child_resumed") as {
       parentInstanceId: string;
-      reason: string;
+      summary: string;
     };
     expect(event.parentInstanceId).toBe("plan-fix-1");
-    expect(event.reason).toContain("the run's workspace could not be re-attached");
+    expect(event.summary).toContain("the run's workspace could not be re-attached");
     expect(sent).toEqual([
       {
         instance: "plan-fix-1",
-        type: "child-interrupted-run-old",
+        type: "child-resumed-run-old",
         payload: {
           runId: "run-old",
-          kind: "interrupted",
-          reason: event.reason,
+          kind: "resumed",
+          reason: event.summary,
           at: NOW,
           parentInstanceId: "plan-fix-1",
         },
@@ -243,8 +244,34 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
     ]);
     // The closed row's record carries the typed event past the highest replayed seq.
     const recorded = w.puts[0].events.map((e) => e as { type: string; seq?: number });
-    expect(recorded.map((e) => e.type)).toEqual(["input", "run_note", "child_interrupted"]);
+    expect(recorded.map((e) => e.type)).toEqual(["input", "run_note", "child_resumed"]);
     expect(recorded[2]).toMatchObject({ seq: 6 });
+  });
+
+  it("a coordinator's child whose request CANNOT restart publishes child_interrupted and sends child-interrupted-<runId>, so the parent's wait settles with the reason — the resume failed, the unit ends (run-history item 47a)", async () => {
+    const sent: Array<{ instance: string; type: string; payload: unknown }> = [];
+    const workflow: WorkflowSender = {
+      get: (instance) =>
+        Promise.resolve({
+          sendEvent: async (event: { type: string; payload: unknown }) => {
+            sent.push({ instance, ...event });
+          },
+        }),
+    };
+    const w = world(resumeOf(row({}, { request: { text: 12 } })));
+    const restart = await abandonLostWorkspace({
+      ...w.ctx,
+      coordinator: { parentInstanceId: "plan-fix-1", idempotencyKey: "plan-fix-1:U10/0/coding" },
+      workflow,
+    });
+    expect(restart).toBeUndefined();
+    const event = w.registry.snapshotById("run-old")!.events.find((e) => e.type === "child_interrupted") as {
+      parentInstanceId: string;
+      reason: string;
+    };
+    expect(event.parentInstanceId).toBe("plan-fix-1");
+    expect(event.reason).toContain("the run's workspace could not be re-attached");
+    expect(sent.map((s) => s.type)).toEqual(["child-interrupted-run-old"]);
   });
 
   it("a run no coordinator spawned publishes no child event and sends nothing", async () => {

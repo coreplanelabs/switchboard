@@ -136,16 +136,19 @@ export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<I
   const note = { type: "run_note" as const, kind: "resumed" as const, summary, at: clock() };
   await refuse("workspace_lost", async () => {
     registry.publish(run.id, note);
-    // A coordinator's child says the interruption to its parent too
-    // (run-history item 47a): the typed event on its own record and the
-    // Workflow twin, so the parent's wait settles at once with the reason
-    // instead of walking out the child's budget.
+    // A coordinator's child says the roll to its parent too (run-history item
+    // 47a). When the request restarts as a new run in this thread (issue 1903:
+    // a replaced container's child resumes from its request by itself), the
+    // word is `resumed` — the parent's wait keeps waiting and follows the
+    // successor through `read-record`'s `restartedAs`, so the pipeline never
+    // ends over a resume that succeeded (issue 1876). Only a request that
+    // cannot be read — no restart — settles the wait as `interrupted`.
     const rollEvent = coordinator
       ? await announceChildRoll({
           registry,
           runId: run.id,
           coordinator,
-          kind: "interrupted",
+          kind: restored ? "resumed" : "interrupted",
           reason: summary,
           clock,
           ...(workflow ? { workflow } : {}),
