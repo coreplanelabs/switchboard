@@ -66,6 +66,8 @@ import type { Settlement, ToolUsePart } from "../../runLedger/resume.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
 import { loopClock, MINUTE_MS, PROVIDER_RETRY_BACKOFFS_MS, turnLeaseMs } from "../../budgets.js";
 import { followUpMessageId, followUpPrompt, followUpSnippet, type FollowUpInput } from "../../threadAdmission.js";
+import { isReissueSteerText } from "../../plane/decide.js";
+import { PLANE_ACTOR_ID } from "../../authz/grants.js";
 import { PiBridge } from "./bridge.js";
 import {
   HarnessControlFileLostError,
@@ -143,6 +145,11 @@ const CALL_SEEN_TICK_MS = 50;
  *  call produced nothing, so the model simply picks up where it stood. */
 const PROVIDER_RETRY_PROMPT =
   "The previous model call failed mid-stream and is being retried; continue where you left off.";
+/** The prompt that re-issues a held turn once the plane's reissue steer
+ *  arrives (model-proxy item 12a; record 0064): the parked call produced
+ *  nothing, so the model picks up where it stood, like the retry prompt's. */
+const REISSUE_PROMPT =
+  "The model provider is answering again and the held call is being re-issued; continue where you left off.";
 
 /** A provider failure worth one retry: a stream cut mid-message, a dropped
  *  connection, an overload or a retryable status code — never an auth or
@@ -156,6 +163,21 @@ const PROVIDER_RETRY_PROMPT =
  *  in closes with this, before the steered write-up runs as the next turn. */
 export function isAbortedProviderError(message: string): boolean {
   return /\baborted\b/i.test(message);
+}
+
+/** The failure shape the model proxy parks the run on (model-proxy item 12a;
+ *  record 0064): a whole-call failure — the proxy's own 502 when the provider
+ *  never answered, or a relayed 5xx past its one retry. Never a stream cut
+ *  after a relayed success: the proxy reported `up` for that call and parked
+ *  nothing, so no reissue steer would ever release the hold — the retry
+ *  ladder keeps those; a 429 is under the proxy's park floor and keeps it too. */
+export function isParkedProviderError(message: string): boolean {
+  return (
+    /the model provider did not answer|upstream_unreachable/i.test(message) ||
+    /(?:\bhttp\b[^a-z0-9]{0,8}|\bstatus(?: code)?\b[^0-9]{0,5}|\berror\b[^0-9]{0,5}|\bapi error\b[^0-9]{0,5})(500|502|503|504|529)\b/i.test(
+      message,
+    )
+  );
 }
 
 export function isTransientProviderError(message: string): boolean {
@@ -1333,11 +1355,62 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       if (echoed!.seq > mirror.inboxConsumedSeq) mirror.inboxConsumedSeq = echoed!.seq;
     };
     requeueUnechoed = () => {
+      // A buffered reissue row goes with the loop, never back to the inbox: the
+      // plane's sentence is a control signal for this loop's hold, and requeued
+      // it would reach a follow-up turn — or the run stage's fresh turn — as
+      // model input, the very leak the buffer exists to prevent.
+      pendingReissue = [];
       run.inbox?.requeue(unechoed.splice(0).flatMap((u) => u.inputs));
+    };
+    /** The failed turn the proxy parked the run on (model-proxy item 12a;
+     *  record 0064): the provider's error, held with no `harness_error` and no
+     *  ladder — the plane's reissue steer releases it (`maybeReissue`); a
+     *  provider that never answers ends the run on its lease as today. */
+    let heldTurn: string | undefined;
+    /** pi settled on the held turn: the reissue prompt is sent only from then
+     *  on — sent between the errored `message_end` and `agent_settled` pi
+     *  refuses it mid-loop (`Agent is already processing`) and the release
+     *  would be lost with the refusal. */
+    let parkSettled = false;
+    /** The plane's reissue rows, buffered as they drain — whether or not the
+     *  hold exists yet: the plane's `up` can beat this loop's read of pi's
+     *  errored `message_end` (a sub-second provider flap), and a reissue row
+     *  steered to pi as an ordinary follow-up would leave the hold with no
+     *  release ever coming — the run parked to its lease with the provider up. */
+    let pendingReissue: FollowUpInput[] = [];
+    /** The reissue prompt in flight, by its id: its response settles the release. */
+    let reissueInFlight: string | undefined;
+    /** Reissue prompts sent, for their ids: one per release. */
+    let reissues = 0;
+    /** Release the held turn (model-proxy item 12a): one prompt under its own
+     *  id — pi settled on the failed call and reads a steer only at a turn
+     *  boundary that is not coming — sent only once pi has settled on the
+     *  held turn and no release is already in flight, however many reissue
+     *  rows the buffer carries. The hold is cleared by the prompt's accepted
+     *  response, never here: a refusal is a failed release, not a wedge. */
+    const maybeReissue = () => {
+      if (heldTurn === undefined || !parkSettled || reissueInFlight !== undefined) return;
+      if (pendingReissue.length === 0) return;
+      if (loopEnded || hardStopped || writeUp !== undefined || finaleAborted) return;
+      const batch = pendingReissue.splice(0);
+      reissues += 1;
+      const id = reissues === 1 ? `${ids.prompt}:reissue` : `${ids.prompt}:reissue:${reissues}`;
+      reissueInFlight = id;
+      unechoed.push({
+        message: REISSUE_PROMPT,
+        seq: Math.max(0, ...batch.map((i) => i.ledgerSeq ?? 0)),
+        inputs: batch,
+      });
+      sends.send({ id, type: "prompt", message: REISSUE_PROMPT });
     };
     const drainFollowUps = () => {
       const inputs: FollowUpInput[] = run.inbox?.drain() ?? [];
-      if (inputs.length === 0) return;
+      if (inputs.length === 0) {
+        // Nothing new drained, but a reissue row buffered earlier may now have
+        // its hold and its settle: the release is judged on every check.
+        maybeReissue();
+        return;
+      }
       const images = inputs.flatMap((i) =>
         (i.images ?? []).map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mediaType })),
       );
@@ -1377,10 +1450,23 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           });
           note("follow_up", `follow-up folded in: ${redactSecrets(followUpSnippet(input))}`);
         }
-        const prompt = followUpPrompt(inputs);
-        const message = stagedLine ? `${prompt}\n\n${stagedLine}` : prompt;
-        unechoed.push({ message, seq: Math.max(0, ...inputs.map((i) => i.ledgerSeq ?? 0)), inputs });
-        sends.send({ type: "steer", message, ...(images.length > 0 ? { images } : {}) });
+        // The plane's reissue steer (model-proxy item 12a): recognized by its
+        // sender and its whole sentence whether or not the hold exists yet,
+        // and buffered — never steered into pi as a follow-up (the sentence is
+        // the plane's control signal, not thread content). `maybeReissue`
+        // sends the one release prompt once the hold exists and pi has
+        // settled on it. Any other follow-up in the batch rides the usual
+        // steer and is read at the re-issued turn's own boundary.
+        const reissued = inputs.filter((i) => i.userId === PLANE_ACTOR_ID && isReissueSteerText(i.text));
+        const steered = reissued.length === 0 ? inputs : inputs.filter((i) => !reissued.includes(i));
+        pendingReissue.push(...reissued);
+        if (steered.length > 0) {
+          const prompt = followUpPrompt(steered);
+          const message = stagedLine ? `${prompt}\n\n${stagedLine}` : prompt;
+          unechoed.push({ message, seq: Math.max(0, ...steered.map((i) => i.ledgerSeq ?? 0)), inputs: steered });
+          sends.send({ type: "steer", message, ...(images.length > 0 ? { images } : {}) });
+        }
+        maybeReissue();
       });
     };
     /** The budgets, the stops and the inbox — on every event and every tick. */
@@ -1706,6 +1792,30 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           };
           save();
         }
+        if (reissueInFlight !== undefined && r.id === reissueInFlight) {
+          reissueInFlight = undefined;
+          if (r.success === false) {
+            // A refused release (model-proxy item 12a): pi was not at a turn
+            // boundary after all, so the hold stands — the sent rows go back
+            // in the buffer, the settle flag drops, and the next
+            // `agent_settled` retries — instead of a cleared hold no steer
+            // would ever release again.
+            parkSettled = false;
+            const at = unechoed.findIndex((u) => u.message === REISSUE_PROMPT);
+            if (at >= 0) pendingReissue.push(...unechoed.splice(at, 1)[0]!.inputs);
+            note(
+              "harness_error",
+              `the reissue prompt was refused (${String(r.error ?? "no reason")}); the turn stays held for the next settle`,
+            );
+          } else {
+            // The release landed: the hold is over. Reissue rows still buffered
+            // were this same recovery's — dropped, so a stale one never
+            // releases a later hold before the plane has said the provider is up.
+            heldTurn = undefined;
+            parkSettled = false;
+            pendingReissue = [];
+          }
+        }
         if (r.id === ids.prompt) {
           catchingUp = false;
           if (r.success === false) throw new PromptRefused(String(r.error ?? "no reason"));
@@ -1770,6 +1880,23 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         if (catchingUp)
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
         else if (
+          run.providerPark === true &&
+          obs.policyRefusal !== true &&
+          !writeUp &&
+          !finaleAborted &&
+          isParkedProviderError(obs.providerError)
+        ) {
+          // The proxy parked the run on `provider_up` (model-proxy item 12a;
+          // record 0064): the failed turn is held — no `harness_error`, no
+          // ladder (the proxy already retried once and the plane owns the
+          // recovery) — and the reissue steer in `drainFollowUps` re-drives
+          // it; a provider that never answers ends the run on its lease.
+          heldTurn = obs.providerError;
+          parkSettled = false;
+          run.onProgress?.(
+            `the model call failed (${obs.providerError}); the turn is held — the run is parked until the provider answers again`,
+          );
+        } else if (
           obs.policyRefusal !== true &&
           providerRetries < PROVIDER_RETRY_BACKOFFS_MS.length &&
           !writeUp &&
@@ -1821,6 +1948,17 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             type: "prompt",
             message: PROVIDER_RETRY_PROMPT,
           });
+          check();
+          if (hardStopped) break;
+          continue;
+        }
+        if (heldTurn !== undefined && providerError === undefined && !hardStopped && !writeUp && !finaleAborted) {
+          // The turn is held parked (model-proxy item 12a): pi settled on the
+          // failed call, and the loop stays open — ticking its budgets and
+          // draining the inbox — until the plane's reissue steer re-drives it
+          // or the lease's wind-down ends the run as today. Only from here may
+          // the release prompt go: `check` drains the inbox and judges it.
+          parkSettled = true;
           check();
           if (hardStopped) break;
           continue;

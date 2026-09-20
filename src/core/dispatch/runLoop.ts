@@ -1140,8 +1140,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(stageFollowUps ? { stageFollowUps } : {}),
             onEvent,
             onProgress,
+            // The provider park's capability (model-proxy item 12a; record
+            // 0064): only a ledger-tracked run can be parked — the proxy's
+            // park and the plane's reissue steer both land on the run's live
+            // row — so only such a run holds a failed turn for the steer;
+            // without the ledger the harness's retry ladder answers as before.
             ...(ledgerRun
-              ? { onStep: ledgerRun.step.bind(ledgerRun), logIndexOf: ledgerRun.logIndexOf.bind(ledgerRun) }
+              ? {
+                  onStep: ledgerRun.step.bind(ledgerRun),
+                  logIndexOf: ledgerRun.logIndexOf.bind(ledgerRun),
+                  providerPark: true,
+                }
               : {}),
             saveFacts,
             ...(harnessResume ? { resume: harnessResume } : {}),
