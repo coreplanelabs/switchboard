@@ -39,6 +39,8 @@ export interface SlackPoster {
  *  person themselves when the footer names them (`on behalf of <@U…>`). */
 export interface RelayFooter {
   channel: string;
+  /** The exact source message the relay copied, from the permalink's `/p…`. */
+  messageTs: string;
   threadTs: string;
   onBehalfOf?: string;
 }
@@ -131,9 +133,10 @@ export function parseRelayFooter(text: string): RelayFooter | undefined {
   if (parts.length !== 3 || parts[0] !== "archives" || !/^[CGD][A-Z0-9_]+$/.test(parts[1])) return undefined;
   const ts = PERMALINK_TS.exec(parts[2]);
   if (!ts) return undefined;
-  const threadTs = url.searchParams.get("thread_ts") ?? `${ts[1]}.${ts[2]}`;
+  const messageTs = `${ts[1]}.${ts[2]}`;
+  const threadTs = url.searchParams.get("thread_ts") ?? messageTs;
   if (!THREAD_TS.test(threadTs)) return undefined;
-  return { channel: parts[1], threadTs, ...(m[2] ? { onBehalfOf: m[2] } : {}) };
+  return { channel: parts[1], messageTs, threadTs, ...(m[2] ? { onBehalfOf: m[2] } : {}) };
 }
 
 /** How the requester was found — on the record's span for forensics, and so a

@@ -134,6 +134,7 @@ import {
   newestFinishedRunOf,
   ownerOf,
   readThread,
+  shipRequestOf,
   stickyAgentOf,
   threadPrOf,
   threadRouteOf,
@@ -670,6 +671,9 @@ export async function dispatch(
     // The repository the typed bind carries. Target resolution treats it as a
     // fallback below an explicit current-message target.
     let operatorRepo: string | undefined;
+    // An ended generated pipeline's stable plan id: read from its coordinator
+    // row and handed to ship so a formatted durable input cannot mint a new id.
+    let reissuePlanId: string | undefined;
     // The thread page the operator reads (newest first): the tail's session
     // keys and, on the newest record, an `on` question still pending — whose
     // "yes" this event may be (routing-and-config item 29). Read here once and
@@ -685,9 +689,10 @@ export async function dispatch(
       // The thread's owner as the operator reads it (issue 2027; record 0051's
       // owner order; thread-admission item 9): a live run — the local slot, one
       // live on another generation, or the page's unfinished run (a hosted
-      // pipeline runner) — else the page's idle unit. Under an owner the turn's
-      // projection narrows to steers and reads, the prompt says the reply is
-      // the owner's follow-up, and the executor folds any other decision.
+      // pipeline runner) — else the page's idle unit or ended generated
+      // pipeline. Under an owner the turn's projection narrows to steers and
+      // reads, the prompt says the reply is the owner's follow-up, and the
+      // executor folds any other decision; an ended pipeline folds steers too.
       const slot = admission.get(msg.threadKey);
       const liveElsewhere = deps.threadsElsewhere.get(msg.threadKey) !== undefined;
       if (
@@ -726,7 +731,9 @@ export async function dispatch(
               : { kind: "live", runId: pageOwner.run.id }
             : pageOwner?.kind === "unit"
               ? { kind: "unit", unit: pageOwner.unit.unit }
-              : undefined;
+              : pageOwner?.kind === "pipeline"
+                ? { kind: "pipeline", unit: pageOwner.unit.unit }
+                : undefined;
       operatorEvent = await root.span("dispatch.operator", () =>
         operatorStage(deps, {
           msg: doorMsg,
@@ -782,8 +789,9 @@ export async function dispatch(
         // `kind: "fold"` (issue 2027; thread-admission item 9): the decision was
         // neither steers-and-reads nor a question in an owned thread, so the
         // words are the owner's follow-up — the dispatch runs on to admission's
-        // fold (a live run) or the unit's one thread event (an idle unit), the
-        // decision's event riding the fold or a door record, no prose posted.
+        // fold (a live run), the unit's one thread event (an idle unit), or the
+        // durable task re-issue (an ended pipeline), the decision's event riding
+        // the fold or a door record, no prose posted.
         // A confirmed "yes" to a question minted before the thread became
         // owned folds the proposal's own words: the person's message is the
         // word "yes", which tells the owner nothing.
@@ -821,8 +829,8 @@ export async function dispatch(
     // (`resolveRun`'s own `operatorPreset` field, `agentSource: "operator"`
     // below) — never written into `directives.agent`, so admission's follow-up
     // rule and the thread-owner rule below keep reading the person's typed
-    // intent alone: a preset bind into a thread a live run or an idle unit
-    // owns folds or is refused by the owner's rule, never refused as an agent
+    // intent alone: a preset bind into a thread a live run, an idle unit or an
+    // ended pipeline owns folds or is refused by the owner's rule, never refused as an agent
     // request nobody typed and never started as a rival run (issue 2010's
     // class). A confirmed proposal carries its own task: its tail is the
     // request, since the person's message was the word "yes".
@@ -872,20 +880,22 @@ export async function dispatch(
       (thread ? newestFinishedRunOf(thread)?.repo : undefined) ??
       deps.config.scopes(msg.channelId, msg.userId).channel.repo;
     const historicalRoutePreset = restart?.row.meta.route?.preset;
-    const settled = resolveRun(deps, {
-      msg,
-      directives,
-      history,
-      ...(stickyAgent !== undefined ? { stickyAgent } : {}),
-      ...(operatorPreset !== undefined
-        ? { operatorPreset }
-        : historicalRoutePreset !== undefined
-          ? { operatorPreset: historicalRoutePreset }
-          : {}),
-      ...(operatorModel !== undefined ? { operatorModel } : {}),
-      ...(resume !== undefined ? { freshSegment: true } : {}),
-    });
-    const { sticky, resolved } = settled;
+    const resolveCurrent = () =>
+      resolveRun(deps, {
+        msg,
+        directives,
+        history,
+        ...(stickyAgent !== undefined ? { stickyAgent } : {}),
+        ...(operatorPreset !== undefined
+          ? { operatorPreset }
+          : historicalRoutePreset !== undefined
+            ? { operatorPreset: historicalRoutePreset }
+            : {}),
+        ...(operatorModel !== undefined ? { operatorModel } : {}),
+        ...(resume !== undefined ? { freshSegment: true } : {}),
+      });
+    let settled = resolveCurrent();
+    let { sticky, resolved } = settled;
     let { agentSource } = settled;
     if (operatorPreset !== undefined) agentSource = "operator";
     else if (historicalRoutePreset !== undefined) agentSource = "route";
@@ -936,6 +946,29 @@ export async function dispatch(
         );
         await recordPendingOperator();
         return ended;
+      }
+      if (owner.kind === "pipeline" && directives.agent === undefined) {
+        // The ended generated pipeline still owns this thread until its unit
+        // merges. Its durable parent input — not this reply — is the task that
+        // re-issues the stable plan id, branch and open pull request. If that
+        // source cannot be read, ask instead of manufacturing a task from a
+        // fragment whose meaning depended on the old pipeline.
+        const original = await shipRequestOf(runsService, owner.run.id);
+        if (original === undefined) {
+          await io.reply(
+            "This ship pipeline ended, but its original task could not be read; what task should this thread re-issue?",
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        const instance = await deps.coordinatorInstances.get(owner.instanceId).catch(() => null);
+        if (instance?.plan?.path === undefined) reissuePlanId = instance?.plan?.id;
+        directives.text = original;
+        operatorPreset = "ship";
+        operatorRequest = original;
+        settled = resolveCurrent();
+        ({ sticky, resolved, agentSource } = settled);
+        agentSource = "sticky";
       }
       if (owner.kind === "unit" && directives.agent === undefined) {
         // The same gate a live steer passes (admission's allowlist check): the
@@ -1282,6 +1315,7 @@ export async function dispatch(
         startedAt,
         card,
         directives,
+        ...(reissuePlanId !== undefined ? { reissuePlanId } : {}),
         sticky,
         history,
         repoCtx,

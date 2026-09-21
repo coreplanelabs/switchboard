@@ -148,6 +148,8 @@ export interface ShipContext {
    *  runner's `round` route redraws it from the boundaries the machine reports. */
   card: StatusHandle;
   directives: RequestDirectives;
+  /** The stable generated plan this ended thread is re-issuing. */
+  reissuePlanId?: string;
   sticky: ThreadDirectives;
   history: HistoryItem[];
   repoCtx: RepoContext;
@@ -531,6 +533,7 @@ export async function runShipBranch(
             {
               entry,
               requestText: directives.text,
+              ...(ctx.reissuePlanId !== undefined ? { reissuePlanId: ctx.reissuePlanId } : {}),
               msg,
               agentSource: ctx.agentSource,
               runId: run.id,

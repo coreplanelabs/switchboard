@@ -43,6 +43,10 @@ export interface HandOffInput {
   entry: ShipEntry;
   /** The request's directive-stripped text (the preflight's input). */
   requestText: string;
+  /** A generated plan this thread already owns and is re-issuing. Internal:
+   *  the dispatcher read it from the coordinator row, so formatting in the
+   *  stored request can never mint a nearby but different plan id. */
+  reissuePlanId?: string;
   msg: {
     channelId: string;
     channelName?: string;
@@ -213,7 +217,7 @@ async function plan(
     const text =
       (taskText ? shipUnitText(input.requestText, entry.repo) : "") ||
       "Implement the task this thread's ship request describes.";
-    const planId = generatedPlanId(text, msg.threadKey);
+    const planId = input.reissuePlanId ?? generatedPlanId(text, msg.threadKey);
     const graph: PlanGraph = {
       planId,
       units: [{ id: "U1", title: unitTitleOf(text), slug: "u1", branch: unitBranch(planId, "u1"), dependsOn: [] }],

@@ -189,13 +189,16 @@ export interface OperatorProjection {
 
 /** The thread's owner as the operator's turn reads it (record 0051's owner
  *  order; thread-admission item 9): a live run — the admission slot's, one
- *  live on another generation, or a hosted pipeline runner's off the page — or
- *  the unfinished unit whose row names this thread. Absent for a
- *  session-owned or unowned thread, where the operator decides as ever. A
- *  live owner carries no `runId` when it is a hosted pipeline runner (or a
- *  slot still in setup): the runner takes no inbox, so no steer is offered
- *  and a steer bind folds like any other decision. */
-export type OperatorThreadOwner = { kind: "live"; runId?: string } | { kind: "unit"; unit: string };
+ *  live on another generation, or a hosted pipeline runner's off the page —
+ *  the unfinished unit whose row names this thread, or an ended generated
+ *  pipeline whose same-thread unit has not merged. Absent for a session-owned
+ *  or unowned thread, where the operator decides as ever. A live owner carries
+ *  no `runId` when it is a hosted pipeline runner (or a slot still in setup):
+ *  the runner takes no inbox, so no steer is offered and a steer bind folds
+ *  like any other decision. An ended pipeline is distinct from an idle unit:
+ *  every steer decision folds so the dispatcher re-issues its durable task. */
+export type OperatorThreadOwner =
+  { kind: "live"; runId?: string } | { kind: "unit"; unit: string } | { kind: "pipeline"; unit: string };
 
 /** The projection an OWNED thread's event is shown (issue 2027;
  *  thread-admission item 9): a reply there is a follow-up for the thread's
@@ -217,12 +220,18 @@ export function ownerNote(owner: OperatorThreadOwner): string {
   const who =
     owner.kind === "live"
       ? `a live run${owner.runId !== undefined ? ` (\`${owner.runId}\`)` : ""}`
-      : `the unfinished plan unit ${owner.unit}`;
+      : owner.kind === "unit"
+        ? `the unfinished plan unit ${owner.unit}`
+        : `the ended pipeline for unmerged plan unit ${owner.unit}`;
   const steer =
     owner.kind === "live" && owner.runId !== undefined
       ? ` bind \`steer run ${owner.runId} <words>\` to deliver it,`
       : "";
-  return `This thread is owned by ${who}: the request below is a follow-up for that owner. To act on it,${steer} bind a read command, or ask a question. Any other decision — a refusal, a preset, a write — folds the whole message into the owner unchanged and posts no answer.`;
+  const fold =
+    owner.kind === "pipeline"
+      ? " Any steer decision also folds, so the pipeline's original task is re-issued instead of targeting an ended transcript run."
+      : "";
+  return `This thread is owned by ${who}: the request below is a follow-up for that owner. To act on it,${steer} bind a read command, or ask a question. Any other decision — a refusal, a preset, a write — folds the whole message into the owner unchanged and posts no answer.${fold}`;
 }
 
 /** The projection, filtered by the author's allowed presets and commands: a
@@ -277,8 +286,8 @@ export interface OperatorInput {
   /** The pending question of the thread's last turn, when one is open: its
    *  proposed line when it carries one, so "yes" binds it (`bindFromAnswer`). */
   pendingQuestion?: { proposal?: string };
-  /** The thread's owner, when a live run or an idle unit holds it (issue
-   *  2027): the projection shown narrows to steers and reads
+  /** The thread's owner, when a live run, an idle unit or an ended pipeline
+   *  holds it (issue 2027): the projection shown narrows to steers and reads
    *  (`ownedProjection`) and the prompt says the reply is the owner's
    *  follow-up (`ownerNote`). */
   owner?: OperatorThreadOwner;
@@ -891,8 +900,11 @@ function ownedDecisionRuns(event: OperatorEventFields, owner: OperatorThreadOwne
     // A live owner without a run id is a hosted pipeline runner (thread-
     // admission item 9's seed rule): it takes no inbox, so a steer bind there
     // would queue words nothing drains — it folds like any other decision, and
-    // the fold meets the seed refusal naming where to reply.
-    if (def.id === "steer.run") return !(owner.kind === "live" && owner.runId === undefined);
+    // the fold meets the seed refusal naming where to reply. An ended pipeline
+    // has no live steer target either: folding reaches the dispatcher's durable
+    // task re-issue path instead of letting a transcript's stale run id answer.
+    if (def.id === "steer.run")
+      return owner.kind !== "pipeline" && !(owner.kind === "live" && owner.runId === undefined);
     return boundBlastRadius(def as CommandDef<unknown>, parsed.input) === "read";
   });
 }
@@ -1302,8 +1314,8 @@ export async function operatorStage(
       operator?: { mode: string; outcome: string; proposal?: string };
     }[];
     intake?: { verdict: IntakeVerdict; reason: string };
-    /** The thread's owner, when a live run or an idle unit holds it (issue
-     *  2027; thread-admission item 9): the turn's projection and prompt read it. */
+    /** The thread's owner, when a live run, an idle unit or an ended pipeline
+     *  holds it (issue 2027; thread-admission item 9): the turn's projection and prompt read it. */
     owner?: OperatorThreadOwner;
   },
 ): Promise<OperatorEventFields | undefined> {
@@ -1433,8 +1445,9 @@ export type OperatorExecution =
   /** An owned thread's decision that was neither steers-and-reads nor a
    *  question (issue 2027; thread-admission item 9): nothing was posted and
    *  nothing ran — the dispatcher folds the whole message into the owner
-   *  (admission's steer for a live run, one thread event for an idle unit),
-   *  the decision's event riding the fold or a door record. */
+   *  (admission's steer for a live run, one thread event for an idle unit, or
+   *  the durable-task re-issue for an ended pipeline), the decision's event
+   *  riding the fold or a door record. */
   | {
       kind: "fold";
       /** The words the fold delivers INSTEAD of the person's message: a
@@ -1505,8 +1518,8 @@ export async function executeOperatorDecision(
     event: OperatorEventFields;
     /** The thread's runs, newest first (the dispatcher's one read). */
     thread?: readonly { agent?: string }[];
-    /** The thread's owner, when a live run or an idle unit holds it (issue
-     *  2027): a decision that is not steers-and-reads or a question is the
+    /** The thread's owner, when a live run, an idle unit or an ended pipeline
+     *  holds it (issue 2027): a decision that is not steers-and-reads or a question is the
      *  steer of the whole message — `kind: "fold"`, nothing posted here. */
     owner?: OperatorThreadOwner;
   },
@@ -1614,14 +1627,34 @@ export async function executeOperatorDecision(
       await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
       return answered;
     }
-    const radius = bound.radius;
+    // A plain reply's steer is addressed to the thread's live owner, not to an
+    // id the model copied from an older transcript turn. An explicitly typed
+    // `steer run …` never enters the operator and keeps its named target; this
+    // fence applies only to the operator's bind. The command run records the
+    // resolved line, so its receipt and audit agree with the inbox it changed.
+    let invocation = parsed;
+    let executedBind = bind;
+    let executedEvent = event;
+    if (def.id === "steer.run" && ctx.owner?.kind === "live" && ctx.owner.runId !== undefined) {
+      const args = [...(parsed.input.args ?? [])];
+      args[0] = ctx.owner.runId;
+      const input = { ...parsed.input, args };
+      invocation = { ...parsed, input };
+      executedBind = { ...bind, line: operatorLine(chatInvocation(def, input)) };
+      executedEvent = {
+        ...event,
+        binds: (event.binds ?? []).map((candidate, index) => (index === 0 ? executedBind : candidate)),
+      };
+    }
+    const radius = boundBlastRadius(def as CommandDef<unknown>, invocation.input);
     // A bind of `steer` is admission's, not the paste ladder's (the one-door
     // plan's admission unit; thread-admission item 1): the fold is the act a
     // thread reply performs with no confirmation, and its fence is the owner
     // rule the wired sender asks (`authorizeSteerOwner`, authorization item
     // 16a) plus the live agent's allowlist.
-    const runsNow = def.id === "steer.run" || routedRunsAtOnce(def as CommandDef<unknown>, confirm.value, parsed.input);
-    const receipt = renderOperatorReceipt(bind.line, radius, bind.reason);
+    const runsNow =
+      def.id === "steer.run" || routedRunsAtOnce(def as CommandDef<unknown>, confirm.value, invocation.input);
+    const receipt = renderOperatorReceipt(executedBind.line, radius, executedBind.reason);
     if (!runsNow) {
       // The `run_command at_or_above` row. On chat, record 0044's one click
       // (routing-and-config item 25): the same row, the same Yes handler, the
@@ -1663,7 +1696,7 @@ export async function executeOperatorDecision(
     }
     // The `run_command below` row: the run cell, through the class ladder.
     if (verbose) await io.reply(receipt);
-    const res = await runChatCommand(deps, msg, io, parsed, ctx.ending, ctx.trace, { operator: event });
+    const res = await runChatCommand(deps, msg, io, invocation, ctx.ending, ctx.trace, { operator: executedEvent });
     carried = true;
     if (res.text.length > 0) await io.reply(res.text);
   }

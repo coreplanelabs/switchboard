@@ -23,9 +23,8 @@ export interface SteerCommandDeps {
    *  `unavailable` by name. */
   steer?: {
     /** Fold the words into the named run's inbox at its next boundary; answers
-     *  the receipt line. Throws `CommandError` when the run is unknown or the
-     *  caller may not steer it (the owner rule); a run that ended re-dispatches
-     *  the words as a bind of their own where a redispatch hook is wired. */
+     *  the receipt line. Throws `CommandError` when the run is unknown, has
+     *  ended, or the caller may not steer it (the owner rule). */
     send(
       runId: string,
       words: string,

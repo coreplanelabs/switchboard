@@ -9,6 +9,11 @@ import { botRepliedAfter, fetchReplies, type CatchUpClient, type SlackHistoryMes
 // runs once. Bounded FIFO; the durable record is Slack (👀 / bot reply).
 const HANDLED_MAX = 5000;
 const handledHere = new Set<string>();
+/** Bot-authored Slack messages this process posted, keyed by their native
+ *  source id. A configured relay can copy one back with a new event ts; the
+ *  copied event is still the same source and must not enter the door. */
+const BOT_SOURCE_MAX = 5000;
+const botSourcesHere = new Set<string>();
 /** Claim (channel, ts) without a dispatch — the catch-up's act marks a
  *  receipt-silenced candidate so the next scan and a live redelivery skip it. */
 export function markHandledHere(channel: string, ts: string): void {
@@ -20,6 +25,18 @@ export function markHandledHere(channel: string, ts: string): void {
 }
 export function wasHandledHere(channel: string, ts: string): boolean {
   return handledHere.has(`${channel}:${ts}`);
+}
+
+export function markBotSourceHere(channel: string, ts: string): void {
+  botSourcesHere.add(`${channel}:${ts}`);
+  if (botSourcesHere.size > BOT_SOURCE_MAX) {
+    const oldest = botSourcesHere.values().next().value;
+    if (oldest !== undefined) botSourcesHere.delete(oldest);
+  }
+}
+
+export function wasBotSourceHere(channel: string, ts: string): boolean {
+  return botSourcesHere.has(`${channel}:${ts}`);
 }
 /** A live delivery older than this is not live: Slack delivers events within
  *  seconds, so an old `ts` means the event was RE-delivered (its original

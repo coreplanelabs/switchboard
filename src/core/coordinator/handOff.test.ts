@@ -359,6 +359,31 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     ]);
   });
 
+  it("an owned generated thread pins its re-issue to the recorded plan id and branch even if the durable task's display text would hash differently", async () => {
+    const id = "plan-owned-task";
+    const h = harness({ status: { [id]: { kind: "status", status: "complete" } } });
+    const first = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "in acme/api: fix the login redirect",
+        reissuePlanId: "owned-task",
+      }),
+    );
+    const second = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "in acme/api: fix the login redirect (attachment display note)",
+        reissuePlanId: "owned-task",
+      }),
+    );
+    expect(first.instanceId).toBe(id);
+    expect(second.instanceId).toBe(`${id}-2`);
+    expect(await h.instances.listUnits(id)).toMatchObject([{ branch: "plan/owned-task/u1" }]);
+    expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([{ branch: "plan/owned-task/u1" }]);
+  });
+
   it("a re-issue after a review_pending ending carries the row's lastPush — the coding child's own last push — onto the next attempt's row, so its pre-check starts at the review round", async () => {
     const id = "plan-warm-the-cache-on-wake-dfa06c";
     const req = input({

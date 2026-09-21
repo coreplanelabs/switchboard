@@ -1263,6 +1263,80 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     };
   }
 
+  it("admits the source message once when a relay loops the bot's reply back into the same thread", async () => {
+    const s = gateClient();
+    const sourceTs = "1790014034.123456";
+    s.postMessage.mockResolvedValueOnce({ ok: true, ts: sourceTs });
+    const source = {
+      channel: "C0SOURCE",
+      user: "UASKER",
+      text: "continue the unit",
+      ts: "1790014030.000001",
+      threadTs: "1790014000.000001",
+      botUserId: BOT,
+    };
+    await new SlackIO(s.client, source).reply("the command could not be delivered");
+
+    const looped = await receiveSlackMessage(
+      s.client,
+      {
+        channel: "CGATE",
+        poster: { botId: "B0RELAY", name: "relay" },
+        rawText:
+          "the command could not be delivered\n" +
+          "Sent by Claude in <#C0SOURCE> on behalf of <@UASKER> · " +
+          `<https://acme.slack.com/archives/C0SOURCE/p${sourceTs.replace(".", "")}?thread_ts=${source.threadTs}|thread>`,
+        text: "the command could not be delivered",
+        ts: nextTs(),
+        threadTs: parentTs,
+        botUserId: BOT,
+        trigger: "mention",
+      },
+      spanStub().span,
+      POLICY,
+      ["B0RELAY"],
+    );
+
+    expect(looped).toBeUndefined();
+    expect(s.postMessage).toHaveBeenCalledTimes(1);
+    expect(s.add).not.toHaveBeenCalled();
+  });
+
+  it("drops a relayed bot source after a restart by reading the exact source id from Slack", async () => {
+    const sourceTs = "1790014035.123456";
+    const sourceThread = "1790014000.000001";
+    const s = gateClient([{ messages: [{ user: BOT, bot_id: "B0SWITCHBOARD", ts: sourceTs, text: "answer" }] }]);
+    const out = await receiveSlackMessage(
+      s.client,
+      {
+        channel: "CGATE",
+        poster: { botId: "B0RELAY", name: "relay" },
+        rawText:
+          "answer\n" +
+          "Sent by Claude in <#C0SOURCE> on behalf of <@UASKER> · " +
+          `<https://acme.slack.com/archives/C0SOURCE/p${sourceTs.replace(".", "")}?thread_ts=${sourceThread}|thread>`,
+        text: "answer",
+        ts: nextTs(),
+        threadTs: parentTs,
+        botUserId: BOT,
+        trigger: "mention",
+      },
+      spanStub().span,
+      POLICY,
+      ["B0RELAY"],
+    );
+    expect(out).toBeUndefined();
+    expect(s.replies).toHaveBeenCalledWith({
+      channel: "C0SOURCE",
+      ts: sourceThread,
+      oldest: sourceTs,
+      latest: sourceTs,
+      inclusive: true,
+      limit: 1,
+    });
+    expect(s.add).not.toHaveBeenCalled();
+  });
+
   const decided = (verdict: "addressed" | "silent", receipt: IntakeDecision["receipt"] = "inserted") =>
     vi.fn(async (): Promise<IntakeDecision> => ({ verdict, reason: "r", source: "model", receipt }));
 
