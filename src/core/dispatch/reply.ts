@@ -549,7 +549,7 @@ export const REFUSAL_SENTENCES = {
     `🚫 You're not on the allowlist for the \`${p.repo}\` repo environment. Ask ${p.adminsHint} for access.`,
   which_branch: (p: { repo: string | undefined }) =>
     `🌿 Which branch of \`${p.repo}\` should this thread work on? ` +
-    `No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I'll pick it up from there.`,
+    `No branch is bound yet; a branch token such as \`branch:main\` will bind it.`,
   ship_thread_live: () =>
     "🚫 A pipeline is already running in this thread — one pipeline per thread. " +
     "Follow the one in flight here, or start this one in a thread of its own.",

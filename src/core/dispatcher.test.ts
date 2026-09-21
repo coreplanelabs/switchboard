@@ -1806,11 +1806,11 @@ describe("repo/ref resolution + resident prompt selection", () => {
     (await import("../execution/factory.js")).resetResidentProbeCache();
   });
 
-  it("the production default resolver (no injection) extracts repo/ref from the message text", async () => {
+  it("the production default resolver (no injection) extracts repo/ref from the head-of-ask routing clause", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider); // resolveRepoContext NOT injected
     const { io } = fakeIO();
-    await dispatch(deps, msg("agent:coding fix the login bug in acme/api on branch fix/login", "slack:UADMIN"), io);
+    await dispatch(deps, msg("agent:coding in acme/api on branch fix/login: fix the login bug", "slack:UADMIN"), io);
     const ctx = vi.mocked(makeExecutor).mock.calls[0][1];
     expect(ctx).toMatchObject({ repo: "acme/api", ref: "fix/login" });
   });
@@ -1882,7 +1882,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(last.title).toContain("resident · acme/api · main@f2fe51e (repo default — no branch named)");
   });
 
-  it('the thread answer "on main" rebinds via re-attach and runs', async () => {
+  it('the thread answer "branch:main" rebinds via re-attach and runs', async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -1895,7 +1895,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
       { role: "assistant", text: "🌿 Which branch of `acme/api` should this thread work on?" },
     ];
     const { io, replies } = fakeIO(history);
-    await dispatch(deps, msg("on main", "slack:UADMIN"), io);
+    await dispatch(deps, msg("branch:main", "slack:UADMIN"), io);
     const attach = calls.find((c) => c.path === "/attach");
     expect(attach?.body).toMatchObject({ resource: "repo:acme/api", refHint: "main" });
     expect(provider.requests).toHaveLength(1); // sticky agent:coding thread ran

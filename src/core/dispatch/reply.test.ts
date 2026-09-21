@@ -368,7 +368,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
         code: "which_branch",
         built: REFUSAL_SENTENCES.which_branch({ repo: "o/r" }),
         quoted:
-          '🌿 Which branch of `o/r` should this thread work on? No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I\'ll pick it up from there.',
+          "🌿 Which branch of `o/r` should this thread work on? No branch is bound yet; a branch token such as `branch:main` will bind it.",
       },
       {
         code: "ship_budget",
