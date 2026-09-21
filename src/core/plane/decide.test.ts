@@ -552,8 +552,15 @@ describe("decide — the checkpoint steers and the provider condition (record 00
     expect(decide(parked.state, { kind: "park", at: 1_200, runId: "run-a", provider: "anthropic" }).writes).toEqual([]);
   });
 
-  it("the provider's next up report — from any run — re-issues each held turn once: one inbox steer per parked run, the park rows deleted, and a repeat up steers nothing again", () => {
-    let s = decide(emptyPlaneState(), {
+  it("the provider's next up report — from any run — writes each held turn's durable row and typed live steer together, then deletes the park; a repeat up steers nothing", () => {
+    let s = stateWith({
+      liveRuns: {
+        "run-a": { channelId: "slack:C1", threadKey: "slack:C1:1.0" },
+        "run-b": { channelId: "slack:C2", threadKey: "slack:C2:2.0" },
+      },
+      inboxSeqs: { "run-a": 4, "run-b": 8 },
+    });
+    s = decide(s, {
       kind: "provider_level",
       at: 1_000,
       provider: "anthropic",
@@ -569,15 +576,63 @@ describe("decide — the checkpoint steers and the provider condition (record 00
         text: "the model provider anthropic is answering again — re-issue the held turn and continue",
         userId: "plane",
       });
+    expect(up.effects).toEqual([
+      {
+        id: "steer:run-a:5",
+        kind: "steer",
+        runId: "run-a",
+        seq: 5,
+        message: {
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
+          text: "the model provider anthropic is answering again — re-issue the held turn and continue",
+          at: 2_000,
+          userId: "plane",
+          userName: "plane",
+          plane: { steer: "reissue", provider: "anthropic" },
+        },
+      },
+      {
+        id: "steer:run-b:9",
+        kind: "steer",
+        runId: "run-b",
+        seq: 9,
+        message: {
+          channelId: "slack:C2",
+          threadKey: "slack:C2:2.0",
+          text: "the model provider anthropic is answering again — re-issue the held turn and continue",
+          at: 2_000,
+          userId: "plane",
+          userName: "plane",
+          plane: { steer: "reissue", provider: "anthropic" },
+        },
+      },
+    ]);
+    expect(up.writes.filter((w) => w.table === "plane_effects")).toEqual(
+      up.effects.map((effect) => ({ table: "plane_effects", op: "offer", effect, at: 2_000 })),
+    );
     expect(up.writes.filter((w) => w.table === "plane_reservations" && w.op === "del")).toEqual([
       { table: "plane_reservations", op: "del", key: "anthropic#run-a", kind: "park" },
       { table: "plane_reservations", op: "del", key: "anthropic#run-b", kind: "park" },
     ]);
     expect(
       decide(up.state, { kind: "provider_level", at: 3_000, provider: "anthropic", level: "up" }).writes.filter(
-        (w) => w.table === "run_inbox",
+        (w) => w.table === "run_inbox" || w.table === "plane_effects",
       ),
     ).toEqual([]);
+  });
+
+  it("a provider up after the parked run is no longer live deletes the stale park and offers no steer", () => {
+    const s = decide(emptyPlaneState(), { kind: "park", at: 1_100, runId: "run-sealed", provider: "anthropic" }).state;
+    const up = decide(s, { kind: "provider_level", at: 2_000, provider: "anthropic", level: "up" });
+    expect(up.effects).toEqual([]);
+    expect(up.writes.filter((w) => w.table === "run_inbox" || w.table === "plane_effects")).toEqual([]);
+    expect(up.writes).toContainEqual({
+      table: "plane_reservations",
+      op: "del",
+      key: "anthropic#run-sealed",
+      kind: "park",
+    });
   });
 
   it("a queued row waiting on provider_up is admitted by the up report and not before", () => {

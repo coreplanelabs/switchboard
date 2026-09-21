@@ -143,6 +143,41 @@ describe("WorkerRunLedger", () => {
     expect(await unknown.ledger.heartbeat("r1", "g1", LEASE_MS)).toEqual({ ok: false, reason: "unknown-run" });
   });
 
+  it("planeFenceSteer asks the object to atomically renew ownership before local delivery", async () => {
+    const w = stubWorker(() => ({ status: 200, data: { accepted: true } }));
+    await expect(w.ledger.planeFenceSteer("steer:r1:7", "r1", "g1", LEASE_MS)).resolves.toBe(true);
+    expect(w.calls).toEqual([
+      {
+        path: "/plane/steer/fence",
+        auth: "Bearer tok",
+        body: {
+          storeKey: "runs:default",
+          id: "steer:r1:7",
+          runId: "r1",
+          gen: "g1",
+          leaseMs: LEASE_MS,
+        },
+      },
+    ]);
+  });
+
+  it("planeAck carries the authoritative owner fence for a steer", async () => {
+    const w = stubWorker();
+    await w.ledger.planeAck("steer:r1:7", "done", { runId: "r1", gen: "g1" });
+    expect(w.calls).toEqual([
+      {
+        path: "/plane/ack",
+        auth: "Bearer tok",
+        body: {
+          storeKey: "runs:default",
+          id: "steer:r1:7",
+          outcome: "done",
+          owner: { runId: "r1", gen: "g1" },
+        },
+      },
+    ]);
+  });
+
   it("append with no events posts nothing; finish clears nothing and releases the session's owner best-effort when the record names one; reclaim re-owns a session log for a row with a session and the transcript object for one without", async () => {
     const session = { key: "slack:C1:1.0:review", seedFrom: 0, request: 0, range: { from: 0 } };
     const w = stubWorker((path) =>

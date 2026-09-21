@@ -250,6 +250,14 @@ export class InMemoryRunLedger implements RunLedger {
     return { ok: true };
   }
 
+  async planeFenceSteer(_id: string, runId: string, gen: string, leaseMs: number): Promise<boolean> {
+    const row = this.live.get(runId);
+    const fence = checkFence(row, gen);
+    if (!fence.ok || row?.phase !== "live") return false;
+    row.leaseUntil = this.now() + leaseMs;
+    return true;
+  }
+
   async planeAck(id: string, outcome: PlaneAckOutcome): Promise<void> {
     this.planeAcks.push({ id, outcome });
   }
