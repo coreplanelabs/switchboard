@@ -544,24 +544,45 @@ describe("authorizePrHead — the PR head preflight", () => {
   });
 });
 
-describe("authorizeAttachedHead — the attached-head guard on the resident path", () => {
+describe("authorizeAttachedHead — every review workspace is at the PR head before the first model turn", () => {
   const review = getAgent("review");
   const repoCtx: RepoContext = { repo: "acme/api", pr: 41, ref: "feature/x", headSha: SHA_A };
 
-  function selection(over: { sha?: string; resident?: boolean } = {}): {
+  function selection(over: { sha?: string; resident?: boolean; observed?: string; seeded?: boolean } = {}): {
     selection: ExecutorSelection;
     releases: string[];
+    commands: string[];
   } {
     const releases: string[] = [];
+    const commands: string[] = [];
     const executor = {
-      release: async (mode: string) => void releases.push(mode),
+      exec: async (command: string) => {
+        commands.push(command);
+        return command.includes("rev-parse HEAD") ? (over.observed ?? "") : "provisioned";
+      },
+      release: async (mode: string) => {
+        releases.push(mode);
+        return { released: true };
+      },
     } as unknown as ExecutorSelection["executor"];
     const selection: ExecutorSelection = {
       executor,
       resident: over.resident ?? true,
       ...(over.sha !== undefined ? { binding: { ref: "feature/x", sha: over.sha } } : {}),
+      ...(over.seeded
+        ? {
+            seeded: {
+              slug: "acme/api",
+              ref: "feature/x",
+              sha: SHA_A,
+              workspace: "/workspace/checkout",
+              cached: false,
+              ms: 12,
+            },
+          }
+        : {}),
     };
-    return { selection, releases };
+    return { selection, releases, commands };
   }
 
   function ctx(
@@ -623,24 +644,69 @@ describe("authorizeAttachedHead — the attached-head guard on the resident path
     expect(s.refusals).toEqual(["branch_moved"]);
     expect(releases).toEqual(["always"]);
     expect(closedReasons(s.closes).join("\n")).toContain("branch moved");
-    expect(s.replies[0]).toMatch(
-      /^🔀 Review of acme\/api#41 not started: the resident attached `feature\/x` at `bbbbbbb`, but the PR head is `aaaaaaa`/,
+    expect(s.replies[0]).toContain(
+      `🔀 Review of acme/api#41 not started: the resident binding for feature/x is at ${SHA_B}, but the PR head is ${SHA_A}`,
     );
   });
 
-  it("no attached sha proves nothing: allowed, not verified; and the guard does not run at all for a non-review agent, a resume, or the sandbox path", async () => {
-    const unverified = setup();
-    const noSha = selection({});
-    expect(await authorizeAttachedHead(unverified.deps, ctx(unverified, noSha.selection))).toEqual({
+  it("an unseeded non-resident backend provisions the PR checkout at the resolved head before verifying it; a mismatch is refused and released before the model", async () => {
+    const verified = setup();
+    const atHead = selection({ resident: false, observed: `${SHA_A}\n` });
+    expect(await authorizeAttachedHead(verified.deps, ctx(verified, atHead.selection))).toEqual({
       kind: "allowed",
       repoCtx,
-      verifiedAtAttach: false,
+      verifiedAtAttach: true,
       headAdopted: false,
     });
+    expect(atHead.commands).toHaveLength(2);
+    expect(atHead.commands[0]).toContain("https://github.com/acme/api.git");
+    expect(atHead.commands[0]).toContain("refs/pull/41/head");
+    expect(atHead.commands[0]).toContain(SHA_A);
+    expect(atHead.commands[1]).toBe("git rev-parse HEAD");
+
+    const seeded = setup();
+    const seededHead = selection({ resident: false, observed: `${SHA_A}\n`, seeded: true });
+    expect((await authorizeAttachedHead(seeded.deps, ctx(seeded, seededHead.selection))).kind).toBe("allowed");
+    expect(seededHead.commands).toEqual(["git -C '/workspace/checkout' rev-parse HEAD"]);
+
+    const residentWithoutBinding = setup();
+    const observedResident = selection({ observed: `${SHA_A}\n` });
+    expect(
+      (
+        await authorizeAttachedHead(
+          residentWithoutBinding.deps,
+          ctx(residentWithoutBinding, observedResident.selection),
+        )
+      ).kind,
+    ).toBe("allowed");
+    expect(observedResident.commands).toEqual(["git rev-parse HEAD"]); // never wipe a resident worktree
+
+    const mismatched = setup();
+    const elsewhere = selection({ resident: false, observed: `${SHA_B}\n` });
+    expect(
+      await authorizeAttachedHead(
+        { ...mismatched.deps, fetchPrHead: async () => SHA_C },
+        ctx(mismatched, elsewhere.selection),
+      ),
+    ).toEqual({ kind: "refused", reason: "branch_moved" });
+    expect(elsewhere.releases).toEqual(["always"]);
+    expect(mismatched.replies[0]).toContain(`workspace-observed HEAD for feature/x is at ${SHA_B}`);
+    expect(mismatched.replies[0]).toContain(`PR head is ${SHA_A}`);
+  });
+
+  it("an unreadable workspace head is refused fail-closed; only non-review and resumed runs skip the first-turn guard", async () => {
+    const unknown = setup();
+    const noSha = selection({ resident: false, observed: "exit 128: not a git repository" });
+    expect(await authorizeAttachedHead(unknown.deps, ctx(unknown, noSha.selection))).toEqual({
+      kind: "refused",
+      reason: "branch_moved",
+    });
+    expect(noSha.releases).toEqual(["always"]);
+    expect(unknown.replies[0]).toContain("workspace-observed HEAD for feature/x could not be read");
 
     const asked: unknown[] = [];
     const deps: AuthorizeDeps = {
-      ...unverified.deps,
+      ...unknown.deps,
       fetchPrHead: async () => {
         asked.push(1);
         return SHA_C;
@@ -654,10 +720,6 @@ describe("authorizeAttachedHead — the attached-head guard on the resident path
     const resumed = setup();
     const resume = { row: { runId: "run-old" } } as unknown as ResumeContext;
     expect((await authorizeAttachedHead(deps, ctx(resumed, moved.selection, { resume }))).kind).toBe("allowed");
-    const sandbox = setup();
-    expect(
-      (await authorizeAttachedHead(deps, ctx(sandbox, selection({ sha: SHA_B, resident: false }).selection))).kind,
-    ).toBe("allowed");
     expect(asked).toEqual([]);
     expect(moved.releases).toEqual([]);
   });

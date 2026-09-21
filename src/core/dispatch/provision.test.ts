@@ -810,6 +810,32 @@ describe("budgetClipLabel — the card's budget line", () => {
 });
 
 describe("attachWorkspace — the workspace attach and the ask-once refusal", () => {
+  it("a hosted process with local execution refuses a workspace preset by name in one sentence before attach", async () => {
+    const d = { ...deps(), hostedRuns: true };
+    const r = request(d, "agent:review acme/api#41", "review");
+    const closes: StatusUpdate[] = [];
+    const before = attachState.rounds.length;
+    const out = await attachWorkspace(d, {
+      msg: r.message,
+      io: fakeIO().io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async (f) => void closes.push(f) },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx: { repo: "acme/api", pr: 41 },
+      root: r.root,
+    });
+    expect(out).toEqual({ kind: "refused", reason: "workspace_backend_unconfigured" });
+    expect(r.refusals).toEqual(["setup_failed"]);
+    expect(r.refusalTexts).toEqual(["🚫 `review` cannot start because this bot has no workspace backend configured."]);
+    expect(r.refusalTexts[0]?.split(/[.!?](?:\s|$)/).filter(Boolean)).toHaveLength(1);
+    expect(attachState.rounds).toHaveLength(before);
+    expect(JSON.stringify(closes)).toContain("workspace backend unavailable");
+  });
+
   it("an agent that declares no repository attaches nothing: the round's executor is the null one, under the attach span", async () => {
     const d = deps();
     const r = request(d, "hello there");

@@ -2611,6 +2611,30 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(other.container.killed).toEqual([4242]);
   });
 
+  it("a send timeout before pi's first line is a start failure at once — no replacement probe or relaunch verdict", async () => {
+    const w = world();
+    let identities = 0;
+    const identity = w.container.identity.bind(w.container);
+    w.container.identity = async () => {
+      identities += 1;
+      return identity();
+    };
+    w.container.failNext = {
+      operation: "send",
+      error: new HarnessContainerError("send", "exit 124: aborted at the 60s command timeout"),
+    };
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(PiContainerReplacedError);
+    expect((err as Error).message).toBe(
+      "pi start failed: the initial send timed out before pi produced its first line (60s command timeout)",
+    );
+    expect(identities).toBe(1); // startup identity only; no replacedVerdict probe
+    expect(noteKinds(w)).toEqual(["harness_error"]);
+    expect(noteSummaries(w)).toEqual([
+      "pi start failed: the initial send timed out before pi produced its first line (60s command timeout)",
+    ]);
+  });
+
   it("a control file that vanished under a live run fails it by name — a harness_error note saying which file under which root is gone — never a replaced-container verdict: the container is alive and answering", async () => {
     const w = world();
     w.container.failNext = {

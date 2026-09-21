@@ -37,12 +37,13 @@ import {
 import { repoResourceId } from "../core/residentAdmin.js";
 import { nearMatch } from "../core/nearMatch.js";
 import {
+  githubAppConfigured,
   resolveGithubCredential,
   resolveGithubIdentity,
   resolveGithubToken,
   type GithubTokenScope,
 } from "./githubApp.js";
-import type { SandboxCredentialSource } from "./sandboxCredentials.js";
+import type { SandboxCredential, SandboxCredentialSource } from "./sandboxCredentials.js";
 import { bindingOf, type BindingSource } from "./authorBinding.js";
 import { pairOfBinding, requesterPairFor } from "./identityRewrite.js";
 import { isServiceable } from "./residentState.js";
@@ -87,6 +88,15 @@ export interface ExecutionConfig {
   resident?: ResidentExecutionConfig;
 }
 
+export interface GithubCredentialProvider {
+  /** Refuse before provisioning when this process cannot honor the profile. */
+  assertProfileIdentity(identity: Identity, machine: MachineClass): void;
+  /** Resolve the token injected into a local process or initial sandbox env. */
+  token(scope: GithubTokenScope): Promise<string | null>;
+  /** Resolve the refreshable credential handed to a remote sandbox. */
+  credential(scope: GithubTokenScope | undefined, opts?: { fresh?: boolean }): Promise<SandboxCredential | null>;
+}
+
 export interface ExecutorFactoryOptions {
   execution?: ExecutionConfig;
   workspaceDir: string; // local mode: base dir for per-thread workspaces
@@ -96,6 +106,9 @@ export interface ExecutorFactoryOptions {
    *  (a test, a caller without config), no binding is read and the bot pair
    *  authors. */
   bindings?: BindingSource;
+  /** The process credential boundary. Production uses the live App/PAT
+   *  provider; tests inject an in-memory provider instead of ambient secrets. */
+  githubCredentials?: GithubCredentialProvider;
 }
 
 /** What executor selection knows about the run it is provisioning for.
@@ -380,6 +393,7 @@ export async function makeExecutor(
   // whatever the context carries (a blank run never resolves one), and no
   // credential (nothing says this run acts as anyone). No resident probe.
   if (machine === "blank") {
+    assertProfileIdentity(ctx.profile.identity, machine);
     return {
       executor: await makePerThreadExecutor(opts, { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }),
       backend: perThreadBackend(opts),
@@ -677,6 +691,7 @@ async function reattachWorkspace(
   const spentAtEntry = leaseSpent();
   if (spentAtEntry) throw spentAtEntry;
   if (recorded.backend !== "resident") {
+    if (ctx.profile.machine === "blank") assertProfileIdentity(ctx.profile.identity, ctx.profile.machine);
     const input =
       ctx.profile.machine === "blank"
         ? { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }
@@ -1147,13 +1162,53 @@ interface PerThreadInputs {
  *  repo and ref, and the run's GitHub credential — the profile's identity —
  *  plus its commit identity pairs in the env. */
 function perThreadCheckout(opts: ExecutorFactoryOptions, ctx: ExecutorContext): PerThreadInputs {
+  const github = opts.githubCredentials ?? processGithubCredentials;
+  github.assertProfileIdentity(ctx.profile.identity, ctx.profile.machine);
+  const scope = githubTokenScopeFor(ctx.profile.identity);
   return {
     threadKey: ctx.threadKey,
     repo: ctx.repo,
     ref: ctx.ref,
-    resolveEnvs: () => githubEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
-    credential: (o) => resolveGithubCredential(githubTokenScopeFor(ctx.profile.identity), o),
+    resolveEnvs: () => githubEnvs(ctx.profile.identity, authorSourceOf(opts, ctx), github.token),
+    credential: (o) => github.credential(scope, o),
   };
+}
+
+/**
+ * Refuse a per-thread backend before provisioning when this process cannot
+ * provide the effective profile's identity. A resident supplies and enforces
+ * its own credential, including a read-only attach. A static PAT can satisfy
+ * `write`, but its permissions
+ * are opaque and cannot be reduced to `read`; no credential cannot satisfy
+ * either identity. `blank` deliberately carries no credential, so only
+ * `none` is truthful there. A configured App is checked lazily when the first
+ * credential is minted; a mint failure refuses that command before it runs.
+ */
+const processGithubCredentials: GithubCredentialProvider = {
+  assertProfileIdentity,
+  token: resolveGithubToken,
+  credential: resolveGithubCredential,
+};
+
+function assertProfileIdentity(identity: Identity, machine: MachineClass): void {
+  if (machine === "blank") {
+    if (identity !== "none") {
+      throw new Error(`machine class "blank" cannot honor profile identity "${identity}"; use identity "none"`);
+    }
+    return;
+  }
+  if (identity === "none" || githubAppConfigured()) return;
+  if (identity === "read") {
+    if (processSecrets.get("GH_TOKEN")) {
+      throw new Error(
+        `profile identity "read" requires a GitHub App credential; a static GH_TOKEN cannot be scoped down to read-only`,
+      );
+    }
+    throw new Error(`profile identity "read" cannot run because no GitHub credential is configured`);
+  }
+  if (!processSecrets.get("GH_TOKEN")) {
+    throw new Error(`profile identity "write" cannot run because no GitHub credential is configured`);
+  }
 }
 
 /** The per-thread backends (the pre-resident selection, unchanged). */
@@ -1164,7 +1219,7 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, input: PerThr
   if (type === "local") {
     const dir = localWorkspaceDir(opts.workspaceDir, threadKey);
     mkdirSync(dir, { recursive: true });
-    return new LocalExecutor(dir);
+    return new LocalExecutor(dir, input.resolveEnvs);
   }
 
   if (type === "e2b") {
@@ -1302,11 +1357,16 @@ export async function gitIdentityEnvs(
  *  token when a GitHub App is configured, else static GH_TOKEN, else none —
  *  and none at all for an identity that mints nothing — with the commit
  *  identity pairs (`gitIdentityEnvs`) beside it for a `write` identity. */
-async function githubEnvs(identity: Identity, author: AuthorEnvSource): Promise<Record<string, string>> {
+async function githubEnvs(
+  identity: Identity,
+  author: AuthorEnvSource,
+  tokenFor: (scope: GithubTokenScope) => Promise<string | null>,
+): Promise<Record<string, string>> {
   const scope = githubTokenScopeFor(identity);
   if (scope === undefined) return {};
-  const token = await resolveGithubToken(scope);
-  return { ...(token ? { GH_TOKEN: token } : {}), ...(await gitIdentityEnvs(identity, author)) };
+  const token = await tokenFor(scope);
+  if (!token) throw new Error(`profile identity "${identity}" cannot run because no GitHub credential is available`);
+  return { GH_TOKEN: token, ...(await gitIdentityEnvs(identity, author)) };
 }
 
 /** The per-thread executor's backend, from the configured execution type. */

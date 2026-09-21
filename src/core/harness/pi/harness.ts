@@ -70,6 +70,7 @@ import { isReissueSteerText } from "../../plane/decide.js";
 import { PLANE_ACTOR_ID } from "../../authz/grants.js";
 import { PiBridge } from "./bridge.js";
 import {
+  HarnessContainerError,
   HarnessControlFileLostError,
   identityOrNothing,
   isControlReset,
@@ -210,6 +211,20 @@ class PromptRefused extends Error {
     super(`pi refused the prompt: ${reason}`);
     this.name = "PromptRefused";
   }
+}
+
+/** A FIFO send that spent its command deadline before pi produced any output
+ * is a start failure, never evidence that the container was replaced. */
+function piStartFailureOf(err: unknown): Error | undefined {
+  if (!(err instanceof HarnessContainerError) || err.operation !== "send") return undefined;
+  const timeout = err.message.match(/exit 124:.*?(\d+)s command timeout/i);
+  if (!timeout) return undefined;
+  const failure = new Error(
+    `pi start failed: the initial send timed out before pi produced its first line (${timeout[1]}s command timeout)`,
+    { cause: err },
+  );
+  failure.name = "PiStartFailureError";
+  return failure;
 }
 
 /** A tool call pi ran to its end without the extension ever asking the gate
@@ -1751,6 +1766,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       try {
         next = await Promise.race([pending, tick]);
       } catch (err) {
+        // A send timeout before pi's first output is the start failure itself.
+        // It is neither a replacement clue nor a failure the model may turn
+        // into content; close the run immediately by name.
+        const startFailure = transport!.consumedOffset === 0 ? piStartFailureOf(err) : undefined;
+        if (startFailure) {
+          note("harness_error", startFailure.message);
+          throw startFailure;
+        }
         // The read failed under the loop. A control file that vanished under a
         // live run fails the run by name, the note saying which file under
         // which root is gone (issue-shaped: a suite or a cleanup emptied the
@@ -2031,6 +2054,18 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  resident, where the registered run resumes through the replaced
      *  verdict's transport condition instead. */
     const judgeUnsettled = async (): Promise<void> => {
+      // The log can report a dead pi while the first FIFO write is still
+      // waiting on its own command timeout. Let that one write settle before
+      // any replacement probe: if it timed out before the first output line,
+      // the start failed and the run ends now — no five-minute probe or relaunch.
+      if (transport !== undefined && transport.consumedOffset === 0) {
+        await transport.flushed();
+        const startFailure = piStartFailureOf(transport.writeFailure);
+        if (startFailure) {
+          note("harness_error", startFailure.message);
+          throw startFailure;
+        }
+      }
       replaced = await containerReplaced(containerSaid);
       if (replaced === undefined) {
         const verdict = await replacedVerdict(container, facts?.container, probe);

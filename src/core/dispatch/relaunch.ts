@@ -106,7 +106,7 @@ export type RelaunchDecision =
  * nothing is relaunched, and the store keeps both secrets verifying.
  */
 export async function prepareRelaunch(
-  deps: Pick<ProvisionDeps, "config" | "dataDir" | "runBearers">,
+  deps: Pick<ProvisionDeps, "config" | "dataDir" | "runBearers" | "githubCredentials">,
   ctx: RelaunchContext,
 ): Promise<RelaunchDecision> {
   const { replaced, facts, harness } = ctx;

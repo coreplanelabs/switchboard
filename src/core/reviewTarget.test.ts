@@ -24,6 +24,9 @@ describe("reviewTargetBlock", () => {
     expect(b).toContain("The worktree is already at that head");
     expect(b).toMatch(/FIRST command: `git rev-parse HEAD`/);
     expect(b).toMatch(/STOP/);
+    expect(b).toMatch(/infrastructure failure/);
+    expect(b).toMatch(/submit no finding or verdict/);
+    expect(b).not.toMatch(/request_changes/);
     expect(b).toMatch(/do not fetch or check out anything/i);
     expect(b).toContain("`origin/main` is already present");
     expect(b).toMatch(/do NOT run `git fetch`/);
@@ -31,13 +34,17 @@ describe("reviewTargetBlock", () => {
     expect(b).not.toMatch(/gh pr checkout/);
   });
 
-  it("sandbox path: clone + gh pr checkout, then the same HEAD check; no worktree claims", () => {
+  it("cold sandbox path: Switchboard already provisioned the PR checkout, then the same HEAD check; no clone or worktree claim", () => {
     const b = reviewTargetBlock({ ...full, resident: false });
-    expect(b).toContain("`gh pr checkout 42`");
+    expect(b).toMatch(/Switchboard provisioned the repository.*resolved pull-request head/i);
+    expect(b).toMatch(/do not clone it again/i);
+    expect(b).not.toContain("gh pr checkout");
     expect(b).toMatch(/`git rev-parse HEAD`/);
     expect(b).toMatch(/STOP/);
+    expect(b).toMatch(/submit no finding or verdict/);
+    expect(b).not.toMatch(/request_changes/);
     expect(b).not.toContain("worktree is already");
-    expect(b).not.toContain("do NOT run `git fetch`");
+    expect(b).toMatch(/never fetch or check out another branch/i);
   });
 
   it("unknown head branch / base are named as unknown, never invented", () => {
@@ -121,6 +128,8 @@ describe("reviewTargetBlock — the seeded sandbox", () => {
     expect(block).toContain("do not clone it again");
     expect(block).toContain("cd /workspace/checkout");
     expect(block).toMatch(/FIRST command there: `git rev-parse HEAD` — it must equal the head commit above/);
+    expect(block).toMatch(/submit no finding or verdict/);
+    expect(block).not.toMatch(/request_changes/);
     expect(block).toContain("`origin/main` is already present in the checkout");
     expect(block).not.toContain("gh pr checkout");
     expect(block).not.toContain("worktree");

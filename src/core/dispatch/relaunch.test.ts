@@ -15,6 +15,7 @@ import {
 } from "../harness/contract.js";
 import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import type { RepoContext } from "../repoContext.js";
+import { TEST_GITHUB_CREDENTIALS } from "../../execution/testing/githubCredentials.js";
 import { prepareRelaunch, RelaunchRefusedError } from "./relaunch.js";
 
 // The re-attach as the run's stop ends it: the provision stage's own answer
@@ -64,7 +65,7 @@ function deps(extra = "") {
   writeFileSync(path, `${YAML}workspaceDir: ${dir}\n${extra}`);
   const config = new ConfigStore(path, join(dir, "overrides.json"));
   const runBearers = new RunBearerStore({ clock: () => NOW });
-  return { config, dataDir: join(dir, "data"), runBearers, dir };
+  return { config, dataDir: join(dir, "data"), runBearers, githubCredentials: TEST_GITHUB_CREDENTIALS, dir };
 }
 
 const record: HarnessRecord = {

@@ -19,10 +19,25 @@ describe("checkReviewedHead", () => {
     });
   });
 
-  it("fails when the observed HEAD is another commit — a review of another PR's branch", () => {
+  it("fails with the authoritative source and full divergence when the observed HEAD is another commit", () => {
     const r = checkReviewedHead({ expected: PR_HEAD, observed: OTHER, reported: OTHER });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toBe(`reviewed head ${OTHER.slice(0, 7)} is not the PR head ${PR_HEAD.slice(0, 7)}`);
+    if (!r.ok)
+      expect(r.reason).toBe(
+        `workspace-observed reviewed head ${OTHER} is not the PR head ${PR_HEAD}; they first differ at hex 1 (d ≠ e)`,
+      );
+  });
+
+  it("shows a divergence beyond an accepted-looking seven-character prefix instead of printing two identical prefixes", () => {
+    const expected = "abcdef0111111111111111111111111111111111";
+    const observed = "abcdef0222222222222222222222222222222222";
+    const r = checkReviewedHead({ expected, observed });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain(`workspace-observed reviewed head ${observed}`);
+      expect(r.reason).toContain(`PR head ${expected}`);
+      expect(r.reason).toContain("first differ at hex 8 (2 ≠ 1)");
+    }
   });
 
   it("the observed HEAD is authoritative: a matching reported head cannot rescue a mismatching observed one", () => {
@@ -42,8 +57,11 @@ describe("checkReviewedHead", () => {
     });
   });
 
-  it("a reported head that mismatches fails", () => {
-    expect(checkReviewedHead({ expected: PR_HEAD, reported: OTHER.slice(0, 12) }).ok).toBe(false);
+  it("a reported head that mismatches names the model report as its source", () => {
+    const reported = OTHER.slice(0, 12);
+    const r = checkReviewedHead({ expected: PR_HEAD, reported });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain(`model-reported reviewed head ${reported}`);
   });
 
   it("fails closed when the PR head is unknown (resolution-time fetch failed)", () => {

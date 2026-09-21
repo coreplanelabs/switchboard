@@ -271,50 +271,68 @@ export type AttachHeadGuard =
   | { outcome: "refused"; reply: string };
 
 /**
- * Compare the sha the resident ATTACHED the worktree at with the PR head the
- * round resolved, BEFORE any model call. Equal → "verified" (told to the
- * model as fact). Different well-formed shas → one current-head lookup
- * decides: attached = the PR's head NOW (a push raced the request and the
- * attach landed on it) → "adopted" with the head the round should review;
- * otherwise → "refused" with the not-started reply verbatim — the caller
- * releases the workspace and sends it, burning no model turn. A
- * malformed/absent sha on either side proves nothing → "unverified" (the
- * round proceeds exactly as before).
+ * Compare the workspace head with the PR head the round resolved, BEFORE any
+ * model call, on every backend. Equal → verified. Different well-formed shas
+ * get one current-head lookup so an attach that raced a push may adopt the
+ * current head; otherwise the run is refused and its workspace released. An
+ * unreadable workspace head is refused too: without proof that the checkout is
+ * the PR head, an infrastructure failure must never become a review finding or
+ * a GitHub post. Only an invalid expected head remains `unverified`; the
+ * earlier PR-head gate owns that refusal.
  */
 export async function guardAttachedHead(input: {
   pr: { repo: string; number: number };
   /** The PR head resolved for the round (`RepoContext.headSha`). */
   expectedHeadSha: string | undefined;
-  /** What the resident answered at attach: the worktree's sha and ref. */
-  attached: { sha: string | undefined; ref: string | undefined };
+  /** What the backend proved before the model: the head, ref and source. */
+  attached: {
+    sha: string | undefined;
+    ref: string | undefined;
+    source?: "resident binding" | "workspace-observed";
+  };
   /** Named in the refusal when the attach answered no ref. */
   fallbackRef: string | undefined;
   fetchPrHead: FetchPrHead;
   logKey: string;
 }): Promise<AttachHeadGuard> {
   const expected = normalizeHead(input.expectedHeadSha);
+  if (!expected) return { outcome: "unverified" };
   const attached = normalizeHead(input.attached.sha);
-  if (expected && attached && sameCommit(expected, attached)) return { outcome: "verified" };
-  if (expected && attached) {
-    const where = `${input.pr.repo}#${input.pr.number}`;
-    const current = normalizeHead(await input.fetchPrHead(input.pr).catch(() => undefined));
-    if (current && sameCommit(attached, current)) {
-      console.log(
-        `[review] ${input.logKey} PR head moved since resolution: ${expected.slice(0, 7)} → ${current.slice(0, 7)}; the worktree is attached at the current head — reviewing it (${where})`,
-      );
-      return { outcome: "adopted", headSha: current };
-    }
-    console.log(
-      `[review] ${input.logKey} not started: worktree attached at ${attached.slice(0, 7)}, PR head ${expected.slice(0, 7)} (${where})`,
-    );
+  const source = input.attached.source ?? "workspace-observed";
+  const where = `${input.pr.repo}#${input.pr.number}`;
+  const branch = input.attached.ref ?? input.fallbackRef;
+  const namedSource =
+    source === "resident binding"
+      ? branch
+        ? `${source} for ${branch}`
+        : source
+      : branch
+        ? `${source} HEAD for ${branch}`
+        : `${source} HEAD`;
+  if (!attached) {
+    console.log(`[review] ${input.logKey} not started: ${namedSource} unreadable, PR head ${expected} (${where})`);
     return {
       outcome: "refused",
       reply:
-        `🔀 Review of ${where} not started: the resident attached \`${input.attached.ref ?? input.fallbackRef ?? "the branch"}\` at \`${attached.slice(0, 7)}\`, ` +
-        `but the PR head is \`${expected.slice(0, 7)}\` — the branch moved while the worktree was being attached (a push or force-push). Re-send the request to review the new head.`,
+        `🔀 Review of ${where} not started: ${namedSource} could not be read, so the workspace cannot be verified against PR head ${expected}. ` +
+        `This infrastructure failure is not a finding and nothing was posted to GitHub; re-send the request after the workspace backend recovers.`,
     };
   }
-  return { outcome: "unverified" };
+  if (sameCommit(expected, attached)) return { outcome: "verified" };
+  const current = normalizeHead(await input.fetchPrHead(input.pr).catch(() => undefined));
+  if (current && sameCommit(attached, current)) {
+    console.log(
+      `[review] ${input.logKey} PR head moved since resolution: ${expected} → ${current}; the ${namedSource} is at the current head — reviewing it (${where})`,
+    );
+    return { outcome: "adopted", headSha: current };
+  }
+  console.log(`[review] ${input.logKey} not started: ${namedSource} ${attached}, PR head ${expected} (${where})`);
+  return {
+    outcome: "refused",
+    reply:
+      `🔀 Review of ${where} not started: the ${namedSource} is at ${attached}, but the PR head is ${expected} — the branch moved while the workspace was being prepared (a push or force-push). ` +
+      `This infrastructure mismatch is not a finding and nothing was posted to GitHub; re-send the request to review the new head.`,
+  };
 }
 
 // ---- head pin + system composition ------------------------------------------
