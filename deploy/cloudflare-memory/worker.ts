@@ -2058,7 +2058,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** The admission ask (`POST /plane/admit`, record 0064 "The queue"): one
    *  transaction decides and writes — `admitted` reserves the thread,
    *  `queued` stores the request under the minted id. */
-  planeAdmit(
+  async planeAdmit(
     post: {
       runId: string;
       requester: string;
@@ -2070,7 +2070,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       reaskMs?: number;
     },
     now: number,
-  ): PlaneAskAnswer {
+  ): Promise<PlaneAskAnswer> {
     let answer!: PlaneAskAnswer;
     this.ctx.storage.transactionSync(() => {
       if (post.reaskMs !== undefined)
@@ -2089,7 +2089,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       this.applyPlaneWrites(decision.writes);
       answer = planeAskAnswerOf(decision, post.runId);
     });
-    if (answer.kind === "queued") void this.ensurePlaneReaskAlarm(now);
+    if (answer.kind === "queued") await this.settlePlaneReaskAlarmAfterCommit(now);
     console.log(
       `[plane/admit] ${post.threadKey} → ${answer.kind}${answer.kind === "queued" ? ` position ${answer.position}` : ""} (run ${post.runId})`,
     );
@@ -2152,7 +2152,10 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** A refusal-by-name the bot met at attach or exec (`POST /plane/observe`,
    *  record 0064): an admitted run re-enters the queue at its old position. */
-  planeObserve(post: { runId: string; resident: string; refusal: string }, now: number): { reentered: boolean } {
+  async planeObserve(
+    post: { runId: string; resident: string; refusal: string },
+    now: number,
+  ): Promise<{ reentered: boolean }> {
     let reentered = false;
     this.ctx.storage.transactionSync(() => {
       const decision = decide(this.planeState(), {
@@ -2165,7 +2168,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       this.applyPlaneWrites(decision.writes);
       reentered = decision.writes.length > 0;
     });
-    if (reentered) void this.ensurePlaneReaskAlarm(now);
+    if (reentered) await this.settlePlaneReaskAlarmAfterCommit(now);
     console.log(
       `[plane/observe] run ${post.runId} on ${post.resident}: ${post.refusal.slice(0, 60)} — ${reentered ? "re-entered" : "no-op"}`,
     );
@@ -2192,6 +2195,18 @@ export class RunHistoryDO extends DurableObject<Env> {
     const due = now + this.planeReaskMs();
     const set = await this.ctx.storage.getAlarm();
     if (set === null || set > due) await this.ctx.storage.setAlarm(due);
+  }
+
+  /** Settle alarm I/O without contradicting the plane transaction that already
+   *  committed. A scheduling failure may delay a re-ask until another wake,
+   *  but returning an error would make the caller proceed or retry while the
+   *  durable queued row remains eligible for admission. */
+  private async settlePlaneReaskAlarmAfterCommit(now: number): Promise<void> {
+    try {
+      await this.ensurePlaneReaskAlarm(now);
+    } catch (err) {
+      console.error("[plane/alarm] re-ask scheduling failed after the plane state committed", err);
+    }
   }
 
   /** The earliest instant the plane must wake at (record 0064): the
