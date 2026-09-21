@@ -142,6 +142,11 @@ export interface PiLaunchSpec {
    *  never one pi chose. Absent (a hand-built spec), the wire-default card
    *  stands: the identity level map, pi's unknown window, the wire's cap field. */
   card?: ModelCard;
+  /** The model stream's HTTP idle and provider request bound. It is the
+   *  run lease remaining when this pi starts, never a transport's fixed
+   *  thirty-second default; the harness still cuts the active turn at its own
+   *  earlier loop/finale bound. */
+  modelStreamTimeoutMs: number;
   /** A session file to continue from (a resume after the container's pi died). */
   sessionPath?: string;
   /** The deployment's compaction thresholds for pi's settings (`pi.compaction`
@@ -387,17 +392,21 @@ export const PI_SHELL_COMMAND_PREFIX = "exec > >(exec cat) 2>&1";
 /** pi's settings for a run: the checkout is never trusted (its `.pi/` never
  *  loads — `--no-extensions` already keeps discovery off; this is the second
  *  lock), no update checks, the shell command prefix that makes the bash
- *  tool's timeout final (`PI_SHELL_COMMAND_PREFIX`) — and, when the deployment
- *  sets them, pi's compaction thresholds under pi's own key
- *  (`compaction.reserveTokens`, `compaction.keepRecentTokens`): pi compacts
- *  when the context passes the window less the reserve, so a reserve near the
- *  window makes a short run compact. Unset, the file names no `compaction`
- *  and pi's defaults stand. */
-export function piSettingsJson(compaction?: PiCompactionConfig): string {
+ *  tool's timeout final (`PI_SHELL_COMMAND_PREFIX`), and the model stream's
+ *  HTTP idle/provider timeout set to the run's remaining lease. pi applies
+ *  `httpIdleTimeoutMs` both to undici's between-byte bound and to provider SDK
+ *  calls, so a reasoning pause is never cut by a library default shorter than
+ *  the turn. When the deployment sets them, pi's compaction thresholds ride
+ *  under pi's own key (`compaction.reserveTokens`,
+ *  `compaction.keepRecentTokens`): pi compacts when the context passes the
+ *  window less the reserve, so a reserve near the window makes a short run
+ *  compact. Unset, the file names no `compaction` and pi's defaults stand. */
+export function piSettingsJson(compaction?: PiCompactionConfig, modelStreamTimeoutMs?: number): string {
   const settings: Record<string, unknown> = {
     defaultProjectTrust: "never",
     checkForUpdates: false,
     shellCommandPrefix: PI_SHELL_COMMAND_PREFIX,
+    ...(modelStreamTimeoutMs !== undefined ? { httpIdleTimeoutMs: modelStreamTimeoutMs } : {}),
   };
   const thresholds = {
     ...(compaction?.reserveTokens !== undefined ? { reserveTokens: compaction.reserveTokens } : {}),
@@ -415,7 +424,10 @@ export interface PiFile {
 /** Every file the container must hold before pi starts, none of them a secret. */
 export function piLaunchFiles(spec: PiLaunchSpec): PiFile[] {
   return [
-    { path: `${spec.paths.agentDir}/settings.json`, content: piSettingsJson(spec.compaction) },
+    {
+      path: `${spec.paths.agentDir}/settings.json`,
+      content: piSettingsJson(spec.compaction, spec.modelStreamTimeoutMs),
+    },
     { path: `${spec.paths.agentDir}/models.json`, content: piModelsJson(spec) },
     { path: `${spec.paths.agentDir}/SYSTEM.md`, content: piSystemPrompt(spec) },
     { path: spec.paths.extension, content: PI_EXTENSION_SOURCE },

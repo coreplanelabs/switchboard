@@ -105,6 +105,7 @@ async function capturedBody(card: ModelCard): Promise<Record<string, unknown>> {
     paths: piRunPathsAt(workDir), // the two writes below read nothing from it
     model: { id: card.model, providerType: "openai-compatible", maxTokens: 4096 },
     harnessUrl: `http://127.0.0.1:${address.port}`,
+    modelStreamTimeoutMs: 5 * 60_000,
     effort: "high",
     identity: "write",
     system: "",

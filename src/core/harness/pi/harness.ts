@@ -183,7 +183,8 @@ export function isParkedProviderError(message: string): boolean {
 
 export function isTransientProviderError(message: string): boolean {
   return (
-    /stream ended before message_stop|ended before completion/i.test(message) ||
+    /stream ended before message_stop|stream ended without finish_reason|ended before completion/i.test(message) ||
+    /^(?:AbortError:\s*)?(?:This|The) operation was aborted\.?$/i.test(message.trim()) ||
     /ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|fetch failed|other side closed|network (error|failure)|(connection|stream) (reset|closed|terminated)|timed? ?out/i.test(
       message,
     ) ||
@@ -941,6 +942,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         paths,
         model: { id: run.model.id, providerType: run.model.providerType, maxTokens: run.agent.maxTokens },
         harnessUrl: deps.harnessUrl,
+        modelStreamTimeoutMs: remainingMs,
         ...(run.card ? { card: run.card } : {}),
         ...(run.effort ? { effort: run.effort } : {}),
         identity: run.agent.identity,
@@ -1943,7 +1945,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       if (obs.providerError !== undefined) {
         if (catchingUp)
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
-        else if (
+        else if (cutAborted && !finaleAborted && isAbortedProviderError(obs.providerError)) {
+          // The cut turn closing on the cut's own abort (decision 0046, unit
+          // seven): pi ends the turn the cut tool was in as an aborted model
+          // call and goes on with the steered write-up as its next turn. This
+          // intentional abort is booked before the transient classifier, so
+          // it never re-issues the turn the budget deliberately cut.
+          cutAborted = false;
+        } else if (
           obs.policyRefusal !== true &&
           !writeUp &&
           !finaleAborted &&
@@ -1953,19 +1962,15 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // failed turn, let a provider-up steer release it early, and arm a
           // local retry after backoff. The last rung repeats until the run's
           // loop lease is spent. Never put the provider's body in a note or in
-          // the ending — it may be a gateway's HTML page.
+          // the ending — it may be a gateway's HTML page. An abort reaches
+          // here only while an ordinary model stream is open; intentional
+          // wind-down and tool-cut aborts were handled above or filtered out.
           heldTurn = obs.providerError;
           parkSettled = false;
           const backoff = PROVIDER_RETRY_BACKOFFS_MS[Math.min(providerRetries, PROVIDER_RETRY_BACKOFFS_MS.length - 1)]!;
           run.onProgress?.(
             `the model provider did not complete the call; the turn is held and retry ${providerRetries + 1} waits ${backoff / 1000}s inside this run's lease`,
           );
-        } else if (cutAborted && !finaleAborted && isAbortedProviderError(obs.providerError)) {
-          // The cut turn closing on the cut's own abort (decision 0046, unit
-          // seven): pi ends the turn the cut tool was in as an aborted model
-          // call and goes on with the steered write-up as its next turn. The
-          // `tool_cut` note already says so; nothing failed under the wind-down.
-          cutAborted = false;
         } else if (writeUp || finaleAborted) {
           // The run is already winding down (a budget, the turn guard, a soft
           // stop) — a model call that fails now, the finale bound's own abort

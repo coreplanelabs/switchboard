@@ -231,6 +231,13 @@ export const PULL_SWEEP = { leaseMinutes: 15, spendCapUsd: 5 } as const;
  *  budget. */
 export const PROVIDER_RETRY_BACKOFFS_MS = [5_000, 15_000, 45_000] as const;
 
+/** How often the model proxy writes an SSE comment while the provider is
+ *  reasoning silently. The public container hop has cut an otherwise healthy
+ *  stream at about thirty seconds of silence; a comment inside half that
+ *  window keeps the transport alive without becoming a model event. The
+ *  model call itself remains bounded by the run's lease. */
+export const MODEL_STREAM_HEARTBEAT_MS = 15_000;
+
 /** A hosted ship parent's deadline margin past the pipeline's wall clock
  *  (record 0060): the row's `state.hosting.until` is the hand-off time plus
  *  the instance's `caps.maxMinutes` plus this hour, absorbing the runner's own

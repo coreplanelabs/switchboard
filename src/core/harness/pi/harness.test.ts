@@ -1109,6 +1109,58 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(prompts[1].id).not.toBe(prompts[0].id);
   });
 
+  it("an OpenAI stream ending without finish_reason is retried and the child survives", async () => {
+    const slept: number[] = [];
+    const w = world({ sleep: async (ms) => void slept.push(ms) });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "Stream ended without finish_reason",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else finalTurn(c, "recovered after the OpenAI stream cut");
+    });
+
+    await expect(w.start()).resolves.toBe("recovered after the OpenAI stream cut");
+    expect(w.notes.some((n) => n.includes("the turn is held and retry 1 waits"))).toBe(true);
+    expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
+    expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(2);
+  });
+
+  it("an abort while a model stream is open is retried as the same turn", async () => {
+    const slept: number[] = [];
+    const w = world({ sleep: async (ms) => void slept.push(ms) });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "This operation was aborted",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else finalTurn(c, "recovered after the open stream abort");
+    });
+
+    await expect(w.start()).resolves.toBe("recovered after the open stream abort");
+    expect(w.notes.some((n) => n.includes("the turn is held and retry 1 waits"))).toBe(true);
+    expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
+    expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(2);
+  });
+
   it("transport failures stay held on backoff inside the lease; exhausting that retry budget ends by type without exposing a gateway page, while a non-transient error is never retried", async () => {
     const gatewayError = {
       type: "message_end",
@@ -1168,6 +1220,8 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   it("isTransientProviderError matches real transient failures and never a non-transient message carrying one of its tokens", () => {
     for (const m of [
       "Anthropic stream ended before message_stop",
+      "Stream ended without finish_reason",
+      "This operation was aborted",
       "fetch failed",
       "terminated",
       "connection terminated",
@@ -1185,6 +1239,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       "403 revoked",
       "401 invalid x-api-key",
       "request terminated: invalid api key",
+      "request aborted: invalid api key",
       "invalid request: network parameter unknown",
       "model claude-502-test not found",
       "prompt is 429000 tokens over the limit",
@@ -5655,6 +5710,7 @@ describe("runPiHarness — the deployment's compaction thresholds in pi's settin
       defaultProjectTrust: "never",
       checkForUpdates: false,
       shellCommandPrefix: PI_SHELL_COMMAND_PREFIX,
+      httpIdleTimeoutMs: 45 * 60_000,
       compaction: { reserveTokens: 150_000, keepRecentTokens: 8_000 },
     });
     const plain = world();
@@ -5664,6 +5720,7 @@ describe("runPiHarness — the deployment's compaction thresholds in pi's settin
       defaultProjectTrust: "never",
       checkForUpdates: false,
       shellCommandPrefix: PI_SHELL_COMMAND_PREFIX,
+      httpIdleTimeoutMs: 45 * 60_000,
     });
   });
 });
