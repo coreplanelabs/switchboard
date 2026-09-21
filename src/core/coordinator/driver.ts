@@ -469,7 +469,7 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
  *  ask's answer carries `retried` instead: whether the re-run was dispatched,
  *  so the machine never waits on a head an undispatched re-run left unchanged. */
 function checksReturn(step: string, a: BotAnswer): StepReturn {
-  const { ok, checks, draft, retried, at } = a.body;
+  const { ok, checks, draft, retried, refired, at } = a.body;
   if (ok !== true) throw new UnreadableAnswer("checks", a, "ok");
   return {
     type: "checks",
@@ -479,6 +479,7 @@ function checksReturn(step: string, a: BotAnswer): StepReturn {
     // unit for the ready event instead of merging or ending without a cause.
     ...(draft === true ? { draft: true } : {}),
     ...(typeof retried === "boolean" ? { retried } : {}),
+    ...(typeof refired === "boolean" ? { refired } : {}),
     at,
   };
 }
@@ -489,7 +490,10 @@ const isRoundChecks = (v: unknown): v is RoundChecks =>
   Array.isArray(v.pending) &&
   v.pending.every((n: unknown) => typeof n === "string") &&
   Array.isArray(v.failed) &&
-  v.failed.every((f: unknown) => isRecord(f) && typeof f.name === "string" && typeof f.conclusion === "string");
+  v.failed.every((f: unknown) => isRecord(f) && typeof f.name === "string" && typeof f.conclusion === "string") &&
+  (v.required === undefined ||
+    (Array.isArray(v.required) && v.required.every((n: unknown) => typeof n === "string"))) &&
+  (v.expected === undefined || (Array.isArray(v.expected) && v.expected.every((n: unknown) => typeof n === "string")));
 
 function mergeReturn(step: string, a: BotAnswer): StepReturn {
   const { ok, outcome, by, sha, mergedAt, reason, at } = a.body;
@@ -670,8 +674,8 @@ async function perform(
     }
     case "checks":
       // The round's checks step (record 0055): the bot reads the check runs at
-      // the reviewed head with the merge door's own reading — or, on a retry
-      // ask, re-runs the named failed checks' jobs first.
+      // the reviewed head with the merge door's own reading — or performs one
+      // of the step's bounded recovery effects first.
       return checksReturn(
         action.step,
         answerOf(
@@ -682,6 +686,7 @@ async function perform(
               prNumber: action.prNumber,
               headSha: action.headSha,
               ...(action.retry !== undefined ? { retry: action.retry } : {}),
+              ...(action.refire === true ? { refire: true } : {}),
             }),
           ),
         ),

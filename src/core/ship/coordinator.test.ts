@@ -2865,6 +2865,39 @@ describe("the round verdict — the checks step at the reviewed head (record 005
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
   });
 
+  it("no required check after one grace chunk re-fires the pull_request event once, records that recovery on the round, then waits without re-firing again", () => {
+    const d = approved({ merge: "person", generated: true });
+    const emptyRequired = {
+      total: 1,
+      pending: [],
+      failed: [],
+      required: ["ci / bot", "ci / workers"],
+      expected: ["ci / bot", "ci / workers"],
+    };
+
+    // A non-required title check reported, but none of the base's required
+    // checks did: give CI one ordinary five-minute chunk before recovery.
+    d.answer({ type: "checks", checks: emptyRequired, at: T0 + 20 * MIN });
+    expect(d.action).toMatchObject({ type: "wait-checks", step: "U10/1/review/checks/wait/1" });
+    d.answer({ type: "wait-checks", outcome: "timeout" });
+    d.answer({ type: "checks", checks: emptyRequired, at: T0 + 25 * MIN });
+
+    expect(d.action).toMatchObject({
+      type: "checks",
+      step: "U10/1/review/checks/3",
+      prNumber: 7,
+      refire: true,
+    });
+    d.answer({ type: "checks", refired: true, at: T0 + 25 * MIN } as StepReturn);
+    expect(d.rounds()).toContain("1 review checks_restarted");
+
+    // The event was spent once. The re-read still sees no required run and
+    // returns to the normal bounded wait, never another close/reopen action.
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/4" });
+    d.answer({ type: "checks", checks: emptyRequired, at: T0 + 26 * MIN });
+    expect(d.action).toMatchObject({ type: "wait-checks", step: "U10/1/review/checks/wait/4" });
+  });
+
   it("a draft pull request holds: the step waits for the ready event and continues once the head is ready; still a draft at the ask's end the unit ends held naming the draft — never an exit with no cause (issue 2063)", () => {
     const d = approved({ merge: "person", generated: true });
     d.answer({ type: "checks", checks: { total: 3, pending: [], failed: [] }, draft: true, at: T0 + 20 * MIN });

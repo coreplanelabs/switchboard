@@ -551,10 +551,10 @@ export type CoordinatorAction =
   | { type: "merge"; step: string; prNumber: number; headSha: string; queued?: true }
   /** Read the check runs at the reviewed head (record 0055, the round verdict):
    *  the merge door's own reading, folded into the round. `retry` names the
-   *  failed checks whose one flake re-run the machine is spending: the bot
-   *  re-runs their failed jobs (the CI retry the deploy already uses) instead
-   *  of reading. */
-  | { type: "checks"; step: string; prNumber: number; headSha: string; retry?: string[] }
+   *  failed checks whose one flake re-run the machine is spending; `refire`
+   *  asks for the one close/reopen recovery when no required check launched.
+   *  Either effect runs instead of a read. */
+  | { type: "checks"; step: string; prNumber: number; headSha: string; retry?: string[]; refire?: true }
   /** Wait for the intake's checks-settled event at the approved head, bounded as the fallback. */
   | { type: "wait-checks"; step: string; headSha: string; timeoutMs: number }
   | { type: "sleep"; step: string; ms: number }
@@ -680,10 +680,18 @@ export type StepReturn =
    *  queue removed it — the reason is the queue's own (issue 2011). */
   | { type: "merge"; step: string; outcome: "pending" | "refused" | "enqueued" | "removed"; reason: string; at: number }
   /** The checks read at the reviewed head; `checks` absent means GitHub could
-   *  not be read, which the machine treats as pending (record 0055). A retry
-   *  ask answers `retried` instead: whether the bot dispatched the re-run —
-   *  false means there is nothing to wait for at the unchanged head. */
-  | { type: "checks"; step: string; checks?: RoundChecks; draft?: boolean; retried?: boolean; at: number }
+   *  not be read, which the machine treats as pending (record 0055). Effect
+   *  asks answer `retried` or `refired` instead; false still spends that one
+   *  recovery so an unchanged head cannot loop on the write. */
+  | {
+      type: "checks";
+      step: string;
+      checks?: RoundChecks;
+      draft?: boolean;
+      retried?: boolean;
+      refired?: boolean;
+      at: number;
+    }
   | { type: "wait-checks"; step: string; outcome: "event" | "timeout" }
   | { type: "sleep"; step: string };
 
@@ -699,14 +707,18 @@ export interface CheckFailure {
 }
 
 /** The check runs at the reviewed head as the round's checks step reads them.
- *  `expected` names checks the head must still gain — a required check, or the
- *  repository's approve workflow whose run does not exist yet (issue 2063):
- *  the base's required contexts not among the reported runs. The table reads
- *  an expected-but-unreported check exactly as a pending one. */
+ *  `required` carries the base's whole required-context set and `expected`
+ *  its unreported subset. The whole set lets the table distinguish no required
+ *  check launching from an unrelated run that did report; an ordinary missing
+ *  subset reads exactly as pending (issue 2063). */
 export interface RoundChecks {
   total: number;
   pending: string[];
   failed: CheckFailure[];
+  /** Every check context required by the base. Together with `expected`, this
+   *  distinguishes an empty required-check launch from an unrelated check
+   *  that did report (for example the title workflow). */
+  required?: string[];
   expected?: string[];
 }
 
@@ -1072,9 +1084,10 @@ type Phase =
   | { at: "merge-wait"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number; queued?: true }
   /** The round's checks step (record 0055): the check runs at the reviewed head
    *  are read after an approve settles, before merge_ready or the merge door.
-   *  `graced`: a head with no check reported has had its one-chunk grace;
-   *  `retried`: the one flake re-run is spent; `retry` names the failed checks
-   *  the next ask re-runs instead of reading. */
+   *  `graced`: a head with no required check reported has had its one-chunk
+   *  grace; `refired`: the one pull_request close/reopen recovery is spent;
+   *  `retried`: the one flake re-run is spent. `retry` and `refire` make the
+   *  next ask perform that effect instead of reading. */
   | {
       at: "checks";
       round: RoundRef;
@@ -1085,7 +1098,9 @@ type Phase =
       waitMs: number;
       graced: boolean;
       retried: boolean;
+      refired: boolean;
       retry?: string[];
+      refire?: true;
     }
   /** Waiting on `checks-settled-<head>` between two checks reads, in the merge
    *  wait's own chunks — the intake wakes the machine when the head settles. */
@@ -1099,6 +1114,7 @@ type Phase =
       waitMs: number;
       graced: boolean;
       retried: boolean;
+      refired: boolean;
     }
   | { at: "ended" };
 
@@ -1338,6 +1354,7 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         prNumber: p.prNumber,
         headSha: p.headSha,
         ...(p.retry !== undefined ? { retry: p.retry } : {}),
+        ...(p.refire === true ? { refire: true as const } : {}),
       };
     case "checks-wait":
       return {
@@ -1745,6 +1762,7 @@ function enterChecks(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNo
         waitMs,
         graced: false,
         retried: false,
+        refired: false,
       },
     },
     notes,
@@ -1764,14 +1782,16 @@ function enterChecks(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNo
  *      (`expected`: a required check, or the repository's approve workflow
  *      whose run does not exist yet), or GitHub unreadable: the head waits on
  *      the settled event and is read again;
- *  (—) no check reported at all: one chunk of grace, never more;
+ *  (—) no required check reported: one chunk of grace, then the pull_request
+ *      event is re-fired once by closing and reopening the pull request;
  *  (c) every expected check reported green: the round proceeds with no wait. */
 function checksVerdict(
   checks: RoundChecks | undefined,
-  p: { retried: boolean; graced: boolean },
+  p: { retried: boolean; graced: boolean; refired: boolean },
   draft?: boolean,
 ):
   | { kind: "retry"; names: string[] }
+  | { kind: "refire" }
   | { kind: "failed"; failed: CheckFailure[] }
   | { kind: "draft" }
   | { kind: "pending" }
@@ -1791,14 +1811,18 @@ function checksVerdict(
   // person's "ready" changes anything — a red check above still gets its fix
   // round, since that work stands whether or not the pull request is a draft.
   if (draft === true) return { kind: "draft" };
+  const required = checks?.required ?? [];
+  const missing = checks?.expected ?? [];
+  const noRequiredReported = required.length > 0 && missing.length === required.length;
+  // A check launcher may report an unrelated workflow while every required
+  // context is still absent. Give it one normal chunk; if it remains empty,
+  // re-fire pull_request once. This is the same recovery a person performs for
+  // a CI run that exists but started no workflows.
+  if ((checks?.total === 0 || noRequiredReported) && !p.graced) return { kind: "grace" };
+  if (noRequiredReported && !p.refired) return { kind: "refire" };
   // GitHub unreadable answers as pending and is re-read at the chunk's end;
   // an expected check not yet reported (issue 2063) is pending the same way.
-  if (checks === undefined || checks.pending.length > 0 || (checks.expected?.length ?? 0) > 0)
-    return { kind: "pending" };
-  // No check reported at the head: one chunk of grace — the first check starts
-  // within minutes where CI exists — then the round proceeds, so a repository
-  // without CI costs one chunk per round and never idles (record 0055).
-  if (checks.total === 0 && !p.graced) return { kind: "grace" };
+  if (checks === undefined || checks.pending.length > 0 || missing.length > 0) return { kind: "pending" };
   return { kind: "green" };
 }
 
@@ -1810,14 +1834,15 @@ function checksVerdict(
  *  is still pending (issue 1991); only a head with no failed check waits a
  *  chunk inside the step's ask on what is unreadable or pending and then
  *  proceeds — the ending's facts read names what is still pending; a head with
- *  no check reported waits one chunk of grace and never more; a green head
- *  proceeds with no wait added. */
+ *  no required check reported gets one grace chunk and one event re-fire; a
+ *  green head proceeds with no wait added. */
 function settleChecks(
   s: UnitPipelineState,
   p: Extract<Phase, { at: "checks" }>,
   checks: RoundChecks | undefined,
   retried?: boolean,
   draft?: boolean,
+  refired?: boolean,
 ): Transition {
   const { round } = p;
   const wait = (over: Partial<Extract<Phase, { at: "checks-wait" }>>): Transition => ({
@@ -1833,11 +1858,23 @@ function settleChecks(
         waitMs: p.waitMs,
         graced: p.graced,
         retried: p.retried,
+        refired: p.refired,
         ...over,
       },
     },
     notes: [],
   });
+  // The pull_request re-fire is an effect ask after a whole grace chunk with
+  // no required check. Whether GitHub accepted it or not, spend the one attempt
+  // and read immediately: that read registers the ordinary bounded wait. A
+  // successful effect adds the round boundary the card renders.
+  if (p.refire === true) {
+    const { refire: _refire, ...read } = p;
+    return {
+      state: { ...s, phase: { ...read, n: p.n + 1, refired: true } },
+      notes: refired === true ? [roundNote(p.round, "checks_restarted")] : [],
+    };
+  }
   // The retry ask. Dispatched: wait for the head to settle, then read again;
   // a second failure is the finding. NOT dispatched (`retried: false` — no
   // re-runnable run behind the checks, or GitHub refused): the one re-run is
@@ -1856,6 +1893,11 @@ function settleChecks(
     case "retry":
       return {
         state: { ...s, phase: { ...p, n: p.n + 1, retry: verdict.names } },
+        notes: [],
+      };
+    case "refire":
+      return {
+        state: { ...s, phase: { ...p, n: p.n + 1, refire: true } },
         notes: [],
       };
     case "failed": {
@@ -2438,7 +2480,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       return settlePrCheck(clocked, p, (ret as Extract<StepReturn, { type: "pr-check" }>).pr);
     case "checks": {
       const r = ret as Extract<StepReturn, { type: "checks" }>;
-      return settleChecks(clocked, p, r.checks, r.retried, r.draft);
+      return settleChecks(clocked, p, r.checks, r.retried, r.draft, r.refired);
     }
     case "checks-wait":
       // The event fired or the chunk elapsed either way the head is read again.
@@ -2455,6 +2497,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
             waitMs: p.waitMs,
             graced: p.graced,
             retried: p.retried,
+            refired: p.refired,
           },
         },
         notes: [],

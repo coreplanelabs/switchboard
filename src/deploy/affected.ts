@@ -22,6 +22,7 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
   { rule: "tests", test: /\.test\.[cm]?[jt]sx?$/ },
   { rule: "tests", test: /(^|\/)testing\// },
   { rule: "tests", test: /(^|\/)vitest\.config\.[cm]?[jt]s$/ },
+  { rule: "tests", test: /(^|\/)(testSetup\.[cm]?[jt]s|wrangler\.test\.jsonc)$/ },
   { rule: "tests", test: /(^|\/)test-env\.d\.ts$/ },
   { rule: "tests", test: /(^|\/)__snapshots__\// },
   { rule: "docs", test: /^docs\// },

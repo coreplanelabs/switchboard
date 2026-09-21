@@ -24,6 +24,7 @@ import {
   findOpenPrByHead,
   mergePullRequest,
   openPullRequest,
+  refirePullRequestEvent,
   rerunFailedJobs,
   updatePullRequest,
 } from "./githubPulls.js";
@@ -260,6 +261,53 @@ describe("githubPulls", () => {
     await expect(updatePullRequest("acme/api", 31, { title: "T2", body: "B2" })).rejects.toThrow(
       /PR update failed: HTTP 403/,
     );
+  });
+
+  it("refirePullRequestEvent closes then reopens the known pull request so GitHub emits pull_request again, retrying a failed reopen so the pull request is restored open", async () => {
+    stubToken();
+    const calls = stubFetch(() => new Response("{}", { status: 200 }));
+    expect(await refirePullRequestEvent("acme/api", 31)).toBe(true);
+    expect(calls.map((c) => ({ method: c.init.method, body: JSON.parse(String(c.init.body)) }))).toEqual([
+      { method: "PATCH", body: { state: "closed" } },
+      { method: "PATCH", body: { state: "open" } },
+    ]);
+    expect(calls.every((c) => c.url === "https://api.github.com/repos/acme/api/pulls/31")).toBe(true);
+
+    let request = 0;
+    const unavailableCalls = stubFetch(
+      () => new Response(request++ === 1 ? "unavailable" : "{}", { status: request === 2 ? 503 : 200 }),
+    );
+    expect(await refirePullRequestEvent("acme/api", 31)).toBe(true);
+    expect(unavailableCalls.map((c) => JSON.parse(String(c.init.body)))).toEqual([
+      { state: "closed" },
+      { state: "open" },
+      { state: "open" },
+    ]);
+
+    request = 0;
+    const timeoutCalls = stubFetch(() => {
+      if (request++ === 1) throw new DOMException("The operation was aborted", "TimeoutError");
+      return new Response("{}", { status: 200 });
+    });
+    expect(await refirePullRequestEvent("acme/api", 31)).toBe(true);
+    expect(timeoutCalls.map((c) => JSON.parse(String(c.init.body)))).toEqual([
+      { state: "closed" },
+      { state: "open" },
+      { state: "open" },
+    ]);
+  });
+
+  it("never reports a completed refire after an accepted close while reopening is unavailable", async () => {
+    stubToken();
+    let request = 0;
+    const calls = stubFetch(() => new Response("unavailable", { status: request++ === 0 ? 200 : 503 }));
+    await expect(refirePullRequestEvent("acme/api", 31)).rejects.toThrow(/could not be reopened/);
+    expect(calls.map((c) => JSON.parse(String(c.init.body)))).toEqual([
+      { state: "closed" },
+      { state: "open" },
+      { state: "open" },
+      { state: "open" },
+    ]);
   });
 
   it("clips an oversized body with a visible note so a huge description still lands", async () => {

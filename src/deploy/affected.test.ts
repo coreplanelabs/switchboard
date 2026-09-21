@@ -179,6 +179,8 @@ describe("classifyPath", () => {
       "deploy/cloudflare-memory/runs.test.ts",
       "deploy/cloudflare-memory/vitest.config.ts",
       "deploy/cloudflare-memory/test-env.d.ts",
+      "deploy/cloudflare-memory/testSetup.ts",
+      "deploy/cloudflare-memory/wrangler.test.jsonc",
       "src/core/testing/commandConformance.ts",
       "web/src/testing/fakeEventSource.ts",
       "web/src/lib/runPageModel.test.ts",

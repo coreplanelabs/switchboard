@@ -27,6 +27,7 @@ function roundStageDecided(o: ShipRoundOutcome): string {
     case "request_changes":
     case "no_verdict":
     case "checks_failed":
+    case "checks_restarted":
     case "transient":
     case "enqueued":
     case "dequeued":
@@ -72,6 +73,7 @@ const ROUND_OUTCOME_WORDS = [
   "request_changes",
   "no_verdict",
   "checks_failed",
+  "checks_restarted",
   "transient",
   "enqueued",
   "dequeued",

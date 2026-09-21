@@ -26,6 +26,9 @@ import { redactAndCap } from "../core/redact.js";
 const MAX_BODY_CHARS = 65000;
 
 const REQUEST_TIMEOUT_MS = 15_000;
+/** Immediate attempts restore an accepted close before the Workflow's durable
+ * step retry takes over for a longer GitHub outage. */
+const REOPEN_ATTEMPTS = 3;
 
 export interface PullRequestTarget {
   /** `owner/name` */
@@ -200,6 +203,35 @@ export async function updatePullRequest(
     const text = await res.text().catch(() => "");
     throw new Error(`PR update failed: HTTP ${res.status} ${redactAndCap(text, 300)}`);
   }
+}
+
+/** Re-fire GitHub's `pull_request` event without changing the head: close the
+ * pull request and reopen it, the recovery for a CI run that started no
+ * workflows. A refused close returns false so callers spend the one event
+ * attempt. Once GitHub accepts the close, reopening is retried immediately;
+ * exhaustion throws so the Workflow retries the durable step instead of
+ * recording a completed effect while the pull request remains closed. */
+export async function refirePullRequestEvent(repo: string, number: number): Promise<boolean> {
+  const token = await requireToken();
+  const url = `https://api.github.com/repos/${repo}/pulls/${number}`;
+  const setState = async (state: "closed" | "open"): Promise<boolean> => {
+    try {
+      const res = await fetch(url, {
+        method: "PATCH",
+        headers: apiHeaders(token, true),
+        body: JSON.stringify({ state }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+  if (!(await setState("closed"))) return false;
+  for (let attempt = 0; attempt < REOPEN_ATTEMPTS; attempt += 1) {
+    if (await setState("open")) return true;
+  }
+  throw new Error(`pull request ${repo}#${number} could not be reopened after its event re-fire`);
 }
 
 /**

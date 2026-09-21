@@ -448,6 +448,10 @@ describe("run ledger — the coordinator's event and the key (items 47–48)", (
     ...TAG,
   });
 
+  it("the test pool leaves the real Workflow engine unbound, so only a test's live-object double can own a workflow promise", () => {
+    expect(env.SHIP_COORDINATOR).toBeUndefined();
+  });
+
   it("a record carrying parentInstanceId committed by the owner's finish sends exactly one `run-finished-<runId>` to that instance, after the commit, and the response says so", async () => {
     const key = storeKey();
     const sent = await coordinatorDouble(key);
@@ -1594,17 +1598,32 @@ describe("the plane's resident stage — /plane/level, /plane/observe, the re-as
     // pool's alarm helper deletes the scheduled alarm around a trigger, so its
     // stored time cannot be read back after one): a far sweep alarm is pulled
     // to the cadence; an earlier alarm is never pushed back.
-    type WithAlarm = { ctx: DurableObjectState; ensurePlaneReaskAlarm(now: number): Promise<void> };
+    type WithAlarm = {
+      ctx: DurableObjectState;
+      sql: SqlStorage;
+      ensurePlaneReaskAlarm(now: number): Promise<void>;
+    };
     await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
       const priv = inst as unknown as WithAlarm;
       const now = Date.now();
       await priv.ctx.storage.setAlarm(now + 6 * 3_600_000);
       await priv.ensurePlaneReaskAlarm(now);
       expect(((await priv.ctx.storage.getAlarm()) as number) - now).toBeLessThan(60_000);
-      const sooner = now + 1;
+
+      // Use a cadence that cannot fire while this assertion is reading the
+      // slot. At the live 1 ms cadence, workerd may consume `sooner` between
+      // setAlarm and getAlarm and correctly re-arm it one millisecond later.
+      const assertionCadence = 60_000;
+      priv.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_reask_ms', ?)`, assertionCadence);
+      const sooner = now + assertionCadence / 2;
       await priv.ctx.storage.setAlarm(sooner);
       await priv.ensurePlaneReaskAlarm(now);
       expect(await priv.ctx.storage.getAlarm()).toBe(sooner);
+
+      // Restore the live cadence and pull the slot forward for the native-alarm
+      // half below.
+      priv.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_reask_ms', '1')`);
+      await priv.ensurePlaneReaskAlarm(now);
     });
     // Alarms fire natively in the pool and the 1 ms cadence re-arms on every
     // firing, so the trigger is not forced — the offered probe is polled for.
@@ -1617,6 +1636,15 @@ describe("the plane's resident stage — /plane/level, /plane/observe, the re-as
     // the acked row under probe:<resident> never swallows the re-offer.
     await post("/plane/ack", { storeKey: key, id: "probe:owner/repo", outcome: "done" });
     await vi.waitFor(async () => expect(await openIds()).toEqual(["probe:owner/repo"]), { timeout: 5_000 });
+
+    // End the one-millisecond native alarm loop before this case releases its
+    // RPC worker. Otherwise teardown can race a pending alarm response and
+    // report its failure under the next file in the shared workerd process.
+    await post("/plane/ack", { storeKey: key, id: "probe:owner/repo", outcome: "done" });
+    expect((await level(key, "owner/repo", "memory", "below")).data).toEqual({ admitted: 1 });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      await (inst as unknown as WithAlarm).ctx.storage.deleteAlarm();
+    });
   });
 
   it("validates: a level with a missing resident, a bad name or side, or a non-string generation is 400; an observation with a bad run id, missing resident or empty refusal is 400", async () => {

@@ -66,7 +66,9 @@ export function classifyRoundChecks(
 ): RoundChecks {
   const out: RoundChecks = { total: 0, pending: [], failed: [] };
   const reported = new Set(runs.map((r) => r.name));
-  const expected = (requiredContexts ?? []).filter((name) => !reported.has(name));
+  const required = requiredContexts ?? [];
+  const expected = required.filter((name) => !reported.has(name));
+  if (required.length > 0) out.required = required;
   if (expected.length > 0) out.expected = expected;
   for (const run of runs) {
     out.total++;
