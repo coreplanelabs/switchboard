@@ -357,7 +357,7 @@ describe("reclaimRuns", () => {
     expect(ledger.live.get("alive")!.ownerGen).toBe("g1");
   });
 
-  it("a ledger without the routes, or one that cannot be reached, is a warning and an empty outcome — the bot boots", async () => {
+  it("a failed reclaim or live-run listing leaves the outcome incomplete, so ownership recovery stays fenced", async () => {
     const missing = harness((inner) =>
       overriding(inner, {
         reclaim: async () => {
@@ -365,17 +365,42 @@ describe("reclaimRuns", () => {
         },
       }),
     );
-    expect(await missing.run()).toEqual({ closed: [], resumable: [], liveElsewhere: [], failed: [] });
+    expect(await missing.run()).toEqual({
+      closed: [],
+      resumable: [],
+      liveElsewhere: [],
+      liveHosted: [],
+      failed: [],
+      liveListingComplete: false,
+    });
     expect(missing.warnings[0]).toMatch(/no run-ledger routes/);
-    const down = harness((inner) =>
+
+    const reclaimDown = harness((inner) =>
       overriding(inner, {
         reclaim: async () => {
           throw new TransientStoreError("HTTP 503");
         },
       }),
     );
-    expect(await down.run()).toEqual({ closed: [], resumable: [], liveElsewhere: [], failed: [] });
-    expect(down.warnings[0]).toMatch(/reclaim failed: HTTP 503/);
+    expect(await reclaimDown.run()).toEqual({
+      closed: [],
+      resumable: [],
+      liveElsewhere: [],
+      liveHosted: [],
+      failed: [],
+      liveListingComplete: false,
+    });
+    expect(reclaimDown.warnings[0]).toMatch(/reclaim failed: HTTP 503/);
+
+    const listingDown = harness((inner) =>
+      overriding(inner, {
+        listLive: async () => {
+          throw new TransientStoreError("HTTP 503");
+        },
+      }),
+    );
+    expect((await listingDown.run()).liveListingComplete).toBe(false);
+    expect(listingDown.warnings.some((w) => /listing live runs failed: HTTP 503/.test(w))).toBe(true);
   });
 
   it("one run's failure does not stop the others: it is reported in `failed`, warned, and its row stays for the next boot", async () => {
@@ -396,7 +421,7 @@ describe("reclaimRuns", () => {
     expect(ledger.live.get("bad")!.ownerGen).toBe("g2"); // ours now; the next boot's reclaim takes it again
   });
 
-  it("startReclaimSweep repeats the reclaim every interval, reports only non-empty outcomes, runs one pass at a time, and a failing pass is a warning", async () => {
+  it("startReclaimSweep repeats the reclaim every interval, reports complete listings even when empty, runs one pass at a time, and a failing pass is a warning", async () => {
     let clock = 1_000;
     const inner = new InMemoryRunLedger(() => clock);
     const outcomes: number[] = [];
@@ -418,12 +443,12 @@ describe("reclaimRuns", () => {
     });
     tick!();
     await new Promise((r) => setImmediate(r));
-    expect(outcomes).toEqual([]); // nothing on the ledger: nothing reported
+    expect(outcomes).toEqual([0]); // an empty complete listing can release recovery fences
     await inner.claim(claim("dead", "slack:C1:1.0"));
     clock = 100_000; // the lease is past
     tick!();
     await new Promise((r) => setImmediate(r));
-    expect(outcomes).toEqual([1]);
+    expect(outcomes).toEqual([0, 1]);
     expect(inner.finished.get("dead")?.status).toBe("interrupted");
     // A pass that throws is a warning, not a crash.
     const failing = startReclaimSweep({
@@ -489,6 +514,29 @@ describe("reclaimRuns — the hosted parent's classification (record 0060)", () 
         l.includes("r-ship web:s:c9#host rehost (from handoff; instance i7; 0 live child(ren); 2 event(s))"),
       ),
     ).toBe(true);
+  });
+
+  it("a hosted row whose classification fails still appears in the complete hosted listing for ownership recovery", async () => {
+    const { ledger, run, warnings } = harness(
+      (inner) =>
+        overriding(inner, {
+          readEvents: async (runId: string) => {
+            if (runId === "r-ship") throw new TransientStoreError("HTTP 503");
+            return inner.readEvents(runId);
+          },
+        }),
+      { storedStatus: async () => "interrupted" },
+    );
+    await ledger.claim(hostedClaim("r-ship", "web:s:c9"));
+    await ledger.setState("r-ship", "g1", { hosting: hosting(900_000) });
+
+    const outcome = await run();
+
+    expect(outcome.resumable).toEqual([]);
+    expect(outcome.failed).toEqual([{ runId: "r-ship", error: "HTTP 503" }]);
+    expect(outcome.liveListingComplete).toBe(true);
+    expect(outcome.liveHosted).toEqual([{ instanceId: "i7", until: 900_000 }]);
+    expect(warnings.some((w) => w.includes("r-ship web:s:c9#host: HTTP 503 — left on the ledger"))).toBe(true);
   });
 
   it("the same row whose store record has a pipeline outcome (completed or failed: the finish landed in the plain store) is abandoned — the live row gone, no record written; a store that cannot be asked is one warning and the row re-hosts", async () => {
@@ -768,7 +816,12 @@ describe("reclaimRuns — the hosted parent's classification (record 0060)", () 
     expect(loser.resumable).toEqual([]);
     expect(loser.closed).toEqual([]);
     expect(loser.liveElsewhere).toEqual([
-      expect.objectContaining({ runId: "r-ship", ownerGen: "g2", threadKey: "web:s:c9#host" }),
+      expect.objectContaining({
+        runId: "r-ship",
+        ownerGen: "g2",
+        threadKey: "web:s:c9#host",
+        hosting: { instanceId: "i7", until: 900_000 },
+      }),
     ]);
   });
 });

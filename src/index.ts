@@ -82,6 +82,7 @@ import {
   type ReclaimOutcome,
 } from "./core/boot.js";
 import { launchResumes, resumeIoTarget } from "./core/resumeLaunch.js";
+import { RunnerOwnershipFence } from "./core/runnerOwnership.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { LedgerTakeover } from "./core/runLedger/takeover.js";
 import { nullChannelIO } from "./core/nullChannelIo.js";
@@ -722,12 +723,18 @@ export async function runBot(): Promise<void> {
   // hold across sweeps and requesters — and across the merge watch (record
   // 0071, mechanism three), whose resolver rounds are the same sweep on one
   // named pull request.
-  // Shared across requesters and with the merge watch: the spent-round flags
-  // (one model round per pull request) and the per-repository queue (one
-  // rebase in flight per repository, whoever asked) — each requester's
+  // Shared across requesters and with the merge watch: the unowned sweep's
+  // spent-round flags (one model round per pull request) and the per-repository
+  // queue (one rebase in flight per repository, whoever asked) — each requester's
   // service already queues its own sweeps, this chain queues them across
   // requesters too, and the watch's spend read counts the spent rounds.
   const sweepState = { roundSpent: new Set<string>() };
+  // New claims are process-local for an immediate fence. Recovered claims are
+  // rebuilt before Slack opens from the durable unit rows of every hosted
+  // runner this generation reclaimed or still sees under another generation.
+  // A ledger-backed process fails closed until one complete live listing has
+  // supplied that durable view.
+  const runnerOwnership = new RunnerOwnershipFence(capabilities.runLedger);
   const pullsWiring: PullsCommandDeps["pulls"] = (() => {
     const state = sweepState;
     const chains = new Map<string, Promise<unknown>>();
@@ -751,6 +758,7 @@ export async function runBot(): Promise<void> {
             git: createSweepGit({ cloneUrl: sweepCloneUrl, authHeader: sweepAuthHeader }),
             origin,
             state,
+            runnerOwns: async (pr) => runnerOwnership.owns(pr.repo, pr.number),
             dispatch: async (m) => {
               const io = threadIoFor({ threadKey: m.threadKey, userId: m.userId }) ?? nullChannelIO(m.threadKey);
               await dispatch(deps, m, io);
@@ -1133,10 +1141,14 @@ export async function runBot(): Promise<void> {
       instances: coordinatorInstances,
       // The spawn's tier gate reads the current app config.
       appConfig: () => config.config,
-      // The merge door's conflict refusal (record 0071 criterion 5): where the
-      // watch is on for the repository, the refusal names the watching unit's
-      // own round; off, the sweep's `pulls rebase` sentence stands.
-      mergeWatchOf: (repo) => config.mergeWatchOf(repo),
+      runnerOwnership,
+      runnerRebase: async (instance, prNumber) => {
+        const service = await pullsWiring!.service({
+          userId: instance.userId,
+          channelId: instance.channelId,
+        });
+        return service.sweep({ repo: instance.repo, number: prNumber, owner: "runner" });
+      },
       shipGrantFor: (instance) => {
         const scopes = config.scopes(instance.channelId, instance.userId);
         return resolveGrant({
@@ -1714,9 +1726,15 @@ export async function runBot(): Promise<void> {
   // Two acts, because the boot performs them at different times: the cards
   // before the socket opens (the sweep must see them), the resumes after it.
   const guardCards = async (outcome: ReclaimOutcome): Promise<void> => {
-    // Every outcome comes from a full listing, so an empty `liveElsewhere` is
-    // the truth (no other generation holds a row) and replaces the set.
-    markForeignLiveCards(outcome.liveElsewhere.flatMap((r) => (r.card ? [r.card] : [])));
+    // Rebuild the sweep's sole-owner fence only from a complete durable view.
+    // An incomplete pass still remembers any rehost it took so a later empty
+    // complete listing can recover that now-local runner.
+    await runnerOwnership.recover(outcome, coordinatorInstances);
+
+    // Only a complete listing may replace the foreign-card view. A failed
+    // listing is no evidence that another generation stopped owning its rows.
+    if (outcome.liveListingComplete)
+      markForeignLiveCards(outcome.liveElsewhere.flatMap((r) => (r.card ? [r.card] : [])));
     // …and the threads a follow-up must be steered into rather than run afresh:
     // rows other generations hold, plus the ones just reclaimed and not yet
     // launched (the launcher runs after this, and in-process admission takes

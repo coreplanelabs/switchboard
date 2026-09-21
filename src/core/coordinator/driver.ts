@@ -51,6 +51,7 @@ import {
   type PlanCursor,
   type UnitStatus,
   renderUnitReport,
+  reenterApprovedRebase,
   settleUnit,
   startUnit,
   type ChildFacts,
@@ -114,6 +115,7 @@ export type CoordinatorStepRoute =
   | "unit-wake"
   | "checks"
   | "merge"
+  | "rebase"
   | "finish";
 
 /** What a step stores: the bot's reply as the wire carried it — its status and
@@ -505,11 +507,24 @@ function mergeReturn(step: string, a: BotAnswer): StepReturn {
     return { type: "merge", step, outcome: "merged", sha, at };
   if (
     ok === true &&
-    (outcome === "pending" || outcome === "refused" || outcome === "enqueued" || outcome === "removed") &&
+    (outcome === "pending" ||
+      outcome === "refused" ||
+      outcome === "conflict" ||
+      outcome === "enqueued" ||
+      outcome === "removed") &&
     typeof reason === "string"
   )
     return { type: "merge", step, outcome, reason, at };
   throw new UnreadableAnswer("merge", a, "outcome");
+}
+
+function rebaseReturn(step: string, a: BotAnswer): StepReturn {
+  const { ok, outcome, headSha, reason, at } = a.body;
+  if (ok === true && (outcome === "carried" || outcome === "changed") && typeof headSha === "string")
+    return { type: "rebase", step, outcome, headSha, at };
+  if (ok === true && (outcome === "conflict" || outcome === "refused") && typeof reason === "string")
+    return { type: "rebase", step, outcome, reason, at };
+  throw new UnreadableAnswer("rebase", a, "outcome");
 }
 
 // ---- the steps ----------------------------------------------------------------------------------------
@@ -706,6 +721,16 @@ async function perform(
           ),
         ),
       );
+    case "rebase":
+      return rebaseReturn(
+        action.step,
+        answerOf(
+          "rebase",
+          await step.do(action.step, STEP_CONFIG, () =>
+            call(bot, "rebase", { ...tag, prNumber: action.prNumber, headSha: action.headSha }),
+          ),
+        ),
+      );
   }
 }
 
@@ -838,7 +863,7 @@ async function runUnit(
   let notes = 0;
   let endedAt: number | undefined;
   try {
-    for (;;) {
+    pipeline: for (;;) {
       const action = nextAction(state);
       if (action.type === "end") return { ...action.ending, ...(endedAt !== undefined ? { endedAt } : {}) };
       // Keep the current round across its non-round phases (for example merge)
@@ -892,9 +917,9 @@ async function runUnit(
                   // The checks at the approved head (record 0055): the report's
                   // headline is a claim about them, never "merge-ready" over a red one.
                   ...(check.pr.checks !== undefined ? { checks: check.pr.checks } : {}),
-                  // The ready state beside them (agent-ship item 9): a conflicting
-                  // head, or one carrying an unsquashed fix-up commit, is reported
-                  // approved-but-not-merge-ready, never "merge-ready".
+                  // The ready state beside them (agent-ship item 9): a conflict
+                  // feeds the runner re-entry below, while an unsquashed fix-up
+                  // commit remains an approved-but-not-merge-ready report.
                   ...(check.pr.mergeableState !== undefined ? { mergeableState: check.pr.mergeableState } : {}),
                   ...(check.pr.fixupCommits !== undefined ? { fixupCommits: check.pr.fixupCommits } : {}),
                   // The base's merge-queue rule (issue 2011): the merge:person
@@ -906,6 +931,14 @@ async function runUnit(
             } catch {
               // the report simply omits the fact
             }
+          }
+          // A person-merge pipeline used to publish this dirty state as its
+          // ending and hand the pull request to the sweep. It remains the
+          // owner instead: rung one runs now, and only a conflict buys a coding
+          // child under this run's remaining lease.
+          if (note.ending.kind === "merge_ready" && endFacts?.mergeableState === "dirty") {
+            state = reenterApprovedRebase(state);
+            continue pipeline;
           }
           // The last coding child's run is named so the bot can put its handoff
           // — the deviations it recorded — on the unit's board issue beside the

@@ -485,20 +485,20 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     greenChecks(d, T0 + 20 * MIN);
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
     // A conflicting head is never called merge-ready, whatever the checks say
-    // — even green ones — and the line names the sweep as the remedy (record
-    // 0071: `pulls rebase` runs the resolver and an unchanged patch carries
-    // the approval), with the base it rebases onto.
+    // — even green ones — and the provisional report names the pipeline runner
+    // as owner. The driver consumes this fact to re-enter the resolver before
+    // publishing any ending; an unchanged patch carries the approval.
     const dirty = renderUnitReport(d.state, {
       mergeableState: "dirty",
       checks: { total: 3, pending: [], failed: [] },
     });
     expect(dirty).toContain(
-      "⚠️ Approved but not merge-ready after 1 review round: https://github.com/acme/api/pull/7 — the head conflicts with `main`: `pulls rebase https://github.com/acme/api/pull/7` rebases it onto `main` (an unchanged patch carries the approval). The approved work stands.",
+      "⚠️ Approved but not merge-ready after 1 review round: https://github.com/acme/api/pull/7 — the head conflicts with `main`; the pipeline runner owns the rebase (an unchanged patch carries the approval). The approved work stands.",
     );
     expect(dirty).not.toContain("✅ Merge-ready");
     expect(dirty).toContain("Verdict: LGTM — clean");
-    // The conflict outranks a red check, exactly as the door refuses it before
-    // reading the checks; the ending kind is unchanged either way.
+    // The conflict outranks a red check, exactly as the door returns its typed
+    // conflict before reading the checks; the driver then re-enters the runner.
     const dirtyRed = renderUnitReport(d.state, {
       mergeableState: "dirty",
       checks: { total: 3, pending: [], failed: ["ci / package"] },

@@ -367,6 +367,121 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
   });
 
+  it("two successive base moves on an approved pull request are rebased by the runner and end merged without a person's command", async () => {
+    const headB = "b".repeat(40);
+    const headC = "c".repeat(40);
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U10/1/review/wait/1": "event",
+      "U10/1/rebase/a1/wait/1": "event",
+      "U10/2/review/wait/1": "event",
+      "U10/2/rebase/a2/wait/1": "event",
+      "U10/3/review/wait/1": "event",
+    });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [
+        spawned("run-c0"),
+        spawned("run-r1", T0 + 10 * MIN),
+        spawned("run-b1", T0 + 21 * MIN),
+        spawned("run-r2", T0 + 30 * MIN),
+        spawned("run-b2", T0 + 41 * MIN),
+        spawned("run-r3", T0 + 50 * MIN),
+      ],
+      "read-record": [
+        codingDone("run-c0", T0 + 10 * MIN),
+        reviewApproved("run-r1", T0 + 20 * MIN),
+        record(
+          {
+            id: "run-b1",
+            finished: true,
+            status: "completed",
+            pr: { number: 7, url: PR_URL, created: false },
+            headSha: headB,
+            finalReply: "Rebased and pushed.",
+          },
+          T0 + 30 * MIN,
+        ),
+        record(
+          {
+            id: "run-r2",
+            finished: true,
+            status: "completed",
+            verdict: { verdict: "approve", summary: "clean after rebase", findings: [] },
+            reviewPosted: true,
+            reviewHead: headB,
+          },
+          T0 + 40 * MIN,
+        ),
+        record(
+          {
+            id: "run-b2",
+            finished: true,
+            status: "completed",
+            pr: { number: 7, url: PR_URL, created: false },
+            headSha: headC,
+            finalReply: "Rebased again and pushed.",
+          },
+          T0 + 50 * MIN,
+        ),
+        record(
+          {
+            id: "run-r3",
+            finished: true,
+            status: "completed",
+            verdict: { verdict: "approve", summary: "clean after the second rebase", findings: [] },
+            reviewPosted: true,
+            reviewHead: headC,
+          },
+          T0 + 60 * MIN,
+        ),
+      ],
+      "pr-check": [
+        prNone(),
+        prOpen(T0 + 10 * MIN),
+        prOpen(T0 + 30 * MIN, { headSha: headB }),
+        prOpen(T0 + 50 * MIN, { headSha: headC }),
+      ],
+      round: Array.from({ length: 16 }, () => acked()),
+      merge: [
+        ok({ ok: true, outcome: "conflict", reason: "the base moved" }, T0 + 21 * MIN),
+        ok({ ok: true, outcome: "conflict", reason: "the base moved again" }, T0 + 41 * MIN),
+        ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 61 * MIN),
+      ],
+      rebase: [
+        ok({ ok: true, outcome: "conflict", reason: "conflict in routing.ts" }, T0 + 21 * MIN),
+        ok({ ok: true, outcome: "conflict", reason: "conflict in config.ts" }, T0 + 41 * MIN),
+      ],
+      "unit-end": [acked(T0 + 61 * MIN)],
+      finish: [acked(T0 + 61 * MIN)],
+    } as Partial<Record<CoordinatorStepRoute, Scripted[]>>);
+
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+
+    expect(summary).toEqual({
+      instance: INSTANCE,
+      planId: "fixture",
+      units: { U10: "merged" },
+      outcome: "completed",
+    });
+    expect(b.of("rebase" as CoordinatorStepRoute)).toEqual([
+      { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD },
+      { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: headB },
+    ]);
+    expect(b.of("spawn")[2]).toMatchObject({
+      preset: "coding",
+      brief: { kind: "rebase", unit: "U10", pr: 7, headSha: HEAD, base: "main" },
+    });
+    expect(b.of("spawn")[4]).toMatchObject({
+      preset: "coding",
+      brief: { kind: "rebase", unit: "U10", pr: 7, headSha: headB, base: "main" },
+    });
+    expect(b.of("merge").at(-1)).toMatchObject({ prNumber: 7, headSha: headC });
+    expect(b.of("unit-end")).toHaveLength(1);
+  });
+
   it("a segment that ends `continued` opens the next: the unit runs again under `U10/s2/…` step names with the session — the sha to continue from, the previous run, the renewals spent and the spend — the unit-end carries the segment row, and the plan settles on the last segment's ending", async () => {
     const budgetEnded = (runId: string, at: number) =>
       record(
@@ -2414,7 +2529,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     expect(end.codingRunId).toBeUndefined();
   });
 
-  it("the ending's facts read carries the ready state beside the checks (agent-ship item 9): a conflicting head is reported approved-but-not-merge-ready naming the rebase — over green checks, before the red-check line — and the unsquashed fix-up commits it carries ride the facts the same way", async () => {
+  it("the ending's facts read still reports an unsquashed fix-up commit when the approved head is otherwise mergeable", async () => {
     const s = steps({ "task/1/review/wait/1": "event" });
     const b = bot({
       plan: [
@@ -2437,11 +2552,11 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0", branch: "ship/fix-the-login-abc123", base: "main" })],
       spawn: [spawned("run-r1")],
       "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
-      // The head conflicts with the base while every check is green, and it
-      // still carries a self-declared fix-up commit: neither is merge-ready.
+      // The head is mergeable and green but still carries a self-declared
+      // fix-up commit, so it is not merge-ready.
       "pr-check": [
         prOpen(T0 + 5 * MIN, {
-          mergeableState: "dirty",
+          mergeableState: "clean",
           fixupCommits: ["fixup! fix the login"],
           checks: { total: 2, pending: [], failed: [] },
         }),
@@ -2455,7 +2570,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
     expect(end.ending.kind).toBe("merge_ready");
     expect(end.ending.report).toContain(`⚠️ Approved but not merge-ready after 1 review round: ${PR_URL}`);
-    expect(end.ending.report).toContain("the head conflicts with `main`: `pulls rebase");
+    expect(end.ending.report).toContain("1 unsquashed fix-up commit on the head (fixup! fix the login)");
     expect(end.ending.report).not.toContain("✅ Merge-ready");
     expect(end.ending.report).not.toContain("checks green");
   });

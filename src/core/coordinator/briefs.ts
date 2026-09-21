@@ -262,6 +262,15 @@ export async function composeChild(
         ref: unit.branch,
       };
     }
+    case "rebase":
+      return {
+        preset: "coding",
+        ref: unit.branch,
+        prompt:
+          `The approved pull request ${prUrl(instance.repo, brief.pr)} conflicts with \`${brief.base}\` at reviewed head \`${brief.headSha}\`. ` +
+          `Rebase \`${unit.branch}\` onto the latest \`${brief.base}\`, resolve only the conflicts git left using the thread and repository rules, run the changed-set fast gates, and push with lease. ` +
+          "Resubmit the pull request description at the pushed head. Never merge and never approve; the pipeline re-reviews the changed patch.",
+      };
     default: {
       const unknown: never = brief;
       throw new Error(`unknown brief kind ${JSON.stringify((unknown as { kind?: unknown }).kind)}`);

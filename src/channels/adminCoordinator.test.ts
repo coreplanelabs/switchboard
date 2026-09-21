@@ -174,9 +174,7 @@ function harness(
     queueState?: MergeQueueState | Error;
     /** The runs page base the plan route answers (agent-ship item 12). */
     runPageBase?: string;
-    /** Watch until merge for the repository (record 0071, mechanism three): the
-     *  merge door's conflict refusal names the remedy that exists. */
-    mergeWatch?: boolean;
+    runnerRebase?: AdminCoordinatorDeps["runnerRebase"];
     /** The grant scopes say at wake time. */
     grantFact?: { grant: { renewals: number; costCapUsd?: number }; source: "org" | "channel" | "user" };
     /** A tiny backlog for the trim tests (record 0065): the seal must not read the trimmed snapshot's standing. */
@@ -243,7 +241,7 @@ function harness(
     grantsFor: (id) => GRANTS[id] ?? NO_GRANTS,
     instances,
     ...(over.runPageBase !== undefined ? { runPageBase: over.runPageBase } : {}),
-    ...(over.mergeWatch !== undefined ? { mergeWatchOf: () => ({ watch: over.mergeWatch! }) } : {}),
+    ...(over.runnerRebase !== undefined ? { runnerRebase: over.runnerRebase } : {}),
     ...(over.grantFact !== undefined ? { shipGrantFor: () => over.grantFact! } : {}),
     runs,
     registry,
@@ -4217,6 +4215,38 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
   const merge = (h: ReturnType<typeof harness>, b: Record<string, unknown> = body, auth?: string) =>
     handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}merge`, b, auth), h.deps);
 
+  it("the runner's rebase route maps the shared resolver's clean carry, changed patch and conflict outcomes", async () => {
+    const newHead = "b".repeat(40);
+    const result = (outcome: "carried" | "delta-review" | "conflict", line: string, headSha?: string) => ({
+      repo: "acme/api",
+      results: [
+        {
+          repo: "acme/api",
+          number: 7,
+          outcome,
+          line,
+          ...(headSha ? { headSha } : {}),
+          ...(outcome === "carried" ? { approvalCarried: true } : {}),
+        },
+      ],
+    });
+    const carried = await mergeHarness({
+      runnerRebase: async () => result("carried", "#7 rebased, patch unchanged, approval carried", newHead),
+    });
+    expect((await call(carried, "rebase", body)).body).toMatchObject({ outcome: "carried", headSha: newHead });
+    const changed = await mergeHarness({
+      runnerRebase: async () => result("delta-review", "#7 rebased, patch changed", newHead),
+    });
+    expect((await call(changed, "rebase", body)).body).toMatchObject({ outcome: "changed", headSha: newHead });
+    const conflict = await mergeHarness({
+      runnerRebase: async () => result("conflict", "#7 conflict in config.ts"),
+    });
+    expect((await call(conflict, "rebase", body)).body).toMatchObject({
+      outcome: "conflict",
+      reason: "#7 conflict in config.ts",
+    });
+  });
+
   it("every guard green: the bot squashes the pull request at exactly the approved head with the title as the commit, and answers merged with the squash's sha", async () => {
     const h = await mergeHarness();
     expect(await merge(h)).toEqual({ status: 200, body: { ok: true, outcome: "merged", sha: MERGED, at: NOW } });
@@ -4385,8 +4415,8 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     for (const h of [red, running, none, unreadable]) expect(h.merges).toEqual([]);
   });
 
-  it("a conflicting pull request (mergeable_state dirty) is refused at once, before the checks are read — zero checks stays pending only on a mergeable pull request", async () => {
-    // Checks unreadable would answer 502; the dirty refusal lands first, so
+  it("a conflicting pull request returns the runner's typed rebase outcome before checks are read — zero checks stays pending only on a mergeable pull request", async () => {
+    // Checks unreadable would answer 502; the typed conflict lands first, so
     // the checks were never consulted.
     const dirty = await mergeHarness({
       prFacts: facts({ mergeable: false, mergeableState: "dirty" }),
@@ -4396,21 +4426,21 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       status: 200,
       body: {
         ok: true,
-        outcome: "refused",
-        reason: `acme/api#7 conflicts with \`main\` at \`${HEAD.slice(0, 7)}\` — \`pulls rebase acme/api#7\` rebases it onto \`main\` (an unchanged patch carries the approval); merge it by hand once the checks are green. The approved work stands`,
+        outcome: "conflict",
+        reason: `acme/api#7 conflicts with \`main\` at \`${HEAD.slice(0, 7)}\``,
         at: NOW,
       },
     });
     expect(dirty.merges).toEqual([]);
-    // The refusal names the pull request's own base — a stacked unit rebases
+    // The outcome names the pull request's own base — a stacked unit rebases
     // onto its parent, not onto main.
     const stacked = await mergeHarness({
       prFacts: facts({ mergeable: false, mergeableState: "dirty", baseRef: "plan/fixture/u9" }),
       checks: undefined,
     });
     expect((await merge(stacked)).body).toMatchObject({
-      outcome: "refused",
-      reason: `acme/api#7 conflicts with \`plan/fixture/u9\` at \`${HEAD.slice(0, 7)}\` — \`pulls rebase acme/api#7\` rebases it onto \`plan/fixture/u9\` (an unchanged patch carries the approval); merge it by hand once the checks are green. The approved work stands`,
+      outcome: "conflict",
+      reason: `acme/api#7 conflicts with \`plan/fixture/u9\` at \`${HEAD.slice(0, 7)}\``,
     });
     // A mergeable pull request with zero checks still answers pending.
     const clean = await mergeHarness({
@@ -4418,30 +4448,6 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       checks: { total: 0, pending: [], failed: [] },
     });
     expect((await merge(clean)).body).toMatchObject({ outcome: "pending" });
-  });
-
-  it("the conflict refusal names the remedy that exists (record 0071 criterion 5): the watching unit's own round where the watch is on, the sweep otherwise", async () => {
-    // Watch on for the repository: the refusal names the waiting unit's round, never the hand merge as the only way.
-    const on = await mergeHarness({
-      prFacts: facts({ mergeable: false, mergeableState: "dirty" }),
-      checks: undefined,
-      mergeWatch: true,
-    });
-    expect((await merge(on)).body).toMatchObject({
-      outcome: "refused",
-      reason: `acme/api#7 conflicts with \`main\` at \`${HEAD.slice(0, 7)}\` — the watch is on for \`acme/api\`: the waiting unit's own round rebases it on the next push to \`main\` (an unchanged patch carries the approval). The approved work stands`,
-    });
-    expect(on.merges).toEqual([]);
-    // Watch off (the setting resolved off, or no resolver wired): the sweep's sentence, byte for byte as today.
-    const off = await mergeHarness({
-      prFacts: facts({ mergeable: false, mergeableState: "dirty" }),
-      checks: undefined,
-      mergeWatch: false,
-    });
-    expect((await merge(off)).body).toMatchObject({
-      outcome: "refused",
-      reason: `acme/api#7 conflicts with \`main\` at \`${HEAD.slice(0, 7)}\` — \`pulls rebase acme/api#7\` rebases it onto \`main\` (an unchanged patch carries the approval); merge it by hand once the checks are green. The approved work stands`,
-    });
   });
 
   it("GitHub's own refusal of the squash — a conflict, a branch protection, a head that moved between the check and the merge — is answered as refused in GitHub's words; the pull request unreadable or the merge call failing is a passing 502; a malformed body is 400 and an unknown instance or unit 404", async () => {

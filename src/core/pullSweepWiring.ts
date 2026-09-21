@@ -61,8 +61,12 @@ export interface PullSweepWiringDeps {
   origin: SweepOrigin;
   /** Which head branches the pipeline owns; default: the plan branches. */
   owns?(branch: string): boolean;
-  /** Shared across the process's per-requester services, so one pull request
-   *  buys its one model round once no matter who sweeps. */
+  /** Whether a live ship runner currently owns this pull request. A command
+   *  sweep defers; the runner invokes the same resolver in runner mode. */
+  runnerOwns?: (pr: SweepPullRequest) => Promise<boolean>;
+  /** Shared across the process's per-requester services, so an unowned pull
+   *  request buys its one sweep model round once no matter who sweeps. Runner
+   *  mode returns conflicts to the lease-bounded pipeline instead. */
   state?: SweepSharedState;
 }
 
@@ -100,51 +104,50 @@ export function buildPullSweepDeps(deps: PullSweepWiringDeps): PullSweepDeps {
   // The bot's identity, looked up once per process and shared across sweeps —
   // the underlying resolver caches too, this just avoids a call per pull request.
   let self: Promise<{ login: string; id?: number } | undefined> | undefined;
+  const readPullRequest = async (repo: string, row: OpenPullRequestRow): Promise<SweepPullRequest | undefined> => {
+    // The facts fresh, never the listing's: `mergeable_state` is absent from
+    // the list endpoint and stale the moment a sibling merges.
+    const facts = await deps.github.facts({ repo, number: row.number });
+    if (!facts || facts.state !== "open") return undefined;
+    const branch = facts.headRef ?? row.headRef;
+    const base = facts.baseRef ?? row.baseRef;
+    const headSha = facts.headSha ?? row.headSha;
+    if (branch === undefined || base === undefined || headSha === undefined) return undefined;
+    const reviews = (await deps.github.reviews({ repo, number: row.number })) ?? [];
+    self ??= deps.github.selfIdentity().catch(() => undefined);
+    const identity = await self;
+    const pinned = reviews.filter((r) => r.commitId !== undefined && sameCommit(r.commitId.toLowerCase(), headSha));
+    const approved = pinned.some(
+      (r) =>
+        r.state === "APPROVED" ||
+        (identity !== undefined &&
+          r.author?.login === identity.login &&
+          (r.author.id === undefined || identity.id === undefined || r.author.id === identity.id) &&
+          r.body.startsWith(LGTM_TOKEN)),
+    );
+    return {
+      repo,
+      number: row.number,
+      branch,
+      base,
+      headSha,
+      mergeableState: facts.mergeableState ?? "unknown",
+      approved,
+    };
+  };
   return {
     async listOwnedPullRequests(repo) {
       const open = await deps.github.listOpen(repo);
       const owned = open.filter((row) => row.sameRepoHead && row.headRef !== undefined && owns(row.headRef));
-      const prs: SweepPullRequest[] = [];
-      for (const row of owned) {
-        // The facts fresh, never the listing's: `mergeable_state` is absent
-        // from the list endpoint and stale the moment a sibling merges.
-        const facts = await deps.github.facts({ repo, number: row.number });
-        if (!facts || facts.state !== "open") continue;
-        const branch = facts.headRef ?? row.headRef;
-        const base = facts.baseRef ?? row.baseRef;
-        const headSha = facts.headSha ?? row.headSha;
-        if (branch === undefined || base === undefined || headSha === undefined) continue;
-        const reviews = (await deps.github.reviews({ repo, number: row.number })) ?? [];
-        // An approval at the head is either a genuine APPROVED review (a
-        // person's, or the auto-approve workflow's on a repository that opted
-        // in) or the bot's own review pinned there whose body starts with the
-        // LGTM token — the pipeline posts its approvals with event COMMENT, so
-        // that is what the merge door itself reads (`reviewPostedAt` in
-        // src/channels/adminCoordinator.ts), identity-checked the same way.
-        // An unknown identity counts only genuine APPROVED states.
-        self ??= deps.github.selfIdentity().catch(() => undefined);
-        const identity = await self;
-        const pinned = reviews.filter((r) => r.commitId !== undefined && sameCommit(r.commitId.toLowerCase(), headSha));
-        const approved = pinned.some(
-          (r) =>
-            r.state === "APPROVED" ||
-            (identity !== undefined &&
-              r.author?.login === identity.login &&
-              (r.author.id === undefined || identity.id === undefined || r.author.id === identity.id) &&
-              r.body.startsWith(LGTM_TOKEN)),
-        );
-        prs.push({
-          repo,
-          number: row.number,
-          branch,
-          base,
-          headSha,
-          mergeableState: facts.mergeableState ?? "unknown",
-          approved,
-        });
-      }
-      return prs;
+      const prs = await Promise.all(owned.map((row) => readPullRequest(repo, row)));
+      return prs.filter((pr): pr is SweepPullRequest => pr !== undefined);
     },
+    async findPullRequest(repo, number) {
+      const row = (await deps.github.listOpen(repo)).find((candidate) => candidate.number === number);
+      if (row === undefined || !row.sameRepoHead) return undefined;
+      return readPullRequest(repo, row);
+    },
+    ...(deps.runnerOwns ? { runnerOwns: deps.runnerOwns } : {}),
     git: deps.git,
     effects: {
       async carryApproval(pr, newHead) {

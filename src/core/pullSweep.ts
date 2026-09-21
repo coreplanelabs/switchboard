@@ -10,10 +10,11 @@ import { redactSecrets } from "./redact.js";
 // of the same hunks; after a clean rebase an empty `git range-diff` carries the
 // existing approval to the new head with no re-review, and the sweep force-pushes
 // with lease and regenerates the pull request description's anchors. Rung two,
-// only for a conflict git leaves, is ONE bounded model round on the pull
-// request's own branch (a short lease, a per-pull-request spend cap); a pull
-// request whose round already ran ends with the conflict named in one line — no
-// retry loop. A stale-but-clean pull request is skipped: it merges as it is.
+// only for a conflict git leaves, is ONE bounded model round on an UNOWNED
+// pull request's own branch (a short lease, a per-pull-request spend cap); one
+// whose sweep round already ran ends with the conflict named in one line. A
+// live runner instead receives every fresh conflict under its own remaining
+// lease. A stale-but-clean pull request is skipped: it merges as it is.
 // The engine never knows what a generator or a formatter is — what a model
 // round may regenerate is only what the repository's own AGENTS.md names, and
 // the round reads it there.
@@ -57,7 +58,7 @@ export interface SweepEffects {
   requestDeltaReview(pr: SweepPullRequest, newHead: string): Promise<void>;
   /** The pull request description's anchors are regenerated at the new head. */
   regenerateAnchors(pr: SweepPullRequest, newHead: string): Promise<void>;
-  /** Has this pull request already spent its one model round? */
+  /** Has this unowned pull request already spent its sweep model round? */
   modelRoundSpent(pr: SweepPullRequest): Promise<boolean>;
   /** Rung two: start the one bounded model round on the pull request's own
    *  branch (the thread's context and the repository's AGENTS.md ride the
@@ -100,6 +101,10 @@ export interface SweepResult {
   number: number;
   outcome: "skipped" | "carried" | "delta-review" | "fix-round" | "conflict" | "error";
   line: string;
+  /** The pushed head when rung one completed. The runner pins its next step to it. */
+  headSha?: string;
+  /** True only when rung one actually posted the approval carry at that head. */
+  approvalCarried?: boolean;
 }
 
 export interface SweepReport {
@@ -110,6 +115,11 @@ export interface SweepReport {
 export interface PullSweepDeps {
   /** The open pull requests the pipeline owns in the repository, GitHub's facts fresh. */
   listOwnedPullRequests(repo: string): Promise<SweepPullRequest[]>;
+  /** One runner-owned pull request by number, including an adopted branch that
+   *  does not use the pipeline's branch naming convention. */
+  findPullRequest?(repo: string, number: number): Promise<SweepPullRequest | undefined>;
+  /** A live ship runner is the sole owner of its pull request's rebase loop. */
+  runnerOwns?(pr: SweepPullRequest): Promise<boolean>;
   git: SweepGit;
   effects: SweepEffects;
   bounds?: { leaseMinutes: number; spendCapUsd: number };
@@ -117,12 +127,12 @@ export interface PullSweepDeps {
 
 /** What the sweep command calls: one sweep over a repository, or one pull request of it. */
 export interface PullSweepService {
-  sweep(target: { repo: string; number?: number }): Promise<SweepReport>;
+  sweep(target: { repo: string; number?: number; owner?: "runner" }): Promise<SweepReport>;
 }
 
 const line = (pr: { number: number }, text: string): string => `#${pr.number} ${text}`;
 
-async function sweepOne(pr: SweepPullRequest, deps: PullSweepDeps): Promise<SweepResult> {
+async function sweepOne(pr: SweepPullRequest, deps: PullSweepDeps, owner: "runner" | undefined): Promise<SweepResult> {
   const bounds = deps.bounds ?? PULL_SWEEP;
   const at = (outcome: SweepResult["outcome"], text: string): SweepResult => ({
     repo: pr.repo,
@@ -130,6 +140,8 @@ async function sweepOne(pr: SweepPullRequest, deps: PullSweepDeps): Promise<Swee
     outcome,
     line: line(pr, text),
   });
+  if (owner !== "runner" && (await deps.runnerOwns?.(pr)) === true)
+    return at("skipped", "deferred — its pipeline runner owns the rebase");
   const dirty = pr.mergeableState === "dirty";
   // GitHub recomputes `mergeable_state` after every base move — exactly the
   // moment the sweep exists for — so an unknown state is named, never claimed
@@ -142,13 +154,17 @@ async function sweepOne(pr: SweepPullRequest, deps: PullSweepDeps): Promise<Swee
     const rebased = await deps.git.rebase(pr);
     const decision =
       rebased.kind === "conflict"
-        ? decideSweep({ dirty, rebase: rebased, modelRoundSpent: await deps.effects.modelRoundSpent(pr) })
+        ? owner === "runner"
+          ? { action: "model-round" as const, file: rebased.file }
+          : decideSweep({ dirty, rebase: rebased, modelRoundSpent: await deps.effects.modelRoundSpent(pr) })
         : decideSweep({ dirty, rebase: rebased, patchUnchanged: await deps.git.patchUnchanged(pr, rebased.newHead) });
     switch (decision.action) {
       case "end":
-        // A second conflict ends with the conflict named in one line — no retry loop.
+        // An unowned second conflict ends with the conflict named in one line.
         return at("conflict", `conflict in ${decision.file}, its fix round is spent — rebase it by hand`);
       case "model-round": {
+        if (owner === "runner")
+          return at("conflict", `conflict in ${decision.file}, the pipeline runner's fix round will resolve it`);
         const round = await deps.effects.startModelRound(pr, bounds);
         if (!round.started) return at("conflict", `conflict in ${decision.file}, no fix round ran — ${round.reason}`);
         return at("fix-round", `conflict in ${decision.file}, a fix round is running`);
@@ -161,10 +177,20 @@ async function sweepOne(pr: SweepPullRequest, deps: PullSweepDeps): Promise<Swee
         if (decision.action === "carry") {
           // The branch's own change is byte-identical; only its parent moved.
           if (pr.approved) await deps.effects.carryApproval(pr, newHead);
-          return at("carried", pr.approved ? "rebased, patch unchanged, approval carried" : "rebased, patch unchanged");
+          const result = at(
+            "carried",
+            pr.approved ? "rebased, patch unchanged, approval carried" : "rebased, patch unchanged",
+          );
+          return owner === "runner" ? { ...result, headSha: newHead, approvalCarried: pr.approved } : result;
         }
-        await deps.effects.requestDeltaReview(pr, newHead);
-        return at("delta-review", "rebased, patch changed, a re-review is requested");
+        if (owner !== "runner") await deps.effects.requestDeltaReview(pr, newHead);
+        const result = at(
+          "delta-review",
+          owner === "runner"
+            ? "rebased, patch changed, the pipeline runner will re-review"
+            : "rebased, patch changed, a re-review is requested",
+        );
+        return owner === "runner" ? { ...result, headSha: newHead } : result;
       }
       case "skip":
         return at("skipped", "skipped, already current");
@@ -199,7 +225,12 @@ export function createPullSweepService(deps: PullSweepDeps): PullSweepService {
   return {
     sweep: (target) =>
       serialize(target.repo, async () => {
-        const open = await deps.listOwnedPullRequests(target.repo);
+        const open =
+          target.owner === "runner" && target.number !== undefined && deps.findPullRequest !== undefined
+            ? [await deps.findPullRequest(target.repo, target.number)].filter(
+                (pr): pr is SweepPullRequest => pr !== undefined,
+              )
+            : await deps.listOwnedPullRequests(target.repo);
         const prs = target.number === undefined ? open : open.filter((pr) => pr.number === target.number);
         if (target.number !== undefined && prs.length === 0)
           return {
@@ -214,7 +245,7 @@ export function createPullSweepService(deps: PullSweepDeps): PullSweepService {
             ],
           };
         const results: SweepResult[] = [];
-        for (const pr of prs) results.push(await sweepOne(pr, deps));
+        for (const pr of prs) results.push(await sweepOne(pr, deps, target.owner));
         return { repo: target.repo, results };
       }),
   };

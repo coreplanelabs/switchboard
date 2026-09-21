@@ -53,6 +53,14 @@ function fakeGithub(rec: Recorded, body = ""): SweepGithub {
       headSha: SHA_B,
       mergeableState: "clean",
     },
+    11: {
+      state: "open",
+      sameRepoHead: true,
+      headRef: "feature/by-hand",
+      baseRef: "main",
+      headSha: SHA_B,
+      mergeableState: "dirty",
+    },
   };
   return {
     listOpen: async () => listing,
@@ -113,6 +121,17 @@ const pr7: SweepPullRequest = {
 };
 
 describe("buildPullSweepDeps — the listing", () => {
+  it("runner lookup includes an adopted same-repo branch that the command sweep correctly excludes", async () => {
+    const rec = record();
+    const deps = buildPullSweepDeps(wiring(rec));
+    expect(await deps.findPullRequest?.("acme/api", 11)).toMatchObject({
+      number: 11,
+      branch: "feature/by-hand",
+      mergeableState: "dirty",
+    });
+    expect((await deps.listOwnedPullRequests("acme/api")).map((pr) => pr.number)).toEqual([7, 9]);
+  });
+
   it("keeps the plan branches on the base repository, reads each one's facts fresh and the approval at the head", async () => {
     const rec = record();
     const deps = buildPullSweepDeps(wiring(rec));

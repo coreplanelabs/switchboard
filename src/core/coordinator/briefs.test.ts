@@ -368,6 +368,21 @@ describe("composeChild — the child a brief names", () => {
     expect(second.prompt).toContain("Dispositions naming no finding of the previous round (dropped): F9");
   });
 
+  it("an approved-head conflict brief keeps the fix round on the unit branch and asks only for the rebase, fast gates, push and description", async () => {
+    const { r } = readers();
+    const child = await composeChild(
+      { kind: "rebase", unit: "U10", pr: 7, headSha: "a".repeat(40), base: "main" },
+      instance,
+      unit,
+      r,
+    );
+    expect(child).toMatchObject({ preset: "coding", ref: unit.branch });
+    expect(child.prompt).toContain("approved pull request https://github.com/acme/api/pull/7 conflicts with `main`");
+    expect(child.prompt).toContain("run the changed-set fast gates, and push with lease");
+    expect(child.prompt).toContain("Never merge and never approve");
+    expect(child.contract).toBeUndefined();
+  });
+
   it("a findings brief is the review's findings as a message into the unit thread: a coding child on the unit's branch whose text carries every finding verbatim, the review's final words and the ask (a disposition per finding, the description resubmitted, the branch pushed, never a merge or an approve), with no contract and no finding-id tag; a review run the history lacks throws by name; no `fix` brief composes", async () => {
     const { r } = readers({ runs: { "run-r1": { findings: [FINDING], finalReply: "Changes requested: one nit." } } });
     const findings = await composeChild(

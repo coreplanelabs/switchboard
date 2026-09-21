@@ -27,6 +27,7 @@ function fixture(opts: {
   unchanged?: (p: SweepPullRequest) => boolean;
   spent?: (p: SweepPullRequest) => boolean;
   roundStarts?: boolean | string;
+  runnerOwns?: (p: SweepPullRequest) => boolean;
 }) {
   const calls: string[] = [];
   const git: SweepGit = {
@@ -65,6 +66,7 @@ function fixture(opts: {
     git,
     effects,
     bounds: { leaseMinutes: 15, spendCapUsd: 5 },
+    ...(opts.runnerOwns ? { runnerOwns: async (p: SweepPullRequest) => opts.runnerOwns!(p) } : {}),
   };
   return { calls, deps, service: createPullSweepService(deps) };
 }
@@ -96,6 +98,13 @@ describe("decideSweep — the resolver's decision table (record 0071, mechanism 
 });
 
 describe("the sweep — one line per pull request, in user words", () => {
+  it("a pull request owned by a live pipeline runner defers to that runner instead of spending the sweep's fix path", async () => {
+    const { calls, service } = fixture({ prs: [pr()], runnerOwns: () => true });
+    const report = await service.sweep({ repo: "acme/api" });
+    expect(report.results[0]?.line).toBe("#7 deferred — its pipeline runner owns the rebase");
+    expect(calls).toEqual([]);
+  });
+
   it("a dirty pull request rebased clean and unchanged: force-push, anchors regenerated, approval carried", async () => {
     const { calls, service } = fixture({ prs: [pr()] });
     const report = await service.sweep({ repo: "acme/api" });
