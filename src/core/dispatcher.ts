@@ -130,7 +130,15 @@ import { fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
-import { ownerOf, readThread, stickyAgentOf, threadPrOf, threadRouteOf, type ThreadOwner } from "./dispatch/thread.js";
+import {
+  newestFinishedRunOf,
+  ownerOf,
+  readThread,
+  stickyAgentOf,
+  threadPrOf,
+  threadRouteOf,
+  type ThreadOwner,
+} from "./dispatch/thread.js";
 import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
@@ -659,6 +667,9 @@ export async function dispatch(
     // words (the plain-words model unit): applied at directive precedence
     // (`resolveRun`'s `operatorModel`), exactly as `model:<ref>` would.
     let operatorModel: string | undefined;
+    // The repository the typed bind carries. Target resolution treats it as a
+    // fallback below an explicit current-message target.
+    let operatorRepo: string | undefined;
     // The thread page the operator reads (newest first): the tail's session
     // keys and, on the newest record, an `on` question still pending — whose
     // "yes" this event may be (routing-and-config item 29). Read here once and
@@ -766,6 +777,7 @@ export async function dispatch(
           operatorPreset = execution.preset;
           operatorRequest = execution.request;
           operatorModel = execution.model;
+          operatorRepo = execution.repo;
         }
         // `kind: "fold"` (issue 2027; thread-admission item 9): the decision was
         // neither steers-and-reads nor a question in an owned thread, so the
@@ -854,6 +866,10 @@ export async function dispatch(
     // (resident-repos item 29): the one its newest finished run opened, for
     // the target resolution below.
     const threadPr = thread ? threadPrOf(thread) : undefined;
+    const inheritedRepo =
+      operatorRepo ??
+      (thread ? newestFinishedRunOf(thread)?.repo : undefined) ??
+      deps.config.scopes(msg.channelId, msg.userId).channel.repo;
     const historicalRoutePreset = restart?.row.meta.route?.preset;
     const settled = resolveRun(deps, {
       msg,
@@ -1001,6 +1017,7 @@ export async function dispatch(
             resume,
             root,
             ...(threadPr ? { records: { pr: threadPr } } : {}),
+            ...(inheritedRepo !== undefined ? { operatorRepo: inheritedRepo } : {}),
           })
         : undefined;
     if (earlyRepoTarget !== undefined) {
@@ -1131,6 +1148,7 @@ export async function dispatch(
       resume,
       root,
       ...(threadPr ? { records: { pr: threadPr } } : {}),
+      ...(inheritedRepo !== undefined ? { operatorRepo: inheritedRepo } : {}),
       ...(earlyRepoTarget !== undefined ? { repoTarget: earlyRepoTarget } : {}),
     });
 

@@ -14,6 +14,7 @@ import {
   THREAD_READ_LIMIT,
   threadPrOf,
   threadRouteOf,
+  newestFinishedRunOf,
 } from "./thread.js";
 
 // docs/reference/specs/routing-and-config.md item 3 and session-log.md item 9:
@@ -55,6 +56,31 @@ describe("readThread — one page of the thread's newest runs", () => {
     });
     expect(await readThread({ listRuns }, "slack:C1:1.0")).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("slack:C1:1.0: thread read failed — store down"));
+  });
+});
+
+describe("newestFinishedRunOf — the operator's thread facts", () => {
+  it("returns the newest finished run's agent, repository and pull request past a live run", () => {
+    expect(
+      newestFinishedRunOf([
+        run({ id: "live", agent: "coding", repo: "acme/web", finished: false }),
+        run({
+          id: "review-7",
+          agent: "review",
+          repo: "acme/api",
+          pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        }),
+        run({ id: "coding-6", agent: "coding", repo: "acme/old" }),
+      ]),
+    ).toEqual({
+      agent: "review",
+      repo: "acme/api",
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    });
+  });
+
+  it("returns no facts when the page has no finished run", () => {
+    expect(newestFinishedRunOf([run({ id: "live", finished: false })])).toBeUndefined();
   });
 });
 

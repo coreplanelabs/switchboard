@@ -72,6 +72,10 @@ import {
 // Runtime overrides set via chat commands persist to data/overrides.json.
 
 export interface Scope {
+  /** The repository a channel's repo-bound asks inherit when neither the
+   *  current request nor its thread names one. Valid only under `channels`;
+   *  set with `config set channel --repo owner/name`. */
+  repo?: string;
   /** Force which agent handles requests in this scope. */
   agent?: string;
   /** Force a model (provider/model) regardless of agent. */
@@ -1664,6 +1668,7 @@ export function formatConfigDescription(d: ConfigDescription): string {
  *  (a sentence, never a JSON dump). `_none_` when the scope sets nothing. */
 export function fmtScope(s: Scope): string {
   const parts: string[] = [];
+  if (s.repo) parts.push(`repository \`${s.repo}\``);
   if (s.agent) parts.push(`agent \`${s.agent}\``);
   if (s.model) parts.push(`model \`${s.model}\``);
   if (s.models && Object.keys(s.models).length > 0) parts.push(`models ${fmtModels(s.models)}`);

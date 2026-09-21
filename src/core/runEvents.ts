@@ -1096,7 +1096,7 @@ export type RunEvent =
        *  `model` is the ref the run uses, resolved from a model the person
        *  named in plain words (the plain-words model unit) — applied at
        *  directive precedence. Additive: unknown → no model. */
-      binds?: ReadonlyArray<{ line: string; reason: string; model?: string; confirmed?: true }>;
+      binds?: ReadonlyArray<{ line: string; reason: string; model?: string; repo?: string; confirmed?: true }>;
       question?: string;
       /** A question's proposed line, redacted and cut like the receipt — what
        *  the next turn's "yes" binds (`bindFromAnswer`). */

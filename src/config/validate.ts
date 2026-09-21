@@ -1033,6 +1033,12 @@ export function validateScopeBlocks(
     ["threads", layer.threads],
   ] as const) {
     for (const [id, scope] of Object.entries(scopes ?? {})) {
+      if (scope.repo !== undefined) {
+        if (kind !== "channels")
+          throw new Error(`${source}: ${kind}.${id}.repo is a channel key — a default repository belongs to a channel`);
+        if (typeof scope.repo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(scope.repo))
+          throw new Error(`${source}: ${kind}.${id}.repo must be an owner/name slug`);
+      }
       const level = addressSeverityProblem(`${kind}.${id}.review.addressSeverity`, scope.review?.addressSeverity);
       if (level) throw new Error(`${source}: ${level}`);
       // The intake gate's scope field (routing-and-config item 27): the mode

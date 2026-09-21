@@ -36,6 +36,18 @@ afterEach(() => {
 });
 
 describe("resolveRepoContext: explicit signals in the current message", () => {
+  it("a typed operator repository fills an otherwise bare request and stays below an explicit current-message target", async () => {
+    const probe = vi.fn(async () => true);
+    await expect(resolveRepoContext(msg("review again"), [], probe, undefined, undefined, "acme/api")).resolves.toEqual(
+      {
+        repo: "acme/api",
+      },
+    );
+    await expect(
+      resolveRepoContext(msg("review in acme/web"), [], probe, undefined, undefined, "acme/api"),
+    ).resolves.toEqual({ repo: "acme/web" });
+  });
+
   it("owner/name slug + 'on branch X' phrasing", async () => {
     const { fn } = stubFetch();
     await expect(resolveRepoContext(msg("fix the bug in acme/api on branch fix/x"), [])).resolves.toEqual({

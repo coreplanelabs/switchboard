@@ -172,6 +172,7 @@ defaults:
 # "config set channel ..." are stored in data/overrides.json and win over these.
 # channels:
 #   slack:C012345:
+#     repo: acme/api                # default repository for repo-bound asks in this channel
 #     agent: review
 #     models:
 #       review: anthropic/claude-opus-5

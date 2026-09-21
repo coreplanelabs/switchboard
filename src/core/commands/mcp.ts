@@ -229,7 +229,9 @@ function renderShow(output: JsonValue): string {
 
 export const mcpList = defineCommand({
   id: "mcp.list",
-  enabledWhen: (caps) => caps.mcp,
+  // The read exists even when the registry backend is unavailable: chat must
+  // resolve `mcp list` to this typed command so its handler can name the
+  // subsystem's state, never fall through to the operator or help.
   options: z.object({
     channel: channelOption,
     all: flag.optional().describe("every tier there is — the org's, every channel's, every user's (admins)"),

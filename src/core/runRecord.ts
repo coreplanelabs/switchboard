@@ -440,7 +440,7 @@ export interface RunOperatorDecision {
   mode: "shadow" | "on";
   outcome: "binds" | "question" | "refusal" | "non_decision";
   reason: string;
-  binds?: { line: string; reason: string }[];
+  binds?: { line: string; reason: string; model?: string; repo?: string; confirmed?: true }[];
   question?: string;
   /** A question's proposed line — what the next turn's "yes" binds. */
   proposal?: string;
@@ -468,7 +468,17 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
     mode: e.mode,
     outcome: e.outcome,
     reason: e.reason,
-    ...(e.binds ? { binds: e.binds.map((b) => ({ line: b.line, reason: b.reason })) } : {}),
+    ...(e.binds
+      ? {
+          binds: e.binds.map((b) => ({
+            line: b.line,
+            reason: b.reason,
+            ...(b.model !== undefined ? { model: b.model } : {}),
+            ...(b.repo !== undefined ? { repo: b.repo } : {}),
+            ...(b.confirmed ? { confirmed: true as const } : {}),
+          })),
+        }
+      : {}),
     ...(e.question !== undefined ? { question: e.question } : {}),
     ...(e.proposal !== undefined ? { proposal: e.proposal } : {}),
     ...(e.request !== undefined ? { request: e.request } : {}),

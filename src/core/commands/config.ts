@@ -508,7 +508,9 @@ export const configSet = defineCommand({
       .string()
       .regex(/^[\w.-]+\/[\w.-]+$/)
       .optional()
-      .describe("the repository (`owner/name`) a repo-scope write targets"),
+      .describe(
+        "the default repository (`owner/name`) for a channel scope, or the repository a repo-scope pull-watch write targets",
+      ),
     user: z
       .string()
       .optional()
@@ -538,7 +540,7 @@ export const configSet = defineCommand({
     risk: () => "changes the scope's settings for everyone in it until reset",
   },
   describe:
-    "Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (`config set user --user <id> --github <login>`, identity admins — never your own: it is not yours to type), or the pull-request watch (`config set org|repo --pulls.watch on|off` with `--pulls.rebaseInFlight` / `--pulls.spendLimitUsd`, repo taking `--repo <owner/name>`); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
+    "Set the agent, model, effort, verbosity, harness, boundary or default repository (`--repo owner/name`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (`config set user --user <id> --github <login>`, identity admins — never your own: it is not yours to type), or the pull-request watch (`config set org|repo --pulls.watch on|off` with its caps, repo taking `--repo <owner/name>`).",
   // A sentence for the person who typed the command (routing-and-config item
   // 28): the scope's settings in `config show`'s words, never a JSON dump.
   render: (output) => {
@@ -624,7 +626,10 @@ export const configSet = defineCommand({
         "invalid_input",
         "pulls: the pull-request watch is an org or repository setting — config set org|repo --pulls.…",
       );
+    if (options.repo !== undefined && args.scope !== "channel")
+      throw new CommandError("invalid_input", "repo: a default repository belongs to a channel scope");
     const patch: Scope = {};
+    if (options.repo !== undefined) patch.repo = options.repo.toLowerCase();
     if (options.agent !== undefined) {
       if (!agents.includes(options.agent))
         throw new CommandError("invalid_input", `agent: expected one of ${agents.join(", ")}`);
@@ -681,7 +686,7 @@ export const configSet = defineCommand({
     if (Object.keys(patch).length === 0)
       throw new CommandError(
         "invalid_input",
-        "nothing to set: pass --agent, --model, --models.<agent>, --effort, --efforts.<agent>, --verbosity, --harness.<agent>, --intake.threadReplies, or --boundary.<maxMinutes|maxIdentity|machines|confirm>",
+        "nothing to set: pass --agent, --model, --models.<agent>, --effort, --efforts.<agent>, --verbosity, --harness.<agent>, --repo, --intake.threadReplies, or --boundary.<maxMinutes|maxIdentity|machines|confirm>",
       );
     let effective: Scope;
     if (args.scope === "channel") {

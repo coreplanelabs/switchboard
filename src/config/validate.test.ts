@@ -261,6 +261,21 @@ describe("validateSlack — the relay apps", () => {
 // refused, the id an integer, one login and one id under one person across
 // config.yaml and the runtime overrides together, and the key valid only
 // under `users`.
+describe("validateScopeBlocks — the channel default repository", () => {
+  it("accepts an owner/name on a channel and rejects malformed or misplaced values", () => {
+    expect(() => validateScopeBlocks({ channels: { "slack:C1": { repo: "acme/api" } } }, "config.yaml")).not.toThrow();
+    expect(() =>
+      validateScopeBlocks({ channels: { "slack:C1": { repo: "not-a-slug" } as Scope } }, "config.yaml"),
+    ).toThrow(/channels\.slack:C1\.repo must be an owner\/name slug/);
+    expect(() => validateScopeBlocks({ users: { "slack:UX": { repo: "acme/api" } as Scope } }, "config.yaml")).toThrow(
+      /users\.slack:UX\.repo is a channel key/,
+    );
+    expect(() =>
+      validateScopeBlocks({ threads: { "thread:fixture": { repo: "acme/api" } as Scope } }, "overrides"),
+    ).toThrow(/threads\.thread:fixture\.repo is a channel key/);
+  });
+});
+
 describe("validateScopeBlocks — the github binding", () => {
   const users = (github: unknown, id = "slack:UONE") => ({ users: { [id]: { github } as Scope } });
 

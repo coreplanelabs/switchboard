@@ -23,9 +23,6 @@ exports[`capability axis — a capability turning on changes exactly the command
   "mcp.connect": [
     "mcp",
   ],
-  "mcp.list": [
-    "mcp",
-  ],
   "mcp.promote": [
     "mcp",
   ],
@@ -107,7 +104,7 @@ commands:
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
   config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
-  config set           — Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with \`--pulls.rebaseInFlight\` / \`--pulls.spendLimitUsd\`, repo taking \`--repo <owner/name>\`); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+  config set           — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
   config clear         — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -287,7 +284,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
 • \`config channels\` — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
-• \`config set\` — Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with \`--pulls.rebaseInFlight\` / \`--pulls.spendLimitUsd\`, repo taking \`--repo <owner/name>\`); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+• \`config set\` — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
 • \`config clear\` — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
@@ -399,7 +396,7 @@ commands:
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
   config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
-  config set           — Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with \`--pulls.rebaseInFlight\` / \`--pulls.spendLimitUsd\`, repo taking \`--repo <owner/name>\`); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+  config set           — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
   config clear         — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -549,7 +546,7 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
 • \`config channels\` — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
-• \`config set\` — Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with \`--pulls.rebaseInFlight\` / \`--pulls.spendLimitUsd\`, repo taking \`--repo <owner/name>\`); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+• \`config set\` — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
 • \`config clear\` — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
@@ -647,7 +644,7 @@ commands:
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
   config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
-  config set           — Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with \`--pulls.rebaseInFlight\` / \`--pulls.spendLimitUsd\`, repo taking \`--repo <owner/name>\`); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+  config set           — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
   config clear         — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -661,6 +658,7 @@ commands:
   friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
   repo test            — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
   repo build           — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  mcp list             — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. \`--all\` (admins): every tier.
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. In \`registry\` mode it first copies the release's images its Workers lack into the account registry (what \`deploy images\` does). --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
   deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
@@ -689,6 +687,7 @@ exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes 
   "deploy.plan",
   "help.commands",
   "help.show",
+  "mcp.list",
   "plane.show",
   "plane.stop",
   "providers.check",
@@ -718,6 +717,7 @@ exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
   "dispatch",
   "help_commands",
   "help_show",
+  "mcp_list",
   "plane_show",
   "plane_stop",
   "providers_check",
@@ -749,7 +749,7 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
 • \`config channels\` — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
-• \`config set\` — Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with \`--pulls.rebaseInFlight\` / \`--pulls.spendLimitUsd\`, repo taking \`--repo <owner/name>\`); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+• \`config set\` — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
 • \`config clear\` — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
@@ -762,6 +762,8 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 *repo*
 • \`repo test\` — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
 • \`repo build\` — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+*mcp*
+• \`mcp list\` — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. \`--all\` (admins): every tier.
 *deploy*
 • \`deploy plan\` — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
 *providers*
