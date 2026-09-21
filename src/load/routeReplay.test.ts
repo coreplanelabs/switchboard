@@ -2182,9 +2182,9 @@ describe("the door row scores the defect fixtures", () => {
   const operate = async (text: string): Promise<OperatorDecision> => asExpected(byText.get(text)!);
   const bindFixtures = ROUTE_DOOR_FIXTURES.filter((f) => f.expected.kind === "bind");
 
-  it("the set is the twenty-five defects — D1 to D14, N1 to N5 and the plain-words model set M1 to M6, each exactly once, ids unique, each tagged with the unit that turns it green", () => {
-    expect(ROUTE_DOOR_FIXTURES).toHaveLength(25);
-    expect(new Set(ROUTE_DOOR_FIXTURES.map((f) => f.id)).size).toBe(25);
+  it("the set is the twenty-seven defects — D1 to D14, N1 to N7 and the plain-words model set M1 to M6, each exactly once, ids unique, each tagged with the unit that turns it green", () => {
+    expect(ROUTE_DOOR_FIXTURES).toHaveLength(27);
+    expect(new Set(ROUTE_DOOR_FIXTURES.map((f) => f.id)).size).toBe(27);
     const defects = ROUTE_DOOR_FIXTURES.map((f) => f.defect);
     expect([...defects].sort()).toEqual(
       [
@@ -2195,10 +2195,12 @@ describe("the door row scores the defect fixtures", () => {
         "N3",
         "N4",
         "N5",
+        "N6",
+        "N7",
       ].sort(),
     );
     for (const f of ROUTE_DOOR_FIXTURES) {
-      expect(["E2", "E3", "W1", "MW1"], f.id).toContain(f.unit);
+      expect(["E2", "E3", "W1", "MW1", "W2"], f.id).toContain(f.unit);
       expect(f.text.length, f.id).toBeGreaterThan(0);
     }
   });
@@ -2206,12 +2208,12 @@ describe("the door row scores the defect fixtures", () => {
   it("a fixture whose unit is unmerged scores pending, never fails: with no unit merged the whole set is pending and the check row passes", () => {
     const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, []);
     expect(split.scored).toEqual([]);
-    expect(split.pending).toHaveLength(25);
+    expect(split.pending).toHaveLength(27);
     const score = doorFixtureScore([], split.pending);
     expect(score).toMatchObject({ fixtures: 0, hits: 0, refusals: 0, misses: [] });
     expect(Number.isNaN(score.hitRate)).toBe(true);
     const lines = renderDoorFixtures(score);
-    expect(lines[0]).toContain("no fixture's unit is merged yet — 25 pending");
+    expect(lines[0]).toContain("no fixture's unit is merged yet — 27 pending");
     expect(lines[1]).toContain("D3 (unit E3)");
     expect(lines[1]).toContain("D13 (unit E3)");
     expect(lines).toContain("misses: none");
@@ -2227,12 +2229,24 @@ describe("the door row scores the defect fixtures", () => {
       door: score,
     }).find((c) => c.name.includes("door fixture"))!;
     expect(row.pass).toBe(true);
-    expect(row.actual).toContain("25 pending");
+    expect(row.actual).toContain("27 pending");
   });
 
-  it("partitioning splits by the unit tag: with E2 merged, E3's fixtures — D3's typed hand-back line expecting a run once E3 lands, and D13's click — stay pending, and so do W1's N5 and MW1's model set", () => {
+  it("partitioning splits by the unit tag: with E2 merged, E3's fixtures stay pending, and so do W1's N5, W2's long-ask pair, and MW1's model set", () => {
     const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, ["E2"]);
-    expect(split.pending.map((f) => f.defect).sort()).toEqual(["D13", "D3", "M1", "M2", "M3", "M4", "M5", "M6", "N5"]);
+    expect(split.pending.map((f) => f.defect).sort()).toEqual([
+      "D13",
+      "D3",
+      "M1",
+      "M2",
+      "M3",
+      "M4",
+      "M5",
+      "M6",
+      "N5",
+      "N6",
+      "N7",
+    ]);
     const d03 = split.pending.find((f) => f.defect === "D3")!;
     expect(d03.expected).toEqual({ kind: "run", line: d03.text });
     const d13 = split.pending.find((f) => f.defect === "D13")!;
@@ -2240,10 +2254,10 @@ describe("the door row scores the defect fixtures", () => {
     expect(split.scored).toHaveLength(16);
   });
 
-  it("E2, E3, W1 and MW1 are merged: all twenty-five fixtures are scored at head and none is pending", async () => {
-    expect(DOOR_MERGED_UNITS).toEqual(["E2", "E3", "W1", "MW1"]);
+  it("E2, E3, W1, MW1 and W2 are merged: all twenty-seven fixtures are scored at head and none is pending", async () => {
+    expect(DOOR_MERGED_UNITS).toEqual(["E2", "E3", "W1", "MW1", "W2"]);
     const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, DOOR_MERGED_UNITS);
-    expect(split.scored).toHaveLength(25);
+    expect(split.scored).toHaveLength(27);
     expect(split.pending).toEqual([]);
     const results = await replayDoorFixtures(split.scored, operate, { now: () => 0 });
     expect(results.filter((r) => !r.hit)).toEqual([]);
@@ -2414,6 +2428,28 @@ describe("the door row scores the defect fixtures", () => {
       pass: false,
       actual: `0/${bindFixtures.length} as expected, ${score.refusals} falsely refused, 0 pending`,
     });
+  });
+
+  it("the long-ask pair (issue 2099): N6's ask is at least 1,900 characters, both expect a bind carrying the ask's words, and the incident's non_decision floor misses", () => {
+    const n6 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "N6")!;
+    const n7 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "N7")!;
+    expect(n6.text.length).toBeGreaterThanOrEqual(1900);
+    expect(n6.expected.kind).toBe("bind");
+    expect(n7.expected.kind).toBe("bind");
+    // The incident's shapes: the output cap cut the verbatim bind (N6), a
+    // multi-call answer floored without a re-ask (N7) — each a non_decision.
+    const capCut: OperatorDecision = {
+      kind: "non_decision",
+      reason: "the operator failed: answer cut at the output cap (374 tokens)",
+    };
+    const multiCall: OperatorDecision = {
+      kind: "non_decision",
+      reason: "the operator failed: answer carried 2 tool calls; the route is one call",
+    };
+    expect(judgeDoorFixture(capCut, n6).hit).toBe(false);
+    expect(judgeDoorFixture(multiCall, n7).hit).toBe(false);
+    expect(judgeDoorFixture(binds(`agent:ship ${n6.text}`), n6).hit).toBe(true);
+    expect(judgeDoorFixture(binds(`agent:ship ${n7.text}`), n7).hit).toBe(true);
   });
 
   it("a bind of another preset, a non_decision and a question are misses; a hit needs the expected preset's head", async () => {
