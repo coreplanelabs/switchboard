@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.260.1](https://github.com/coreplanelabs/switchboard/compare/v1.260.0...v1.260.1) (2026-09-21)
+
+
+### Bug fixes
+
+* **config:** name confirmation setting owners ([#2139](https://github.com/coreplanelabs/switchboard/issues/2139)) ([616847f](https://github.com/coreplanelabs/switchboard/commit/616847fbc560ef29fc67d4c34e41e1c6a428f897))
+* **deploy:** make bot restarts fail closed ([#2138](https://github.com/coreplanelabs/switchboard/issues/2138)) ([e392e08](https://github.com/coreplanelabs/switchboard/commit/e392e08aac3277269a77de60e80f1e8e3978cacc))
+* **dispatcher:** inherit repository facts at the door ([#2135](https://github.com/coreplanelabs/switchboard/issues/2135)) ([f95ad1a](https://github.com/coreplanelabs/switchboard/commit/f95ad1a7c8fa1b04e8f07c025d698c5f1f1b8791))
+* **harness:** preserve coding work through model outages ([#2136](https://github.com/coreplanelabs/switchboard/issues/2136)) ([d48d82e](https://github.com/coreplanelabs/switchboard/commit/d48d82ef09d47d86c83e213e7ffaa6d78c811533))
+* **resident:** bound drain waits by the fallback deadline ([#2113](https://github.com/coreplanelabs/switchboard/issues/2113)) ([afd2b51](https://github.com/coreplanelabs/switchboard/commit/afd2b515062aa697f851f029c5e94ab90948e093))
+* **ship:** restart empty CI launches once ([#2137](https://github.com/coreplanelabs/switchboard/issues/2137)) ([1bec076](https://github.com/coreplanelabs/switchboard/commit/1bec076e932f254ca87fc9d67d05d4156217c731))
+* **ship:** resume pipeline ownership after restarts ([#2133](https://github.com/coreplanelabs/switchboard/issues/2133)) ([2c9c5c8](https://github.com/coreplanelabs/switchboard/commit/2c9c5c8ddc6ebe7be6b96fbc2bdbbbe4276a831b))
+
 ## [1.260.0](https://github.com/coreplanelabs/switchboard/compare/v1.259.0...v1.260.0) (2026-09-21)
 
 
