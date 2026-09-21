@@ -2610,7 +2610,8 @@ export class RunHistoryDO extends DurableObject<Env> {
   // ---- the thread events of a unit-owned thread (record 0051's reply-as-event rule) --------------
 
   /** The next sequence assigned in one transaction, the per-event cap applied
-   *  (attachments dropped whole, the row saying how many). */
+   *  (attachments dropped whole, the row saying how many). A stable event id
+   *  already on the unit returns its first sequence without another row. */
   async appendUnitEvent(
     instanceId: string,
     unit: string,
@@ -2618,6 +2619,20 @@ export class RunHistoryDO extends DurableObject<Env> {
   ): Promise<{ ok: true; seq: number }> {
     let seq = 1;
     this.ctx.storage.transactionSync(() => {
+      if (event.id !== undefined) {
+        const existing = this.sql
+          .exec<{ seq: number; json: string }>(
+            `SELECT seq, json FROM coordinator_unit_events WHERE instance_id = ? AND unit = ? ORDER BY seq`,
+            instanceId,
+            unit,
+          )
+          .toArray()
+          .find((row) => (JSON.parse(row.json) as ThreadEvent).id === event.id);
+        if (existing !== undefined) {
+          seq = existing.seq;
+          return;
+        }
+      }
       const max = this.sql
         .exec<{
           m: number | null;
@@ -5593,7 +5608,8 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     return json(r);
   }
   // The thread events of a unit-owned thread (record 0051's reply-as-event rule): append assigns
-  // the sequence, list filters unconsumed, mark-consumed is idempotent.
+  // the sequence (or returns the row with the same stable id), list filters
+  // unconsumed, mark-consumed is idempotent.
   if (pathname.startsWith("/runs/coordinator/events/")) {
     if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))
       return json({ error: "instanceId must be a Workflow instance id" }, 400);

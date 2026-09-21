@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import { InMemoryArtifactStore } from "../artifacts/store.js";
 import { Secret } from "../secrets.js";
 import { AGENTS } from "../agents/registry.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
@@ -17,6 +18,7 @@ import { HOSTED_DEADLINE_MARGIN_MINUTES, RESTART_CLAIM_GRACE_MS, minutesToMs } f
 import { createRunsService } from "../core/runsService.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
+import { stageIntoWorkspace, stagingIndex } from "../core/dispatch/staging.js";
 import { isRunRecord, type RunRecord } from "../core/runRecord.js";
 import type { ChannelIO, IncomingMessage, StatusUpdate } from "../core/types.js";
 import type {
@@ -4659,6 +4661,139 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     expect(h.dispatched[0]!.msg.documents).toEqual([note]);
     expect((await h.instances.listEvents(key)).map((e) => e.consumedBy)).toEqual(["u12/1/fix", "u12/1/fix"]);
     expect(await h.instances.listEvents(key, true)).toEqual([]);
+
+    const roundTwo = await call(h, "spawn", {
+      parentInstanceId: INSTANCE.id,
+      step: "u12/2/fix",
+      preset: "coding",
+      prompt: "Address the next findings.",
+      unit: "u12",
+    });
+    expect(roundTwo.status).toBe(200);
+    expect(h.dispatched[1]!.msg.images).toBeUndefined();
+    expect(h.dispatched[1]!.msg.documents).toBeUndefined();
+  });
+
+  it("a ship-request PNG reaches the coding child's attachment staging and catalogue once; replay folds no second file", async () => {
+    const artifacts: RunEvent[] = [];
+    const commands: string[] = [];
+    const store = new InMemoryArtifactStore({
+      bucket: "test",
+      fetch: (async () =>
+        new Response(new Uint8Array([104, 105]), {
+          status: 200,
+          headers: { "content-type": "image/png" },
+        })) as unknown as typeof fetch,
+    });
+    const lines: string[] = [];
+    const nextIndex = stagingIndex();
+    const h = await foldHarness({
+      script: async (msg, io) => {
+        const staged = await stageIntoWorkspace(msg.staged ?? [], {
+          store,
+          threadKey: msg.threadKey,
+          nextIndex,
+          preserveWorkspaceIndexes: true,
+          publish: (event) => void artifacts.push(event),
+          executor: {
+            exec: async (command) => {
+              commands.push(command);
+              return "";
+            },
+            readFile: async () => "",
+            writeFile: async () => "",
+          },
+          resident: false,
+        });
+        lines.push(staged.line);
+        io.runStarted?.({ id: `run-child-${lines.length}` });
+        return { status: "completed" };
+      },
+    });
+    await h.instances.appendEvent(key, {
+      ...event(1, "Attachments from the ship request.", "slack:UALICE", "alice"),
+      id: `${INSTANCE.id}:u12:ship-request`,
+      attachments: [
+        {
+          ...shot,
+          staged: {
+            name: "shot.png",
+            size: 2,
+            type: "image/png",
+            url: "https://files.slack.com/files-pri/T1-F1/shot.png",
+            messageId: "1700000000.000100",
+            workspaceIndex: 0,
+          },
+        },
+      ],
+    });
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      step: "u12/0/coding",
+      preset: "coding",
+      prompt: "Do the unit.",
+      unit: "u12",
+    };
+
+    expect((await call(h, "spawn", body)).status).toBe(200);
+    expect(lines[0]).toBe("Attached files are in ./attachments/: 0-shot.png (2 B, image/png)");
+    expect(commands).toEqual([
+      expect.stringMatching(
+        /^mkdir -p attachments && curl -fsS -o 'attachments\/0-shot\.png' 'memory:\/\/test\/threads/,
+      ),
+    ]);
+    expect(artifacts).toEqual([
+      expect.objectContaining({
+        type: "artifact",
+        direction: "in",
+        key: "threads/slack-C1-1.0/in/1700000000.000100/0-shot.png",
+        name: "shot.png",
+        size: 2,
+        contentType: "image/png",
+      }),
+    ]);
+
+    // The real child persists the same coordinator key when it ends. A replay
+    // meets that record before dispatch, so neither the fold nor staging runs
+    // a second time.
+    await h.store.put(record("run-child-1", { ...TAG }));
+    const replay = await call(h, "spawn", body);
+    expect(replay).toMatchObject({
+      status: 200,
+      body: { ok: true, runId: "run-child-1", alreadySpawned: true },
+    });
+    expect(h.dispatched).toHaveLength(1);
+    expect(lines).toEqual(["Attached files are in ./attachments/: 0-shot.png (2 B, image/png)"]);
+    expect(commands).toHaveLength(1);
+    expect(artifacts).toHaveLength(1);
+  });
+
+  it("a coding spawn that fails before registration leaves its attachment event unconsumed, so the retry carries and consumes it", async () => {
+    const h = await foldHarness({ script: async () => ({ status: "failed" }) });
+    await h.instances.appendEvent(key, {
+      ...event(1, "Attachments from the ship request.", "slack:UALICE", "alice"),
+      id: `${INSTANCE.id}:u12:ship-request`,
+      attachments: [shot],
+    });
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      step: "u12/0/coding",
+      preset: "coding",
+      prompt: "Do the unit.",
+      unit: "u12",
+    };
+
+    expect((await call(h, "spawn", body)).status).toBe(502);
+    expect(h.dispatched[0]!.msg.images).toEqual([shot]);
+    expect(await h.instances.listEvents(key, true)).toHaveLength(1);
+
+    h.deps.dispatch = async (msg, io, opts) => {
+      h.dispatched.push({ msg, opts });
+      return registers("run-retry")(msg, io, opts);
+    };
+    expect((await call(h, "spawn", body)).status).toBe(200);
+    expect(h.dispatched[1]!.msg.images).toEqual([shot]);
+    expect((await h.instances.listEvents(key))[0]!.consumedBy).toBe("u12/0/coding");
   });
 
   it("a review spawn leaves the events unconsumed and folds nothing", async () => {

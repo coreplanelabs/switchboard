@@ -11,6 +11,11 @@ export interface ImageAttachment {
   /** base64 payload, no data: URI prefix */
   data: string;
   name?: string;
+  /** A channel-native source the coordinator may preserve so a later child
+   *  stages the same accepted file through the artifact path. The current
+   *  turn still reads `data` inline; only a folded durable event promotes this
+   *  reference to `IncomingMessage.staged`. */
+  staged?: StagedFile;
 }
 
 /**
@@ -25,6 +30,8 @@ export interface DocumentAttachment {
   mediaType: string;
   data: string;
   name?: string;
+  /** The same optional by-reference source as an accepted image. */
+  staged?: StagedFile;
 }
 
 /** A file left on the platform by reference (record 0033): what the store's
@@ -38,6 +45,10 @@ export interface StagedFile {
   url: string;
   /** The platform's id of the message that carried the file — the per-message segment of its key. */
   messageId: string;
+  /** A channel file's message-local zero-based slot when accepted inline
+   *  media is carried to a later child. Ordinary by-reference files omit it
+   *  and take the run's one-based staging counter. */
+  workspaceIndex?: number;
 }
 
 export interface IncomingMessage {

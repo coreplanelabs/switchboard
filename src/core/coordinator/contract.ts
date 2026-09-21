@@ -111,12 +111,24 @@ export interface ThreadEventAttachment {
   mediaType: string;
   data: string;
   name?: string;
+  /** The accepted channel file's by-reference source, when one exists, so the
+   *  coding child can stage it without moving the inline bytes through a
+   *  second request. */
+  staged?: {
+    name: string;
+    size: number;
+    type: string;
+    url: string;
+    messageId: string;
+    workspaceIndex?: number;
+  };
 }
 
 export interface ThreadEvent {
   /** Assigned by the store's append, in arrival order, per unit. */
   seq: number;
-  /** The channel's message id, when the platform gave one. */
+  /** The channel's message id, or another producer's stable event id. An
+   *  append that repeats it on one unit returns the original row. */
   id?: string;
   /** The sender (platform-namespaced) and the display name the channel knew. */
   sender: string;
@@ -174,11 +186,24 @@ export function capThreadEvent<T extends Omit<ThreadEvent, "seq"> & { seq?: numb
   }
 }
 
+const isThreadEventStagedFile = (v: unknown): v is NonNullable<ThreadEventAttachment["staged"]> =>
+  isObject(v) &&
+  typeof v.name === "string" &&
+  typeof v.size === "number" &&
+  Number.isInteger(v.size) &&
+  v.size > 0 &&
+  typeof v.type === "string" &&
+  typeof v.url === "string" &&
+  typeof v.messageId === "string" &&
+  (v.workspaceIndex === undefined ||
+    (typeof v.workspaceIndex === "number" && Number.isInteger(v.workspaceIndex) && v.workspaceIndex >= 0));
+
 const isThreadEventAttachment = (v: unknown): v is ThreadEventAttachment =>
   isObject(v) &&
   typeof v.mediaType === "string" &&
   typeof v.data === "string" &&
-  (v.name === undefined || typeof v.name === "string");
+  (v.name === undefined || typeof v.name === "string") &&
+  (v.staged === undefined || isThreadEventStagedFile(v.staged));
 
 const isThreadEventMode = (v: unknown): v is ThreadEventMode => v === "steer" || v === "wake" || v === "interrupt";
 

@@ -38,6 +38,7 @@ import { mdToMrkdwn } from "./mrkdwn.js";
 import { escapeMrkdwn } from "./slackEscape.js";
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 import {
+  acceptedStagedFile,
   fetchDocuments,
   fetchImages,
   stagedFiles,
@@ -706,17 +707,34 @@ export async function receiveSlackMessage(
       })
     : Promise.resolve();
   // Independent budgets, independent downloads — the two passes overlap.
-  const [{ images, skippedFiles: imagePassSkipped }, { documents, skippedFiles: documentPassSkipped }] =
-    await Promise.all([
-      fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE),
-      fetchDocuments(ev.files, MAX_DOCS_PER_MESSAGE),
-      delayNote,
-    ]);
+  const [imagePass, documentPass] = await Promise.all([
+    fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE),
+    fetchDocuments(ev.files, MAX_DOCS_PER_MESSAGE),
+    delayNote,
+  ]);
+  // When an artifact store exists, accepted inline media keeps the original
+  // Slack reference beside its bytes. An ordinary run ignores this metadata;
+  // a hosted ship hand-off persists it on the seed event, and the coding
+  // child's fold promotes it to `staged` so the normal copy/pull/catalogue
+  // path lands the file at its zero-based Slack slot.
+  const source = (accepted: { file: SlackFile; size: number }) => {
+    if (!policy.staging) return undefined;
+    const workspaceIndex = ev.files?.indexOf(accepted.file) ?? -1;
+    return workspaceIndex < 0 ? undefined : acceptedStagedFile(accepted, ev.ts, workspaceIndex);
+  };
+  const images = imagePass.images.map((image, i) => {
+    const staged = source(imagePass.acceptedFiles[i]!);
+    return staged === undefined ? image : { ...image, staged };
+  });
+  const documents = documentPass.documents.map((document, i) => {
+    const staged = source(documentPass.acceptedFiles[i]!);
+    return staged === undefined ? document : { ...document, staged };
+  });
   // A file is genuinely unsupported only when BOTH passes rejected it — the
   // image pass skips every non-image (PDFs, text) and the document pass skips
   // every non-document (images), so their intersection is exactly the files
   // that are neither a usable image nor a usable document.
-  const unsupported = imagePassSkipped.filter((f) => documentPassSkipped.includes(f));
+  const unsupported = imagePass.skippedFiles.filter((f) => documentPass.skippedFiles.includes(f));
   // With a store configured (record 0033) the files neither pass could carry
   // stay on Slack by reference for a run with a workspace to stage; the rest
   // are the ones the note below names, each with its reason.

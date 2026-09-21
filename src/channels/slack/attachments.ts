@@ -169,8 +169,15 @@ export async function fetchImages(
   files: SlackFile[] | undefined,
   maxImages: number,
   maxTotalBytes = Infinity,
-): Promise<{ images: ImageAttachment[]; skipped: string[]; skippedFiles: SlackFile[]; bytes: number }> {
+): Promise<{
+  images: ImageAttachment[];
+  acceptedFiles: Array<{ file: SlackFile; size: number }>;
+  skipped: string[];
+  skippedFiles: SlackFile[];
+  bytes: number;
+}> {
   const images: ImageAttachment[] = [];
+  const acceptedFiles: Array<{ file: SlackFile; size: number }> = [];
   const skipped: string[] = [];
   /** The same files as `skipped`, as objects: what staging matches on (a label can collide). */
   const skippedFiles: SlackFile[] = [];
@@ -218,11 +225,34 @@ export async function fetchImages(
     }
     bytes += buf.byteLength;
     images.push({ mediaType, data: buf.toString("base64"), name: f.name });
+    acceptedFiles.push({ file: f, size: buf.byteLength });
   });
-  return { images, skipped, skippedFiles, bytes };
+  return { images, acceptedFiles, skipped, skippedFiles, bytes };
 }
 
 const fileLabel = (f: SlackFile) => `${f.name ?? f.id ?? "file"} (${f.mimetype ?? "unknown type"})`;
+
+/** The by-reference twin of media Slack already downloaded and accepted
+ * inline. It is preserved only for a coordinator fold: the triggering turn
+ * keeps reading the inline bytes, while a later coding child can copy the
+ * original Slack object into its artifact store and workspace. */
+export function acceptedStagedFile(
+  accepted: { file: SlackFile; size: number },
+  messageId: string,
+  workspaceIndex: number,
+): StagedFile | undefined {
+  const { file, size } = accepted;
+  const url = file.url_private_download ?? file.url_private;
+  if (!url || !file.name || !Number.isInteger(size) || size <= 0) return undefined;
+  return {
+    name: file.name,
+    size,
+    type: file.mimetype ?? "application/octet-stream",
+    url,
+    messageId,
+    workspaceIndex,
+  };
+}
 
 /** One Slack-hosted file's bytes, or undefined when the download failed (the
  *  failure is logged here; the caller only has to list the file as skipped).
@@ -259,8 +289,15 @@ export async function fetchDocuments(
   files: SlackFile[] | undefined,
   maxDocs: number,
   maxTotalBytes = Infinity,
-): Promise<{ documents: DocumentAttachment[]; skipped: string[]; skippedFiles: SlackFile[]; bytes: number }> {
+): Promise<{
+  documents: DocumentAttachment[];
+  acceptedFiles: Array<{ file: SlackFile; size: number }>;
+  skipped: string[];
+  skippedFiles: SlackFile[];
+  bytes: number;
+}> {
   const documents: DocumentAttachment[] = [];
+  const acceptedFiles: Array<{ file: SlackFile; size: number }> = [];
   const skipped: string[] = [];
   const skippedFiles: SlackFile[] = [];
   let bytes = 0;
@@ -296,8 +333,9 @@ export async function fetchDocuments(
       data: kind === "pdf" ? buf.toString("base64") : buf.toString("utf-8"),
       name: f.name,
     });
+    acceptedFiles.push({ file: f, size: buf.byteLength });
   });
-  return { documents, skipped, skippedFiles, bytes };
+  return { documents, acceptedFiles, skipped, skippedFiles, bytes };
 }
 
 // Staging (docs/reference/specs/execution.md item 20, record 0033): the files

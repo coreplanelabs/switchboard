@@ -101,6 +101,10 @@ export interface CopyDeps {
    *  round a run stages — the request and each steer — so two files of one
    *  name from different messages never share a workspace path. */
   nextIndex: () => number;
+  /** Only the initial request may retain the channel's zero-based workspace
+   *  slots. Follow-up rounds always allocate from `nextIndex`, even when their
+   *  message-local attachment carries the same slot. */
+  preserveWorkspaceIndexes?: boolean;
   /** Where the `artifact` event goes once the copy answered. */
   publish?: (event: RunEvent) => void;
 }
@@ -131,9 +135,30 @@ export class WorkspaceFiles {
  *  the `artifact` event when the store holds it. A copy that fails is an
  *  outcome with the reason, never a throw — the turn still runs, naming it. */
 export async function copyStaged(files: readonly StagedFile[], deps: CopyDeps): Promise<StagedOutcome[]> {
+  // A channel slot is local to one message. Only the initial coordinator fold
+  // may preserve the hosted seed's stable zero-based paths; later calls are
+  // steers and must allocate from the run counter even if their first file is
+  // another message-local slot 0. Within the initial fold, every other message
+  // still gets a run index so same-named attachments cannot collide. Reserve
+  // through a sparse seed's highest slot before allocating those run indexes.
+  const seedMessageId = deps.preserveWorkspaceIndexes
+    ? files.find((file) => file.workspaceIndex !== undefined)?.messageId
+    : undefined;
+  const highestSeedIndex = Math.max(
+    -1,
+    ...files.map((file) =>
+      file.messageId === seedMessageId && file.workspaceIndex !== undefined ? file.workspaceIndex : -1,
+    ),
+  );
+  for (let i = 0; i <= highestSeedIndex; i++) deps.nextIndex();
+  const indexes = files.map((file) =>
+    seedMessageId !== undefined && file.messageId === seedMessageId && file.workspaceIndex !== undefined
+      ? file.workspaceIndex
+      : deps.nextIndex(),
+  );
   return Promise.all(
-    files.map(async (file): Promise<StagedOutcome> => {
-      const index = deps.nextIndex();
+    files.map(async (file, position): Promise<StagedOutcome> => {
+      const index = indexes[position]!;
       const basename = stagedBasename(index, file.name);
       const key = inboundKey(deps.threadKey, file.messageId, index, file.name);
       try {

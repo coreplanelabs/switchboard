@@ -197,6 +197,76 @@ describe("staging — copy then pull", () => {
     expect(rec.commands).toEqual([]);
   });
 
+  it("preserves Slack slot 0 only for the initial seed; a later slot-0 steer with the same name takes a run index", async () => {
+    const store = storeWithSlack({ "shot.png": 10 });
+    const nextIndex = stagingIndex();
+    const rec = recorder();
+    const seed: StagedFile = {
+      name: "shot.png",
+      size: 10,
+      type: "image/png",
+      url: "https://files.slack.com/x/seed/shot.png",
+      messageId: "1700000000.000100",
+      workspaceIndex: 0,
+    };
+    const initial = await stageIntoWorkspace([seed], {
+      store,
+      threadKey: THREAD,
+      nextIndex,
+      executor: rec.executor,
+      resident: false,
+      preserveWorkspaceIndexes: true,
+    });
+    const steer = await stageIntoWorkspace(
+      [{ ...seed, url: "https://files.slack.com/x/steer/shot.png", messageId: "1700000000.000900" }],
+      {
+        store,
+        threadKey: THREAD,
+        nextIndex,
+        executor: rec.executor,
+        resident: false,
+      },
+    );
+    expect(initial.outcomes[0]!.basename).toBe("0-shot.png");
+    expect(steer.outcomes[0]!.basename).toBe("2-shot.png");
+    expect(rec.commands.map((c) => /attachments\/([^']+)'/.exec(c.command)![1])).toEqual(["0-shot.png", "2-shot.png"]);
+  });
+
+  it("folded files from different messages keep the hosted seed at slot 0 and give a same-name reply a collision-free run index", async () => {
+    const store = storeWithSlack({ "shot.png": 10 });
+    const nextIndex = stagingIndex();
+    const rec = recorder();
+    const seed: StagedFile = {
+      name: "shot.png",
+      size: 10,
+      type: "image/png",
+      url: "https://files.slack.com/x/seed/shot.png",
+      messageId: "1700000000.000100",
+      workspaceIndex: 0,
+    };
+    const reply: StagedFile = {
+      ...seed,
+      url: "https://files.slack.com/x/reply/shot.png",
+      messageId: "1700000000.000900",
+    };
+
+    const folded = await stageIntoWorkspace([seed, reply], {
+      store,
+      threadKey: THREAD,
+      nextIndex,
+      executor: rec.executor,
+      resident: false,
+      preserveWorkspaceIndexes: true,
+    });
+
+    expect(folded.outcomes.map((o) => o.basename)).toEqual(["0-shot.png", "2-shot.png"]);
+    expect(folded.outcomes.map((o) => o.key)).toEqual([
+      "threads/slack-C1-1700000000.000100/in/1700000000.000100/0-shot.png",
+      "threads/slack-C1-1700000000.000100/in/1700000000.000900/2-shot.png",
+    ]);
+    expect(rec.commands.map((c) => /attachments\/([^']+)'/.exec(c.command)![1])).toEqual(["0-shot.png", "2-shot.png"]);
+  });
+
   it("one counter across a run's rounds: the request's file takes 1-, a later steer's file of the same name takes 2- — no workspace path is reused", async () => {
     const store = storeWithSlack({ "clip.mp4": clip.size });
     const nextIndex = stagingIndex();

@@ -879,7 +879,12 @@ describe("run ledger — the coordinator's unit events (record 0051's reply-as-e
   it("append assigns sequences in order and caps per event; list filters unconsumed; mark-consumed is idempotent; a put of the unit row leaves the events untouched", async () => {
     const key = storeKey();
     const body = { storeKey: key, instanceId: INSTANCE_ID, unit: "U12" };
-    expect(await post("/runs/coordinator/events/append", { ...body, event: event("first") })).toEqual({
+    const seeded = event("first", { id: `${INSTANCE_ID}:U12:ship-request` });
+    expect(await post("/runs/coordinator/events/append", { ...body, event: seeded })).toEqual({
+      status: 200,
+      data: { ok: true, seq: 1 },
+    });
+    expect(await post("/runs/coordinator/events/append", { ...body, event: seeded })).toEqual({
       status: 200,
       data: { ok: true, seq: 1 },
     });

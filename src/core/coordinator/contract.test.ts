@@ -512,7 +512,40 @@ describe("capThreadEvent and isThreadEvent — one event row of a unit's list", 
     expect(both.textDropped).toBeGreaterThanOrEqual(cut.textDropped!);
     expect(new TextEncoder().encode(JSON.stringify(both)).length).toBeLessThanOrEqual(THREAD_EVENT_MAX_BYTES);
     expect(isThreadEvent({ ...cut, seq: 1 })).toBe(true);
+    expect(
+      isThreadEvent({
+        ...event,
+        seq: 1,
+        attachments: [
+          {
+            mediaType: "image/png",
+            data: "aGk=",
+            staged: {
+              name: "shot.png",
+              size: 2,
+              type: "image/png",
+              url: "https://files.slack.com/shot.png",
+              messageId: "1.0",
+              workspaceIndex: 0,
+            },
+          },
+        ],
+      }),
+    ).toBe(true);
     expect(isThreadEvent({ ...cut, seq: 1, textDropped: "many" })).toBe(false);
+    expect(
+      isThreadEvent({
+        ...event,
+        seq: 1,
+        attachments: [
+          {
+            mediaType: "image/png",
+            data: "aGk=",
+            staged: { name: "shot.png", size: 2, type: "image/png", url: "u", messageId: "1.0", workspaceIndex: -1 },
+          },
+        ],
+      }),
+    ).toBe(false);
   });
 
   it("the counters are non-negative integers and the fixed fields are bounded, so a row's cap has a floor: a fraction, a negative, NaN or an oversized id is refused", () => {

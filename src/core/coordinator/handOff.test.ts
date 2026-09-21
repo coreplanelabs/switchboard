@@ -246,6 +246,49 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       input({ entry: { repo: "acme/api", base: "main" }, requestText: "in acme/api: make the runner warm the cache" }),
     );
     expect(await wordy.instances.get("plan-make-the-runner-warm-the-eaaa45")).toMatchObject({ merge: "person" });
+    expect(await h.instances.listEvents({ instanceId: id, unit: ["U", "1"].join("") })).toEqual([]);
+  });
+
+  it("a generated task persists its accepted inline media as one retry-stable seed event after the unit row and before the Workflow starts; an over-cap seed says what was dropped", async () => {
+    const h = harness();
+    let creates = 0;
+    let instanceId = "";
+    const unit = ["U", "1"].join("");
+    h.deps.create = async (id) => {
+      instanceId = id;
+      expect(await h.instances.listUnits(id)).toHaveLength(1);
+      expect(await h.instances.listEvents({ instanceId: id, unit })).toHaveLength(1);
+      return creates++ === 0 ? { kind: "failed", id, reason: "engine warming" } : { kind: "created", id };
+    };
+    const req = input({
+      entry: { repo: "acme/api", base: "main" },
+      requestText:
+        "in acme/api: match the screenshot\n\n(Note: 1 attachment(s) could not be passed through: archive.zip — unsupported type)",
+    });
+    const shot = { mediaType: "image/png", data: "aGk=", name: "brief.png" };
+    const oversized = { mediaType: "application/pdf", data: "x".repeat(500 * 1024), name: "huge.pdf" };
+    (req.msg as typeof req.msg & { images: (typeof shot)[]; documents: (typeof oversized)[] }).images = [shot];
+    (req.msg as typeof req.msg & { images: (typeof shot)[]; documents: (typeof oversized)[] }).documents = [oversized];
+
+    const first = await handOffToCoordinator(h.deps, req);
+    expect(first.status).toBe("aborted");
+    expect(instanceId).not.toBe("");
+    const key = { instanceId, unit };
+    expect(await h.instances.listEvents(key)).toEqual([
+      {
+        seq: 1,
+        id: `${instanceId}:${unit}:ship-request`,
+        sender: "slack:UALICE",
+        senderName: "alice",
+        text: "Attachments from the ship request.",
+        attachmentsDropped: 2,
+        mode: "steer",
+        at: NOW,
+      },
+    ]);
+    const retry = await handOffToCoordinator(h.deps, req);
+    expect(retry.status).toBe("completed");
+    expect(await h.instances.listEvents(key)).toHaveLength(1);
   });
 
   it("a base the preflight fell back from (issue 1827) is named on the reply's FIRST plan line — the missing ref and the default branch the plan runs on", async () => {
