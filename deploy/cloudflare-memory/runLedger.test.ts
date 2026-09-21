@@ -1688,9 +1688,22 @@ describe("the plane's checkpoint steers and the provider condition — the heart
     expect(await inbox(key, "r2")).toEqual([]);
   });
 
-  it("a provider down lands in plane_levels; a parked run is re-issued ONCE by the provider's next up — the reissue steer with sender plane, the park row deleted — and a repeat up writes nothing", async () => {
+  it("a provider down and parked live run recover atomically as one durable row and one pushed offered steer; repeat up writes nothing", async () => {
     const key = storeKey();
+    const pushed: Array<Record<string, unknown>> = [];
     await post("/runs/claim", claimBody(key, "r3", "slack:C20:3.0"));
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const withBot = inst as unknown as { env: Record<string, unknown> };
+      withBot.env = {
+        ...withBot.env,
+        BOT: {
+          fetch: async (_url: string, init: { body: string }) => {
+            pushed.push(JSON.parse(init.body) as Record<string, unknown>);
+            return new Response("ok");
+          },
+        },
+      };
+    });
     expect(
       (await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "down" })).data,
     ).toEqual({ admitted: 0 });
@@ -1709,13 +1722,167 @@ describe("the plane's checkpoint steers and the provider condition — the heart
     await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "up" });
     const items = await inbox(key, "r3");
     expect(items).toHaveLength(1);
-    expect(items[0].message).toMatchObject({ userId: "plane", plane: { steer: "reissue", provider: "anthropic" } });
+    expect(items[0]).toMatchObject({
+      seq: 1,
+      message: { userId: "plane", plane: { steer: "reissue", provider: "anthropic" } },
+    });
+    await vi.waitFor(() => expect(pushed).toHaveLength(1));
+    const effect = (pushed[0]!.effects as Array<Record<string, unknown>>)[0];
+    expect(effect).toMatchObject({
+      id: "steer:r3:1",
+      kind: "steer",
+      runId: "r3",
+      seq: 1,
+      message: items[0]!.message,
+    });
     await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
       const sql = (inst as unknown as { sql: SqlStorage }).sql;
       expect(sql.exec(`SELECT * FROM plane_reservations WHERE kind = 'park'`).toArray()).toEqual([]);
+      expect(inst.openPlaneEffects()).toEqual([effect]);
     });
     await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "up" });
     expect(await inbox(key, "r3")).toHaveLength(1);
+    expect(pushed).toHaveLength(1);
+  });
+
+  it("fences a pushed steer and renews its owner's lease atomically before registry delivery", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "r-fenced", "slack:C20:3.1", "gen-stale"));
+    await post("/plane/park", { storeKey: key, runId: "r-fenced", provider: "anthropic" });
+    await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "up" });
+
+    expect(
+      (
+        await post("/plane/steer/fence", {
+          storeKey: key,
+          id: "steer:r-fenced:1",
+          runId: "r-fenced",
+          gen: "gen-stale",
+          leaseMs: LEASE_MS,
+        })
+      ).data,
+    ).toEqual({ accepted: true });
+    const [row] = (await post("/runs/live", { storeKey: key })).data.runs as Array<{ leaseUntil: number }>;
+    expect(
+      (
+        await post("/runs/reclaim", {
+          storeKey: key,
+          gen: "gen-owner",
+          now: row!.leaseUntil - 1,
+          leaseMs: LEASE_MS,
+        })
+      ).data.runs,
+    ).toEqual([]);
+    expect(
+      (
+        await post("/runs/reclaim", {
+          storeKey: key,
+          gen: "gen-owner",
+          now: row!.leaseUntil,
+          leaseMs: LEASE_MS,
+        })
+      ).data.runs,
+    ).toMatchObject([{ row: { runId: "r-fenced", ownerGen: "gen-owner" } }]);
+    expect(
+      (
+        await post("/plane/steer/fence", {
+          storeKey: key,
+          id: "steer:r-fenced:1",
+          runId: "r-fenced",
+          gen: "gen-stale",
+          leaseMs: LEASE_MS,
+        })
+      ).data,
+    ).toEqual({ accepted: false });
+  });
+
+  it("a stale generation cannot close a steer offer after reclaim; the durable owner heartbeat receives and closes it", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "r-owner", "slack:C20:3.1", "gen-stale"));
+    await post("/plane/park", { storeKey: key, runId: "r-owner", provider: "anthropic" });
+    await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "up" });
+    const reclaimed = await post("/runs/reclaim", {
+      storeKey: key,
+      gen: "gen-owner",
+      now: Date.now() + 2 * LEASE_MS,
+      leaseMs: LEASE_MS,
+    });
+    expect(reclaimed.data.runs).toMatchObject([{ row: { runId: "r-owner", ownerGen: "gen-owner" } }]);
+
+    await post("/plane/ack", {
+      storeKey: key,
+      id: "steer:r-owner:1",
+      outcome: "done",
+      owner: { runId: "r-owner", gen: "gen-stale" },
+    });
+    const ownerBeat = () =>
+      post("/runs/heartbeat", { storeKey: key, runId: "r-owner", gen: "gen-owner", leaseMs: LEASE_MS });
+    expect((await ownerBeat()).data.effects).toMatchObject([{ id: "steer:r-owner:1", kind: "steer", seq: 1 }]);
+
+    await post("/plane/ack", {
+      storeKey: key,
+      id: "steer:r-owner:1",
+      outcome: "done",
+      owner: { runId: "r-owner", gen: "gen-owner" },
+    });
+    expect((await ownerBeat()).data.effects).toEqual([]);
+  });
+
+  it("a failed provider-up transaction writes neither the durable row nor its steer effect", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "r4", "slack:C20:4.0"));
+    await post("/plane/park", { storeKey: key, runId: "r4", provider: "anthropic" });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const sql = (inst as unknown as { sql: SqlStorage }).sql;
+      for (let i = 0; i < 256; i++)
+        sql.exec(
+          `INSERT INTO plane_effects (id, body_json, offered_at, acked_at) VALUES (?, ?, ?, NULL)`,
+          `probe:cap-${i}`,
+          JSON.stringify({ id: `probe:cap-${i}`, kind: "probe", resident: `r-${i}` }),
+          i,
+        );
+    });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      expect(() => inst.planeLevel({ name: "provider", provider: "anthropic", side: "up" }, Date.now())).toThrow(
+        /plane_effects total cap/,
+      );
+    });
+    expect(await inbox(key, "r4")).toEqual([]);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const sql = (inst as unknown as { sql: SqlStorage }).sql;
+      expect(sql.exec(`SELECT COUNT(*) AS n FROM plane_effects`).one().n).toBe(256);
+      expect(sql.exec(`SELECT key FROM plane_reservations WHERE kind = 'park'`).toArray()).toEqual([
+        { key: "anthropic#r4" },
+      ]);
+    });
+  });
+
+  it("a failed live push leaves both the durable row and steer offer for an owner heartbeat; sealing first removes the park and produces no steer", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "r5", "slack:C20:5.0"));
+    await post("/plane/park", { storeKey: key, runId: "r5", provider: "anthropic" });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const withBot = inst as unknown as { env: Record<string, unknown> };
+      withBot.env = {
+        ...withBot.env,
+        BOT: { fetch: async () => new Response("down", { status: 503 }) },
+      };
+    });
+    await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "up" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(await inbox(key, "r5")).toHaveLength(1);
+    const beat = await post("/runs/heartbeat", { storeKey: key, runId: "r5", gen: "g1", leaseMs: LEASE_MS });
+    expect(beat.data.effects).toMatchObject([{ id: "steer:r5:1", kind: "steer", seq: 1 }]);
+
+    const sealedKey = storeKey();
+    const thread = "slack:C20:5.1";
+    await post("/runs/claim", claimBody(sealedKey, "r6", thread));
+    await post("/plane/park", { storeKey: sealedKey, runId: "r6", provider: "anthropic" });
+    await post("/runs/finish", { storeKey: sealedKey, runId: "r6", gen: "g1", record: record("r6", thread) });
+    await post("/plane/level", { storeKey: sealedKey, name: "provider", provider: "anthropic", side: "up" });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sealedKey)), async (inst: RunHistoryDO) => {
+      expect(inst.openPlaneEffects()).toEqual([]);
+    });
   });
 });
 

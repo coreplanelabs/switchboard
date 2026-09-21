@@ -3,7 +3,7 @@
 // Worker POSTs committed effects to the bot shim over its service binding, the
 // shim checks the bearer and forwards here, and this route runs each effect
 // through the SAME executor and ack path the heartbeat answer uses — so an
-// admit lands within a push instead of waiting up to a heartbeat interval.
+// admit or already-durable live steer lands without waiting for a heartbeat.
 // Best-effort like the heartbeat's: an ack that fails leaves the offer
 // standing, and it rides the next heartbeat or reclaim-sweep answer.
 //
@@ -32,35 +32,72 @@ export interface PlaneEffectsDeps {
     | {
         draining(): boolean;
         admit(effect: Extract<PlaneEffect, { kind: "admit" }>): Promise<PlaneAckOutcome>;
+        steer(effect: Extract<PlaneEffect, { kind: "steer" }>): Promise<PlaneAckOutcome>;
       }
     | undefined;
-  /** `RunLedger.planeAck` — closes or re-offers the effect on the object. */
-  ack: (id: string, outcome: PlaneAckOutcome) => Promise<void>;
+  /** Atomically verify the open steer and this generation's ownership, then
+   *  renew its lease before local registry delivery. False leaves it offered. */
+  fenceSteer: (effect: Extract<PlaneEffect, { kind: "steer" }>) => Promise<boolean>;
+  /** `RunLedger.planeAck` — closes or re-offers the effect on the object. The
+   *  whole effect lets steer acknowledgements carry their owner fence. */
+  ack: (effect: PushedEffect, outcome: PlaneAckOutcome) => Promise<void>;
   warn?: (line: string) => void;
   log?: (line: string) => void;
 }
 
 /** One pushed effect, shape-checked before anything runs: the push crosses a
- *  process boundary, so a malformed body is a 400, never a throw. */
-/** The pushed effects this door executes are the admits alone: a `probe`
- *  rides the heartbeat answer (its executor lives beside the ledger client),
- *  so a pushed one is left unparsed here and stays offered there. */
-type AdmitEffect = Extract<PlaneEffect, { kind: "admit" }>;
+ *  process boundary, so a malformed body is a 400, never a throw. `probe`
+ *  still rides the heartbeat answer because its executor lives beside the
+ *  ledger client; admits and already-durable live steers use this fast path. */
+export type PushedEffect = Extract<PlaneEffect, { kind: "admit" | "steer" }>;
 
-function parseEffect(v: unknown): AdmitEffect | undefined {
-  if (typeof v !== "object" || v === null) return undefined;
-  const e = v as Record<string, unknown>;
-  if (e.kind !== "admit") return undefined;
-  if (typeof e.id !== "string" || e.id.length === 0) return undefined;
+type ObjectValue = Record<string, unknown>;
+const objectValue = (v: unknown): ObjectValue | undefined =>
+  typeof v === "object" && v !== null && !Array.isArray(v) ? (v as ObjectValue) : undefined;
+
+function parseEffect(v: unknown): PushedEffect | undefined {
+  const e = objectValue(v);
+  if (!e || typeof e.id !== "string" || e.id.length === 0) return undefined;
   if (typeof e.runId !== "string" || e.runId.length === 0) return undefined;
-  if (typeof e.threadKey !== "string" || e.threadKey.length === 0) return undefined;
-  if (typeof e.request !== "object" || e.request === null || Array.isArray(e.request)) return undefined;
+  if (e.kind === "admit") {
+    if (typeof e.threadKey !== "string" || e.threadKey.length === 0) return undefined;
+    const request = objectValue(e.request);
+    if (!request) return undefined;
+    return { id: e.id, kind: "admit", runId: e.runId, threadKey: e.threadKey, request };
+  }
+  if (e.kind !== "steer" || !Number.isSafeInteger(e.seq) || (e.seq as number) < 1) return undefined;
+  const message = objectValue(e.message);
+  const plane = objectValue(message?.plane);
+  if (
+    !message ||
+    typeof message.channelId !== "string" ||
+    message.channelId.length === 0 ||
+    typeof message.threadKey !== "string" ||
+    message.threadKey.length === 0 ||
+    typeof message.text !== "string" ||
+    typeof message.at !== "number" ||
+    !Number.isFinite(message.at) ||
+    message.userId !== "plane" ||
+    message.userName !== "plane" ||
+    plane?.steer !== "reissue" ||
+    typeof plane.provider !== "string" ||
+    plane.provider.length === 0
+  )
+    return undefined;
   return {
     id: e.id,
-    kind: "admit",
+    kind: "steer",
     runId: e.runId,
-    threadKey: e.threadKey,
-    request: e.request as AdmitEffect["request"],
+    seq: e.seq as number,
+    message: {
+      channelId: message.channelId,
+      threadKey: message.threadKey,
+      text: message.text,
+      at: message.at,
+      userId: "plane",
+      userName: "plane",
+      plane: { steer: "reissue", provider: plane.provider },
+    },
   };
 }
 
@@ -98,11 +135,15 @@ export function handlePlaneEffects(req: IncomingMessage, res: ServerResponse, de
       json(400, { ok: false, error: "effects must be an array" });
       return;
     }
-    // A pushed effect of another kind (a `probe`) is not this door's to run:
-    // it stays offered and rides the next heartbeat answer, whose loop has
-    // the executor for it — never a 400 that would fail the admits beside it.
-    const admits = raw.filter((v) => typeof v === "object" && v !== null && (v as { kind?: unknown }).kind === "admit");
-    const effects = admits.map(parseEffect);
+    // A pushed effect of another kind (a `probe` or a later move) is not this
+    // door's to run: it stays offered and rides the next heartbeat answer,
+    // whose loop has the executor for it — never a 400 that would fail the
+    // admits or live steers beside it.
+    const pushed = raw.filter((v) => {
+      const kind = objectValue(v)?.kind;
+      return kind === "admit" || kind === "steer";
+    });
+    const effects = pushed.map(parseEffect);
     if (effects.some((e) => e === undefined)) {
       json(400, { ok: false, error: "malformed effect" });
       return;
@@ -111,12 +152,20 @@ export function handlePlaneEffects(req: IncomingMessage, res: ServerResponse, de
     // draining generation defers — the offer stays for a bot that can run it —
     // and a failed ack leaves the offer standing to ride the next answer.
     const acks: { id: string; outcome: PlaneAckOutcome }[] = [];
-    for (const effect of effects as AdmitEffect[]) {
+    for (const effect of effects as PushedEffect[]) {
       try {
         const executor = deps.execute;
-        const outcome: PlaneAckOutcome =
-          executor === undefined || executor.draining() ? "deferred" : await executor.admit(effect);
-        await deps.ack(effect.id, outcome);
+        let outcome: PlaneAckOutcome;
+        if (executor === undefined || executor.draining()) outcome = "deferred";
+        else if (effect.kind === "admit") outcome = await executor.admit(effect);
+        else {
+          const fenced = await deps.fenceSteer(effect);
+          // Drain can begin while the durable fence call is in flight. Check it
+          // again before the synchronous local inbox put; a handed-off owner
+          // leaves the offer for its successor instead of waking stale state.
+          outcome = fenced && !executor.draining() ? await executor.steer(effect) : "deferred";
+        }
+        await deps.ack(effect, outcome);
         acks.push({ id: effect.id, outcome });
       } catch (err) {
         warn(

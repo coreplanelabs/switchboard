@@ -193,6 +193,11 @@ export interface PlaneQueueRow {
 export interface PlaneState {
   queue: PlaneQueueRow[];
   liveThreads: string[];
+  /** The live runs and their message route: provider recovery only steers a
+   *  run whose durable row still exists, and its row remains readable after a reclaim. */
+  liveRuns: Record<string, { channelId: string; threadKey: string }>;
+  /** The greatest durable inbox sequence per live run, read in the decision's transaction. */
+  inboxSeqs: Record<string, number>;
   /** Threads an admitted ask holds before its claim lands (or after, until the seal). */
   reservations: PlaneReservation[];
   /** Open window kinds; `deploy` is the pending-deploy window (`deploy_settled` is its absence). */
@@ -202,7 +207,7 @@ export interface PlaneState {
 }
 
 export function emptyPlaneState(): PlaneState {
-  return { queue: [], liveThreads: [], reservations: [], openWindows: [], levels: [] };
+  return { queue: [], liveThreads: [], liveRuns: {}, inboxSeqs: {}, reservations: [], openWindows: [], levels: [] };
 }
 
 /** The window kind behind `deploy_settled`: opened while a deploy is pending,
@@ -374,6 +379,10 @@ export type PlaneEffect =
    *  (record 0064): the id is `probe:<resident>`, so the object holds at most one
    *  open probe per resident and a duplicate offer is the same effect. */
   | { id: string; kind: "probe"; resident: string }
+  /** Deliver an already-durable provider-recovery steer to the owning live
+   *  run. The inbox sequence is the idempotency key across push, heartbeat and
+   *  reclaim; execution never writes the durable row again. */
+  | { id: string; kind: "steer"; runId: string; seq: number; message: PlaneSteerMessage }
   /** The `unit_title` move (record 0064): retitle the pull request under the
    *  title rule — the bot re-reads the title before acting, so a person's own
    *  retitle first makes this a `skipped`. Id `retitle:<repo>#<number>`. */
@@ -599,10 +608,38 @@ function onRunnerStatus(
   return { state, effects: [effect], writes: [{ table: "plane_effects", op: "offer", effect, at: event.at }] };
 }
 
+/** The typed provider-recovery row carried by both the durable inbox and its
+ *  live-delivery effect. */
+export interface PlaneSteerMessage {
+  [key: string]: unknown;
+  channelId: string;
+  threadKey: string;
+  text: string;
+  at: number;
+  userId: "plane";
+  userName: "plane";
+  plane: { steer: "reissue"; provider: string };
+}
+
 /** The inbox row a plane steer writes: sender `plane` (record 0064), the sentence as
  *  the text, and the cause under `plane` so the run page can say why. */
 function planeInboxMessage(text: string, at: number, plane: Record<string, unknown>): Record<string, unknown> {
   return { text, at, userId: "plane", userName: "plane", plane };
+}
+
+function reissueInboxMessage(
+  provider: string,
+  at: number,
+  route: { channelId: string; threadKey: string },
+): PlaneSteerMessage {
+  return {
+    ...route,
+    text: reissueSteerSentence(provider),
+    at,
+    userId: "plane",
+    userName: "plane",
+    plane: { steer: "reissue", provider },
+  };
 }
 
 /** The checkpoint steer (record 0064, "The backpressure contract"): a stalled
@@ -669,21 +706,25 @@ function onProviderLevel(
   let next = { ...state, levels };
   if (event.level === "down") return { state: next, effects: [], writes };
   const parked = next.reservations.filter((r) => r.kind === "park" && r.key.startsWith(`${event.provider}#`));
+  const steers: PlaneEffect[] = [];
+  const inboxSeqs = { ...next.inboxSeqs };
   for (const p of parked) {
-    writes.push({
-      table: "run_inbox",
-      op: "push",
-      runId: p.runId,
-      message: planeInboxMessage(reissueSteerSentence(event.provider), event.at, {
-        steer: "reissue",
-        provider: event.provider,
-      }),
-    });
+    const route = next.liveRuns[p.runId];
+    if (route) {
+      const seq = (inboxSeqs[p.runId] ?? 0) + 1;
+      inboxSeqs[p.runId] = seq;
+      const message = reissueInboxMessage(event.provider, event.at, route);
+      const effect: PlaneEffect = { id: `steer:${p.runId}:${seq}`, kind: "steer", runId: p.runId, seq, message };
+      steers.push(effect);
+      writes.push({ table: "run_inbox", op: "push", runId: p.runId, message });
+      writes.push({ table: "plane_effects", op: "offer", effect, at: event.at });
+    }
     writes.push({ table: "plane_reservations", op: "del", key: p.key, kind: "park" });
   }
-  if (parked.length > 0) next = { ...next, reservations: next.reservations.filter((r) => !parked.includes(r)) };
+  if (parked.length > 0)
+    next = { ...next, inboxSeqs, reservations: next.reservations.filter((r) => !parked.includes(r)) };
   const walked = walk(next, event.at);
-  return { ...walked, writes: [...writes, ...walked.writes] };
+  return { ...walked, effects: [...steers, ...walked.effects], writes: [...writes, ...walked.writes] };
 }
 
 /** A run parked on its provider: one park row — a second park of the same run

@@ -383,8 +383,15 @@ export class WorkerRunLedger implements RunLedger {
     return r.data as { ok: boolean; decider?: string; agreed?: boolean | null };
   }
 
-  async planeAck(id: string, outcome: PlaneAckOutcome): Promise<void> {
-    await this.post("/plane/ack", { storeKey: this.opts.storeKey, id, outcome });
+  async planeFenceSteer(id: string, runId: string, gen: string, leaseMs: number): Promise<boolean> {
+    this.checkIds(runId, gen);
+    const r = await this.post("/plane/steer/fence", { storeKey: this.opts.storeKey, id, runId, gen, leaseMs });
+    return r.data.accepted === true;
+  }
+
+  async planeAck(id: string, outcome: PlaneAckOutcome, owner?: { runId: string; gen: string }): Promise<void> {
+    if (owner) this.checkIds(owner.runId, owner.gen);
+    await this.post("/plane/ack", { storeKey: this.opts.storeKey, id, outcome, ...(owner ? { owner } : {}) });
   }
 
   async planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer> {

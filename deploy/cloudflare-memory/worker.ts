@@ -1851,10 +1851,27 @@ export class RunHistoryDO extends DurableObject<Env> {
         queuedAt: r.queued_at,
         state: r.state as PlaneQueueRow["state"],
       }));
-    const liveThreads = this.sql
-      .exec<{ thread_key: string }>(`SELECT thread_key FROM live_runs WHERE run_id IS NOT ?`, excludeRunId ?? null)
-      .toArray()
-      .map((r) => r.thread_key);
+    const liveRows = this.sql
+      .exec<{ run_id: string; thread_key: string; meta_json: string }>(
+        `SELECT run_id, thread_key, meta_json FROM live_runs WHERE run_id IS NOT ?`,
+        excludeRunId ?? null,
+      )
+      .toArray();
+    const liveThreads = liveRows.map((r) => r.thread_key);
+    const liveRuns = Object.fromEntries(
+      liveRows.flatMap((r) => {
+        const meta = JSON.parse(r.meta_json) as Record<string, unknown>;
+        return typeof meta.channelId === "string"
+          ? [[r.run_id, { channelId: meta.channelId, threadKey: r.thread_key }] as const]
+          : [];
+      }),
+    );
+    const inboxSeqs = Object.fromEntries(
+      this.sql
+        .exec<{ run_id: string; seq: number }>(`SELECT run_id, MAX(seq) AS seq FROM run_inbox GROUP BY run_id`)
+        .toArray()
+        .map((r) => [r.run_id, r.seq]),
+    );
     const levels = this.sql
       .exec<{ resident: string; name: string; side: string; reported_at: number; generation: string }>(
         `SELECT * FROM plane_levels`,
@@ -1867,7 +1884,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         reportedAt: r.reported_at,
         generation: r.generation,
       }));
-    return { queue, liveThreads, reservations, openWindows, levels };
+    return { queue, liveThreads, liveRuns, inboxSeqs, reservations, openWindows, levels };
   }
 
   /** The decider's writes, applied inside the same `transactionSync` that read
@@ -1974,21 +1991,19 @@ export class RunHistoryDO extends DurableObject<Env> {
           this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM plane_effects WHERE acked_at IS NULL`).toArray()[0]
             ?.n ?? 0,
         );
+        const effectRunId = w.effect.kind === "admit" || w.effect.kind === "steer" ? w.effect.runId : undefined;
         const forRun =
-          w.effect.kind === "admit"
-            ? Number(
+          effectRunId === undefined
+            ? 0
+            : Number(
                 this.sql
-                  .exec<{
-                    n: number;
-                  }>(
-                    // Exact id matching (`admit:<runId>`): the seal runs with bot-minted
-                    // run ids, and a LIKE would read `%`/`_` in one as wildcards.
-                    `SELECT COUNT(*) AS n FROM plane_effects WHERE acked_at IS NULL AND id = 'admit:' || ?`,
-                    w.effect.runId,
+                  .exec<{ n: number }>(
+                    `SELECT COUNT(*) AS n FROM plane_effects
+                     WHERE acked_at IS NULL AND json_extract(body_json, '$.runId') = ?`,
+                    effectRunId,
                   )
                   .toArray()[0]?.n ?? 0,
-              )
-            : 0;
+              );
         const refusal = effectCapRefusal({ total, forRun }, w.effect);
         if (refusal !== undefined) throw new Error(refusal);
         // A re-offer lands after an ack for any kind — a probe re-probes after
@@ -2333,6 +2348,13 @@ export class RunHistoryDO extends DurableObject<Env> {
         // Exact id matching (`admit:<runId>`), never LIKE: a bot-minted run id
         // can carry `%` or `_`, which a pattern would read as wildcards.
         this.sql.exec(`DELETE FROM plane_effects WHERE acked_at IS NULL AND id = 'admit:' || ?`, runId);
+        this.sql.exec(
+          `DELETE FROM plane_effects
+           WHERE acked_at IS NULL
+             AND json_extract(body_json, '$.kind') = 'steer'
+             AND json_extract(body_json, '$.runId') = ?`,
+          runId,
+        );
         // The run's steer dedupe rows and any park go with it (record 0064):
         // a sealed run holds no turn and reads no steer.
         this.sql.exec(`DELETE FROM plane_reservations WHERE kind IN ('steer', 'park') AND run_id = ?`, runId);
@@ -2437,12 +2459,54 @@ export class RunHistoryDO extends DurableObject<Env> {
     this.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_disagreements', ?)`, JSON.stringify(counts));
   }
 
+  /** Fence a pushed steer to the owning live generation before its local
+   *  registry is touched. The effect check, owner check and lease renewal are
+   *  one transaction: an expired owner may renew before reclaim, but reclaim
+   *  can never cross the synchronous local delivery that follows a success. */
+  async planeFenceSteer(
+    id: string,
+    runId: string,
+    gen: string,
+    leaseMs: number,
+    now: number,
+  ): Promise<{ accepted: boolean }> {
+    let accepted = false;
+    this.ctx.storage.transactionSync(() => {
+      const offered = this.sql
+        .exec<{ body_json: string }>(`SELECT body_json FROM plane_effects WHERE id = ? AND acked_at IS NULL`, id)
+        .toArray()[0];
+      if (!offered) return;
+      const effect = JSON.parse(offered.body_json) as PlaneEffect;
+      if (effect.kind !== "steer" || effect.runId !== runId) return;
+      const live = this.liveRow(runId);
+      if (!live || live.ownerGen !== gen || live.phase !== "live") return;
+      this.sql.exec(`UPDATE live_runs SET lease_until = ? WHERE run_id = ?`, now + leaseMs, runId);
+      accepted = true;
+    });
+    if (accepted) await this.ensurePlaneAlarm(now);
+    return { accepted };
+  }
+
   /** An effect's acknowledgement by id (orchestration-plane item 7): `done` and `skipped` close it,
-   *  `deferred` leaves it offered for the next answer. An unknown id is a
-   *  no-op — the bot may ack an effect an older table never held. */
-  planeAck(id: string, outcome: PlaneAckOutcome, now: number): { ok: true } {
-    if (outcome !== "deferred")
-      this.sql.exec(`UPDATE plane_effects SET acked_at = ? WHERE id = ? AND acked_at IS NULL`, now, id);
+   *  `deferred` leaves it offered for the next answer. A steer is special: the
+   *  acknowledging generation must still own its live row. A stale process
+   *  may retain registry state during reclaim overlap, but it cannot close the
+   *  durable offer. An unknown id is a no-op. */
+  planeAck(id: string, outcome: PlaneAckOutcome, now: number, owner?: { runId: string; gen: string }): { ok: true } {
+    if (outcome === "deferred") return { ok: true };
+    const offered = this.sql
+      .exec<{ body_json: string }>(`SELECT body_json FROM plane_effects WHERE id = ? AND acked_at IS NULL`, id)
+      .toArray()[0];
+    if (!offered) return { ok: true };
+    const effect = JSON.parse(offered.body_json) as PlaneEffect;
+    if (effect.kind === "steer") {
+      if (!owner || owner.runId !== effect.runId) return { ok: true };
+      const live = this.sql
+        .exec<{ owner_gen: string }>(`SELECT owner_gen FROM live_runs WHERE run_id = ?`, owner.runId)
+        .toArray()[0];
+      if (live?.owner_gen !== owner.gen) return { ok: true };
+    }
+    this.sql.exec(`UPDATE plane_effects SET acked_at = ? WHERE id = ? AND acked_at IS NULL`, now, id);
     return { ok: true };
   }
 
@@ -4890,12 +4954,13 @@ const LEDGER_ROUTES = new Set([
   "/runs/session/notepad/write",
 ]);
 
-/** The plane's routes (record 0064; orchestration-plane items 7 and 8): the shadow outcome post and the
- *  effect acknowledgement. Both land on the ledger object of the given store
- *  key, like every `/runs/*` route. */
+/** The plane's routes (record 0064; orchestration-plane items 7 and 8):
+ *  outcomes, effect delivery fencing and acknowledgements land on the ledger
+ *  object of the given store key, like every `/runs/*` route. */
 const PLANE_ROUTES = new Set([
   "/plane/outcome",
   "/plane/ack",
+  "/plane/steer/fence",
   "/plane/admit",
   "/plane/withdraw",
   "/plane/deploy",
@@ -4951,11 +5016,32 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
     );
     return json(r);
   }
+  if (pathname === "/plane/steer/fence") {
+    if (typeof b.id !== "string" || b.id.length === 0) return json({ error: "id must be a non-empty string" }, 400);
+    const runId = parseRunId(b.runId);
+    if (!runId.ok) return json({ error: runId.error }, 400);
+    const g = gen(b.gen);
+    if (!g.ok) return json({ error: g.error }, 400);
+    const lease = parseLeaseMs(b.leaseMs);
+    if (!lease.ok) return json({ error: lease.error }, 400);
+    return json(await stub.planeFenceSteer(b.id, runId.value, g.value, lease.value, now));
+  }
   if (pathname === "/plane/ack") {
     if (typeof b.id !== "string" || b.id.length === 0) return json({ error: "id must be a non-empty string" }, 400);
     if (typeof b.outcome !== "string" || !PLANE_ACK_OUTCOMES.has(b.outcome))
       return json({ error: "outcome must be done, skipped or deferred" }, 400);
-    return json(await stub.planeAck(b.id, b.outcome as PlaneAckOutcome, now));
+    let owner: { runId: string; gen: string } | undefined;
+    if (b.owner !== undefined) {
+      if (typeof b.owner !== "object" || b.owner === null || Array.isArray(b.owner))
+        return json({ error: "owner must name a runId and generation" }, 400);
+      const rawOwner = b.owner as Record<string, unknown>;
+      const runId = parseRunId(rawOwner.runId);
+      if (!runId.ok) return json({ error: runId.error }, 400);
+      if (typeof rawOwner.gen !== "string" || rawOwner.gen.length === 0)
+        return json({ error: "owner generation must be a non-empty string" }, 400);
+      owner = { runId: runId.value, gen: rawOwner.gen };
+    }
+    return json(await stub.planeAck(b.id, b.outcome as PlaneAckOutcome, now, owner));
   }
   if (pathname === "/plane/admit") {
     // The admission-stage ask (record 0064, "The queue"): the thread key, the

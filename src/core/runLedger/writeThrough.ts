@@ -78,12 +78,15 @@ export interface LedgerWriteThroughOptions {
    *  never proceed past one that did not resolve `ok`). Default 3. */
   claimAttempts?: number;
   /** The plane's effect execution (record 0064, "The queue"): how an `admit`
-   *  riding a heartbeat answer runs — absent (an older wiring, tests), every
-   *  effect defers and stays offered. `draining()` true defers `admit` too: a
-   *  draining generation starts nothing it cannot finish. */
+   *  or already-durable `steer` riding a heartbeat answer runs — absent (an
+   *  older wiring, tests), every effect defers and stays offered. `draining()`
+   *  true defers both: a draining generation starts or wakes nothing. */
   planeEffects?: {
     draining(): boolean;
     admit(effect: Extract<PlaneEffect, { kind: "admit" }>): Promise<PlaneAckOutcome>;
+    /** Deliver an already-durable provider-recovery row to the live inbox.
+     *  Absent on an older wiring: the effect remains offered. */
+    steer?(effect: Extract<PlaneEffect, { kind: "steer" }>): Promise<PlaneAckOutcome>;
     /** The `probe` effect (record 0064): probe the resident's `/status`
      *  and forward its levels. Absent — a process without a resident — the
      *  probe is `skipped`; a drain never defers it (it starts no run). */
@@ -94,6 +97,53 @@ export interface LedgerWriteThroughOptions {
   setInterval?: (fn: () => void, ms: number) => { unref?(): void };
   clearInterval?: (timer: { unref?(): void }) => void;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
+}
+
+/** Put an already-durable steer into this generation's live inbox. The inbox's
+ *  own durable-sequence set is the idempotency fence shared by a pushed
+ *  effect, a heartbeat replay and a reclaimed row. */
+export function deliverPlaneSteer(
+  effect: Extract<PlaneEffect, { kind: "steer" }>,
+  live:
+    | {
+        runId?: string;
+        inbox: {
+          readonly arrived: number;
+          push(input: {
+            text: string;
+            at: number;
+            userId: string;
+            userName?: string;
+            ledgerSeq: number;
+            msg: {
+              channelId: string;
+              threadKey: string;
+              text: string;
+              userId: string;
+              userName?: string;
+            };
+          }): void;
+        };
+      }
+    | undefined,
+): PlaneAckOutcome {
+  if (live?.runId !== effect.runId) return "deferred";
+  const before = live.inbox.arrived;
+  live.inbox.push({
+    text: effect.message.text,
+    at: effect.message.at,
+    userId: effect.message.userId,
+    userName: effect.message.userName,
+    ledgerSeq: effect.seq,
+    msg: {
+      channelId: effect.message.channelId,
+      threadKey: effect.message.threadKey,
+      text: effect.message.text,
+      userId: effect.message.userId,
+      userName: effect.message.userName,
+    },
+  });
+  return live.inbox.arrived === before ? "skipped" : "done";
 }
 
 export interface OpenRunRequest {
@@ -1148,10 +1198,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           this.onStop(result.stop);
         }
         // The plane's effects (orchestration-plane; record 0064; orchestration-plane item 7):
-        // an `admit` runs through the wired executor — the restart-from-request
-        // path under the plane's id — unless this generation is draining, which
-        // defers it (it starts nothing it cannot finish); a process without the
-        // wiring defers everything, and the offer stays for a bot that can.
+        // an `admit` runs through the restart-from-request path and a `steer`
+        // puts its already-durable row into the owning live inbox. A draining
+        // generation defers both; a process without the wiring defers every
+        // executable effect, and the offer stays for a bot that can run it.
         // Best-effort: a failed ack leaves the offer standing.
         for (const effect of result.effects ?? []) {
           try {
@@ -1168,12 +1218,20 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
                 ? executor?.probe === undefined
                   ? "skipped"
                   : await executor.probe(effect)
-                : effect.kind !== "admit"
-                  ? "deferred"
-                  : executor === undefined || executor.draining()
+                : effect.kind === "steer"
+                  ? executor?.steer === undefined || executor.draining()
                     ? "deferred"
-                    : await executor.admit(effect);
-            await ledger.planeAck(effect.id, outcome);
+                    : await executor.steer(effect)
+                  : effect.kind !== "admit"
+                    ? "deferred"
+                    : executor === undefined || executor.draining()
+                      ? "deferred"
+                      : await executor.admit(effect);
+            await ledger.planeAck(
+              effect.id,
+              outcome,
+              effect.kind === "steer" ? { runId: effect.runId, gen } : undefined,
+            );
           } catch (err) {
             warn(`[ledger] plane ack failed for effect ${effect.id}: ${describe(err)} — it stays offered`);
           }

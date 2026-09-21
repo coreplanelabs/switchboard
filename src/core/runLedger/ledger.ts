@@ -195,9 +195,14 @@ export interface RunLedger {
    *  Best-effort by contract — the caller fires and forgets; a missing route
    *  (an older state Worker) throws like every other missing route. */
   planeOutcome(post: PlaneOutcomePost): Promise<{ ok: boolean; decider?: string; agreed?: boolean | null }>;
+  /** Fence one pushed steer to its current owner before touching the local
+   *  registry. The object verifies the open effect and owner in one transaction
+   *  and renews the lease, so reclaim cannot cross the local delivery. */
+  planeFenceSteer(id: string, runId: string, gen: string, leaseMs: number): Promise<boolean>;
   /** One effect's acknowledgement by id (orchestration-plane item 7): `done` and `skipped` close it,
-   *  `deferred` leaves it offered. An unknown id is the object's no-op. */
-  planeAck(id: string, outcome: PlaneAckOutcome): Promise<void>;
+   *  `deferred` leaves it offered. A steer closes only while `owner` still
+   *  matches its live row; an unknown id is the object's no-op. */
+  planeAck(id: string, outcome: PlaneAckOutcome, owner?: { runId: string; gen: string }): Promise<void>;
   /** The admission-stage ask (record 0064, "The queue"): `admitted` with a
    *  reservation on the thread, or `queued` with the stored request's minted
    *  id, its position and the conditions it waits on. */

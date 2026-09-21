@@ -6,6 +6,7 @@ import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
 import { InMemoryRunLedger } from "./inMemory.js";
 import type { RunLedger } from "./ledger.js";
+import { FollowUpInbox } from "../threadAdmission.js";
 import { GEN_PATTERN, TRANSCRIPT_PART_BYTES, type IntakeReceipt } from "./types.js";
 import {
   actorOfStoredRow,
@@ -18,6 +19,7 @@ import {
 } from "./sessionLog.js";
 import {
   createLedgerWriteThrough,
+  deliverPlaneSteer,
   LANDED_MAX,
   mintGeneration,
   NullLedgerRun,
@@ -1176,6 +1178,68 @@ describe("events, state, heartbeat", () => {
     await t.beat();
     expect(admitted).toEqual(["q2"]);
     expect(inner.planeAcks[1]).toEqual({ id: "admit:q2", outcome: "deferred" });
+  });
+
+  it("an owner heartbeat delivers a live steer once; duplicate heartbeat and reclaim copies of its durable sequence are skipped", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const effect = {
+      id: "steer:r1:7",
+      kind: "steer" as const,
+      runId: "r1",
+      seq: 7,
+      message: {
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1.0",
+        text: "the model provider anthropic is answering again — re-issue the held turn and continue",
+        at: 2_000,
+        userId: "plane" as const,
+        userName: "plane" as const,
+        plane: { steer: "reissue" as const, provider: "anthropic" },
+      },
+    };
+    const ledger = overriding(inner, {
+      heartbeat: async (runId, gen, leaseMs) => {
+        const r = await inner.heartbeat(runId, gen, leaseMs);
+        return r.ok ? { ...r, effects: [effect] } : r;
+      },
+    });
+    const inbox = new FollowUpInbox();
+    expect(deliverPlaneSteer(effect, undefined)).toBe("deferred");
+    expect(deliverPlaneSteer(effect, { runId: "another-run", inbox })).toBe("deferred");
+    const { wt, t } = harness({
+      ledger,
+      planeEffects: {
+        draining: () => false,
+        admit: async () => "done",
+        steer: async (offered) => deliverPlaneSteer(offered, { runId: "r1", inbox }),
+      },
+    });
+    await openRun(wt, openReq());
+    await t.beat();
+    // The reclaim's durable row can arrive after the live push; the shared seq
+    // makes it the same message, not a second release.
+    inbox.push({ ...effect.message, ledgerSeq: effect.seq });
+    await t.beat();
+    expect(inbox.drain()).toEqual([
+      {
+        text: effect.message.text,
+        at: effect.message.at,
+        userId: "plane",
+        userName: "plane",
+        ledgerSeq: 7,
+        msg: {
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
+          text: effect.message.text,
+          userId: "plane",
+          userName: "plane",
+        },
+      },
+    ]);
+    expect(inner.planeAcks).toEqual([
+      { id: "steer:r1:7", outcome: "done" },
+      { id: "steer:r1:7", outcome: "skipped" },
+    ]);
   });
 
   it("planeOutcome fires the post and swallows a failure with one warning — the dispatch never waits on the plane (orchestration-plane item 8)", async () => {

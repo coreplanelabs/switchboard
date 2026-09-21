@@ -8,7 +8,7 @@ import { parseModelRef } from "./core/provider.js";
 import { providerStructuredModel } from "./core/dispatch/route.js";
 import { providerModelsReader } from "./core/dispatch/providerModels.js";
 import { configuredModelRefs } from "./core/commands/providers.js";
-import type { IntakeReceipt } from "./core/runLedger/types.js";
+import { LEASE_MS, type IntakeReceipt } from "./core/runLedger/types.js";
 import { capabilitiesFrom } from "./core/capabilities.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
 import { createSlackApp, wireIntakeGate, type SlackIntakeGate } from "./channels/slack.js";
@@ -67,7 +67,12 @@ import { readingDiffStartupWarning } from "./core/readingDiff.js";
 import { autoAbridgeOnPersist, reviewAbridgerFromConfig } from "./core/reviewAbridge.js";
 import { meatOnPath } from "./core/meatProcess.js";
 import { buildRunLedger } from "./core/runLedgerWorker.js";
-import { createLedgerWriteThrough, mintGeneration, NullLedgerWriteThrough } from "./core/runLedger/writeThrough.js";
+import {
+  createLedgerWriteThrough,
+  deliverPlaneSteer,
+  mintGeneration,
+  NullLedgerWriteThrough,
+} from "./core/runLedger/writeThrough.js";
 import {
   reclaimRuns,
   startReclaimSweep,
@@ -430,6 +435,15 @@ export async function runBot(): Promise<void> {
       if (!planeAdmitPass) return "deferred";
       await planeAdmitPass();
       return "done";
+    },
+    steer: async (effect: Extract<PlaneEffect, { kind: "steer" }>): Promise<PlaneAckOutcome> => {
+      const run = defaultRunRegistry.getById(effect.runId);
+      if (!run || run.finished || !run.threadKey) return "deferred";
+      // The push route checks the ledger's generation fence before reaching
+      // this local lookup. The heartbeat path is already owner-fenced by the
+      // heartbeat that carried the effect; the admission slot then prevents a
+      // different run on the same thread from receiving it.
+      return deliverPlaneSteer(effect, defaultAdmission.get(run.threadKey));
     },
   };
   const runLedger = ledgerClient
@@ -1471,8 +1485,15 @@ export async function runBot(): Promise<void> {
         handlePlaneEffects(req, res, {
           token: processSecrets.named(runHistoryCfg?.worker?.tokenEnv ?? DEFAULT_RUN_STORE_TOKEN_ENV),
           execute: ledgerClient ? planeEffectExecutor : undefined,
-          ack: async (id, outcome) => {
-            if (ledgerClient) await ledgerClient.planeAck(id, outcome);
+          fenceSteer: async (effect) =>
+            (await ledgerClient?.planeFenceSteer(effect.id, effect.runId, generation, LEASE_MS)) ?? false,
+          ack: async (effect, outcome) => {
+            if (ledgerClient)
+              await ledgerClient.planeAck(
+                effect.id,
+                outcome,
+                effect.kind === "steer" ? { runId: effect.runId, gen: generation } : undefined,
+              );
           },
           warn: (w) => console.warn(w),
         });

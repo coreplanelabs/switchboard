@@ -1,5 +1,8 @@
 import { ALLOWANCES, bearerExpiresAt, loopClock, MINUTE_MS, PROVIDER_RETRY_BACKOFFS_MS } from "../../budgets.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { Secret } from "../../../secrets.js";
+import { handlePlaneEffects } from "../../../channels/planeEffects.js";
 import type { AgentDef } from "../../../agents/registry.js";
 import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../../execution/executor.js";
 import { ResidentExecutor } from "../../../execution/resident.js";
@@ -21,6 +24,7 @@ import {
   wrapUpInstruction,
 } from "../windDown.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
+import { deliverPlaneSteer } from "../../runLedger/writeThrough.js";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { bearerHashOf, RunBearerStore } from "../../modelProxy/runBearers.js";
 import type { RunEvent } from "../../runEvents.js";
@@ -1233,6 +1237,76 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(w.events.filter((e) => e.type === "input")).toHaveLength(2);
     expect(w.steps.at(-1)?.inboxConsumedSeq).toBe(4);
     expect(w.inbox.size).toBe(0);
+  });
+
+  it("a provider-up effect pushed into the owning live inbox reissues the parked turn immediately and acks done before any heartbeat or reclaim", async () => {
+    const w = world({ providerPark: true });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "502 the model provider did not answer",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else {
+        echoPrompt(c);
+        finalTurn(c, "recovered from the live push");
+      }
+    });
+    const done = w.start();
+    await vi.waitFor(() => expect(w.notes.some((n) => n.includes("the turn is held"))).toBe(true));
+    const effect = {
+      id: "steer:run-7:3",
+      kind: "steer" as const,
+      runId: "run-7",
+      seq: 3,
+      message: {
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1.0",
+        text: reissueSteerSentence("anthropic"),
+        at: NOW,
+        userId: "plane" as const,
+        userName: "plane" as const,
+        plane: { steer: "reissue" as const, provider: "anthropic" },
+      },
+    };
+    const acked: Array<{ id: string; outcome: string }> = [];
+    const raw = JSON.stringify({ effects: [effect] });
+    const req = {
+      method: "POST",
+      headers: { authorization: "Bearer memory-token" },
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from(raw);
+      },
+    } as unknown as IncomingMessage;
+    const res = {
+      headersSent: false,
+      writeHead: () => {},
+      end: () => {},
+    } as unknown as ServerResponse;
+    handlePlaneEffects(req, res, {
+      token: new Secret("memory-token", "MEMORY_TOKEN"),
+      execute: {
+        draining: () => false,
+        admit: async () => "done",
+        steer: async (offered) => deliverPlaneSteer(offered, { runId: "run-7", inbox: w.inbox }),
+      },
+      fenceSteer: async () => true,
+      ack: async (offered, outcome) => void acked.push({ id: offered.id, outcome }),
+      log: () => {},
+    });
+    await vi.waitFor(() => expect(acked).toEqual([{ id: "steer:run-7:3", outcome: "done" }]));
+    expect(await done).toBe("recovered from the live push");
+    expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(2);
+    expect(w.container.commands().filter((c) => c.type === "steer")).toEqual([]);
+    expect(w.steps.at(-1)?.inboxConsumedSeq).toBe(3);
   });
 
   it("a stream cut after a relayed success keeps the retry ladder even on a park-capable run: the proxy parked nothing, so no steer would release a hold", async () => {
