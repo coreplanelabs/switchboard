@@ -189,6 +189,31 @@ export const DRAIN_WAIT_MAX_MS: number = DRAIN.waitMaxMs;
 /** What the wait leaves of the run's lease for the attach and the work after
  *  it: a drained run that would start with less has nothing to start for. */
 export const DRAIN_LEASE_RESERVE_MS: number = DRAIN.leaseReserveMs;
+/** The drain wait where a fallback stands behind the attach (issue 2101): the
+ *  factory's first attach falls to a seeded sandbox, which stands up in about
+ *  two minutes, so the wait is bounded by the fallback's own cost — never the
+ *  deploy's. Passed as `drainBoundMs`; an attach with no fallback (a resumed
+ *  run's re-attach, a mid-run recovery) passes none and keeps the lease's bound. */
+export const DRAIN_FALLBACK_WAIT_MS: number = DRAIN.fallbackWaitMs;
+
+/** Stamp the drain's share of a failed wait on the error, so the factory's
+ *  fallback can publish the run's `drain_wait` note even though the attach
+ *  never answered a binding to carry it (issue 2101: the incident's run fell
+ *  to the sandbox and `runs friction` counted `drain_wait: 0`). */
+function stampDrainWait<E>(err: E, waitedMs: number): E {
+  if (err !== null && typeof err === "object") (err as { drainWaitMs?: number }).drainWaitMs = waitedMs;
+  return err;
+}
+
+/** The drain's share stamped on an error thrown out of the drain wait — the
+ *  typed `ResidentDrainingError`, the attach's own refusal after the drain
+ *  ended, or the wake hand-off's strike; undefined when the attach met no
+ *  drain. */
+export function drainWaitOf(err: unknown): number | undefined {
+  if (err === null || typeof err !== "object") return undefined;
+  const stamped = (err as { drainWaitMs?: unknown }).drainWaitMs;
+  return typeof stamped === "number" && stamped > 0 ? stamped : undefined;
+}
 
 export function isDrainingRefusal(answer: { status: number; data: Record<string, unknown> }): boolean {
   const d = answer.data.draining;
@@ -1127,7 +1152,10 @@ export class ResidentExecutor implements Executor {
    *  bounds the wait's PROBING alone (item 65's ceiling too), never a request:
    *  an operation's wall clock is the command's, and a recovery attach is not
    *  the command. */
-  async attach(span?: Span, opts: { signal?: AbortSignal; budgetMs?: number } = {}): Promise<ResidentBinding> {
+  async attach(
+    span?: Span,
+    opts: { signal?: AbortSignal; budgetMs?: number; drainBoundMs?: number } = {},
+  ): Promise<ResidentBinding> {
     const answer = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
     if (answer.ok) return answer.binding;
     if (isDrainingRefusal(answer)) {
@@ -1139,6 +1167,7 @@ export class ResidentExecutor implements Executor {
         origin: "transient-refusal",
         signal: opts.signal,
         budgetMs: opts.budgetMs,
+        drainBoundMs: opts.drainBoundMs,
         span,
       });
       // The spread keeps a `drainWaitMs` the wake path stamped when its
@@ -1153,25 +1182,43 @@ export class ResidentExecutor implements Executor {
   /** The wait for a drained fleet to reopen (item 69): one re-attach every
    *  `DRAIN_POLL_MS` until the fleet admits the run, under the run's own lease
    *  less what the attach and the work need (`DRAIN_LEASE_RESERVE_MS`), or the
-   *  ceiling with no lease. The run's stop ends it at once (the pause and the
-   *  re-attach both carry its signal). An answer that is no longer the drain is
-   *  judged as `attach` judges a first answer: admitted, the platform's transient
-   *  (handed to the wake wait with what the budget left), or the attach's own
-   *  refusal. The budget ending with the fleet still drained is the typed
+   *  ceiling with no lease — and under `drainBoundMs` where the caller has a
+   *  fallback whose cost bounds the wait (issue 2101: the factory's first
+   *  attach falls to a seeded sandbox in minutes, so it never waits out the
+   *  deploy). The run's stop ends it at once (the pause and the re-attach both
+   *  carry its signal). An answer that is no longer the drain is judged as
+   *  `attach` judges a first answer: admitted, the platform's transient (handed
+   *  to the wake wait with what the budget left), or the attach's own refusal.
+   *  The budget ending with the fleet still drained is the typed
    *  `ResidentDrainingError`, naming how long the run could wait and when the
-   *  drain says it ends. */
+   *  drain says it ends. Every error thrown out of the wait carries the
+   *  drain's share (`stampDrainWait`), so the fallback still publishes the
+   *  run's `drain_wait` note. The wait is one child span under the attach span
+   *  (`dispatch.workspace.attach.drain-wait`, issue 2101): an 18-minute hold
+   *  with zero events between the attach's start and its end was the incident's
+   *  shape; the span carries the typed error's classification — the refusal's
+   *  words stay on the card note and the attach error (tracing.md item 2 keeps
+   *  remote free text off spans). */
   private async awaitDrainEnd(
     first: { status: number; data: Record<string, unknown> },
-    opts: { signal?: AbortSignal; budgetMs?: number },
+    opts: {
+      signal?: AbortSignal;
+      budgetMs?: number;
+      drainBoundMs?: number;
+      /** The effective deadline an earlier drain wait opened. A wake hand-off
+       *  carries it back here so no later drain can renew any allowance. */
+      drainDeadlineMs?: number;
+    },
     span?: Span,
   ): Promise<{ binding: ResidentBinding; waitedMs: number }> {
     const t0 = systemClock();
     const left = this.opts.remainingMs?.();
-    const budget = Math.min(
-      DRAIN_WAIT_MAX_MS,
-      left === undefined ? DRAIN_WAIT_MAX_MS : Math.max(0, left - DRAIN_LEASE_RESERVE_MS),
+    const deadline = Math.min(
+      opts.drainDeadlineMs ?? Number.POSITIVE_INFINITY,
+      t0 + DRAIN_WAIT_MAX_MS,
+      t0 + (opts.drainBoundMs ?? DRAIN_WAIT_MAX_MS),
+      t0 + (left === undefined ? DRAIN_WAIT_MAX_MS : Math.max(0, left - DRAIN_LEASE_RESERVE_MS)),
     );
-    const deadline = t0 + budget;
     let answer = first;
     // The card's one line while the run waits (issue 2044): user words, the
     // minutes counted up on every poll, cleared however the wait ends — the
@@ -1181,6 +1228,7 @@ export class ResidentExecutor implements Executor {
       this.opts.onSetupNote?.(
         `waiting for the deploy to finish · ${Math.max(1, Math.round((now - t0) / MINUTE_MS))} min`,
       );
+    const waitSpan = span?.start("dispatch.workspace.attach.drain-wait");
     try {
       for (;;) {
         const now = systemClock();
@@ -1188,21 +1236,45 @@ export class ResidentExecutor implements Executor {
         if (now >= deadline)
           throw new ResidentDrainingError(this.opts.resource, now - t0, drainingUntil(answer), refusalWords(answer));
         await wakePause(Math.min(DRAIN_POLL_MS, deadline - now), opts.signal, "/attach");
-        const next = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
-        if (next.ok) return { binding: next.binding, waitedMs: systemClock() - t0 };
+        const next = await this.attachOnce(waitSpan ?? span, this.attachBoundMs("/attach"), opts.signal);
+        if (next.ok) {
+          waitSpan?.end("ok");
+          return { binding: next.binding, waitedMs: systemClock() - t0 };
+        }
         answer = next;
         if (isDrainingRefusal(answer)) continue;
         if (isTransientRefusal(answer)) {
-          const woke = await this.awaitWake("/attach", refusalWords(answer), {
-            origin: "transient-refusal",
-            signal: opts.signal,
-            budgetMs: Math.max(0, deadline - systemClock()),
-            span,
-          });
-          return { binding: woke.binding, waitedMs: systemClock() - t0 };
+          // The drain's own share ends here; the wake wait that follows is its
+          // own span and its own budget's, and a failure inside it still
+          // carries the drain's share for the fallback's note.
+          const drainShareMs = systemClock() - t0;
+          waitSpan?.end("ok");
+          try {
+            const woke = await this.awaitWake("/attach", refusalWords(answer), {
+              origin: "transient-refusal",
+              signal: opts.signal,
+              budgetMs: Math.max(0, deadline - systemClock()),
+              drainBoundMs: opts.drainBoundMs,
+              drainDeadlineMs: deadline,
+              span,
+            });
+            return { binding: woke.binding, waitedMs: systemClock() - t0 };
+          } catch (err) {
+            throw stampDrainWait(err, drainShareMs + (drainWaitOf(err) ?? 0));
+          }
         }
         throw this.attachRefusal(answer);
       }
+    } catch (err) {
+      // The wake hand-off stamped the drain's own share already; everything
+      // else — the typed draining error, the attach's refusal after the drain
+      // ended, the run's stop — spent the whole wait on the drain.
+      if (drainWaitOf(err) === undefined) stampDrainWait(err, systemClock() - t0);
+      if (waitSpan !== undefined && !waitSpan.ended) {
+        waitSpan.fail(err);
+        waitSpan.end();
+      }
+      throw err;
     } finally {
       this.opts.onSetupNote?.(undefined);
     }
@@ -1589,9 +1661,27 @@ export class ResidentExecutor implements Executor {
       origin: WakeOrigin;
       signal?: AbortSignal;
       budgetMs?: number;
+      /** The drain wait's bound where a fallback stands behind the attach
+       *  (issue 2101): handed to the drain wait a re-attach's `draining`
+       *  answer opens, so the hand-off keeps the fallback's bound too. */
+      drainBoundMs?: number;
+      /** The effective deadline of a drain wait that handed off to this wake.
+       *  A later draining answer keeps this deadline rather than opening a new bound. */
+      drainDeadlineMs?: number;
       span?: Span;
     },
   ): Promise<{ waitedMs: number; binding: ResidentBinding }> {
+    // The attach's wake wait is one child span under the attach span (issue
+    // 2101, as the drain wait is): the incident's run spent the wake budget
+    // here with nothing on the timeline. Other routes' waits stay log-only —
+    // their parent is the command's span, not the attach's.
+    const waitSpan = route === "/attach" ? opts.span?.start("dispatch.workspace.attach.wake-wait") : undefined;
+    const failWaitSpan = (err: unknown): void => {
+      if (waitSpan !== undefined && !waitSpan.ended) {
+        waitSpan.fail(err);
+        waitSpan.end();
+      }
+    };
     // The wait's one clock, before the first probe: the loop reads it for its
     // budget check and hands it to `judge` as `spent()`, so every `waited Ns` —
     // the strikes', the binding's — is the whole wait, never short by one
@@ -1620,12 +1710,20 @@ export class ResidentExecutor implements Executor {
         opts.span,
         signal,
       );
-    const first = await probe(opts.signal);
-    // The run's stop rides into the probe as into every send: a stop during
-    // one is the stop's own typed error, as the pause throws it — never a
-    // strike on an "unreachable" view the stop itself produced. (The loop
-    // makes this check after each of its own probes.)
-    if (opts.signal?.aborted) throw wakeStopped(route);
+    let first: ResidentStatusProbe;
+    try {
+      first = await probe(opts.signal);
+      // The run's stop rides into the probe as into every send: a stop during
+      // one is the stop's own typed error, as the pause throws it — never a
+      // strike on an "unreachable" view the stop itself produced. (The loop
+      // makes this check after each of its own probes.)
+      if (opts.signal?.aborted) throw wakeStopped(route);
+    } catch (err) {
+      // The initial probe precedes `waitOnStatus`, but it is still part of the
+      // visible wake wait and must close the same span on a stop or failure.
+      failWaitSpan(err);
+      throw err;
+    }
     // Each turn of the wake path's one loop (`waitOnStatus`), the first view
     // included: judge the view — a definite one is the strike at once, before
     // any pause — then re-attach when it says the resident serves, else (or
@@ -1637,7 +1735,7 @@ export class ResidentExecutor implements Executor {
     // the exit, so the first re-attach follows the first pause, never a full
     // /attach into a container still starting.
     let firstView = true;
-    return waitOnStatus<{ waitedMs: number; binding: ResidentBinding }>({
+    const wait = waitOnStatus<{ waitedMs: number; binding: ResidentBinding }>({
       first,
       since: t0,
       probe,
@@ -1694,7 +1792,16 @@ export class ResidentExecutor implements Executor {
           // and a binding without the share would publish no `drain_wait`
           // note — the silence the field exists to end.
           if (isDrainingRefusal(answer)) {
-            const reopened = await this.awaitDrainEnd(answer, { signal: opts.signal }, opts.span);
+            waitSpan?.end("ok");
+            const reopened = await this.awaitDrainEnd(
+              answer,
+              {
+                signal: opts.signal,
+                drainBoundMs: opts.drainBoundMs,
+                drainDeadlineMs: opts.drainDeadlineMs,
+              },
+              opts.span,
+            );
             return {
               end: { waitedMs: spent(), binding: { ...reopened.binding, drainWaitMs: reopened.waitedMs } },
             };
@@ -1720,6 +1827,15 @@ export class ResidentExecutor implements Executor {
         throw residentWakeBudgetStrike(route, refusal, spentMs, last, { origin: opts.origin, transient });
       },
     });
+    if (waitSpan === undefined) return wait;
+    try {
+      const out = await wait;
+      waitSpan.end("ok");
+      return out;
+    } catch (err) {
+      failWaitSpan(err);
+      throw err;
+    }
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {

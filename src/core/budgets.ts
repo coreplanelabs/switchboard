@@ -104,11 +104,18 @@ export const HARNESS_PROBE_WAIT_MS = 5 * MINUTE_MS;
  *  `maxMinutes` so one nobody lifted is an hour and a half, not a day. A run
  *  asked during a drain waits at its attach one `pollMs` at a time under its
  *  own lease less `leaseReserveMs` (what the attach and the work after it
- *  need), `waitMaxMs` with no lease to clip it. */
+ *  need), `waitMaxMs` with no lease to clip it — unless a fallback stands
+ *  behind the attach: `fallbackWaitMs` bounds the wait by the FALLBACK's own
+ *  cost, never the deploy's (issue 2101: a run refused by the drain waited
+ *  18 minutes for the whole deploy, then did the job in a seeded sandbox that
+ *  stands up in about two), so a drain refusal on a first attach falls to the
+ *  seeded sandbox after at most a few minutes; a re-attach with no fallback —
+ *  a resumed run, a mid-run recovery — keeps the lease's bound. */
 export const DRAIN = {
   pollMs: 30_000,
   waitMaxMs: 60 * MINUTE_MS,
   leaseReserveMs: 10 * MINUTE_MS,
+  fallbackWaitMs: 3 * MINUTE_MS,
   deployWaitMaxMs: 60 * MINUTE_MS,
   marginMinutes: 5,
   maxMinutes: 90,

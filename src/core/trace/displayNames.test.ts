@@ -41,6 +41,14 @@ describe("display names", () => {
     // every streamed prefix family has a rule
     for (const prefix of Object.keys(STREAMED_PREFIXES)) expect(displayNameOf(`${prefix}x`)).not.toBe(`${prefix}x`);
   });
+
+  // The bot client's own attach waits (issue 2101): named beside the Worker's
+  // step vocabulary, never inside it — the step table is scanned against the
+  // Worker's source, and these spans are the bot's.
+  it("the attach's drain and wake waits have display names under the attach prefix", () => {
+    expect(displayNameOf("dispatch.workspace.attach.drain-wait")).toBe("waiting for the deploy to finish");
+    expect(displayNameOf("dispatch.workspace.attach.wake-wait")).toBe("waiting for the resident to wake");
+  });
 });
 
 // The resident Worker names each command it runs (`runOk(argv, "<step>", …)`,

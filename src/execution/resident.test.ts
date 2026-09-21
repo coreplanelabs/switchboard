@@ -18,6 +18,8 @@ import {
   ResidentReuseRefusedError,
   DRAIN_LEASE_RESERVE_MS,
   DRAIN_POLL_MS,
+  DRAIN_FALLBACK_WAIT_MS,
+  drainWaitOf,
   ResidentDrainingError,
   isDrainingRefusal,
 } from "./resident.js";
@@ -2699,5 +2701,147 @@ describe("ResidentExecutor.attach during a fleet drain (item 69)", () => {
     const err = await p;
     expect(err).toBeInstanceOf(Error);
     expect(calls).toHaveLength(1);
+  });
+
+  // Issue 2101: a run refused by the drain waited 18 minutes for the whole
+  // deploy, then did the job in a seeded sandbox that stands up in about two.
+  // Where a fallback stands behind the attach, its cost bounds the wait.
+  it("a fallback bounds the drain wait by its own cost (issue 2101): drainBoundMs ends the wait in the typed error after minutes, with most of the lease left, and the error carries the drain's share", async () => {
+    const polls = DRAIN_FALLBACK_WAIT_MS / DRAIN_POLL_MS;
+    stubFetch(...Array.from({ length: polls + 2 }, () => draining));
+    const ex = new ResidentExecutor({ ...OPTS, remainingMs: () => 45 * 60_000 });
+    const p = ex.attach(undefined, { drainBoundMs: DRAIN_FALLBACK_WAIT_MS }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(DRAIN_FALLBACK_WAIT_MS + 1_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ResidentDrainingError);
+    expect((err as Error).message).toContain(
+      `did not reopen within the ${DRAIN_FALLBACK_WAIT_MS / 1000}s this run could wait`,
+    );
+    // The drain's share rides the error, so the factory's fallback still
+    // publishes the run's `drain_wait` note (the incident counted zero).
+    expect(drainWaitOf(err)).toBe(DRAIN_FALLBACK_WAIT_MS);
+  });
+
+  it("one fallback deadline survives drain/wake hand-offs, so a second drain gets only the first wait's remaining allowance", async () => {
+    const transient = {
+      body: {
+        error: "attach-failed: Durable Object reset because its code was updated.",
+        status: 500,
+        transient: true,
+      },
+    };
+    const firstDrainPolls = DRAIN_FALLBACK_WAIT_MS / DRAIN_POLL_MS - 2;
+    const { calls } = stubFetch(
+      draining,
+      ...Array.from({ length: firstDrainPolls }, () => draining),
+      transient,
+      { body: { state: "warm", reason: "", inFlight: 0 } },
+      draining,
+      draining,
+    );
+    const p = new ResidentExecutor(OPTS)
+      .attach(undefined, { drainBoundMs: DRAIN_FALLBACK_WAIT_MS })
+      .catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(DRAIN_FALLBACK_WAIT_MS);
+    const err = await p;
+
+    expect(err).toBeInstanceOf(ResidentDrainingError);
+    expect(drainWaitOf(err)).toBe(DRAIN_FALLBACK_WAIT_MS);
+    expect(calls.map(route)).toEqual([
+      "/attach",
+      ...Array.from({ length: firstDrainPolls + 1 }, () => "/attach"),
+      "/status",
+      "/attach",
+      "/attach",
+    ]);
+  });
+
+  it("the drain wait is one span under the attach span (issue 2101): dispatch.workspace.attach.drain-wait ends ok when the fleet reopens, its duration the wait's own", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => Date.now() }).start("request", { sinks: [log] });
+    const attachSpan = root.start("dispatch.workspace.attach");
+    stubFetch(draining, draining, { raw: "\n" + JSON.stringify(ATTACH_OK) });
+    const p = new ResidentExecutor(OPTS).attach(attachSpan);
+    await vi.advanceTimersByTimeAsync(2 * DRAIN_POLL_MS);
+    await p;
+    const span = log.ended("dispatch.workspace.attach.drain-wait");
+    expect(span).toMatchObject({ parentSpanId: attachSpan.id, status: "ok", durationMs: 2 * DRAIN_POLL_MS });
+  });
+
+  it("a drain wait that runs out fails its span with the typed classification and no remote words (issue 2101)", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => Date.now() }).start("request", { sinks: [log] });
+    const attachSpan = root.start("dispatch.workspace.attach");
+    const polls = DRAIN_FALLBACK_WAIT_MS / DRAIN_POLL_MS;
+    stubFetch(...Array.from({ length: polls + 2 }, () => draining));
+    const p = new ResidentExecutor(OPTS)
+      .attach(attachSpan, { drainBoundMs: DRAIN_FALLBACK_WAIT_MS })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(DRAIN_FALLBACK_WAIT_MS + 1_000);
+    await p;
+    const span = log.ended("dispatch.workspace.attach.drain-wait");
+    // The typed error's classification, never the refusal's free text: the
+    // words stay on the card note and the attach error (tracing.md item 2).
+    expect(span).toMatchObject({ status: "error", errorKind: "infra", errorCode: "attach" });
+    expect(JSON.stringify(span)).not.toContain("draining:");
+  });
+
+  it("the wake wait after a transient refusal is its own span under the attach span (issue 2101): dispatch.workspace.attach.wake-wait", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => Date.now() }).start("request", { sinks: [log] });
+    const attachSpan = root.start("dispatch.workspace.attach");
+    stubFetch(
+      { body: { error: "attach-failed: Network connection lost.", status: 500, transient: true } },
+      { body: { state: "warm", reason: "", inFlight: 0 } },
+      { raw: "\n" + JSON.stringify(ATTACH_OK) },
+    );
+    const p = new ResidentExecutor(OPTS).attach(attachSpan);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await p;
+    const span = log.ended("dispatch.workspace.attach.wake-wait");
+    expect(span).toMatchObject({ parentSpanId: attachSpan.id, status: "ok" });
+  });
+
+  it("a stop during the wake wait's initial status probe closes the wake span as failed", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: unknown, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        if (calls.length === 1) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ error: "attach-failed: Network connection lost.", status: 500, transient: true }),
+              { status: 200 },
+            ),
+          );
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal?.aborted) reject(signal.reason);
+          else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }),
+    );
+    const log = recordingSink();
+    const root = createTracer({ clock: () => Date.now() }).start("request", { sinks: [log] });
+    const attachSpan = root.start("dispatch.workspace.attach");
+    const control = new AbortController();
+    const outcome = new ResidentExecutor(OPTS).attach(attachSpan, { signal: control.signal }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.map(route)).toEqual(["/attach", "/status"]);
+
+    control.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    const err = await outcome;
+
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("aborted");
+    expect(log.ended("dispatch.workspace.attach.wake-wait")).toMatchObject({
+      parentSpanId: attachSpan.id,
+      status: "error",
+      errorKind: "transport",
+    });
   });
 });

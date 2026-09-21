@@ -23,6 +23,8 @@ import {
   type SeededSandbox,
 } from "./seedPlan.js";
 import {
+  DRAIN_FALLBACK_WAIT_MS,
+  drainWaitOf,
   ResidentExecutor,
   ResidentLeaseSpentError,
   ResidentNeedsRefError,
@@ -303,6 +305,11 @@ export interface ExecutorSelection {
    *  path — the dispatcher names the path to the model and checks the sha
    *  against the PR head before a review runs. Unset on every other path. */
   binding?: ResidentBinding;
+  /** The drain's share of a failed attach's wait (issue 2101): on the sandbox
+   *  fallback after a drained fleet refused the run, so the dispatcher still
+   *  publishes the run's `drain_wait` note — the resident path carries it on
+   *  the binding instead. */
+  drainWaitMs?: number;
 }
 
 // Resident lifecycle states the bot attaches in — `isServiceable` in
@@ -403,6 +410,8 @@ export async function makeExecutor(
   let reason: string | undefined;
   /** The steps of a resident attach that failed before the sandbox fallback. */
   let failedAttach: ResidentTrace | undefined;
+  /** The drain's share of a failed attach's wait, for the run's `drain_wait` note. */
+  let drainWaitMs: number | undefined;
   if (ctx.repo && opts.execution?.resident) {
     const resident = opts.execution.resident;
     const tokenEnv = resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN";
@@ -495,6 +504,10 @@ export async function makeExecutor(
             signal: ctx.stopSignal,
             budgetMs: Math.max(0, FIRST_ATTACH_WAIT_MS - probeWaitMs),
             waitedMs: probeWaitMs,
+            // A drained fleet is waited for under the FALLBACK's own cost, not
+            // the deploy's (issue 2101): this attach has the seeded sandbox
+            // below to fall to, so the drain wait ends in minutes.
+            drainBoundMs: DRAIN_FALLBACK_WAIT_MS,
           },
         );
         // Item 27: the wait is on the card whichever state the restore landed on.
@@ -512,6 +525,7 @@ export async function makeExecutor(
         // is that failure, and falls cold as it always did.
         if (isRunStopError(err)) throw err;
         failedAttach = residentTraceOf(err);
+        drainWaitMs = drainWaitOf(err);
         // Item 27: an attach that fails after a wait names the wait too — the
         // probe's through a typed blip (item 9) and the restore's alike, so a
         // run that started late says why even when it then fell cold.
@@ -561,6 +575,7 @@ export async function makeExecutor(
           backend: perThreadBackend(opts),
           seeded: outcome.seeded,
           ...(failedAttach ? { trace: failedAttach.steps } : {}),
+          ...(drainWaitMs !== undefined ? { drainWaitMs } : {}),
         };
       }
       return {
@@ -568,6 +583,7 @@ export async function makeExecutor(
         note: `${reason} — using fresh sandbox${outcome ? ` (${outcome.why})` : ""}`,
         backend: perThreadBackend(opts),
         ...(failedAttach ? { trace: failedAttach.steps } : {}),
+        ...(drainWaitMs !== undefined ? { drainWaitMs } : {}),
       };
     }
   }
@@ -823,8 +839,9 @@ async function openResident(
    *  stop, which ends the wait at once, and the budget past which the attach
    *  fails with the wake's strike; `waitedMs` is a wait the caller already
    *  spent before this attach (the selection probe's), added to the total the
-   *  card names. */
-  wait: { signal?: AbortSignal; budgetMs?: number; waitedMs?: number } = {},
+   *  card names; `drainBoundMs` bounds a drained fleet's wait by the caller's
+   *  fallback cost (issue 2101). */
+  wait: { signal?: AbortSignal; budgetMs?: number; waitedMs?: number; drainBoundMs?: number } = {},
 ): Promise<ExecutorSelection> {
   let executor = new ResidentExecutor(opts);
   let binding: ResidentBinding;

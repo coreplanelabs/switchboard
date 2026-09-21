@@ -1647,8 +1647,10 @@ export async function dispatch(
     // the note is what `runs friction` reads as the wait's category and the
     // plane's table shows as the run's cause — a half-hour wait with a card
     // that counted "attaching the workspace…" and a friction verdict of
-    // "none" was the incident's shape.
-    const drainWaitMs = round.selection.binding?.drainWaitMs ?? 0;
+    // "none" was the incident's shape. A run the drain sent to the sandbox
+    // fallback carries the wait on the selection instead of a binding (issue
+    // 2101: the incident's run fell cold and `runs friction` counted zero).
+    const drainWaitMs = round.selection.binding?.drainWaitMs ?? round.selection.drainWaitMs ?? 0;
     if (drainWaitMs > 0)
       registry.publish(run.id, {
         type: "run_note",

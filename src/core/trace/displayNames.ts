@@ -46,6 +46,15 @@ export const DISPLAY_NAMES = {
 /** The fallback for a prefixed span whose leaf we cannot name. */
 export const GENERIC_STEP_NAME = "a Switchboard step";
 
+/** The bot client's own attach waits (issue 2101): spans under the attach
+ *  span, named here rather than in the resident step table — that table is
+ *  the Worker's vocabulary, scanned against its source, and these waits run
+ *  in the bot. */
+export const ATTACH_WAIT_NAMES = {
+  "drain-wait": "waiting for the deploy to finish",
+  "wake-wait": "waiting for the resident to wake",
+} as const;
+
 /** The display name for any span name: the table for an enumerated name; for a
  *  prefix family the tool's own name (`tool.bash` → `bash`), the MCP tool's own
  *  name (`mcp.<server>.<tool>` → `<tool>`), or the resident step's label, with
@@ -59,7 +68,11 @@ export function displayNameOf(name: string): string {
     return leaf && leaf !== "mcp" ? leaf : GENERIC_STEP_NAME;
   }
   for (const prefix of ["dispatch.workspace.attach.", "run.command."]) {
-    if (name.startsWith(prefix)) return residentStepLabel(name.slice(prefix.length)) ?? GENERIC_STEP_NAME;
+    if (name.startsWith(prefix)) {
+      const leaf = name.slice(prefix.length);
+      if (leaf in ATTACH_WAIT_NAMES) return ATTACH_WAIT_NAMES[leaf as keyof typeof ATTACH_WAIT_NAMES];
+      return residentStepLabel(leaf) ?? GENERIC_STEP_NAME;
+    }
   }
   return GENERIC_STEP_NAME;
 }
