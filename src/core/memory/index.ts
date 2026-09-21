@@ -1,4 +1,5 @@
-import { parseModelRef, type Provider } from "../provider.js";
+import { parseModelRef, type Provider, type ProviderConfig } from "../provider.js";
+import { turnEffort } from "../dispatch/turnEffort.js";
 import type { Actor, ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";
 import type { MemoryConfig, MemoryRecord, MemoryStore } from "./types.js";
@@ -98,6 +99,9 @@ export function scheduleReflection(input: {
   cfg: MemoryConfig | undefined;
   store: MemoryStore | undefined;
   providers: { get(name: string): Provider };
+  /** The config's provider blocks, for the extractor's model card — where
+   *  `memory.effort` is decided (`turnEffort`). Absent → no effort is sent. */
+  providerBlocks?: Readonly<Record<string, ProviderConfig>>;
   /** The run's resolved model ref — the fallback when `memory.model` is unset. */
   runModelRef: string;
   gate: ReflectGateInput;
@@ -132,10 +136,15 @@ export function scheduleReflection(input: {
     warn(`reflection skipped: ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
+  // `memory.effort` (memory.md item 11): decided against the extractor model's
+  // card; a degraded or dropped tier is a log line, never a skipped pass.
+  const effort = turnEffort(input.cfg.model ?? input.runModelRef, input.cfg.effort, input.providerBlocks ?? {});
+  if (effort.note) info(`reflection effort: ${effort.note}`);
   trackReflection(
     reflect({
       provider,
       model,
+      ...(effort.request ? { effort: effort.request.effort, effortWord: effort.request.effortWord } : {}),
       store: selectMemoryStore(input.cfg, input.store),
       scopeKeys: requestScopeKeys(input.organization, input.userId, { channelId: input.channelId, repo: input.repo }),
       actor: reflectionActor(input.actor, { channelId: input.channelId, repo: input.repo }),

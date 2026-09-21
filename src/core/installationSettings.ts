@@ -96,7 +96,18 @@ export function installationSettings(config: AppConfig, caps: Capabilities): Ins
   );
   for (const [agent, model] of Object.entries(d.models).sort(([a], [b]) => a.localeCompare(b)))
     settings.push(row(`defaults.models.${agent}`, model, model, "runtime", `the model the ${agent} preset runs on`));
-  for (const [agent, effort] of Object.entries(d.efforts ?? {}).sort(([a], [b]) => a.localeCompare(b)))
+  settings.push(
+    row(
+      "defaults.efforts.general",
+      d.efforts?.general,
+      "the model's own default",
+      "runtime",
+      "how hard the general preset's model thinks per turn — the operator's own turn included",
+    ),
+  );
+  for (const [agent, effort] of Object.entries(d.efforts ?? {})
+    .filter(([agent]) => agent !== "general")
+    .sort(([a], [b]) => a.localeCompare(b)))
     settings.push(
       row(
         `defaults.efforts.${agent}`,
@@ -132,6 +143,13 @@ export function installationSettings(config: AppConfig, caps: Capabilities): Ins
   );
 
   settings.push(
+    row(
+      "intake.effort",
+      config.intake?.effort,
+      "the model's own default",
+      "config",
+      "how hard the thread-reply gate's model thinks per verdict",
+    ),
     row(
       "references.enabled",
       config.references?.enabled,
@@ -248,6 +266,13 @@ export function installationSettings(config: AppConfig, caps: Capabilities): Ins
       "active records kept per scope before the least recently used are evicted",
     ),
     row("memory.model", memory?.model, "the run's own model", "config", "the model the reflection pass distills with"),
+    row(
+      "memory.effort",
+      memory?.effort,
+      "the model's own default",
+      "config",
+      "how hard the reflection pass's model thinks per distillation",
+    ),
   );
 
   const artifacts = config.artifacts;

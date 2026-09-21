@@ -10,6 +10,7 @@ import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messag
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import type {
+  AnthropicEffort,
   AnthropicOptions,
   AssistantMessage as PiAssistantMessage,
   Context,
@@ -137,16 +138,17 @@ export class PiAiProvider implements Provider {
   }
 
   /** The model pi is handed for one request: the block as its provider, the
-   *  request's output cap as its own, no thinking (neither caller asks for
-   *  any), text and images in, the zero rate card. */
-  model(id: string, maxTokens: number): Model<PiApi> {
+   *  request's output cap as its own, thinking only when the request carries
+   *  an effort (the card-decided word rides the options, `piStreamOptions`),
+   *  text and images in, the zero rate card. */
+  model(id: string, maxTokens: number, reasoning = false): Model<PiApi> {
     return {
       id,
       name: id,
       api: this.api,
       provider: this.name,
       baseUrl: this.baseUrl,
-      reasoning: false,
+      reasoning,
       input: ["text", "image"],
       cost: { ...ZERO_RATES },
       contextWindow: CONTEXT_WINDOW,
@@ -167,7 +169,7 @@ export class PiAiProvider implements Provider {
       if (!secret) throw new Error(`Provider "${this.name}": ${this.keyEnv} is not set`);
       key = secret.reveal();
     }
-    const model = this.model(req.model, req.maxTokens);
+    const model = this.model(req.model, req.maxTokens, req.effort !== undefined);
     const options = {
       ...piStreamOptions(this.api, req, key),
       ...(this.fetchImpl ? { fetch: this.fetchImpl } : {}),
@@ -211,11 +213,25 @@ export function piStreamOptions(
   req: CompletionRequest,
   key: string | undefined,
 ): AnthropicOptions | OpenAICompletionsOptions | OpenAIResponsesOptions {
+  // The request's effort, in the API's own dialect (routing-and-config item
+  // 2): the card-decided wire word (`effortWord`, vouched or degraded by the
+  // levels map — the tier's own word when a caller card-resolved nothing),
+  // Anthropic's `thinkingEnabled` + `effort`, both OpenAI dialects'
+  // `reasoningEffort`. No effort sends nothing — the request is byte-identical
+  // to before the field existed.
+  const word = req.effort !== undefined ? (req.effortWord ?? req.effort) : undefined;
+  const effort =
+    word === undefined
+      ? {}
+      : api === "anthropic-messages"
+        ? { thinkingEnabled: true, effort: word as AnthropicEffort }
+        : { reasoningEffort: word as OpenAICompletionsOptions["reasoningEffort"] };
   const shared = {
     ...(key !== undefined ? { apiKey: key } : { apiKey: "unused", headers: { Authorization: null } }),
     maxTokens: req.maxTokens,
     ...(req.signal ? { signal: req.signal } : {}),
     cacheRetention: req.cacheTtl === "1h" ? ("long" as const) : ("short" as const),
+    ...effort,
   };
   if (!req.toolChoice) return shared;
   if (req.toolChoice.type === "any") {

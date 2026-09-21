@@ -435,6 +435,17 @@ describe("reflect (one extractor call → store.write)", () => {
     expect(provider.requests[0].model).toBe("cheap-model");
     expect(provider.requests[0].system).toBe(REFLECTION_SYSTEM);
     expect(provider.requests[0].tools).toBeUndefined();
+    // No `memory.effort` → no effort on the request (the model's own default).
+    expect(provider.requests[0].effort).toBeUndefined();
+    expect(provider.requests[0].effortWord).toBeUndefined();
+  });
+
+  it("`memory.effort` as the caller card-decided it rides the one completion — the tier and the wire word (memory.md item 11)", async () => {
+    const provider = fakeProvider(goodReply);
+    const store = new InMemoryMemoryStore();
+    await reflect({ ...base, provider, store, effort: "low", effortWord: "quick" });
+    expect(provider.requests[0].effort).toBe("low");
+    expect(provider.requests[0].effortWord).toBe("quick");
   });
 
   it("shows the extractor the scope's relevant existing records, then writes with supersede applied", async () => {

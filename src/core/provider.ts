@@ -50,6 +50,11 @@ export interface CompletionRequest {
   maxTokens: number;
   /** model effort hint; providers apply it only where the model supports it */
   effort?: Effort;
+  /** The wire word the model card decided for `effort` (`turnEffort`,
+   *  routing-and-config item 2) — vouched or degraded by the card's levels
+   *  map. Rides only beside `effort`; absent, a provider that applies effort
+   *  sends the tier's own word. */
+  effortWord?: string;
   /** Cancellation for a hard run stop: providers pass it to their HTTP
    *  call so an aborted run stops billing/streaming now. Absent → never aborts. */
   signal?: AbortSignal;

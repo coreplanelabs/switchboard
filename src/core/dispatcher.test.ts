@@ -6053,6 +6053,20 @@ describe("cross-session memory WRITE path", () => {
     expect(written.every((r) => typeof r.sourceRunId === "string" && r.sourceRunId.length > 0)).toBe(true);
   });
 
+  // Feature: docs/reference/specs/memory.md item 11 — `memory.effort` is the
+  // extractor's own effort key beside `memory.model`: card-decided
+  // (`turnEffort`) and riding the one reflection call; unset sends nothing.
+  it("`memory.effort` rides the reflection call with its card-decided word; unset sends no effort", async () => {
+    const { requests } = await run(MEMORY_WRITE_YAML + "  effort: low\n", [], { toolFirst: true });
+    const reflection = requests.find((r) => r.system === REFLECTION_SYSTEM);
+    expect(reflection?.effort).toBe("low");
+    expect(reflection?.effortWord).toBe("low");
+    const { requests: bare } = await run(MEMORY_WRITE_YAML, [], { toolFirst: true });
+    const bareReflection = bare.find((r) => r.system === REFLECTION_SYSTEM);
+    expect(bareReflection?.effort).toBeUndefined();
+    expect(bareReflection?.effortWord).toBeUndefined();
+  });
+
   // Feature: docs/reference/specs/memory.md item 12 — a reflection's outcome is
   // observable: one `[memory] <threadKey>` line on stdout says what it wrote,
   // so the rate of rejections against successes can be read off the log.

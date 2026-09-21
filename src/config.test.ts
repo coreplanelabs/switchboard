@@ -382,6 +382,57 @@ users:
   });
 });
 
+describe("the non-preset turns' effort keys (intake.effort, memory.effort, operator)", () => {
+  const yamlWith = (block: string, operatorEffort?: string) => `
+organization: acme
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+${operatorEffort ? `  efforts:\n    general: ${operatorEffort}\n` : ""}${block}
+`;
+
+  it("each key loads with a valid tier and reads back off the config", async () => {
+    const s = store(yamlWith("intake:\n  effort: medium\nmemory:\n  effort: high", "xhigh"));
+    expect(s.config.defaults.efforts?.general).toBe("xhigh");
+    expect(s.config.intake?.effort).toBe("medium");
+    expect(s.config.memory?.effort).toBe("high");
+  });
+
+  it("config show names each installation effort, including the model's own default when unset", () => {
+    const configured = store(yamlWith("intake:\n  effort: medium\nmemory:\n  effort: high", "xhigh"));
+    expect(configured.describeConfig("slack:CX", "slack:UX").installationEfforts).toEqual({
+      operator: "xhigh",
+      intake: "medium",
+      memory: "high",
+    });
+    expect(configured.describe("slack:CX", "slack:UX")).toContain(
+      "*Installation efforts:* `defaults.efforts.general=xhigh`, `intake.effort=medium`, `memory.effort=high`",
+    );
+
+    const unset = store(yamlWith(""));
+    expect(unset.describeConfig("slack:CX", "slack:UX").installationEfforts).toEqual({});
+    expect(unset.describe("slack:CX", "slack:UX")).toContain(
+      "*Installation efforts:* `defaults.efforts.general=the model's own default`, `intake.effort=the model's own default`, `memory.effort=the model's own default`",
+    );
+  });
+
+  it("intake.effort outside the five tiers is rejected at load, naming the valid ones", async () => {
+    expect(() => store(yamlWith("intake:\n  effort: turbo"))).toThrow(
+      /intake\.effort is "turbo" — valid efforts: low, medium, high, xhigh, max/,
+    );
+  });
+
+  it("memory.effort outside the five tiers is rejected at load, naming the valid ones", async () => {
+    expect(() => store(yamlWith("memory:\n  effort: turbo"))).toThrow(
+      /memory\.effort is "turbo" — valid efforts: low, medium, high, xhigh, max/,
+    );
+  });
+});
+
 describe("permission gates", () => {
   const s = store();
 

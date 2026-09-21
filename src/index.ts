@@ -3,9 +3,8 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
-import { intakeModelRef, openConfigStore } from "./config.js";
-import { parseModelRef } from "./core/provider.js";
-import { providerStructuredModel } from "./core/dispatch/route.js";
+import { openConfigStore } from "./config.js";
+import { intakeCompletion } from "./intakeModel.js";
 import { providerModelsReader } from "./core/dispatch/providerModels.js";
 import { configuredModelRefs } from "./core/commands/providers.js";
 import type { IntakeReceipt } from "./core/runLedger/types.js";
@@ -804,9 +803,10 @@ export async function runBot(): Promise<void> {
   // replies run as `always`: degrade open, never a silence nothing decided.
   let slackIntake: SlackIntakeGate | undefined;
   try {
-    const intakeRef = intakeModelRef(config.config);
-    if (intakeRef) {
-      const ref = parseModelRef(intakeRef);
+    // `intakeCompletion` owns the verdict's model and card-decided effort
+    // together: the composition root cannot wire one without the other.
+    const intake = intakeCompletion(config.config, completions);
+    if (intake) {
       const intakeLedger = ledgerClient
         ? {
             readIntake: (key: string) => ledgerClient.readIntake(key),
@@ -823,11 +823,11 @@ export async function runBot(): Promise<void> {
       slackIntake = wireIntakeGate({
         intakeModeFor: (threadKey, userId, channelId) => config.intakeModeFor(threadKey, userId, channelId),
         deps: {
-          model: providerStructuredModel(completions.get(ref.provider), ref.model),
+          model: intake.model,
           ledger: intakeLedger,
           now: systemClock,
         },
-        modelRef: intakeRef,
+        modelRef: intake.modelRef,
         gen: PROCESS_STARTED_AT,
         runs: runsService,
         confirmations,

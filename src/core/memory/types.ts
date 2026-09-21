@@ -9,6 +9,7 @@
  *  live in thread history; duplicating them defeats the token win. Every record
  *  keeps provenance (`sourceThreadKey`/`sourceRunId`) so a distilled fact can be
  *  re-grounded in the run that produced it. */
+import type { Effort } from "../../effort.js";
 import type { TraceOptions } from "../trace/types.js";
 
 export interface MemoryRecord {
@@ -170,6 +171,10 @@ export interface MemoryConfig {
   /** `<provider>/<model>` ref for the post-run reflection (write path) — a cheap
    *  tier. Absent → the run's own resolved model. Never hardcoded (invariant 7). */
   model?: string;
+  /** How hard the extractor's model thinks, one of the five tiers; unset → the
+   *  model's own default. Applied through the model card like a preset's
+   *  effort (`turnEffort`, memory.md item 11). */
+  effort?: Effort;
   /** The durable store: the Memory Worker (deploy/cloudflare-memory/). Absent →
    *  an in-process store that a restart loses (dev only; startup warns). */
   worker?: {
