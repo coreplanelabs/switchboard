@@ -207,7 +207,14 @@ describe("isCoordinatorUnit — one unit's row", () => {
     pr: { number: 979, url: "https://github.com/acme/api/pull/979" },
     resume: { pr: 979, headSha: "a".repeat(40), url: "https://github.com/acme/api/pull/979" },
     rounds: [{ index: 0, agent: "coding", outcome: "started", at: 1_000 }],
-    ending: { kind: "merge_ready", report: "✅ Merge-ready after 1 review round", at: 2_000 },
+    ending: {
+      kind: "failed",
+      cause: "step_threw",
+      step: "U12/2/review/read/1",
+      round: 2,
+      report: "The runner failed while reading the review",
+      at: 2_000,
+    },
     startedAt: 900,
   };
 
@@ -290,6 +297,9 @@ describe("isCoordinatorUnit — one unit's row", () => {
     expect(isCoordinatorUnit({ ...unit, pr: { number: "979" } })).toBe(false);
     expect(isCoordinatorUnit({ ...unit, rounds: [{ index: 0 }] })).toBe(false);
     expect(isCoordinatorUnit({ ...unit, ending: { kind: "merged" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, ending: { ...unit.ending!, step: "bad:step" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, ending: { ...unit.ending!, round: -1 } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, ending: { ...unit.ending!, round: 1.5 } })).toBe(false);
     expect(isCoordinatorUnit({ ...unit, issue: "834" })).toBe(false);
     expect(isCoordinatorUnit(null)).toBe(false);
   });

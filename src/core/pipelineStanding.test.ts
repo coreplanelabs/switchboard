@@ -113,9 +113,10 @@ function unit(name: string, state: string, at: number, extra: { pr?: number; thr
 describe("the fold binds rounds by adjacency, ignores a companion's state and is total over the unions", () => {
   it("the runtime tables cover every member of both unions and nothing else", () => {
     expect(Object.keys(ROUND_STAGE).sort()).toEqual([...ROUND_OUTCOME_WORDS].sort());
-    // `blocked` is a unit status the driver posts to `unit-end` for a unit
-    // that never started — the one word beyond the ending union.
-    expect(Object.keys(ENDING_STAGE).sort()).toEqual([...UNIT_ENDING_WORDS, "blocked"].sort());
+    // `blocked` and `failed` are unit statuses the driver posts to `unit-end`
+    // beyond the machine's ending union: `blocked` for a unit that never
+    // started, `failed` for a step that threw inside the walk (issue 2100).
+    expect(Object.keys(ENDING_STAGE).sort()).toEqual([...UNIT_ENDING_WORDS, "blocked", "failed"].sort());
     for (const o of ROUND_OUTCOME_WORDS) expect(typeof roundStageDecided(o)).toBe("string");
     for (const k of UNIT_ENDING_WORDS) expect(typeof endingStageDecided(k)).toBe("string");
   });
@@ -276,7 +277,7 @@ describe("the user's words for endings and round outcomes (record 0066)", () => 
     expect(endingWordOf("held")).toBe("held");
     expect(endingWordOf("stopped")).toBe("stopped");
     expect(endingWordOf("already_landed")).toBe("merged");
-    for (const kind of [...UNIT_ENDING_WORDS, "blocked"]) expect(endingWordOf(kind)).not.toMatch(/_/);
+    for (const kind of [...UNIT_ENDING_WORDS, "blocked", "failed"]) expect(endingWordOf(kind)).not.toMatch(/_/);
     for (const outcome of ROUND_OUTCOME_WORDS) expect(roundOutcomeWordOf(outcome)).not.toMatch(/_/);
   });
 

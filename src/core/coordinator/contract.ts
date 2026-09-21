@@ -462,8 +462,12 @@ export interface CoordinatorUnit {
    *  item 9) — a mismatch to be seen, since the child's parser holds an approve
    *  to the same level. */
   rounds: Array<{ index: number; agent: string; outcome: string; at: number; gate?: RoundGate }>;
-  /** How the unit ended: the ending's kind and the thread's report, when it has. */
-  ending?: { kind: string; report: string; at: number };
+  /** How the unit ended: the ending's kind and the thread's report, when it
+   *  has. `cause` names the machine's reason behind a driver-posted kind;
+   *  `step` and `round` locate that reason without parsing the report. For a
+   *  `step_threw` failure the driver records all available fields before it
+   *  rethrows (issue 2100); unit-start has no round yet. */
+  ending?: { kind: string; report: string; at: number; cause?: string; step?: string; round?: number };
   startedAt?: number;
 }
 
@@ -578,7 +582,16 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
     return false;
   if (
     r.ending !== undefined &&
-    !(isObject(r.ending) && isText(r.ending.kind) && isText(r.ending.report, MAX_REPORT) && isFinite(r.ending.at))
+    !(
+      isObject(r.ending) &&
+      isText(r.ending.kind) &&
+      isText(r.ending.report, MAX_REPORT) &&
+      isFinite(r.ending.at) &&
+      (r.ending.cause === undefined || isText(r.ending.cause, 64)) &&
+      (r.ending.step === undefined || (typeof r.ending.step === "string" && STEP_NAME_PATTERN.test(r.ending.step))) &&
+      (r.ending.round === undefined ||
+        (typeof r.ending.round === "number" && Number.isInteger(r.ending.round) && r.ending.round >= 0))
+    )
   )
     return false;
   if (r.startedAt !== undefined && !isFinite(r.startedAt)) return false;
