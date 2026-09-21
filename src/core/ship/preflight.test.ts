@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PullRequestFacts, RepoShipInfo } from "../../execution/githubPulls.js";
 import type { RefusalCause, RefusalCode } from "../refusal.js";
+import { resolveRepoContext } from "../repoContext.js";
 import { shipPreflight, shipTaskText, shipUnitText, type ShipPreflightInput } from "./preflight.js";
 
 const HEAD = "a".repeat(40);
@@ -260,7 +261,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     expect(throwing).toEqual({ ok: true, entry: { repo: "acme/api", base: undefined } });
   });
 
-  it("every gate's refusal carries its own `ship_preflight_*` code and the table's cause — ten codes, one per gate, the result carrying it (record 0054)", async () => {
+  it("every gate's refusal carries its own `ship_preflight_*` code and the table's cause — nine codes, one per gate, the result carrying it (record 0054)", async () => {
     const cases: Array<{ gate: string; code: RefusalCode; cause: RefusalCause; input: ShipPreflightInput }> = [
       {
         gate: "channel",
@@ -320,16 +321,6 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
         cause: "request",
         input: input({ requestText: "" }),
       },
-      {
-        gate: "base ref missing",
-        code: "ship_preflight_base_missing",
-        cause: "request",
-        input: input({
-          requestText: "in acme/api: fix it on branch feat/gone",
-          repoCtx: { repo: "acme/api", ref: "feat/gone" },
-          refExists: async () => false,
-        }),
-      },
     ];
     const codes = new Set<string>();
     for (const c of cases) {
@@ -343,7 +334,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
       expect(res.refusal.text, c.gate).toBe(res.reply);
       codes.add(res.refusal.code);
     }
-    expect(codes.size, "one code per gate, never a shared one").toBe(10);
+    expect(codes.size, "one code per gate, never a shared one").toBe(9);
   });
 });
 
@@ -369,7 +360,7 @@ describe("shipPreflight — the channel capability (agent-ship item 1, record 00
   });
 });
 
-describe("shipPreflight — the base ref existence check before the pipeline branch is cut (agent-ship item 10, issue 1827)", () => {
+describe("shipPreflight — the base ref existence check before the pipeline branch is cut (agent-ship item 10, issues 1827 and 2161)", () => {
   const FLAKE_TASK = "in acme/api: the ci job flakes on web/src/pages/runPage.test.ts — fix it";
 
   it("an ambiguously bound ref that does not exist falls back to the default branch, the fallback named on the entry", async () => {
@@ -388,22 +379,22 @@ describe("shipPreflight — the base ref existence check before the pipeline bra
     expect(refExists).toHaveBeenCalledWith("acme/api", "web/src/pages/runPage.test.ts");
   });
 
-  it("an explicitly named ref (branch keyword) that does not exist is refused fail-closed naming the ref", async () => {
+  it("a missing branch token falls back to the default branch instead of refusing or naming a command", async () => {
     const res = await shipPreflight(
       input({
-        requestText: "in acme/api: fix the login redirect on branch feat/gone",
+        requestText: "in acme/api branch:feat/gone fix the login redirect",
         repoCtx: { repo: "acme/api", ref: "feat/gone" },
         refExists: async () => false,
       }),
     );
-    expect(res).toMatchObject({ ok: false, where: "base ref missing" });
-    if (res.ok) return;
-    expect(res.refusal.code).toBe("ship_preflight_base_missing");
-    expect(res.reply).toContain("`feat/gone`");
-    expect(res.reply).toContain("acme/api");
+    expect(res).toEqual({
+      ok: true,
+      entry: { repo: "acme/api", base: "main", baseFallback: { requested: "feat/gone" } },
+    });
+    expect(JSON.stringify(res)).not.toMatch(/agent:ship|repo test|Name an existing branch|Retarget/);
   });
 
-  it("an explicitly named ref (tree URL) that does not exist is refused the same way — slashes in the ref included", async () => {
+  it("a missing tree-URL ref falls back the same way — slashes in the ref included", async () => {
     const res = await shipPreflight(
       input({
         requestText: "fix the login redirect on https://github.com/acme/api/tree/feat/gone",
@@ -411,8 +402,28 @@ describe("shipPreflight — the base ref existence check before the pipeline bra
         refExists: async () => false,
       }),
     );
-    expect(res).toMatchObject({ ok: false, where: "base ref missing" });
-    if (!res.ok) expect(res.reply).toContain("`feat/gone`");
+    expect(res).toEqual({
+      ok: true,
+      entry: { repo: "acme/api", base: "main", baseFallback: { requested: "feat/gone" } },
+    });
+  });
+
+  it("the 20:05Z narrative fixture binds no ref and runs on the default branch", async () => {
+    const repo = ["core", "planelabs/switchboard"].join("");
+    const requestText = `in coreplanelabs/switchboard: fix issue #2154 — a human-gated review finding has no way back into the pipeline once the person answers. Today on PR #2140 the review found F2 "cold-reader acceptance gate was not independently run" (minor, humanGated: true); the coding child rightly declined it ("this coding context cannot manufacture independent evidence") and the pipeline ended held; the maintainer posted the receipt as a PR comment; a re-issue (attempt 3, run d69afa9a) adopted the PR and went straight to a review round, the reviewer re-raised the same human-gated finding, and the pipeline ended held again three minutes later, having never read the comment that answered it. The recovery took two hand-posted steps (a directive coding run on the branch with the answer, then another re-issue). Hold the invariant from record 0054: a human-gated finding is a question to a person, and the person's answer resumes the unit. Direction: when a review round yields only human-gated findings, the unit does not end — it parks with the question (record 0051's idle state, the finding as the pending state on the thread) and resumes on the next human input on the pull request or in the unit thread (a PR comment or a thread reply from a person), which becomes the fix round's brief (the finding plus the answer); an adopted attempt on a pull request whose newest human comment postdates the last verdict runs that fix round before the review, never review-first. Tests: a review with one human-gated finding parks the unit instead of ending it held; a person's PR comment resumes it into a fix round carrying the comment; an adopted attempt with a newer human comment runs fix-then-review; a human-gated finding alone never ends a pipeline held. Spec rows in agent-ship.md (the round's endings) and agent-review.md (humanGated). Receipt runnable when: worker:bot ≥ this PR's merge sha and a review posts a human-gated finding on a live unit (the next record acceptance is the natural fixture).`;
+    const repoCtx = await resolveRepoContext({ text: requestText }, []);
+    const refExists = vi.fn(async () => false);
+    const res = await shipPreflight(
+      input({
+        requestText,
+        repoCtx,
+        repoInfo: async () => ({ defaultBranch: "main" }),
+        refExists,
+      }),
+    );
+    expect(repoCtx).toEqual({ repo });
+    expect(res).toEqual({ ok: true, entry: { repo, base: "main" } });
+    expect(refExists).not.toHaveBeenCalled();
   });
 
   it("an existing ref is unchanged — the entry carries it as the base with no fallback", async () => {
@@ -458,12 +469,14 @@ describe("shipPreflight — the base ref existence check before the pipeline bra
     expect(refExists).not.toHaveBeenCalled();
   });
 
-  it("a pull request's own base that does not exist is refused fail-closed naming the ref — adopt and resume alike", async () => {
+  it("a pull request's missing base falls back to the repository default — adopt and resume alike", async () => {
     const adopt = await shipPreflight(
       input({ repoCtx: { repo: "acme/api", pr: 7 }, prFacts: async () => openPr(), refExists: async () => false }),
     );
-    expect(adopt).toMatchObject({ ok: false, where: "base ref missing" });
-    if (!adopt.ok) expect(adopt.reply).toContain("`release/1.x`");
+    expect(adopt).toMatchObject({
+      ok: true,
+      entry: { branch: "feat/rate-limit", base: "main", baseFallback: { requested: "release/1.x" } },
+    });
     const resume = await shipPreflight(
       input({
         requestText: PR_URL,
@@ -472,7 +485,10 @@ describe("shipPreflight — the base ref existence check before the pipeline bra
         refExists: async () => false,
       }),
     );
-    expect(resume).toMatchObject({ ok: false, where: "base ref missing" });
+    expect(resume).toMatchObject({
+      ok: true,
+      entry: { branch: "feat/rate-limit", base: "main", baseFallback: { requested: "release/1.x" } },
+    });
   });
 
   it("a pull request's own base that exists leaves the adopt unchanged; a PR without its own base spends no lookup", async () => {

@@ -73,12 +73,12 @@ import type { PrSize } from "./digestCoverage.js";
 // `unverifiedRepo` and binds nothing — never a silent fall back to the
 // thread's old repo, which is the wrong-repo run this strength exists to end.
 //
-// Ref extraction is deliberately conservative (ref binding is
-// explicit-or-ask-once, never a silent guess): explicit forms only —
-// "on branch X" / `branch:X`, "on X" where X is a well-known default branch
-// or slash-shaped, a /tree/<ref> URL, or a PR's head ref. When in doubt the
-// ref stays undefined and attach either reuses the resident's sticky binding
-// or answers needs-ref (the dispatcher then asks ONE clarifying question).
+// Ref extraction is deliberately conservative: a ref is a typed slot, never
+// a guess from narrative prose. Only the head-of-ask routing clause
+// (`… in owner/name on branch X: task`), a `branch:X` token, a /tree/<ref>
+// URL, or a PR's head ref fills it. When in doubt the ref stays undefined and
+// attach either reuses the resident's sticky binding or answers needs-ref (the
+// dispatcher then asks ONE clarifying question).
 //
 // PR head refs are resolved via the GitHub REST API authenticated with
 // resolveGithubToken() — NEVER a `gh` shell-out (no host gh credential in
@@ -139,8 +139,8 @@ export interface RepoContext {
    *  branch (`ownPrOf`; docs/reference/specs/resident-repos.md item 16). */
   prFromRecord?: boolean;
   /** True when `ref` was taken from a cited PR's head branch (the REST head
-   *  fetch below), false/unset when `ref` came from message phrasing (`on X`,
-   *  `/tree/<ref>`) or is absent. A consumer that does NOT bind that PR as its
+   *  fetch below), false/unset when `ref` came from a typed branch form or
+   *  `/tree/<ref>` URL, or is absent. A consumer that does NOT bind that PR as its
    *  target must DROP `ref` — basing new work on a stranger's PR head branch
    *  would carry its commits and dangle when the PR merges. The flag is
    *  decided HERE so it holds even when a later facts fetch fails and the head
@@ -224,9 +224,8 @@ const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 // Repo name: word chars, dots, hyphens (GitHub's charset).
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 // Ref candidates are validated with validRef (the resident's strict ref
-// pattern, shared with residentAdmin.ts) so a hostile or malformed phrase
+// pattern, shared with residentAdmin.ts) so a hostile or malformed token
 // never becomes a refHint.
-const WELL_KNOWN_REFS = new Set(["main", "master", "develop", "trunk"]);
 // Words a person puts between `in` and the target ("in the web repo", "in our
 // web repository"): skipped by the address scan, never themselves an address.
 const DETERMINERS = new Set(["the", "a", "an", "our", "my", "this"]);
@@ -269,7 +268,7 @@ interface Signals {
   /** true when `repo` came from a URL (a bare slug token is weak — see the
    *  file header). `pr` is always strong. */
   repoStrong?: boolean;
-  /** definite ref: keyword phrasing, well-known "on X", /tree/<ref> */
+  /** definite ref: head routing clause, branch token, /tree/<ref> */
   ref?: string;
   /** PR reference; the head ref needs one REST call */
   pr?: { repo: string; number: number };
@@ -286,6 +285,15 @@ interface Signals {
 /** `in <owner/name>` → `{ slug }`; `in <name>` → `{ name }`. */
 type Addressed = { slug: string; name?: undefined } | { name: string; slug?: undefined };
 
+/** The routing clause generated for a repository child, or typed at the head
+ *  of an ask: `[directives] in owner/name on branch <ref>: <task>`. The task
+ *  delimiter is the boundary that keeps a later narrative `on the branch X`
+ *  from becoming a ref. */
+function headBranchRef(text: string): string | undefined {
+  const match = /^\s*(?:(?:<@[^>\s]+>|[a-z]+:\S+)\s+)*(?:in\s+\S+\s+)?on\s+(?:the\s+)?branch\s+(\S+?)\s*:/i.exec(text);
+  return match ? validRef(stripPunct(match[1])) : undefined;
+}
+
 /** Pure, sync signal extraction from one message text (no network). */
 function extractSignals(rawText: string): Signals {
   const text = unwrapSlack(rawText);
@@ -298,9 +306,11 @@ function extractSignals(rawText: string): Signals {
     if (slug) out.pr = { repo: slug, number: Number(prUrl[3]) };
   }
 
-  // Explicit branch keyword: "on [the] branch X" or "branch:X" / "branch=X"
-  const kw = /(?:^|\s)on\s+(?:the\s+)?branch\s+(\S+)/i.exec(text) ?? /(?:^|\s)branch[:=](\S+)/i.exec(text);
-  if (kw) out.ref = validRef(stripPunct(kw[1]));
+  // Typed branch forms only: the head-of-ask routing clause or a branch token.
+  // A phrase with the same words after the task begins is narrative, not a ref.
+  out.ref = headBranchRef(text);
+  const branchToken = /(?:^|\s)branch:(\S+)/i.exec(text);
+  if (!out.ref && branchToken) out.ref = validRef(stripPunct(branchToken[1]));
 
   // Repo URL with an explicit /tree/<ref>
   const treeUrl = /https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+)\/tree\/([^\s?#]+)/i.exec(text);
@@ -326,14 +336,13 @@ function extractSignals(rawText: string): Signals {
   }
 
   // Token scan: bare `owner/name` slugs, `owner/name#N` PR shorthand, and
-  // "on X" ref phrasing. A token in ref position (after "on"/"branch") is
-  // never taken as a repo; an `owner/name`-shaped one there is ambiguous and
-  // recorded separately (the caller resolves it against repo presence).
+  // the legacy `on owner/name` repository mention. A token after `on` or
+  // `branch` is never taken as an ordinary bare repo token.
   //
   // A token inside a code span / fenced block (`like/this`) is code or a path
   // being TALKED ABOUT, never a repo switch — it is excluded from the bare-slug
-  // branch only (see docs/reference/specs/resident-repos.md item 29). Refs (`on \`main\``)
-  // and URL/PR forms are unaffected.
+  // branch only (see docs/reference/specs/resident-repos.md item 29). Typed
+  // branch tokens and URL/PR forms are unaffected.
   const tokens = text.split(/\s+/).filter(Boolean);
   const inCode = text
     .replace(CODE_SPAN, (m) => m.replace(/\S/g, "\u0000"))
@@ -361,7 +370,7 @@ function extractSignals(rawText: string): Signals {
     // mentions, or the start of a line; a bare word deeper in prose is
     // prose). One determiner may sit between the keyword and the target; it
     // is never the target. `on` addresses only with `repo`/`repository` right
-    // after the target — `on X` alone is the ref phrasing below. Recorded
+    // after the target — `on X` alone is prose. Recorded
     // beside the weak-slug scan (the slug still lands in `repo` as before);
     // code spans are paths being talked about.
     const keywordAt =
@@ -374,9 +383,9 @@ function extractSignals(rawText: string): Signals {
         out.addressed = { name: t.toLowerCase() };
     }
     if (prev === "on") {
-      if (!out.ref && WELL_KNOWN_REFS.has(t)) out.ref = t;
-      else if (!out.onSlug && slugOf(t) && validRef(t)) out.onSlug = t;
-      else if (!out.ref && t.includes("/") && !slugOf(t)) out.ref = validRef(t);
+      // Keep the legacy repository mention (`on owner/name`) only. A bare
+      // `on <word>` or slash-shaped token is prose and never fills the ref slot.
+      if (!out.onSlug && slugOf(t) && validRef(t)) out.onSlug = t;
       continue;
     }
     const prShort = /^([^/#\s]+)\/([^/#\s]+)#(\d+)$/.exec(t);
@@ -609,18 +618,12 @@ export async function resolveRepoContext(
   let ref = s.ref;
   let refFromPr = false;
 
-  // "on <owner/name-shaped>": a ref when a repo is independently established
-  // (current message or thread), otherwise a (vetted) repo mention. When the
-  // slug IS the established repo, "on <slug>" merely restates it — never a
-  // ref (otherwise "auto-merge is now disabled on acme/api" hands ship a
-  // repo-shaped base ref).
-  if (s.onSlug) {
-    if (repo && !ref) {
-      if (slugOf(s.onSlug) !== repo) ref = s.onSlug;
-    } else if (!repo) {
-      const cand = slugOf(s.onSlug);
-      if (cand && (await vet(cand))) repo = cand;
-    }
+  // `on <owner/name-shaped>` remains a repository mention only when no repo
+  // is otherwise established. It is never a ref: refs come from the typed
+  // forms above, so a path or prose phrase cannot silently choose a base.
+  if (s.onSlug && !repo) {
+    const cand = slugOf(s.onSlug);
+    if (cand && (await vet(cand))) repo = cand;
   }
   if (repo) {
     rejected = undefined;
@@ -633,8 +636,8 @@ export async function resolveRepoContext(
   // review post (agent-review.md item 8). A prose "on X" in the same message
   // ("re-review: rebuilt on main after the caching PR landed…") used
   // to bind `ref` and thereby SKIP this fetch — leaving the head unknown, the
-  // resident's worktree stale and the post refused. Now the phrase is only a
-  // fallback for when the fetch fails (repo-only otherwise).
+  // resident's worktree stale and the post refused. It now binds nothing; the
+  // PR head is the ref when fetched, and a failed fetch stays repo-only.
   let headSha: string | undefined;
   let baseRef: string | undefined;
   let prSize: PrSize | undefined;

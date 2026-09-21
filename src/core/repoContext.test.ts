@@ -48,19 +48,21 @@ describe("resolveRepoContext: explicit signals in the current message", () => {
     ).resolves.toEqual({ repo: "acme/web" });
   });
 
-  it("owner/name slug + 'on branch X' phrasing", async () => {
+  it("the head-of-ask 'on branch X' clause binds the ref", async () => {
     const { fn } = stubFetch();
-    await expect(resolveRepoContext(msg("fix the bug in acme/api on branch fix/x"), [])).resolves.toEqual({
-      repo: "acme/api",
-      ref: "fix/x",
-    });
+    await expect(resolveRepoContext(msg("agent:coding in acme/api on branch fix/x: fix the bug"), [])).resolves.toEqual(
+      {
+        repo: "acme/api",
+        ref: "fix/x",
+      },
+    );
     expect(fn).not.toHaveBeenCalled();
   });
 
-  it("'on <well-known>' binds the ref; trailing punctuation on the slug is stripped", async () => {
+  it("a narrative 'on <well-known>' phrase does not bind a ref; trailing punctuation on the slug is stripped", async () => {
     await expect(
-      resolveRepoContext(msg('agent:coding on master in jshttp/vary: run node -e "console.log(1)" and report'), []),
-    ).resolves.toEqual({ repo: "jshttp/vary", ref: "master" });
+      resolveRepoContext(msg('run node -e "console.log(1)" on master in jshttp/vary: and report'), []),
+    ).resolves.toEqual({ repo: "jshttp/vary" });
   });
 
   it("branch:X token form", async () => {
@@ -94,11 +96,21 @@ describe("resolveRepoContext: explicit signals in the current message", () => {
     });
   });
 
-  it("'on <slug-shaped>' WITH a repo signal present is a ref", async () => {
+  it("'on <slug-shaped>' WITH a repo signal present is still prose, not a ref", async () => {
     await expect(resolveRepoContext(msg("on fix/x in acme/api please"), [])).resolves.toEqual({
       repo: "acme/api",
-      ref: "fix/x",
     });
+  });
+
+  it("the 20:05Z ship ask's narrative branch phrase binds no ref (issue 2161)", async () => {
+    const repo = ["core", "planelabs/switchboard"].join("");
+    const request =
+      `agent:ship in ${repo}: fix issue #${2154} — a human-gated review finding has no way back in — the person's answer on the PR is never consumed, every re-issue holds again (#${2140} ×2). ` +
+      "A human-gated review finding has no path back into the pipeline once the person answers: an adopted attempt goes straight to a review round, the reviewer finds the same human-gated finding, and the pipeline ends held again — the person's answer on the pull request is never consumed. " +
+      "The recovery took two hand-posted steps (a directive coding run on the branch with the answer, then another re-issue). " +
+      "Hold the invariant: a human-gated finding is a question to a person, and the person's answer resumes the unit. When a review round yields only human-gated findings, the unit parks with the question and resumes on the next human input on the pull request or the unit thread. An adopted attempt on a pull request whose newest human comment postdates the last verdict runs that fix round before the review, never review-first. " +
+      "Tests: a review with one human-gated finding parks the unit; a person's PR comment resumes it into a fix round carrying the comment; the adopted attempt with a newer human comment runs fix-then-review; a human-gated finding alone never ends a pipeline held.";
+    await expect(resolveRepoContext(msg(request), [])).resolves.toEqual({ repo });
   });
 });
 
@@ -233,11 +245,10 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     );
   });
 
-  it("a PR URL whose head fetch fails, with a prose ref beside it: the prose ref binds as a fallback, the head stays unknown", async () => {
+  it("a PR URL whose head fetch fails does not take a prose ref beside it as a fallback", async () => {
     stubFetch({ reject: "fetch failed" });
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42 on main"), [])).resolves.toEqual({
       repo: "jshttp/vary",
-      ref: "main", // the prose fallback, NOT the PR head — so refFromPr stays unset
       pr: 42,
       prFromMessage: true,
     });
@@ -499,9 +510,9 @@ describe("resolveRepoContext: re-review follow-ups inherit the thread's PR (fail
     });
   });
 
-  it("an explicit ref in the follow-up still binds and the PR is still inherited (one fetch, for the pin)", async () => {
+  it("an explicit branch token in the follow-up still binds and the PR is still inherited (one fetch, for the pin)", async () => {
     stubFetch({ body: { state: "open", head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } });
-    await expect(resolveRepoContext(msg("re-review on branch patch-1"), history)).resolves.toEqual({
+    await expect(resolveRepoContext(msg("re-review branch:patch-1"), history)).resolves.toEqual({
       repo: "acme/api",
       ref: "patch-1",
       pr: 7,
@@ -530,11 +541,11 @@ describe("resolveRepoContext: no signal / invalid signals", () => {
     ).resolves.toEqual({});
   });
 
-  it("hostile ref phrasing is ignored (pattern-validated like the resident)", async () => {
-    await expect(resolveRepoContext(msg("in acme/api on branch ../evil"), [])).resolves.toEqual({
+  it("hostile head-of-ask refs are ignored (pattern-validated like the resident)", async () => {
+    await expect(resolveRepoContext(msg("in acme/api on branch ../evil: do it"), [])).resolves.toEqual({
       repo: "acme/api",
     });
-    await expect(resolveRepoContext(msg("in acme/api on branch foo..bar"), [])).resolves.toEqual({
+    await expect(resolveRepoContext(msg("in acme/api on branch foo..bar: do it"), [])).resolves.toEqual({
       repo: "acme/api",
     });
   });
@@ -556,9 +567,9 @@ describe("resolveRepoContext: thread history inheritance", () => {
     await expect(resolveRepoContext(msg("now run the tests"), history)).resolves.toEqual({ repo: "acme/api" });
   });
 
-  it("a follow-up naming a branch binds the ref against the inherited repo (ask-once answer)", async () => {
-    await expect(resolveRepoContext(msg("on main"), history)).resolves.toEqual({ repo: "acme/api", ref: "main" });
-    await expect(resolveRepoContext(msg("on fix/x"), history)).resolves.toEqual({ repo: "acme/api", ref: "fix/x" });
+  it("a prose follow-up naming a branch binds no ref against the inherited repo", async () => {
+    await expect(resolveRepoContext(msg("on main"), history)).resolves.toEqual({ repo: "acme/api" });
+    await expect(resolveRepoContext(msg("on fix/x"), history)).resolves.toEqual({ repo: "acme/api" });
   });
 
   it("`on <the established repo's own slug>` restates the repo — it never becomes the ref (else ship's base branch becomes 'acme/api')", async () => {
@@ -598,10 +609,10 @@ describe("resolveRepoContext: thread history inheritance", () => {
     await expect(resolveRepoContext(msg(fence), [])).resolves.toEqual({});
   });
 
-  it("a backticked ref still binds: `on \\`main\\`` and `on \\`fix/x\\`` (code spans only exclude the bare-slug branch)", async () => {
-    await expect(resolveRepoContext(msg("on `main`"), history)).resolves.toEqual({ repo: "acme/api", ref: "main" });
-    await expect(resolveRepoContext(msg("on `fix/x`"), history)).resolves.toEqual({ repo: "acme/api", ref: "fix/x" });
-    await expect(resolveRepoContext(msg("in acme/api on branch `release-2`"), [])).resolves.toEqual({
+  it("backticked prose does not bind a ref; the explicit branch token still does", async () => {
+    await expect(resolveRepoContext(msg("on `main`"), history)).resolves.toEqual({ repo: "acme/api" });
+    await expect(resolveRepoContext(msg("on `fix/x`"), history)).resolves.toEqual({ repo: "acme/api" });
+    await expect(resolveRepoContext(msg("in acme/api branch:release-2"), [])).resolves.toEqual({
       repo: "acme/api",
       ref: "release-2",
     });
