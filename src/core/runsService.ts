@@ -216,6 +216,9 @@ export interface RunView {
    *  for `child_resumed` instead of ending its unit. Absent on live rows and
    *  on final records. */
   restarting?: true;
+  /** The persisted boundary for a current restarting close. Absent on legacy
+   *  closes, whose compatibility behavior remains unbounded. */
+  restartUntil?: number;
   /** The generation driving this run when it is not this process (run-history
    *  item 41): a row read from the run ledger — live under another container,
    *  or reclaimed here and not yet launched. Absent on this process's rows. */
@@ -793,17 +796,29 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     if (!store || !RUN_ID_PATTERN.test(id)) return null;
     return store.getSummary(id);
   };
-  /** The typed artifacts of a finished run's record (run-history item 2) as the
-   *  store's summary row carries them, for a FINISHED row the registry still
-   *  holds: the finish record lands in the store before the finish event that
-   *  wakes a reader is sent, so the reader that follows sees the verdict the
-   *  record landed with, never the row's silence. A store without the record
-   *  yet — or holding only the start tombstone, which carries none — lends
-   *  nothing; a store that throws is one warning and nothing. */
+  /** The typed fields of a finished run's record (run-history items 2 and 47a)
+   *  as the store's summary row carries them, for a FINISHED row the registry
+   *  still holds: the finish record lands in the store before the finish event
+   *  that wakes a reader is sent, so the reader that follows sees the verdict
+   *  and restart grace the record landed with, never the row's silence. A store
+   *  without the record yet — or holding only the start tombstone, which carries
+   *  none — lends nothing; a store that throws is one warning and nothing. */
   const storedArtifacts = async (
     id: string,
   ): Promise<
-    Pick<RunView, "verdict" | "reviewHead" | "reviewPost" | "dispositions" | "handoff" | "pr" | "usage" | "cost">
+    Pick<
+      RunView,
+      | "verdict"
+      | "reviewHead"
+      | "reviewPost"
+      | "dispositions"
+      | "handoff"
+      | "pr"
+      | "restarting"
+      | "restartUntil"
+      | "usage"
+      | "cost"
+    >
   > => {
     let row: RunListItem | null;
     try {
@@ -822,6 +837,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       ...(row.dispositions !== undefined ? { dispositions: row.dispositions } : {}),
       ...(row.handoff !== undefined ? { handoff: row.handoff } : {}),
       ...(row.pr !== undefined ? { pr: row.pr } : {}),
+      ...(row.restarting !== undefined ? { restarting: row.restarting } : {}),
+      ...(row.restartUntil !== undefined ? { restartUntil: row.restartUntil } : {}),
       ...(row.pushed !== undefined ? { pushed: row.pushed } : {}),
       ...(row.lease !== undefined ? { lease: row.lease } : {}),
       // The run's tokens and their price (costs.md item 4c): summed at finish, so only the record has them.

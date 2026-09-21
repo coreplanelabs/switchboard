@@ -15,6 +15,7 @@ import {
 } from "./reviewVerdict.js";
 import { IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN } from "./coordinator/contract.js";
 import { isPipelineSummaryShape, type PipelineSummary } from "./pipelineStanding.js";
+import { RESTART_CLAIM_GRACE_MS } from "./budgets.js";
 import {
   FRICTION_CATEGORIES,
   type CategoryTotals,
@@ -231,6 +232,11 @@ export interface RunRecord {
    *  waiting for `child_resumed` instead of ending its unit on this record.
    *  Absent on every ending that is final. */
   restarting?: true;
+  /** Epoch ms through which a `restarting` close with no visible successor is
+   *  projected as running. Current writers stamp one central grace from the
+   *  close; absent on legacy restarting records, which retain the old
+   *  unbounded compatibility behavior, and on every final ending. */
+  restartUntil?: number;
   /** Where the run's conversation started (item 52): `channel` — its own
    *  thread's history, as for every run a person, a schedule or a coordinator
    *  started — or `parent` — a spawned child seeded from its parent's text
@@ -944,11 +950,34 @@ export function normalizeDiagnosis(d: FrictionDiagnosis): FrictionDiagnosis {
 /** `normalizeDiagnosis` applied to anything carrying a `diagnosis` — a record or
  *  a listing row — on its way out of a store, and the `channelVisibility` stamp
  *  filled with `unknown` for a row written before it existed (fail-closed:
- *  `unknown` is never public). */
+ *  `unknown` is never public). A restart deadline is trusted only inside the
+ *  central grace after its persisted close stamp; malformed or overlong
+ *  values drop the restarting projection, while a legacy row with no deadline
+ *  keeps its compatibility behavior. */
 export function normalizeStored<T extends { diagnosis: FrictionDiagnosis; channelVisibility?: ChannelVisibility }>(
   v: T,
 ): T & { channelVisibility: ChannelVisibility } {
-  return { ...v, diagnosis: normalizeDiagnosis(v.diagnosis), channelVisibility: v.channelVisibility ?? "unknown" };
+  const normalized = {
+    ...v,
+    diagnosis: normalizeDiagnosis(v.diagnosis),
+    channelVisibility: v.channelVisibility ?? "unknown",
+  } as T & { channelVisibility: ChannelVisibility };
+  const restart = normalized as T & { restarting?: unknown; restartUntil?: unknown; finishedAt?: unknown };
+  if (restart.restartUntil !== undefined) {
+    const bounded =
+      restart.restarting === true &&
+      typeof restart.restartUntil === "number" &&
+      Number.isFinite(restart.restartUntil) &&
+      typeof restart.finishedAt === "number" &&
+      Number.isFinite(restart.finishedAt) &&
+      restart.restartUntil >= restart.finishedAt &&
+      restart.restartUntil <= restart.finishedAt + RESTART_CLAIM_GRACE_MS;
+    if (!bounded) {
+      delete restart.restarting;
+      delete restart.restartUntil;
+    }
+  }
+  return normalized;
 }
 
 /** Structural check on a record from outside the process (a Worker response, a
@@ -1027,8 +1056,12 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // marker, like `provisional`, is the literal `true` or absent.
   if (r.pipeline !== undefined && !isPipelineSummaryShape(r.pipeline)) return false;
   if (r.hosted !== undefined && r.hosted !== true) return false;
-  // A restarting close carries the literal `true` or nothing (record 0064).
+  // A restarting close carries the literal `true` and, on current writers,
+  // one finite deadline; legacy closes carry no deadline. The persisted close
+  // stamp bounds a future value in `normalizeStored`, where it can fail closed
+  // without making the whole record unreadable.
   if (r.restarting !== undefined && r.restarting !== true) return false;
+  if (r.restartUntil !== undefined && (!isFiniteNumber(r.restartUntil) || r.restarting !== true)) return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   if (r.relayedBy !== undefined && typeof r.relayedBy !== "string") return false;
   if (r.authenticatedAs !== undefined && typeof r.authenticatedAs !== "string") return false;

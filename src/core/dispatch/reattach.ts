@@ -232,7 +232,7 @@ export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<A
         // A close a restart follows is not the run's end (record 0064; item
         // 47a): the record says `restarting`, so a waiting parent re-arms on
         // `child_resumed` instead of ending its unit.
-        restored ? { restarting: true } : undefined,
+        restored ? { restarting: true, clock } : undefined,
       );
   });
   console.log(
@@ -267,7 +267,7 @@ export async function recordRestartDeath(ctx: {
   const { writer, closed, why, clock, coordinator, workflow } = ctx;
   const at = clock();
   const summary = `the restart from the request died before it claimed the run (${why}); this close is the run's end`;
-  const { restarting: _restarting, ...ended } = closed;
+  const { restarting: _restarting, restartUntil: _restartUntil, ...ended } = closed;
   const lastSeq = closed.events.reduce((max, e) => Math.max(max, e.seq ?? 0), 0);
   writer.write({
     ...ended,
