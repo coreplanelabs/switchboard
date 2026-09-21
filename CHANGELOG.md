@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.259.0](https://github.com/coreplanelabs/switchboard/compare/v1.258.0...v1.259.0) (2026-09-20)
+
+
+### Features
+
+* **config:** every model comes from configuration, never a literal ([#2096](https://github.com/coreplanelabs/switchboard/issues/2096)) ([c584a0c](https://github.com/coreplanelabs/switchboard/commit/c584a0ce75557560a791b70b0ba8e6d204b065f7))
+
 ## [1.258.0](https://github.com/coreplanelabs/switchboard/compare/v1.257.0...v1.258.0) (2026-09-20)
 
 
