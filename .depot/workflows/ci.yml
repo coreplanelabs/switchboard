@@ -191,6 +191,14 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci
       - run: npm run verify -w ${{ matrix.worker }}
+      - name: upload memory test diagnostics
+        if: ${{ always() && matrix.worker == 'deploy/cloudflare-memory' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: memory-test-diagnostics-${{ github.run_attempt }}
+          path: deploy/cloudflare-memory/artifacts/memory-test-diagnostics.json
+          if-no-files-found: error
+          retention-days: 14
 
   workers:
     # The required check `workers`: green only when every Worker's job succeeded.
