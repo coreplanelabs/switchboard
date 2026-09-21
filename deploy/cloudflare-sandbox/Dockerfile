@@ -48,11 +48,14 @@ ENV NODE_OPTIONS=--max-old-space-size=8192
 # item 25) restores the resident's snapshot with the SDK's presigned restore,
 # which MOUNTS the archive (squashfuse + fuse-overlayfs) instead of extracting
 # it; the Worker extracts it onto the disk the way the resident does
-# (resident-repos item 61) so the checkout is one plain ext4 tree. The build
-# asserts the binary with the probe the extract script uses (`command -v`).
+# (resident-repos item 61) so the checkout is one plain ext4 tree.
+# ripgrep (`rg`): the search binary is an image invariant for both fresh and
+# seeded sandboxes; restoring a seed changes the disk, not the image tools.
+# The build asserts both binaries with the probes their callers use.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git curl ca-certificates docker.io iptables squashfs-tools \
+  && apt-get install -y --no-install-recommends git curl ca-certificates docker.io iptables squashfs-tools ripgrep \
   && command -v unsquashfs >/dev/null \
+  && command -v rg >/dev/null \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
