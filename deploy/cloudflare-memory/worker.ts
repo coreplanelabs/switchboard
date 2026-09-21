@@ -78,6 +78,7 @@ import {
   selectReclaim,
 } from "../../src/core/runLedger/decisions.ts";
 import { intakeReceiptRetentionMs, minutesToMs, PLANE } from "../../src/core/budgets.ts";
+import { holdBackgroundTask } from "./backgroundTasks.ts";
 import {
   causeOfClose,
   causeOfReclaim,
@@ -2387,21 +2388,24 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** The transport's push (record 0064, "Where it lives"): committed effects
    *  are pushed to the bot Worker over the service binding, which forwards to
-   *  the container. Fire and forget — a push that fails is not retried by a
-   *  timer; the effect rides the next heartbeat or reclaim-sweep answer. */
+   *  the container. The response does not wait for this best-effort push, but
+   *  the actor does: waitUntil keeps its I/O inside this request's lifetime so
+   *  it cannot contend with an unrelated request after the caller moves on. */
   private pushPlaneEffects(effects: PlaneEffect[]): void {
     if (effects.length === 0) return;
     const bot = this.env.BOT;
     if (!bot) return;
-    void bot
-      .fetch("https://bot/plane/effects", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.env.MEMORY_TOKEN ?? ""}`,
-        },
-        body: JSON.stringify({ effects }),
-      })
+    const delivery = Promise.resolve()
+      .then(() =>
+        bot.fetch("https://bot/plane/effects", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${this.env.MEMORY_TOKEN ?? ""}`,
+          },
+          body: JSON.stringify({ effects }),
+        }),
+      )
       .then((r) => {
         if (!r.ok)
           console.warn(
@@ -2413,6 +2417,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           `[plane/push] ${effects.length} effect(s) not delivered: ${err instanceof Error ? err.message : String(err)} — they ride the next heartbeat`,
         );
       });
+    holdBackgroundTask(this.ctx, `plane effect push (${effects.map((effect) => effect.id).join(", ")})`, delivery);
   }
 
   /** The unacknowledged effects, oldest first, at most `PLANE_EFFECTS_PER_ANSWER`

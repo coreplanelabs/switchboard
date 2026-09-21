@@ -1,0 +1,22 @@
+import { describe, expect, it, vi } from "vitest";
+import { assertNoPendingBackgroundTasks, holdBackgroundTask } from "./backgroundTasks.ts";
+
+describe("memory Worker pending task guard", () => {
+  it("fails on a fixture promise that is still pending when the test ends", async () => {
+    let release!: () => void;
+    const fixture = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const waitUntil = vi.fn<(task: Promise<unknown>) => void>();
+
+    holdBackgroundTask({ waitUntil }, "fixture pending promise", fixture);
+
+    expect(waitUntil).toHaveBeenCalledOnce();
+    expect(() => assertNoPendingBackgroundTasks()).toThrow(/fixture pending promise/);
+
+    release();
+    await fixture;
+    await Promise.resolve();
+    expect(() => assertNoPendingBackgroundTasks()).not.toThrow();
+  });
+});

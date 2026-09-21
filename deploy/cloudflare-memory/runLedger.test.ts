@@ -4,6 +4,7 @@ import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
 import type { CoordinatorInstance, CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
+import { assertNoPendingBackgroundTasks } from "./backgroundTasks.ts";
 import type { RunHistoryDO, SessionLogDO } from "./worker.ts";
 
 // Feature: docs/reference/specs/run-history.md items 28–34 — the live-run ledger on the
@@ -1429,6 +1430,14 @@ describe("the plane's admission stage — /plane/admit, reservations, the seal's
     await post("/runs/claim", claimBody(key, "r1", t));
     const q = (await admit(key, t, "two")).data.id as string;
     const pushes: { url: string; auth: string | null }[] = [];
+    let startedPush!: () => void;
+    let finishPush!: () => void;
+    const pushStarted = new Promise<void>((resolve) => {
+      startedPush = resolve;
+    });
+    const pushCanFinish = new Promise<void>((resolve) => {
+      finishPush = resolve;
+    });
     await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
       // A BOT binding whose push dead-ends (the container down, an older bot
       // without the route): the fetch answers 404 and delivers nothing.
@@ -1438,14 +1447,21 @@ describe("the plane's admission stage — /plane/admit, reservations, the seal's
         BOT: {
           fetch: async (url: string, init: { headers: Record<string, string> }) => {
             pushes.push({ url: String(url), auth: init.headers.authorization ?? null });
+            startedPush();
+            await pushCanFinish;
             return new Response("not found", { status: 404 });
           },
         },
       };
     });
-    // The seal walks the queue and pushes the admit; the push fails.
-    await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", t) });
-    await new Promise((r) => setTimeout(r, 10)); // the push is fire-and-forget
+    // The seal walks the queue and pushes the admit. Its response stays
+    // independent, while waitUntil and the test guard own the unfinished I/O.
+    const finishing = post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", t) });
+    await pushStarted;
+    expect(() => assertNoPendingBackgroundTasks()).toThrow(/plane effect push \(admit:/);
+    finishPush();
+    await finishing;
+    await vi.waitFor(() => expect(() => assertNoPendingBackgroundTasks()).not.toThrow());
     expect(pushes).toEqual([{ url: "https://bot/plane/effects", auth: "Bearer test-token" }]);
     // Nothing was acked: the offer stands and rides the next heartbeat answer.
     await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
@@ -1953,15 +1969,24 @@ describe("the plane's checkpoint steers and the provider condition — the heart
     const key = storeKey();
     await post("/runs/claim", claimBody(key, "r5", "slack:C20:5.0"));
     await post("/plane/park", { storeKey: key, runId: "r5", provider: "anthropic" });
+    let pushed!: () => void;
+    const pushStarted = new Promise<void>((resolve) => {
+      pushed = resolve;
+    });
     await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
       const withBot = inst as unknown as { env: Record<string, unknown> };
       withBot.env = {
         ...withBot.env,
-        BOT: { fetch: async () => new Response("down", { status: 503 }) },
+        BOT: {
+          fetch: async () => {
+            pushed();
+            return new Response("down", { status: 503 });
+          },
+        },
       };
     });
     await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "up" });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await pushStarted;
     expect(await inbox(key, "r5")).toHaveLength(1);
     const beat = await post("/runs/heartbeat", { storeKey: key, runId: "r5", gen: "g1", leaseMs: LEASE_MS });
     expect(beat.data.effects).toMatchObject([{ id: "steer:r5:1", kind: "steer", seq: 1 }]);

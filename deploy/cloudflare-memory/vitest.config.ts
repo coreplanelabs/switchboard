@@ -32,6 +32,7 @@ export default defineConfig({
     // not correctness, was the only failure shape.
     fileParallelism: false,
     include: [
+      "backgroundTasks.test.ts",
       "worker.test.ts",
       "schedules.test.ts",
       "runs.test.ts",
