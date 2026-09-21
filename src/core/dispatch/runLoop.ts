@@ -129,6 +129,9 @@ export interface RunOutcome {
    *  reply stage renders the channel reply from them (agent-review.md item 5b). */
   verdict: ReviewVerdict | undefined;
   reviewPost: ReviewPostOutcome | undefined;
+  /** A stop landed before the review used any substantive tool. The reply is
+   *  the stop sentence itself, not the normal verdict projection. */
+  reviewStoppedBeforeStart: boolean;
   prNote: string | undefined;
   /** "Did real work" — the memory reflection gate. */
   toolCalls: number;
@@ -765,13 +768,42 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  `tailSkipped`, as a hard stop skips it — the one predicate every tail
    *  step keys on. */
   let relaunchEndedRun = false;
+  // A review stopped before its first substantive tool has no reviewed head or
+  // verdict. `update_status` is bookkeeping, not evidence that code was read;
+  // any other tool (including submit_verdict) establishes that the review did
+  // begin. Only activity before the first stop request counts — the soft-stop
+  // write-up and the synthetic verdict turn it used to trigger are tail work.
+  let reviewStoppedBeforeStart = false;
+  const latchReviewStoppedBeforeStart = (): boolean => {
+    if (reviewStoppedBeforeStart || agent.name !== "review") return reviewStoppedBeforeStart;
+    const events = recordEvents();
+    const stopAt = events.findIndex(
+      (event) => event.type === "run_note" && (event.kind === "stop_requested" || event.kind === "stopped"),
+    );
+    if (stopAt < 0) return false;
+    reviewStoppedBeforeStart = !events
+      .slice(0, stopAt)
+      .some((event) => event.type === "tool_call" && event.tool !== "update_status");
+    return reviewStoppedBeforeStart;
+  };
+  const clearStoppedReviewTail = (): boolean => {
+    if (!latchReviewStoppedBeforeStart()) return false;
+    answer = "⏹ Review stopped before it started.";
+    verdict = undefined;
+    reviewHead = undefined;
+    observedHead = undefined;
+    carried = undefined;
+    reviewPost = undefined;
+    return true;
+  };
   /** Whether the run's tail — a coding run's observation, salvage, description
    *  turn, work-left-behind note and PR post-step; a review's head settle,
    *  verdict turn and review post-step — is skipped: a hard stop observed
    *  nothing and posts nothing, and a relaunch that ended the run has no tree
-   *  to look at and no verdict to post. Read at each step, since a stop can
-   *  land between them. */
-  const tailSkipped = (): boolean => run.control.requested === "hard" || relaunchEndedRun;
+   *  to look at and no verdict to post. Re-latch at every boundary, since a
+   *  soft pre-review stop can land while the preceding tail step awaits. */
+  const tailSkipped = (): boolean =>
+    run.control.requested === "hard" || relaunchEndedRun || latchReviewStoppedBeforeStart();
   // Give the workspace back now rather than at the inactivity sweep: a
   // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
   // 16a). The release mode is paired to the round's agent by the attach
@@ -1290,6 +1322,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       answer = harnessSession?.answer ?? leaseSpentDuringRelaunch ?? HARD_STOP_MESSAGE;
       if (harnessSession?.ending !== undefined) windDownEnding = harnessSession.ending;
     }
+    clearStoppedReviewTail();
     // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
     // settleReviewedHead in reviewRound.ts): for a PR review, read the
     // workspace HEAD NOW — after the model is done, BEFORE the finally
@@ -1323,6 +1356,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         },
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
         fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
+        preReviewStopped: latchReviewStoppedBeforeStart,
         // What the run did about a moved head: the re-review's note is an
         // acknowledgement (`verbose`), the card's word is `debug` material
         // (routing-and-config item 28). The verdict that follows is the reply
@@ -1694,6 +1728,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // post-turn put in its place (a review's re-review at a moved head) stands.
     if (windDownEnding !== undefined && answer === windDownAnswer(windDownEnding, agent.maxMinutes))
       answer = windDownAnswer(windDownEnding, agent.maxMinutes, endingFacts());
+    // A soft stop may have landed during any awaited tail step above. Latch it
+    // immediately before the synchronous publication boundary and discard
+    // every review claim the tail may have computed since the prior check.
+    clearStoppedReviewTail();
     // Typed-output boundary (docs/reference/specs/llm-output.md item 5): the answer is
     // canonicalized ONCE here, so the event text, the channel reply, the
     // GitHub post, and memory all read one Markdown dialect; the model's raw
@@ -1892,6 +1930,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     reviewHead,
     verdict,
     reviewPost,
+    reviewStoppedBeforeStart,
     prNote,
     toolCalls,
     runDiagnosis,

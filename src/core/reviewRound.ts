@@ -199,7 +199,30 @@ export async function attachRoundWorkspace(input: {
   return { selection, release };
 }
 
-// ---- PR-head pre-flight (agent-review.md item 11) ---------------------------
+// ---- review state + PR-head pre-flight (agent-review.md item 11) ------------
+
+export type ClosedReviewPreflight = { ok: true } | { ok: false; reply: string };
+
+/**
+ * A resolved closed pull request is terminal before review admission. The
+ * repository resolver owns the state fact; this pure projection owns its one
+ * user-facing line, so no caller can start a workspace or run merely to repeat
+ * GitHub's answer.
+ */
+export function closedReviewPreflight(input: {
+  agent: AgentDef;
+  repoCtx: Pick<RepoContext, "repo" | "closedPr">;
+}): ClosedReviewPreflight {
+  const { repo, closedPr } = input.repoCtx;
+  if (input.agent.name !== "review" || repo === undefined || closedPr === undefined) return { ok: true };
+  const where = `${repo}#${closedPr.number}`;
+  return closedPr.merged
+    ? {
+        ok: false,
+        reply: `${where} merged${closedPr.mergedAt !== undefined ? ` at ${closedPr.mergedAt}` : ""}; nothing to review. Say which pull request you meant.`,
+      }
+    : { ok: false, reply: `${where} is closed; nothing to review. Say which pull request you meant.` };
+}
 
 export type PrHeadPreflight = { ok: true } | { ok: false; where: string; reply: string };
 
@@ -487,6 +510,10 @@ export interface SettleReviewedHeadInput {
   turn: ReviewTurnSpec;
   fetchPrHead: FetchPrHead;
   fetchPrCommits: FetchPrCommits;
+  /** Re-evaluated after every awaited settlement boundary. True only when a
+   *  stop preceded substantive review work; the caller owns latching and
+   *  clearing the review outcome. */
+  preReviewStopped: () => boolean;
   notify: {
     /** Thread note before a re-review; best-effort (failures swallowed). */
     reply: (text: string) => Promise<void>;
@@ -507,12 +534,15 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
   let reviewHead = input.reviewHead;
   let carried: { reviewed: string; current: string; commits: number } | undefined;
   let observedHead = await probeHead();
+  const outcome = (): SettledReviewHead => ({ answer, verdict, reviewHead, observedHead, carried });
+  if (input.preReviewStopped()) return outcome();
   const where = `${pr.repo}#${pr.number}`;
   const currentHead = async () => normalizeHead(await input.fetchPrHead(pr).catch(() => undefined));
   const expected = normalizeHead(reviewHead);
   const reviewed = normalizeHead(observedHead) ?? normalizeHead(verdict?.head);
   if (expected && reviewed) {
     const current = await currentHead();
+    if (input.preReviewStopped()) return outcome();
     if (current && !sameCommit(current, expected) && sameCommit(reviewed, current)) {
       console.log(
         `[review] ${logKey} reviewed the PR's current head ${current.slice(0, 7)} (resolved ${expected.slice(0, 7)} was superseded mid-run) (${where})`,
@@ -525,6 +555,7 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         from: expected,
         to: current,
       });
+      if (input.preReviewStopped()) return outcome();
       const move = classified?.move;
       const followUp = turn.followUp;
       if (move?.kind === "rebase") {
@@ -544,6 +575,7 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
         input.notify.headMoved(`head moved → ${current.slice(0, 7)}`);
         await input.notify.reply(headRereviewNote({ where, reviewed: expected, current, move })).catch(() => {});
+        if (input.preReviewStopped()) return outcome();
         // Resident: move the worktree ourselves (one re-attach at the new
         // head), the round's hard stop riding in so a move that waits on the
         // resident ends with the stop. Anything else — no moveTo, a refusal,
@@ -564,6 +596,7 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
             );
           }
         }
+        if (input.preReviewStopped()) return outcome();
         verdict = undefined; // the earlier verdict is void; the re-review must submit its own
         reviewHead = current;
         const followUpText = rereviewFollowUp({
@@ -595,12 +628,14 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
           toolContext,
           ...(span ? { span } : {}),
         });
+        if (input.preReviewStopped()) return outcome();
         // Re-read, not narrowed: the stop may have been requested during the turn.
         if (!turn.control.hardSignal.aborted) observedHead = await probeHead();
+        if (input.preReviewStopped()) return outcome();
       }
     }
   }
-  return { answer, verdict, reviewHead, observedHead, carried };
+  return outcome();
 }
 
 /** Item 12: the PR's commits over its base at the reviewed head and at the

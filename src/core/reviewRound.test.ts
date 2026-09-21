@@ -810,6 +810,7 @@ describe("settleReviewedHead — the head-move re-review", () => {
       fetchPrHead: async () => OTHER,
       fetchPrCommits: async ({ sha }) =>
         sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
+      preReviewStopped: () => false,
       notify: { reply: async (t) => void replies.push(t), headMoved: (s) => void labels.push(s) },
       logKey: "t",
     };

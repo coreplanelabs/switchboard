@@ -629,6 +629,9 @@ export interface DeliveryContext {
    *  from them (agent-review.md item 5b). Absent on every other run. */
   verdict?: ReviewVerdict | undefined;
   reviewPost?: ReviewPost | undefined;
+  /** A stop before review work began is already the complete reply; verdict
+   *  rendering and the live-run suffix would add claims beyond that stop. */
+  reviewStoppedBeforeStart?: boolean;
   /** The request's level: a review's thread reply is one line below `verbose`
    *  (routing-and-config item 28). Absent reads as `verbose` — the full render. */
   verbosity?: Verbosity | undefined;
@@ -706,8 +709,9 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     // write-up rides along only when no GitHub post carries it. Projection
     // only — the `answer` event published above stays the model's own words
     // and link-free.
-    const channelAnswer =
-      agent.name === "review"
+    const channelAnswer = ctx.reviewStoppedBeforeStart
+      ? answer
+      : agent.name === "review"
         ? buildReviewChannelReply({
             answer,
             verdict: ctx.verdict,

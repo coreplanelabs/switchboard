@@ -307,6 +307,7 @@ describe("resolveRepoContext: PR-source flags for ship", () => {
       body: {
         state: "closed",
         merged: true,
+        merged_at: "2026-09-20T03:28:00Z",
         head: { ref: "feat/schema", sha: SHA, repo: { full_name: "acme/api" } },
         base: { ref: "main" },
       },
@@ -322,6 +323,7 @@ describe("resolveRepoContext: PR-source flags for ship", () => {
     expect(ctx.pr).toBe(91);
     expect(ctx.prFromMessage).toBe(true);
     expect(ctx.headSha).toBe(SHA);
+    expect(ctx.closedPr).toEqual({ number: 91, merged: true, mergedAt: "2026-09-20T03:28:00.000Z" });
   });
 
   it("a closed-unmerged PR contributes no ref hint either, and an explicit `on branch X` beside a merged PR binds the phrase's ref with refFromPr unset (a contract child attaches on its contract branch)", async () => {
@@ -331,6 +333,7 @@ describe("resolveRepoContext: PR-source flags for ship", () => {
     const closed = await resolveRepoContext(msg("see https://github.com/acme/api/pull/91"), []);
     expect(closed.ref).toBeUndefined();
     expect(closed.refFromPr).toBeUndefined();
+    expect(closed.closedPr).toEqual({ number: 91, merged: false });
     stubFetch({
       body: {
         state: "closed",
@@ -472,6 +475,7 @@ describe("resolveRepoContext: re-review follow-ups inherit the thread's PR (fail
     await expect(resolveRepoContext(msg("re-review"), history)).resolves.toEqual({
       repo: "acme/api",
       prUnpostable: { number: 7, reason: "closed" },
+      closedPr: { number: 7, merged: false },
     });
   });
 
@@ -1435,6 +1439,7 @@ describe("resolveRepoContext: the pull request the thread's own run opened binds
     expect(merged).toEqual({
       repo: "acme/api",
       prUnpostable: { number: 40, reason: "closed" },
+      closedPr: { number: 40, merged: true },
       closedRecordPr: { number: 40, headSha: SHA, headRef: "fix/exact-match", merged: true },
     });
     expect(recordPrOf(merged)).toEqual({ number: 40, headSha: SHA, headBranch: "fix/exact-match", state: "merged" });
@@ -1465,7 +1470,11 @@ describe("resolveRepoContext: the pull request the thread's own run opened binds
     // A closed PR whose head GitHub does not report (a malformed sha) is unpostable and nothing more: no target to render at.
     stubFetch({ body: { state: "closed", merged: true, head: { sha: "not-a-sha", repo: { full_name: "acme/api" } } } });
     const headless = await resolveRepoContext(msg("continue"), history, undefined, undefined, records);
-    expect(headless).toEqual({ repo: "acme/api", prUnpostable: { number: 40, reason: "closed" } });
+    expect(headless).toEqual({
+      repo: "acme/api",
+      prUnpostable: { number: 40, reason: "closed" },
+      closedPr: { number: 40, merged: true },
+    });
     expect(recordPrOf(headless)).toBeUndefined();
     // Unreachable: nothing is known about the PR, so nothing is edited.
     stubFetch({ reject: "fetch failed" });
@@ -1506,7 +1515,11 @@ describe("resolveRepoContext: the pull request the thread's own run opened binds
       undefined,
       records,
     );
-    expect(turn).toEqual({ repo: "acme/api", prUnpostable: { number: 9, reason: "closed" } });
+    expect(turn).toEqual({
+      repo: "acme/api",
+      prUnpostable: { number: 9, reason: "closed" },
+      closedPr: { number: 9, merged: true },
+    });
     expect(recordPrOf(turn)).toBeUndefined();
   });
 
