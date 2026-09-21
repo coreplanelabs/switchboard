@@ -1,5 +1,40 @@
 # Changelog
 
+## [1.260.0](https://github.com/coreplanelabs/switchboard/compare/v1.259.0...v1.260.0) (2026-09-21)
+
+
+### Features
+
+* **commands:** the merge and queue enter the registry born fenced ([#2097](https://github.com/coreplanelabs/switchboard/issues/2097)) ([801527e](https://github.com/coreplanelabs/switchboard/commit/801527eb26d6379d3f6073bdbbc785511d6123c2))
+* **config:** every non-preset model turn takes an effort setting ([#2114](https://github.com/coreplanelabs/switchboard/issues/2114)) ([4f21973](https://github.com/coreplanelabs/switchboard/commit/4f2197326638ef682999b4fa289e3ce00accc02c))
+* **dispatcher:** a plain-words model name picks the run's model ([#2107](https://github.com/coreplanelabs/switchboard/issues/2107)) ([f6cc96f](https://github.com/coreplanelabs/switchboard/commit/f6cc96fa2034b884402fd1cbfcb4d59be83b18b2))
+* **runs:** wake parked runs on provider recovery ([#2123](https://github.com/coreplanelabs/switchboard/issues/2123)) ([215bf64](https://github.com/coreplanelabs/switchboard/commit/215bf6485d6afda42069a2e22b17c81a84fa86ba))
+* **ship:** wake idle units through indexed waits ([#2122](https://github.com/coreplanelabs/switchboard/issues/2122)) ([6b1a436](https://github.com/coreplanelabs/switchboard/commit/6b1a4366a123e23a63735d7d58756d4ab3209b9f))
+* **web:** hide bookkeeping runs and retire dashboard labels ([#2117](https://github.com/coreplanelabs/switchboard/issues/2117)) ([8008226](https://github.com/coreplanelabs/switchboard/commit/800822655a91bcf5b2a3c00dc8d28976e5a4f48f))
+
+
+### Bug fixes
+
+* **dispatcher:** a long plain-words ask binds instead of flooring ([#2106](https://github.com/coreplanelabs/switchboard/issues/2106)) ([8385f67](https://github.com/coreplanelabs/switchboard/commit/8385f67de7cc4a53edf7f9e1966484b862c1955f))
+* **resident:** reconcile images without attach restart loops ([#2111](https://github.com/coreplanelabs/switchboard/issues/2111)) ([74c59d7](https://github.com/coreplanelabs/switchboard/commit/74c59d7152509c18d45fc4b37c53a50dba269460))
+* **review:** stop closed pull request reviews before admission ([#2128](https://github.com/coreplanelabs/switchboard/issues/2128)) ([e455a88](https://github.com/coreplanelabs/switchboard/commit/e455a882fcac5e6c1d1ef133ff92f7c41fc2b3aa))
+* **runs:** expire orphaned restart closes at read-record ([#2125](https://github.com/coreplanelabs/switchboard/issues/2125)) ([81684fc](https://github.com/coreplanelabs/switchboard/commit/81684fc8cf13144d1f3804f5902ec31da6bcd582))
+* **sandbox:** include ripgrep in sandbox images ([#2127](https://github.com/coreplanelabs/switchboard/issues/2127)) ([fa6f4c8](https://github.com/coreplanelabs/switchboard/commit/fa6f4c8f54b1d1f44bbf8415762f82f802e0a2f3))
+* **ship:** carry request media to the coding child ([#2126](https://github.com/coreplanelabs/switchboard/issues/2126)) ([efb53af](https://github.com/coreplanelabs/switchboard/commit/efb53afb0ef83187c911df702d5ea60774d904f0))
+* **ship:** every throwing unit step records its ending ([#2108](https://github.com/coreplanelabs/switchboard/issues/2108)) ([a8a9dd2](https://github.com/coreplanelabs/switchboard/commit/a8a9dd2bfa97e098913e0a8610778e683e48cafa))
+* **ship:** the merge:person line says queued on a merge-queue base ([#2105](https://github.com/coreplanelabs/switchboard/issues/2105)) ([5fd69b2](https://github.com/coreplanelabs/switchboard/commit/5fd69b231c994b52579ff52279cfeccdb3133bbe))
+
+
+### Documentation
+
+* **docs:** decision record 0072 — one live run state the server owns ([#2110](https://github.com/coreplanelabs/switchboard/issues/2110)) ([db6003c](https://github.com/coreplanelabs/switchboard/commit/db6003c4e577f2cfe9c661c21b8ad8d061b549c5))
+* queue ten independent follow-up units ([#2121](https://github.com/coreplanelabs/switchboard/issues/2121)) ([2ff2366](https://github.com/coreplanelabs/switchboard/commit/2ff2366c3184578dda6f636cb36c4b88c9fc8fe8))
+
+
+### Refactoring
+
+* **dispatcher:** make the door own its no-call floor ([#2118](https://github.com/coreplanelabs/switchboard/issues/2118)) ([cff3380](https://github.com/coreplanelabs/switchboard/commit/cff3380635a2eb327acbf77f384fc4ba4ed96c27))
+
 ## [1.259.0](https://github.com/coreplanelabs/switchboard/compare/v1.258.0...v1.259.0) (2026-09-20)
 
 
