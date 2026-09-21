@@ -1427,7 +1427,7 @@ describe("createModelProxyHandler — the node adapter", () => {
     expect(h.ends.filter((s) => s.name === "model.turn")).toHaveLength(1);
   });
 
-  it("writes every content type from a closed table with nosniff: a refusal is JSON, an upstream error page that claims to be HTML is written as plain text and never rendered", async () => {
+  it("writes every content type from a closed table with nosniff: refusals are JSON and an upstream gateway page is sanitized, never rendered or relayed", async () => {
     const h = harness({
       answer: () =>
         new Response("<script>alert(1)</script>", {
@@ -1446,9 +1446,10 @@ describe("createModelProxyHandler — the node adapter", () => {
     handler(page.req, page.res);
     await vi.waitFor(() => expect(page.ended()).toBe(true));
     expect(page.status()).toBe(502);
-    expect(page.headers()["content-type"]).toBe("text/plain; charset=utf-8");
+    expect(page.headers()["content-type"]).toBe("application/json; charset=utf-8");
     expect(page.headers()["x-content-type-options"]).toBe("nosniff");
-    expect(page.text()).toBe("<script>alert(1)</script>");
+    expect(page.text()).toContain("the model provider did not answer");
+    expect(page.text()).not.toContain("<script>");
     expect(bodyKindOf("application/json")).toBe("json");
     expect(bodyKindOf("text/event-stream; charset=utf-8")).toBe("sse");
     expect(bodyKindOf("text/html")).toBe("text");
@@ -1524,6 +1525,25 @@ describe("the provider level and the park (record 0064)", () => {
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, deps);
     expect(res.status).toBe(529);
     expect(h.calls).toHaveLength(2); // never a third call (record 0064's one retry)
+    expect(p.levels).toEqual([{ provider: "anthropic", side: "down" }]);
+    expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
+  });
+
+  it("a gateway HTML page is a transport failure even when it claims 200: it is retried, parked past the retry, and never relayed as model output", async () => {
+    const h = harness({
+      answer: () =>
+        new Response("<html><title>Bad Gateway</title><body>cloudflare</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        }),
+    });
+    const p = planeFake();
+    const token = h.bearers.mint(h.grant("run-1"));
+    const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, { ...h.deps, plane: p.plane });
+    expect(res.status).toBe(502);
+    expect(String(res.body)).toContain("the model provider did not answer");
+    expect(String(res.body)).not.toContain("cloudflare");
+    expect(h.calls).toHaveLength(2);
     expect(p.levels).toEqual([{ provider: "anthropic", side: "down" }]);
     expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
   });

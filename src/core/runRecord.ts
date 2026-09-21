@@ -289,19 +289,23 @@ export interface RunLease {
   loopEndsAt: number;
 }
 
-/** A head a run pushed, as the record names it (item 2): the branch and the sha. */
+/** A head a run pushed, as the record names it (item 2): the branch, sha,
+ *  and whether the agent pushed it or the run's mechanical WIP salvage did.
+ *  `by` is optional for records written before that distinction survived the
+ *  event fold. */
 export interface PushedHead {
   ref: string;
   sha: string;
+  by?: "push" | "salvage";
 }
 
 /** The heads a run's events say it pushed — one per branch, the last event's
  *  sha winning, in first-seen order — or nothing when it pushed none. */
 export function pushedHeadsOf(events: readonly RunEvent[]): PushedHead[] | undefined {
-  const byRef = new Map<string, string>();
-  for (const e of events) if (e.type === "pushed_head") byRef.set(e.ref, e.sha);
+  const byRef = new Map<string, { sha: string; by: "push" | "salvage" }>();
+  for (const e of events) if (e.type === "pushed_head") byRef.set(e.ref, { sha: e.sha, by: e.by });
   if (byRef.size === 0) return undefined;
-  return [...byRef].map(([ref, sha]) => ({ ref, sha }));
+  return [...byRef].map(([ref, pushed]) => ({ ref, ...pushed }));
 }
 
 /** The lease a run's events say its harness started — the first `lease`
@@ -1029,8 +1033,14 @@ export function isRunRecord(v: unknown): v is RunRecord {
       Array.isArray(r.pushed) &&
       r.pushed.every((h) => {
         if (typeof h !== "object" || h === null) return false;
-        const { ref, sha } = h as Record<string, unknown>;
-        return typeof ref === "string" && ref.length > 0 && typeof sha === "string" && /^[0-9a-f]{7,40}$/.test(sha);
+        const { ref, sha, by } = h as Record<string, unknown>;
+        return (
+          typeof ref === "string" &&
+          ref.length > 0 &&
+          typeof sha === "string" &&
+          /^[0-9a-f]{7,40}$/.test(sha) &&
+          (by === undefined || by === "push" || by === "salvage")
+        );
       })
     )
   )

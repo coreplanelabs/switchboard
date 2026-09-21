@@ -73,7 +73,6 @@ import {
   runCodingPrPostStep,
   salvageBudgetPush,
   salvageTargetOf,
-  salvageWorkOf,
   trackPushedBranch,
   workLeftBehindLabel,
   workLeftBehindOf,
@@ -753,9 +752,69 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  spent in a relaunch — so the thread's answer is composed again once the
    *  tail has established the facts (harness-pi item 6, `endingFacts`). */
   let windDownEnding: WindDownEnding | undefined;
-  /** Where the budget-end salvage pushed what the tree held, when it did: the
+  /** Where the ending salvage pushed what the tree held, when it did: the
    *  fact the answer names over the observation that preceded the push. */
   let salvagedTo: { branch: string; head?: string } | undefined;
+  let workspaceObserved = false;
+  let workSalvageAttempted = false;
+  let endingSalvageAttempted = false;
+  const observeWorkspaceNow = async () => {
+    const pushedBranch = pushes.branch();
+    const observed = await root.span("run.observe_workspace", (span) =>
+      observeCodingWorkspace(
+        executor,
+        {
+          probeRemote: repoCtx.repo === undefined,
+          ...(pushedBranch !== undefined ? { pushedBranch } : {}),
+        },
+        span,
+      ),
+    );
+    workspaceObserved = true;
+    observedHead = observed.head;
+    observedBranch = observed.branch;
+    observedCheckedOut = observed.checkedOut;
+    observedRemoteHead = observed.remoteHead;
+    observedRemoteRepo = observed.remoteRepo;
+    observedUncommitted = observed.uncommittedChanges;
+    observedUnpushed = observed.unpushedCommits;
+  };
+  /** Preserve a coordinator coding child's work before any abnormal teardown.
+   *  One path serves failure, stop, restart and lease end, so none can regress
+   *  to the resident release's discarded-tree card. */
+  const preserveCodingChildWork = async (cue: "budget" | "ending"): Promise<void> => {
+    if (workSalvageAttempted || !isCodingPrRun || coordinator === undefined) return;
+    if (!workspaceObserved) await observeWorkspaceNow();
+    workSalvageAttempted = true;
+    if (cue === "ending") endingSalvageAttempted = true;
+    const target = salvageTargetOf({
+      pushedBranch: pushes.branch(),
+      checkedOut: observedCheckedOut,
+      base: repoCtx.baseRef ?? (await coordinatorBase),
+    });
+    // The ending checkpoint measures for itself and includes untracked,
+    // non-ignored files. The ordinary workspace observation deliberately
+    // counts tracked dirt only and therefore cannot decide that there is
+    // nothing to preserve here.
+    const salvaged =
+      "skipped" in target
+        ? { pushed: false, summary: target.skipped }
+        : await root.span(cue === "budget" ? "run.budget_salvage" : "run.work_salvage", (span) =>
+            salvageBudgetPush(executor, { branch: target.branch, cue }, span),
+          );
+    onEvent({
+      type: "run_note",
+      kind: cue === "budget" ? "budget_salvage" : "work_salvage",
+      summary: salvaged.summary,
+    });
+    if (salvaged.pushed && "head" in salvaged && salvaged.head !== undefined && !("skipped" in target)) {
+      onEvent({ type: "pushed_head", ref: target.branch, sha: salvaged.head, by: "salvage" });
+      salvagedTo = { branch: target.branch, head: salvaged.head };
+    } else if (salvaged.pushed && !("skipped" in target)) salvagedTo = { branch: target.branch };
+    if (salvaged.pushed) await observeWorkspaceNow();
+    else if ("skipped" in target || /failed|not attempted/i.test(salvaged.summary))
+      shell.note("quiet", salvaged.summary);
+  };
   /** The relaunch's re-attach ended the run — a stop, or the lease spent — so
    *  no process runs and the executor is the replaced container's, whose
    *  worktree was never re-attached: a coding run's workspace observation,
@@ -1428,26 +1487,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // undefined and the post-step reports honestly instead of guessing. A
     // hard stop tore the work down mid-flight — nothing observed, nothing
     // posted.
-    const observeWorkspaceNow = async () => {
-      const pushedBranch = pushes.branch();
-      const observed = await root.span("run.observe_workspace", (span) =>
-        observeCodingWorkspace(
-          executor,
-          {
-            probeRemote: repoCtx.repo === undefined,
-            ...(pushedBranch !== undefined ? { pushedBranch } : {}),
-          },
-          span,
-        ),
-      );
-      observedHead = observed.head;
-      observedBranch = observed.branch;
-      observedCheckedOut = observed.checkedOut;
-      observedRemoteHead = observed.remoteHead;
-      observedRemoteRepo = observed.remoteRepo;
-      observedUncommitted = observed.uncommittedChanges;
-      observedUnpushed = observed.unpushedCommits;
-    };
     // Where the post-step's PR would open (CodingPrTarget), in order: the PR's
     // true base ref when the thread's context came from a PR (a fix round
     // repushes the PR's own head branch — the PR, not the thread, knows its
@@ -1490,48 +1529,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ...(recordedStart !== undefined ? { startState: recordedStart.state, startBranch: recordedStart.branch } : {}),
       ...(pushedStart !== undefined ? { pushedStart } : {}),
     };
+    const endingNeedsPreservation =
+      isCodingPrRun && coordinator !== undefined && (budgetEnded || run.control.requested !== undefined);
+    // A hard stop ends pi before git is touched; unlike the old skipped tail,
+    // its workspace still gets the same WIP checkpoint before force teardown.
+    if (endingNeedsPreservation && run.control.requested === "hard") await endHarness();
     if (isCodingPrRun && !tailSkipped()) await observeWorkspaceNow();
-    // Push-before-abort (agent-ship.md item 8): a ship coding child (a
-    // coordinator's spawn) whose loop ended at the time budget commits and
-    // pushes what the observation found still in the tree to the unit's own
-    // branch — never the plan's base, and nowhere when the base cannot be
-    // named, since the branch might then be it — or says plainly that it had
-    // nothing, that the tree could not be measured, or why the salvage was
-    // skipped, so a re-issue starts from the partial work instead of zero.
-    // The note is the record's; a push moves the observation, so it is read
-    // again.
-    if (isCodingPrRun && coordinator !== undefined && budgetEnded && !tailSkipped()) {
-      const target = salvageTargetOf({
-        pushedBranch: pushes.branch(),
-        checkedOut: observedCheckedOut,
-        base: repoCtx.baseRef ?? planBase,
-      });
-      const work =
-        "skipped" in target
-          ? undefined
-          : salvageWorkOf(
-              { uncommittedChanges: observedUncommitted, unpushedCommits: observedUnpushed },
-              target.branch,
-            );
-      const salvaged =
-        "skipped" in target
-          ? { pushed: false, summary: target.skipped }
-          : work !== undefined && !work.work
-            ? { pushed: false, summary: work.summary }
-            : await root.span("run.budget_salvage", (span) =>
-                salvageBudgetPush(executor, { branch: target.branch }, span),
-              );
-      onEvent({ type: "run_note", kind: "budget_salvage", summary: salvaged.summary });
-      // The salvaged head is a fact of the run (run-history item 2): what renewal reads.
-      if (salvaged.pushed && "head" in salvaged && salvaged.head !== undefined && !("skipped" in target))
-        onEvent({ type: "pushed_head", ref: target.branch, sha: salvaged.head, by: "salvage" });
-      if (salvaged.pushed && !("skipped" in target))
-        salvagedTo = {
-          branch: target.branch,
-          ...("head" in salvaged && salvaged.head !== undefined ? { head: salvaged.head } : {}),
-        };
-      if (salvaged.pushed) await observeWorkspaceNow();
-    }
+    if (endingNeedsPreservation) await preserveCodingChildWork(budgetEnded ? "budget" : "ending");
     // The description turn (docs/reference/specs/pr-description.md item 5,
     // descriptionTurn.ts): the coding prompt requires a resubmitted
     // description after EVERY push to a PR that already exists (agent-coding.md
@@ -1548,7 +1552,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // and asks nothing — the post-step's note then says the description was
     // not resubmitted.
     let descriptionTurnRan = false;
-    if (isCodingPrRun && !tailSkipped() && prDescription === undefined) {
+    if (isCodingPrRun && !tailSkipped() && !endingSalvageAttempted && prDescription === undefined) {
       const turnTarget = await descriptionTurnTarget({
         observed: {
           head: observedHead,
@@ -1596,7 +1600,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // observation above (after the description turn, in case it pushed); a
     // hard stop observed nothing and has its own ⛔.
     const leftBehind =
-      isCodingPrRun && !tailSkipped()
+      isCodingPrRun && !tailSkipped() && !workSalvageAttempted
         ? workLeftBehindOf({ uncommittedChanges: observedUncommitted, unpushedCommits: observedUnpushed })
         : undefined;
     /** What the tail established, for the wind-down's answer (harness-pi item
@@ -1663,7 +1667,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // path (factory.ts), so no resident check is needed. The note rides on
     // the final reply below. A hard stop observed nothing above and posts
     // nothing; a relaunch that ended the run likewise (`tailSkipped`).
-    if (isCodingPrRun && !tailSkipped()) {
+    if (isCodingPrRun && !tailSkipped() && !endingSalvageAttempted) {
       // The requester's bound login (record 0062): the assignee and the
       // requested-by line — present only when an identity admin bound one.
       const requestedLogin =
@@ -1815,6 +1819,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         summary: redactAndCap(detail, ENDING_NOTE_MAX),
         at: clock(),
       });
+    });
+    // A failed or interrupted coordinator coding child is the highest-risk
+    // teardown: its model cannot make another push. Preserve the tree now,
+    // before the release removes it, whatever raised the ending.
+    await preserveCodingChildWork("ending").catch((salvageErr: unknown) => {
+      const summary = `the interrupted-work checkpoint failed before teardown: ${salvageErr instanceof Error ? salvageErr.message : String(salvageErr)}`;
+      registry.publish(run.id, { type: "run_note", kind: "work_salvage", summary, at: clock() });
+      shell.note("quiet", summary);
     });
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
     if (!interrupted) throw err;

@@ -907,8 +907,8 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
       { type: "pushed_head", ref: "fix/a", sha: "c".repeat(40), by: "salvage" },
     ];
     expect(pushedHeadsOf(events)).toEqual([
-      { ref: "fix/a", sha: "c".repeat(40) },
-      { ref: "fix/b", sha: "b".repeat(40) },
+      { ref: "fix/a", sha: "c".repeat(40), by: "salvage" },
+      { ref: "fix/b", sha: "b".repeat(40), by: "push" },
     ]);
   });
 

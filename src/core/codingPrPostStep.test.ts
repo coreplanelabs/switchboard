@@ -1931,9 +1931,9 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     };
   };
 
-  it("commits the tracked changes and pushes them to the unit's branch, naming the head", async () => {
+  it("commits tracked and untracked non-ignored changes and pushes them to the unit's branch, naming the head", async () => {
     const w = fakeExecutor({
-      "git status": " M src/a.ts\n",
+      "git status": " M src/a.ts\n?? src/new-test.ts\n",
       "git rev-list": "0\n",
       "git rev-parse HEAD": "abc123def456abc123def456abc123def456ab12\n",
     });
@@ -1946,28 +1946,33 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     expect(out.summary).toContain("committed the uncommitted work and pushed");
     expect(out.summary).toContain("`plan/p/u1`");
     expect(out.summary).toContain("abc123d");
-    expect(w.commands).toContain("git add -u");
+    expect(w.commands).toContain("git add -A");
     expect(w.commands.some((c) => c.startsWith("git commit -m") && c.includes("budget wind-down"))).toBe(true);
     expect(w.commands).toContain("git push origin 'HEAD:refs/heads/plan/p/u1'");
   });
 
-  it("pushes the unpushed commits without committing when the tree is clean", async () => {
+  it("a compaction checkpoint pushes the unpushed commits without committing when the tree is clean", async () => {
     const w = fakeExecutor({ "git status": "\n", "git rev-list": "2\n" });
-    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1" });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "compaction" });
     expect(out.pushed).toBe(true);
     expect(out.summary).toContain("pushed the unpushed commits");
     expect(w.commands.some((c) => c.startsWith("git commit"))).toBe(false);
     expect(w.commands.some((c) => c.startsWith("git push origin"))).toBe(true);
   });
 
-  it("states plainly that it had nothing when the tree is clean and no commit is unpushed", async () => {
-    const w = fakeExecutor({ "git status": "\n", "git rev-list": "0\n" });
-    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1" });
-    expect(out.pushed).toBe(false);
-    expect(out.summary).toBe(
-      "the budget ended with nothing to salvage: the tree is clean and `plan/p/u1` holds no unpushed commits",
-    );
-    expect(w.commands.some((c) => c.startsWith("git push"))).toBe(false);
+  it("an abnormal ending creates and pushes a WIP marker when an ordinary push already left the tree clean", async () => {
+    const w = fakeExecutor({
+      "git status": "\n",
+      "git rev-list": "0\n",
+      "git rev-parse HEAD": "abc123def456abc123def456abc123def456ab12\n",
+    });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "ending" });
+    expect(out).toMatchObject({
+      pushed: true,
+      head: "abc123def456abc123def456abc123def456ab12",
+    });
+    expect(w.commands.some((c) => c.startsWith("git commit --allow-empty -m") && c.includes("interrupted"))).toBe(true);
+    expect(w.commands).toContain("git push origin 'HEAD:refs/heads/plan/p/u1'");
   });
 
   it("a failed push reports itself and never throws", async () => {

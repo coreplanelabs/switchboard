@@ -408,7 +408,7 @@ describe("assembleRunRecord — the handoff on the record", () => {
       ...base(),
       snap: { events, startedAt: 1, eventCount: 2, stepCount: 0 } as never,
     });
-    expect(record.pushed).toEqual([{ ref: "fix/a", sha: "a".repeat(40) }]);
+    expect(record.pushed).toEqual([{ ref: "fix/a", sha: "a".repeat(40), by: "push" }]);
     expect(isRunRecord(record)).toBe(true);
     expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
     expect("pushed" in assembleRunRecord(base())).toBe(false);

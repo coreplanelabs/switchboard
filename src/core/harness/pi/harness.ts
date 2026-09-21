@@ -188,11 +188,20 @@ export function isTransientProviderError(message: string): boolean {
     ) ||
     /^terminated$/i.test(message.trim()) ||
     /overloaded/i.test(message) ||
-    /(?:\bhttp\b[^a-z0-9]{0,8}|\bstatus(?: code)?\b[^0-9]{0,5}|\berror\b[^0-9]{0,5}|\bapi error\b[^0-9]{0,5})(429|500|502|503|504|529)\b/i.test(
+    /^\s*(408|425|429|5\d\d)\b/.test(message) ||
+    /<html[\s>][\s\S]{0,4000}\b(?:bad gateway|service unavailable|gateway timeout)\b/i.test(message) ||
+    /(?:\bhttp\b[^a-z0-9]{0,8}|\bstatus(?: code)?\b[^0-9]{0,5}|\berror\b[^0-9]{0,5}|\bapi error\b[^0-9]{0,5})(408|425|429|5\d\d)\b/i.test(
       message,
     )
   );
 }
+
+/** The only ending a transport-class model failure may produce. Provider
+ * bodies are untrusted wire content (and are often whole HTML pages), so the
+ * thread gets our stable words while the detailed attempt remains on the
+ * model span. */
+export const PROVIDER_RETRY_EXHAUSTED =
+  "the model provider did not complete the call before the run's retry budget ended";
 
 type WriteUp = { kind: "time" } | { kind: "turns"; pace: string } | { kind: "soft" };
 
@@ -1362,10 +1371,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       pendingReissue = [];
       run.inbox?.requeue(unechoed.splice(0).flatMap((u) => u.inputs));
     };
-    /** The failed turn the proxy parked the run on (model-proxy item 12a;
-     *  record 0064): the provider's error, held with no `harness_error` and no
-     *  ladder — the plane's reissue steer releases it (`maybeReissue`); a
-     *  provider that never answers ends the run on its lease as today. */
+    /** A transport-class model failure holds the failed turn in this run.
+     *  The plane's provider-up steer may release it early; otherwise the
+     *  harness retries it on backoff until the loop's share of the lease is
+     *  spent. The provider's body never becomes the run's ending. */
     let heldTurn: string | undefined;
     /** pi settled on the held turn: the reissue prompt is sent only from then
      *  on — sent between the errored `message_end` and `agent_settled` pi
@@ -1382,14 +1391,30 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     let reissueInFlight: string | undefined;
     /** Reissue prompts sent, for their ids: one per release. */
     let reissues = 0;
+    /** A held turn's local retry: armed only after pi settled on the failed
+     *  call, made ready by the backoff promise, and sent from `check` so stops,
+     *  follow-ups and a plane reissue keep running while it waits. */
+    let providerRetryReady = false;
+    let providerRetryWait: Promise<void> | undefined;
+    let providerRetryGeneration = 0;
+    let retryInFlight: string | undefined;
     /** Release the held turn (model-proxy item 12a): one prompt under its own
      *  id — pi settled on the failed call and reads a steer only at a turn
      *  boundary that is not coming — sent only once pi has settled on the
      *  held turn and no release is already in flight, however many reissue
      *  rows the buffer carries. The hold is cleared by the prompt's accepted
      *  response, never here: a refusal is a failed release, not a wedge. */
+    const clearProviderHold = () => {
+      heldTurn = undefined;
+      parkSettled = false;
+      providerRetryReady = false;
+      providerRetryWait = undefined;
+      providerRetryGeneration += 1;
+      pendingReissue = [];
+    };
     const maybeReissue = () => {
-      if (heldTurn === undefined || !parkSettled || reissueInFlight !== undefined) return;
+      if (heldTurn === undefined || !parkSettled || reissueInFlight !== undefined || retryInFlight !== undefined)
+        return;
       if (pendingReissue.length === 0) return;
       if (loopEnded || hardStopped || writeUp !== undefined || finaleAborted) return;
       const batch = pendingReissue.splice(0);
@@ -1489,6 +1514,18 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           abortPi();
         }
         return;
+      }
+      if (heldTurn !== undefined) {
+        if (now() >= loopEnd) throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+        if (parkSettled && providerRetryReady && retryInFlight === undefined && reissueInFlight === undefined) {
+          providerRetryReady = false;
+          providerRetryWait = undefined;
+          providerRetries += 1;
+          const id = providerRetries === 1 ? `${ids.prompt}:retry` : `${ids.prompt}:retry:${providerRetries}`;
+          retryInFlight = id;
+          parkSettled = false;
+          sends.send({ id, type: "prompt", message: PROVIDER_RETRY_PROMPT });
+        }
       }
       if (requested === "soft") {
         stopMode = "soft";
@@ -1674,11 +1711,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     let providerError: string | undefined;
     /** The failed call was refused under the provider's usage policy: the failure by name (item 6). */
     let providerRefusal = false;
-    /** Retries of transient provider failures already spent, off the bounded
-     *  ladder (`PROVIDER_RETRY_BACKOFFS_MS`, issue 1932) — charged to the lease. */
+    /** Retries of transport-class provider failures already sent. The ladder's
+     *  final rung repeats; the run's remaining lease, not three quick tries,
+     *  is the retry budget. */
     let providerRetries = 0;
-    /** A transient failure waiting for pi to settle so its retry can be re-driven. */
-    let retryOwed = false;
     /** A container command under the read failed saying the runtime was replaced (item 16): the loop ends for the judgement below. */
     let containerSaid: Error | undefined;
     /** A container command under the read failed on its transport with no word
@@ -1811,10 +1847,15 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             // The release landed: the hold is over. Reissue rows still buffered
             // were this same recovery's — dropped, so a stale one never
             // releases a later hold before the plane has said the provider is up.
-            heldTurn = undefined;
-            parkSettled = false;
-            pendingReissue = [];
+            clearProviderHold();
           }
+        }
+        if (retryInFlight !== undefined && r.id === retryInFlight) {
+          retryInFlight = undefined;
+          if (r.success === false) {
+            parkSettled = false;
+            note("harness_error", "the model retry prompt was refused; the transport failure remains held");
+          } else clearProviderHold();
         }
         if (r.id === ids.prompt) {
           catchingUp = false;
@@ -1880,40 +1921,21 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         if (catchingUp)
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
         else if (
-          run.providerPark === true &&
           obs.policyRefusal !== true &&
           !writeUp &&
           !finaleAborted &&
-          isParkedProviderError(obs.providerError)
-        ) {
-          // The proxy parked the run on `provider_up` (model-proxy item 12a;
-          // record 0064): the failed turn is held — no `harness_error`, no
-          // ladder (the proxy already retried once and the plane owns the
-          // recovery) — and the reissue steer in `drainFollowUps` re-drives
-          // it; a provider that never answers ends the run on its lease.
-          heldTurn = obs.providerError;
-          parkSettled = false;
-          run.onProgress?.(
-            `the model call failed (${obs.providerError}); the turn is held — the run is parked until the provider answers again`,
-          );
-        } else if (
-          obs.policyRefusal !== true &&
-          providerRetries < PROVIDER_RETRY_BACKOFFS_MS.length &&
-          !writeUp &&
           isTransientProviderError(obs.providerError)
         ) {
-          // A truncated stream, a dropped connection or a gateway 5xx is
-          // transient: the run retries on the bounded ladder (issue 1932) —
-          // the failed call produced nothing, so pi is re-prompted after the
-          // attempt's backoff when it settles below, each attempt a note on
-          // the record and its wait charged to the lease. A failure past the
-          // ladder, or a non-transient one, fails the run as before. A call
-          // refused under the provider's usage policy is never transient: the
-          // same words would be refused again.
-          retryOwed = true;
-          note(
-            "harness_error",
-            `the model call failed (${obs.providerError}) — that looks transient; retry ${providerRetries + 1} of ${PROVIDER_RETRY_BACKOFFS_MS.length} after ${PROVIDER_RETRY_BACKOFFS_MS[providerRetries]! / 1000}s`,
+          // Every transport-class failure has one recovery shape: hold the
+          // failed turn, let a provider-up steer release it early, and arm a
+          // local retry after backoff. The last rung repeats until the run's
+          // loop lease is spent. Never put the provider's body in a note or in
+          // the ending — it may be a gateway's HTML page.
+          heldTurn = obs.providerError;
+          parkSettled = false;
+          const backoff = PROVIDER_RETRY_BACKOFFS_MS[Math.min(providerRetries, PROVIDER_RETRY_BACKOFFS_MS.length - 1)]!;
+          run.onProgress?.(
+            `the model provider did not complete the call; the turn is held and retry ${providerRetries + 1} waits ${backoff / 1000}s inside this run's lease`,
           );
         } else if (cutAborted && !finaleAborted && isAbortedProviderError(obs.providerError)) {
           // The cut turn closing on the cut's own abort (decision 0046, unit
@@ -1934,31 +1956,19 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         }
       }
       if (obs.settled && !catchingUp) {
-        if (retryOwed && providerError === undefined && !hardStopped) {
-          // pi settled on the failed call: back off on the attempt's rung,
-          // then re-drive it. The retry's prompt carries its own id, so nothing
-          // mistakes its response for the seed's — and a reset that races its
-          // send is resolved by that id's echo like the seed's (item 16),
-          // never an id-less write.
-          retryOwed = false;
-          await deps.sleep(PROVIDER_RETRY_BACKOFFS_MS[providerRetries]!);
-          providerRetries += 1;
-          sends.send({
-            id: providerRetries === 1 ? `${ids.prompt}:retry` : `${ids.prompt}:retry:${providerRetries}`,
-            type: "prompt",
-            message: PROVIDER_RETRY_PROMPT,
-          });
-          check();
-          if (hardStopped) break;
-          continue;
-        }
         if (heldTurn !== undefined && providerError === undefined && !hardStopped && !writeUp && !finaleAborted) {
-          // The turn is held parked (model-proxy item 12a): pi settled on the
-          // failed call, and the loop stays open — ticking its budgets and
-          // draining the inbox — until the plane's reissue steer re-drives it
-          // or the lease's wind-down ends the run as today. Only from here may
-          // the release prompt go: `check` drains the inbox and judges it.
+          // pi settled on the failed call. Keep the loop alive while the
+          // backoff runs, so its lease, stops, inbox and provider-up effect all
+          // remain live; the promise only marks the retry ready.
           parkSettled = true;
+          if (providerRetryWait === undefined) {
+            const backoff =
+              PROVIDER_RETRY_BACKOFFS_MS[Math.min(providerRetries, PROVIDER_RETRY_BACKOFFS_MS.length - 1)]!;
+            const generation = ++providerRetryGeneration;
+            providerRetryWait = deps.sleep(backoff).then(() => {
+              if (providerRetryGeneration === generation) providerRetryReady = true;
+            });
+          }
           check();
           if (hardStopped) break;
           continue;
@@ -2091,13 +2101,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       if (bypass) throw bypass;
       if (providerError !== undefined) {
         if (providerRefusal) throw policyRefused(providerError);
-        // A transient failure past the ladder is the failure by type (issue
-        // 1932): the record is marked `provider_transient`, so a coordinator
-        // can re-run the round instead of aborting the unit.
-        if (isTransientProviderError(providerError))
-          throw new ModelTransientFailureError(
-            `the model call failed after ${providerRetries} ${providerRetries === 1 ? "retry" : "retries"}: ${providerError} — this is usually transient; re-ask in the thread to run it again`,
-          );
+        // Defensive fallback: transport failures normally enter the hold
+        // above. If one reaches this boundary, keep the same typed, sanitized
+        // ending rather than exposing a provider body.
+        if (isTransientProviderError(providerError)) throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
         throw new Error(
           providerRetries > 0
             ? `the model call failed after ${providerRetries} ${providerRetries === 1 ? "retry" : "retries"}: ${providerError}`

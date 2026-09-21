@@ -1714,7 +1714,27 @@ describe("the transient re-run — round 0 dies on a provider transient with not
     expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 1, kind: "review" } });
   });
 
-  it("a transient WITH a push never re-runs: the recover pr-check opened the pull request and the round carries on to review", () => {
+  it("a transport failure whose WIP checkpoint reached the unit branch aborts with the recoverable head instead of reviewing unfinished work", () => {
+    const d = fresh(input({ merge: "person" }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      d,
+      "run-c0",
+      finished({
+        status: "failed",
+        failure: { kind: "provider_transient" },
+        pushed: [{ ref: d.state.input.unit.branch, sha: HEAD_A, by: "salvage" }],
+      }),
+      T0 + 5 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain(`the branch carries the interrupted work at \`${HEAD_A.slice(0, 7)}\``);
+    expect(report).toContain("Re-issue");
+    expect(report).not.toContain("Bad Gateway");
+  });
+
+  it("a transient WITH an ordinary push never re-runs: the recover pr-check opened the pull request and the round carries on to review", () => {
     const d = fresh(input({ merge: "person" }));
     d.answer({ type: "branch", ok: true, at: T0 });
     runChild(d, "run-c0", transientChild, T0 + 5 * MIN);
@@ -1766,6 +1786,27 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     expect(d.action).toMatchObject({ type: "wait", step: "U10/0/coding/wait/1" });
     return d;
   }
+
+  it("an interrupted coding child whose WIP checkpoint reached the unit branch ends with that recoverable head, never a discarded-work restart", () => {
+    const d = atWait();
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({
+        status: "interrupted",
+        interruption: "bot_restart",
+        pushed: [{ ref: d.state.input.unit.branch, sha: HEAD_A, by: "salvage" }],
+      }),
+      at: T0 + MIN,
+    });
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: { kind: "interrupted", checkpoint: { branch: d.state.input.unit.branch, sha: HEAD_A } },
+    });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain(`branch carries the interrupted work at \`${HEAD_A.slice(0, 7)}\``);
+    expect(report).not.toContain("discarded");
+  });
 
   it("a duplicate `run finished` for the same run advances the state once: the second return names a step the machine has left and changes nothing", () => {
     const d = atWait();

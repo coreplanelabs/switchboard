@@ -69,6 +69,7 @@ import {
 } from "../harness/pi/harness.js";
 import { PiHarness } from "../harness/pi/piHarness.js";
 import { OpenCodeHarness } from "../harness/opencode/harness.js";
+import { HarnessInterruptedError } from "../harness/contract.js";
 import { scriptOpenCodeServe } from "../harness/opencode/testing/driver.js";
 import { openCodeReplacedCallNote } from "../harness/opencode/session.js";
 import { FakeHarnessContainer } from "../harness/testing/fakeContainer.js";
@@ -371,6 +372,11 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  const WIP_COORDINATOR: CoordinatorTag = {
+    parentInstanceId: "instance",
+    idempotencyKey: "key",
+    base: "main",
+  };
   // docs/reference/specs/agent-coding.md item 10: the thread's file upload
   // rides the tool context only when the channel has one — a coding run's
   // `attach_file` posts through the requesting thread's `attachFile`.
@@ -930,7 +936,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
   // docs/reference/specs/run-history.md item 57 and agent-ship.md item 9: a
   // provider transient past the harness's retry ladder is the failure by name,
   // so a coordinator reading the child's record can re-run the round (issue 1932).
-  it("a run whose model call died on a provider transient past the harness's retry ladder fails by name: the record says failure: provider_transient", async () => {
+  it("a run whose model call spent the transport retry budget fails by name: the record says failure: provider_transient", async () => {
     const s = setup("", {
       agent: "coding",
       harness: {
@@ -938,7 +944,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
           ...watched(piHarness).harness,
           open: async () => {
             throw new ModelTransientFailureError(
-              "the model call failed after 3 retries: 502 Bad gateway — this is usually transient; re-ask in the thread to run it again",
+              "the model provider did not complete the call before the run's retry budget ended",
             );
           },
         }),
@@ -948,10 +954,158 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       },
       bearer: "sbr_run-l.s3cret",
     });
-    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("after 3 retries");
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("retry budget ended");
     s.ending.drain(undefined);
     await s.writer.settled();
     expect((await s.store.get("run-l"))!).toMatchObject({ status: "failed", failure: { kind: "provider_transient" } });
+  });
+
+  it("a coding child whose transport retry budget is exhausted commits and pushes its interrupted workspace before teardown", async () => {
+    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const BRANCH = "unit-work";
+    const commands: string[] = [];
+    const s = setup("", {
+      agent: "coding",
+      coding: true,
+      repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+      coordinator: WIP_COORDINATOR,
+      harness: {
+        harnesses: roster({
+          ...watched(piHarness).harness,
+          open: async () => {
+            throw new ModelTransientFailureError(
+              "the model provider did not complete the call before the run's retry budget ended",
+            );
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      bearer: "sbr_run-l.s3cret",
+      executor: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+          if (/status --porcelain/.test(cmd)) return " M src/work.ts\n";
+          if (/rev-list --count/.test(cmd)) return "0\n";
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+          return "";
+        },
+      },
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("retry budget ended");
+    expect(commands).toContain("git add -A");
+    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(s.releases).toEqual(["paired"]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.pushed).toEqual([{ ref: BRANCH, sha: HEAD, by: "salvage" }]);
+    expect(rec.events).toContainEqual(
+      expect.objectContaining({ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "salvage" }),
+    );
+    expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
+  });
+
+  it("a stopped coding child checkpoints its WIP before the hard-stop teardown", async () => {
+    const HEAD = "c1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const BRANCH = "unit-work";
+    const commands: string[] = [];
+    const s = setup("", {
+      agent: "coding",
+      coding: true,
+      repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+      coordinator: WIP_COORDINATOR,
+      harness: {
+        harnesses: roster({
+          ...watched(piHarness).harness,
+          open: async (_deps, run) => {
+            run.control?.requestStop("hard");
+            return {
+              answer: "⛔ Run aborted by an operator (hard stop).",
+              followUp: async () => "",
+              remainingMs: () => 1,
+              end: async () => {},
+            };
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      bearer: "sbr_run-l.s3cret",
+      executor: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+          if (/status --porcelain/.test(cmd)) return " M src/work.ts\n";
+          if (/rev-list --count/.test(cmd)) return "0\n";
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+          return "";
+        },
+      },
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.answer).toContain("aborted by an operator");
+    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["hard"]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect((await s.store.get("run-l"))!.pushed).toEqual([{ ref: BRANCH, sha: HEAD, by: "salvage" }]);
+  });
+
+  it("a restarting coding child pushes a WIP checkpoint before release and its card never says the work was discarded", async () => {
+    class RestartingChild extends HarnessInterruptedError {
+      constructor() {
+        super("the bot restarted while the coding child was running", "the bot restarted under the run", "bot_restart");
+      }
+    }
+    const HEAD = "b1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const BRANCH = "unit-work";
+    const commands: string[] = [];
+    const s = setup("", {
+      agent: "coding",
+      coding: true,
+      repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+      coordinator: WIP_COORDINATOR,
+      harness: {
+        harnesses: roster({
+          ...watched(piHarness).harness,
+          open: async () => {
+            throw new RestartingChild();
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      bearer: "sbr_run-l.s3cret",
+      executor: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+          if (/status --porcelain/.test(cmd)) return " M src/work.ts\n";
+          if (/rev-list --count/.test(cmd)) return "0\n";
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+          return "";
+        },
+      },
+    });
+    const out = await runLoop(s.deps, s.ctx);
+    expect(out).toMatchObject({ kind: "interrupted", refusal: "bot_restart" });
+    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(JSON.stringify(s.closes)).not.toContain("left behind — discarded");
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect((await s.store.get("run-l"))!.pushed).toEqual([{ ref: BRANCH, sha: HEAD, by: "salvage" }]);
   });
 });
 
@@ -1145,7 +1299,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
             commands.push(cmd);
             if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
             if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
-            if (/status --porcelain -uno/.test(cmd)) return " M src/a.ts\n";
+            if (/status --porcelain/.test(cmd)) return " M src/a.ts\n";
             if (/rev-list --count/.test(cmd)) return "0\n";
             return "";
           },
@@ -1168,7 +1322,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(pushed.out.answer).toBe(
       `⚠️ _Hit the ${ASKS.coding}-minute budget before finishing. What the tree held was pushed to \`${BRANCH}\` at \`${HEAD.slice(0, 7)}\` by the budget salvage, unreviewed — a follow-up starts from it. No PR description was submitted. Findings so far:_\n\nhalf done`,
     );
-    expect(pushed.commands).toContain("git add -u");
+    expect(pushed.commands).toContain("git add -A");
     expect(pushed.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
     expect(pushed.salvage).toEqual([
       expect.objectContaining({
@@ -1202,6 +1356,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       const registry = new HarnessRegistry();
       const container = new FakeHarnessContainer();
       const commands: string[] = [];
+      let dirty = opts.dirty;
       container.onStdin = (line, c) => {
         const cmd = JSON.parse(line) as Record<string, unknown>;
         if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
@@ -1260,7 +1415,8 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
             commands.push(cmd);
             if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
             if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
-            if (/status --porcelain -uno/.test(cmd)) return opts.dirty ? " M src/a.ts\n" : "";
+            if (/status --porcelain/.test(cmd)) return dirty ? " M src/a.ts\n" : "";
+            if (/^git commit /.test(cmd)) dirty = false;
             if (/rev-list --count/.test(cmd)) return "0\n";
             return "";
           },
@@ -1282,7 +1438,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     const tracked = await compacted({ dirty: true });
     // The run continued past the failed compaction and answered.
     expect(tracked.out.answer).toBe("done");
-    expect(tracked.commands).toContain("git add -u");
+    expect(tracked.commands).toContain("git add -A");
     expect(tracked.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
     expect(tracked.notes.map((n) => n.summary)).toEqual([
       `the compaction failed (${REFUSAL}); the failed compaction left work in the tree — committed the uncommitted work and pushed to \`${BRANCH}\` (${HEAD.slice(0, 7)})`,
@@ -1300,16 +1456,21 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     const overflowed = await compacted({ dirty: true, thenOverflow: true });
     expect(overflowed.out.failed).toContain("the model call failed");
     expect(overflowed.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
-    expect(overflowed.pushed).toEqual([expect.objectContaining({ ref: BRANCH, sha: HEAD, by: "salvage" })]);
+    // The compaction checkpoint preserves the dirty tree; the abnormal ending
+    // then adds its own WIP marker so the durable last push cannot look final.
+    expect(overflowed.pushed).toHaveLength(2);
+    expect(overflowed.pushed).toEqual(
+      expect.arrayContaining([expect.objectContaining({ ref: BRANCH, sha: HEAD, by: "salvage" })]),
+    );
     expect(overflowed.notes).toHaveLength(1);
   });
 
   // harness-pi item 6: the finale answer reads what the ending established.
   // The loop's answer is composed AFTER the salvage, the description turn and
-  // the PR post-step, from the ending the harness handed over: a clean tree
-  // whose head is on the remote names that head and the submitted description,
-  // never "partial work may exist" in a tree the salvage just measured clean.
-  it("a coding child at its time budget with a clean, pushed tree and an empty write-up answers with the pushed head and the submitted description, not a guess about partial work", async () => {
+  // the PR post-step, from the ending the harness handed over: even a clean
+  // tree gets an ending marker so its earlier ordinary push cannot be mistaken
+  // for finished work, and the answer names that checkpoint and description.
+  it("a coding child at its time budget marks a clean, already-pushed tree as WIP and names the checkpoint and submitted description", async () => {
     const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     const BRANCH = "plan/p/u1";
     const DESCRIPTION: PrDescription = {
@@ -1374,7 +1535,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
           if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
           if (/rev-parse @\{u\}/.test(cmd)) return `${HEAD}\n`;
           if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
-          if (/status --porcelain -uno/.test(cmd)) return "";
+          if (/status --porcelain/.test(cmd)) return "";
           if (/rev-list --count/.test(cmd)) return "0\n";
           return "";
         },
@@ -1388,19 +1549,20 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     await s.writer.settled();
     const rec = (await s.store.get("run-l"))!;
     const notes = rec.events.filter((e) => e.type === "run_note") as Array<{ kind: string; summary: string }>;
-    // The record's own order: the salvage found nothing, the description was
-    // asked for and submitted, the PR edited at the head.
+    // The record's own order: the salvage marked the abnormal ending, the
+    // description was asked for and submitted, the PR edited at the WIP head.
     expect(notes.filter((n) => n.kind === "budget_salvage").map((n) => n.summary)).toEqual([
-      `the budget ended with nothing to salvage: the tree is clean and \`${BRANCH}\` holds no unpushed commits`,
+      `the budget ended with work in the tree — created a WIP checkpoint commit and pushed to \`${BRANCH}\` (${HEAD.slice(0, 7)})`,
     ]);
     expect(notes.some((n) => n.kind === "description_turn")).toBe(true);
-    expect(commands.some((c) => c.startsWith("git push") || c.startsWith("git commit"))).toBe(false);
+    expect(commands.some((c) => c.startsWith("git commit --allow-empty -m"))).toBe(true);
+    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
     // The quiet default (routing-and-config item 28): the link, not the head it was rendered at.
     expect(out.prNote).toContain("PR updated: https://github.com/o/r/pull/700");
     expect(out.prNote).not.toContain("re-rendered");
     // The card reads what the ending established, in that order.
     expect(out.answer).toBe(
-      `Stopped at the ${ASKS.coding}-minute budget without finishing. The tree was clean and \`${BRANCH}\` held no unpushed commits — its head \`${HEAD.slice(0, 7)}\` is on the remote. The PR description was submitted.`,
+      `Stopped at the ${ASKS.coding}-minute budget without finishing. What the tree held was pushed to \`${BRANCH}\` at \`${HEAD.slice(0, 7)}\` by the budget salvage, unreviewed — a follow-up starts from it. The PR description was submitted.`,
     );
     expect(out.answer).not.toContain("Partial work may exist");
     // The record's answer event carries the same words.

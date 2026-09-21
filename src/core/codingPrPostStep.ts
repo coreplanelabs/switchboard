@@ -276,11 +276,13 @@ export function salvageWorkOf(
 }
 
 /** Push-before-abort (docs/reference/specs/agent-ship.md item 8): a ship coding
- *  child whose loop ended at the time budget commits and pushes what its tree
- *  still holds to the unit's branch (`salvageTargetOf` names it), so a re-issue
- *  starts from the partial work instead of zero — or says plainly that it had
- *  nothing. Mechanical, in the run loop after the model is done: the model can
- *  make no more tool calls at the wind-down, so nothing else can push.
+ *  child whose loop ended abnormally commits and pushes what its tree still
+ *  holds to the unit's branch (`salvageTargetOf` names it), so a re-issue
+ *  starts from the partial work instead of zero. A clean ending gets an empty
+ *  WIP marker commit too: its earlier ordinary push may still be unfinished,
+ *  and only a final `by: "salvage"` head lets the coordinator tell. Mechanical,
+ *  in the run loop after the model is done: the model can make no more tool
+ *  calls at the wind-down, so nothing else can push.
  *  Best-effort: a failed step reports itself and never fails the run.
  *  The same push, worded for its cue, is the compaction checkpoint's
  *  (docs/reference/specs/harness-pi.md item 7): a compaction the provider
@@ -288,7 +290,7 @@ export function salvageWorkOf(
  *  wind-down, so the tree is pushed the moment the failure is known. */
 export async function salvageBudgetPush(
   executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
-  opts: { branch: string; cue?: "budget" | "compaction" },
+  opts: { branch: string; cue?: "budget" | "compaction" | "ending" },
   span?: Span,
 ): Promise<{ pushed: boolean; summary: string; head?: string }> {
   const trace = span ? { span } : undefined;
@@ -302,31 +304,50 @@ export async function salvageBudgetPush(
           pushedLead: "the failed compaction left work in the tree",
           failedLead: `the compaction checkpoint push to \`${opts.branch}\` failed`,
         }
-      : {
-          commit: "wip: committed at the budget wind-down — work in progress, not reviewed",
-          nothing: nothingToSalvageNote(opts.branch),
-          pushedLead: "the budget ended with work in the tree",
-          failedLead: `the budget-end salvage push to \`${opts.branch}\` failed`,
-        };
+      : opts.cue === "ending"
+        ? {
+            commit: "wip: preserve interrupted coding work — work in progress, not reviewed",
+            nothing: `the coding child ended with nothing to preserve: the tree is clean and \`${opts.branch}\` holds no unpushed commits`,
+            pushedLead: "the coding child ended with interrupted work",
+            failedLead: `the interrupted-work push to \`${opts.branch}\` failed`,
+          }
+        : {
+            commit: "wip: committed at the budget wind-down — work in progress, not reviewed",
+            nothing: nothingToSalvageNote(opts.branch),
+            pushedLead: "the budget ended with work in the tree",
+            failedLead: `the budget-end salvage push to \`${opts.branch}\` failed`,
+          };
   try {
-    // Tracked changes only, the clean-tree rule's own measure (resident-repos
-    // item 17): untracked scratch is the run's own noise. The two measures are
-    // `run`, not `probe`: a measure that fails is the salvage failing (the
-    // catch below says so), never a tree read as clean.
-    const dirty = (await run("git status --porcelain -uno")).trim() !== "";
+    // An ending checkpoint preserves every non-ignored workspace change,
+    // including a new source or test file the child had not added yet. Git's
+    // ignore rules still keep dependency caches, credentials and attachment
+    // staging out. The measure is `run`, not `probe`: a failure is the salvage
+    // failing, never a tree read as clean.
+    const dirty = (await run("git status --porcelain")).trim() !== "";
+    const endingCheckpoint = opts.cue !== "compaction";
     if (dirty) {
-      await run("git add -u");
+      await run("git add -A");
       await run(`git commit -m ${shellQuote(words.commit)}`);
+    } else if (endingCheckpoint) {
+      // A clean tree can still be unfinished: the child may have pushed an
+      // ordinary intermediate commit before its abnormal ending. Give every
+      // ending its own mechanical marker so the durable fold records the last
+      // head as salvage and the coordinator never reviews that work as final.
+      await run(`git commit --allow-empty -m ${shellQuote(words.commit)}`);
     }
     const unpushed = parseCountOutput(await run("git rev-list --count HEAD --not --remotes")) ?? 0;
-    if (!dirty && unpushed === 0) return { pushed: false, summary: words.nothing };
+    if (!dirty && !endingCheckpoint && unpushed === 0) return { pushed: false, summary: words.nothing };
     await run(`git push origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
     const head = parseRevParseOutput(await probe("git rev-parse HEAD"));
     return {
       pushed: true,
       ...(head !== undefined ? { head } : {}),
       summary: `${words.pushedLead} — ${
-        dirty ? "committed the uncommitted work and pushed" : "pushed the unpushed commits"
+        dirty
+          ? "committed the uncommitted work and pushed"
+          : endingCheckpoint
+            ? "created a WIP checkpoint commit and pushed"
+            : "pushed the unpushed commits"
       } to \`${opts.branch}\`${head !== undefined ? ` (${head.slice(0, 7)})` : ""}`,
     };
   } catch (err) {

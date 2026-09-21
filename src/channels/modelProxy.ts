@@ -759,8 +759,10 @@ export async function handleAdmitted(
     );
   const outcome = (status: number, outBytes: number) =>
     `[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → ${status} in=${Buffer.byteLength(payload)} out=${outBytes} ${Math.max(0, deps.clock() - startedAt)}ms`;
-  // One retry TOTAL on a transport failure or a 5xx (record 0064): the two
-  // failure shapes share it, so a turn makes at most two upstream calls. A
+  // One immediate retry TOTAL on a transport-class failure (record 0064): a
+  // throw/reset, a retryable status, or a gateway HTML page. The run-level
+  // harness then holds and backs off inside its lease; this fast retry only
+  // absorbs a single edge blip, so a turn makes at most two upstream calls. A
   // failure past the retry is the provider's level going `down` — reported to
   // the plane with the run parked on `provider_up` — and the error is still
   // relayed (the harness's held turn reads the steer). A client abort says
@@ -777,6 +779,13 @@ export async function handleAdmitted(
     deps.plane?.park(grant.runId, grant.providerName);
   };
   const aborted = () => req.signal?.aborted === true;
+  const retryable = (answer: Response | undefined): boolean => {
+    if (answer === undefined) return true;
+    if (answer.status === 408 || answer.status === 425 || answer.status === 429 || answer.status >= 500) return true;
+    // A gateway can answer its own document with 200. It is transport output,
+    // never a model answer and never safe to relay into the harness as HTML.
+    return (answer.headers.get("content-type") ?? "").toLowerCase().includes("text/html");
+  };
   let res: Response | undefined;
   let failure: unknown;
   try {
@@ -784,14 +793,14 @@ export async function handleAdmitted(
   } catch (err) {
     failure = err;
   }
-  if ((res === undefined || res.status >= 500) && !aborted()) {
+  if (retryable(res) && !aborted()) {
     const retried = await call().catch(() => undefined);
     // A retry that also failed transport keeps the first answer: a 5xx body
     // relays as it came; nothing at all is the 502 below.
     if (retried !== undefined) res = retried;
   }
-  if ((res === undefined || res.status >= 500) && !aborted()) providerDown();
-  if (res === undefined) {
+  if (retryable(res) && !aborted()) providerDown();
+  if (res === undefined || (res.headers.get("content-type") ?? "").toLowerCase().includes("text/html")) {
     span.fail(failure ?? new Error("upstream unreachable"));
     span.end("error");
     log(`[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → upstream unreachable`);
@@ -827,6 +836,7 @@ export async function handleAdmitted(
         log(outcome(res.status, outBytes));
       },
       onError: (err) => {
+        providerDown();
         const result = meter.result();
         span.setAttrs(
           turnAttrs(grant, result, firstAt !== undefined ? firstAt - startedAt : undefined, offered, priceOf(result)),

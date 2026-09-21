@@ -225,11 +225,10 @@ export const MERGE_WAIT_ASK_MINUTES = 60;
  *  request's line with the conflict named, never a retry loop. */
 export const PULL_SWEEP = { leaseMinutes: 15, spendCapUsd: 5 } as const;
 
-/** The provider retry ladder (issue 1932): the backoff before each retry of a
- *  transient model-call failure — a gateway 5xx, a stream cut before
- *  `message_stop`, a gateway timeout. Three attempts with growing waits,
- *  charged to the run's lease; the waits stay small next to the run's minutes
- *  because the observed blips are edge transients of seconds. */
+/** The provider retry ladder: the first backoffs for a transport-class
+ *  model-call failure. The final rung repeats while the run's loop lease has
+ *  time, so these are pacing intervals rather than a three-attempt terminal
+ *  budget. */
 export const PROVIDER_RETRY_BACKOFFS_MS = [5_000, 15_000, 45_000] as const;
 
 /** A hosted ship parent's deadline margin past the pipeline's wall clock

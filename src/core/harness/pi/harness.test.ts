@@ -333,7 +333,12 @@ function world(
     bearers,
     ...(opts.compaction ? { compaction: opts.compaction } : {}),
     clock: () => clock.now,
-    sleep: opts.sleep ?? (() => new Promise((r) => setImmediate(r))),
+    sleep:
+      opts.sleep ??
+      ((ms) =>
+        opts.providerPark && ms >= PROVIDER_RETRY_BACKOFFS_MS[0]
+          ? new Promise<void>(() => {})
+          : new Promise((r) => setImmediate(r))),
     pollMs: 10,
     tickMs: opts.tickMs ?? 10,
   };
@@ -656,13 +661,16 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     scriptedPi(failed.container, (_n, c) => {
       failed.inbox.push({ text: "also bump the version", userId: "slack:UANN", at: NOW, ledgerSeq: 3 });
       bashTurn(failed, "c1", "ls", "files");
-      // The next model call fails with the steer still queued in pi.
+      // The next model call fails non-transiently with the steer still queued in pi.
       c.emit(
-        { type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "503" } },
+        {
+          type: "message_end",
+          message: { role: "assistant", content: [], stopReason: "error", errorMessage: "403 revoked" },
+        },
         { type: "agent_settled" },
       );
     });
-    await expect(failed.start()).rejects.toThrow("the model call failed: 503");
+    await expect(failed.start()).rejects.toThrow("the model call failed: 403 revoked");
     expect(failed.container.commands().some((c) => c.type === "steer")).toBe(true);
     expect(failed.inbox.drain().map((i) => i.text)).toEqual(["also bump the version"]);
     expect(failed.steps.every((s) => s.inboxConsumedSeq === 0)).toBe(true);
@@ -1087,8 +1095,9 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     const answer = await w.start();
     expect(answer).toBe("recovered");
-    // The attempt is on the record, naming its rung of the ladder.
-    expect(w.notes.some((n) => n.includes("retry 1 of 3"))).toBe(true);
+    // The attempt is held on the run and names its next backoff without
+    // exposing the gateway body.
+    expect(w.notes.some((n) => n.includes("the turn is held and retry 1 waits"))).toBe(true);
     // The wait is the rung's, charged to the lease through the harness's sleep.
     expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
     const prompts = w.container.commands().filter((c) => c.type === "prompt");
@@ -1100,7 +1109,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(prompts[1].id).not.toBe(prompts[0].id);
   });
 
-  it("a 5xx on every attempt spends the whole ladder then ends the run by type, each attempt on the record with its growing wait; a non-transient error is never retried", async () => {
+  it("transport failures stay held on backoff inside the lease; exhausting that retry budget ends by type without exposing a gateway page, while a non-transient error is never retried", async () => {
     const gatewayError = {
       type: "message_end",
       message: {
@@ -1111,25 +1120,33 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       },
     };
     const slept: number[] = [];
-    const always = world({ sleep: async (ms) => void slept.push(ms) });
+    const clock = { now: NOW };
+    const always = world({
+      clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        // The provider stays unavailable until the run's lease-backed retry
+        // budget is gone; no wall time is spent in this unit test. Harness
+        // polling ticks still leave the fake clock alone.
+        if (ms >= PROVIDER_RETRY_BACKOFFS_MS[0]) clock.now += 2 * 60 * 60_000;
+      },
+    });
     scriptedPi(always.container, (_n, c) => c.emit(gatewayError, { type: "agent_settled" }));
     const err = await always.start().then(
       () => undefined,
       (e: unknown) => e,
     );
     // The failure by type (the run loop marks the record `provider_transient`),
-    // naming the spent ladder in plain words.
+    // naming the spent lease-backed retry budget in the user's words. The
+    // provider's HTML/JSON body is never the ending.
     expect(err).toBeInstanceOf(ModelTransientFailureError);
-    expect((err as Error).message).toMatch(/the model call failed after 3 retries: .*502.*re-ask in the thread/);
-    // Each attempt is a run note on its rung, and each wait grew.
-    for (const [i, backoff] of PROVIDER_RETRY_BACKOFFS_MS.entries()) {
-      expect(always.notes.some((n) => n.includes(`retry ${i + 1} of ${PROVIDER_RETRY_BACKOFFS_MS.length}`))).toBe(true);
-      expect(slept).toContain(backoff);
-    }
-    // The seed plus the ladder's three re-drives, each under its own id.
-    const prompts = always.container.commands().filter((c) => c.type === "prompt");
-    expect(prompts).toHaveLength(4);
-    expect(new Set(prompts.map((p) => p.id)).size).toBe(4);
+    expect((err as Error).message).toBe(
+      "the model provider did not complete the call before the run's retry budget ended",
+    );
+    expect((err as Error).message).not.toContain("origin_bad_gateway");
+    expect(always.notes.some((n) => n.includes("the turn is held"))).toBe(true);
+    expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
+    expect(always.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
 
     const auth = world();
     scriptedPi(auth.container, (_n, c) =>
@@ -1158,8 +1175,10 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       "network error",
       "request timed out",
       "Anthropic API error 529: overloaded_error",
+      "Our servers are currently overloaded. Please try again later.",
       "HTTP 503 Service Unavailable",
       "status code 429",
+      "<html><title>Bad Gateway</title><body>cloudflare</body></html>",
     ])
       expect(isTransientProviderError(m), m).toBe(true);
     for (const m of [
@@ -1179,7 +1198,34 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   // proxy parks on holds the turn — no `harness_error`, no retry ladder —
   // while the run is parked on `provider_up`, and the plane's reissue steer
   // re-issues exactly that held turn once.
-  it("a parked provider failure on a park-capable run holds the turn with no harness_error and no ladder; the plane's reissue steer re-issues the held turn once — two steers in one drain are one prompt — and the seq is consumed on pi's echo", async () => {
+  it("a parked provider failure on a park-capable run holds the turn and retries on backoff without waiting for another run; a plane reissue can still release it early", async () => {
+    const slept: number[] = [];
+    const w = world({ providerPark: true, sleep: async (ms) => void slept.push(ms) });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "502 the model provider did not answer",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else finalTurn(c, "recovered on the held retry");
+    });
+    expect(await w.start()).toBe("recovered on the held retry");
+    expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
+    expect(w.notes.some((n) => n.includes("the turn is held"))).toBe(true);
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(2);
+    expect(String(prompts[1].id)).toContain(":retry");
+  });
+
+  it("a plane reissue releases a held provider turn before its backoff when another run proves the provider recovered", async () => {
     const w = world({ providerPark: true });
     scriptedPi(w.container, (n, c) => {
       if (n === 0)
@@ -1330,7 +1376,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     const answer = await w.start();
     expect(answer).toBe("recovered");
-    expect(w.notes.some((n) => n.includes("retry 1 of"))).toBe(true);
+    expect(w.notes.some((n) => n.includes("the turn is held and retry 1 waits"))).toBe(true);
     expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
   });
 

@@ -843,6 +843,8 @@ export type UnitEnding =
       finalReply?: string;
       /** A changes-requested review posted this round before the stop. */
       postedReview?: boolean;
+      /** The mechanical WIP checkpoint a stopped coding child pushed before teardown. */
+      checkpoint?: { branch: string; sha: string };
     }
   | {
       kind: "aborted";
@@ -886,7 +888,14 @@ export type UnitEnding =
    *  `transient` so it reads as a condition beside `checks_failed` and `held`
    *  in the plane's table, never as the child failing on its task. */
   | { kind: "transient"; round: RoundRef; runId: string; reviewRounds: number }
-  | { kind: "interrupted"; round: RoundRef; runId: string; reviewRounds: number; cause?: InterruptionCause }
+  | {
+      kind: "interrupted";
+      round: RoundRef;
+      runId: string;
+      reviewRounds: number;
+      cause?: InterruptionCause;
+      checkpoint?: { branch: string; sha: string };
+    }
   | { kind: "refused"; refusal: string; message?: string; round: RoundRef; reviewRounds: number }
   /** The unit idles instead of ending (record 0051): with the resolved
    *  `ship.idleDays` above zero, `end()` wraps an idling kind — every kind but
@@ -1535,6 +1544,16 @@ function nextReview(s: UnitPipelineState, notes: CoordinatorNote[] = []): Transi
 const stopMode = (status: RunStatus): "soft" | "hard" | undefined =>
   status === "stopped_soft" ? "soft" : status === "stopped_hard" ? "hard" : undefined;
 
+/** The last mechanical WIP push to this unit branch. Unlike an ordinary push,
+ *  it says the child ended before its work was ready for review. */
+function interruptedCheckpoint(
+  s: UnitPipelineState,
+  pushed: readonly PushedHeadFact[] | undefined,
+): { branch: string; sha: string } | undefined {
+  const found = pushed?.filter((p) => p.ref === s.input.unit.branch && p.by === "salvage").at(-1);
+  return found ? { branch: found.ref, sha: found.sha } : undefined;
+}
+
 /** A coding run's confirmed end: round 0's child, or the run a findings step dispatched. */
 function settleCoding(
   s: UnitPipelineState,
@@ -1562,6 +1581,7 @@ function settleCoding(
         }
       : {}),
   };
+  const checkpoint = interruptedCheckpoint(next, facts.pushed);
   const mode = stopMode(facts.status);
   if (mode !== undefined)
     return end(
@@ -1572,13 +1592,33 @@ function settleCoding(
         round,
         reviewRounds: next.reviewRounds,
         ...(facts.finalReply !== undefined ? { finalReply: facts.finalReply } : {}),
+        ...(checkpoint !== undefined ? { checkpoint } : {}),
       },
       [roundNote(round, "stopped")],
     );
+  // A mechanical WIP push means the child did not declare the work ready for
+  // review. Keep the unit branch as the resumption point and abort this
+  // attempt; an ordinary push still takes the established recover-PR path.
+  if (facts.status === "failed" && checkpoint !== undefined) {
+    const cause =
+      facts.failure?.kind === "provider_transient"
+        ? "the model provider's transport retry budget was spent"
+        : "it failed before finishing";
+    return end(
+      next,
+      {
+        kind: "aborted",
+        reason: `⚠️ The coding child ended because ${cause}; the branch carries the interrupted work at \`${checkpoint.sha.slice(0, 7)}\` on \`${checkpoint.branch}\`. Re-issue the request to resume from it instead of starting over.`,
+        round,
+        reviewRounds: next.reviewRounds,
+      },
+      [roundNote(round, "aborted")],
+    );
+  }
   // A failed coding child no longer aborts outright: the pr-check looks at the
-  // branch first — a push before the death is recovered as the round's pull
-  // request (agent-ship items 10 and 15), and only a branch with
-  // nothing on it ends the unit with the child's own reason.
+  // branch first — an ordinary push before the death is recovered as the
+  // round's pull request, and only a branch with nothing on it ends the unit
+  // with the child's own reason.
   if (facts.status === "failed")
     return {
       state: {
@@ -2429,7 +2469,8 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       // The hosted parent's hard stop landed while this child ran (record 0060;
       // issue 1924): the unit ends stopped as the child ends, whatever the
       // child's own status — the runner runs nothing more of it.
-      if (r.stopped === true)
+      if (r.stopped === true) {
+        const checkpoint = p.round.kind === "review" ? undefined : interruptedCheckpoint(clocked, r.run.pushed);
         return end(
           clocked,
           {
@@ -2438,14 +2479,33 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
             round: p.round,
             reviewRounds: s.reviewRounds,
             ...(r.run.finalReply !== undefined ? { finalReply: r.run.finalReply } : {}),
+            ...(checkpoint !== undefined ? { checkpoint } : {}),
           },
           [roundNote(p.round, "stopped")],
         );
+      }
       if (r.run.status === "interrupted") {
         const cause = r.run.interruption;
-        // A dead CODING child may have pushed before the ledger closed it: the
-        // pr-check recovers the branch. A review child has nothing on the
-        // branch to recover, so its interruption still ends the unit at once.
+        const checkpoint = interruptedCheckpoint(clocked, r.run.pushed);
+        // A mechanical WIP checkpoint is deliberately not opened for review:
+        // the interrupted child never declared it finished. The next attempt
+        // starts from the unit branch at that head.
+        if (p.round.kind !== "review" && checkpoint !== undefined)
+          return end(
+            clocked,
+            {
+              kind: "interrupted",
+              round: p.round,
+              runId: p.runId,
+              reviewRounds: s.reviewRounds,
+              ...(cause !== undefined ? { cause } : {}),
+              checkpoint,
+            },
+            [roundNote(p.round, "aborted")],
+          );
+        // A dead CODING child may have pushed normally before the ledger closed
+        // it: the pr-check recovers that branch. A review child has nothing on
+        // the branch to recover, so its interruption still ends the unit at once.
         if (p.round.kind !== "review")
           return {
             state: {
@@ -2768,6 +2828,10 @@ export function renderUnitReport(
       ? `Findings below ${level}, left as-is: ${skipped.map((f) => `${f.id} (${f.severity}) — ${f.title}`).join("; ")}`
       : undefined;
   const join = (parts: Array<string | undefined>) => parts.filter(Boolean).join("\n\n");
+  const checkpointLine = (checkpoint: { branch: string; sha: string } | undefined) =>
+    checkpoint === undefined
+      ? undefined
+      : `The branch carries the interrupted work at \`${checkpoint.sha.slice(0, 7)}\` on \`${checkpoint.branch}\`; re-issue to resume from it instead of starting over.`;
   switch (e.kind) {
     case "merged":
       if (e.by === "other")
@@ -2916,9 +2980,11 @@ export function renderUnitReport(
         aside(reissue),
       ]);
     case "stopped":
-      if (!shows(verbosity, "verbose")) return `${e.mode === "hard" ? "⛔" : "⏹"} Stopped.${prLine}`;
+      if (!shows(verbosity, "verbose"))
+        return join([`${e.mode === "hard" ? "⛔" : "⏹"} Stopped.${prLine}`, checkpointLine(e.checkpoint)]);
       return join([
         `${e.mode === "hard" ? "⛔" : "⏹"} Ship stopped by operator (${e.mode} stop) after ${rounds}.${prLine}`,
+        checkpointLine(e.checkpoint),
         writeUpPointer(
           s,
           e.round.kind,
@@ -2973,7 +3039,7 @@ export function renderUnitReport(
         reissue,
       ]);
     case "interrupted":
-      return shipInterruptedNote(prUrl, e.cause, (s.input.idleDays ?? 0) > 0);
+      return join([shipInterruptedNote(prUrl, e.cause, (s.input.idleDays ?? 0) > 0), checkpointLine(e.checkpoint)]);
     case "idle_expired":
       return "⌛ Idle expired: no reply continued this unit before its idle window closed.";
     case "refused":
