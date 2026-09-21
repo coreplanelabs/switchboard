@@ -551,6 +551,130 @@ describe("operatorThreadTail reads the thread session first (session-log item 13
   });
 });
 
+// The plain-words model unit (routing-and-config items 2 and 29): a person
+// names a model in plain words ("with astra, …") and the run uses it — the
+// loop resolves the word through `provider_models`, `bind_preset` carries the
+// ref typed, and the executor applies it at directive precedence. The request
+// rides verbatim: the model word is stripped from nothing.
+describe("a plain-words model rides bind_preset (the plain-words model unit)", () => {
+  const ASTRA = "openrouter/openai/gpt-6-astra";
+  const modelCtx = () => ctxOf({ providers: ["anthropic", "openrouter"] });
+  const reader = (refs: readonly string[]) => ({
+    read: async (filter?: string) => {
+      const needle = filter?.trim().toLowerCase();
+      const hit = needle ? refs.filter((r) => r.toLowerCase().includes(needle)) : [...refs];
+      return hit.length === 0
+        ? "No ref matches; the deployment's refs are `<provider>/<model>` on the configured providers."
+        : ["Model refs this deployment can run:", ...hit.map((r) => `- \`${r}\``)].join("\n");
+    },
+  });
+
+  it("the bind carries the resolved ref typed, and the bound line still rides the person's words verbatim — the model word stripped from nothing", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "general", request: "with astra, list the runs", reason: "r", model: ASTRA },
+      },
+      ctxOf({ requestText: "with astra, list the runs", providers: ["anthropic", "openrouter"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0]).toMatchObject({ line: "agent:general with astra, list the runs", model: ASTRA });
+  });
+
+  it("a model naming no declared provider is a violation the seam re-asks — never a guess and never a silent default", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "x", reason: "r", model: "openai/gpt-6" } },
+      modelCtx(),
+    );
+    if (turn.kind !== "violation") throw new Error("not a violation");
+    expect(turn.violation).toContain("names no model provider this deployment has");
+    expect(turn.violation).toContain("provider_models");
+  });
+
+  it("a model that is not a <provider>/<model> ref — the bare word — is a violation naming the shape", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "x", reason: "r", model: "astra" } },
+      modelCtx(),
+    );
+    if (turn.kind !== "violation") throw new Error("not a violation");
+    expect(turn.violation).toContain("is not a `<provider>/<model>` ref");
+  });
+
+  it("a bind without a model carries none: a request naming no model binds with no model", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "list the runs", reason: "r" } },
+      modelCtx(),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].model).toBeUndefined();
+  });
+
+  it("a ref the provider catalogue does not list is re-asked, and the corrected listed ref binds — the ref is held against the catalogue, not the schema alone", async () => {
+    const answers = [
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "general", request: "list the runs", reason: "r", model: "openrouter/openai/gpt-7" },
+      },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "list the runs", reason: "r", model: ASTRA } },
+    ];
+    const answer = await runOperator(
+      input({ providers: ["anthropic", "openrouter"], providerModels: reader([ASTRA]) }),
+      async () => answers.shift()!,
+    );
+    if (answer.decision.kind !== "binds") throw new Error("not a bind");
+    expect(answer.decision.binds[0].model).toBe(ASTRA);
+    expect(answer.attempts).toEqual([
+      {
+        outcome: "violation",
+        violation: expect.stringContaining("is not in the provider catalogue") as unknown as string,
+      },
+      { outcome: "accepted" },
+    ]);
+  });
+
+  it("a catalogue that cannot be read costs the check, never the bind: the declared provider's ref stands", async () => {
+    const answer = await runOperator(
+      input({
+        providers: ["anthropic", "openrouter"],
+        providerModels: {
+          read: async () => {
+            throw new Error("503");
+          },
+        },
+      }),
+      async () => ({
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "general", request: "list the runs", reason: "r", model: ASTRA },
+      }),
+    );
+    if (answer.decision.kind !== "binds") throw new Error("not a bind");
+    expect(answer.decision.binds[0].model).toBe(ASTRA);
+  });
+
+  it("the operator event carries the bind's model, so the record says which ref the run was asked onto", () => {
+    const event = operatorEventOf("on", {
+      decision: {
+        kind: "binds",
+        binds: [{ line: "agent:general list the runs", reason: "r", model: ASTRA }],
+        reason: "r",
+      },
+      latencyMs: 1,
+      outputTokens: 1,
+    });
+    expect(event.binds).toEqual([{ line: "agent:general list the runs", reason: "r", model: ASTRA }]);
+  });
+
+  it("the prompt says a plain-words model resolves through provider_models and rides bind_preset's model, and the tool's schema carries the argument", () => {
+    const prompt = buildOperatorPrompt(input());
+    expect(prompt.system).toContain("names a model in plain words");
+    expect(prompt.system).toContain("never a guess and never a silent default");
+    const bind = operatorTools(input()).find((t) => t.name === OPERATOR_BIND_TOOL)!;
+    const schema = bind.inputSchema as { properties: Record<string, unknown>; required: string[] };
+    expect(Object.keys(schema.properties)).toContain("model");
+    expect(schema.required).not.toContain("model");
+  });
+});
+
 // Issue 2088's write-intent cell (record 0069, as amended; `decideExecution`'s
 // `unresolvable_write` row): the executor can run the read/write check — every
 // command tool declares a typed `intent`, and a write-class intent never

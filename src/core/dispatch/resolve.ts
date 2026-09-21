@@ -110,6 +110,12 @@ export function resolveRun(
      *  directives — so admission's follow-up rule and the thread-owner rule
      *  keep reading the person's typed intent alone. */
     operatorPreset?: string;
+    /** The model ref an `on` operator bind resolved from a model the person
+     *  named in plain words (the plain-words model unit): it stands where a
+     *  `model:` directive would in the resolution — the request layer, so the
+     *  run uses it exactly as the directive path resolves the same ref — and
+     *  a typed directive on the message still outranks it. */
+    operatorModel?: string;
   },
 ): ResolvedRun {
   const { msg, directives, history } = ctx;
@@ -128,7 +134,7 @@ export function resolveRun(
     userId: msg.userId,
     request: {
       agent: directives.agent ?? ctx.operatorPreset ?? sticky.agent,
-      model: directives.model ?? sticky.model,
+      model: directives.model ?? ctx.operatorModel ?? sticky.model,
       effort: directives.effort ?? sticky.effort,
       verbosity: directives.verbosity ?? sticky.verbosity,
     },

@@ -689,11 +689,17 @@ export function judgeDoorFixture(
   const bound = decision.kind === "binds" ? decision.binds[0]?.line : undefined;
   if (expected.kind === "bind") {
     const preset = bound === undefined ? undefined : presetBindOf(bound, [expected.preset]);
+    // The plain-words model unit: a `model` expectation hits only when the
+    // first bind carries exactly that ref, and `noModel` only when it carries
+    // none — a silent default is the miss the fixture exists to catch.
+    const model = decision.kind === "binds" ? decision.binds[0]?.model : undefined;
     const hit =
       bound !== undefined &&
       preset === expected.preset &&
       (expected.carries === undefined || bound.includes(expected.carries)) &&
-      (expected.forbids === undefined || !bound.includes(expected.forbids));
+      (expected.forbids === undefined || !bound.includes(expected.forbids)) &&
+      (expected.model === undefined || model === expected.model) &&
+      (expected.noModel !== true || model === undefined);
     return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
   }
   if (expected.kind === "refusal") {
@@ -728,11 +734,18 @@ export function judgeDoorFixture(
     // read command standing in for the write and never the floor.
     const questions = decideExecution({ kind: "unresolvable_write" }, "chat").cell === "question";
     const proposal = decision.kind === "question" ? decision.proposal : undefined;
+    // A `names` expectation (the plain-words model unit): the question's own
+    // text must name the catalogue's candidates — an ambiguous model word is
+    // one question naming what could run, never a guess.
+    const text = decision.kind === "question" ? decision.text : undefined;
     const hit =
       questions &&
-      proposal !== undefined &&
-      proposal.includes(expected.proposes) &&
-      (expected.forbids === undefined || !proposal.includes(expected.forbids));
+      decision.kind === "question" &&
+      (expected.proposes === undefined ||
+        (proposal !== undefined &&
+          proposal.includes(expected.proposes) &&
+          (expected.forbids === undefined || !proposal.includes(expected.forbids)))) &&
+      (expected.names === undefined || (text !== undefined && text.includes(expected.names)));
     return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
   }
   if (expected.kind === "fold") {

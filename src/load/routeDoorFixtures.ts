@@ -1,10 +1,12 @@
 // The checked-in door set of `load:route` (docs/reference/specs/load-harness.md
-// item 17): the door row of nineteen fixtures — record 0069's fourteen defects
-// D1 to D14 from one day under `routing.operator: on` (issues 1993, 2010,
-// 2025), the first night's four door failures N1 to N4 (issues 2043, 2045,
-// 2046) and the one loop's first defect N5 (issue 2088, the write ask a read
-// answered) — each the failure's message shape with the amended table's expected
-// outcome and the unit of the one-execution-path plan that turns it green.
+// item 17): the door row of twenty-five fixtures — record 0069's fourteen
+// defects D1 to D14 from one day under `routing.operator: on` (issues 1993,
+// 2010, 2025), the first night's four door failures N1 to N4 (issues 2043,
+// 2045, 2046), the one loop's first defect N5 (issue 2088, the write ask a
+// read answered) and the plain-words model set M1 to M6 (a person names a
+// model in plain words and the run uses it) — each the failure's message
+// shape with the amended table's expected outcome and the unit that turns it
+// green.
 // The replay scores a fixture only once its unit is on `DOOR_MERGED_UNITS`
 // and prints the rest as pending, so the row is green at head while the
 // units land one pull request at a time. Neutral names only (acme/…, plan
@@ -15,14 +17,16 @@
  *  (typed tools, the parked question, policy-only refusals, the verifier's
  *  retirement); E3 is the click on every write path; W1 is issue 2088's
  *  write-intent question cell (a write-class intent never executes as a read
- *  command — record 0069's amendment). */
-export type DoorUnit = "E2" | "E3" | "W1";
+ *  command — record 0069's amendment); MW1 is the plain-words model unit (a
+ *  model named in plain words rides `bind_preset`'s `model` and the run uses
+ *  it at directive precedence). */
+export type DoorUnit = "E2" | "E3" | "W1" | "MW1";
 
 /** The units already merged, read by the row's scorer: a fixture whose unit
  *  is not on this list is printed as pending, never replayed and never a
  *  failure. The unit that lands appends itself here in its own pull request,
  *  turning its fixtures from pending to scored. */
-export const DOOR_MERGED_UNITS: readonly DoorUnit[] = ["E2", "E3", "W1"];
+export const DOOR_MERGED_UNITS: readonly DoorUnit[] = ["E2", "E3", "W1", "MW1"];
 
 /** The amended table's expected outcome for one fixture — what the door must
  *  do with the message once the fixture's unit is merged.
@@ -36,8 +40,12 @@ export const DOOR_MERGED_UNITS: readonly DoorUnit[] = ["E2", "E3", "W1"];
 export type DoorExpectation =
   /** A binds decision whose first bind names `preset` and carries the
    *  person's words: `carries` must appear in the bound line verbatim and
-   *  `forbids` must not (the doubled or re-spelled head). */
-  | { kind: "bind"; preset: string; carries?: string; forbids?: string }
+   *  `forbids` must not (the doubled or re-spelled head). `model` is the ref
+   *  the bind must carry — a model the person named in plain words, resolved
+   *  through the catalogue (the plain-words model unit) — and `noModel`
+   *  holds a bind to carrying none: a request naming no model binds with no
+   *  model, never a silent default. */
+  | { kind: "bind"; preset: string; carries?: string; forbids?: string; model?: string; noModel?: true }
   /** A refusal from the policy table whose text carries `naming` — the row
    *  it stands on or the remedy — whole, never cut at a quote or bracket. */
   | { kind: "refusal"; naming: string }
@@ -55,10 +63,13 @@ export type DoorExpectation =
   /** A turn that ends with no tool call floors to the readers' route on the
    *  person's own request — never a line to retype. */
   | { kind: "route" }
-  /** One question (the write-intent cell, issue 2088): the decision is a
-   *  question whose proposal carries `proposes` — a line that would do the
-   *  asked work — and never `forbids` (the read that stood in for it). */
-  | { kind: "question"; proposes: string; forbids?: string };
+  /** One question (the write-intent cell, issue 2088; the plain-words model
+   *  unit's ambiguous word): the decision is a question — when `proposes` is
+   *  set its proposal carries it, a line that would do the asked work, and
+   *  never `forbids` (the read that stood in for it); when `names` is set the
+   *  question's text carries it — the catalogue's candidate refs for a model
+   *  word that matches several refs or none, never a guess. */
+  | { kind: "question"; proposes?: string; forbids?: string; names?: string };
 
 /** One door fixture: the failure's message shape, the defect it replays
  *  (record 0069's table), the unit that turns it green and the amended
@@ -277,6 +288,65 @@ export const ROUTE_DOOR_FIXTURES: readonly RouteDoorFixture[] = [
       question: "which repository?",
     },
     expected: { kind: "rebind", carries: "acme/api" },
+  },
+  // M1 (the plain-words model unit): "with astra, …" — the person names a
+  // model in plain words, so the bind carries the catalogue's ref and the
+  // request rides verbatim, the model word stripped from nothing.
+  {
+    id: "m01",
+    defect: "M1",
+    unit: "MW1",
+    text: "with astra, fix issue 42 in acme/api — the retry never backs off.",
+    expected: { kind: "bind", preset: "ship", carries: "fix issue 42", model: "openrouter/openai/gpt-6-astra" },
+  },
+  // M2 (the same unit): "use astra …" resolves the same way.
+  {
+    id: "m02",
+    defect: "M2",
+    unit: "MW1",
+    text: "use astra for this: in acme/api add a regression test for the empty-state crash.",
+    expected: { kind: "bind", preset: "ship", carries: "empty-state crash", model: "openrouter/openai/gpt-6-astra" },
+  },
+  // M3 (the same unit): "on astra:" ahead of a review ask — the model word
+  // rides any preset, not only the write one.
+  {
+    id: "m03",
+    defect: "M3",
+    unit: "MW1",
+    text: "on astra: review https://github.com/acme/api/pull/12",
+    expected: {
+      kind: "bind",
+      preset: "review",
+      carries: "https://github.com/acme/api/pull/12",
+      model: "openrouter/openai/gpt-6-astra",
+    },
+  },
+  // M4 (the same unit): the model word as a trailing courtesy — "astra
+  // please" — resolves like the leading forms.
+  {
+    id: "m04",
+    defect: "M4",
+    unit: "MW1",
+    text: "astra please — in acme/api rename the stale feature flag and delete its dead branch.",
+    expected: { kind: "bind", preset: "ship", carries: "stale feature flag", model: "openrouter/openai/gpt-6-astra" },
+  },
+  // M5 (the same unit): a request naming no model binds with no model —
+  // never a silent default the person did not ask for.
+  {
+    id: "m05",
+    defect: "M5",
+    unit: "MW1",
+    text: "in acme/api: fix the reports page's empty-state crash and add a test.",
+    expected: { kind: "bind", preset: "ship", carries: "empty-state crash", noModel: true },
+  },
+  // M6 (the same unit): a model word that matches several catalogue refs
+  // ("gpt") is one question naming the candidates — never a guess.
+  {
+    id: "m06",
+    defect: "M6",
+    unit: "MW1",
+    text: "use gpt for this: in acme/api fix the flaky login test.",
+    expected: { kind: "question", names: "openrouter/openai/gpt" },
   },
   // N5 (issue 2088): a plain-words write ask naming a provider this
   // deployment does not have ("openai" — OpenAI models ride openrouter) was
