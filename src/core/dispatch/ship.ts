@@ -233,7 +233,18 @@ export async function runShipBranch(
   );
   if (!pre.ok) {
     console.log(`[ship] ${msg.threadKey} not started: ${pre.where}`);
-    await refuse(pre.refusal, () =>
+    const refusal =
+      pre.guess === undefined
+        ? pre.refusal
+        : {
+            ...pre.refusal,
+            guess: {
+              proposal: { ...msg, text: pre.guess.line },
+              line: pre.guess.line,
+              evidence: pre.guess.evidence,
+            },
+          };
+    await refuse(refusal, () =>
       card.done(shell.close({ kind: "refused", icon: "🚫", reason: pre.card, ...closeLines(clock(), false) })),
     );
     return { hostedLive: false };

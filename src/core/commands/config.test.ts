@@ -479,6 +479,20 @@ describe("config set", () => {
     ).toBe(true);
   });
 
+  it("a channel can set its default repository; user and thread scopes cannot", async () => {
+    const config = store(OPEN_YAML);
+    const commands = bind(config);
+    const channel = await say(commands, "config set channel --repo acme/api", chat(config, "slack:UX"));
+    expect(channel.text).toBe("Updated channel scope: repository `acme/api`.");
+    expect(config.scopes("slack:CX", "slack:UX").channel).toEqual({ repo: "acme/api" });
+    expect((await say(commands, "config show", chat(config, "slack:UX"))).text).toContain(
+      "*Channel scope:* repository `acme/api`",
+    );
+    expect((await say(commands, "config set me --repo acme/api", chat(config, "slack:UX"))).text).toContain(
+      "repo: a default repository belongs to a channel scope",
+    );
+  });
+
   it("semantic checks are the handler's `invalid_input`, naming the expectation and never the value: unknown agent, bad effort, nothing to set, bad scope word", async () => {
     const config = store();
     const commands = bind(config);

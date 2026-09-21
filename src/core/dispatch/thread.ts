@@ -54,6 +54,29 @@ export function continuable(run: RunView): run is RunView & { agent: string } {
  *  person's follow-up is not a continuation of them. */
 const addressed = (run: RunView): boolean => run.parentInstanceId === undefined;
 
+/** The facts the operator may read from the thread's newest finished run
+ *  (routing-and-config items 3 and 29): the run's agent, repository and pull
+ *  request exactly as the runs page already computed them. A coordinator child
+ *  is deliberately eligible: its review of a PR is the newest completed work
+ *  a bare "review again" continues. */
+export interface NewestFinishedRun {
+  agent?: string;
+  repo?: string;
+  pr?: RunPullRequest;
+}
+
+export function newestFinishedRunOf(
+  runs: readonly Pick<RunView, "finished" | "agent" | "repo" | "pr">[],
+): NewestFinishedRun | undefined {
+  const run = runs.find((candidate) => candidate.finished);
+  if (run === undefined) return undefined;
+  return {
+    ...(run.agent !== undefined ? { agent: run.agent } : {}),
+    ...(run.repo !== undefined ? { repo: run.repo } : {}),
+    ...(run.pr !== undefined ? { pr: run.pr } : {}),
+  };
+}
+
 /** The thread's requester (routing-and-config item 27, record 0058): the
  *  person of the thread's newest run a person addressed — whether that run is
  *  live, finished or refused at a gate, since "who the bot is talking to" does

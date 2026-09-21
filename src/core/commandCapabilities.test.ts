@@ -77,7 +77,6 @@ const GATES: Record<string, (c: Capabilities) => boolean> = {
   "repo.reconfigure": (c) => c.residents,
   "repo.test": (c) => c.residents || c.execution === "local",
   "repo.build": (c) => c.residents || c.execution === "local",
-  "mcp.list": (c) => c.mcp,
   "mcp.add": (c) => c.mcp,
   "mcp.connect": (c) => c.mcp,
   "mcp.show": (c) => c.mcp,

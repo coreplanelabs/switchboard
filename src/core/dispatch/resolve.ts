@@ -56,6 +56,7 @@ export interface ResolveDeps {
     msg: IncomingMessage,
     history: HistoryItem[],
     records?: RunRecordSignals,
+    operatorRepo?: string,
   ) => Promise<RepoContext> | RepoContext;
 }
 
@@ -231,6 +232,8 @@ export interface ResolveTargetContext {
    *  request its newest finished run opened, from the dispatcher's one read
    *  of the thread's runs; absent for a message that starts a thread. */
   records?: RunRecordSignals;
+  /** The typed/factual repository inherited through the operator door. */
+  operatorRepo?: string;
   /** A repository resolution already started before admission. */
   repoTarget?: ResolvedRepoTarget;
 }
@@ -241,7 +244,7 @@ export interface ResolveTargetContext {
  */
 export function resolveRepoTarget(
   deps: ResolveDeps,
-  ctx: Pick<ResolveTargetContext, "msg" | "history" | "profile" | "resume" | "root" | "records">,
+  ctx: Pick<ResolveTargetContext, "msg" | "history" | "profile" | "resume" | "root" | "records" | "operatorRepo">,
 ): ResolvedRepoTarget {
   const { msg, history, profile, resume, root } = ctx;
   const needsRepo = machineNeedsRepo(profile.machine);
@@ -251,12 +254,13 @@ export function resolveRepoTarget(
       : needsRepo
         ? Promise.resolve(
             deps.resolveRepoContext
-              ? deps.resolveRepoContext(msg, history, ctx.records)
+              ? deps.resolveRepoContext(msg, history, ctx.records, ctx.operatorRepo)
               : resolveRepoContext(
                   msg,
                   history,
                   ...repoVetFor(profile, deps.config.config.execution?.resident),
                   ctx.records,
+                  ctx.operatorRepo,
                 ),
           ).then((resolvedCtx) => resolvedCtx ?? {})
         : Promise.resolve({}),

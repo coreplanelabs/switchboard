@@ -92,7 +92,16 @@ export interface ShipEntry {
 }
 
 export type ShipPreflightResult =
-  { ok: true; entry: ShipEntry } | { ok: false; where: string; card: string; reply: string; refusal: Refusal };
+  | { ok: true; entry: ShipEntry }
+  | {
+      ok: false;
+      where: string;
+      card: string;
+      reply: string;
+      refusal: Refusal;
+      /** A runnable redispatch line for record 0054's Yes/No question. */
+      guess?: { line: string; evidence: string };
+    };
 
 export interface ShipPreflightInput {
   /** Platform-namespaced channel id (AGENTS.md invariant 4) — names the
@@ -132,7 +141,12 @@ export interface ShipPreflightInput {
   refExists?: (repo: string, ref: string) => Promise<boolean | undefined>;
 }
 
-const refuse = (code: RefusalCode, where: string, card: string, reply: string): ShipPreflightResult => ({
+const refuse = (
+  code: RefusalCode,
+  where: string,
+  card: string,
+  reply: string,
+): Extract<ShipPreflightResult, { ok: false }> => ({
   ok: false,
   where,
   card,
@@ -163,19 +177,32 @@ export function refNamedExplicitly(requestText: string, ref: string): boolean {
  *  repository in. Deliberately the same shape repoContext binds. */
 const REPO_TOKEN = /(?:^|[^\w./-])([A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*)(?![\w./-])/;
 
-/** The no-repo refusal's best guess (record 0054): the request's own repo token
- *  against the onboarded list, appended to the sentence as the question — the
- *  corrected line to type and the evidence. Nothing to correct, no list, or no
- *  unique match → the sentence unchanged. */
-function noRepoQuestion(input: ShipPreflightInput): string {
+/** The no-repo refusal's best guess (record 0054): a single available
+ * repository is a yes/no proposal even when the request named none; otherwise
+ * a uniquely near typed slug is corrected. The line is a complete runnable
+ * bind because preflight receives directive-stripped task text. */
+function noRepoGuess(
+  input: ShipPreflightInput,
+): { line: string; evidence: string; source: "single" | "near" } | undefined {
   const candidates = input.repoCandidates ?? [];
-  if (candidates.length === 0) return "";
+  if (candidates.length === 0) return undefined;
   const typed = REPO_TOKEN.exec(input.requestText)?.[1];
-  if (!typed) return "";
-  const near = nearMatch(typed, candidates);
-  if (!near.guess) return "";
-  const line = input.requestText.replace(typed, near.guess);
-  return `\nDid you mean:\n\`${line}\`\n\n${near.reason ?? `\`${near.guess}\``}, which is onboarded`;
+  if (typed) {
+    const near = nearMatch(typed, candidates);
+    if (near.guess)
+      return {
+        line: `agent:ship ${input.requestText.replace(typed, near.guess)}`,
+        evidence: `${near.reason ?? `\`${near.guess}\``}, which is onboarded`,
+        source: "near",
+      };
+  }
+  if (candidates.length !== 1) return undefined;
+  const repo = candidates[0]!;
+  return {
+    line: `agent:ship in ${repo}: ${input.requestText}`,
+    evidence: `\`${repo}\` is the one available repository`,
+    source: "single",
+  };
 }
 
 /**
@@ -219,13 +246,15 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   }
   const repo = repoCtx.repo;
   if (!repo) {
-    return refuse(
-      "ship_preflight_no_repo",
-      "no repo",
-      "not started (no repository)",
-      "🚫 `agent:ship` needs a target repository — name it in the request, e.g. `agent:ship in owner/repo: <task>`." +
-        noRepoQuestion(input),
-    );
+    const guess = noRepoGuess(input);
+    const reply =
+      guess?.source === "single"
+        ? `🚫 \`agent:ship\` needs a target repository. Is \`${input.repoCandidates![0]}\` the target?`
+        : guess !== undefined
+          ? "🚫 `agent:ship` needs a target repository; the named repository is not available."
+          : "🚫 `agent:ship` needs a target repository — name it in the request, e.g. `agent:ship in owner/repo: <task>`.";
+    const result = refuse("ship_preflight_no_repo", "no repo", "not started (no repository)", reply);
+    return guess === undefined ? result : { ...result, guess: { line: guess.line, evidence: guess.evidence } };
   }
   // The repository lookup is advisory: it names the default branch, the PR
   // base of last resort. A failed lookup leaves it undefined and refuses

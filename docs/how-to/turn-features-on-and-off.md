@@ -65,7 +65,7 @@ A command under two capabilities is on when either gives it a backend.
 | `memory` | `memory list`, `memory forget`, `memory sweep` |
 | `runHistory` | `runs findings`, `review abridge`, `friction report`, `friction propose` |
 | `runLedger` | — |
-| `mcp` | `mcp list`, `mcp add`, `mcp connect`, `mcp show`, `mcp remove`, `mcp promote` |
+| `mcp` | `mcp add`, `mcp connect`, `mcp show`, `mcp remove`, `mcp promote` |
 | `costs` | `costs by`, `costs snapshot` |
 | `metrics` | `metrics trend` |
 | `schedules` | `schedule list` |
@@ -74,7 +74,7 @@ A command under two capabilities is on when either gives it a backend.
 | `readingDiffAbridge` | `review abridge` |
 | `dashboardAuth` | — |
 
-The other 34 commands are on in every installation.
+The other 35 commands are on in every installation.
 
 <!-- /generated:capability-commands -->
 

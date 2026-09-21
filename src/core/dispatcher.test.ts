@@ -16235,6 +16235,16 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     return { deps, provider, registry };
   }
 
+  it("`mcp list` is the typed MCP registry command in chat, never an operator or help request", async () => {
+    const { deps } = operatorDeps(ON_YAML);
+    deps.operatorModel = vi.fn<RouteModel>();
+    const { io } = fakeIO();
+    await dispatch(deps, msg("mcp list", "slack:UADMIN"), io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(deps.invoked).toEqual(["mcp.list"]);
+    expect(deps.invoked).not.toContain("help.show");
+  });
+
   it("shadow: readers and operator disagree on a typed line — the row holds both and nothing runs from the operator", async () => {
     const { deps, registry } = operatorDeps(SHADOW_YAML);
     deps.operatorModel = decides({

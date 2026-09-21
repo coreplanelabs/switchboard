@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import {
   answerOperatorRead,
   operatorStage,
@@ -83,8 +84,13 @@ describe("the operator is one loop with typed tools", () => {
       ...Object.values(OPERATOR_READ_TOOLS),
     ]);
     const bind = tools.find((t) => t.name === OPERATOR_BIND_TOOL)!;
-    const preset = (bind.inputSchema as { properties: { preset: { enum: string[] } } }).properties.preset;
-    expect(preset.enum).toEqual(["general", "research"]);
+    const properties = (
+      bind.inputSchema as {
+        properties: { preset: { enum: string[] }; repo: { pattern: string } };
+      }
+    ).properties;
+    expect(properties.preset.enum).toEqual(["general", "research"]);
+    expect(properties.repo.pattern).toBe("^[\\w.-]+/[\\w.-]+$");
     expect(names).not.toContain("decide");
     expect(names.some((n) => n.includes("refus"))).toBe(false);
   });
@@ -113,6 +119,26 @@ describe("the operator is one loop with typed tools", () => {
     expect(turn.decision.binds).toEqual([{ line: "agent:general what changed this week?", reason: "read ask" }]);
   });
 
+  it("bind_preset carries a typed repository slot without rewriting the person's request", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "research", repo: "acme/api", reason: "the thread target" },
+      },
+      ctxOf({ requestText: "review again" }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds).toEqual([
+      { line: "agent:research review again", reason: "the thread target", repo: "acme/api" },
+    ]);
+    expect(
+      parseOperatorTurn(
+        { tool: OPERATOR_BIND_TOOL, input: { preset: "research", repo: "not-a-slug", reason: "guess" } },
+        ctxOf(),
+      ),
+    ).toMatchObject({ kind: "violation", violation: expect.stringContaining("owner/name") as unknown as string });
+  });
+
   it("a typo'd directive head naming the bound preset is stripped from the request the bind carries", () => {
     const turn = parseOperatorTurn(
       { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "x", reason: "r" } },
@@ -136,17 +162,40 @@ describe("the operator is one loop with typed tools", () => {
     expect(turn.decision.binds[0].line).toBe("runs list");
   });
 
-  it("an ask is a question decision with the proposal cut like a receipt; an ask with no text is a violation", () => {
+  it("an ask is a question decision only when its proposal parses as a runnable command or preset bind", () => {
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_ASK_TOOL,
-        input: { text: "Which listing?", proposal: "runs list --status all", reason: "fork" },
+        input: { text: "Which listing?", proposal: "runs list", reason: "fork" },
       },
       ctxOf(),
     );
     expect(turn).toMatchObject({
       kind: "decision",
-      decision: { kind: "question", text: "Which listing?", proposal: "runs list --status all" },
+      decision: { kind: "question", text: "Which listing?", proposal: "runs list" },
+    });
+    expect(
+      parseOperatorTurn(
+        { tool: OPERATOR_ASK_TOOL, input: { text: "Review it?", proposal: "agent:research", reason: "fork" } },
+        ctxOf(),
+      ),
+    ).toMatchObject({ kind: "violation", violation: expect.stringContaining("runnable bind") as unknown as string });
+    expect(parseOperatorTurn({ tool: OPERATOR_ASK_TOOL, input: { reason: "r" } }, ctxOf())).toMatchObject({
+      kind: "violation",
+    });
+  });
+
+  it("an ask is a question decision with the proposal cut like a receipt; an ask with no text is a violation", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_ASK_TOOL,
+        input: { text: "Which listing?", proposal: "runs list", reason: "fork" },
+      },
+      ctxOf(),
+    );
+    expect(turn).toMatchObject({
+      kind: "decision",
+      decision: { kind: "question", text: "Which listing?", proposal: "runs list" },
     });
     expect(parseOperatorTurn({ tool: OPERATOR_ASK_TOOL, input: { reason: "r" } }, ctxOf())).toMatchObject({
       kind: "violation",
@@ -171,6 +220,19 @@ describe("the operator is one loop with typed tools", () => {
     expect(owned).toContain("the unfinished plan unit U12");
     expect(owned).toContain("`runs list`");
     expect(answerOperatorRead(OPERATOR_READ_TOOLS.threadState, input())).toContain("no owner");
+    const target = answerOperatorRead(
+      OPERATOR_READ_TOOLS.threadState,
+      input({
+        newestFinishedRun: {
+          agent: "review",
+          repo: "acme/api",
+          pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        },
+        channelRepo: "acme/default",
+      }),
+    );
+    expect(target).toContain("newest finished run: agent `review`, repository `acme/api`, pull request `acme/api#7`");
+    expect(target).toContain("channel default repository: `acme/default`");
     expect(answerOperatorRead(OPERATOR_READ_TOOLS.repoFacts, input())).toContain("docs/decisions/*.md");
     expect(answerOperatorRead(OPERATOR_READ_TOOLS.registryHelp, input())).toContain("Presets this author may run:");
   });
@@ -184,6 +246,34 @@ describe("the operator is one loop with typed tools", () => {
 });
 
 describe("runOperator — the loop over a scripted model", () => {
+  it("a bare re-review reads the newest finished run and binds that pull request's repository", async () => {
+    const answers: RouteToolCall[] = [
+      { tool: OPERATOR_READ_TOOLS.threadState, input: {} },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "re-review the thread PR" } },
+    ];
+    const prompts: { retries?: readonly { answer: string; violation: string }[] }[] = [];
+    const answer = await runOperator(
+      input({
+        text: "review again",
+        projection: projectionOf(["review"]),
+        newestFinishedRun: {
+          agent: "review",
+          repo: "acme/api",
+          pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        },
+      }),
+      async (prompt) => {
+        prompts.push(prompt);
+        return answers.shift()!;
+      },
+    );
+    expect(prompts[1].retries?.[0].violation).toContain("pull request `acme/api#7`");
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ line: "agent:review review again", repo: "acme/api" }],
+    });
+  });
+
   it("a read tool call is answered and the model asked again; the decision lands with the read as a turn", async () => {
     const answers: (RouteToolCall | string)[] = [
       { tool: OPERATOR_READ_TOOLS.repoFacts, input: {} },
@@ -382,14 +472,14 @@ describe("the question and its answer-as-a-bind", () => {
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_ASK_TOOL,
-        input: { reason: "ambiguous", text: "Which listing?", proposal: "runs list --status all" },
+        input: { reason: "ambiguous", text: "Which listing?", proposal: "runs list" },
       },
       ctxOf(),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
     const rendered = renderOperatorQuestion(turn.decision);
     expect(rendered).toContain(OPERATOR_QUESTION_MARKER);
-    expect(rendered).toContain("`runs list --status all`");
+    expect(rendered).toContain("`runs list`");
   });
 
   it('the next turn "yes" binds the proposed line; "no, the docs one" binds fresh', () => {
@@ -466,7 +556,7 @@ describe("the pending question's free-text answer joins the original ask (issue 
 
   it("the prompt's rules bind a named-repo write ask instead of asking, and hold a question's proposal to a line that would do the work", () => {
     const prompt = buildOperatorPrompt(input());
-    expect(prompt.system).toContain("A write ask in a named repository binds the write preset");
+    expect(prompt.system).toContain("A write ask in a named or inherited repository binds the write preset");
     expect(prompt.system).toContain("a question's proposal must be a line that would do the asked work");
   });
 
@@ -801,7 +891,11 @@ describe("the write-intent cell (issue 2088)", () => {
       description: "set config",
       inputSchema: { type: "object", properties: {}, required: ["scope"] },
     },
-    def: { id: "config.set", args: [{ name: "scope" }], options: undefined } as unknown as CommandDef<unknown>,
+    def: {
+      id: "config.set",
+      args: [{ name: "scope", schema: z.enum(["me", "channel"]) }],
+      options: z.object({ models: z.record(z.string(), z.string()).optional() }),
+    } as unknown as CommandDef<unknown>,
   });
   const ctx = () => ctxOf({ commands: [command("runs.list"), configSet()], providers: ["anthropic", "openrouter"] });
 
@@ -896,10 +990,16 @@ describe("the write-intent cell (issue 2088)", () => {
       },
     ];
     const prompts: { retries?: readonly { answer: string; violation: string }[] }[] = [];
-    const answer = await runOperator(input({ providerModels: { read } }), async (prompt) => {
-      prompts.push(prompt);
-      return answers.shift()!;
-    });
+    const answer = await runOperator(
+      input({
+        providerModels: { read },
+        projection: { presets: input().projection.presets, commands: [configSet()] },
+      }),
+      async (prompt) => {
+        prompts.push(prompt);
+        return answers.shift()!;
+      },
+    );
     expect(read).toHaveBeenCalledWith("openai");
     expect(prompts[1].retries![0].violation).toContain("openrouter/openai/gpt-5");
     expect(answer.decision).toMatchObject({

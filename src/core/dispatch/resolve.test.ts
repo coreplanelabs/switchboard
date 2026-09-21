@@ -432,6 +432,30 @@ describe("resolveTarget — the provider checked, and the target repo/ref/PR sta
     expect(await second.repoCtxP).toEqual({});
   });
 
+  it("passes the operator's typed repository slot to target resolution", async () => {
+    const calls: unknown[] = [];
+    const deps: ResolveDeps = {
+      config: configStore(),
+      resolveRepoContext: (_message, _history, _records, operatorRepo) => {
+        calls.push(operatorRepo);
+        return { repo: operatorRepo };
+      },
+    };
+    const agent = getAgent("review");
+    const out = resolveTarget(deps, {
+      msg: msg("review again"),
+      history,
+      agent,
+      profile: declaredProfile(agent),
+      resolved: resolvedFor("review"),
+      resume: undefined,
+      root: root(message).root,
+      operatorRepo: "acme/api",
+    });
+    expect(await out.repoCtxP).toEqual({ repo: "acme/api" });
+    expect(calls).toEqual(["acme/api"]);
+  });
+
   it("a resume carries the repo context its row was reclaimed with: the resolver is not asked", async () => {
     const calls: unknown[] = [];
     const deps: ResolveDeps = {

@@ -530,6 +530,10 @@ export async function resolveRepoContext(
    *  run opened. Absent for a message that starts a thread, a resume, a
    *  spawned child, and every caller without the thread's runs in hand. */
   records?: RunRecordSignals,
+  /** A repository the operator bound from typed request/thread/channel facts.
+   *  It is a fallback below an explicit current-message target and above the
+   *  historical token scan; the same machine-class probe vets it. */
+  operatorRepo?: string,
 ): Promise<RepoContext> {
   const s = extractSignals(msg.text);
   const thread = threadSignals(history);
@@ -594,7 +598,8 @@ export async function resolveRepoContext(
   if (strongNow === undefined && s.addressed?.slug !== undefined && unverified === s.addressed.slug) {
     return { unverifiedRepo: s.addressed.slug };
   }
-  let repo = strongNow;
+  const typedRepo = operatorRepo === undefined ? undefined : slugOf(operatorRepo);
+  let repo = strongNow ?? (typedRepo !== undefined && (await vet(typedRepo)) ? typedRepo : undefined);
   for (let i = thread.events.length - 1; repo === undefined && i >= 0; i--) {
     const ev = thread.events[i];
     repo = "strong" in ev ? ev.strong : await resolveAddressed(ev.addressed);

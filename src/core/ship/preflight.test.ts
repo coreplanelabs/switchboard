@@ -211,9 +211,11 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     expect(near.ok).toBe(false);
     if (near.ok) return;
     expect(near.refusal.code).toBe("ship_preflight_no_repo");
-    expect(near.reply).toContain("Did you mean:");
-    expect(near.reply).toContain("`in acme/infrastructure: add the onboarding link`");
-    expect(near.reply).toContain("which is onboarded");
+    expect(near.reply).not.toContain("e.g.");
+    expect(near.guess).toMatchObject({
+      line: "agent:ship in acme/infrastructure: add the onboarding link",
+      evidence: expect.stringContaining("which is onboarded") as unknown as string,
+    });
 
     const tie = await shipPreflight(
       input({
@@ -224,7 +226,25 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     );
     expect(tie.ok).toBe(false);
     if (tie.ok) return;
-    expect(tie.reply).not.toContain("Did you mean:");
+    expect(tie.guess).toBeUndefined();
+  });
+
+  it("a write ask with one candidate repository asks one yes/no question with a runnable guess, never a syntax example", async () => {
+    const one = await shipPreflight(
+      input({
+        repoCtx: {},
+        requestText: "fix issue 2131",
+        repoCandidates: ["acme/api"],
+      }),
+    );
+    expect(one.ok).toBe(false);
+    if (one.ok) return;
+    expect(one.reply).toBe("🚫 `agent:ship` needs a target repository. Is `acme/api` the target?");
+    expect(one.guess).toEqual({
+      line: "agent:ship in acme/api: fix issue 2131",
+      evidence: "`acme/api` is the one available repository",
+    });
+    expect(one.reply).not.toContain("e.g.");
   });
 
   it("a failed repository lookup with a fresh unit proceeds with no base — the hand-off's own refusal names it later; a repository with auto-merge allowed proceeds too (no repository-level check remains)", async () => {
