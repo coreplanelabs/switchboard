@@ -5027,11 +5027,32 @@ export class ResidentDO extends Sandbox<Env> {
    *  deploy's alone. Answers `restarted` when a stop was issued, else why
    *  not. */
   private async reconcileImage(where: "attach" | "refresh" | "deploy", force = false): Promise<ImageReconcileResult> {
-    if (!(await this.isRuntimeActive().catch(() => false))) {
-      // Inactivity proves only that the old process is gone, not that its
-      // replacement started successfully. Keep the marker: the next refresh's
-      // hydration starts the deployed image and reports only after it reaches
-      // `warm` (issue 2101).
+    const active = await this.isRuntimeActive().catch((err) => {
+      console.log(`image-reconcile (${where}): activity probe failed — preserving the pending report: ${errMsg(err)}`);
+      return null;
+    });
+    // A failed probe proves neither state. Preserve the marker and its drain
+    // hold until a later reconcile confirms inactivity or hydrates a fresh
+    // active container. An attach with that marker must fail closed even after
+    // the drain backstop reopens: admitting it could wake a pre-deploy image.
+    if (active === null) {
+      if (
+        where === "attach" &&
+        (await this.ctx.storage.get<{ resource: string }>(IMAGE_REPORT_PENDING_KEY)) !== undefined
+      ) {
+        console.log(
+          "image-stale (attach): activity could not be verified while a new-image report is pending — the attach is refused",
+        );
+        return "stale";
+      }
+      return "deferred";
+    }
+    if (!active) {
+      // An inactive container's next start is on the deployed image by
+      // construction. Report on every reconcile: the deploy may have marked
+      // it pending after an earlier idle cycle, and the drain itself refuses
+      // the attach that would otherwise wake it and provide another reporter.
+      await this.reportPendingImageCurrent(where);
       return "inactive";
     }
     const last = THREAD_USERS[THREAD_USERS.length - 1];
@@ -5091,12 +5112,13 @@ export class ResidentDO extends Sandbox<Env> {
   /** The report a held drain waits for (issue 1931): when the deploy's
    *  reconcile could not verify this resident's fresh container on the new
    *  image, a marker stays in storage and the registry holds the drain. The
-   *  fact the report stands on is the replacement's own completed hydration:
-   *  the fresh container has restored its snapshot and reached `warm`. A stop
-   *  or inactive runtime does not report; each keeps the marker for that next
-   *  start (issue 2101). The marker is deleted only after a successful report:
-   *  a transient failure keeps it for the next reconcile, and the drain's
-   *  `until` is the backstop for a report that never lands. */
+   *  fact the report stands on is either an inactive runtime, whose next start
+   *  uses the deployed image by construction, or the active replacement's own
+   *  completed hydration: the fresh container has restored its snapshot and
+   *  reached `warm`. A stop alone does not report (issue 2101). The marker is
+   *  deleted only after a successful report: a transient failure keeps it for
+   *  the next reconcile, and the drain's `until` is the backstop for a report
+   *  that never lands. */
   private async reportPendingImageCurrent(where: string): Promise<boolean> {
     const pending = await this.ctx.storage.get<{ resource: string }>(IMAGE_REPORT_PENDING_KEY);
     if (pending === undefined) return true;
@@ -5125,9 +5147,9 @@ export class ResidentDO extends Sandbox<Env> {
    *  an active, quiet container is always cycled, but that stop is not a report.
    *  The marker survives until the replacement hydrates and reaches `warm` on
    *  the deploy's image (issue 2101: the old probe raced that restore and lost).
-   *  `verified` true is the fact the reopen may stand on; a cycle or inactive
-   *  result leaves a hold on the drain, cleared by this resident's later
-   *  `reportPendingImageCurrent`, never by a timer.
+   *  `verified` true is the fact the reopen may stand on: inactivity reports
+   *  at once, while an active container's cycle leaves a hold until its fresh
+   *  hydration calls `reportPendingImageCurrent`, never until a timer.
    *
    *  The hold lands BEFORE the marker: the marker is what lets any concurrent
    *  attach/refresh reconcile report, and a report that reaches the registry
@@ -5139,10 +5161,9 @@ export class ResidentDO extends Sandbox<Env> {
     await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource });
     const result = await this.reconcileImage("deploy", true);
     if (result === "deferred") return { result, verified: false };
-    // Neither inactivity nor a successful stop is verification: only the
-    // replacement's completed hydration clears the marker. A concurrent fresh
-    // start may have done so while this reconcile yielded, hence the storage
-    // read rather than an unconditional false.
+    // Inactivity reports synchronously; a successful stop does not. A
+    // concurrent fresh start may also have hydrated while this reconcile
+    // yielded, hence the storage read rather than a verdict from `result`.
     const verified = (await this.ctx.storage.get(IMAGE_REPORT_PENDING_KEY)) === undefined;
     return { result, verified };
   }
