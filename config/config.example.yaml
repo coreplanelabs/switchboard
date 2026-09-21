@@ -479,26 +479,11 @@ workspaceDir: ./workspaces
 # spawn:
 #   maxChildren: 3
 
-# The request router (docs/reference/specs/routing-and-config.md item 21). ON BY
-# DEFAULT: a plain message — no `agent:` directive, no sticky preset, no channel
-# or user `agent` — asks the fast model which preset it means and runs as that
-# preset, the card saying why (`routed: <reason>`) and how to run it another way.
-# `ship` is never routed. The one way off, so every plain message runs
-# `defaults.agent` as before the router: `auto: false`. `model` is the router's
-# model; default `defaults.models.general`. `answer` is how that model answers:
-# `tool` (default) forces a call to the router's `route` tool, whose schema is
-# the answer, so prose cannot occur; `text` is the one-JSON-object text contract
-# alone — set it for a provider or model that cannot take a forced tool call.
-# `operator` is the one door's flag (routing-and-config item 29): `on`
-# (default) — the operator's decision is what runs; `shadow` — one operator
-# turn per admitted chat event, ahead of stage A, its decision written beside
-# the routed request in the run store and nothing run from it; `off` — the
-# rollback lever: it turns the operator back off after a bad day, not a choice
-# to make up front. `shadow` and `on` run even under `auto: false`.
+# The one door's mode (routing-and-config item 29): `on` (default) — the
+# operator's typed decision is what runs; `shadow` — one operator turn per
+# admitted chat event, its decision recorded and nothing run from it; `off` —
+# the rollback lever. The retired readers' router has no model or effort key.
 # routing:
-#   auto: false
-#   model: anthropic/claude-haiku-4-5
-#   answer: text
 #   operator: off
 
 # The thread-reply intake gate (docs/decisions/0058-a-thread-reply-is-read-before-it-is-answered-intake-decides-whether-the-bot-was-addressed.md;
@@ -512,8 +497,8 @@ workspaceDir: ./workspaces
 # model call) or `always` (today's answer-every-reply path, byte for byte).
 # Also settable per channel and per user: `intake: { threadReplies: <mode> }`
 # on a `channels.<id>` or `users.<id>` scope, user over channel over here.
-# `model` is the verdict's model; default `routing.model`, else
-# `defaults.models.general`. A mention, a DM and a top-level post never pass
+# `model` is the verdict's model; default `defaults.models.general`. A mention,
+# a DM and a top-level post never pass
 # through the gate in any mode. A model whose operator card (`providers.<p>.
 # models.<id>.answers`) declares it answers neither a forced tool call nor the
 # text contract is refused at load when the default mode is `classify`.

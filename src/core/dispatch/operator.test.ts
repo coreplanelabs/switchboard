@@ -147,19 +147,12 @@ describe("the operator is one loop with typed tools", () => {
     });
   });
 
-  it("a turn that ends with no tool call is the floor: a non_decision, and the event is marked floored so it never re-enters the loop", () => {
+  it("a turn that ends with no tool call is a named non_decision for the loop to repair", () => {
     const turn = parseOperatorTurn("nothing to do here", ctxOf());
-    expect(turn).toMatchObject({ kind: "decision", decision: { kind: "non_decision" } });
-    if (turn.kind !== "decision") throw new Error("not a decision");
-    const event = operatorEventOf("on", { decision: turn.decision, latencyMs: 1, outputTokens: 1 });
-    expect(event.floored).toBe(true);
-    expect(event.outcome).toBe("non_decision");
-    const bound = operatorEventOf("on", {
-      decision: { kind: "binds", binds: [{ line: "runs list", reason: "r" }], reason: "r" },
-      latencyMs: 1,
-      outputTokens: 1,
+    expect(turn).toMatchObject({
+      kind: "decision",
+      decision: { kind: "non_decision", reason: expect.stringContaining("no tool call") as unknown as string },
     });
-    expect(bound.floored).toBeUndefined();
   });
 
   it("a read tool is recognized and answered from the turn's own state: the owner, the pending question, the facts, the help", () => {
@@ -217,7 +210,7 @@ describe("runOperator — the loop over a scripted model", () => {
     ]);
   });
 
-  it("a violation that persists past the bounded retries floors to non_decision — the readers' route, never a rendered sentence", async () => {
+  it("a violation that persists past the bounded retries returns non_decision for the configured default — never a second model or rendered sentence", async () => {
     let calls = 0;
     const answer = await runOperator(input(), async () => {
       calls++;
@@ -228,16 +221,29 @@ describe("runOperator — the loop over a scripted model", () => {
     expect(answer.attempts).toHaveLength(3);
   });
 
-  it("a turn ending with no tool call is the floor directly: one call, no re-ask", async () => {
-    let calls = 0;
-    const answer = await runOperator(input(), async () => {
-      calls++;
+  it("a no-call turn is re-asked once with the violation named; a second binds general through bind_preset and records no_decision", async () => {
+    const prompts: { retries?: readonly { answer: string; violation: string }[] }[] = [];
+    const answer = await runOperator(input(), async (prompt) => {
+      prompts.push(prompt);
       return "";
     });
-    expect(calls).toBe(1);
-    expect(answer.decision).toMatchObject({
-      kind: "non_decision",
-      reason: expect.stringContaining("no tool call") as unknown as string,
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1].retries).toEqual([
+      { answer: "", violation: expect.stringContaining("no tool call") as unknown as string },
+    ]);
+    expect(answer.decision).toEqual({
+      kind: "binds",
+      binds: [{ line: "agent:general list the runs", reason: "no_decision" }],
+      reason: "no_decision",
+    });
+    expect(answer.attempts).toEqual([
+      { outcome: "violation", violation: expect.stringContaining("no tool call") as unknown as string },
+      { outcome: "accepted" },
+    ]);
+    expect(operatorEventOf("on", answer)).toMatchObject({
+      outcome: "binds",
+      reason: "no_decision",
+      binds: [{ line: "agent:general list the runs", reason: "no_decision" }],
     });
   });
 

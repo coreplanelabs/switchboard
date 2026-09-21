@@ -50,7 +50,8 @@ import { operatorModeOf, referencesOn } from "../config.js";
 import { parseChatCommand } from "./commandChat.js";
 import { parseDirectives } from "../directives.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
-import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps, type RouteModel } from "./dispatch/route.js";
+import { compoundBrief, type RouteDecided, type RouteModel } from "./dispatch/route.js";
+import type { ProviderTable } from "./harness/piAi.js";
 import {
   executeOperatorDecision,
   isYesAnswer,
@@ -143,7 +144,6 @@ export interface CoreDeps
     AdmissionDeps,
     FastPathDeps,
     ResolveDeps,
-    RouteDeps,
     AuthorizeDeps,
     ProvisionDeps,
     RunDeps,
@@ -151,12 +151,12 @@ export interface CoreDeps
     RecordDeps,
     ReferenceDeps,
     ShipDeps {
-  /** The MCP tool source: required for provisioning (every run asks it for its tools), and the same instance the
-   *  route stage reads the caller's catalog off (record 0040) — declared here so the two bases agree. */
+  /** The MCP tool source required for provisioning every run. */
   mcp: McpToolSource;
+  /** The configured providers used to build the one door's model call. */
+  completions: ProviderTable;
   /** The operator's model call (record 0057; routing-and-config item 29).
-   *  Default: the provider behind `defaults.models.general` — the strong
-   *  tier, never `routing.model`'s fast one. Tests script one. */
+   *  Default: the provider behind `defaults.models.general`. Tests script one. */
   operatorModel?: RouteModel;
   /** The providers catalogue behind the loop's `provider_models` read tool
    *  (issue 2088): the refs this deployment can run, so a write proposal
@@ -609,7 +609,7 @@ export async function dispatch(
   try {
     // The operator (record 0057; routing-and-config item 29): under
     // `routing.operator: shadow` or `on`, ONE operator turn per admitted chat
-    // event — here, ahead of stage A and outside the route stage's live-thread
+    // event — here, ahead of stage A and outside the deterministic live-thread
     // and directive short-circuits, or the shadow week would never see the
     // replies and typed lines the readers answer. Under `shadow` the decision
     // only rides the record, beside the routed request: onto the live run a
@@ -623,8 +623,8 @@ export async function dispatch(
     const configuredOperator =
       !resume && !restart && !opts.parent && !opts.coordinator ? operatorModeOf(deps.config.config) : "off";
     // Until the one-door plan's directive unit lands, a message that opens with
-    // `agent:<preset>` is the person's typed decision and stays stage A's and
-    // the route stage's under `on`: the operator's re-reading of a seed bound a
+    // `agent:<preset>` is the person's typed decision and stays stage A's
+    // under `on`: the operator's re-reading of a seed bound a
     // line no registry parses and handed the seed back, on its first day on.
     // The same gate covers a message the registry's chat grammar parses, until
     // the typed-line unit (plan 002 U13) lands: the operator's re-reading of a
@@ -640,9 +640,8 @@ export async function dispatch(
       (deps.commands !== undefined && parseChatCommand(msg.text, deps.commands) !== null);
     const operatorMode = configuredOperator === "on" && typedDecision ? "off" : configuredOperator;
     let operatorEvent: OperatorEventFields | undefined;
-    // The preset an `on` decision routes the request through (a preset bind,
-    // `presetBindOf`): the route stage runs it on the person's own words with
-    // the decision's event on the run.
+    // The preset an `on` decision binds on the person's own words, with the
+    // decision's event on the run.
     let operatorPreset: string | undefined;
     // The request the route runs instead of the person's message: a confirmed
     // proposal's own tail (`presetRequestOf`) — the person's message was the
@@ -683,11 +682,10 @@ export async function dispatch(
       // item 29): when the thread's newest record is an `on` question and this
       // reply is not the bare "yes" the proposal path binds, the person's words
       // are the question's answer — joined back onto the original ask
-      // (`joinedAnswerRequest`) and decided, routed and folded as the request
-      // would have been — mention or not, never floored as a bare answer. The
-      // joined line is what the operator's loop and — on any floor — the
-      // readers' route read, so the answer never reaches the router as a bare
-      // fragment.
+      // (`joinedAnswerRequest`) and decided and folded as the request would
+      // have been — mention or not, never reduced to a bare answer. The joined
+      // line is what the operator's loop and its floor bind, so the fragment
+      // never becomes a request by itself.
       const pendingQuestion = operatorMode === "on" ? pendingQuestionOf(operatorThread) : undefined;
       const joinedAnswer =
         pendingQuestion !== undefined && !(pendingQuestion.proposal !== undefined && isYesAnswer(msg.text))
@@ -731,13 +729,11 @@ export async function dispatch(
       // the live run. Thread occupancy itself is untouched: one live run per
       // thread, and nothing here starts a rival in an occupied one.
       const live = operatorEvent ? admission.get(msg.threadKey) : undefined;
-      // A `non_decision` is the structured seam's floor (record 0067) — an
-      // answer that was no decision after the bounded re-asks, or a transport
-      // failure — never the model's decision: under `on` the event falls back
-      // to the readers' route — the route stage runs as under `off` — and the
-      // decision is recorded, its attempts and last violation included, beside
-      // what then runs, exactly as a shadow row is. A model-authored refusal
-      // (a real decision) still renders here.
+      // A `non_decision` after the bounded malformed-call retries, or a
+      // transport failure, is never a model decision: the request resolves on
+      // the configured default with the attempts recorded and no second model.
+      // The no-call case does not reach this branch: runOperator repairs it
+      // once and turns a second no-call into the typed general bind.
       const operatorFellBack = operatorEvent?.outcome === "non_decision";
       if ((operatorMode === "shadow" || operatorFellBack) && operatorEvent && live?.runId !== undefined) {
         registry.publish(live.runId, { type: "operator", ...operatorEvent, at: clock() });
@@ -850,29 +846,29 @@ export async function dispatch(
     // (resident-repos item 29): the one its newest finished run opened, for
     // the target resolution below.
     const threadPr = thread ? threadPrOf(thread) : undefined;
+    const historicalRoutePreset = restart?.row.meta.route?.preset;
     const settled = resolveRun(deps, {
       msg,
       directives,
       history,
       ...(stickyAgent !== undefined ? { stickyAgent } : {}),
-      ...(operatorPreset !== undefined ? { operatorPreset } : {}),
+      ...(operatorPreset !== undefined
+        ? { operatorPreset }
+        : historicalRoutePreset !== undefined
+          ? { operatorPreset: historicalRoutePreset }
+          : {}),
       ...(operatorModel !== undefined ? { operatorModel } : {}),
     });
-    const { sticky } = settled;
-    let { resolved, agentSource } = settled;
+    const { sticky, resolved } = settled;
+    let { agentSource } = settled;
     if (operatorPreset !== undefined) agentSource = "operator";
+    else if (historicalRoutePreset !== undefined) agentSource = "route";
 
-    // The route stage (dispatch/route.ts; record 0026): a plain message — no
-    // directive, no sticky preset, no user or channel agent — picks its preset
-    // through the fast model when `routing.auto` is on. Whatever it picks
-    // meets the gates below like a typed directive; a router that is off,
-    // fails or answers outside the requester's allowlist leaves the request
-    // on `defaults.agent` exactly as before. A compound (the conductor with
-    // its parts) is a route like any other here; a compound the parse refused
-    // leaves the request on the default and rides the record as its `route`
-    // event with the rejection — `routeEvent` is what the record gets,
-    // `route` what the card and the run read.
-    let route: RouteDecided | undefined;
+    // Route metadata survives only for records written before the readers'
+    // router retired. A resumed, restarted or sticky run can still repaint
+    // the historical reason on its card; no new dispatch asks a second model
+    // or publishes a route event.
+    let route: RouteDecided | undefined = restart?.row.meta.route;
     const threadLive =
       admission.get(msg.threadKey) !== undefined ||
       (!resume && !restart && deps.threadsElsewhere.get(msg.threadKey) !== undefined);
@@ -881,11 +877,11 @@ export async function dispatch(
     // plus at most one read of the instance's unit rows. A plain reply into a
     // thread owned by an unfinished unit with no live run is one thread event
     // on that unit — appended with the mode read off the row, the instance
-    // nudged, the sender acked — and the router never runs (the gate does).
+    // nudged and the sender acked before any fresh run resolves.
     // In a UNIT's thread a directive naming an agent falls through to today's
     // path: `agent:review <url>` there still means what it says. A live thread
-    // is the live run's (admission steers below); a session or no owner is the
-    // sticky path and the router, exactly as before.
+    // is the live run's (admission steers below); a session or no owner follows
+    // the ordinary sticky or door-bound path.
     if (thread && !threadLive && deps.coordinatorInstances !== undefined) {
       const owner =
         pageOwner ?? (await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey));
@@ -943,45 +939,10 @@ export async function dispatch(
         // unowned by any unit.
       }
     }
-    const routing = await routeRequest(deps, {
-      msg,
-      directives,
-      sticky,
-      agentSource,
-      threadLive,
-      root,
-      // A restart is the same run under the same card: the row's decision
-      // (run-history item 35) is the route, re-resolved, never re-asked.
-      ...(restart?.row.meta.route ? { carried: restart.row.meta.route } : {}),
-      // The command menu (record 0036, unit 2): the router may call a chat
-      // command instead of routing; the branch answers it here — a write
-      // handed back, a read run through the registry — with no card, no
-      // thread claim and no agent run.
-      command: { deps, io, ending, trace, history },
-    });
-    // A command the router bound has been answered (record 0039): the reply
-    // went out, a read's run is sealed by the drain, and the dispatch is over
-    // before the agent gate and the thread claim.
-    if (routing.kind === "command") return ended;
-    if (routing.kind === "routed") {
-      resolved = routing.resolved;
-      route = routing.route;
-      agentSource = "route";
-    }
-    const routeEvent = routing.kind === "routed" ? routing.route : routing.rejected;
-    // A sticky-by-transcript follow-up in a routed thread carries the thread's
-    // decision (routing-and-config item 21): the router was rightly not asked
-    // — the preset is the transcript's — but the card still says why the
-    // preset was chosen (the `route reason:` note at debug, item 28), the
-    // row's `meta.route` repaints it on a resume or reclaim, and the record's
-    // `route` field hands it to the next follow-up. No `route` event and
-    // `agentSource` stays `sticky`: the router made no new decision here.
-    if (routing.kind === "unrouted" && stickyAgent !== undefined && agentSource === "sticky" && thread)
+    // A sticky follow-up may carry a historical router decision so its old
+    // card remains legible; the door itself chose no route on this event.
+    if (route === undefined && stickyAgent !== undefined && agentSource === "sticky" && thread)
       route = threadRouteOf(thread, resolved.agentName);
-    // A resume repaints the card as the first generation painted it: the row
-    // carries the router's decision (run-history item 35), the resumed message
-    // pins the preset by directive so the router is rightly never asked again,
-    // and the record already holds the `route` event — the card alone needs it.
     if (resume?.row.meta.route) route = resume.row.meta.route;
 
     // The agent gate (dispatch/authorize.ts), against the RESOLVED agent and
@@ -1393,7 +1354,6 @@ export async function dispatch(
       agentSource,
       modelCard,
       cardDecisions,
-      ...(routeEvent ? { route: routeEvent } : {}),
       ...(operatorEvent ? { operator: operatorEvent } : {}),
       ...(references.conversations.length > 0 ? { references } : {}),
     });

@@ -17,7 +17,7 @@
 //   - no code here decides from the words: the facts computed by code
 //     (a live run, the requester, a pending confirmation, another mention) are
 //     inputs to the turn, and the turns enter it inside the untrusted fence.
-// The model seam is the router's (`RouteModel`, `providerRouteModel`) under
+// The model seam is the router's (`RouteModel`, `providerStructuredModel`) under
 // the router's timeout; nothing calls this module yet — the Slack adapter's
 // gate arrives in a later unit.
 import type { ToolDef } from "./provider.js";

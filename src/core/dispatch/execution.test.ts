@@ -30,7 +30,7 @@ describe("the turn-outcome table is total and owns every outcome", () => {
       expect: { chat: { cell: "refuse", names: "mint_failure" }, typed: { cell: "refuse", names: "typed_form" } },
     },
     {
-      name: "bind_preset routes the person's own request through the route stage",
+      name: "bind_preset runs the person's own request through preset resolution",
       outcome: { kind: "bind_preset" },
       expect: { chat: { cell: "route" }, typed: { cell: "route" } },
     },
@@ -43,11 +43,6 @@ describe("the turn-outcome table is total and owns every outcome", () => {
       name: "an unresolvable write — a write-class call the deployment cannot run as typed — is the parked question with the best guess from what exists, never a read standing in (issue 2088)",
       outcome: { kind: "unresolvable_write" },
       expect: { chat: { cell: "question" }, typed: { cell: "question" } },
-    },
-    {
-      name: "a turn ending with no tool call floors to the route — the only floor, terminal for the event",
-      outcome: { kind: "ended" },
-      expect: { chat: { cell: "route" }, typed: { cell: "route" } },
     },
     {
       name: "a typed registry line runs as typed — it never enters the loop and is never re-spelled",
@@ -83,7 +78,6 @@ describe("the turn-outcome table is total and owns every outcome", () => {
       { kind: "bind_preset" },
       { kind: "ask" },
       { kind: "unresolvable_write" },
-      { kind: "ended" },
       { kind: "typed_line" },
       { kind: "steer_owned" },
       { kind: "policy_refusal" },

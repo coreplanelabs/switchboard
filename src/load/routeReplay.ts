@@ -1,25 +1,20 @@
-// `load:route` (docs/reference/specs/load-harness.md item 17): the request
-// router scored offline against the requests people already typed. A finished
-// run whose requester chose the preset themselves — `agent:<preset>` on the
-// message, or the thread's sticky preset they typed earlier — is a labelled
-// example: the label is the preset the run ran on, the text is the request
-// with every directive token hidden, and the router is asked what it would
-// have picked. The result is a per-preset confusion table with accuracy and
-// the misroutes listed. The compound half (the same item): the router's
-// compound form scored on the checked-in set — detected where a request has
-// independent read parts, collapsed to its write preset where a part needs
-// one (record 0034: a write ask is never a part), kept single on a decoy,
-// each part on its preset — and on the history's conductor requests,
-// detection alone, their count printed. The
-// imperative half (the same item): the checked-in set of terse imperatives —
-// an order to change code with no detail to route on — scored on reaching the
-// write preset, its read-only look-alikes on never reaching one. The command
-// half (the same item): the checked-in command set bound and parsed, never
-// invoked; under `--verify`, one more call on every bind of a write- or
-// destructive-class command (record 0044's verifier), scored as write
-// misbinds removed and correct binds rejected. Pure over
-// records and a `RouteDecision` function; the entrypoint (`scripts/load.ts`)
-// pages the run store and picks the model.
+// `load:route` (docs/reference/specs/load-harness.md item 17): the one
+// operator door scored offline against requests people already typed. A
+// finished run whose requester chose the preset themselves —
+// `agent:<preset>` on the message, or the thread's sticky preset they typed
+// earlier — is a labelled example: the label is the preset the run used, the
+// text is the request with every directive token hidden, and the door is asked
+// what it would bind. The result is a per-preset confusion table with accuracy
+// and misses listed. The compound half scores the checked-in set on typed
+// `conductor` binds for independent read asks, write-preset binds where one ask
+// needs write identity, and decoys kept off conductor; historical conductor
+// requests score the same typed bind. The imperative half scores terse orders
+// to change code on reaching the write preset and read-only look-alikes on
+// never reaching one. The command half binds and parses the checked-in command
+// set without invoking it; under `--verify`, one more call on every write- or
+// destructive-class bind measures verifier removals and false rejections.
+// Pure over records and a `RouteDecision` compatibility shape; the entrypoint
+// (`scripts/load.ts`) pages the run store and drives `runOperator`.
 import { AGENTS, COMPOUND_PRESET } from "../agents/registry.js";
 import { stripDirectiveTokens } from "../directives.js";
 import { blastRadius, parseInput, type CommandDef, type CommandInput } from "../core/commandRegistry.js";
@@ -33,7 +28,6 @@ import {
   ROUTE_TIMEOUT_MS,
   verifierPrompt,
   type RouteDecision,
-  type RouteInput,
   type RouteModel,
   type VerifierAnswer,
 } from "../core/dispatch/route.js";
@@ -169,7 +163,7 @@ export function labelledRequests(
   return { requests, skipped };
 }
 
-/** One replayed request: the router's answer beside the label. */
+/** One replayed request: the operator's typed preset bind beside the label. */
 export interface ReplayResult extends ReplayRequest {
   routed: string | undefined;
   reason: string;
@@ -178,15 +172,17 @@ export interface ReplayResult extends ReplayRequest {
   ms: number;
 }
 
-/** The one replay loop every half shares: ask the router about each item's
+/** The replay loop every half shares: ask the one door about each item's
  *  text, `concurrency` at a time, results in item order, each decision timed.
- *  The decision function is the same seam the dispatcher's stage calls
- *  (`route` bound to a model); the harness never dispatches anything. */
+ *  The harness binds decisions but never dispatches anything. */
 /** The facts a fixture puts on the router's user turn beside its text, as the
  *  route stage puts them there in production: the thread's repository (a
  *  command fixture's `threadRepo`) and the count of conversations the text
  *  links that the bot could quote (an imperative fixture's `references`). */
-export type RouteFacts = Pick<RouteInput, "threadRepo" | "references">;
+export interface RouteFacts {
+  threadRepo?: string;
+  references?: number;
+}
 
 async function decideEach<T extends { text: string }, R>(
   items: readonly T[],
@@ -213,7 +209,7 @@ async function decideEach<T extends { text: string }, R>(
   return results;
 }
 
-/** Ask the router about each labelled request: the answer beside the label,
+/** Ask the one door about each labelled request: the bind beside the label,
  *  correct when they agree. */
 export async function replayRoutes(
   requests: readonly ReplayRequest[],
@@ -357,7 +353,7 @@ export function renderConfusion(table: ConfusionTable, opts: { textCap?: number 
   return lines;
 }
 
-/** One compound example the router is scored on: a request with the presets a
+/** One compound example the operator is scored on: a request with the presets a
  *  right split names (two or more, order free), or a decoy — one ask with
  *  several steps — with its one preset. `source` says where it came from: the
  *  checked-in set, or a `conductor` run in the history, whose parts are not on
@@ -380,52 +376,25 @@ export function historyCompounds(requests: readonly ReplayRequest[]): CompoundEx
     .map((r) => ({ id: r.id, kind: "compound", text: r.text, presets: [], source: "history" }));
 }
 
-/** One replayed example: the router's answer beside the expectation. */
+/** One replayed example: the one door's typed preset bind beside the expectation. */
 export interface CompoundResult extends CompoundExample {
   routed: string | undefined;
   reason: string;
-  /** The presets of the answer's parts, in answer order; empty for a single route or no route. */
-  answered: string[];
-  /** The router answered the compound form. */
+  /** The operator bound the conductor preset for independent read asks. */
   detected: boolean;
-  /** The example expects a collapse (`collapsesTo`) and the router answered
-   *  that preset, single: outright, as the prompt asks, or through the parse's
-   *  collapse of a compound answer that named it as a part. */
+  /** The example expects a collapse (`collapsesTo`) and the operator bound
+   *  that write preset as the one run. */
   collapsed: boolean;
-  /** The expected part presets (0 for a decoy, a history example or a
-   *  compound that collapses: its parts are never spawned) and how many of
-   *  them the answer's parts cover, as multisets. */
-  expectedParts: number;
-  matchedParts: number;
-  /** Wall time of the router's decision, ms. */
+  /** Wall time of the operator's decision, ms. */
   ms: number;
 }
 
-/** How many of `expected` the answer covers: each preset counted as often as
- *  both sides name it. */
-function multisetOverlap(expected: readonly string[], answered: readonly string[]): number {
-  const left = new Map<string, number>();
-  for (const p of answered) left.set(p, (left.get(p) ?? 0) + 1);
-  let matched = 0;
-  for (const p of expected) {
-    const n = left.get(p) ?? 0;
-    if (n > 0) {
-      matched++;
-      left.set(p, n - 1);
-    }
-  }
-  return matched;
-}
-
 /**
- * Ask the router about each example, `concurrency` at a time, in order — the
- * same seam `replayRoutes` uses, so the singles and the compounds replay under
- * one prompt. A compound is detected when the answer is the conductor with
- * parts; a compound with a write part (`collapsesTo`) is collapsed when the
- * answer is that preset, single; a decoy expects no detection; the parts are
- * matched as multisets against the expected presets (a compound whose parts
- * are unknown scores detection alone; one that collapses has no parts to
- * match).
+ * Ask the one door about each example, `concurrency` at a time, in order — the
+ * same seam `replayRoutes` uses, so singles and compounds share one operator
+ * projection. A read-only compound is detected by the typed `conductor` bind;
+ * a compound with a write part (`collapsesTo`) is collapsed when the operator
+ * binds that preset; a decoy expects neither.
  */
 export async function replayCompound(
   examples: readonly CompoundExample[],
@@ -433,59 +402,45 @@ export async function replayCompound(
   opts: { concurrency?: number; now: () => number },
 ): Promise<CompoundResult[]> {
   return decideEach(examples, decide, opts, (example, decision, ms) => {
-    const parts = decision.preset === COMPOUND_PRESET && "parts" in decision ? (decision.parts ?? []) : [];
-    const answered = parts.map((p) => p.preset);
-    const detected = decision.preset === COMPOUND_PRESET && parts.length > 0;
     const collapsesTo = example.kind === "compound" ? example.collapsesTo : undefined;
-    const expectedParts = example.kind === "compound" && collapsesTo === undefined ? example.presets.length : 0;
     return {
       ...example,
       routed: decision.preset,
       reason: decision.reason,
-      answered,
-      detected,
+      detected: decision.preset === COMPOUND_PRESET,
       collapsed: collapsesTo !== undefined && decision.preset === collapsesTo,
-      expectedParts,
-      matchedParts: detected && expectedParts > 0 ? multisetOverlap(example.presets, answered) : 0,
       ms,
     };
   });
 }
 
-/** The compound score over a set of results: detection on the compounds to
- *  split, the collapse on the compounds with a write part, the decoys split,
- *  the part presets matched — and every miss, in replay order. */
+/** The compound score over typed preset binds: conductor for independent
+ *  read asks, the write preset for a compound with a write part, no conductor
+ *  bind for decoys — and every miss, in replay order. */
 export interface CompoundScore {
-  /** The compounds the router should split: `kind: "compound"` without `collapsesTo`. */
+  /** The compounds the operator should bind to conductor. */
   compounds: number;
   detected: number;
   /** `detected / compounds`; NaN with no compounds. */
   detectionRate: number;
-  /** The compounds with a write part (`collapsesTo`), and how many the router
-   *  answered as that preset, single. Its own row: a collapse is a write label,
+  /** The compounds with a write part (`collapsesTo`), and how many the operator
+   *  bound as that preset, single. Its own row: a collapse is a write label,
    *  never a read-to-write route. */
   collapseExpected: number;
   collapsed: number;
   decoys: number;
+  /** Decoys incorrectly bound to conductor. */
   decoysSplit: number;
-  expectedParts: number;
-  matchedParts: number;
-  /** `matchedParts / expectedParts`; NaN with no expected parts. */
-  partAccuracy: number;
-  /** A compound the router kept single, a compound with a write part it did
-   *  not collapse onto that preset, a decoy it split, or a detected compound
-   *  whose parts are not exactly the expected presets. */
+  /** A compound not bound to conductor, a write compound not collapsed onto
+   *  its write preset, or a decoy incorrectly bound to conductor. */
   misses: CompoundResult[];
 }
 
-/** Whether a result is a miss: a decoy detected, a compound with a write part
- *  not collapsed onto it, a compound to split not detected, or a detected
- *  compound with known parts that are not exactly the expected ones. */
+/** Whether the typed preset bind disagrees with the fixture's expected door. */
 function isMiss(r: CompoundResult): boolean {
   if (r.kind === "decoy") return r.detected;
   if (r.collapsesTo !== undefined) return !r.collapsed;
-  if (!r.detected) return true;
-  return r.expectedParts > 0 && (r.matchedParts < r.expectedParts || r.answered.length !== r.expectedParts);
+  return !r.detected;
 }
 
 export function compoundScore(results: readonly CompoundResult[]): CompoundScore {
@@ -493,8 +448,6 @@ export function compoundScore(results: readonly CompoundResult[]): CompoundScore
   const collapsing = results.filter((r) => r.kind === "compound" && r.collapsesTo !== undefined);
   const decoys = results.filter((r) => r.kind === "decoy");
   const detected = compounds.filter((r) => r.detected).length;
-  const expectedParts = compounds.reduce((n, r) => n + r.expectedParts, 0);
-  const matchedParts = compounds.reduce((n, r) => n + r.matchedParts, 0);
   return {
     compounds: compounds.length,
     detected,
@@ -503,9 +456,6 @@ export function compoundScore(results: readonly CompoundResult[]): CompoundScore
     collapsed: collapsing.filter((r) => r.collapsed).length,
     decoys: decoys.length,
     decoysSplit: decoys.filter((r) => r.detected).length,
-    expectedParts,
-    matchedParts,
-    partAccuracy: expectedParts === 0 ? NaN : matchedParts / expectedParts,
     misses: results.filter(isMiss),
   };
 }
@@ -520,12 +470,12 @@ export function renderCompound(score: CompoundScore, opts: { textCap?: number } 
   const expectedOf = (r: CompoundResult) =>
     r.collapsesTo !== undefined
       ? `${r.collapsesTo} single (a write part among ${r.presets.join("+")})`
-      : r.presets.length > 0
-        ? r.presets.join("+")
-        : "(unknown)";
-  const answeredOf = (r: CompoundResult) => (r.detected ? r.answered.join("+") : (r.routed ?? NO_ROUTE));
+      : r.kind === "compound"
+        ? COMPOUND_PRESET
+        : (r.presets[0] ?? NO_ROUTE);
+  const answeredOf = (r: CompoundResult) => r.routed ?? NO_ROUTE;
   return [
-    `compound: detected ${score.detected}/${score.compounds} (${pct(score.detectionRate)}), collapsed to its write preset ${score.collapsed}/${score.collapseExpected}, decoys split ${score.decoysSplit}/${score.decoys}, part presets ${score.matchedParts}/${score.expectedParts} (${pct(score.partAccuracy)})`,
+    `compound: bound conductor ${score.detected}/${score.compounds} (${pct(score.detectionRate)}), collapsed to its write preset ${score.collapsed}/${score.collapseExpected}, decoys bound conductor ${score.decoysSplit}/${score.decoys}`,
     "",
     score.misses.length === 0 ? "misses: none" : `misses (${score.misses.length}):`,
     ...score.misses.map(
@@ -675,10 +625,8 @@ export function partitionDoorFixtures(
  *  decision binds a line carrying the pasted words — the paste starts a run
  *  through the table's `run` or `route` cell instead of dying as a dead
  *  hand-back. The loop unit (E2) extended the judge with its own kinds: a
- *  `route` hits when the decision floored (or bound) — the `ended` row's cell
- *  is the route, never a line to retype; a `fold` hits when the decision is
- *  anything an owned thread folds (everything but a question, the
- *  `steer_owned` row); a `rebind` hits when the parked question's answer,
+ *  `fold` hits when the decision is anything an owned thread folds (everything
+ *  but a question, the `steer_owned` row); a `rebind` hits when the parked question's answer,
  *  joined onto the original ask before the loop saw it, carried the ask's
  *  words and the decision bound. */
 export function judgeDoorFixture(
@@ -698,6 +646,7 @@ export function judgeDoorFixture(
       preset === expected.preset &&
       (expected.carries === undefined || bound.includes(expected.carries)) &&
       (expected.forbids === undefined || !bound.includes(expected.forbids)) &&
+      (expected.reason === undefined || decision.reason === expected.reason) &&
       (expected.model === undefined || model === expected.model) &&
       (expected.noModel !== true || model === undefined);
     return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
@@ -715,16 +664,6 @@ export function judgeDoorFixture(
   }
   if (expected.kind === "run") {
     const hit = decision.kind === "binds" && bound !== undefined && bound.includes(expected.line);
-    return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
-  }
-  if (expected.kind === "route") {
-    // The loop unit (E2): a turn that ends with no tool call is the floor —
-    // the readers' route on the person's own request (`decideExecution`'s
-    // `ended` row) — and a decision that acted instead still never rendered a
-    // line to retype, so a bind hits too; only a question or a refusal (the
-    // incident's shape) misses.
-    const routes = decideExecution({ kind: "ended" }, "chat").cell === "route";
-    const hit = routes && (decision.kind === "non_decision" || decision.kind === "binds");
     return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
   }
   if (expected.kind === "question") {
@@ -1681,7 +1620,7 @@ export function renderVolume(points: readonly VolumePoint[]): string {
 
 /** Token accounting over every router call of one replay: the three usage
  *  fields summed and the calls counted, plus the answers the model spent on
- *  two tool calls — refused by `providerRouteModel` ("the route is one call"),
+ *  two tool calls — refused by `providerStructuredModel` ("the route is one call"),
  *  so they show up as no-routes; the counter says how often the model, not the
  *  parse, was the reason. */
 export interface RouteCallCounters {

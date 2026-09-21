@@ -1070,15 +1070,13 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
-  /** The operator's decision beside the routed request ([record 0057](../../docs/decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat-input-and-deterministic-code-authorizes-fences-and-executes.md);
-   *  the one-door plan's operator unit; run-history item 60): one per admitted chat
-   *  event under `routing.operator: shadow` or `on`, published beside the
-   *  `route` event. The decision is binds, a question, a refusal or — the
-   *  structured seam's floor ([record 0067](../../docs/decisions/0067-one-seam-for-a-structured-answer-a-violation-is-re-asked-with-the-violation-named-and-the-callers-declared-floor-holds-never-a-refusal-shown-to-the-person.md)),
-   *  never the model's decision — `non_decision`: under `on` the dispatcher
-   *  falls back to the readers' route for that event, this event recorded on
-   *  the run that then runs; `attempts` lists what each answer violated or
-   *  that it was accepted. A bind's `line` is redacted and cut like the
+  /** The operator's decision ([record 0057](../../docs/decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat-input-and-deterministic-code-authorizes-fences-and-executes.md);
+   *  run-history item 60): one per admitted chat event under
+   *  `routing.operator: shadow` or `on`. A no-call turn is repaired once and a
+   *  second becomes a typed general bind with reason `no_decision`; another
+   *  exhausted violation may remain `non_decision` and resolves on the
+   *  configured default with no second model. `attempts` lists what each
+   *  answer violated or that it was accepted. A bind's `line` is redacted and cut like the
    *  receipt (`ROUTE_RECEIPT_CAP`), never the message text; `intake` carries
    *  the intake gate's verdict when the gate is present; `latencyMs` and
    *  `outputTokens` feed the replay's median rows. Under `shadow` nothing
@@ -1088,10 +1086,8 @@ export type RunEvent =
       mode: "shadow" | "on";
       outcome: "binds" | "question" | "refusal" | "non_decision";
       reason: string;
-      /** The decision was the loop's floor (record 0069, as amended): a turn
-       *  that ended with no tool call, or the bounded re-asks ran out — the
-       *  readers' route ran the person's own request, and the event never
-       *  re-enters the loop. Additive: unknown → ignored. */
+      /** Historical marker from records written before the readers' router
+       *  retired. New events never emit it. Additive: unknown → ignored. */
       floored?: true;
       /** A bind marked `confirmed` is a pending question's confirmed proposal
        *  (`bindFromAnswer`): the line itself carries the task — the person's

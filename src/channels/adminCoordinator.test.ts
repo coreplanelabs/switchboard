@@ -493,26 +493,23 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     );
   });
 
-  it("a coding child on the fast tier is refused `spawn_tier` before any store is read, and a malformed model or effort is refused by name", async () => {
+  it("every configured child model is strong after the classifier tier retires, and a malformed model or effort is refused by name", async () => {
     const h = harness();
     await h.instances.put(INSTANCE);
-    const deps: AdminCoordinatorDeps = { ...h.deps, appConfig: () => ({ routing: { model: "anthropic/fast-model" } }) };
     const res = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, model: "anthropic/fast-model" }),
-      deps,
+      h.deps,
     );
-    expect(res.status).toBe(400);
-    expect(res.body).toMatchObject({ ok: false, error: "spawn_tier" });
-    expect((res.body as { message: string }).message).toContain("fast tier");
-    expect(h.dispatched).toEqual([]);
+    expect(res.status).toBe(200);
+    expect(h.dispatched[0].msg.text).toContain("model:anthropic/fast-model");
     const badModel = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, model: "no-slash" }),
-      deps,
+      h.deps,
     );
     expect(badModel).toEqual({ status: 400, body: { ok: false, error: "model must be a `<provider>/<model>` ref" } });
     const badEffort = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, effort: "turbo" }),
-      deps,
+      h.deps,
     );
     expect(badEffort).toEqual({
       status: 400,

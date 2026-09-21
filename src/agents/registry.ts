@@ -47,11 +47,9 @@ export function machineNeedsRepo(machine: MachineClass): boolean {
 export const IDENTITIES = ["none", "read", "write"] as const;
 export type Identity = (typeof IDENTITIES)[number];
 
-/** The model tiers a preset may run on (the one-door plan's tiers rule): the
- *  `fast` tier is the router's own model (`routing.model`), everything else is
- *  `strong`. Each preset declares its allowed set below (`AgentDef.tiers`);
- *  a parent choosing a child's model at spawn is held to the child preset's
- *  set, and escalation is a new run — a run's tier is fixed at dispatch. */
+/** The model tiers a preset may run on. The retired classifier leaves no
+ *  configured fast-tier ref, so current run models resolve strong; declarations
+ *  remain explicit for model-card tiering and future configured catalogues. */
 export const MODEL_TIERS = ["fast", "strong"] as const;
 export type ModelTier = (typeof MODEL_TIERS)[number];
 

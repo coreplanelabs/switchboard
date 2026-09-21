@@ -110,7 +110,7 @@ export interface ParsedReference {
  *  offered to the readers, the first whose `parseConversationUrl` answers owns
  *  it, and a URL no reader parses is plain text. The URL grammar alone — no
  *  reader is asked anything else, so this is what the request's own text
- *  settles before any adapter call, the half of the step the route stage may
+ *  settles before any adapter call, the half of the step deterministic code may
  *  read (record 0037 keeps the quote itself after admission). */
 export function parseReferences(text: string, readers: readonly ConversationReader[]): ParsedReference[] {
   const refs: ParsedReference[] = [];
@@ -133,7 +133,7 @@ export function parseReferences(text: string, readers: readonly ConversationRead
 
 /** How many conversations the step would quote for `text`: the parsed
  *  references under the per-request cap (a fourth is refused, never quoted).
- *  The fact the route stage puts on the router's user turn. */
+ *  A fact callers may include in their own grounded input. */
 export function quotableReferences(text: string, readers: readonly ConversationReader[]): number {
   return Math.min(parseReferences(text, readers).length, REFERENCE_MAX_PER_REQUEST);
 }

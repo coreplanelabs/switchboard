@@ -1,8 +1,7 @@
-// One seam for a structured answer (docs/decisions/0067-one-seam-for-a-structured-answer-a-violation-is-re-asked-with-the-violation-named-and-the-callers-declared-floor-holds-never-a-refusal-shown-to-the-person.md;
-// the one-door plan's U19): every place the product asks a model for ONE
-// structured answer — the route tool, the verifier, the operator, the intake
-// gate — asks through this loop. The tool is forced by the caller's prompt as
-// before (`providerRouteModel`); the caller's PURE parser reads each answer
+// One seam for a structured answer (record 0067): every place the product
+// asks a model for one structured answer — the operator, intake and replay
+// verifier — asks through this loop. The tool is forced by the caller's prompt as
+// before (`providerStructuredModel`); the caller's PURE parser reads each answer
 // and either accepts the value or names the violation in one line; a named
 // violation is re-asked of the SAME model with the model's answer and the
 // violation quoted back as a user turn ("your answer was not <noun>: <why>;
@@ -10,9 +9,9 @@
 // every attempt — the violation it named, or the acceptance — is handed back
 // for the caller's event, so a flaky model is legible on the record as
 // re-asks, not as silent floors. After the retries the CALLER's declared
-// floor holds: the value the caller builds from the last violation — the
-// default agent, a disagreement, the readers' route, silence — never a
-// refusal shown to the person. Timeouts and transport failures stay what they
+// floor holds: the value the caller builds from the last violation — a
+// configured default, disagreement or silence — never a refusal shown to the
+// person. Timeouts and transport failures stay what they
 // are: the model's throw propagates to the caller's existing fail-closed
 // catch WITHOUT a re-ask — there is no answer to quote back, and the caller's
 // one timeout covers the whole loop, so a re-ask never spends time the caller

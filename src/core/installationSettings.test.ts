@@ -20,9 +20,7 @@ const MANIFEST_SECRETS: string[] = (
 /** A config that fills in every behaviour knob the projection names, beside the
  *  cloud-full fixture's Workers and env var names — the worst case for a leak. */
 const EVERYTHING_YAML = `${CLOUD_FULL.yaml}routing:
-  auto: false
-  model: anthropic/router-model
-  answer: text
+  operator: shadow
 references:
   enabled: true
 ship:
@@ -61,8 +59,10 @@ describe("installationSettings", () => {
   it("renders every named knob with its configured value, or the default marked as such", () => {
     const view = installationSettings(parseAppConfigText(EVERYTHING_YAML), ALL_CAPABILITIES);
     const rows = rowsByKey(view.settings);
-    expect(rows.get("routing.auto")).toMatchObject({ value: "false", isDefault: false, how: "config" });
-    expect(rows.get("routing.answer")).toMatchObject({ value: "text", isDefault: false });
+    expect(rows.has("routing.model")).toBe(false);
+    expect(rows.has("routing.effort")).toBe(false);
+    expect(rows.has("routing.auto")).toBe(false);
+    expect(rows.has("routing.answer")).toBe(false);
     expect(rows.get("references.enabled")).toMatchObject({ value: "true", isDefault: false });
     expect(rows.get("ship.maxRounds")).toMatchObject({ value: "5", isDefault: false });
     expect(rows.get("spawn.maxChildren")).toMatchObject({ value: "2", isDefault: false });
@@ -81,7 +81,7 @@ describe("installationSettings", () => {
   it("the minimal installation shows every knob at its default and every optional capability off", () => {
     const view = installationSettings(parseAppConfigText(MINIMAL.yaml), NO_CAPABILITIES);
     expect(view.settings.every((r) => r.key.startsWith("defaults.") || r.isDefault)).toBe(true);
-    expect(rowsByKey(view.settings).get("routing.auto")).toMatchObject({ value: "true", isDefault: true });
+    expect(rowsByKey(view.settings).has("routing.model")).toBe(false);
     expect(rowsByKey(view.settings).get("memory.enabled")).toMatchObject({ value: "false", isDefault: true });
     const caps = new Map(view.capabilities.map((c) => [c.key, c]));
     expect(caps.get("mcp")).toMatchObject({ on: false });

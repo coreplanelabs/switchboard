@@ -502,12 +502,10 @@ function validateOpenCode(opencode: unknown): void {
   }
 }
 
-/** The two ways the router's model may answer (`routing.answer`; routing-and-config item 21):
- *  `tool` — forced to call the `route` tool, whose input is the answer;
- *  `text` — the one-JSON-object text contract alone, for a provider that
- *  cannot take a forced tool call. */
-export const ROUTE_ANSWER_MODES = ["tool", "text"] as const;
-export type RouteAnswerMode = (typeof ROUTE_ANSWER_MODES)[number];
+/** The two structured answer shapes a model card may declare: a forced
+ *  tool call, or the one-JSON-object text contract. */
+export const STRUCTURED_ANSWER_MODES = ["tool", "text"] as const;
+export type StructuredAnswerMode = (typeof STRUCTURED_ANSWER_MODES)[number];
 
 /** The operator's three modes (`routing.operator`; record 0057, plan
  *  the one-door plan's operator unit; routing-and-config item 29): `on` (the
@@ -622,11 +620,11 @@ export function validateModelOverride(path: string, raw: unknown): void {
     throw new Error(`${path}.cache must be ${CACHE_RULES.join(", ")}`);
   if (m.answers !== undefined) {
     if (!Array.isArray(m.answers))
-      throw new Error(`${path}.answers must be a list of answer shapes (${ROUTE_ANSWER_MODES.join(", ")})`);
+      throw new Error(`${path}.answers must be a list of answer shapes (${STRUCTURED_ANSWER_MODES.join(", ")})`);
     for (const shape of m.answers as unknown[]) {
-      if (!(ROUTE_ANSWER_MODES as readonly unknown[]).includes(shape))
+      if (!(STRUCTURED_ANSWER_MODES as readonly unknown[]).includes(shape))
         throw new Error(
-          `${path}.answers carries ${JSON.stringify(shape)}, which is not an answer shape (${ROUTE_ANSWER_MODES.join(", ")})`,
+          `${path}.answers carries ${JSON.stringify(shape)}, which is not an answer shape (${STRUCTURED_ANSWER_MODES.join(", ")})`,
         );
     }
   }
@@ -705,32 +703,25 @@ export function validateProviders(cfg: AppConfig, source: string): void {
   }
 }
 
-/** The `routing` block's keys, held equal to `RoutingConfig` the way the top-level keys are. */
-const ROUTING_KEYS: Record<keyof RoutingConfig, true> = { auto: true, model: true, answer: true, operator: true };
+/** The `routing` block now carries only the one door's operator mode. */
+const ROUTING_KEYS: Record<keyof RoutingConfig, true> = { operator: true };
+const RETIRED_ROUTER_KEYS = new Set(["auto", "model", "effort", "answer"]);
+const retiredRouterKey = (key: string): string =>
+  `config.yaml: the readers' router is retired — the door now re-asks a no-call turn once and then binds general; remove routing.${key} (docs/reference/migrations.md)`;
 
-/** `routing` (docs/reference/specs/routing-and-config.md item 21): `auto` is a
- *  boolean and nothing else — a `"yes"` or a `1` is refused by name, never read
- *  as on or as off — and `model` is a `<provider>/<model>` ref whose provider
- *  the config declares, so a router that cannot be built fails the load rather
- *  than silently never routing. Any other key is refused by name. */
-function validateRouting(routing: RoutingConfig, providers: Record<string, unknown> | undefined): void {
+/** `routing` (routing-and-config item 29): only the door's mode remains. The
+ *  readers' router keys get a migration sentence rather than an unknown-key
+ *  error, so an old deployment cannot silently believe it still selected a
+ *  second model. */
+function validateRouting(routing: RoutingConfig, _providers: Record<string, unknown> | undefined): void {
   if (typeof routing !== "object" || routing === null || Array.isArray(routing))
     throw new Error("config.yaml: routing must be a mapping");
-  for (const key of unknownKeys(routing, ROUTING_KEYS))
+  for (const key of unknownKeys(routing, ROUTING_KEYS)) {
+    if (RETIRED_ROUTER_KEYS.has(key)) throw new Error(retiredRouterKey(key));
     throw new Error(`config.yaml: routing.${key} is not a known key`);
-  if (routing.auto !== undefined && typeof routing.auto !== "boolean")
-    throw new Error("config.yaml: routing.auto must be true or false");
-  if (routing.answer !== undefined && !(ROUTE_ANSWER_MODES as readonly unknown[]).includes(routing.answer))
-    throw new Error(`config.yaml: routing.answer must be ${ROUTE_ANSWER_MODES.join(" or ")}`);
+  }
   if (routing.operator !== undefined && !(OPERATOR_MODES as readonly unknown[]).includes(routing.operator))
     throw new Error(`config.yaml: routing.operator must be ${OPERATOR_MODES.join(", ")}`);
-  if (routing.model !== undefined) {
-    if (typeof routing.model !== "string" || !routing.model.includes("/"))
-      throw new Error("config.yaml: routing.model must be a <provider>/<model> ref");
-    const provider = parseModelRef(routing.model).provider;
-    if (!providers || !Object.hasOwn(providers, provider))
-      throw new Error(`config.yaml: routing.model names provider "${provider}", which providers does not define`);
-  }
 }
 
 /** The `intake` block's keys, held equal to `IntakeConfig` the way the top-level keys are. */
@@ -748,13 +739,13 @@ export function defaultIntakeMode(config: AppConfig): IntakeMode {
   return config.intake?.threadReplies ?? "classify";
 }
 
-/** The verdict's model ref, resolved as the router's is: `intake.model`, else
- *  `routing.model`, else `defaults.models.general`; undefined when the config
- *  names none — the gate then cannot classify and says so at its caller. The
- *  one resolver: `validateIntake` checks the card of the ref it returns, and
- *  `decideIntake` calls the same ref at runtime (`src/config.ts` re-exports it). */
+/** The verdict's model ref: `intake.model`, else
+ *  `defaults.models.general`; undefined when the config names none — the gate
+ *  then cannot classify and says so at its caller. The one resolver:
+ *  `validateIntake` checks the card of the ref it returns, and `decideIntake`
+ *  calls the same ref at runtime (`src/config.ts` re-exports it). */
 export function intakeModelRef(config: AppConfig): string | undefined {
-  return config.intake?.model ?? config.routing?.model ?? config.defaults?.models?.["general"];
+  return config.intake?.model ?? config.defaults?.models?.["general"];
 }
 
 /** `intake` (docs/reference/specs/routing-and-config.md item 27): the mode is

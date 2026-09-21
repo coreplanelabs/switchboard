@@ -140,14 +140,13 @@ import { CommandRegistry } from "../src/core/commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../src/core/commands/all.js";
 import { ALL_CAPABILITIES } from "../src/core/capabilities.js";
 import {
-  providerRouteModel,
+  providerStructuredModel,
   routableCommands,
-  routablePresets,
-  route,
   ROUTE_TIMEOUT_MS,
+  type RouteDecision,
 } from "../src/core/dispatch/route.js";
-import { runOperator } from "../src/core/dispatch/operator.js";
-import { DEFAULT_MAX_CHILDREN } from "../src/core/dispatch/spawn.js";
+import { operatorPresets, presetBindOf, runOperator } from "../src/core/dispatch/operator.js";
+import { parseChatCommand } from "../src/core/commandChat.js";
 import { doorReport, renderDoor } from "../src/load/doorReport.js";
 import {
   intakeScore,
@@ -205,13 +204,11 @@ commands
              the model key is read from the environment variable --key-env names (default: the variable pi reads
              for --provider, e.g. ANTHROPIC_API_KEY); never from a file, never printed
              --print-prompt --task <name>: print the task's prompt and exit (for the same task on today's coding agent)
-  route      the request router replayed against finished runs whose requester typed the preset (the label), its
-             compound form scored on the checked-in set (src/load/routeCompoundFixtures.ts) and the history's conductor runs,
-             and the terse imperatives scored on theirs (src/load/routeImperativeFixtures.ts); the door row
-             (src/load/routeDoorFixtures.ts) replays the operator over the defect fixtures whose unit is merged,
-             the rest printed pending
+  route      the one door replayed against finished runs whose requester typed the preset (the label), with
+             the checked-in compound, imperative and defect fixture sets all driven through runOperator; no readers'
+             classifier or second model is called
              --provider NAME  --model ID  [--key-env VAR  --base-url URL  --since DATE  --limit N  --default-agent NAME
-             --concurrency N  --max-parts N (the compound cap, default spawn.maxChildren's 3)]
+             --concurrency N]
              [--verify: one more call on every bind of a write- or destructive-class command in the checked-in command set,
              shown the sentence and the bound line and asked whether the line does what was asked; printed beside the command
              rows as write misbinds removed and correct binds rejected — a measurement for the production decision, never a
@@ -287,7 +284,6 @@ function flags(argv: string[]): Flags {
       live: { type: "boolean" },
       "default-agent": { type: "string" },
       concurrency: { type: "string" },
-      "max-parts": { type: "string" },
       verify: { type: "boolean" },
       help: { type: "boolean" },
     },
@@ -1161,24 +1157,23 @@ async function piReviewSuite(f: Flags): Promise<boolean> {
   );
 }
 
-/** `load:route` (docs/reference/specs/load-harness.md item 17): the request
- *  router scored against the requests people already typed. Finished runs are
- *  read newest-first from the run store; a run whose requester chose its
- *  preset (`labelledRequests`) is one labelled example, the directive hidden
- *  from its text; the router — the dispatcher's own `route` over the same
- *  `RouteModel` seam, bound to the provider `--provider`/`--model` name, the
- *  compound form offered as production offers it — is asked what it would
- *  have picked; the receipt is the per-preset confusion table over the
- *  directive labels (typed for the message), the accuracy against record
- *  0026's bar, its read-only-to-write clause as a row of its own, the
- *  misroutes, and — replayed and reported apart — the sticky labels (the
- *  thread's preset carried onto a later message) and the unstamped ones (a
- *  pre-stamp record cannot tell a typed preset from a scope's). Then the compound half: the
- *  checked-in set (twenty compounds, five decoys) scored on detection, on the
+/** `load:route` (docs/reference/specs/load-harness.md item 17): the one
+ *  operator door scored against the requests people already typed. Finished
+ *  runs are read newest-first from the run store; a run whose requester chose
+ *  its preset (`labelledRequests`) is one labelled example, the directive
+ *  hidden from its text. The same `runOperator` loop production uses, bound to
+ *  the provider `--provider`/`--model` name, is asked what it would have bound;
+ *  the receipt is the per-preset confusion table over the directive labels
+ *  (typed for the message), the accuracy against record 0026's bar, its
+ *  read-only-to-write clause as a row of its own, the misses, and — replayed
+ *  and reported apart — the sticky labels (the thread's preset carried onto a
+ *  later message) and the unstamped ones (a pre-stamp record cannot tell a
+ *  typed preset from a scope's). Then the compound half: the checked-in set
+ *  (twenty compounds, five decoys) scored on a typed `conductor` bind, on the
  *  collapse of every compound with a write part onto that preset (its own row,
- *  apart from the read-to-write clause), on decoys kept single and on part
- *  presets against the unit's bar, and the history's `conductor` requests —
- *  few — on detection, their count printed.
+ *  apart from the read-to-write clause), on decoys kept off conductor, and the
+ *  history's `conductor` requests — few — on the same typed bind, their count
+ *  printed.
  *  Then the imperative half: the checked-in set of terse imperatives (twenty,
  *  five read-only decoys, six review-shaped) scored on reaching the table's write preset and on
  *  no look-alike reaching a write preset. Then the command half: the checked-in
@@ -1215,7 +1210,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
   // line sums the usage fields (cost and prompt caching) and counts the
   // answers refused for carrying two tool calls (load-harness item 17).
   const counters = emptyCounters();
-  const model = providerRouteModel(tallyingProvider(providers.get(providerName), counters), modelId);
+  const model = providerStructuredModel(tallyingProvider(providers.get(providerName), counters), modelId);
   const modelRef = `${providerName}/${modelId}`;
   const base = str(f, "state-url", process.env.SWITCHBOARD_STATE_WORKER_URL).replace(/\/$/, "");
   const store = new WorkerRunStore({
@@ -1228,7 +1223,6 @@ async function routeReplay(f: Flags): Promise<boolean> {
   const limit = num(f, "limit", 200);
   const defaultPreset = str(f, "default-agent", "general");
   const concurrency = num(f, "concurrency", 4);
-  const maxParts = num(f, "max-parts", DEFAULT_MAX_CHILDREN);
   const verify = f.verify === true;
 
   // Newest first, one record at a time, until `limit` labelled requests or
@@ -1289,7 +1283,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
   // clause and the bar; a sticky one (the thread's preset carried onto a later
   // message) and an unstamped one (a pre-stamp record, whose preset may be a
   // scope's) are replayed and reported apart, so neither moves the accuracy.
-  const presets = routablePresets();
+  const presets = operatorPresets();
   const allowed = presets.map((p) => p.name);
   const writePreset = tableWritePreset(allowed) ?? "(none)";
   // Historical labels whose preset left the table but shares its write
@@ -1308,39 +1302,55 @@ async function routeReplay(f: Flags): Promise<boolean> {
     `route: ${typed.length} typed + ${sticky.length} sticky + ${unstamped.length} unstamped labelled request(s) and ${fromHistory.length} conductor request(s) from ${scanned} record(s) scanned; model ${modelRef}\n`,
   );
 
-  // One decision function for both halves: the production prompt, the compound
-  // form offered under the cap — so a single that the router splits is a
-  // misroute in the table, and a decoy split is counted where it belongs.
-  // A fixture's facts — the conversations it links, a command fixture's thread
-  // repository — ride the user turn as the route stage puts them there.
-  const decide = (text: string, facts?: RouteFacts) =>
-    route(
-      { text, recentDirectives: {}, presets, allowed, fallback: defaultPreset, compound: { maxParts }, ...facts },
-      model,
-      { timeoutMs: ROUTE_TIMEOUT_MS },
-    );
-  // The command half's menu: the bare full-capability catalogue —
-  // `registerCoreCommands` over a fresh registry, never a bound deployment's —
-  // so every offered command is scored; the replay binds and parses only,
-  // nothing is ever invoked (the registry carries no deps to invoke with).
+  // The full command catalogue is projected into the same operator loop
+  // production runs. The replay converts the loop's typed bind back into the
+  // historical score shape; no readers' router or second model is involved.
   const commandRegistry = new CommandRegistry<CoreCommandDeps>({ audit: () => {}, capabilities: ALL_CAPABILITIES });
   registerCoreCommands(commandRegistry);
   const menu = routableCommands(commandRegistry);
-  const decideCommand = (text: string, facts?: RouteFacts) =>
-    route(
-      {
-        text,
-        recentDirectives: {},
-        presets,
-        allowed,
-        fallback: defaultPreset,
-        compound: { maxParts },
-        commands: menu,
-        ...facts,
-      },
-      model,
-      { timeoutMs: ROUTE_TIMEOUT_MS },
-    );
+  const decideWith =
+    (commands: typeof menu) =>
+    async (text: string, facts?: RouteFacts): Promise<RouteDecision> => {
+      const answer = await runOperator(
+        {
+          text,
+          projection: { presets, commands },
+          briefs: [
+            ...(facts?.threadRepo ? [`Thread repository: ${facts.threadRepo}`] : []),
+            ...(facts?.references ? [`Linked conversations: ${facts.references}`] : []),
+          ],
+          tail: [],
+          providers: [providerName],
+        },
+        model,
+        { timeoutMs: ROUTE_TIMEOUT_MS },
+      );
+      if (answer.decision.kind !== "binds")
+        return {
+          preset: undefined,
+          reason: answer.decision.reason,
+          ...(answer.attempts ? { attempts: answer.attempts } : {}),
+        };
+      const line = answer.decision.binds[0]?.line ?? "";
+      const preset = presetBindOf(line, allowed);
+      if (preset !== undefined)
+        return { preset, reason: answer.decision.reason, ...(answer.attempts ? { attempts: answer.attempts } : {}) };
+      const parsed = parseChatCommand(line, commandRegistry);
+      return parsed?.kind === "invoke"
+        ? {
+            preset: undefined,
+            reason: answer.decision.reason,
+            command: { id: parsed.id, input: parsed.input },
+            ...(answer.attempts ? { attempts: answer.attempts } : {}),
+          }
+        : {
+            preset: undefined,
+            reason: answer.decision.reason,
+            ...(answer.attempts ? { attempts: answer.attempts } : {}),
+          };
+    };
+  const decide = decideWith([]);
+  const decideCommand = decideWith(menu);
   const results = await replayRoutes(typed, decide, { concurrency, now: systemClock });
   const table = confusionTable(results, allowed);
   const stickyResults = await replayRoutes(sticky, decide, { concurrency, now: systemClock });
@@ -1360,7 +1370,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
     now: systemClock,
   });
   const imperative = imperativeScore(imperativeResults);
-  // The door row (record 0069's D1–D14 and the night's N1–N4): the OPERATOR
+  // The door row (record 0069's D1–D14 and the night's N1–N7): the OPERATOR
   // itself replayed over the defect fixtures whose unit is merged — the full
   // projection (every preset, the whole command menu), an empty tail — each
   // scored against the amended table's expected outcome; a fixture whose unit
@@ -1591,18 +1601,18 @@ async function routeReplay(f: Flags): Promise<boolean> {
     "",
     sticky.length === 0
       ? "sticky labels: none"
-      : `sticky labels (the thread's preset carried onto a later message — the thread's choice, not the message's): ${sticky.length}, router agreed ${stickyAgreed} (${pct(stickyAgreed / sticky.length)}), read-only ones answered with a write preset ${stickyReadToWrite.length} — excluded from the table, the clause and the bar`,
+      : `sticky labels (the thread's preset carried onto a later message — the thread's choice, not the message's): ${sticky.length}, door agreed ${stickyAgreed} (${pct(stickyAgreed / sticky.length)}), read-only ones answered with a write preset ${stickyReadToWrite.length} — excluded from the table, the clause and the bar`,
     "",
     unstamped.length === 0
       ? `unstamped labels: none (every labelled record carries run_meta.agentSource)`
-      : `unstamped labels (a record from before the agentSource stamp, on a preset other than ${defaultPreset} — typed, sticky or a channel/user scope's agent; the record cannot say): ${unstamped.length}, router agreed ${unstampedAgreed} (${pct(unstampedAgreed / unstamped.length)}) — excluded from the table and the bar`,
+      : `unstamped labels (a record from before the agentSource stamp, on a preset other than ${defaultPreset} — typed, sticky or a channel/user scope's agent; the record cannot say): ${unstamped.length}, door agreed ${unstampedAgreed} (${pct(unstampedAgreed / unstamped.length)}) — excluded from the table and the bar`,
     "",
-    `checked-in compound set (${fixtures.compounds} compounds to split, ${fixtures.collapseExpected} with a write part to collapse onto it, ${fixtures.decoys} decoys; cap ${maxParts} parts):`,
+    `checked-in compound set (${fixtures.compounds} compounds to bind to ${COMPOUND_PRESET}, ${fixtures.collapseExpected} with a write part to collapse onto it, ${fixtures.decoys} decoys):`,
     ...renderCompound(fixtures),
     "",
     history.compounds === 0
       ? "history: no conductor request in the window — the checked-in set is the whole compound score"
-      : `history: ${history.compounds} conductor request(s), ${history.detected} detected as compound (parts unknown on the record, so detection alone)`,
+      : `history: ${history.compounds} conductor request(s), ${history.detected} rebound to conductor (the record supplies the expected typed bind)`,
     ...(history.compounds === 0 ? [] : renderCompound(history).slice(2)),
     "",
     `checked-in imperative set (${imperative.imperatives} imperatives, ${imperative.decoys} read-only decoys, ${imperative.reviews} review-shaped):`,
@@ -1620,7 +1630,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
     `the directive words (${directive.fixtures} fixtures: each word in first position and mid-sentence):`,
     ...renderDirectives(directive),
     "",
-    `the door row (${ROUTE_DOOR_FIXTURES.length} defect fixtures — record 0069's D1–D14, the night's N1–N5 and the plain-words model set M1–M6; ${door.fixtures} scored over the operator itself, ${door.pending.length} pending their unit):`,
+    `the door row (${ROUTE_DOOR_FIXTURES.length} defect fixtures — record 0069's D1–D14, the night's N1–N7 and the plain-words model set M1–M6; ${door.fixtures} scored over the operator itself, ${door.pending.length} pending their unit):`,
     ...renderDoorFixtures(door),
     ...(planted === undefined
       ? [
@@ -1655,7 +1665,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
         .map(([k, v]) => `${k}=${v}`)
         .join(" ") || "none"
     }`,
-    "the thread's earlier directives are not on a record, so every request replays with none; the allowlist is every routable preset and the compound form is offered over the read-identity presets, as production offers it to a requester who may run the conductor",
+    `the thread's earlier directives are not on a record, so every request replays with none; the projection is every operator preset and read-only compounds bind ${COMPOUND_PRESET} as production does`,
   ];
   const redacted = <T extends { text: string; reason: string }>(r: T): T => ({
     ...r,
@@ -1666,7 +1676,18 @@ async function routeReplay(f: Flags): Promise<boolean> {
     "route",
     id,
     startedAt,
-    { stateUrl: base, model: modelRef, since: f.since, limit, defaultPreset, concurrency, maxParts, keyEnv, verify },
+    {
+      stateUrl: base,
+      model: modelRef,
+      since: f.since,
+      limit,
+      defaultPreset,
+      concurrency,
+      decisionPath: "operator",
+      compoundPreset: COMPOUND_PRESET,
+      keyEnv,
+      verify,
+    },
     summary,
     checks,
     {
@@ -1725,7 +1746,7 @@ async function intake(f: Flags): Promise<boolean> {
       ...(baseUrl ? { baseUrl } : {}),
     },
   });
-  const model = providerRouteModel(providers.get(providerName), modelId);
+  const model = providerStructuredModel(providers.get(providerName), modelId);
   const modelRef = `${providerName}/${modelId}`;
   const path = str(f, "fixtures", `${RESULTS_DIR}/intake-fixtures.jsonl`);
   const fixtures = parseIntakeFixtures(readFileSync(path, "utf8"));

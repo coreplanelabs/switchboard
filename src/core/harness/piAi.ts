@@ -1,20 +1,11 @@
-// pi's model library (`@earendil-works/pi-ai`) as the bot's own provider layer
-// for the model calls made outside a run loop (docs/reference/specs/harness-pi.md
-// item 13; docs/decisions/0032-pi-is-the-harness-the-native-loop-retires.md):
-// the request router's one call (`src/core/dispatch/route.ts`) and memory
-// reflection's one call (`src/core/memory/reflection.ts`). Both keep the
-// completion vocabulary — a `Provider` whose `complete` takes a
-// `CompletionRequest` and answers a `CompletionResult` — so the callers and
-// their tests are unchanged; what changes is the code that speaks to the
-// provider: pi's own adapters, the ones a run's pi drives through the model
-// proxy, here inside the bot with the deployment's key. The table `config.yaml`
-// names is built on them exactly as `ProviderRegistry` builds it on the native
-// adapters — same names, same refusals — so `defaults.models.general`,
-// `routing.model` and `memory.model` resolve as before, and OpenRouter, Groq or
-// a local server are the same `openai-compatible` blocks they were. Neither
-// caller records a `model.turn` span or usage on a record — the router's call
-// sits under the request's `dispatch.route` span, reflection is a background
-// pass off the run's trace — and nothing here changes that.
+// pi's model library (`@earendil-works/pi-ai`) as the bot's provider layer for
+// structured model calls outside a run loop (harness-pi item 13): the one door,
+// intake and memory reflection. Callers keep the completion vocabulary — a
+// `Provider` whose `complete` takes a `CompletionRequest` and answers a
+// `CompletionResult` — while pi's adapters speak each provider's wire shape.
+// The table is built from config provider blocks; `defaults.models.general`,
+// `intake.model` and `memory.model` resolve through it. These background calls
+// do not publish a run's `model.turn` span or usage record.
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";

@@ -1,5 +1,5 @@
 import { ARTIFACT_DEFAULTS } from "../artifacts/config.js";
-import { referencesOn, routingOn, type AppConfig } from "../config.js";
+import { referencesOn, type AppConfig } from "../config.js";
 import { DEFAULT_WINDOW_MS } from "../channels/slackCatchUp.js";
 import type { Capabilities } from "./capabilities.js";
 import { parseDeliveryConfig, SNAPSHOT_EVERY_MINUTES } from "./delivery.js";
@@ -91,7 +91,7 @@ export function installationSettings(config: AppConfig, caps: Capabilities): Ins
       d.agent,
       d.agent,
       "runtime",
-      "the preset a plain message runs as when no channel, user or router says otherwise",
+      "the preset a plain message runs as when no channel, user or door decision says otherwise",
     ),
   );
   for (const [agent, model] of Object.entries(d.models).sort(([a], [b]) => a.localeCompare(b)))
@@ -131,23 +131,7 @@ export function installationSettings(config: AppConfig, caps: Capabilities): Ins
     ),
   );
 
-  const routing = config.routing;
   settings.push(
-    row(
-      "routing.auto",
-      routing?.auto,
-      routingOn(config),
-      "config",
-      "a plain message is routed to a preset by the fast model",
-    ),
-    row("routing.model", routing?.model, d.models.general, "config", "the model the router asks"),
-    row(
-      "routing.answer",
-      routing?.answer,
-      "tool",
-      "config",
-      "how the router's model answers: a forced tool call, or one JSON object as text",
-    ),
     row(
       "references.enabled",
       config.references?.enabled,
