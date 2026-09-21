@@ -9,6 +9,8 @@ Let runs move large files — a 1 GiB attachment out of a run, a 300 MB video dr
 - A bearer you mint yourself for the bot's copy route, saved as `ARTIFACTS_COPY_TOKEN` beside them (`openssl rand -hex 32`).
 - `PUBLIC_BASE_URL` set on the bot: the run page's file links are built from it.
 
+Run the commands below from the operator directory with the released CLI version you operate.
+
 ## Name the bucket in the deployment profile
 
 ```json
@@ -20,7 +22,7 @@ With this in `deploy/profile.json`, the bot Worker's rendered `wrangler.jsonc` b
 ## Put the secrets, then turn the store on
 
 ```bash
-npx @coreplane/switchboard deploy secrets bot --only ARTIFACTS_R2_ACCESS_KEY_ID,ARTIFACTS_R2_SECRET_ACCESS_KEY,ARTIFACTS_COPY_TOKEN
+npx --yes @coreplane/switchboard@<version> deploy secrets bot --only ARTIFACTS_R2_ACCESS_KEY_ID,ARTIFACTS_R2_SECRET_ACCESS_KEY,ARTIFACTS_COPY_TOKEN
 ```
 
 Secrets first, always: a configured store with a missing secret fails the bot's startup by name. Then add the section to the bot's `config.yaml`, push it and restart:
@@ -34,8 +36,8 @@ artifacts:
 ```
 
 ```bash
-npx @coreplane/switchboard deploy config
-npx @coreplane/switchboard deploy restart
+npx --yes @coreplane/switchboard@<version> deploy config
+npx --yes @coreplane/switchboard@<version> deploy restart
 ```
 
 `/healthz` now carries `"artifacts": { "bucket": "switchboard-artifacts" }`. A bucket name that differs between the profile and the config refuses the bot at startup naming both.
@@ -43,8 +45,8 @@ npx @coreplane/switchboard deploy restart
 ## Apply retention
 
 ```bash
-npx @coreplane/switchboard artifacts lifecycle --dry-run
-npx @coreplane/switchboard artifacts lifecycle
+npx --yes @coreplane/switchboard@<version> artifacts lifecycle --dry-run
+npx --yes @coreplane/switchboard@<version> artifacts lifecycle
 ```
 
 The first prints the two rules — every object deleted `retentionDays` after it was written, an incomplete multipart upload aborted after one day — and touches nothing. The second applies them through Cloudflare's API with your token and reads them back; it refuses to claim success when the read-back differs. Run it again after changing `retentionDays`. The run page shows a file whose object has expired as `expired after N days`.
@@ -52,7 +54,7 @@ The first prints the two rules — every object deleted `retentionDays` after it
 ## Check the bucket is private
 
 ```bash
-npx @coreplane/switchboard artifacts check
+npx --yes @coreplane/switchboard@<version> artifacts check
 ```
 
 `… is private: the managed domain pub-….r2.dev is disabled and no custom domain is attached` is the answer you want. Anything else names the setting to turn off in the dashboard (R2 → the bucket → Settings → Public access). The check reads the bucket's domain settings; nothing unsigned can reach an R2 object either way, which is why the bot does not probe at runtime.

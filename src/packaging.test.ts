@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -15,6 +15,32 @@ const read = (p: string) => readFileSync(new URL(p, `file://${root}`), "utf8");
 
 const PACKAGE_DIR = "packages/switchboard";
 const MANIFEST = `${PACKAGE_DIR}/package.json`;
+const npmPackage = (JSON.parse(read("project.json")) as { npmPackage: string }).npmPackage;
+const escapedPackage = npmPackage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+describe("operator documentation chooses a CLI by execution location", () => {
+  const howTos = readdirSync(new URL("../docs/how-to/", import.meta.url))
+    .filter((name) => name.endsWith(".md"))
+    .map((name) => ({ name, text: read(`docs/how-to/${name}`) }));
+
+  it("pins every published invocation and keeps operator-directory procedures on the package", () => {
+    const packageInvocations = howTos.flatMap(({ name, text }) =>
+      [...text.matchAll(new RegExp(`npx(?: --yes)? ${escapedPackage}(?:@[^\\s\\x60]+)?`, "g"))].map((match) => ({
+        name,
+        command: match[0],
+      })),
+    );
+    expect(packageInvocations.length).toBeGreaterThan(0);
+    for (const invocation of packageInvocations) {
+      expect(invocation.command, invocation.name).toBe(`npx --yes ${npmPackage}@<version>`);
+    }
+    for (const name of ["operate-production.md", "rotate-a-secret.md", "store-run-artifacts.md"]) {
+      const text = howTos.find((doc) => doc.name === name)?.text;
+      expect(text, name).toContain(`npx --yes ${npmPackage}@<version>`);
+      expect(text, name).not.toContain("npm run --silent cli --");
+    }
+  });
+});
 
 describe("the package's version is the repository's", () => {
   const rootVersion = (JSON.parse(read("package.json")) as { version: string }).version;

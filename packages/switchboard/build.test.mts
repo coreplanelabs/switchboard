@@ -1,9 +1,12 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { build } from "esbuild";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { WORKER_SPECS } from "../../src/deploy/plan.js";
 import {
+  assertPackageDependencies,
+  buildCli,
+  packageDependencyProblems,
   packageReadme,
   ROOT_ASSETS,
   shippedAssets,
@@ -22,6 +25,8 @@ const PACKAGE_DIR = import.meta.dirname;
 const REPO_ROOT = resolve(PACKAGE_DIR, "..", "..");
 const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), "utf8");
 const readTree = async (rel: string) => (existsSync(join(REPO_ROOT, rel)) ? read(rel) : undefined);
+const BUILD_DIR = mkdtempSync(join(tmpdir(), "swb-package-build-"));
+afterAll(() => rmSync(BUILD_DIR, { recursive: true, force: true }));
 
 describe("shippedDeployAssets", () => {
   const tracked = [
@@ -140,16 +145,7 @@ describe("the package manifest", () => {
   };
   const rootPkg = JSON.parse(read("package.json")) as { dependencies: Record<string, string> };
 
-  const bundled = build({
-    entryPoints: [join(REPO_ROOT, "src/cli.ts")],
-    bundle: true,
-    platform: "node",
-    format: "esm",
-    packages: "external",
-    write: false,
-    metafile: true,
-    logLevel: "silent",
-  });
+  const bundled = buildCli(join(BUILD_DIR, "cli.js"));
 
   it("the bundle carries the bot process: the CLI's closure reaches src/index.ts and the Slack adapter, so `start` is the same process the image runs", async () => {
     // The metafile keys inputs relative to esbuild's working directory (this package's).
@@ -159,20 +155,31 @@ describe("the package manifest", () => {
     expect(inputs).toContain("src/channels/webAssets.ts");
   });
 
-  it("depends on exactly the npm packages the bundled CLI imports, at the root's ranges — nothing more, nothing missing", async () => {
+  it("depends on exactly the packages imported by the emitted bundle, at the root's ranges — nothing more, nothing missing", async () => {
     const result = await bundled;
-    const externals = new Set<string>();
-    for (const input of Object.values(result.metafile.inputs)) {
-      for (const imp of input.imports) {
-        if (!imp.external || imp.path.startsWith("node:")) continue;
-        const [scope, name] = imp.path.split("/");
-        externals.add(scope.startsWith("@") ? `${scope}/${name}` : scope);
-      }
-    }
-    expect([...externals].sort()).toEqual(Object.keys(pkg.dependencies).sort());
-    for (const [name, range] of Object.entries(pkg.dependencies)) {
-      expect(range, `${name} must be at the root's range`).toBe(rootPkg.dependencies[name]);
-    }
+    expect(readFileSync(join(BUILD_DIR, "cli.js"), "utf8").length).toBeGreaterThan(0);
+    expect(packageDependencyProblems(result.metafile, pkg.dependencies, rootPkg.dependencies)).toEqual([]);
+  });
+
+  it("names an injected external, a declared-but-unused dependency and a root range mismatch from an emitted fixture", async () => {
+    const entry = join(BUILD_DIR, "dependency-fixture.mjs");
+    writeFileSync(entry, 'import "left-pad";\n');
+    const result = await buildCli(join(BUILD_DIR, "dependency-fixture.js"), entry);
+    expect(readFileSync(join(BUILD_DIR, "dependency-fixture.js"), "utf8")).toContain("left-pad");
+
+    expect(() => assertPackageDependencies(result.metafile, {}, {})).toThrow(
+      "left-pad is imported by the emitted bundle but is not declared in the package dependencies",
+    );
+    expect(() =>
+      assertPackageDependencies(
+        result.metafile,
+        { "left-pad": "1.0.0", unused: "1.0.0" },
+        { "left-pad": "1.0.0", unused: "1.0.0" },
+      ),
+    ).toThrow("unused is declared in the package dependencies but is not imported by the emitted bundle");
+    expect(() => assertPackageDependencies(result.metafile, { "left-pad": "1.0.0" }, { "left-pad": "2.0.0" })).toThrow(
+      "left-pad has package range 1.0.0 but root range 2.0.0",
+    );
   });
 
   it("runs on the Node the tree pins (.nvmrc), names the committed entry that hands the process to the bundle as the `switchboard` bin, ships bin/ and dist/ alone, and would publish public", () => {

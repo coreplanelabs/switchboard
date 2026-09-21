@@ -8,10 +8,12 @@ Deploy outside a release, change the config, read the span log, or probe the mod
 - `CLOUDFLARE_API_TOKEN` for the profile's account; no `CLOUDFLARE_ACCOUNT_ID` in the shell.
 - For `deploy restart`, the span log and the model-proxy probe, an ingress bearer whose subject holds `deploy:write` or `trace:read`.
 
+Run the commands below from the operator directory with the released CLI version you operate. If the profile is elsewhere, name it with `SWITCHBOARD_DEPLOY_PROFILE`.
+
 ## Read what is running
 
 ```bash
-npx @coreplane/switchboard deploy plan --affected
+npx --yes @coreplane/switchboard@<version> deploy plan --affected
 ```
 
 Nothing runs: it prints which Workers are stale, why, and each preflight. `GET /healthz` on the bot is public: `build.commit`, `inFlight`, `draining`, `startedAt`.
@@ -19,7 +21,7 @@ Nothing runs: it prints which Workers are stale, why, and each preflight. `GET /
 ## Deploy outside a release
 
 ```bash
-npx @coreplane/switchboard deploy all --affected
+npx --yes @coreplane/switchboard@<version> deploy all --affected
 ```
 
 `deploy all` is the only runner: memory, bot, resident, sandbox, never the four by hand. A refusing preflight is retried every 60 s (`--wait-max` minutes), then the deploy fails by name — it never rolls over what refused; re-run it once it clears (`gh run rerun RUN_ID --failed` for a CI job). In-flight bot runs never refuse: they hand off to the next container. `--force` bypasses the preflight. A newer release cut while an older run's re-run is pending supersedes it — cancel the older run; if it runs anyway, `deploy all` refuses a Worker whose live `/healthz` commit already contains the commit being deployed (`refused: … this release is superseded — re-run nothing, the newer release carries it`), and only `--force` / `SWITCHBOARD_DEPLOY_FORCE=1` deploys over it, as a deliberate rollback.
@@ -32,8 +34,8 @@ npx @coreplane/switchboard deploy all --affected
 ## Change the config without a release
 
 ```bash
-npx @coreplane/switchboard deploy config     # from the profile's configSource, or --source <path|github://…|op://…>
-npx @coreplane/switchboard deploy restart    # the running container keeps the config it started with
+npx --yes @coreplane/switchboard@<version> deploy config     # from the profile's configSource, or --source <path|github://…|op://…>
+npx --yes @coreplane/switchboard@<version> deploy restart    # the running container keeps the config it started with
 ```
 
 `deploy config` refuses an unreadable source, an invalid config, or a missing `MEMORY_TOKEN`. Secrets are the same two steps: [Rotate a secret](rotate-a-secret.md).

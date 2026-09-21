@@ -55,7 +55,7 @@ providers:
 5. *Install App* → your organization → *Only select repositories*. The installation id ends the URL you land on: `GITHUB_APP_INSTALLATION_ID`.
 
 ```bash
-npx @coreplane/switchboard init --force --organization <org> --anthropic-key <key> --github-app-id <app id> --github-installation-id <installation id> --github-private-key-file <path to .pem>
+npx --yes @coreplane/switchboard@<version> init --force --organization <org> --anthropic-key <key> --github-app-id <app id> --github-installation-id <installation id> --github-private-key-file <path to .pem>
 ```
 
 - A repository outside the installation is refused by name; the review agent gets a read-only token.
