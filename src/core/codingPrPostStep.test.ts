@@ -1960,6 +1960,30 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     expect(w.commands.some((c) => c.startsWith("git push origin"))).toBe(true);
   });
 
+  it("a completed child pushes an unpushed commit as a WIP head without adding an empty marker", async () => {
+    const w = fakeExecutor({
+      "git status": "\n",
+      "git rev-list": "1\n",
+      "git rev-parse HEAD": "abc123def456abc123def456abc123def456ab12\n",
+    });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "completion" });
+    expect(out).toMatchObject({
+      pushed: true,
+      head: "abc123def456abc123def456abc123def456ab12",
+    });
+    expect(out.summary).toContain("pushed the unpushed commits");
+    expect(w.commands.some((c) => c.startsWith("git commit"))).toBe(false);
+    expect(w.commands).toContain("git push origin 'HEAD:refs/heads/plan/p/u1'");
+  });
+
+  it("a completed child with no work leaves the ordinary PR post-step free to run", async () => {
+    const w = fakeExecutor({ "git status": "\n", "git rev-list": "0\n" });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "completion" });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toContain("nothing to preserve");
+    expect(w.commands.some((c) => c.startsWith("git commit") || c.startsWith("git push"))).toBe(false);
+  });
+
   it("an abnormal ending creates and pushes a WIP marker when an ordinary push already left the tree clean", async () => {
     const w = fakeExecutor({
       "git status": "\n",

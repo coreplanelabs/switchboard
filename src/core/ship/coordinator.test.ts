@@ -1734,6 +1734,30 @@ describe("the transient re-run — round 0 dies on a provider transient with not
     expect(report).not.toContain("Bad Gateway");
   });
 
+  it("a completed coding child whose ending checkpoint reached the unit branch aborts with the resumable head", () => {
+    const d = fresh(input({ merge: "person" }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      d,
+      "run-c0",
+      finished({
+        status: "completed",
+        finalReply: "Stopped after the contract handoff.",
+        pushed: [{ ref: d.state.input.unit.branch, sha: HEAD_A, by: "salvage" }],
+      }),
+      T0 + 5 * MIN,
+    );
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: { kind: "aborted", round: { index: 0, kind: "coding" } },
+    });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain(`branch carries the interrupted work at \`${HEAD_A.slice(0, 7)}\``);
+    expect(report).toContain(`\`${d.state.input.unit.branch}\``);
+    expect(report).toContain("Re-issue");
+    expect(report).not.toContain("discarded");
+  });
+
   it("a transient WITH an ordinary push never re-runs: the recover pr-check opened the pull request and the round carries on to review", () => {
     const d = fresh(input({ merge: "person" }));
     d.answer({ type: "branch", ok: true, at: T0 });

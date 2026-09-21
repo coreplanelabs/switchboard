@@ -597,7 +597,7 @@ describe("coding prompts: the fast gates before every push (agent-coding item 13
 describe("coding prompts: the rebase before every push (agent-coding item 13, record 0071 mechanism one)", () => {
   const codingPrompts = () => [AGENTS.coding.system, AGENTS.coding.residentSystem!, AGENTS.coding.seededSystem!];
 
-  it("the paragraph orders the fetch, the rebase, the fast gates on the rebased tree, then the push — in that order, resolving with the context in hand and AGENTS.md for generated files, never configurable", () => {
+  it("the paragraph resolves a pre-push conflict in one bounded round, then orders the fast gates and push", () => {
     expect(REBASE_BEFORE_PUSH).toContain("always, not configurable");
     expect(REBASE_BEFORE_PUSH).toContain("Immediately before each push");
     // the order is the paragraph's own: fetch, rebase, gates, push
@@ -612,7 +612,11 @@ describe("coding prompts: the rebase before every push (agent-coding item 13, re
     // conflicts resolve with the context already in the window, and a generated file is
     // regenerated the way the repository's AGENTS.md says, never hand-merged
     expect(REBASE_BEFORE_PUSH).toContain("resolve any conflict with the context you already have");
-    expect(REBASE_BEFORE_PUSH).toContain("AGENTS.md says how a generated file is regenerated");
+    expect(REBASE_BEFORE_PUSH).toContain("one bounded model round");
+    expect(REBASE_BEFORE_PUSH).toContain("the thread's context");
+    expect(REBASE_BEFORE_PUSH).toMatch(/AGENTS\.md.*generated file is regenerated/);
+    expect(REBASE_BEFORE_PUSH).toMatch(/cannot resolve it inside that bound.*end the round/);
+    expect(REBASE_BEFORE_PUSH).not.toMatch(/conflict ends the unit|report it and stop|never resolve it by force/i);
     // the why: a head reaching review is current with its base, no merge-ready behind a sibling
     expect(REBASE_BEFORE_PUSH).toContain("current with its base");
     expect(REBASE_BEFORE_PUSH).toContain("no unit ends merge-ready behind a sibling");
@@ -947,11 +951,11 @@ describe("coding prompts: the unit contract (agent-coding item 8)", () => {
     }
   });
 
-  it("the block outranks the free-text task, the rebase comes first, the plan is never edited", () => {
+  it("the block outranks the free-text task, the rebase comes first, and carries no rival conflict stop rule", () => {
     for (const sys of prompts()) {
       expect(sys).toMatch(/outranks any free-text task/);
       expect(sys).toMatch(/Do its first instruction first: the rebase of the unit's branch onto the merged parent/);
-      expect(sys).toMatch(/a conflict ends the unit — report it and stop/);
+      expect(sys).not.toMatch(/a conflict ends the unit|report it and stop|never resolve it by force/i);
       expect(sys).toMatch(/Never edit the plan record/);
     }
   });

@@ -314,14 +314,12 @@ export function piReviewProfileScript(opts: ProfileOptions): Script {
   ];
 }
 
-/** A replay fixture of a coding child whose base moved during its round
- *  (record 0071 mechanism one; docs/reference/specs/agent-coding.md item 13):
- *  the change is written, the base branch is fetched — it moved while the
- *  child worked — the unit branch is rebased onto it, the fast gates re-run on
- *  the rebased tree, and only then does the push happen, in exactly that
- *  order. Replayed by its unit test alone (`nextStep` walks it like any
- *  script); it is wired into no load suite, because its last step is a real
- *  push. */
+/** A replay fixture of a coding child whose base moved into conflict during
+ *  its round (record 0071 mechanism one; agent-coding item 13): the child
+ *  reads and resolves the conflicted coordinator in the same bounded round,
+ *  continues the rebase, re-runs the gates and only then pushes. Replayed by
+ *  its unit test alone; it is wired into no load suite because its last step
+ *  is a real push. */
 export function rebaseBeforePushScript(opts: ProfileOptions): Script {
   return [
     {
@@ -340,7 +338,28 @@ export function rebaseBeforePushScript(opts: ProfileOptions): Script {
       kind: "tool",
       name: "bash",
       input: { command: "git rebase origin/main" },
-      text: "Rebasing the unit branch onto the fetched base.",
+      text: "The rebase reports a conflict in src/core/ship/coordinator.ts.",
+    },
+    {
+      kind: "tool",
+      name: "read_file",
+      input: { path: "src/core/ship/coordinator.ts" },
+      text: "Reading the conflicted coordinator with the unit's context still in this round.",
+    },
+    {
+      kind: "tool",
+      name: "write_file",
+      input: {
+        path: "src/core/ship/coordinator.ts",
+        content: "// fixture: the bounded round reconciled the base ending with the unit ending\n",
+      },
+      text: "Resolving the coordinator conflict with the base and unit requirements together.",
+    },
+    {
+      kind: "tool",
+      name: "bash",
+      input: { command: "git add src/core/ship/coordinator.ts && GIT_EDITOR=true git rebase --continue" },
+      text: "Continuing the resolved rebase inside the same bounded round.",
     },
     {
       kind: "tool",

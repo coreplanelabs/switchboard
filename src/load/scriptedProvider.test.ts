@@ -287,11 +287,10 @@ describe("startScriptedProvider — the server", () => {
 
 // Feature: docs/reference/specs/agent-coding.md item 13 — the rebase before
 // every push (record 0071 mechanism one). The fixture is a coding child whose
-// base moved during its round; the replay proves the order the preset's
-// paragraph names: the fetch, the rebase and the fast gates come before the
-// push, always.
-describe("rebaseBeforePushScript — a child whose base moved rebases before the push (agent-coding item 13, record 0071)", () => {
-  it("replayed step by step, the fetch, the rebase and the gates all come before the push, in that order", () => {
+// coordinator edit conflicts after the base moves; the replay keeps conflict
+// resolution, the continued rebase, the fast gates and the push in one round.
+describe("rebaseBeforePushScript — a child whose pre-push rebase conflicts (agent-coding item 13, record 0071)", () => {
+  it("resolves the coordinator conflict inside one bounded round, then runs gates and pushes", () => {
     const fixture = rebaseBeforePushScript({ cpuSeconds: 1 });
     // walk the script the way the provider does: one step per tool-result count
     const messages: Array<{ role: string; tool_call_id?: string; content?: unknown }> = [
@@ -307,12 +306,18 @@ describe("rebaseBeforePushScript — a child whose base moved rebases before the
     const at = (want: (cmd: string) => boolean) => replayed.findIndex(want);
     const fetch = at((c) => c.startsWith("git fetch"));
     const rebase = at((c) => c.startsWith("git rebase"));
+    const conflictRead = at((c) => c === "read_file");
+    const resolve = at((c) => c.includes("rebase --continue"));
     const gates = at((c) => c.includes("burn"));
     const push = at((c) => c.startsWith("git push"));
     expect(fetch).toBeGreaterThan(-1);
     expect(rebase).toBeGreaterThan(fetch);
-    expect(gates).toBeGreaterThan(rebase);
+    expect(conflictRead).toBeGreaterThan(rebase);
+    expect(resolve).toBeGreaterThan(conflictRead);
+    expect(gates).toBeGreaterThan(resolve);
     expect(push).toBeGreaterThan(gates);
+    const read = fixture[conflictRead];
+    expect(read).toMatchObject({ kind: "tool", name: "read_file", input: { path: "src/core/ship/coordinator.ts" } });
     // the push is the last tool of the round: nothing edits after the gates ran
     expect(push).toBe(replayed.length - 1);
   });

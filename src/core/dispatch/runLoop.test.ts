@@ -1012,6 +1012,123 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
   });
 
+  it("a coding child's final description turn checkpoints dirty work before release", async () => {
+    const HEAD = "e1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const BRANCH = "unit-work";
+    const DESCRIPTION: PrDescription = {
+      title: "fix(ship): preserve final-turn work",
+      tldr: "Preserves work from the final description turn. The workspace can be released safely.",
+      why: "The final turn can use workspace tools after the first completion checkpoint.",
+      pointers: [
+        { label: "Final checkpoint", text: "Runs after the last turn.", anchor: { path: "src/a", from: 1, to: 2 } },
+      ],
+      feedbackWanted: "The checkpoint placement.",
+      verified: "Unit test.",
+      decisions: [],
+      risk: "none",
+      validation: { criteria: [{ criterion: "final turn", proof: "green" }] },
+    };
+    let dirty = false;
+    let unpushed = false;
+    const commands: string[] = [];
+    const finalTurn = watched(piHarness);
+    finalTurn.harness.open = async () => ({
+      answer: "the contract handoff is complete",
+      followUp: async (turn) => {
+        expect(turn.tools).toContain("bash");
+        dirty = true;
+        turn.toolContext.onPrDescription?.(DESCRIPTION);
+        return "description submitted";
+      },
+      remainingMs: () => 20 * 60_000,
+      end: async () => {},
+    });
+    const s = setup("unused", {
+      agent: "coding",
+      coding: true,
+      repoCtx: { repo: "o/r", ref: BRANCH, baseRef: "main" } as RepoContext,
+      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+      coordinator: WIP_COORDINATOR,
+      harness: {
+        harnesses: roster(finalTurn.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      executor: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+          if (/rev-parse @\{u\}/.test(cmd)) return `${HEAD}\n`;
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+          if (/status --porcelain/.test(cmd)) return dirty ? " M src/work.ts\n" : "";
+          if (/rev-list --count/.test(cmd)) return unpushed ? "1\n" : "0\n";
+          if (/git commit -m/.test(cmd)) {
+            dirty = false;
+            unpushed = true;
+            return "";
+          }
+          if (/git push origin/.test(cmd)) {
+            unpushed = false;
+            return "";
+          }
+          return "";
+        },
+      },
+    });
+    s.deps.findOpenPrByHead = vi.fn(async () => ({ number: 700, htmlUrl: "https://github.com/o/r/pull/700" }));
+
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.answer).toBe("the contract handoff is complete");
+    expect(commands).toContain("git add -A");
+    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(out.prNote).toBeUndefined();
+    expect(JSON.stringify(s.closes)).not.toContain("discarded at the run's end");
+    await out.releaseWorkspace();
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.pushed).toEqual([{ ref: BRANCH, sha: HEAD, by: "salvage" }]);
+    expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
+  });
+
+  it("a coding child that ends with an unpushed commit checkpoints it before release and its card never says discarded", async () => {
+    const HEAD = "d1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const BRANCH = "unit-work";
+    const commands: string[] = [];
+    const s = setup("the contract handoff is complete", {
+      agent: "coding",
+      coding: true,
+      repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+      coordinator: WIP_COORDINATOR,
+      executor: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+          if (/status --porcelain/.test(cmd)) return "";
+          if (/rev-list --count/.test(cmd)) return "1\n";
+          if (/ls-remote --exit-code origin/.test(cmd)) return "";
+          return "";
+        },
+      },
+    });
+
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.answer).toBe("the contract handoff is complete");
+    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands.some((cmd) => cmd.startsWith("git commit --allow-empty"))).toBe(false);
+    expect(JSON.stringify(s.closes)).not.toContain("discarded at the run's end");
+    await out.releaseWorkspace();
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.pushed).toEqual([{ ref: BRANCH, sha: HEAD, by: "salvage" }]);
+    expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
+  });
+
   it("a stopped coding child checkpoints its WIP before the hard-stop teardown", async () => {
     const HEAD = "c1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     const BRANCH = "unit-work";

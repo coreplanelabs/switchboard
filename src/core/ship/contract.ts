@@ -480,7 +480,7 @@ function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
   const gates = `${FAST_GATES_POINTER} ${GATE_RECEIPTS}`;
   return (
     `Rebase ${branch} onto ${onto} before any other work — the parent unit has merged and the base has moved; ` +
-    `the only writes are your own on that branch. A conflict ends the unit: report it as the handoff and stop. ` +
+    `the only writes are your own on that branch. ` +
     `Push the branch as soon as the change exists and the fast gates pass — the project's full verification ` +
     `is CI's gate, run there after the push with any fix as a further commit; an unpushed tree does not ` +
     `survive the run's end. ${gates} ${REBASE_POINTER} At the wind-down note, ` +
