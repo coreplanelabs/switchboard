@@ -183,6 +183,57 @@ function bot(script: Partial<Record<CoordinatorStepRoute, Scripted[]>>) {
   return { client, calls, of };
 }
 
+const wakeReply = (answer: object, at = T0 + 46 * MIN): BotReply => ok({ ok: true, answer }, at);
+
+/** One lease-ending segment followed by its indexed idle. When `segment` is
+ * true the wake opens a segment whose pre-check finds the unit already landed,
+ * keeping these tests focused on the idle driver rather than another loop. */
+function idleWakeRun(input: {
+  waits: Record<string, "event" | "timeout">;
+  wakes?: Scripted[];
+  segment?: boolean;
+  idleDays?: number;
+}) {
+  const s = steps({ "U10/0/coding/wait/1": "event", ...input.waits });
+  const lists = { deviations: [], followUps: [{ what: "tests", where: "src" }], unproven: [] };
+  const b = bot({
+    plan: [
+      planAnswer([row("U10")], T0, "person", {
+        grant: { renewals: 6 },
+        idleDays: input.idleDays ?? 7,
+      }),
+    ],
+    "unit-start": input.segment ? [started("U10"), started("U10", T0 + 47 * MIN)] : [started("U10")],
+    branch: [branched("U10")],
+    spawn: [spawned("run-c0")],
+    "read-record": [
+      record(
+        {
+          id: "run-c0",
+          finished: true,
+          status: "completed",
+          finalReply: "Budget reached.",
+          pushed: [{ ref: "plan/fixture/u10", sha: HEAD, at: T0 + 44 * MIN }],
+          leaseStartedAt: T0,
+          costUsd: 4,
+          handoffLists: lists,
+        },
+        T0 + 45 * MIN,
+      ),
+    ],
+    "pr-check": input.segment
+      ? [prNone(), prNone(T0 + 45 * MIN), prMerged(T0 + 47 * MIN)]
+      : [prNone(), prNone(T0 + 45 * MIN)],
+    round: [acked(), acked()],
+    ...(input.wakes !== undefined ? { "unit-wake": input.wakes } : {}),
+    "unit-end": input.segment
+      ? [acked(T0 + 45 * MIN), acked(T0 + 47 * MIN)]
+      : [acked(T0 + 45 * MIN), acked(T0 + 7 * 24 * 60 * MIN)],
+    finish: [acked(T0 + 48 * MIN)],
+  });
+  return { s, b, lists };
+}
+
 describe("the plan runner's driver — the Workflow body over the step runner (item 9)", () => {
   it("a one-unit plan runs coding, then review to approve, then the runner's merge at the approved head, and ends merged: the steps in order under the machine's names, every spawn typed by its brief and clipped budget, every wait typed `run-finished-<runId>` for one chunk and followed by a read-record, the round boundaries and the ending told to the bot, the finish completed", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
@@ -410,10 +461,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(ends[1].ending.report).toContain("Renewals: 0 of 6 spent, cost cap $50 (granted by channel).");
   });
 
-  // record 0051: nothing waits yet — the indexed wait and the wake land with
-  // that plan's fifth unit — so an idle ending settles the walk as `failed`
-  // here; this test is replaced there.
-  it("an idle ending settles the unit failed in this unit: with the plan answering idleDays above zero, a segment's lease end maps to idle — the unit-end carries the why and the continuation facts, no segment row, no renewal — and the walk does not open a second segment", async () => {
+  it("an idle ending waits under the first indexed identity for its remaining days; a timeout writes idle_expired under that wait's end and opens no segment", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event" });
     const lists = { deviations: [], followUps: [{ what: "tests", where: "src" }], unproven: [] };
     const b = bot({
@@ -444,11 +492,16 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       ],
       "pr-check": [prNone(), prNone(T0 + 45 * MIN)],
       round: [acked(), acked()],
-      "unit-end": [ok({ ok: true, told: true }, T0 + 45 * MIN)],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 45 * MIN), ok({ ok: true, told: true }, T0 + 7 * 24 * 60 * MIN)],
       finish: [ok({ ok: true, runId: "run-parent" }, T0 + 45 * MIN)],
     });
     const summary = await runPlan(s.runner, b.client, INSTANCE);
-    expect(summary).toEqual({ instance: INSTANCE, planId: "fixture", units: { U10: "idle" }, outcome: "failed" });
+    expect(summary).toEqual({
+      instance: INSTANCE,
+      planId: "fixture",
+      units: { U10: "idle_expired" },
+      outcome: "failed",
+    });
     // No second segment opened: the renewal is the wake's to spend, and nothing wakes yet.
     expect(s.names().some((n) => n.startsWith("U10/s2/"))).toBe(false);
     const [end] = b.of("unit-end") as Array<{
@@ -468,6 +521,151 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     // An idle ending writes no segment row: no renewal is spent.
     expect(end.segment).toBeUndefined();
     expect(end.codingRunId).toBe("run-c0");
+    expect(s.taken).toContainEqual({
+      kind: "wait",
+      name: "U10/idle/1",
+      type: `unit-nudge-${INSTANCE}-U10`,
+      timeout: 7 * 24 * 60 * MIN,
+    });
+    expect(s.names()).toContain("U10/idle/1/end");
+  });
+
+  it("a nudge answered without a segment re-enters the indexed wait with only the idle days that remain", async () => {
+    const { s, b } = idleWakeRun({
+      waits: { "U10/idle/1": "event" },
+      wakes: [wakeReply({ kind: "answered", reply: "nothing to do" }, T0 + 2 * 24 * 60 * MIN)],
+    });
+    expect((await runPlan(s.runner, b.client, INSTANCE)).units).toEqual({ U10: "idle_expired" });
+    const waits = s.taken.filter((t): t is Extract<Taken, { kind: "wait" }> => t.kind === "wait");
+    expect(waits.find((w) => w.name === "U10/idle/2")?.timeout).toBe(5 * 24 * 60 * MIN + 45 * MIN);
+  });
+
+  it("a wake segment carries the handoff, attributed texts and previous run into the continued path, spending one renewal", async () => {
+    const { s, b } = idleWakeRun({
+      waits: { "U10/idle/1": "event" },
+      wakes: [
+        wakeReply({
+          kind: "segment",
+          index: 2,
+          from: HEAD,
+          runId: "run-c0",
+          spendUsd: 4,
+          handoff: { deviations: [], followUps: [{ what: "tests", where: "src" }], unproven: [] },
+          texts: ["Alice: continue", "Bob: preserve the fixture"],
+          senders: ["Alice", "Bob"],
+        }),
+      ],
+      segment: true,
+    });
+    expect((await runPlan(s.runner, b.client, INSTANCE)).units).toEqual({ U10: "merged" });
+    expect(b.of("spawn")).toHaveLength(1);
+    expect(b.of("unit-start")).toHaveLength(2);
+    expect(s.names()).toContain("U10/s2/start");
+    expect(b.of("unit-wake")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10", waitId: "U10/idle/1" }]);
+  });
+
+  it("a wake segment carrying leaseMs reopens the cut segment under a fresh durable prefix with its remaining lease and renewals unchanged", async () => {
+    const { s, b } = idleWakeRun({
+      waits: { "U10/idle/1": "event" },
+      wakes: [
+        wakeReply({
+          kind: "segment",
+          index: 1,
+          from: HEAD,
+          runId: "run-c0",
+          spendUsd: 4,
+          texts: ["Alice: resume"],
+          senders: ["Alice"],
+          leaseMs: 20 * MIN,
+        }),
+      ],
+      segment: true,
+    });
+    expect((await runPlan(s.runner, b.client, INSTANCE)).units).toEqual({ U10: "merged" });
+    expect(s.names().filter((name) => name === "U10/start")).toHaveLength(1);
+    expect(s.names()).toContain("U10/r1/start");
+    expect(s.names()).toContain("U10/r1/pr-check");
+  });
+
+  it("an explicit expired answer — including the hundredth event decision — writes idle_expired under that indexed wait", async () => {
+    const { s, b } = idleWakeRun({
+      waits: { "U10/idle/100": "event" },
+      wakes: [wakeReply({ kind: "expired" })],
+    });
+    // Answered waits advance by identity; model the ninety-nine prior answers
+    // as stored events by making the hundredth the first live name the fake sees.
+    const original = s.runner.waitForEvent.bind(s.runner);
+    let calls = 0;
+    s.runner.waitForEvent = (name, options) => original(calls++ === 1 ? "U10/idle/100" : name, options);
+    expect((await runPlan(s.runner, b.client, INSTANCE)).units).toEqual({ U10: "idle_expired" });
+    expect(s.names()).toContain("U10/idle/1/end");
+  });
+
+  it("a wake that throws after the step retries re-enters the wait under the next index", async () => {
+    const failures = Array.from({ length: STEP_RETRIES.limit + 1 }, () => new Error("bot rolling"));
+    const { s, b } = idleWakeRun({
+      waits: { "U10/idle/1": "event", "U10/idle/2": "event" },
+      wakes: [
+        ...failures,
+        wakeReply({
+          kind: "segment",
+          index: 2,
+          spendUsd: 4,
+          texts: ["Alice: continue"],
+          senders: ["Alice"],
+        }),
+      ],
+      segment: true,
+    });
+    expect((await runPlan(s.runner, b.client, INSTANCE)).units).toEqual({ U10: "merged" });
+    expect(s.names()).toContain("U10/idle/2");
+  });
+
+  it("later units do not start while the walk is parked behind the idle unit", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10"), row("U11")], T0, "person", { grant: { renewals: 1 }, idleDays: 7 })],
+      "unit-start": [started("U10"), started("U11", T0 + 7 * 24 * 60 * MIN)],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [
+        record(
+          {
+            id: "run-c0",
+            finished: true,
+            status: "completed",
+            pushed: [{ ref: "plan/fixture/u10", sha: HEAD, at: T0 + 44 * MIN }],
+            leaseStartedAt: T0,
+            costUsd: 4,
+          },
+          T0 + 45 * MIN,
+        ),
+      ],
+      "pr-check": [prNone(), prNone(T0 + 45 * MIN), prMerged(T0 + 7 * 24 * 60 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked(), acked(), acked()],
+      finish: [acked()],
+    });
+    expect((await runPlan(s.runner, b.client, INSTANCE)).units).toEqual({ U10: "idle_expired", U11: "merged" });
+    const names = s.names();
+    expect(names.indexOf("U10/idle/1/end")).toBeLessThan(names.indexOf("U11/start"));
+  });
+
+  it("idleDays zero never emits an idle ending from the machine", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "person", { idleDays: 0 })],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [record({ id: "run-c0", finished: true, status: "completed", finalReply: "done" }, T0 + 45 * MIN)],
+      "pr-check": [prNone(), prNone(T0 + 45 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    expect((await runPlan(s.runner, b.client, INSTANCE)).units).toEqual({ U10: "aborted" });
+    expect(b.of("unit-end")[0]?.ending).toMatchObject({ kind: "aborted" });
   });
 
   it("the grant rides the plan answer into the unit's report — spent of granted, the cap and the granter — and a count the route answers above the module's ceiling reads as the default, so nothing renews on a guess (decision 0046)", async () => {
@@ -1714,11 +1912,11 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
       "read-record": [codingDone("run-c0", T0 + 205 * MIN)],
       "pr-check": [prNone(), prOpen(T0 + 205 * MIN)],
       round: [acked(), acked()],
-      "unit-end": [acked()],
+      "unit-end": [acked(), acked(T0 + 7 * 24 * 60 * MIN)],
       finish: [acked()],
     });
     const summary = await runPlan(s.runner, b.client, INSTANCE);
-    expect(summary.units).toEqual({ U10: "idle" });
+    expect(summary.units).toEqual({ U10: "idle_expired" });
     const [end] = b.of("unit-end") as Array<{ ending: Record<string, unknown>; pr: unknown; headSha?: string }>;
     expect(end.ending).toMatchObject({ kind: "idle", why: "review_pending", from: HEAD });
     expect(end.pr).toEqual({ number: 7, url: PR_URL });

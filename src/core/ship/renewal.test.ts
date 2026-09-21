@@ -208,6 +208,27 @@ describe("renewalDecision — renew only when progress, a renewal and the cap al
     ).toMatchObject({ renew: true });
   });
 
+  it("progress set aside for an idle wake still refuses on the cost cap and the fit", () => {
+    expect(
+      renewalDecision({
+        grant: { renewals: 3, costCapUsd: 10 },
+        renewalsSpent: 0,
+        spendUsd: 10,
+        progress: "set_aside",
+        pipeline: PIPELINE,
+      }),
+    ).toMatchObject({ renew: false, why: "cost_cap" });
+    expect(
+      renewalDecision({
+        grant: { renewals: 3 },
+        renewalsSpent: 0,
+        spendUsd: 0,
+        progress: "set_aside",
+        pipeline: { maxRounds: 3, maxMinutes: 40 },
+      }),
+    ).toMatchObject({ renew: false, why: "unfit" });
+  });
+
   it("a pipeline that no longer holds its loop stops naming the fit's sum", () => {
     expect(
       renewalDecision({
@@ -234,6 +255,24 @@ describe("renderRenewal — the card's words, as the record's trace has them", (
     expect(renderRenewal({ renew: true, segment: 3, renewalsLeft: 4 }, { renewals: 6 })).toBe(
       "budget renewed, 2 of 6, continues the branch's head",
     );
+  });
+
+  it("an idle renewal names the senders folded into the next segment", () => {
+    expect(
+      renderRenewal(
+        { renew: true, segment: 2, renewalsLeft: 2 },
+        { renewals: 3 },
+        { idle: true, senders: ["Ada", "Lin"] },
+      ),
+    ).toBe("budget renewed, 1 of 3, continues the branch's head, with 2 messages from Ada, Lin");
+  });
+
+  it("the stop sentence follows the idle flag and otherwise keeps today's re-issue words", () => {
+    const decision = { renew: false, why: "unfit", detail: "the pipeline no longer fits", renewalsLeft: 2 } as const;
+    expect(renderRenewal(decision, { renewals: 3 }, { idle: true })).toBe(
+      "the pipeline no longer fits; reply in this thread to continue",
+    );
+    expect(renderRenewal(decision, { renewals: 3 })).toBe("the pipeline no longer fits");
   });
 
   it("a stop names the clause and, when renewals remain, what actually spends one — no keyword the router does not have", () => {

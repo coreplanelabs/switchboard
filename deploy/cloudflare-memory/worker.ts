@@ -109,13 +109,16 @@ import {
   isCoordinatorInstance,
   isCoordinatorUnit,
   isThreadEvent,
+  isUnitWakeAnswer,
   sendChildSignal,
   sendRunFinished,
+  STEP_NAME_PATTERN,
   UNIT_PATTERN,
   type CoordinatorInstance,
   type CoordinatorUnit,
   type RunFinishedSend,
   type ThreadEvent,
+  type UnitWakeAnswer,
 } from "../../src/core/coordinator/contract.ts";
 import {
   GEN_PATTERN,
@@ -2602,6 +2605,38 @@ export class RunHistoryDO extends DurableObject<Env> {
     return { ok: true };
   }
 
+  /** One transaction is the wake's decision: the indexed answer on the unit
+   * row and every event it consumed become visible together. */
+  async answerUnitWake(
+    unit: CoordinatorUnit,
+    waitId: string,
+    answer: UnitWakeAnswer,
+    seqs: number[],
+    by: string,
+    now: number,
+  ): Promise<{ ok: true }> {
+    this.ctx.storage.transactionSync(() => {
+      const updated = { ...unit, wakes: { ...(unit.wakes ?? {}), [waitId]: answer } };
+      this.sql.exec(
+        `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
+        unit.instanceId,
+        unit.unit,
+        JSON.stringify(updated),
+        now,
+      );
+      for (const seq of seqs)
+        this.sql.exec(
+          `UPDATE coordinator_unit_events SET consumed_by = ? WHERE instance_id = ? AND unit = ? AND seq = ? AND consumed_by IS NULL`,
+          by,
+          unit.instanceId,
+          unit.unit,
+          seq,
+        );
+    });
+    return { ok: true };
+  }
+
   // ---- the live-run ledger (run-history items 28–34) --------------------------
 
   private liveRow(runId: string): LiveRunRow | undefined {
@@ -4820,6 +4855,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/events/append",
   "/runs/coordinator/events/list",
   "/runs/coordinator/events/mark-consumed",
+  "/runs/coordinator/wake",
   "/runs/claim",
   "/runs/heartbeat",
   "/runs/append",
@@ -5456,6 +5492,19 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))
       return json({ error: "instanceId must be a Workflow instance id" }, 400);
     return json({ units: await stub.listUnits(b.instanceId) });
+  }
+  if (pathname === "/runs/coordinator/wake") {
+    if (!isCoordinatorUnit(b.unit)) return json({ error: "unit must be a coordinator unit row" }, 400);
+    if (typeof b.waitId !== "string" || !STEP_NAME_PATTERN.test(b.waitId))
+      return json({ error: "waitId must be a step name" }, 400);
+    if (!isUnitWakeAnswer(b.answer)) return json({ error: "answer must be a unit wake answer" }, 400);
+    if (!Array.isArray(b.seqs) || !b.seqs.every((s) => typeof s === "number" && Number.isInteger(s) && s >= 1))
+      return json({ error: "seqs must be an array of sequence numbers" }, 400);
+    if (typeof b.by !== "string" || b.by.length === 0 || b.by.length > 200)
+      return json({ error: "by must name the consumer" }, 400);
+    const r = await stub.answerUnitWake(b.unit, b.waitId, b.answer, b.seqs as number[], b.by, now);
+    console.log(`[runs/coordinator/wake] ${key.value} ${b.unit.instanceId}:${b.unit.unit} ${b.waitId}`);
+    return json(r);
   }
   // The thread events of a unit-owned thread (record 0051's reply-as-event rule): append assigns
   // the sequence, list filters unconsumed, mark-consumed is idempotent.

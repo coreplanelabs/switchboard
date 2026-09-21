@@ -39,7 +39,7 @@
 // plan's re-issue. A task string's ship branch waits for a person. Node-free:
 // the shim Worker imports this by relative path.
 
-import { DEFAULT_GRANT, GRANT_RENEWALS_MAX, IDLE_DAYS_MAX, type Grant, type GrantSource } from "../budgets.js";
+import { DAY_MS, DEFAULT_GRANT, GRANT_RENEWALS_MAX, IDLE_DAYS_MAX, type Grant, type GrantSource } from "../budgets.js";
 import { DEFAULT_VERBOSITY, isVerbosity, type Verbosity } from "../verbosity.js";
 import {
   applyReturn,
@@ -74,8 +74,11 @@ import {
   childInterruptedEventType,
   childResumedEventType,
   isCoordinatorUnit,
+  isUnitWakeAnswer,
   runFinishedEventType,
+  unitNudgeEventType,
   type CoordinatorUnit,
+  type UnitWakeAnswer,
 } from "./contract.js";
 
 const MIN = 60_000;
@@ -108,6 +111,7 @@ export type CoordinatorStepRoute =
   | "pr-check"
   | "round"
   | "unit-end"
+  | "unit-wake"
   | "checks"
   | "merge"
   | "finish";
@@ -283,6 +287,11 @@ function readPlan(a: BotAnswer): PlanFacts {
 function readUnitStart(a: BotAnswer): { at: number } {
   if (a.body.ok !== true || typeof a.body.threadKey !== "string") throw new UnreadableAnswer("unit-start", a, "thread");
   return { at: a.body.at };
+}
+
+function readWakeAnswer(a: BotAnswer): { answer: UnitWakeAnswer; at: number } {
+  if (a.body.ok !== true || !isUnitWakeAnswer(a.body.answer)) throw new UnreadableAnswer("unit-wake", a, "wake answer");
+  return { answer: a.body.answer, at: a.body.at };
 }
 
 function branchReturn(step: string, a: BotAnswer): StepReturn {
@@ -757,6 +766,8 @@ async function tellStepThrew(
 
 /** One unit's pipeline: its start, then the machine's steps until it ends;
  *  every round boundary and the ending told to the bot as they happen. */
+type DrivenEnding = UnitEnding & { endedAt?: number };
+
 async function runUnit(
   step: StepRunner,
   bot: CoordinatorBot,
@@ -764,7 +775,7 @@ async function runUnit(
   node: PlanUnitNode,
   plan: PlanFacts,
   session?: LeaseSegmentProgress,
-): Promise<UnitEnding> {
+): Promise<DrivenEnding> {
   const unit = node.id;
   // A renewal's segment names its steps under the segment (`U10/s2/…`), so
   // the Workflow's durable step cache never answers segment two with segment
@@ -820,10 +831,11 @@ async function runUnit(
     start.at,
   );
   let notes = 0;
+  let endedAt: number | undefined;
   try {
     for (;;) {
       const action = nextAction(state);
-      if (action.type === "end") return action.ending;
+      if (action.type === "end") return { ...action.ending, ...(endedAt !== undefined ? { endedAt } : {}) };
       // Keep the current round across its non-round phases (for example merge)
       // while replacing it whenever the pipeline names a new one.
       last = {
@@ -939,7 +951,11 @@ async function runUnit(
           };
           const endStep = `${prefix}/end`;
           last = { step: endStep, ...(last.round !== undefined ? { round: last.round } : {}) };
-          await step.do(endStep, STEP_CONFIG, () => call(bot, "unit-end", body));
+          const endAnswer = answerOf(
+            "unit-end",
+            await step.do(endStep, STEP_CONFIG, () => call(bot, "unit-end", body)),
+          );
+          endedAt = endAnswer.body.at;
         }
       }
     }
@@ -1025,6 +1041,106 @@ function rereadCursor(cursor: PlanCursor, fresh: PlanGraph): { cursor: PlanCurso
   return { cursor: { order, status }, gone };
 }
 
+type IdleResult =
+  | { kind: "segment"; session: LeaseSegmentProgress }
+  | { kind: "ending"; ending: Extract<UnitEnding, { kind: "idle_expired" }> | { kind: "stopped" } };
+
+/** Park one unit behind its indexed wait. A timeout closes the idle; a wake
+ * answer is durable at the bot, so this loop may safely move to the next index
+ * after a transport failure without deciding the same event twice. */
+async function waitOnIdle(
+  step: StepRunner,
+  bot: CoordinatorBot,
+  instanceId: string,
+  unit: string,
+  prefix: string,
+  idle: Extract<DrivenEnding, { kind: "idle" }>,
+  idleDays: number,
+  currentSession: LeaseSegmentProgress | undefined,
+): Promise<IdleResult> {
+  const deadline = (idle.endedAt ?? 0) + idleDays * DAY_MS;
+  let now = idle.endedAt ?? 0;
+  for (let index = 1; ; index += 1) {
+    const waitId = `${prefix}/idle/${index}`;
+    const timeout = Math.max(1, deadline - now);
+    try {
+      await step.waitForEvent(waitId, { type: unitNudgeEventType({ instanceId, unit }), timeout });
+    } catch {
+      const ending = { kind: "idle_expired" as const, reviewRounds: idle.reviewRounds };
+      const endStep = `${waitId}/end`;
+      await step.do(endStep, STEP_CONFIG, () =>
+        call(bot, "unit-end", {
+          parentInstanceId: instanceId,
+          unit,
+          ending: {
+            kind: ending.kind,
+            report: "⌛ Idle expired: no reply continued this unit before its idle window closed.",
+          },
+        }),
+      );
+      return { kind: "ending", ending };
+    }
+    let wake: { answer: UnitWakeAnswer; at: number };
+    try {
+      wake = readWakeAnswer(
+        answerOf(
+          "unit-wake",
+          await step.do(`${waitId}/wake`, STEP_CONFIG, () =>
+            call(bot, "unit-wake", { parentInstanceId: instanceId, unit, waitId }),
+          ),
+        ),
+      );
+    } catch {
+      // The event remains unconsumed when the wake could not store an answer.
+      // A stored answer is replayed by the next identity, so either way the
+      // next indexed wait is the safe place to listen again.
+      continue;
+    }
+    now = wake.at;
+    const answer = wake.answer;
+    if (answer.kind === "answered") continue;
+    if (answer.kind === "expired") {
+      const ending = { kind: "idle_expired" as const, reviewRounds: idle.reviewRounds };
+      await step.do(`${waitId}/end`, STEP_CONFIG, () =>
+        call(bot, "unit-end", {
+          parentInstanceId: instanceId,
+          unit,
+          ending: {
+            kind: ending.kind,
+            report: "⌛ Idle expired: the unit reached its indexed wake limit.",
+          },
+        }),
+      );
+      return { kind: "ending", ending };
+    }
+    if (answer.kind === "stopped") {
+      await step.do(`${waitId}/end`, STEP_CONFIG, () =>
+        call(bot, "unit-end", {
+          parentInstanceId: instanceId,
+          unit,
+          ending: { kind: "stopped", report: "⏹ Stopped: the idle unit was ended by an operator." },
+        }),
+      );
+      return { kind: "ending", ending: { kind: "stopped" } };
+    }
+    return {
+      kind: "segment",
+      session: {
+        segment: answer.index,
+        renewalsSpent: answer.leaseMs !== undefined ? (currentSession?.renewalsSpent ?? 0) : answer.index - 1,
+        spendUsd: answer.spendUsd,
+        ...(answer.from !== undefined ? { continueFrom: answer.from } : {}),
+        ...(answer.runId !== undefined ? { previousRunId: answer.runId } : {}),
+        ...(answer.handoff !== undefined ? { previousHandoff: answer.handoff } : {}),
+        ...(answer.texts.length > 0 ? { texts: answer.texts } : {}),
+        ...(answer.leaseMs !== undefined
+          ? { resume: { leaseMs: answer.leaseMs, attempt: (currentSession?.resume?.attempt ?? 0) + 1 } }
+          : {}),
+      },
+    };
+  }
+}
+
 /** The plan: its units one at a time in dependency order, then the endings of the units it never reached. */
 async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): Promise<PlanRunSummary> {
   // The selection is read at every unit boundary (the orchestration-plane plan): the first read opens
@@ -1059,21 +1175,45 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
     if (next === undefined) break;
     cursor = startUnit(graph, cursor, next);
     const node = graph.units.find((u) => u.id === next)!;
-    let ending = await runUnit(step, bot, instanceId, node, plan);
-    // The lease continues while the grant renews (decision 0046): each
-    // `continued` ending opens the next segment of the same unit — a fresh
-    // pipeline under a fresh lease, from the recorded sha, briefed with the
-    // previous segment's write-up — until the unit ends some other way.
-    while (ending.kind === "continued") {
-      const c = ending;
-      ending = await runUnit(step, bot, instanceId, node, plan, {
-        segment: c.segment,
-        renewalsSpent: c.segment - 1,
-        spendUsd: c.spendUsd,
-        ...(c.from !== undefined ? { continueFrom: c.from } : {}),
-        previousRunId: c.runId,
-        ...(c.handoff !== undefined ? { previousHandoff: c.handoff } : {}),
-      });
+    let session: LeaseSegmentProgress | undefined;
+    let ending: DrivenEnding | { kind: "stopped" } = await runUnit(step, bot, instanceId, node, plan);
+    // A machine-renewed continuation opens at once. An idle continuation parks
+    // the whole walk and opens only when the durable wake answer names the
+    // segment (or settles as stopped/expired).
+    for (;;) {
+      if (ending.kind === "continued") {
+        const c = ending;
+        session = {
+          segment: c.segment,
+          renewalsSpent: c.segment - 1,
+          spendUsd: c.spendUsd,
+          ...(c.from !== undefined ? { continueFrom: c.from } : {}),
+          previousRunId: c.runId,
+          ...(c.handoff !== undefined ? { previousHandoff: c.handoff } : {}),
+        };
+        ending = await runUnit(step, bot, instanceId, node, plan, session);
+        continue;
+      }
+      if (ending.kind === "idle") {
+        const parked = await waitOnIdle(
+          step,
+          bot,
+          instanceId,
+          next,
+          stepPrefixOf(next, session),
+          ending,
+          plan.idleDays,
+          session,
+        );
+        if (parked.kind === "ending") {
+          ending = parked.ending;
+          break;
+        }
+        session = parked.session;
+        ending = await runUnit(step, bot, instanceId, node, plan, session);
+        continue;
+      }
+      break;
     }
     endings[next] = ending.kind;
     // A unit is done for its dependents when the base carries its scope: the

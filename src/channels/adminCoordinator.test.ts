@@ -172,6 +172,8 @@ function harness(
     /** Watch until merge for the repository (record 0071, mechanism three): the
      *  merge door's conflict refusal names the remedy that exists. */
     mergeWatch?: boolean;
+    /** The grant scopes say at wake time. */
+    grantFact?: { grant: { renewals: number; costCapUsd?: number }; source: "org" | "channel" | "user" };
     /** A tiny backlog for the trim tests (record 0065): the seal must not read the trimmed snapshot's standing. */
     backlogLimit?: number;
   } = {},
@@ -233,6 +235,7 @@ function harness(
     instances,
     ...(over.runPageBase !== undefined ? { runPageBase: over.runPageBase } : {}),
     ...(over.mergeWatch !== undefined ? { mergeWatchOf: () => ({ watch: over.mergeWatch! }) } : {}),
+    ...(over.grantFact !== undefined ? { shipGrantFor: () => over.grantFact! } : {}),
     runs,
     registry,
     ledgerRuns: () => writeThrough.liveRuns(),
@@ -1753,6 +1756,32 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     await h.instances.putUnits([unitRow("U10"), unitRow("U11")]);
     return h;
   }
+  async function idleHarness(
+    over: Parameters<typeof harness>[0] = {},
+    idle: Partial<NonNullable<CoordinatorUnit["idle"]>> = {},
+  ) {
+    const h = await planHarness(over);
+    await h.instances.replace({ ...PLAN_INSTANCE, caps: { maxRounds: 2, maxMinutes: 240 } });
+    await h.instances.putUnits([
+      unitRow("U10", {
+        threadKey: "slack:C1:2.0",
+        startedAt: NOW - minutesToMs(10),
+        idle: {
+          why: "wall_clock_cap",
+          at: NOW,
+          renewalsLeft: 2,
+          from: "a".repeat(40),
+          runId: "run-c0",
+          spendUsd: 4,
+          handoff: { deviations: [], followUps: [{ what: "tests", where: "src" }], unproven: [] },
+          wakes: 0,
+          ...idle,
+        },
+      }),
+      unitRow("U11"),
+    ]);
+    return h;
+  }
 
   /** The hosted parent as the ship branch leaves it after a tracked hand-off
    *  (record 0060): the registry row live under the instance's `runId`, the
@@ -3138,6 +3167,156 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     await flagged.instances.putUnits([unitRow("U10"), unitRow("U11")]);
     const body = (await call(flagged, "plan", { parentInstanceId: PLAN_INSTANCE.id })).body as Record<string, unknown>;
     expect(body.idleDays).toBe(7);
+  });
+
+  it("unit-wake folds every sender before deciding: a requester renewal survives newer collaborator context; replay reads the identical segment and writes nothing", async () => {
+    const h = await idleHarness({ grantFact: { grant: { renewals: 3 }, source: "user" } });
+    const key = { instanceId: PLAN_INSTANCE.id, unit: "U10" };
+    await h.instances.appendEvent(key, {
+      sender: PLAN_INSTANCE.userId,
+      senderName: "Alice",
+      text: "continue now",
+      mode: "wake",
+      at: NOW + 1,
+    });
+    await h.instances.appendEvent(key, {
+      sender: "slack:UBOB",
+      senderName: "Bob",
+      text: "keep the old fixture",
+      mode: "wake",
+      at: NOW + 2,
+    });
+    let writes = 0;
+    const answerWake = h.instances.answerWake.bind(h.instances);
+    h.instances.answerWake = async (...args) => {
+      writes += 1;
+      return answerWake(...args);
+    };
+    const body = { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", waitId: "U10/idle/1" };
+    const first = await call(h, "unit-wake", body);
+    expect(first.body).toMatchObject({
+      ok: true,
+      answer: {
+        kind: "segment",
+        index: 2,
+        texts: ["Alice: continue now", "Bob: keep the old fixture"],
+        senders: ["Alice", "Bob"],
+      },
+    });
+    expect(await call(h, "unit-wake", body)).toEqual(first);
+    expect(writes).toBe(1);
+    expect(await h.instances.listEvents(key, true)).toEqual([]);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].wakes?.["U10/idle/1"]).toEqual(
+      (first.body as { answer: unknown }).answer,
+    );
+  });
+
+  it("unit-wake with the next identity and no unconsumed events answers with nothing to say and does not count a wake", async () => {
+    const h = await idleHarness();
+    const response = await call(h, "unit-wake", {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      waitId: "U10/idle/2",
+    });
+    expect(response.body).toMatchObject({
+      ok: true,
+      answer: { kind: "answered", reply: expect.stringContaining("Nothing new") },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].idle?.wakes).toBe(0);
+  });
+
+  it("unit-wake re-resolves the grant: a raised scope opens a segment; another sender cannot spend it", async () => {
+    const raised = await idleHarness({ grantFact: { grant: { renewals: 2 }, source: "channel" } });
+    const key = { instanceId: PLAN_INSTANCE.id, unit: "U10" };
+    await raised.instances.appendEvent(key, {
+      sender: PLAN_INSTANCE.userId,
+      text: "go on",
+      mode: "wake",
+      at: NOW + 1,
+    });
+    expect(
+      (await call(raised, "unit-wake", { ...key, parentInstanceId: key.instanceId, waitId: "U10/idle/1" })).body,
+    ).toMatchObject({ answer: { kind: "segment", index: 2 } });
+
+    const other = await idleHarness({ grantFact: { grant: { renewals: 2 }, source: "channel" } });
+    await other.instances.appendEvent(key, { sender: "slack:UBOB", text: "go on", mode: "wake", at: NOW + 1 });
+    expect(
+      (await call(other, "unit-wake", { ...key, parentInstanceId: key.instanceId, waitId: "U10/idle/1" })).body,
+    ).toMatchObject({ answer: { kind: "answered", reply: expect.stringContaining("requester's to spend; 2 left") } });
+  });
+
+  it("unit-wake reopens a stopped segment for any folded stopper under the remaining lease without storing segment one; below the lease minimum it falls through to the renewal rule", async () => {
+    const reopened = await idleHarness({ grantFact: { grant: { renewals: 2 }, source: "org" } }, { why: "stopped" });
+    const key = { instanceId: PLAN_INSTANCE.id, unit: "U10" };
+    await reopened.instances.appendEvent(key, {
+      sender: "slack:UBOB",
+      text: "resume what I stopped",
+      mode: "interrupt",
+      at: NOW + 1,
+    });
+    await reopened.instances.appendEvent(key, {
+      sender: "slack:UCAROL",
+      text: "keep the fixture context",
+      mode: "steer",
+      at: NOW + 2,
+    });
+    expect(
+      (await call(reopened, "unit-wake", { ...key, parentInstanceId: key.instanceId, waitId: "U10/idle/1" })).body,
+    ).toMatchObject({ answer: { kind: "segment", index: 1, leaseMs: minutesToMs(230) } });
+    expect((await reopened.instances.listUnits(PLAN_INSTANCE.id))[0].segments).toBeUndefined();
+
+    const short = await idleHarness({ grantFact: { grant: { renewals: 2 }, source: "org" } }, { why: "stopped" });
+    const [row] = await short.instances.listUnits(PLAN_INSTANCE.id);
+    await short.instances.putUnits([{ ...row!, startedAt: NOW - minutesToMs(239) }]);
+    await short.instances.appendEvent(key, {
+      sender: PLAN_INSTANCE.userId,
+      text: "use a renewal instead",
+      mode: "wake",
+      at: NOW + 1,
+    });
+    expect(
+      (await call(short, "unit-wake", { ...key, parentInstanceId: key.instanceId, waitId: "U10/idle/1" })).body,
+    ).toMatchObject({ answer: { kind: "segment", index: 2 } });
+  });
+
+  it("unit-wake answers cost-cap and unfit refusals with the idle continuation sentence; the hundredth event expires", async () => {
+    const key = { instanceId: PLAN_INSTANCE.id, unit: "U10" };
+    const capped = await idleHarness({ grantFact: { grant: { renewals: 2, costCapUsd: 4 }, source: "user" } });
+    await capped.instances.appendEvent(key, {
+      sender: PLAN_INSTANCE.userId,
+      text: "continue",
+      mode: "wake",
+      at: NOW + 1,
+    });
+    expect(
+      (await call(capped, "unit-wake", { ...key, parentInstanceId: key.instanceId, waitId: "U10/idle/1" })).body,
+    ).toMatchObject({ answer: { kind: "answered", reply: expect.stringContaining("cost cap") } });
+    expect(capped.replies.at(-1)).toContain("reply in this thread to continue");
+
+    const unfit = await idleHarness({ grantFact: { grant: { renewals: 2 }, source: "org" } });
+    const unfitRows = await unfit.instances.listUnits(PLAN_INSTANCE.id);
+    await unfit.instances.replace({ ...PLAN_INSTANCE, caps: { maxRounds: 3, maxMinutes: 40 } });
+    await unfit.instances.putUnits(unfitRows);
+    await unfit.instances.appendEvent(key, {
+      sender: PLAN_INSTANCE.userId,
+      text: "continue",
+      mode: "wake",
+      at: NOW + 1,
+    });
+    expect(
+      (await call(unfit, "unit-wake", { ...key, parentInstanceId: key.instanceId, waitId: "U10/idle/1" })).body,
+    ).toMatchObject({ answer: { kind: "answered", reply: expect.stringContaining("cannot hold the ship loop") } });
+
+    const exhausted = await idleHarness({}, { wakes: 99 });
+    await exhausted.instances.appendEvent(key, {
+      sender: PLAN_INSTANCE.userId,
+      text: "one hundred",
+      mode: "wake",
+      at: NOW + 1,
+    });
+    expect(
+      (await call(exhausted, "unit-wake", { ...key, parentInstanceId: key.instanceId, waitId: "U10/idle/100" })).body,
+    ).toMatchObject({ answer: { kind: "expired" } });
   });
 
   it("unit-end keeps a driver-posted step-threw ending whole (issue 2100): kind `failed` with cause `step_threw` lands on the row — the cause beside the kind and the report — the report reaches the unit's thread in the user's words, and the plan summary prints the ending, never the bare 'no ending was recorded' seal", async () => {

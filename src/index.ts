@@ -126,6 +126,7 @@ import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
 import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { createAdminCoordinatorHandler, isCoordinatorAdminPath } from "./channels/adminCoordinator.js";
+import { resolveGrant } from "./core/shipPipeline.js";
 import { createGithubWebhookHandler, GITHUB_WEBHOOK_PATH } from "./channels/githubWebhook.js";
 import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
 import { sendPullMerged } from "./core/coordinator/contract.js";
@@ -1093,6 +1094,14 @@ export async function runBot(): Promise<void> {
       // watch is on for the repository, the refusal names the watching unit's
       // own round; off, the sweep's `pulls rebase` sentence stands.
       mergeWatchOf: (repo) => config.mergeWatchOf(repo),
+      shipGrantFor: (instance) => {
+        const scopes = config.scopes(instance.channelId, instance.userId);
+        return resolveGrant({
+          org: config.config.ship?.grant,
+          channel: scopes.channel.ship?.grant,
+          user: scopes.user.ship?.grant,
+        });
+      },
       // The runs page base (agent-ship item 12): a unit-end report links a
       // child's write-up to its run page; without PUBLIC_BASE_URL it names the run id.
       ...(process.env.PUBLIC_BASE_URL?.trim()

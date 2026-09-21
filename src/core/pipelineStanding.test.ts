@@ -59,6 +59,7 @@ function endingStageDecided(k: UnitEnding["kind"]): string {
     case "interrupted":
     case "refused":
     case "idle":
+    case "idle_expired":
       return ENDING_STAGE[k];
   }
 }
@@ -98,6 +99,7 @@ const UNIT_ENDING_WORDS = [
   "interrupted",
   "refused",
   "idle",
+  "idle_expired",
 ] as const satisfies readonly UnitEnding["kind"][];
 
 // ---- event builders --------------------------------------------------------

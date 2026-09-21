@@ -268,6 +268,27 @@ describe("isCoordinatorUnit — one unit's row", () => {
     expect(isCoordinatorUnit({ ...unit, idle: "wall_clock_cap" })).toBe(false);
   });
 
+  it("wake answers are keyed by the indexed wait and retain every segment continuation fact; malformed keys and answers are refused", () => {
+    const segment = {
+      kind: "segment",
+      index: 3,
+      from: "a".repeat(40),
+      runId: "run-c0",
+      spendUsd: 12.5,
+      handoff: { deviations: [], followUps: [], unproven: [] },
+      texts: ["Ada: continue"],
+      senders: ["Ada"],
+      leaseMs: 120_000,
+    } as const;
+    expect(isCoordinatorUnit({ ...unit, wakes: { "U10/idle/1": segment } })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, wakes: { "U10/idle/2": { kind: "answered", reply: "not yet" } } })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, wakes: { "U10/idle/3": { kind: "stopped" } } })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, wakes: { "U10/idle/4": { kind: "expired" } } })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, wakes: { "bad:wait": segment } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, wakes: { "U10/idle/1": { ...segment, texts: "Ada: continue" } } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, wakes: [] })).toBe(false);
+  });
+
   it("a resume at review is the pull request number with an optional head and url; a resume without the number, or with a malformed head or url, is refused", () => {
     expect(isCoordinatorUnit({ ...unit, resume: { pr: 7 } })).toBe(true);
     expect(isCoordinatorUnit({ ...unit, resume: { pr: 7, headSha: "b".repeat(40) } })).toBe(true);

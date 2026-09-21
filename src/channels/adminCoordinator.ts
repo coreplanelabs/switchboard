@@ -43,7 +43,16 @@
 // The handler here is pure over a parsed request (`handleCoordinatorRequest`),
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
-import { DEFAULT_GRANT, HOSTED_DEADLINE_MARGIN_MINUTES, IDLE_DAYS_DEFAULT, minutesToMs } from "../core/budgets.js";
+import {
+  DEFAULT_GRANT,
+  HOSTED_DEADLINE_MARGIN_MINUTES,
+  IDLE_DAYS_DEFAULT,
+  IDLE_WAKES_MAX,
+  leaseMinimum,
+  minutesToMs,
+  type Grant,
+  type GrantSource,
+} from "../core/budgets.js";
 import { DEFAULT_VERBOSITY, shows } from "../core/verbosity.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { AGENTS } from "../agents/registry.js";
@@ -64,9 +73,10 @@ import {
   type CoordinatorUnit,
   type ThreadEvent,
   type UnitIdle,
+  type UnitWakeAnswer,
 } from "../core/coordinator/contract.js";
 import { foldThreadAttachments } from "../core/dispatch/admission.js";
-import { foldThreadEvents } from "../core/threadEvents.js";
+import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
@@ -95,6 +105,7 @@ import {
   type InterruptionCause,
   type RoundChecks,
 } from "../core/ship/coordinator.js";
+import { renderRenewal, renewalDecision } from "../core/ship/renewal.js";
 import { BOT_SCOPES, checkPrTitle, TITLE_MAX_LENGTH } from "../core/prTitle.mjs";
 import PR_TITLE_VOCABULARY from "../core/prTitleVocabulary.json" with { type: "json" };
 import { isHandoffShape, renderHandoffComment, type Handoff } from "../core/ship/handoff.js";
@@ -164,6 +175,10 @@ export interface AdminCoordinatorDeps {
    *  where the setting is on, the sweep a person runs otherwise. Absent — a
    *  test of the other paths — the watch reads as off. */
   mergeWatchOf?: (repo: string) => { watch: boolean };
+  /** The ship grant as the requester's channel and user scopes say now. Idle
+   * waits can outlive a config change, so a wake never relies on the grant
+   * captured when the instance was created. */
+  shipGrantFor?: (instance: CoordinatorInstance) => { grant: Grant; source: GrantSource };
   /** The one runs service every surface reads: the live and finished runs of the instance's thread. */
   runs: RunsService;
   /** The registry the hosted parent run lives in (record 0060): the four
@@ -1751,9 +1766,14 @@ function unitLines(
             ? "starting"
             : "waiting";
     // A renewed unit names its segment (decision 0046): `segment 2 · …`.
+    const lastWake = u.wakes ? Object.values(u.wakes).at(-1) : undefined;
+    const wakeSenders =
+      lastWake?.kind === "segment" && lastWake.senders.length > 0
+        ? ` · with ${lastWake.texts.length} message${lastWake.texts.length === 1 ? "" : "s"} from ${lastWake.senders.join(", ")}`
+        : "";
     const seg =
       u.ending === undefined && u.segments !== undefined && u.segments.length > 0
-        ? `segment ${u.segments[u.segments.length - 1]!.index} · `
+        ? `segment ${u.segments[u.segments.length - 1]!.index}${wakeSenders} · `
         : "";
     return generated ? `${seg}${state}` : `${u.unit} · ${seg}${state}`;
   });
@@ -1915,6 +1935,148 @@ function parseSegment(raw: unknown): { index: number; from?: string; runId?: str
     ...(from !== undefined ? { from } : {}),
     ...(typeof s.runId === "string" && RUN_ID_PATTERN.test(s.runId) ? { runId: s.runId } : {}),
   };
+}
+
+/** One indexed idle wake. Its answer and every event mark are one store
+ * transaction; the answer is read first, making a reclaimed runner's replay a
+ * pure read. */
+async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
+  const id = parseInstanceId(body.parentInstanceId);
+  if (!id.ok) return json(400, { ok: false, error: id.error });
+  if (typeof body.unit !== "string" || !UNIT_ID.test(body.unit))
+    return json(400, { ok: false, error: "unit must be a unit id" });
+  if (typeof body.waitId !== "string" || !STEP_NAME_PATTERN.test(body.waitId))
+    return json(400, { ok: false, error: "waitId must be a step name" });
+  const at = (deps.clock ?? systemClock)();
+  const instance = await deps.instances.get(id.value);
+  if (!instance) return json(404, { ok: false, error: "unknown_instance" });
+  if (namesForeignRun(instance, body)) return json(404, { ok: false, error: "not_found" });
+  const host = await hostRunOf(deps, instance);
+  if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
+  const units = await deps.instances.listUnits(instance.id);
+  const row = units.find((u) => u.unit === body.unit);
+  if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  const stored = row.wakes?.[body.waitId];
+  if (stored !== undefined) return json(200, { ok: true, answer: stored, at });
+  if (!row.idle) {
+    const answer: UnitWakeAnswer = row.ending?.kind === "stopped" ? { kind: "stopped" } : { kind: "expired" };
+    await deps.instances.answerWake(row, body.waitId, answer, [], body.waitId);
+    return json(200, { ok: true, answer, at });
+  }
+
+  const events = await deps.instances.listEvents({ instanceId: instance.id, unit: row.unit }, true);
+  const idle = row.idle;
+  const senderOf = (e: ThreadEvent): string => e.senderName ?? e.sender;
+  const senders = [...new Set(events.map(senderOf))];
+  const requesterWoke = events.some((event) => event.sender === instance.userId);
+  const stopperWoke = events.some((event) => event.mode === "interrupt");
+  const grantFact = deps.shipGrantFor?.(instance) ?? {
+    grant: instance.grant ?? DEFAULT_GRANT,
+    source: instance.grantSource ?? ("org" as const),
+  };
+  const renewalsSpent = row.segments?.length ?? 0;
+  let answer: UnitWakeAnswer;
+
+  if (events.length === 0) {
+    answer = { kind: "answered", reply: "Nothing new was waiting for this unit." };
+  } else if (idle.wakes + 1 >= IDLE_WAKES_MAX) {
+    answer = { kind: "expired" };
+  } else {
+    const segmentStart = row.segments?.at(-1)?.at ?? row.startedAt ?? idle.at;
+    const leaseMs = Math.max(
+      0,
+      minutesToMs(instance.caps?.maxMinutes ?? resolveShipCaps(undefined).maxMinutes) - (idle.at - segmentStart),
+    );
+    if (idle.why === "stopped" && (requesterWoke || stopperWoke) && leaseMs >= minutesToMs(leaseMinimum("coding"))) {
+      answer = {
+        kind: "segment",
+        index: row.segments?.at(-1)?.index ?? 1,
+        ...(idle.from !== undefined ? { from: idle.from } : {}),
+        ...(idle.runId !== undefined ? { runId: idle.runId } : {}),
+        spendUsd: idle.spendUsd,
+        ...(idle.handoff !== undefined ? { handoff: idle.handoff } : {}),
+        texts: events.map(attributedText),
+        senders,
+        leaseMs,
+      };
+    } else if (!requesterWoke) {
+      answer = {
+        kind: "answered",
+        reply: `The grant's renewals are the requester's to spend; ${Math.max(0, grantFact.grant.renewals - renewalsSpent)} left.`,
+      };
+    } else {
+      const decision = renewalDecision({
+        grant: grantFact.grant,
+        renewalsSpent,
+        spendUsd: idle.spendUsd,
+        progress: "set_aside",
+        pipeline: instance.caps ?? resolveShipCaps(undefined),
+      });
+      if (decision.renew) {
+        answer = {
+          kind: "segment",
+          index: decision.segment,
+          ...(idle.from !== undefined
+            ? { from: idle.from }
+            : decision.from !== undefined
+              ? { from: decision.from }
+              : {}),
+          ...(idle.runId !== undefined ? { runId: idle.runId } : {}),
+          spendUsd: idle.spendUsd,
+          ...(idle.handoff !== undefined ? { handoff: idle.handoff } : {}),
+          texts: events.map(attributedText),
+          senders,
+        };
+      } else {
+        answer = {
+          kind: "answered",
+          reply: `${renderRenewal(decision, grantFact.grant, { idle: true })} (grant from ${grantFact.source}); run \`runs stop ${instance.id}:${row.unit}\` to end this idle unit.`,
+        };
+      }
+    }
+  }
+
+  const countedIdle = events.length > 0 ? { ...idle, wakes: idle.wakes + 1 } : idle;
+  const segments = row.segments ?? [];
+  const updated: CoordinatorUnit = {
+    ...row,
+    idle: countedIdle,
+    ...(answer.kind === "segment" && answer.index >= 2 && !segments.some((s) => s.index === answer.index)
+      ? {
+          segments: [
+            ...segments,
+            {
+              index: answer.index,
+              ...(answer.from ? { from: answer.from } : {}),
+              ...(answer.runId ? { runId: answer.runId } : {}),
+              at,
+            },
+          ],
+        }
+      : {}),
+  };
+  const by = answer.kind === "segment" ? `segment:${answer.index}` : body.waitId;
+  await deps.instances.answerWake(
+    updated,
+    body.waitId,
+    answer,
+    events.map((e) => e.seq),
+    by,
+  );
+  const visible = { ...updated, wakes: { ...(updated.wakes ?? {}), [body.waitId]: answer } };
+  if (answer.kind === "answered") {
+    const thread = unitThread(instance, visible, units.length);
+    const io = thread.threadKey ? deps.ioFor({ threadKey: thread.threadKey, userId: instance.userId }) : undefined;
+    await io?.reply(answer.reply);
+  }
+  await drawCard(
+    deps,
+    instance,
+    units.map((u) => (u.unit === visible.unit ? visible : u)),
+  ).catch((err) =>
+    (deps.log ?? console.warn)(`[coordinator] ${instance.id}: the card could not be redrawn: ${describe(err)}`),
+  );
+  return json(200, { ok: true, answer, at });
 }
 
 /** A unit ended: the row says how, the unit's thread gets the report, the card is redrawn. */
@@ -2633,6 +2795,7 @@ type Step =
   | "pr-check"
   | "round"
   | "unit-end"
+  | "unit-wake"
   | "checks"
   | "merge"
   | "finish";
@@ -2646,6 +2809,7 @@ const STEPS: readonly Step[] = [
   "pr-check",
   "round",
   "unit-end",
+  "unit-wake",
   "checks",
   "merge",
   "finish",
@@ -2704,6 +2868,8 @@ export async function answerCoordinatorStep(
       return round(parsed.value, deps);
     case "unit-end":
       return unitEnd(parsed.value, deps);
+    case "unit-wake":
+      return unitWake(parsed.value, deps);
     case "checks":
       return checksStep(parsed.value, deps);
     case "merge":

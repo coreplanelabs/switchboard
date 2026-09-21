@@ -274,7 +274,12 @@ describe("composeChild — the child a brief names", () => {
         kind: "contract",
         unit: "U10",
         rebase: { branch: unit.branch, onto: "main" },
-        continue: { segment: 2, from: "a".repeat(40), previousRunId: "run-c0" },
+        continue: {
+          segment: 2,
+          from: "a".repeat(40),
+          previousRunId: "run-c0",
+          texts: ["Ada: please keep the parser API", "Lin: and preserve the old fixture"],
+        },
       },
       instance,
       unit,
@@ -289,6 +294,10 @@ describe("composeChild — the child a brief names", () => {
     expect(child.prompt).toContain("follow-ups still open:\n- tests (src/parser.test.ts)");
     expect(child.prompt).toContain("Deviations it recorded:\n- one parser → two: the grammar forked");
     expect(child.prompt).toContain("Unproven:\n- round-trip: no fixture yet");
+    expect(child.prompt).toContain(
+      "The replies that woke this segment, in arrival order:\nAda: please keep the parser API\n\nLin: and preserve the old fixture",
+    );
+    expect(child.prompt.indexOf("follow-ups still open")).toBeLessThan(child.prompt.indexOf("Ada: please"));
     expect(child.prompt).toContain("Implement unit U10 — Warm the cache on wake — of docs/plans/fixture.md");
     expect(child.prompt.indexOf("Segment 2")).toBeLessThan(child.prompt.indexOf("Implement unit U10"));
     expect(child.contract?.unit.id).toBe("U10");
@@ -304,6 +313,7 @@ describe("composeChild — the child a brief names", () => {
       `Segment 3 of this unit: the previous segment ended at its lease with the unit unfinished. Continue from \`${unit.branch}\` as it stands`,
     );
     expect(bare.prompt).not.toContain("write-up");
+    expect(bare.prompt).not.toContain("replies that woke");
   });
 
   it("a review brief is a review child on the pull request: round one's turn names the head; a re-review carries the prior review run's findings and the coding run's dispositions from their records, matched to the review's ids with an id it never issued dropped and noted, and the same contract", async () => {
