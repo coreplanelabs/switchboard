@@ -154,6 +154,23 @@ describe("the reopen gate — the fleet reopens on the last container's new-imag
     expect(liftDrain(reported.record!)).toEqual({ cleared: true });
   });
 
+  it("the two-idle two-restarted fleet reopens on its last report, before the backstop", () => {
+    const resources = ["repo:a/idle-one", "repo:a/idle-two", "repo:a/restarted-one", "repo:a/restarted-two"];
+    const held = holdDrain(record, resources, NOW);
+    const gated = liftDrain(held);
+    if (gated.cleared) throw new Error("fixture");
+
+    const restartedOne = reportImageCurrent(gated.record, "repo:a/restarted-one");
+    const idleOne = reportImageCurrent(restartedOne.record!, "repo:a/idle-one");
+    const idleTwo = reportImageCurrent(idleOne.record!, "repo:a/idle-two");
+    expect(idleTwo.record?.holds).toEqual(["repo:a/restarted-two"]);
+    expect(liveDrain(idleTwo.record, NOW + 7 * 60_000)).not.toBeNull();
+
+    const restartedTwo = reportImageCurrent(idleTwo.record!, "repo:a/restarted-two");
+    expect(restartedTwo).toEqual({ lifted: true, record: null });
+    expect(NOW + 7 * 60_000).toBeLessThan(Date.parse(held.holdsUntil!));
+  });
+
   it("liveDrain carries holds and liftAsked through a stored record, and drops malformed holds", () => {
     const gated = { ...record, holds: ["repo:a/x", 7], liftAsked: true };
     expect(liveDrain(gated, NOW)).toEqual({ ...record, holds: ["repo:a/x"], liftAsked: true });
@@ -351,16 +368,16 @@ describe("the Worker's wiring (by scan)", () => {
     // leaves a hold nothing will report (the `until` backstop alone).
     expect(forDeploy).toMatch(/registryStub\(this\.env\)\.holdDrainFor\(\[resource\]\)/);
     expect(forDeploy.indexOf("holdDrainFor([resource])")).toBeLessThan(forDeploy.indexOf("IMAGE_REPORT_PENDING_KEY"));
-    // The later report stands on the post-deploy replacement completing its
-    // own hydration to `warm`, never on the stop or the inactive fact and never
-    // on the pool-user probe. The marker therefore survives both reconcile
-    // paths until `doHydrate` reaches `warm` on the fresh container.
+    // The later report stands on either an inactive runtime (whose next start
+    // is on the deployed image by construction), or an active replacement
+    // completing its own hydration to `warm` — never on the stop or the
+    // pool-user probe.
     const reconcile = source.slice(
       source.indexOf("private async reconcileImage("),
       source.indexOf("/** The report a held drain waits for"),
     );
     expect(reconcile).toMatch(/if \(!force && pending === undefined\) \{/);
-    expect(reconcile).not.toContain("reportPendingImageCurrent");
+    expect(reconcile).toContain("reportPendingImageCurrent");
     const hydrate = source.slice(source.indexOf("private async doHydrate()"), source.indexOf("// -- freshness"));
     expect(hydrate.match(/setResidentState\("warm"\)/g)).toHaveLength(2);
     expect(hydrate.match(/reportPendingImageCurrent\("hydrate"\)/g)).toHaveLength(2);
@@ -398,7 +415,59 @@ describe("the Worker's wiring (by scan)", () => {
     expect(source).toMatch(/\(await this\.reconcileImage\("attach"\)\) === "stale" && !registered/);
   });
 
-  it("an attach never stops the container, and only the replacement's completed hydration reports the new image (issue 2101)", () => {
+  it("an idle DO marked pending after its reconcile still reports current on the next cycle", () => {
+    const reconcile = source.slice(
+      source.indexOf("private async reconcileImage("),
+      source.indexOf("/** The report a held drain waits for"),
+    );
+    const inactive = reconcile.slice(
+      reconcile.indexOf("const active = await this.isRuntimeActive()"),
+      reconcile.indexOf("const last = THREAD_USERS"),
+    );
+    // The helper reads the marker at call time. A reconcile before the marker
+    // is a no-op; the first cycle after the marker reports it.
+    expect(inactive).toMatch(
+      /if \(!active\) \{[\s\S]*await this\.reportPendingImageCurrent\(where\);\s*return "inactive";/,
+    );
+  });
+
+  it("a failed activity probe preserves the pending marker and drain hold, and refuses a new attach", () => {
+    const reconcile = source.slice(
+      source.indexOf("private async reconcileImage("),
+      source.indexOf("/** The report a held drain waits for"),
+    );
+    const activity = reconcile.slice(
+      reconcile.indexOf("const active = await this.isRuntimeActive()"),
+      reconcile.indexOf("const last = THREAD_USERS"),
+    );
+    expect(activity).toMatch(
+      /\.catch\(\(err\) => \{[\s\S]*return null;[\s\S]*if \(active === null\) \{[\s\S]*where === "attach"[\s\S]*IMAGE_REPORT_PENDING_KEY[\s\S]*return "stale";[\s\S]*return "deferred";/,
+    );
+    expect(activity.indexOf("if (active === null) {")).toBeLessThan(activity.indexOf("if (!active)"));
+    expect(activity.indexOf('where === "attach"')).toBeLessThan(activity.indexOf('return "stale";'));
+    expect(activity.indexOf("IMAGE_REPORT_PENDING_KEY")).toBeLessThan(activity.indexOf('return "stale";'));
+    expect(activity.indexOf('return "stale";')).toBeLessThan(activity.indexOf('return "deferred";'));
+    expect(activity.indexOf("if (!active)")).toBeLessThan(activity.indexOf("reportPendingImageCurrent(where)"));
+  });
+
+  it("a report from a non-running container reaches the registry", () => {
+    const reconcile = source.slice(
+      source.indexOf("private async reconcileImage("),
+      source.indexOf("/** The report a held drain waits for"),
+    );
+    const inactive = reconcile.slice(
+      reconcile.indexOf("const active = await this.isRuntimeActive()"),
+      reconcile.indexOf("const last = THREAD_USERS"),
+    );
+    expect(inactive).toContain("reportPendingImageCurrent(where)");
+    const report = source.slice(
+      source.indexOf("private async reportPendingImageCurrent("),
+      source.indexOf("async reconcileForDeploy("),
+    );
+    expect(report).toContain("registryStub(this.env).reportContainerImageCurrent(pending.resource)");
+  });
+
+  it("an attach never stops an active container, and its replacement reports only after hydration (issue 2101)", () => {
     const reconcile = source.slice(
       source.indexOf("private async reconcileImage("),
       source.indexOf("/** The report a held drain waits for"),
@@ -413,11 +482,9 @@ describe("the Worker's wiring (by scan)", () => {
     expect(attachBranch).not.toMatch(/this\.stop\(/);
     expect(attachBranch).not.toMatch(/swapIncarnation/);
     expect(attachBranch).toMatch(/if \(pending === undefined && \(this\.inFlightCount\(\) > 0/);
-    // A successful stop and an inactive runtime both keep the marker. The one
-    // pool-user probe left runs only with NO pending marker (the current-image
-    // shortcut), while `doHydrate` reports only after the fresh start reaches
-    // `warm`, so neither reporting path races the restore.
-    expect(reconcile).not.toContain("reportPendingImageCurrent");
+    // The one pool-user probe left runs only with NO pending marker (the
+    // current-image shortcut), while `doHydrate` reports only after an active
+    // replacement reaches `warm`, so the active path cannot race the restore.
     expect(reconcile.match(/this\.run\(\["id", "-u", last\]\)/g)).toHaveLength(1);
     const hydrate = source.slice(source.indexOf("private async doHydrate()"), source.indexOf("// -- freshness"));
     expect(hydrate).toContain('reportPendingImageCurrent("hydrate")');
