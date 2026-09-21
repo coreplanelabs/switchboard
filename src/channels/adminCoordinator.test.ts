@@ -41,6 +41,7 @@ import {
   REVIEW_POSTED_CHECKS,
   REVIEW_POSTED_RECHECK_MS,
   createAdminCoordinatorHandler,
+  createCoordinatorChildAdmission,
   handleCoordinatorRequest,
   isCoordinatorAdminPath,
   planSummary,
@@ -178,6 +179,8 @@ function harness(
     grantFact?: { grant: { renewals: number; costCapUsd?: number }; source: "org" | "channel" | "user" };
     /** A tiny backlog for the trim tests (record 0065): the seal must not read the trimmed snapshot's standing. */
     backlogLimit?: number;
+    /** The process drain flag: once true, no new child may be admitted. */
+    draining?: boolean;
   } = {},
 ) {
   let n = 0;
@@ -233,6 +236,7 @@ function harness(
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
   const deps: AdminCoordinatorDeps = {
     tokens: "tokens" in over ? over.tokens : TOKENS,
+    childAdmission: createCoordinatorChildAdmission(() => over.draining === true),
     grantsFor: (id) => GRANTS[id] ?? NO_GRANTS,
     instances,
     ...(over.runPageBase !== undefined ? { runPageBase: over.runPageBase } : {}),
@@ -533,6 +537,76 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), noBase.deps);
     expect(noBase.dispatched[0].opts!.coordinator).toEqual({ parentInstanceId: INSTANCE.id, idempotencyKey: KEY });
     expect("base" in noBase.dispatched[0].opts!.coordinator).toBe(false);
+  });
+
+  it("SIGTERM closes child admission immediately: a spawn is held for the next generation and dispatch is never entered", async () => {
+    const h = harness({ draining: true });
+    await h.instances.put(INSTANCE);
+    const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
+    expect(res).toEqual({
+      status: 409,
+      body: { ok: false, error: "queued", message: "waiting for the next bot generation", at: NOW },
+    });
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it("SIGTERM fences a spawn that was already reading its parent before the drain boundary", async () => {
+    const state = { draining: false };
+    const h = harness(state);
+    await h.instances.put(INSTANCE);
+    const get = h.deps.instances.get.bind(h.deps.instances);
+    let reading!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      reading = resolve;
+    });
+    let finishRead!: () => void;
+    const readBlocked = new Promise<void>((resolve) => {
+      finishRead = resolve;
+    });
+    h.deps.instances.get = async (id) => {
+      reading();
+      await readBlocked;
+      return get(id);
+    };
+
+    const response = handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
+    await readStarted;
+    state.draining = true;
+    finishRead();
+
+    expect(await response).toEqual({
+      status: 409,
+      body: { ok: false, error: "queued", message: "waiting for the next bot generation", at: NOW },
+    });
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it("the drain holds a dispatch admission until the child registers", async () => {
+    let dispatching!: () => void;
+    const dispatchStarted = new Promise<void>((resolve) => {
+      dispatching = resolve;
+    });
+    let register!: () => void;
+    const registrationGate = new Promise<void>((resolve) => {
+      register = resolve;
+    });
+    const h = harness({
+      script: async (_msg, io) => {
+        dispatching();
+        await registrationGate;
+        io.runStarted?.({ id: "run-child" });
+        return { status: "completed" };
+      },
+    });
+    await h.instances.put(INSTANCE);
+
+    const response = handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
+    await dispatchStarted;
+    expect(h.deps.childAdmission!.pending()).toBe(1);
+    register();
+
+    expect((await response).status).toBe(200);
+    expect(h.deps.childAdmission!.pending()).toBe(0);
   });
 
   it("an unknown parentInstanceId is refused 404 and nothing is dispatched", async () => {

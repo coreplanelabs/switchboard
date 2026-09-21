@@ -79,6 +79,14 @@ export const profileSchema = z.object({
   /** Where the bot's runtime config comes from at deploy time; `deploy all`
    *  materializes it into the image's build context. */
   configSource: source,
+  /** The ingress-token subject allowed to stop the bot container. Rendered as
+   *  a Worker var, so config recovery never depends on the runtime document it
+   *  may be repairing. Absent disables the restart route. */
+  restart: z
+    .object({
+      deployer: z.string().regex(/^[A-Za-z0-9_.:@/-]+$/, "an ingress identity subject, without whitespace"),
+    })
+    .optional(),
   /** Where `secrets put` reads values from: a directory of `<NAME>` files, or
    *  `op://Vault/Item` with the secret's name as the field. Optional: the
    *  secrets tooling has its own default directory. */

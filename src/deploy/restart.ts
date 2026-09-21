@@ -18,34 +18,25 @@ import { profileUrls, type DeploymentProfile } from "./profile.js";
 // (src/deploy/run.ts `runBotRestart`), so both sides are unit-tested here and
 // nothing in this file imports node:*.
 //
-// Authorization: the bearer must be an entry of the bot's own
-// `SWITCHBOARD_INGRESS_TOKENS` map whose `http:<subject>` actor holds
-// `deploy:write` in the bot's config (`grants`, authorization.md item 9) — the
-// very action the `deploy.restart` command declares, so the Worker route is
-// authorized exactly as `/api/deploy.restart` would be if the bot served it.
-// Two halves, because the two sides hold different things: the Worker holds the
-// token map (it fires scheduled runs with the `cron` entry) and can tell WHO a
-// bearer is — `authenticateRestart`, 401/503 without touching the container —
-// but the grants live in the container's config, so it asks the bot
-// (`POST /admin/restart/authorize`, src/channels/adminRestartAuthorize.ts) whether
-// that subject holds the action and relays the answer (`parseRestartAuthorization`).
-// The Worker names the subject it authenticated in `RESTART_SUBJECT_HEADER` and
-// the bot decides the grant for THAT subject without re-authenticating the
-// bearer: the two sides can hold different generations of the token map (a
-// `wrangler secret put` reaches the Worker's env at once and the container's
-// only after a restart), so re-authenticating in the container would refuse the
-// very rotation the restart exists to finish. The header is trustworthy because
-// the container is reachable only through the Worker, which strips it from every
-// proxied request (`stripRestartSubject`) and sets it only on its own internal
-// call. The bot's own `/admin/crash` runs the whole check in one place
-// (`authorizeRestart`).
+// Authorization stays entirely on the Worker side: the bearer is an entry of
+// `SWITCHBOARD_INGRESS_TOKENS`, and its subject must equal
+// `SWITCHBOARD_RESTART_DEPLOYER`, rendered from the deployment profile (or set
+// directly as a Worker var). The route never asks the container or its runtime
+// grants: a missing/invalid config is exactly when recovery must still work.
+// The bot's separate `/admin/crash` check still uses `authorizeRestart`, the
+// ordinary runtime-grant path for a route served by the bot itself.
 //
 // The route's URL is the installation's: the deployment profile names the
 // bot's hostname, `planRestart` derives `https://<bot>/admin/restart` from it.
 
 /** The operator's env var holding a `SWITCHBOARD_INGRESS_TOKENS` bearer with `deploy:write`. */
 export const RESTART_TOKEN_ENV = "SWITCHBOARD_DEPLOY_TOKEN";
-/** The scope the bearer's identity must carry — the `deploy.restart` command's own. */
+/** Worker var naming the authenticated ingress subject allowed to restart. It
+ * is rendered from the deployment profile and never forwarded into the
+ * container, so a broken runtime config cannot lock out its own recovery. */
+export const RESTART_DEPLOYER_ENV = "SWITCHBOARD_RESTART_DEPLOYER";
+/** The scope the command declares. The Worker-side restart grant above is the
+ * independent recovery authorization for the route. */
 export const RESTART_SCOPE = "deploy:write";
 
 // ---- refusal decision (Worker side; the CLI relies on the 409) -----------------------------
@@ -122,6 +113,25 @@ export function constantTimeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/** Authorize the already-authenticated ingress subject against the deployment
+ * profile's Worker var. This check deliberately has no ConfigStore input: the
+ * route exists to recover a missing or invalid runtime config. */
+export function authorizeRestartDeployer(subject: string, configured: string | undefined): RestartAuth {
+  if (!configured)
+    return {
+      ok: false,
+      status: 503,
+      reason: `restart disabled: ${RESTART_DEPLOYER_ENV} is not set by the deployment profile or Worker env`,
+    };
+  if (!constantTimeEqual(subject, configured))
+    return {
+      ok: false,
+      status: 403,
+      reason: `forbidden: identity "${subject}" is not the restart deployer named by ${RESTART_DEPLOYER_ENV}`,
+    };
+  return { ok: true, subject };
+}
+
 /** Find the presented bearer among the configured tokens by comparing against
  *  EVERY entry (fixed work; a plain object-key lookup would let a probe learn
  *  which prefixes exist from timing). Returns the matched identity, if any. */
@@ -134,14 +144,14 @@ export function lookupConstantTime<T>(tokens: Record<string, T>, presented: stri
 export type RestartAuth = { ok: true; subject: string } | { ok: false; status: 401 | 403 | 503; reason: string };
 export type RestartAuthn = { ok: true; identity: IngressIdentity } | { ok: false; status: 401 | 503; reason: string };
 
-/** The bot route the Worker asks before stopping the container: 200 `{ ok, subject }`
- *  when the bearer's actor holds `deploy:write`, else `authorizeRestart`'s 401/403/503. */
+/** Compatibility contract for a bot-served authorization probe. The external
+ * restart route no longer calls it; keeping the pure shape avoids breaking an
+ * older shim while a fleet rolls between versions. */
 export const RESTART_AUTHORIZE_PATH = "/admin/restart/authorize";
-/** The header the Worker sets on its internal authorize call, naming the subject it
- *  authenticated from its own token map; stripped from every proxied request. */
 export const RESTART_SUBJECT_HEADER = "x-switchboard-restart-subject";
 
-/** WHETHER, for a subject the Worker already authenticated: the bot's grants alone. */
+/** WHETHER for the bot's own runtime-granted admin routes (`/admin/crash`).
+ * The Worker's restart route deliberately does not call this path. */
 export function authorizeRestartSubject(subject: string, grantsFor: GrantsLookup): RestartAuth {
   if (subject.trim() === "") return { ok: false, status: 401, reason: "unauthorized: an empty subject" };
   if (!hasAction(grantsFor(`http:${subject}`).actions, RESTART_SCOPE))
@@ -153,8 +163,7 @@ export function authorizeRestartSubject(subject: string, grantsFor: GrantsLookup
   return { ok: true, subject };
 }
 
-/** The request without the subject header — what the Worker forwards to the container for
- *  every route it does not answer itself, so a caller can never assert a subject. */
+/** Strip the compatibility probe's trusted header from ordinary proxying. */
 export function stripRestartSubject(request: Request): Request {
   if (!request.headers.has(RESTART_SUBJECT_HEADER)) return request;
   const headers = new Headers(request.headers);
@@ -232,11 +241,8 @@ export function authorizeIngressBearer(
   return { ok: true, subject: identity.subject };
 }
 
-/** The bot's `POST /admin/restart/authorize` answer, as the Worker reads it: 200
- *  `{ ok: true, subject }` → allowed; 401 / 403 / 503 `{ ok: false, error }` →
- *  relayed as they are; anything else (a bot without the route, a non-JSON body,
- *  an unexpected status) → 503, fail-closed — the Worker never restarts on an
- *  answer it cannot read. */
+/** Parse the compatibility probe's answer. New restart routes authorize on the
+ * Worker without making this request. */
 export function parseRestartAuthorization(status: number, text: string): RestartAuth {
   let parsed: unknown;
   try {
@@ -358,6 +364,9 @@ export interface RestartPlan {
   target: "bot";
   adminUrl: string;
   healthUrl: string;
+  /** The source and durable base document this restart must prove equal before
+   * it stops anything. `generation` is the document version read at runtime. */
+  config: { source: string; document: "base"; stateWorkerUrl?: string };
   tokenEnv: string;
   force: boolean;
   /** Budget for waiting out a 409 (runs in flight) before giving up. */
@@ -373,6 +382,11 @@ export function planRestart(opts: RestartOptions, profile: DeploymentProfile): R
     target: opts.only,
     adminUrl: urls.botAdminRestartUrl,
     healthUrl: `${urls.publicBaseUrl}/healthz`,
+    config: {
+      source: profile.configSource,
+      document: "base",
+      ...(urls.stateWorkerUrl !== undefined ? { stateWorkerUrl: urls.stateWorkerUrl } : {}),
+    },
     tokenEnv: RESTART_TOKEN_ENV,
     force: opts.force,
     waitMaxMs: opts.waitMaxMinutes * 60_000,
@@ -386,7 +400,7 @@ export function formatRestartPlan(plan: RestartPlan): string {
     ? `preflight FORCED — in-flight runs are drained (SIGTERM), killed only at the drain deadline`
     : `refused while runs are in flight or draining (409) — retry every ${plan.pollMs / 1000}s up to ${plan.waitMaxMs / 60_000} min`;
   return [
-    `Restart ${plan.target}: POST ${plan.adminUrl} (bearer from $${plan.tokenEnv}, needs ${RESTART_SCOPE}) — ${gate}`,
+    `Restart ${plan.target}: prove ${plan.config.source} matches document "${plan.config.document}" on ${plan.config.stateWorkerUrl ?? "the missing state Worker"}, then POST ${plan.adminUrl} (bearer from $${plan.tokenEnv}, needs ${RESTART_SCOPE}) — ${gate}`,
     `  then wait until ${plan.healthUrl} answers not draining with a later startedAt (up to ${Math.round(plan.liveDeadlineMs / 60_000)} min: drain + cold start)`,
     `  no image build: the container restarts on the same build with the Worker's CURRENT secrets`,
   ].join("\n");

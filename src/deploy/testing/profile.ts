@@ -13,6 +13,7 @@ export const TEST_PROFILE: DeploymentProfile = {
     sandbox: { script: "switchboard-sandbox", hostname: "switchboard-sandbox.example.test" },
   },
   configSource: "config/config.production.yaml",
+  restart: { deployer: "ops" },
   images: "build",
 };
 

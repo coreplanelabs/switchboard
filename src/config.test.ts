@@ -1918,8 +1918,13 @@ describe("loadAppConfigFrom", () => {
         return Response.json({ document, version });
       return new Response("{}", { status: 404 });
     };
+  const productionYaml = `${YAML_FIXTURE}
+runHistory:
+  worker:
+    baseUrl: https://state.example
+`;
   const pushed = {
-    yaml: YAML_FIXTURE,
+    yaml: productionYaml,
     sha256: "a".repeat(64),
     source: "config/config.production.yaml",
     pushedAt: "2026-09-08T00:00:00.000Z",
@@ -1973,6 +1978,23 @@ describe("loadAppConfigFrom", () => {
     await expect(
       loadAppConfigFrom("state://base", { env, secrets, warn: () => {}, fetch: stateWorker(broken) }),
     ).rejects.toThrow();
+  });
+
+  it("a state:// production config requires runHistory.worker, providers and grants — a bare valid local config is refused", async () => {
+    for (const [yaml, problem] of [
+      [YAML_FIXTURE, "runHistory.worker"],
+      [productionYaml.replace(/providers:[\s\S]*?defaults:/, "providers: {}\ndefaults:"), "provider"],
+      [productionYaml.replace(/grants:[\s\S]*?restrict:/, "grants: {}\nrestrict:"), "grants"],
+    ] as const) {
+      await expect(
+        loadAppConfigFrom("state://base", {
+          env,
+          secrets,
+          warn: () => {},
+          fetch: stateWorker({ ...pushed, yaml }),
+        }),
+      ).rejects.toThrow(problem);
+    }
   });
 });
 

@@ -40,6 +40,7 @@ describe("templateView", () => {
         stateWorkerUrl: "https://switchboard-memory.example.test",
       },
       access: undefined,
+      restart: { deployer: "ops" },
       bot: { script: "switchboard" },
       resident: { script: "switchboard-resident" },
     });
@@ -58,7 +59,7 @@ describe("templateView", () => {
     expect(text).toContain('"name": "switchboard-ship-coordinator"');
   });
 
-  it("carries the Access application when the profile has one, and is undefined for a Worker the profile lacks", () => {
+  it("carries the Access application and restart deployer when the profile names them, and is undefined for a Worker the profile lacks", () => {
     const withAccess: DeploymentProfile = {
       ...TEST_PROFILE,
       access: { teamDomain: "acme.cloudflareaccess.com", aud: "a".repeat(64) },
@@ -67,6 +68,10 @@ describe("templateView", () => {
       teamDomain: "acme.cloudflareaccess.com",
       aud: "a".repeat(64),
     });
+    expect(templateView(TEST_PROFILE, "bot", TEST_PUBLISHED_IMAGES)?.restart).toEqual({ deployer: "ops" });
+    expect(
+      templateView({ ...TEST_PROFILE, restart: undefined }, "bot", TEST_PUBLISHED_IMAGES)?.restart,
+    ).toBeUndefined();
     // The artifacts bucket rides the same way (execution.md item 20): named when the profile names it.
     expect(templateView(TEST_PROFILE, "bot", TEST_PUBLISHED_IMAGES)?.artifacts).toBeUndefined();
     expect(
@@ -249,6 +254,7 @@ describe("templateView / renderTemplate for a bot-only profile", () => {
     expect(without.ok && without.text).toContain('"PUBLIC_BASE_URL": "https://switchboard.example.test"');
     const withState = renderTemplate(template, templateView(TEST_PROFILE, "bot", TEST_PUBLISHED_IMAGES)!);
     expect(withState.ok && withState.text).toContain('"STATE_WORKER_URL": "https://switchboard-memory.example.test"');
+    expect(withState.ok && withState.text).toContain('"SWITCHBOARD_RESTART_DEPLOYER": "ops"');
   });
 
   // docs/reference/specs/execution.md item 20 — the artifacts bucket binding and its name var are

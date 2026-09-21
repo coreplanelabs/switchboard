@@ -47,13 +47,18 @@ export function parseConfigSource(s: string): { ok: true; source: ConfigSource }
 /** The I/O a loader needs; the host supplies the real ones, tests supply fakes. */
 export interface ConfigSourceIO {
   readFile(path: string): Promise<string | undefined>;
-  fetch(url: string, init: { headers: Record<string, string> }): Promise<{ status: number; text(): Promise<string> }>;
+  /** Filesystem mtime for a path source, when the host can read it. */
+  pathModifiedAt?: (path: string) => Promise<string | undefined>;
+  fetch(
+    url: string,
+    init: { headers: Record<string, string> },
+  ): Promise<{ status: number; text(): Promise<string>; headers?: { get(name: string): string | null } }>;
   /** Run `op read <ref>`; `undefined` when `op` is not installed. */
   opRead(ref: string): Promise<{ code: number; output: string } | undefined>;
   env: Record<string, string | undefined>;
 }
 
-export type ReadOutcome = { ok: true; text: string; how: string } | { ok: false; problem: string };
+export type ReadOutcome = { ok: true; text: string; how: string; modifiedAt?: string } | { ok: false; problem: string };
 
 /** Read the config the source names. The `how` is what `deploy all` logs so the
  *  run record says where the config came from. */
@@ -63,7 +68,13 @@ export async function readConfigSource(source: ConfigSource, io: ConfigSourceIO)
       const text = await io.readFile(source.path);
       if (text === undefined)
         return { ok: false, problem: `configSource: ${source.path} does not exist or cannot be read` };
-      return { ok: true, text, how: `config from ${source.path}` };
+      const modifiedAt = await io.pathModifiedAt?.(source.path);
+      return {
+        ok: true,
+        text,
+        how: `config from ${source.path}`,
+        ...(modifiedAt !== undefined ? { modifiedAt } : {}),
+      };
     }
     case "github": {
       const token = io.env[CONFIG_REPO_TOKEN_ENV];
@@ -87,10 +98,12 @@ export async function readConfigSource(source: ConfigSource, io: ConfigSourceIO)
           problem: `configSource github://${source.owner}/${source.repo}/${source.path}@${source.ref}: GET → HTTP ${res.status}${res.status === 404 ? " (wrong path or ref, or the token cannot read this repository)" : ""}`,
         };
       }
+      const modifiedAt = res.headers?.get("last-modified") ?? undefined;
       return {
         ok: true,
         text: await res.text(),
         how: `config from github://${source.owner}/${source.repo}/${source.path}@${source.ref}`,
+        ...(modifiedAt !== undefined ? { modifiedAt } : {}),
       };
     }
     case "op": {

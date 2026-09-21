@@ -155,9 +155,40 @@ export const MAX_SPAWN_PROMPT_CHARS = 200_000;
 export const FINISHED_LOOKBACK_PAGES = 25;
 const MAX_ADMIN_BODY_BYTES = 1_000_000;
 
+/** The synchronous fence between a coordinator spawn's last drain check and
+ * its child's registration. A permit keeps the drain alive until either the
+ * registry can hold the child or dispatch ends without one. */
+export interface CoordinatorChildAdmission {
+  draining(): boolean;
+  enter(): (() => void) | undefined;
+  pending(): number;
+}
+
+export function createCoordinatorChildAdmission(draining: () => boolean): CoordinatorChildAdmission {
+  let pending = 0;
+  return {
+    draining,
+    enter: () => {
+      if (draining()) return undefined;
+      pending++;
+      let held = true;
+      return () => {
+        if (!held) return;
+        held = false;
+        pending--;
+      };
+    },
+    pending: () => pending,
+  };
+}
+
 export interface AdminCoordinatorDeps {
   /** The `SWITCHBOARD_INGRESS_TOKENS` secret as the process sees it. */
   tokens: Secret | undefined;
+  /** The process drain's child-admission fence. Once draining, a runner's
+   * durable spawn step is held for the next generation; a permit acquired at
+   * dispatch keeps this generation alive until the child registers. */
+  childAdmission?: CoordinatorChildAdmission;
   /** Grants by actor id (`ConfigStore.grantsFor`): the bearer's `http:<subject>` must hold `coordinator:step`. */
   grantsFor: GrantsLookup;
   /** The parent ship records (run-history item 49). */
@@ -730,10 +761,18 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // review child on the fast tier is refused before any store is read.
   const tierProblem = spawnTierRefusal(req, deps.appConfig?.() ?? {});
   if (tierProblem !== undefined) return json(400, { ok: false, error: "spawn_tier", message: tierProblem });
+  const at = (deps.clock ?? systemClock)();
+  const queued = () =>
+    json(409, {
+      ok: false,
+      error: "queued",
+      message: "waiting for the next bot generation",
+      at,
+    });
+  if (deps.childAdmission?.draining() === true) return queued();
   const log = deps.log ?? console.log;
   const instance = await deps.instances.get(req.parentInstanceId);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
-  const at = (deps.clock ?? systemClock)();
   // The hard stop's mark (record 0060; issue 1924): a sealed parent's runner
   // spawns nothing more — the refusal is terminal, and the machine ends the
   // unit stopped on it.
@@ -828,6 +867,13 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     ...carried,
     receivedAt: at,
   };
+  // The definitive drain fence sits beside dispatch, after every asynchronous
+  // read. Its synchronous permit acquisition and dispatch call cannot have a
+  // signal callback interleave; once dispatch yields, the drain counts this
+  // permit until a registry row exists (or dispatch ends without one).
+  const leaveAdmission = deps.childAdmission?.enter();
+  if (deps.childAdmission !== undefined && leaveAdmission === undefined) return queued();
+  const releaseAdmission = leaveAdmission ?? (() => {});
   let startedId: string | undefined;
   let lastReply: string | undefined;
   let resolveStarted!: (id: string) => void;
@@ -837,6 +883,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const child = watched(io, {
     started: (id) => {
       startedId = id;
+      releaseAdmission();
       resolveStarted(id);
     },
     replied: (text) => {
@@ -851,18 +898,24 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     idempotencyKey: key,
     ...(instance.base !== undefined ? { base: instance.base } : {}),
   };
-  const settled = deps
-    .dispatch(msg, child, {
+  let dispatching: Promise<DispatchOutcome>;
+  try {
+    dispatching = deps.dispatch(msg, child, {
       coordinator: tag,
       ...(turn.contract !== undefined ? { contract: turn.contract } : {}),
-    })
-    .then(
-      (outcome) => ({ kind: "ended" as const, outcome }),
-      (err: unknown) => ({ kind: "threw" as const, err }),
-    );
+    });
+  } catch (err) {
+    releaseAdmission();
+    return json(502, { ok: false, error: "spawn_failed", message: describe(err), at });
+  }
+  const settled = dispatching.then(
+    (outcome) => ({ kind: "ended" as const, outcome }),
+    (err: unknown) => ({ kind: "threw" as const, err }),
+  );
   // The dispatch runs on in the process (counted in flight like any run); the
   // route answers at registration, and a throw after that is a log line.
   void settled.then((end) => {
+    releaseAdmission();
     if (end.kind === "threw")
       log(`[coordinator] ${instance.id} ${req.step}: the child's dispatch threw: ${describe(end.err)}`);
   });
