@@ -20,6 +20,7 @@ import {
   type CoordinatorInstance,
   type CoordinatorUnit,
   type ThreadEvent,
+  type UnitWakeAnswer,
 } from "./contract.js";
 
 /** `exists`: a different record already holds the id (an identical put is
@@ -28,6 +29,7 @@ export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "
 export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type AppendEventResult = { ok: true; seq: number } | { ok: false; reason: "unavailable" };
 export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailable" };
+export type AnswerWakeResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type MarkStoppedResult = { ok: true } | { ok: false; reason: "unknown_instance" | "unavailable" };
 
 /** The (instance, unit) a thread event belongs to. */
@@ -69,6 +71,15 @@ export interface CoordinatorInstanceStore {
   listEvents(key: UnitEventKey, unconsumedOnly?: boolean): Promise<ThreadEvent[]>;
   /** Named sequences consumed by a spawn step or a run — idempotent: a row already consumed keeps its first consumer. */
   markConsumed(key: UnitEventKey, seqs: readonly number[], by: string): Promise<MarkConsumedResult>;
+  /** Store one indexed wake answer, its rewritten unit row and all event
+   * consumption marks atomically. */
+  answerWake(
+    unit: CoordinatorUnit,
+    waitId: string,
+    answer: UnitWakeAnswer,
+    seqs: readonly number[],
+    by: string,
+  ): Promise<AnswerWakeResult>;
 }
 
 const unitKey = (u: Pick<CoordinatorUnit, "instanceId" | "unit">) => `${u.instanceId}\0${u.unit}`;
@@ -128,6 +139,19 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     for (const e of list) if (seqs.includes(e.seq) && e.consumedBy === undefined) e.consumedBy = by;
     return { ok: true };
   }
+  async answerWake(
+    unit: CoordinatorUnit,
+    waitId: string,
+    answer: UnitWakeAnswer,
+    seqs: readonly number[],
+    by: string,
+  ): Promise<AnswerWakeResult> {
+    const updated = { ...unit, wakes: { ...(unit.wakes ?? {}), [waitId]: answer } };
+    this.units.set(unitKey(updated), JSON.stringify(updated));
+    const list = this.events.get(unitKey(unit)) ?? [];
+    for (const e of list) if (seqs.includes(e.seq) && e.consumedBy === undefined) e.consumedBy = by;
+    return { ok: true };
+  }
 }
 
 /** The store of a process without a durable state Worker: no instance exists
@@ -158,6 +182,15 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
     return [];
   }
   async markConsumed(_key: UnitEventKey, _seqs: readonly number[], _by: string): Promise<MarkConsumedResult> {
+    return { ok: false, reason: "unavailable" };
+  }
+  async answerWake(
+    _unit: CoordinatorUnit,
+    _waitId: string,
+    _answer: UnitWakeAnswer,
+    _seqs: readonly number[],
+    _by: string,
+  ): Promise<AnswerWakeResult> {
     return { ok: false, reason: "unavailable" };
   }
 }
@@ -268,6 +301,18 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     const d = r.data as { ok?: unknown };
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/events/mark-consumed: unexpected answer (HTTP ${r.status})`);
+  }
+  async answerWake(
+    unit: CoordinatorUnit,
+    waitId: string,
+    answer: UnitWakeAnswer,
+    seqs: readonly number[],
+    by: string,
+  ): Promise<AnswerWakeResult> {
+    const r = await this.post("/runs/coordinator/wake", { unit, waitId, answer, seqs: [...seqs], by });
+    const d = r.data as { ok?: unknown };
+    if (d.ok === true) return { ok: true };
+    throw new Error(`coordinator store /runs/coordinator/wake: unexpected answer (HTTP ${r.status})`);
   }
 }
 

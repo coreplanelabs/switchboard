@@ -32,7 +32,14 @@
 import type { ShipRoundOutcome } from "../runEvents.js";
 import { shows, type Verbosity } from "../verbosity.js";
 import type { Handoff, HandoffLanded } from "./handoff.js";
-import { progressOf, renderRenewal, renewalDecision, type PushedHeadFact, type RenewalDecision } from "./renewal.js";
+import {
+  progressOf,
+  renderRenewal,
+  renewalDecision,
+  type PushedHeadFact,
+  type RenewalDecision,
+  type RenewalWhy,
+} from "./renewal.js";
 import type { RunStatus } from "../runRecord.js";
 import { normalizeHead, sameCommit } from "../reviewedHead.js";
 import {
@@ -125,13 +132,15 @@ export function interruptionCauseOfWords(words: string): InterruptionCause | und
   return undefined;
 }
 
-export function shipInterruptedNote(prUrl?: string, cause?: InterruptionCause): string {
+export function shipInterruptedNote(prUrl?: string, cause?: InterruptionCause, idle = false): string {
   const stands = prUrl
     ? `Its work stands on GitHub: ${prUrl}.`
     : "Whatever it pushed stands on its pipeline branch; no PR was opened yet.";
-  const reissue = prUrl
-    ? `To continue the review loop, re-issue \`agent:ship\` in this thread with only the PR URL (${prUrl}).`
-    : "To continue, re-issue `agent:ship` in this thread with the task — round 0 runs again on the same branch.";
+  const reissue = idle
+    ? "To continue, reply in this thread to continue."
+    : prUrl
+      ? `To continue the review loop, re-issue \`agent:ship\` in this thread with only the PR URL (${prUrl}).`
+      : "To continue, re-issue `agent:ship` in this thread with the task — round 0 runs again on the same branch.";
   const opening =
     cause === "container_replaced"
       ? "⚠️ The resident container running this pipeline's child was replaced (a deploy's image swap) and the child could not resume, so the pipeline stopped."
@@ -477,7 +486,7 @@ export type Brief =
       rebase: { branch: string; onto: string };
       /** A renewal's segment (decision 0046): the child continues the previous
        *  segment's work from `from`, briefed with that run's write-up and handoff. */
-      continue?: { segment: number; from?: string; previousRunId?: string };
+      continue?: { segment: number; from?: string; previousRunId?: string; texts?: string[] };
     }
   | {
       kind: "review";
@@ -856,6 +865,7 @@ export type UnitEnding =
       spent: ShipBudgetSpent;
     }
   | { kind: "no_verdict"; round: RoundRef; reviewRounds: number; finalReply?: string }
+  | { kind: "idle_expired"; reviewRounds: number }
   /** Round 0's coding child died on a provider transient — a model-gateway
    *  5xx, a cut stream, a gateway timeout, past the harness's retry ladder —
    *  with nothing pushed, TWICE: the first such death re-ran the round once
@@ -900,7 +910,8 @@ export type UnitEnding =
  *  the pull request, which no thread reply can produce — but a blocked hold
  *  (issue 2086) waits for exactly the person's word the idle's wake carries,
  *  so it alone idles; `idleEnding` draws that line by cause. */
-export type IdleWhy = Exclude<UnitEnding["kind"], "idle" | "merged" | "already_landed" | "merge_ready" | "refused">;
+export type IdleWhy =
+  Exclude<UnitEnding["kind"], "idle" | "merged" | "already_landed" | "merge_ready" | "refused"> | RenewalWhy;
 
 const NEVER_IDLES: ReadonlySet<UnitEnding["kind"]> = new Set([
   "idle",
@@ -908,6 +919,7 @@ const NEVER_IDLES: ReadonlySet<UnitEnding["kind"]> = new Set([
   "already_landed",
   "merge_ready",
   "refused",
+  "idle_expired",
 ]);
 
 /** What a transition tells the driver beyond the next action: a round boundary
@@ -961,6 +973,12 @@ export interface LeaseSegmentProgress {
   /** The previous segment's coding run: its write-up and handoff brief the continuation. */
   previousRunId?: string;
   previousHandoff?: Handoff;
+  /** Words that woke an idle segment, already attributed in arrival order. */
+  texts?: string[];
+  /** A stopped segment reopens under the remainder of its cut lease. Each
+   *  reopen gets a fresh attempt so its Workflow steps cannot replay the
+   *  stopped attempt's cached answers. */
+  resume?: { leaseMs: number; attempt: number };
 }
 
 export interface UnitPipelineInput {
@@ -1166,7 +1184,8 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
   return nextReview(resumed).state;
 }
 
-const deadlineAt = (s: UnitPipelineState) => s.startedAt + s.input.caps.maxMinutes * MIN;
+const deadlineAt = (s: UnitPipelineState) =>
+  s.startedAt + (s.input.session?.resume?.leaseMs ?? s.input.caps.maxMinutes * MIN);
 const remainingMs = (s: UnitPipelineState) => deadlineAt(s) - s.clock;
 
 /** The next slice of a wait: a chunk; the remainder when less is left before
@@ -1193,11 +1212,14 @@ function roundCarve(s: UnitPipelineState, round: RoundRef): Carve {
   );
 }
 
-/** The prefix every step of this pipeline is named under: the unit id, and for
- *  a renewal's segment the segment too (`U10/s2/…`), so the Workflow's durable
- *  step cache never hands segment two the answers of segment one. */
-export const stepPrefixOf = (unit: string, session: LeaseSegmentProgress | undefined): string =>
-  session !== undefined && session.segment > 1 ? `${unit}/s${session.segment}` : unit;
+/** The prefix every step of this pipeline is named under: the unit id, a
+ *  renewal's segment (`U10/s2/…`), and a stopped segment's resumed attempt
+ *  (`U10/s2/r1/…`). Both transitions need fresh Workflow identities so the
+ *  durable step cache cannot answer a new attempt with an older one's result. */
+export const stepPrefixOf = (unit: string, session: LeaseSegmentProgress | undefined): string => {
+  const segment = session !== undefined && session.segment > 1 ? `${unit}/s${session.segment}` : unit;
+  return session?.resume !== undefined ? `${segment}/r${session.resume.attempt}` : segment;
+};
 const stepPrefix = (s: UnitPipelineState) => stepPrefixOf(s.input.unit.id, s.input.session);
 const roundStep = (s: UnitPipelineState, round: RoundRef) =>
   `${stepPrefix(s)}/${round.index}/${round.kind}${round.attempt !== undefined ? `/a${round.attempt}` : ""}`;
@@ -1216,6 +1238,7 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
               segment: session.segment,
               ...(session.continueFrom !== undefined ? { from: session.continueFrom } : {}),
               ...(session.previousRunId !== undefined ? { previousRunId: session.previousRunId } : {}),
+              ...(session.texts !== undefined ? { texts: session.texts } : {}),
             },
           }
         : {}),
@@ -1404,7 +1427,7 @@ function idleEnding(s: UnitPipelineState, ending: UnitEnding): Extract<UnitEndin
   const round = "round" in old ? old.round : undefined;
   return {
     kind: "idle",
-    why: old.kind,
+    why: old.kind === "aborted" && old.renewal !== undefined ? old.renewal.decision.why : old.kind,
     idled: old,
     renewalsLeft,
     ...(from !== undefined ? { from } : {}),
@@ -2861,7 +2884,7 @@ export function renderUnitReport(
         e.postedReview
           ? "ℹ️ A changes-requested review was posted this round before the stop — its findings stand on the PR."
           : undefined,
-        reissue,
+        s.input.idleDays && s.input.idleDays > 0 ? "Next step: reply in this thread to continue." : reissue,
       ]);
     case "aborted":
       if (!shows(verbosity, "verbose")) return `⚠️ Aborted after ${rounds}: ${e.reason}${prLine}`;
@@ -2883,7 +2906,9 @@ export function renderUnitReport(
       if (!shows(verbosity, "verbose")) return "";
       return join([
         writeUpPointer(s, e.round.kind, e.runId),
-        `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. A fresh ${s.input.caps.maxMinutes}-minute budget opens in this thread${e.from !== undefined ? ` from \`${e.from.slice(0, 7)}\`` : ""}, with the last run's write-up as its request; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`,
+        s.input.idleDays && s.input.idleDays > 0
+          ? `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. Next step: reply in this thread to continue; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`
+          : `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. A fresh ${s.input.caps.maxMinutes}-minute budget opens in this thread${e.from !== undefined ? ` from \`${e.from.slice(0, 7)}\`` : ""}, with the last run's write-up as its request; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`,
         aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
       ]);
     case "transient":
@@ -2905,7 +2930,9 @@ export function renderUnitReport(
         reissue,
       ]);
     case "interrupted":
-      return shipInterruptedNote(prUrl, e.cause);
+      return shipInterruptedNote(prUrl, e.cause, (s.input.idleDays ?? 0) > 0);
+    case "idle_expired":
+      return "⌛ Idle expired: no reply continued this unit before its idle window closed.";
     case "refused":
       return join([
         `🚫 The ${presetOf(e.round.kind)} child of round ${e.round.index} was refused by the authorize stage (${e.refusal})${e.message ? `: ${e.message}` : ""} — every child is authorized as the requesting user, so the pipeline ends here.`,

@@ -82,7 +82,10 @@ export interface RenewalInput {
   /** Dollars spent under this request so far; null when a run's model had no
    *  price, since a total that left a model's tokens out would understate it. */
   spendUsd: number | null;
-  progress: Progress;
+  /** Progress normally comes from the segment's row. An idle wake sets it
+   * aside because the person's reply is the new work to run; the count, cap
+   * and fit still decide whether another lease may open. */
+  progress: Progress | "set_aside";
   /** The pipeline the next segment would run: its fit is re-asserted before every segment. */
   pipeline: Pipeline;
 }
@@ -101,7 +104,8 @@ const usd = (n: number): string => `$${n.toFixed(2)}`;
  *  the progress. */
 export function renewalDecision(input: RenewalInput): RenewalDecision {
   const renewalsLeft = Math.max(0, input.grant.renewals - input.renewalsSpent);
-  if (!input.progress.progressed) return { renew: false, why: "no_progress", detail: input.progress.why, renewalsLeft };
+  if (input.progress !== "set_aside" && !input.progress.progressed)
+    return { renew: false, why: "no_progress", detail: input.progress.why, renewalsLeft };
   if (renewalsLeft === 0) {
     const detail =
       input.grant.renewals === 0
@@ -139,7 +143,7 @@ export function renewalDecision(input: RenewalInput): RenewalDecision {
   return {
     renew: true,
     segment: input.renewalsSpent + 2,
-    ...(input.progress.by === "push" ? { from: input.progress.sha } : {}),
+    ...(input.progress !== "set_aside" && input.progress.by === "push" ? { from: input.progress.sha } : {}),
     renewalsLeft: renewalsLeft - 1,
   };
 }
@@ -149,22 +153,31 @@ export function renewalDecision(input: RenewalInput): RenewalDecision {
  *  names the clause and, when renewals remain, what actually spends one — a
  *  budget that made progress — and the honest recourse (re-issue the request).
  *  It teaches no keyword: the router has none (routing-and-config item 3). */
-export function renderRenewal(decision: RenewalDecision, grant: Grant): string {
+export function renderRenewal(
+  decision: RenewalDecision,
+  grant: Grant,
+  options: { idle?: boolean; senders?: readonly string[] } = {},
+): string {
+  const recourse = options.idle ? "reply in this thread to continue" : "re-issue the request to try again";
+  const senders = options.senders?.length
+    ? `, with ${options.senders.length} message${options.senders.length === 1 ? "" : "s"} from ${options.senders.join(", ")}`
+    : "";
   if (decision.renew)
-    return `budget renewed, ${decision.segment - 1} of ${grant.renewals}, continues ${decision.from !== undefined ? decision.from.slice(0, 7) : "the branch's head"}`;
+    return `budget renewed, ${decision.segment - 1} of ${grant.renewals}, continues ${decision.from !== undefined ? decision.from.slice(0, 7) : "the branch's head"}${senders}`;
   const holds =
     decision.renewalsLeft > 0
       ? `${decision.renewalsLeft} renewal${decision.renewalsLeft === 1 ? "" : "s"} left`
       : "no renewals left";
+  const idleRecourse = (line: string): string => (options.idle ? `${line}; ${recourse}` : line);
   switch (decision.why) {
     case "no_progress":
       return decision.renewalsLeft > 0
-        ? `no progress on the last budget; ${holds} unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; re-issue the request to try again`
+        ? `no progress on the last budget; ${holds} unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; ${recourse}`
         : `no progress on the last budget; ${holds}`;
     case "cost_cap":
-      return decision.renewalsLeft > 0 ? `${decision.detail}; ${holds} unspent` : decision.detail;
+      return idleRecourse(decision.renewalsLeft > 0 ? `${decision.detail}; ${holds} unspent` : decision.detail);
     case "grant_exhausted":
     case "unfit":
-      return decision.detail;
+      return idleRecourse(decision.detail);
   }
 }

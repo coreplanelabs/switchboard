@@ -1096,6 +1096,22 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect((d.action as { ending: { from?: string } }).ending.from).toBeUndefined();
   });
 
+  it("a resumed stopped segment runs under its remaining lease instead of a fresh segment lease", () => {
+    const d = new Driver(
+      openUnitPipeline(
+        input({
+          merge: "person",
+          generated: true,
+          session: { segment: 1, renewalsSpent: 0, spendUsd: 4, resume: { leaseMs: 120 * MIN, attempt: 1 } },
+        }),
+        T0,
+      ),
+    );
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 });
+    d.answer({ type: "branch", ok: true, at: T0 });
+    expect(d.action).toMatchObject({ type: "spawn", step: "U10/r1/0/coding", budgetMinutes: 50 });
+  });
+
   it("a refusal names its clause on the abort: no progress under a grant with renewals says what actually spends one; spend at the cap stops even with progress; a grant of zero with nothing pushed keeps the plain abort", () => {
     const branch = input().unit.branch;
     // No progress: the child pushed nothing and there is no previous handoff.
@@ -1862,6 +1878,8 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     runChild(withPr, "run-r1", finished({ status: "interrupted" }), T0 + 20 * MIN);
     expect(withPr.action).toMatchObject({ type: "end", ending: { kind: "interrupted", runId: "run-r1" } });
     expect(renderUnitReport(withPr.state)).toBe(shipInterruptedNote(PR_URL));
+    expect(shipInterruptedNote(PR_URL, undefined, true)).toContain("reply in this thread to continue");
+    expect(shipInterruptedNote(PR_URL, undefined, true)).not.toContain("re-issue `agent:ship`");
   });
 
   it("a child whose container was replaced mid-round RESUMES and the pipeline continues (issues 1903/1876): a read-record answering `restartedAs` moves the wait onto the successor, and the successor's finish carries the round on — the unit never ends over a resume that succeeded", () => {
@@ -3444,6 +3462,7 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
     // The report is the old kind's sentence, unchanged.
     const report = renderUnitReport(d.state);
     expect(report).toContain("⏹ Ship stopped by operator (soft stop) after 0 review rounds.");
+    expect(report).toContain("reply in this thread to continue");
     expect(d.notes.at(-1)).toMatchObject({ type: "ended", ending: { kind: "idle", why: "stopped" } });
   });
 
@@ -3477,6 +3496,7 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
       },
     });
     expect(renderUnitReport(d.state)).toContain("🔁 The unit's budget ran out with the unit unfinished");
+    expect(renderUnitReport(d.state)).toContain("reply in this thread to continue");
   });
 
   it("every other idling kind maps to `idle` with itself as `why` and its report intact: the caps, review_pending, merge_refused, no_verdict, an abort and an interrupt", () => {

@@ -146,7 +146,7 @@ const prUrl = (repo: string, pr: number) => `https://github.com/${repo}/pull/${p
  *  write-up and handoff as the checkpoint to pick up — the unit's request
  *  follows unchanged, so the contract stays the contract. */
 async function continuationPreface(
-  cont: { segment: number; from?: string; previousRunId?: string },
+  cont: { segment: number; from?: string; previousRunId?: string; texts?: string[] },
   unit: CoordinatorUnit,
   readers: BriefReaders,
 ): Promise<string> {
@@ -165,6 +165,8 @@ async function continuationPreface(
         `Unproven:\n${list(h.unproven.map((u) => `${u.criterion}: ${u.why}`))}`,
     );
   }
+  if (cont.texts !== undefined && cont.texts.length > 0)
+    lines.push(`The replies that woke this segment, in arrival order:\n${cont.texts.join("\n\n")}`);
   return lines.join("\n\n");
 }
 

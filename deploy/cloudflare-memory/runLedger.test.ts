@@ -801,6 +801,49 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
     });
   });
 
+  it("the validating wake boundary accepts a first-segment resume without inventing a renewal segment row", async () => {
+    const key = storeKey();
+    const row = unit("U12", {
+      startedAt: 1_000,
+      idle: { why: "stopped", at: 2_000, renewalsLeft: 2, spendUsd: null, wakes: 1 },
+    });
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [row] })).status).toBe(200);
+    expect(
+      (
+        await post("/runs/coordinator/events/append", {
+          storeKey: key,
+          instanceId: INSTANCE_ID,
+          unit: "U12",
+          event: { sender: "slack:UALICE", text: "resume", mode: "wake", at: 3_000 },
+        })
+      ).status,
+    ).toBe(200);
+    const answer = {
+      kind: "segment",
+      index: 1,
+      spendUsd: null,
+      texts: ["Alice: resume"],
+      senders: ["Alice"],
+      leaseMs: 60_000,
+    } as const;
+    expect(
+      await post("/runs/coordinator/wake", {
+        storeKey: key,
+        unit: row,
+        waitId: "U12/idle/1",
+        answer,
+        seqs: [1],
+        by: "segment:1",
+      }),
+    ).toEqual({ status: 200, data: { ok: true } });
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: INSTANCE_ID })).data).toEqual({
+      units: [{ ...row, wakes: { "U12/idle/1": answer } }],
+    });
+    expect(
+      (await post("/runs/coordinator/events/list", { storeKey: key, instanceId: INSTANCE_ID, unit: "U12" })).data,
+    ).toMatchObject({ events: [{ consumedBy: "segment:1" }] });
+  });
+
   it("validates: an empty list, a malformed row or instance id is 400; no bearer is 401", async () => {
     const key = storeKey();
     expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [] })).status).toBe(400);

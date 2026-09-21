@@ -399,6 +399,26 @@ export interface UnitIdle {
   wakes: number;
 }
 
+/** The durable answer to one indexed idle wait. The wait id is the key on the
+ * unit row, so a reclaimed runner receives byte-for-byte the decision the
+ * first caller stored instead of spending a renewal or consuming an event
+ * twice. */
+export type UnitWakeAnswer =
+  | {
+      kind: "segment";
+      index: number;
+      from?: string;
+      runId?: string;
+      spendUsd: number | null;
+      handoff?: Handoff;
+      texts: string[];
+      senders: string[];
+      leaseMs?: number;
+    }
+  | { kind: "answered"; reply: string }
+  | { kind: "stopped" }
+  | { kind: "expired" };
+
 /** What the severity gate caught on a round: the level in force and the gated findings as `id (severity)`. */
 export interface RoundGate {
   level: AddressSeverity;
@@ -456,6 +476,8 @@ export interface CoordinatorUnit {
    *  (null once any run's cost is unknown), `handoff` that child's lists, and
    *  `wakes` how many wakes this idle has answered — zero at the write. */
   idle?: UnitIdle;
+  /** Answers to indexed idle waits, keyed by the wait step's durable identity. */
+  wakes?: Record<string, UnitWakeAnswer>;
   /** The round boundaries the coordinator reported, oldest first (the `ship_round`
    *  vocabulary). `gate` rides an approve the machine's severity check caught
    *  carrying a finding at or above the level in force ([agent-ship](../../../docs/reference/specs/agent-ship.md)
@@ -552,6 +574,27 @@ const isSegment = (v: unknown): boolean =>
   (v.runId === undefined || isText(v.runId)) &&
   typeof v.at === "number";
 
+export const isUnitWakeAnswer = (v: unknown): v is UnitWakeAnswer => {
+  if (!isObject(v)) return false;
+  if (v.kind === "answered") return typeof v.reply === "string";
+  if (v.kind === "stopped" || v.kind === "expired") return true;
+  return (
+    v.kind === "segment" &&
+    typeof v.index === "number" &&
+    Number.isInteger(v.index) &&
+    v.index >= 1 &&
+    (v.from === undefined || isText(v.from)) &&
+    (v.runId === undefined || isText(v.runId)) &&
+    (v.spendUsd === null || isFinite(v.spendUsd)) &&
+    (v.handoff === undefined || isHandoffShape(v.handoff)) &&
+    Array.isArray(v.texts) &&
+    v.texts.every((text) => typeof text === "string") &&
+    Array.isArray(v.senders) &&
+    v.senders.every((sender) => isText(sender)) &&
+    (v.leaseMs === undefined || (isFinite(v.leaseMs) && v.leaseMs > 0))
+  );
+};
+
 export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isObject(v)) return false;
   const r = v;
@@ -566,6 +609,13 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (r.lastPush !== undefined && !isText(r.lastPush)) return false;
   if (r.segments !== undefined && (!Array.isArray(r.segments) || !r.segments.every(isSegment))) return false;
   if (r.idle !== undefined && !isUnitIdle(r.idle)) return false;
+  if (
+    r.wakes !== undefined &&
+    (!isObject(r.wakes) ||
+      Array.isArray(r.wakes) ||
+      !Object.entries(r.wakes).every(([waitId, answer]) => STEP_NAME_PATTERN.test(waitId) && isUnitWakeAnswer(answer)))
+  )
+    return false;
   if (
     !Array.isArray(r.rounds) ||
     r.rounds.length > MAX_ROUNDS ||

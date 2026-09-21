@@ -130,6 +130,7 @@ export const ENDING_STAGE = {
   interrupted: "ended",
   refused: "ended",
   idle: "idle",
+  idle_expired: "ended",
   blocked: "ended",
   failed: "ended",
 } as const satisfies Record<UnitEnding["kind"] | "blocked" | "failed", Stage | "hold">;
@@ -157,6 +158,7 @@ export const ENDING_WORDS = {
   interrupted: "interrupted",
   refused: "refused",
   idle: "idle",
+  idle_expired: "idle expired",
   blocked: "blocked",
   failed: "failed",
 } as const satisfies Record<UnitEnding["kind"] | "blocked" | "failed", string>;
