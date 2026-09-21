@@ -191,7 +191,7 @@ const CONTRACT_HEADINGS_LIST = Object.values(CONTRACT_SECTION_HEADINGS)
 // assembled by the child, which would choose what to leave out. Both coding
 // prompts carry this verbatim so the resident and sandbox children read the
 // same rule; the review prompts name the same block and the same severity.
-const UNIT_CONTRACT = `UNIT CONTRACT: when your first user turn carries a \`${CONTRACT_HEADING}\` block — its sub-headings, in this order: ${CONTRACT_HEADINGS_LIST} — it is the contract for one plan unit, rendered by Switchboard from the plan itself, and it outranks any free-text task beside it. Do its first instruction first: the rebase of the unit's branch onto the merged parent (a conflict ends the unit — report it and stop; never resolve it by force). Then implement the unit's section as written: every test scenario it lists is added as a test, every spec row it names is updated so its proof binding resolves, the agent rules are followed, and no guard it names is weakened. The review is handed the same block and checks the diff against it: a test scenario the unit listed and the diff did not add is a finding at minor severity — the same severity as a spec contradiction. Never edit the plan record itself; where the unit is wrong or a criterion could not be proven, say so in the handoff and in your final message.`;
+const UNIT_CONTRACT = `UNIT CONTRACT: when your first user turn carries a \`${CONTRACT_HEADING}\` block — its sub-headings, in this order: ${CONTRACT_HEADINGS_LIST} — it is the contract for one plan unit, rendered by Switchboard from the plan itself, and it outranks any free-text task beside it. Do its first instruction first: the rebase of the unit's branch onto the merged parent. Then implement the unit's section as written: every test scenario it lists is added as a test, every spec row it names is updated so its proof binding resolves, the agent rules are followed, and no guard it names is weakened. The review is handed the same block and checks the diff against it: a test scenario the unit listed and the diff did not add is a finding at minor severity — the same severity as a spec contradiction. Never edit the plan record itself; where the unit is wrong or a criterion could not be proven, say so in the handoff and in your final message.`;
 
 // The unit handoff (docs/reference/specs/agent-coding.md item 9; agent-ship.md
 // item 14): the contract's return edge, as data. A child that ran for a plan
@@ -289,10 +289,11 @@ export const FAST_GATES_BEFORE_PUSH =
 // (src/core/ship/contract.ts).
 export const REBASE_BEFORE_PUSH =
   "REBASE BEFORE EVERY PUSH — always, not configurable. Immediately before each push: fetch your base branch, " +
-  "rebase your branch onto it, resolve any conflict with the context you already have (the repository's " +
-  "AGENTS.md says how a generated file is regenerated — regenerate it, never hand-merge it), re-run THE FAST " +
-  "GATES on the rebased tree, and only then push. Every head that reaches review is then current with its " +
-  "base when it lands, and no unit ends merge-ready behind a sibling that merged first.";
+  "rebase your branch onto it, and resolve any conflict with the context you already have in one bounded model " +
+  "round — the thread's context and the repository's AGENTS.md (which says how a generated file is regenerated: " +
+  "regenerate it, never hand-merge it). If you cannot resolve it inside that bound, end the round; otherwise " +
+  "re-run THE FAST GATES on the rebased tree, and only then push. Every head that reaches review is then current " +
+  "with its base when it lands, and no unit ends merge-ready behind a sibling that merged first.";
 
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
 

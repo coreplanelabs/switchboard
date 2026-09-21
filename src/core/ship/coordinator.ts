@@ -1634,13 +1634,16 @@ function settleCoding(
       [roundNote(round, "stopped")],
     );
   // A mechanical WIP push means the child did not declare the work ready for
-  // review. Keep the unit branch as the resumption point and abort this
-  // attempt; an ordinary push still takes the established recover-PR path.
-  if (facts.status === "failed" && checkpoint !== undefined) {
+  // review, whatever terminal status its own answer produced. Keep the unit
+  // branch as the resumption point and abort this attempt; an ordinary push
+  // still takes the established recover-PR path.
+  if (checkpoint !== undefined) {
     const cause =
       facts.failure?.kind === "provider_transient"
         ? "the model provider's transport retry budget was spent"
-        : "it failed before finishing";
+        : facts.status === "failed"
+          ? "it failed before finishing"
+          : "it ended before its work was ready for review";
     return end(
       next,
       {

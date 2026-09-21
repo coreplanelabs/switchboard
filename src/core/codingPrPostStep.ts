@@ -275,14 +275,15 @@ export function salvageWorkOf(
   return { work: false, summary: nothingToSalvageNote(branch) };
 }
 
-/** Push-before-abort (docs/reference/specs/agent-ship.md item 8): a ship coding
- *  child whose loop ended abnormally commits and pushes what its tree still
- *  holds to the unit's branch (`salvageTargetOf` names it), so a re-issue
- *  starts from the partial work instead of zero. A clean ending gets an empty
- *  WIP marker commit too: its earlier ordinary push may still be unfinished,
- *  and only a final `by: "salvage"` head lets the coordinator tell. Mechanical,
- *  in the run loop after the model is done: the model can make no more tool
- *  calls at the wind-down, so nothing else can push.
+/** Push-before-release (docs/reference/specs/agent-ship.md item 8): every
+ *  ship coding child commits and pushes work its tree still holds to the unit
+ *  branch (`salvageTargetOf` names it), so a re-issue starts from the partial
+ *  work instead of zero. A clean abnormal ending gets an empty WIP marker too:
+ *  its earlier ordinary push may still be unfinished, and only a final
+ *  `by: "salvage"` head lets the coordinator tell; an ordinary clean completion
+ *  leaves no marker and proceeds to the PR post-step. Mechanical,
+ *  in the run loop after the model is done, and repeated after a final
+ *  description turn so no later workspace tool can leave work behind.
  *  Best-effort: a failed step reports itself and never fails the run.
  *  The same push, worded for its cue, is the compaction checkpoint's
  *  (docs/reference/specs/harness-pi.md item 7): a compaction the provider
@@ -290,7 +291,7 @@ export function salvageWorkOf(
  *  wind-down, so the tree is pushed the moment the failure is known. */
 export async function salvageBudgetPush(
   executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
-  opts: { branch: string; cue?: "budget" | "compaction" | "ending" },
+  opts: { branch: string; cue?: "budget" | "compaction" | "ending" | "completion" },
   span?: Span,
 ): Promise<{ pushed: boolean; summary: string; head?: string }> {
   const trace = span ? { span } : undefined;
@@ -311,12 +312,19 @@ export async function salvageBudgetPush(
             pushedLead: "the coding child ended with interrupted work",
             failedLead: `the interrupted-work push to \`${opts.branch}\` failed`,
           }
-        : {
-            commit: "wip: committed at the budget wind-down — work in progress, not reviewed",
-            nothing: nothingToSalvageNote(opts.branch),
-            pushedLead: "the budget ended with work in the tree",
-            failedLead: `the budget-end salvage push to \`${opts.branch}\` failed`,
-          };
+        : opts.cue === "completion"
+          ? {
+              commit: "wip: preserve unfinished coding work — work in progress, not reviewed",
+              nothing: `the coding child ended with nothing to preserve: the tree is clean and \`${opts.branch}\` holds no unpushed commits`,
+              pushedLead: "the coding child ended with unfinished work",
+              failedLead: `the unfinished-work push to \`${opts.branch}\` failed`,
+            }
+          : {
+              commit: "wip: committed at the budget wind-down — work in progress, not reviewed",
+              nothing: nothingToSalvageNote(opts.branch),
+              pushedLead: "the budget ended with work in the tree",
+              failedLead: `the budget-end salvage push to \`${opts.branch}\` failed`,
+            };
   try {
     // An ending checkpoint preserves every non-ignored workspace change,
     // including a new source or test file the child had not added yet. Git's
@@ -324,7 +332,7 @@ export async function salvageBudgetPush(
     // staging out. The measure is `run`, not `probe`: a failure is the salvage
     // failing, never a tree read as clean.
     const dirty = (await run("git status --porcelain")).trim() !== "";
-    const endingCheckpoint = opts.cue !== "compaction";
+    const endingCheckpoint = opts.cue !== "compaction" && opts.cue !== "completion";
     if (dirty) {
       await run("git add -A");
       await run(`git commit -m ${shellQuote(words.commit)}`);

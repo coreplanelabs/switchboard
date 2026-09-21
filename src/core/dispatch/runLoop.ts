@@ -779,29 +779,35 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     observedUncommitted = observed.uncommittedChanges;
     observedUnpushed = observed.unpushedCommits;
   };
-  /** Preserve a coordinator coding child's work before any abnormal teardown.
-   *  One path serves failure, stop, restart and lease end, so none can regress
-   *  to the resident release's discarded-tree card. */
-  const preserveCodingChildWork = async (cue: "budget" | "ending"): Promise<void> => {
+  /** Preserve a coordinator coding child's work before its workspace is
+   *  released. Abnormal endings always leave a mechanical marker; an ordinary
+   *  completion checkpoints only work the child left dirty or unpushed, so a
+   *  clean completed run can still use the description and PR post-steps. */
+  const preserveCodingChildWork = async (cue: "budget" | "ending" | "completion"): Promise<void> => {
     if (workSalvageAttempted || !isCodingPrRun || coordinator === undefined) return;
     if (!workspaceObserved) await observeWorkspaceNow();
-    workSalvageAttempted = true;
-    if (cue === "ending") endingSalvageAttempted = true;
     const target = salvageTargetOf({
       pushedBranch: pushes.branch(),
       checkedOut: observedCheckedOut,
       base: repoCtx.baseRef ?? (await coordinatorBase),
     });
-    // The ending checkpoint measures for itself and includes untracked,
-    // non-ignored files. The ordinary workspace observation deliberately
-    // counts tracked dirt only and therefore cannot decide that there is
-    // nothing to preserve here.
+    // The checkpoint measures for itself and includes untracked, non-ignored
+    // files. The ordinary workspace observation deliberately counts tracked
+    // dirt only and therefore cannot decide that a completed child is clean.
     const salvaged =
       "skipped" in target
         ? { pushed: false, summary: target.skipped }
         : await root.span(cue === "budget" ? "run.budget_salvage" : "run.work_salvage", (span) =>
             salvageBudgetPush(executor, { branch: target.branch, cue }, span),
           );
+    const cleanCompletion =
+      cue === "completion" &&
+      !salvaged.pushed &&
+      (/ended with nothing to preserve/i.test(salvaged.summary) ||
+        ("skipped" in target && (observedUncommitted ?? 0) === 0 && (observedUnpushed ?? 0) === 0));
+    if (cleanCompletion) return;
+    workSalvageAttempted = true;
+    if (cue === "ending" || cue === "completion") endingSalvageAttempted = true;
     onEvent({
       type: "run_note",
       kind: cue === "budget" ? "budget_salvage" : "work_salvage",
@@ -1536,6 +1542,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (endingNeedsPreservation && run.control.requested === "hard") await endHarness();
     if (isCodingPrRun && !tailSkipped()) await observeWorkspaceNow();
     if (endingNeedsPreservation) await preserveCodingChildWork(budgetEnded ? "budget" : "ending");
+    else if (isCodingPrRun && coordinator !== undefined && !tailSkipped()) await preserveCodingChildWork("completion");
     // The description turn (docs/reference/specs/pr-description.md item 5,
     // descriptionTurn.ts): the coding prompt requires a resubmitted
     // description after EVERY push to a PR that already exists (agent-coding.md
@@ -1586,6 +1593,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         if (!run.control.hardSignal.aborted) await observeWorkspaceNow();
       }
     }
+    // A clean first checkpoint leaves the description turn available, and
+    // that turn can still use workspace tools. Checkpoint again after the
+    // actual last model turn so its dirty tree or unpushed commit cannot reach
+    // release as work_left_behind. A clean turn remains eligible for the PR
+    // post-step; a pushed checkpoint marks the child unfinished as usual.
+    if (descriptionTurnRan) await preserveCodingChildWork("completion");
     // The last prompt on the run's pi has been sent: pi ends here, before the
     // post-step and before the workspace it runs in can be released; what its
     // ending left running is read off the record once it has — here, once,

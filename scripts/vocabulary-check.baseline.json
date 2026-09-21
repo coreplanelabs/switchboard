@@ -102,7 +102,7 @@
     "handoff": 5
   },
   "src/core/ship/contract.ts": {
-    "handoff": 2,
+    "handoff": 1,
     "wind-down": 1
   },
   "src/core/ship/handoff.ts": {
