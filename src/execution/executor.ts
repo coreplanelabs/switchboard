@@ -322,9 +322,15 @@ export function truncate(s: string): string {
   return s.length > MAX_OUTPUT ? s.slice(0, MAX_OUTPUT) + `\n...[truncated ${s.length - MAX_OUTPUT} chars]` : s;
 }
 
-/** Runs everything on the local host inside a confined workspace directory. */
+/** Runs everything on the local host inside a confined workspace directory.
+ *  A factory-created local executor resolves the run profile's identity for
+ *  every command, just like the remote backends. Direct construction keeps
+ *  the historical process-env behavior for local utilities and tests. */
 export class LocalExecutor implements Executor {
-  constructor(private workspaceDir: string) {}
+  constructor(
+    private workspaceDir: string,
+    private readonly resolveEnvs?: () => Promise<Record<string, string>>,
+  ) {}
 
   private confine(p: string): string {
     const abs = resolve(this.workspaceDir, p);
@@ -336,7 +342,12 @@ export class LocalExecutor implements Executor {
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
-    const r = await runBash(command, this.workspaceDir, opts?.signal, timeoutMs, opts?.env);
+    const identityEnv = await this.resolveEnvs?.();
+    // The profile's identity wins a clash, as on E2B, Cloudflare and the
+    // resident. Passing an explicit map also prevents a factory-created local
+    // run from inheriting arbitrary host credentials.
+    const env = identityEnv === undefined ? opts?.env : { ...(opts?.env ?? {}), ...identityEnv };
+    const r = await runBash(command, this.workspaceDir, opts?.signal, timeoutMs, env);
     const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
     if (r.timedOut) {
       // Name the limit that fired (not a generic abort) so the model can

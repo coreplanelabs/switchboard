@@ -17,6 +17,9 @@ import type { ExecutorSelection } from "../../execution/factory.js";
 import { currentPrHeadSha, type RepoContext, type ResidentSlugs } from "../repoContext.js";
 import { nearMatch } from "../nearMatch.js";
 import { residentSlugsLister } from "../../execution/factory.js";
+import { BASH_TIMEOUT_MAX_MS } from "../../execution/bashTimeout.js";
+import { shellQuote } from "../../execution/shellQuote.js";
+import { parseRevParseOutput } from "../reviewedHead.js";
 import { checkPrHeadPreflight, guardAttachedHead } from "../reviewRound.js";
 import type { CardShell } from "../statusCardFrame.js";
 import type { Clock, Span } from "../trace/types.js";
@@ -416,12 +419,39 @@ export type AttachedHeadGate =
   | { kind: "refused"; reason: "branch_moved" };
 
 /**
- * The attached-head guard (docs/reference/specs/agent-review.md item 10): for a
- * PR review on the resident path, the sha the resident ATTACHED the worktree at
- * against the PR head resolved before, decided before any model turn.
- * Verified; adopted (a push raced the request and the worktree sits at the PR's
- * head NOW — the repo context takes it); or refused (the branch moved while the
- * worktree was being attached): the pool user released, one named reply.
+ * A cold review starts in an empty per-thread workspace. Provision the exact
+ * pull-request checkout there before the attached-head gate observes it: the
+ * model never owns clone/checkout, and therefore never gets a first turn in an
+ * empty directory. The fetch uses the run's injected credential through git's
+ * env-backed helper; no token enters this command text. `origin/HEAD` and the
+ * resolved base are fetched beside the PR head because the review prompt diffs
+ * against those remote-tracking refs.
+ */
+function coldReviewCheckoutCommand(repoCtx: RepoContext & { repo: string; pr: number; headSha: string }): string {
+  const remote = `https://github.com/${repoCtx.repo}.git`;
+  const helper = `!f() { test -n "$GH_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_TOKEN"; }; f`;
+  const refspecs = [
+    "+HEAD:refs/remotes/origin/HEAD",
+    `+refs/pull/${repoCtx.pr}/head:refs/remotes/origin/pull/${repoCtx.pr}/head`,
+    ...(repoCtx.baseRef ? [`+refs/heads/${repoCtx.baseRef}:refs/remotes/origin/${repoCtx.baseRef}`] : []),
+  ];
+  return [
+    "set -eu",
+    "find . -mindepth 1 -maxdepth 1 ! -name attachments -exec rm -rf -- {} +",
+    "git init -q .",
+    `git remote add origin ${shellQuote(remote)}`,
+    `git -c credential.helper= -c credential.helper=${shellQuote(helper)} fetch --force --no-tags origin ${refspecs.map(shellQuote).join(" ")}`,
+    `git checkout --detach --force ${shellQuote(repoCtx.headSha)}`,
+  ].join("\n");
+}
+
+/**
+ * The attached-head guard (docs/reference/specs/agent-review.md item 10): every
+ * PR review is at its resolved head before any model turn. Cold backends are
+ * provisioned first; seeded backends are observed at their named checkout; a
+ * resident's attach binding is its proof. Verified; adopted (a push raced the
+ * request and the workspace is at the PR's head now); or refused (mismatch or
+ * unreadable): the workspace is released and one named reply is sent.
  */
 export async function authorizeAttachedHead(
   deps: AuthorizeDeps,
@@ -438,24 +468,38 @@ export async function authorizeAttachedHead(
   const { msg, refuse, card, shell, closeLines, clock, agent, resume, selection, root } = ctx;
   const { executor, resident, binding } = selection;
   let repoCtx = ctx.repoCtx;
-  // Attach-head check (docs/reference/specs/agent-review.md item 10): for a PR
-  // review on the resident path, the sha the resident ATTACHED the worktree
-  // at is compared with the PR head resolved above — before any model turn
-  // (the comparison, the current-head second lookup and the refusal reply
-  // live in `guardAttachedHead`). "adopted" means a push raced the request
-  // and the worktree sits at the PR's head NOW: RepoContext adopts it and
-  // the block says it was verified. "refused" means the branch moved while
-  // the worktree was being attached: not started — one named reply, the
-  // pool user released, no provider call.
+  // Attach-head check (docs/reference/specs/agent-review.md item 10): every PR
+  // review proves the workspace's HEAD before any model turn. A resident's
+  // attach binding is the proof it just returned; every other backend is
+  // observed directly in the checkout. Unknown is a refusal, not permission
+  // for the model to turn an infrastructure failure into a finding.
   let verifiedAtAttach = false;
   let headAdopted = false;
-  if (!resume && agent.name === "review" && resident && repoCtx.pr !== undefined && repoCtx.repo) {
+  if (!resume && agent.name === "review" && repoCtx.pr !== undefined && repoCtx.repo) {
     const pr = { repo: repoCtx.repo, number: repoCtx.pr };
+    const expectedHeadSha = repoCtx.headSha;
     const guard = await root.span("dispatch.gate.attached_head", async (span) => {
+      const source = resident && binding?.sha !== undefined ? "resident binding" : "workspace-observed";
+      const command = selection.seeded?.workspace
+        ? `git -C ${shellQuote(selection.seeded.workspace)} rev-parse HEAD`
+        : "git rev-parse HEAD";
+      if (!resident && selection.seeded === undefined && expectedHeadSha !== undefined) {
+        await executor.exec(
+          coldReviewCheckoutCommand({ ...repoCtx, repo: pr.repo, pr: pr.number, headSha: expectedHeadSha }),
+          { timeoutMs: BASH_TIMEOUT_MAX_MS },
+        );
+      }
+      const sha =
+        source === "resident binding"
+          ? binding?.sha
+          : await executor
+              .exec(command, { timeoutMs: 30_000 })
+              .then(parseRevParseOutput)
+              .catch(() => undefined);
       const g = await guardAttachedHead({
         pr,
-        expectedHeadSha: repoCtx.headSha,
-        attached: { sha: binding?.sha, ref: binding?.ref },
+        expectedHeadSha,
+        attached: { sha, ref: binding?.ref ?? repoCtx.ref, source },
         fallbackRef: repoCtx.ref,
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
         logKey: msg.threadKey,

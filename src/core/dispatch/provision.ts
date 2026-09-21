@@ -20,6 +20,7 @@ import {
   WorkspaceReattachLeaseSpentError,
   WorkspaceReattachRefusedError,
   type ExecutorSelection,
+  type GithubCredentialProvider,
   type WorkspaceBinding,
 } from "../../execution/factory.js";
 import { isRunStopError } from "../../execution/executor.js";
@@ -82,6 +83,13 @@ import type { ReferencedConversation } from "../references/types.js";
 export interface ProvisionDeps
   extends RecordDeps, Pick<AdmissionDeps, "runLedger">, Pick<AuthorizeDeps, "capabilities"> {
   config: ConfigStore;
+  /** True for the long-lived bot process. A one-shot CLI ask leaves this off:
+   *  local execution is its own deliberate workspace backend, while a hosted
+   *  bot must never run workspace presets inside its own container. */
+  hostedRuns?: boolean;
+  /** Injectable credential boundary for hermetic dispatcher tests. Production
+   *  leaves this absent and the factory reads the process's App/PAT state. */
+  githubCredentials?: GithubCredentialProvider;
   /** The harnesses the process drives runs with (docs/reference/specs/harness.md
    *  items 8 and 10), for the name `run_meta` carries — the one the scopes'
    *  word for the preset picks; absent in a process that starts no run (a test
@@ -816,7 +824,7 @@ export type WorkspaceReattach =
  *  ask-once refusal (no branch is bound and none was named). */
 export type WorkspaceAttach =
   | WorkspaceReattach
-  | { kind: "refused"; reason: "which_branch" }
+  | { kind: "refused"; reason: "which_branch" | "workspace_backend_unconfigured" }
   /** The run's own stop ended the attach (its signal rode into the attach's wait): not a failure, never provisioned cold. */
   | { kind: "stopped" };
 
@@ -830,7 +838,7 @@ export type WorkspaceAttach =
  * Every failure propagates: the callers read the ones they decide by name.
  */
 async function attachRound(
-  deps: Pick<ProvisionDeps, "config" | "dataDir">,
+  deps: Pick<ProvisionDeps, "config" | "dataDir" | "githubCredentials">,
   ctx: AttachContext,
 ): Promise<RoundWorkspace> {
   const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal, remainingMs, requester } = ctx;
@@ -858,6 +866,7 @@ async function attachRound(
           // Where a requester's stored GitHub binding is read: the commit
           // identity env resolves the author pair from it (record 0062).
           bindings: deps.config,
+          ...(deps.githubCredentials !== undefined ? { githubCredentials: deps.githubCredentials } : {}),
         },
         round: {
           threadKey,
@@ -937,6 +946,27 @@ export async function attachWorkspace(
 ): Promise<WorkspaceAttach> {
   const { msg, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach, stopSignal } = ctx;
   const { remainingMs } = ctx;
+  // A local backend is deliberate for the one-shot CLI, but in the hosted bot
+  // it means a workspace preset would execute inside the bot container. Refuse
+  // from the process capability before the factory can silently create one.
+  if (deps.hostedRuns === true && deps.capabilities.execution === "local" && profile.machine !== "none") {
+    await refuse(
+      refusalOf(
+        "setup_failed",
+        `🚫 \`${agent.name}\` cannot start because this bot has no workspace backend configured.`,
+      ),
+      () =>
+        card.done(
+          shell.close({
+            kind: "not_started",
+            icon: "🚫",
+            reason: "workspace backend unavailable",
+            ...closeLines(clock(), false),
+          }),
+        ),
+    );
+    return { kind: "refused", reason: "workspace_backend_unconfigured" };
+  }
   let round: RoundWorkspace;
   try {
     round = await attachRound(deps, {

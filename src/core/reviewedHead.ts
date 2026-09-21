@@ -51,6 +51,20 @@ export function sameCommit(a: string, b: string): boolean {
   return n >= 7 && a.slice(0, n) === b.slice(0, n);
 }
 
+/** A mismatch sentence that cannot print two identical accepted-looking
+ * prefixes: it names the authoritative source, both values and their first
+ * differing hex position. */
+function mismatchReason(source: "workspace-observed" | "model-reported", reviewed: string, expected: string): string {
+  const compared = Math.min(reviewed.length, expected.length);
+  let at = 0;
+  while (at < compared && reviewed[at] === expected[at]) at += 1;
+  const divergence =
+    at < compared
+      ? `they first differ at hex ${at + 1} (${reviewed[at]} ≠ ${expected[at]})`
+      : `the ${reviewed.length}-hex reviewed value ends before the ${expected.length}-hex PR head`;
+  return `${source} reviewed head ${reviewed} is not the PR head ${expected}; ${divergence}`;
+}
+
 /**
  * Decide whether the reviewed head is the PR head. `expected` is the PR head
  * from repo resolution; `observed` the dispatcher's own `git rev-parse HEAD`
@@ -63,7 +77,7 @@ export function checkReviewedHead(input: { expected?: string; observed?: string;
   if (observed) {
     return sameCommit(observed, expected)
       ? { ok: true, head: observed, source: "observed" }
-      : { ok: false, reason: `reviewed head ${observed.slice(0, 7)} is not the PR head ${expected.slice(0, 7)}` };
+      : { ok: false, reason: mismatchReason("workspace-observed", observed, expected) };
   }
   const reported = normalizeHead(input.reported);
   if (!reported)
@@ -73,5 +87,5 @@ export function checkReviewedHead(input: { expected?: string; observed?: string;
     };
   return sameCommit(reported, expected)
     ? { ok: true, head: reported, source: "reported" }
-    : { ok: false, reason: `reviewed head ${reported.slice(0, 7)} is not the PR head ${expected.slice(0, 7)}` };
+    : { ok: false, reason: mismatchReason("model-reported", reported, expected) };
 }

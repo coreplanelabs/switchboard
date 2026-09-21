@@ -259,8 +259,9 @@ describe("guardAttachedHead (before any model call)", () => {
     expect(r.outcome).toBe("refused");
     if (r.outcome === "refused") {
       expect(r.reply).toContain("acme/api#42");
-      expect(r.reply).toContain(`\`${OTHER.slice(0, 7)}\``);
-      expect(r.reply).toContain(`\`${HEAD.slice(0, 7)}\``);
+      expect(r.reply).toContain(`workspace-observed HEAD for patch-1 is at ${OTHER}`);
+      expect(r.reply).toContain(`PR head is ${HEAD}`);
+      expect(r.reply).toContain("This infrastructure mismatch is not a finding and nothing was posted to GitHub");
       expect(r.reply).toMatch(/re-send/i);
     }
   });
@@ -277,18 +278,25 @@ describe("guardAttachedHead (before any model call)", () => {
       logKey: "t",
     });
     expect(r.outcome).toBe("refused");
-    if (r.outcome === "refused") expect(r.reply).toContain("`patch-1`"); // the fallback ref names the branch
+    if (r.outcome === "refused") expect(r.reply).toContain("workspace-observed HEAD for patch-1");
   });
 
-  it("a malformed or absent sha on either side proves nothing → unverified", async () => {
+  it("an invalid expected head stays with the earlier preflight; an unreadable workspace head is refused as infrastructure", async () => {
     const fetchPrHead = vi.fn(async () => HEAD);
     const base = { pr: { repo: "acme/api", number: 42 }, fallbackRef: undefined, fetchPrHead, logKey: "t" };
     expect(
       await guardAttachedHead({ ...base, expectedHeadSha: undefined, attached: { sha: OTHER, ref: "b" } }),
     ).toEqual({ outcome: "unverified" });
-    expect(
-      await guardAttachedHead({ ...base, expectedHeadSha: HEAD, attached: { sha: "not-a-sha", ref: "b" } }),
-    ).toEqual({ outcome: "unverified" });
+    const unreadable = await guardAttachedHead({
+      ...base,
+      expectedHeadSha: HEAD,
+      attached: { sha: "not-a-sha", ref: "b", source: "workspace-observed" },
+    });
+    expect(unreadable.outcome).toBe("refused");
+    if (unreadable.outcome === "refused") {
+      expect(unreadable.reply).toContain("workspace-observed HEAD for b could not be read");
+      expect(unreadable.reply).toContain("not a finding and nothing was posted to GitHub");
+    }
     expect(fetchPrHead).not.toHaveBeenCalled();
   });
 });

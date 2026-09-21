@@ -9,6 +9,7 @@ import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
+import { TEST_GITHUB_CREDENTIALS } from "../../execution/testing/githubCredentials.js";
 import type { Provider } from "../provider.js";
 import { ExecSandboxRestartedError, type Executor } from "../../execution/executor.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
@@ -264,6 +265,7 @@ function setup(
     runHistoryWriter: writer,
     runStore: new NullRunStore(),
     githubApi: new InMemoryGithubApi(),
+    githubCredentials: TEST_GITHUB_CREDENTIALS,
     ...(harness ? { harness } : {}),
     ...(opts.artifacts ? { artifacts: opts.artifacts } : {}),
     ...(opts.review
@@ -4535,7 +4537,11 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
   it("a recorded binding re-attaches mid-run with no gate context — the same round comes back on the local backend, the thread's directory made once; a resident binding with no resident configured is refused by name — and pi starts again in a replacement container from a session rebuilt from the ledger's rows, the call in flight settled with the restart note, the model continuing from the rebuilt transcript", async () => {
     const workspaceDir = mkdtempSync(join(tmpdir(), "swb-relaunch-"));
     const config = configStore(`${YAML}workspaceDir: ${workspaceDir}\n`);
-    const provisionDeps = { config, dataDir: join(workspaceDir, "data") };
+    const provisionDeps = {
+      config,
+      dataDir: join(workspaceDir, "data"),
+      githubCredentials: TEST_GITHUB_CREDENTIALS,
+    };
     const agent = getAgent("coding");
     const profile = declaredProfile(agent);
     const repoCtx: RepoContext = { repo: "acme/api", ref: "main" };

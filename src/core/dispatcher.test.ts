@@ -22,6 +22,7 @@ import { reclaimRuns } from "./boot.js";
 import { piRunPaths, RUN_BEARER_ENV } from "./harness/pi/process.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
+import { TEST_GITHUB_CREDENTIALS } from "../execution/testing/githubCredentials.js";
 import { InMemoryArtifactStore } from "../artifacts/store.js";
 import { ExecInfraError, ExecSandboxRestartedError } from "../execution/executor.js";
 import { classifyError } from "./trace/classify.js";
@@ -259,6 +260,7 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
       sleep: realSleep,
     },
     capabilities: capabilitiesFrom(config.config, process.env, processSecrets),
+    githubCredentials: TEST_GITHUB_CREDENTIALS,
     residentFleet: NO_FLEET,
     memory: new NullMemoryStore(),
     mcp: new NullMcpToolSource(),
@@ -2117,21 +2119,33 @@ describe("repo/ref resolution + resident prompt selection", () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
-    residentFetchStub();
+    const head = "e".repeat(40);
+    residentFetchStub({
+      attach: () =>
+        new Response(
+          JSON.stringify({ workspace: "/workspace/threads/t/main", ref: "patch-1", sha: head, user: "worker3" }),
+          { status: 200 },
+        ),
+    });
     const provider = capturingProvider();
     const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
-    const ctx = { repo: "acme/api", ref: "patch-1", pr: 42, headSha: "e".repeat(40), baseRef: "main" };
+    const ctx = { repo: "acme/api", ref: "patch-1", pr: 42, headSha: head, baseRef: "main" };
     deps.resolveRepoContext = () => ctx;
     deps.postReviewComment = vi.fn(async () => {});
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
     const system = provider.requests[0].system ?? "";
     expect(system).toContain(AGENTS.review.residentSystem!);
-    // The stub attaches at the malformed sha "abc": nothing to verify against,
-    // so the block carries the worktree path but no verified-at-attach claim.
-    expect(system).toContain(reviewTargetBlock({ ...ctx, resident: true, workspace: "/workspace/threads/t/main" }));
-    expect(system).toContain(`Head commit: ${"e".repeat(40)}`);
-    expect(system).not.toMatch(/verified it before this run/);
+    expect(system).toContain(
+      reviewTargetBlock({
+        ...ctx,
+        resident: true,
+        workspace: "/workspace/threads/t/main",
+        verifiedAtAttach: true,
+      }),
+    );
+    expect(system).toContain(`Head commit: ${head}`);
+    expect(system).toMatch(/verified it before this run/);
   });
 
   // Feature: docs/reference/specs/agent-review.md item 10 — the dispatcher compares
@@ -2224,8 +2238,8 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(post).not.toHaveBeenCalled();
     const reply = replies.find((r) => /not started/i.test(r)) ?? "";
     expect(reply).toContain("acme/api#42");
-    expect(reply).toContain("`4dd3832`"); // what the resident attached
-    expect(reply).toContain("`eeeeeee`"); // what the PR head is
+    expect(reply).toContain(attached); // what the resident attached
+    expect(reply).toContain(head); // what the PR head is
     expect(reply).toMatch(/re-send/i);
     const last = statuses[statuses.length - 1];
     expect(last.title).toMatch(/not started/);
@@ -2407,12 +2421,20 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const ctx = { repo: "acme/api", pr: 42, headSha: "e".repeat(40) };
     deps.resolveRepoContext = () => ctx;
     deps.postReviewComment = vi.fn(async () => {});
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: {
+        exec: async (command: string) => (/git rev-parse HEAD/.test(command) ? `${ctx.headSha}\n` : ""),
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => ({ released: true }),
+      },
+    });
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
     const system = provider.requests[0].system ?? "";
     expect(system).toContain(AGENTS.review.system);
     expect(system).toContain(reviewTargetBlock({ ...ctx, resident: false }));
-    expect(system).toContain("`gh pr checkout 42`");
+    expect(system).toContain("Switchboard provisioned the repository in your current workspace");
   });
 
   it("no REVIEW TARGET block for a coding run on a PR, nor for a review with no resolved PR", async () => {
@@ -2471,13 +2493,18 @@ describe("review post-step", () => {
   /** An executor whose workspace is a checkout at `head` (`git rev-parse HEAD`
    *  answers it); `head` undefined = a cwd that is not a git repo (the cold
    *  sandbox's workspace root). Records the order of exec/release calls. */
-  function headExecutor(head: string | undefined) {
+  function headExecutor(head: string | undefined | readonly (string | undefined)[]) {
     const order: string[] = [];
+    const heads = Array.isArray(head) ? [...head] : [head];
     const executor = {
       exec: async (cmd: string) => {
         order.push(`exec:${cmd}`);
-        if (/git rev-parse HEAD/.test(cmd))
-          return head ? `${head}\n` : "fatal: not a git repository (or any of the parent directories): .git\nexit 128";
+        if (/git rev-parse HEAD/.test(cmd)) {
+          const observed = heads.length > 1 ? heads.shift() : heads[0];
+          return observed
+            ? `${observed}\n`
+            : "fatal: not a git repository (or any of the parent directories): .git\nexit 128";
+        }
         return "";
       },
       readFile: async () => "",
@@ -2967,7 +2994,7 @@ describe("review post-step", () => {
     it("a post the reviewed-head guard refused is recorded as a skip with its reason, beside a review_not_posted note — the record says the verdict is Slack-only, not that GitHub is slow (item 18)", async () => {
       const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "looks great"));
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
-      headExecutor(OTHER_HEAD);
+      headExecutor([PR_HEAD, OTHER_HEAD]);
       deps.postReviewComment = postSpy().fn;
       deps.runRegistry = new RunRegistry({ genId: () => "r-skip", genToken: () => "t-skip" });
       const store = new InMemoryRunStore();
@@ -3030,13 +3057,13 @@ describe("review post-step", () => {
         return THIRD_HEAD;
       });
       vi.mocked(makeExecutor).mockReset();
-      headExecutor(OTHER_HEAD); // workspace HEAD is not the PR head → guard skips the post
+      headExecutor([PR_HEAD, OTHER_HEAD]); // verified before the turn, then moved before publication
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(spy.calls).toHaveLength(0);
       expect(asked).toHaveLength(1);
       expect(replies.some((r) => r.includes("moved during the run"))).toBe(false);
-      expect(replies.some((r) => r.includes("reviewed head d75b5a5 is not the PR head e8e43f4"))).toBe(true);
+      expect(replies.some((r) => r.includes(`reviewed head ${OTHER_HEAD} is not the PR head ${PR_HEAD}`))).toBe(true);
     });
   });
 
@@ -3175,7 +3202,7 @@ describe("review post-step", () => {
       expect(reviewTurns(provider)).toHaveLength(1); // no re-review
       expect(ex.moves).toEqual([]);
       expect(ex.probeSpans.length).toBeGreaterThan(0);
-      expect(new Set(ex.probeSpans)).toEqual(new Set(["run.settle_reviewed_head"]));
+      expect(new Set(ex.probeSpans)).toEqual(new Set(["none", "run.settle_reviewed_head"]));
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
       expect(spy.calls[0].body).toMatch(
@@ -3413,6 +3440,7 @@ describe("review post-step", () => {
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "e".repeat(40) });
     const spy = postSpy();
     deps.postReviewComment = spy.fn;
+    headExecutor("e".repeat(40));
     const { io, replies } = fakeIO();
     const run = dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     while (!hardSignal) await new Promise((r) => setTimeout(r, 5));
@@ -3699,7 +3727,7 @@ describe("review post-step", () => {
     it("the workspace HEAD is not the PR head → no post, the thread is told both shas", async () => {
       const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "looks great"));
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
-      headExecutor(OTHER_HEAD);
+      headExecutor([PR_HEAD, OTHER_HEAD]);
       const spy = postSpy();
       deps.postReviewComment = spy.fn;
       const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -3708,11 +3736,9 @@ describe("review post-step", () => {
       expect(spy.fn).not.toHaveBeenCalled();
       expect(replies.some((r) => r.includes("the findings"))).toBe(true); // Slack still gets the review (item 5b: nothing posted → the write-up rides along)
       const note = replies.find((r) => /not posted to acme\/api#42/.test(r));
-      expect(note).toMatch(
-        new RegExp(`reviewed head ${OTHER_HEAD.slice(0, 7)} is not the PR head ${PR_HEAD.slice(0, 7)}`),
-      );
+      expect(note).toMatch(new RegExp(`reviewed head ${OTHER_HEAD} is not the PR head ${PR_HEAD}`));
       expect(log.mock.calls.map((c) => c.map(String).join(" "))).toContainEqual(
-        expect.stringMatching(/^\[review-post\] .* skipped: reviewed head .* is not the PR head/),
+        expect.stringMatching(/^\[review-post\] .* skipped: workspace-observed reviewed head .* is not the PR head/),
       );
       log.mockRestore();
     });
@@ -3747,7 +3773,7 @@ describe("review post-step", () => {
     it("no git in the workspace cwd (cold sandbox root) → the agent-reported head decides: match posts, pinned", async () => {
       const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok", "fine", PR_HEAD.slice(0, 12)));
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
-      headExecutor(undefined);
+      headExecutor([PR_HEAD, undefined]);
       const spy = postSpy();
       deps.postReviewComment = spy.fn;
       const { io } = fakeIO();
@@ -3760,7 +3786,7 @@ describe("review post-step", () => {
     it("no git in the cwd and the reported head mismatches → no post", async () => {
       const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok", "fine", OTHER_HEAD));
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
-      headExecutor(undefined);
+      headExecutor([PR_HEAD, undefined]);
       const spy = postSpy();
       deps.postReviewComment = spy.fn;
       const { io, replies } = fakeIO();
@@ -3772,7 +3798,7 @@ describe("review post-step", () => {
     it("no git in the cwd and no reported head → no post (reviewed head unknown)", async () => {
       const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok"));
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
-      headExecutor(undefined);
+      headExecutor([PR_HEAD, undefined]);
       const spy = postSpy();
       deps.postReviewComment = spy.fn;
       const { io, replies } = fakeIO();
@@ -3784,7 +3810,7 @@ describe("review post-step", () => {
     it("a matching reported head cannot override a mismatching observed HEAD", async () => {
       const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok", "fine", PR_HEAD));
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
-      headExecutor(OTHER_HEAD);
+      headExecutor([PR_HEAD, OTHER_HEAD]);
       const spy = postSpy();
       deps.postReviewComment = spy.fn;
       const { io } = fakeIO();
@@ -5829,6 +5855,7 @@ describe("closed-card checklist and review verdict run link", () => {
     n = 0;
     const quiet = fakeIO();
     await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+    prHeadExecutor();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), quiet.io);
     expect(quiet.statuses.some((s) => s.activity?.kind === "command")).toBe(false);
     expect(quiet.statuses.some((s) => s.activity?.kind === "line" && s.activity.text === "→ bash")).toBe(true);
@@ -15307,8 +15334,8 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
   ];
   const followUp = { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: THREAD, text: "and bump the version" };
   /** The coding run's workspace: a fake executor that answers every command with nothing. */
-  const fakeExecutor = () => ({
-    exec: async () => "",
+  const fakeExecutor = (head?: string) => ({
+    exec: async (command: string) => (/git rev-parse HEAD/.test(command) && head ? `${head}\n` : ""),
     readFile: async () => "",
     writeFile: async () => "",
     release: async () => ({ released: true }),
@@ -15610,7 +15637,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       baseRef: "main",
     });
     t.deps.postReviewComment = vi.fn(async () => {});
-    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor("a".repeat(40)) });
     let systemOnPi: string | undefined;
     let agentOnPi: string | undefined;
     vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (_deps, run) => {

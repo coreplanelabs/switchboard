@@ -601,6 +601,7 @@ export async function runBot(): Promise<void> {
       ...(process.env.PORT ? { loopbackUrl: `http://127.0.0.1:${process.env.PORT}` } : {}),
     },
     capabilities,
+    hostedRuns: true,
     residentFleet,
     // What this process is, for the About block: the package version and the image's stamp.
     build: { version: packageVersion(), commit: build.commit },

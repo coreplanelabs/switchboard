@@ -21,7 +21,7 @@ import {
   type ExecutorFactoryOptions,
   type WorkspaceBinding,
 } from "./factory.js";
-import { resolveGithubIdentity, resolveGithubToken } from "./githubApp.js";
+import { githubAppConfigured, resolveGithubIdentity, resolveGithubToken } from "./githubApp.js";
 
 // The sandbox's GitHub credential is minted per identity (least-privilege), so
 // mock the mint to a scope-tagged token: the test asserts the SCOPE requested
@@ -32,6 +32,7 @@ vi.mock("./githubApp.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("./githubApp.js")>();
   return {
     ...mod,
+    githubAppConfigured: vi.fn(() => true),
     resolveGithubToken: vi.fn(async (scope?: "read" | "write") => `ghs_${scope ?? "write"}`),
     resolveGithubIdentity: vi.fn(async () => undefined),
   };
@@ -56,6 +57,7 @@ describe("makeExecutor per-agent provisioning", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+    vi.mocked(githubAppConfigured).mockReturnValue(true);
   });
 
   it("an agent declaring no repo gets a null executor with cloudflare configured (no sandbox call, no token needed)", async () => {
@@ -89,12 +91,42 @@ describe("makeExecutor per-agent provisioning", () => {
     expect(existsSync(d.workspaceDir)).toBe(false);
   });
 
-  it("a repo-requiring agent gets a LocalExecutor with a per-thread workspace (local)", async () => {
+  it("a local backend honors the effective profile's identity on every exec instead of inheriting an arbitrary host credential", async () => {
     const d = dirs();
-    const { executor: ex, backend } = await makeExecutor({ ...d }, ctx("coding"));
-    expect(ex).toBeInstanceOf(LocalExecutor);
-    expect(backend).toBe("local");
+    vi.mocked(resolveGithubToken).mockClear();
+    const writing = await makeExecutor({ ...d }, ctx("coding"));
+    expect(writing.executor).toBeInstanceOf(LocalExecutor);
+    expect(writing.backend).toBe("local");
     expect(existsSync(join(d.workspaceDir, "slack_CX_1.0"))).toBe(true);
+    await expect(writing.executor.exec('printf %s "$GH_TOKEN"')).resolves.toBe("ghs_write");
+    expect(resolveGithubToken).toHaveBeenLastCalledWith("write");
+
+    const reading = await makeExecutor({ ...d }, ctx("review"));
+    await expect(reading.executor.exec('printf %s "$GH_TOKEN"')).resolves.toBe("ghs_read");
+    expect(resolveGithubToken).toHaveBeenLastCalledWith("read");
+  });
+
+  it("refuses a read identity when only an unscoped static token is available, and a write identity when no credential is available", async () => {
+    vi.mocked(githubAppConfigured).mockReturnValue(false);
+    vi.stubEnv("GH_TOKEN", "ghp_static");
+    await expect(makeExecutor({ ...dirs() }, ctx("review"))).rejects.toThrow(
+      /profile identity "read".*GitHub App.*static GH_TOKEN cannot be scoped down/i,
+    );
+
+    vi.stubEnv("GH_TOKEN", "");
+    await expect(makeExecutor({ ...dirs() }, ctx("review"))).rejects.toThrow(
+      /profile identity "read".*no GitHub credential is configured/i,
+    );
+    await expect(makeExecutor({ ...dirs() }, ctx("coding"))).rejects.toThrow(
+      /profile identity "write".*no GitHub credential is configured/i,
+    );
+
+    vi.mocked(githubAppConfigured).mockReturnValue(true);
+    vi.mocked(resolveGithubToken).mockResolvedValueOnce(null);
+    const mintFailed = await makeExecutor({ ...dirs() }, ctx("review"));
+    await expect(mintFailed.executor.exec("echo must-not-run")).rejects.toThrow(
+      /profile identity "read".*no GitHub credential is available/i,
+    );
   });
 
   it("a repo-requiring agent gets the Cloudflare backend when configured", async () => {
@@ -2096,6 +2128,9 @@ describe("makeExecutor machine classes", () => {
     ...base,
     name: `${base.name}-${machine}`,
     machine,
+    // `blank` carries no credential by definition, so its truthful profile is
+    // identity `none`; the factory refuses any stronger combination.
+    identity: machine === "blank" ? "none" : base.identity,
   });
 
   /** A fetch that records nothing and fails loudly: no class here may call the network at selection. */

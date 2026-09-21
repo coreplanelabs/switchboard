@@ -192,6 +192,12 @@ export class PiRpcTransport implements PiTransport {
     return this.deps.container.writeLine(this.deps.paths, line).then(() => "landed" as const);
   }
 
+  /** The first FIFO write failure, for the harness's start-failure rule. The
+   *  command stays private: reset recovery resolves it through `pendingSend`. */
+  get writeFailure(): Error | undefined {
+    return this.sendError;
+  }
+
   /** Whether the reader is at the log's end as far as it knows: every record
    *  read has been handed out and the last read was short. The gate reads its
    *  clock only then (`HeldSends.quiet`): a catch-up burst still being handed
