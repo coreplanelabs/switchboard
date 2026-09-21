@@ -45,11 +45,18 @@ import {
   referenceRefusalCode,
   type ReferenceDeps,
 } from "./dispatch/references.js";
-import { resolveChatActor } from "./authz/actor.js";
+import { chatActorOf, resolveChatActor } from "./authz/actor.js";
 import { operatorModeOf, referencesOn } from "../config.js";
 import { parseChatCommand } from "./commandChat.js";
 import { parseDirectives } from "../directives.js";
-import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
+import {
+  readRequest,
+  resolveProfile,
+  resolveRepoTarget,
+  resolveRun,
+  resolveTarget,
+  type ResolveDeps,
+} from "./dispatch/resolve.js";
 import { compoundBrief, type RouteDecided, type RouteModel } from "./dispatch/route.js";
 import type { ProviderTable } from "./harness/piAi.js";
 import {
@@ -104,6 +111,7 @@ import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
 import { fetchInstanceStatusViaShim, processShimOptions } from "./coordinator/instancesClient.js";
 import { shipPresetFor } from "./shipPipeline.js";
 import { resolveAddressSeverity } from "./reviewVerdict.js";
+import { closedReviewPreflight } from "./reviewRound.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
 import { withContractInFirstUserTurn } from "./ship/codingChild.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
@@ -979,6 +987,49 @@ export async function dispatch(
     if (profileGate.kind === "refused") return ended;
     const { profile } = profileGate;
 
+    // A review resolves its repository state before admission. A pull request
+    // GitHub already closed cannot be reviewed, so it must not claim the
+    // thread, open a card, register a run or provision a workspace merely to
+    // say so. The full target stage below reuses this same promise for an open
+    // pull request; every other agent starts resolution in its old position.
+    const earlyRepoTarget =
+      agent.name === "review"
+        ? resolveRepoTarget(deps, {
+            msg,
+            history,
+            profile,
+            resume,
+            root,
+            ...(threadPr ? { records: { pr: threadPr } } : {}),
+          })
+        : undefined;
+    if (earlyRepoTarget !== undefined) {
+      const preflightRepoCtx = await earlyRepoTarget.repoCtxP;
+      const preflight = closedReviewPreflight({ agent, repoCtx: preflightRepoCtx });
+      if (!preflight.ok) {
+        // State is never disclosed around the repository authorization table.
+        // This request ends here, so this is the one and only repo check.
+        if (
+          preflightRepoCtx.repo !== undefined &&
+          !deps.config.canUseRepo(chatActorOf(deps.config, msg), preflightRepoCtx.repo)
+        ) {
+          await refuse(
+            refusalOf(
+              "repo_access",
+              REFUSAL_SENTENCES.repo_access({
+                repo: preflightRepoCtx.repo,
+                adminsHint: deps.config.adminsHint(),
+              }),
+            ),
+          );
+        } else {
+          await io.reply(preflight.reply);
+        }
+        await recordPendingOperator();
+        return ended;
+      }
+    }
+
     // Thread admission (docs/reference/specs/thread-admission.md item 1) and the
     // carried run's row and inbox: the admission stage (dispatch/admission.ts).
     // What the stage takes hold of — the thread slot, an adopted row, a
@@ -1080,6 +1131,7 @@ export async function dispatch(
       resume,
       root,
       ...(threadPr ? { records: { pr: threadPr } } : {}),
+      ...(earlyRepoTarget !== undefined ? { repoTarget: earlyRepoTarget } : {}),
     });
 
     // Cross-session memory — READ path, started here (dispatch/provision.ts) so
@@ -1974,6 +2026,7 @@ export async function dispatch(
       answer,
       verdict: ran.verdict,
       reviewPost: ran.reviewPost,
+      reviewStoppedBeforeStart: ran.reviewStoppedBeforeStart,
       verbosity: resolved.verbosity,
       liveUrl,
       prNote,

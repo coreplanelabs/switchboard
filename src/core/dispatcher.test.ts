@@ -2321,7 +2321,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(replies.find((r) => /not started/i.test(r)) ?? "").toContain("acme/api#42");
   });
 
-  it("a review whose inherited PR is CLOSED still runs (Slack-only, as before) — only an unknown head refuses", async () => {
+  it("a legacy inherited-PR context without the resolved closed-state fact still runs Slack-only — only an unknown head refuses", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -2466,6 +2466,260 @@ describe("review post-step", () => {
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
     return { executor, order };
   }
+
+  it("a merged PR ends before admission with one nothing-to-review line and no run machinery", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = vi.spyOn(admission, "claim");
+    deps.admission = admission;
+    const registry = new RunRegistry({ genId: () => "never", genToken: () => "never" });
+    const create = vi.spyOn(registry, "create");
+    deps.runRegistry = registry;
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      pr: 42,
+      closedPr: { number: 42, merged: true, mergedAt: "2026-09-20T03:28:00.000Z" },
+    });
+    const post = postSpy();
+    deps.postReviewComment = post.fn;
+    const { io, replies, statuses } = fakeIO();
+
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+
+    expect(replies).toEqual([
+      "acme/api#42 merged at 2026-09-20T03:28:00.000Z; nothing to review. Say which pull request you meant.",
+    ]);
+    expect(statuses).toEqual([]);
+    expect(claim).not.toHaveBeenCalled();
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(provider.requests).toEqual([]);
+    expect(post.fn).not.toHaveBeenCalled();
+  });
+
+  it("a closed-unmerged PR ends before admission with one closed line and no merge time or run machinery", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = vi.spyOn(admission, "claim");
+    deps.admission = admission;
+    const registry = new RunRegistry({ genId: () => "never", genToken: () => "never" });
+    const create = vi.spyOn(registry, "create");
+    deps.runRegistry = registry;
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      pr: 42,
+      closedPr: { number: 42, merged: false },
+    });
+    const post = postSpy();
+    deps.postReviewComment = post.fn;
+    const { io, replies, statuses } = fakeIO();
+
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+
+    expect(replies).toEqual(["acme/api#42 is closed; nothing to review. Say which pull request you meant."]);
+    expect(replies[0]).not.toContain("merged at");
+    expect(statuses).toEqual([]);
+    expect(claim).not.toHaveBeenCalled();
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(provider.requests).toEqual([]);
+    expect(post.fn).not.toHaveBeenCalled();
+  });
+
+  it("a soft stop before review activity replies only that it stopped and runs no review tail", async () => {
+    const registry = new RunRegistry({ genId: () => "r-early-stop", genToken: () => "t-early-stop" });
+    let turn = 0;
+    const provider: Provider & { requests: CompletionRequest[] } = {
+      name: "fake",
+      requests: [],
+      async complete(req): Promise<CompletionResult> {
+        this.requests.push(req);
+        turn++;
+        if (turn === 1) {
+          registry.requestStop("r-early-stop", "t-early-stop", "soft");
+          return { content: [{ type: "text", text: "no review activity yet" }], stopReason: "end_turn" };
+        }
+        if (turn === 2) return { content: [{ type: "text", text: "there were no findings" }], stopReason: "end_turn" };
+        return {
+          content: [
+            {
+              type: "tool_use",
+              id: "synthetic-verdict",
+              name: "submit_verdict",
+              input: {
+                verdict: "request_changes",
+                summary: "checkout was not at the pull request head",
+                findings: [
+                  {
+                    id: "F1",
+                    severity: "blocking",
+                    title: "No checkout",
+                    detail: "No code was reviewed.",
+                  },
+                ],
+              },
+            },
+          ],
+          stopReason: "tool_use",
+        };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    const store = new InMemoryRunStore();
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+    headExecutor(PR_HEAD);
+    const post = postSpy();
+    deps.postReviewComment = post.fn;
+    const { io, replies } = fakeIO();
+
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    await deps.runHistoryWriter.settled();
+
+    expect(replies).toEqual(["⏹ Review stopped before it started."]);
+    const events = registry.snapshotById("r-early-stop")!.events;
+    expect(events.some((e) => e.type === "tool_call" && e.tool === "submit_verdict")).toBe(false);
+    expect(events.some((e) => e.type === "run_note" && e.kind === "review_not_posted")).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("checkout was not at the pull request head");
+    expect(JSON.stringify(events)).not.toContain('"id":"F1"');
+    expect(provider.requests).toHaveLength(1);
+    expect(post.fn).not.toHaveBeenCalled();
+    const record = await store.get("r-early-stop");
+    expect(record).toMatchObject({ status: "stopped_soft" });
+    expect(record).not.toHaveProperty("reviewHead");
+    expect(record).not.toHaveProperty("verdict");
+    expect(record).not.toHaveProperty("reviewPost");
+  });
+
+  it("a soft stop during a substantive head fetch aborts settlement before notifications, movement, follow-up, or publication", async () => {
+    const registry = new RunRegistry({ genId: () => "r-settle-stop", genToken: () => "t-settle-stop" });
+    let turn = 0;
+    const provider: Provider & { requests: CompletionRequest[] } = {
+      name: "fake",
+      requests: [],
+      async complete(req): Promise<CompletionResult> {
+        this.requests.push(req);
+        turn++;
+        if (turn === 1)
+          return { content: [{ type: "text", text: "ready to settle the reviewed head" }], stopReason: "end_turn" };
+        return { content: [{ type: "text", text: "too-late re-review turn" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    const store = new InMemoryRunStore();
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "patch-1",
+      pr: 42,
+      headSha: PR_HEAD,
+      baseRef: "main",
+    });
+    const { executor } = headExecutor(PR_HEAD);
+    const moveTo = vi.fn(async (sha: string) => ({ sha }));
+    Object.assign(executor, { moveTo });
+    deps.fetchPrHead = async () => {
+      registry.requestStop("r-settle-stop", "t-settle-stop", "soft");
+      return OTHER_HEAD;
+    };
+    const fetchPrCommits = vi.fn(async ({ sha }: { sha: string }) => ({
+      commits:
+        sha === PR_HEAD
+          ? [{ sha: "1".repeat(40), message: "feat: first version" }]
+          : [
+              { sha: "1".repeat(40), message: "feat: first version" },
+              { sha: "2".repeat(40), message: "fix: substantive follow-up" },
+            ],
+      files: ["src/x.ts"],
+      filesTruncated: false,
+    }));
+    deps.fetchPrCommits = fetchPrCommits;
+    const post = postSpy();
+    deps.postReviewComment = post.fn;
+    const { io, replies, statuses } = fakeIO();
+
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    await deps.runHistoryWriter.settled();
+
+    expect(replies).toEqual(["⏹ Review stopped before it started."]);
+    expect(statuses.map((status) => `${status.title}\n${status.detail ?? ""}`).join("\n")).not.toContain("head moved");
+    const events = registry.snapshotById("r-settle-stop")!.events;
+    expect(events.some((e) => e.type === "tool_call" && e.tool === "submit_verdict")).toBe(false);
+    expect(events.some((e) => e.type === "run_note" && e.kind === "head_moved")).toBe(false);
+    expect(events.some((e) => e.type === "run_note" && e.kind === "review_not_posted")).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("too-late re-review turn");
+    expect(fetchPrCommits).not.toHaveBeenCalled();
+    expect(moveTo).not.toHaveBeenCalled();
+    expect(provider.requests).toHaveLength(1);
+    expect(post.fn).not.toHaveBeenCalled();
+    const record = await store.get("r-settle-stop");
+    expect(record).toMatchObject({ status: "stopped_soft" });
+    expect(record).not.toHaveProperty("reviewHead");
+    expect(record).not.toHaveProperty("verdict");
+    expect(record).not.toHaveProperty("reviewPost");
+  });
+
+  it("a soft stop after checkout and real findings keeps the findings-so-far review behavior", async () => {
+    const registry = new RunRegistry({ genId: () => "r-late-stop", genToken: () => "t-late-stop" });
+    let turn = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        turn++;
+        if (turn === 1)
+          return {
+            content: [{ type: "tool_use", id: "checkout", name: "bash", input: { command: "git diff --stat" } }],
+            stopReason: "tool_use",
+          };
+        if (turn === 2)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "real-verdict",
+                name: "submit_verdict",
+                input: {
+                  verdict: "request_changes",
+                  summary: "one real issue",
+                  head: PR_HEAD,
+                  findings: [
+                    {
+                      id: "F1",
+                      severity: "major",
+                      file: "src/a.ts",
+                      line: 12,
+                      title: "Real issue",
+                      detail: "The reviewed change breaks the caller.",
+                    },
+                  ],
+                },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        registry.requestStop("r-late-stop", "t-late-stop", "soft");
+        return { content: [{ type: "text", text: "the real finding remains" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+    headExecutor(PR_HEAD);
+    const post = postSpy();
+    deps.postReviewComment = post.fn;
+    const { io, replies } = fakeIO();
+
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+
+    expect(replies.some((reply) => reply.includes("one real issue") && reply.includes("Real issue"))).toBe(true);
+    expect(post.calls).toHaveLength(1);
+    expect(post.calls[0].body).toContain("Changes requested: one real issue");
+    expect(post.calls[0].body).toContain("Real issue");
+  });
 
   it("a review of a resolved PR posts the review back to the PR by default", async () => {
     const provider = capturingProvider();
@@ -3140,7 +3394,7 @@ describe("review post-step", () => {
     while (!hardSignal) await new Promise((r) => setTimeout(r, 5));
     registry.requestStop("r1", "t1", "hard");
     await run;
-    expect(replies.some((r) => r.includes("aborted"))).toBe(true); // Slack still learns why it ended
+    expect(replies).toEqual(["⏹ Review stopped before it started."]); // Slack gets only the stop outcome
     expect(spy.calls).toEqual([]); // …but the PR gets no "review"
   });
 

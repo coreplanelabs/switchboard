@@ -198,12 +198,17 @@ export function resolveProfile(ctx: {
   return resolution;
 }
 
+/** The repository half of target resolution. A review starts this before
+ *  admission so a closed pull request can end without claiming the thread. */
+export interface ResolvedRepoTarget {
+  needsRepo: boolean;
+  repoCtxP: Promise<RepoContext>;
+}
+
 /** Whether the run's machine class carries a repository, the target's
  *  resolution in flight, and the model card resolved beside the block check
  *  (record 0052) with every control decided against it. */
-export interface ResolvedTarget {
-  needsRepo: boolean;
-  repoCtxP: Promise<RepoContext>;
+export interface ResolvedTarget extends ResolvedRepoTarget {
   /** The card resolved before the first call; the run records it. */
   modelCard: ModelCard;
   /** Every control's decision — the degraded ones become notes on the record
@@ -226,6 +231,38 @@ export interface ResolveTargetContext {
    *  request its newest finished run opened, from the dispatcher's one read
    *  of the thread's runs; absent for a message that starts a thread. */
   records?: RunRecordSignals;
+  /** A repository resolution already started before admission. */
+  repoTarget?: ResolvedRepoTarget;
+}
+
+/**
+ * Resolve only the repository target. Review admission calls this early; the
+ * full target resolver reuses the same promise after admission.
+ */
+export function resolveRepoTarget(
+  deps: ResolveDeps,
+  ctx: Pick<ResolveTargetContext, "msg" | "history" | "profile" | "resume" | "root" | "records">,
+): ResolvedRepoTarget {
+  const { msg, history, profile, resume, root } = ctx;
+  const needsRepo = machineNeedsRepo(profile.machine);
+  const repoCtxP: Promise<RepoContext> = root.span("dispatch.repo_context", () =>
+    resume
+      ? Promise.resolve(resume.repoCtx)
+      : needsRepo
+        ? Promise.resolve(
+            deps.resolveRepoContext
+              ? deps.resolveRepoContext(msg, history, ctx.records)
+              : resolveRepoContext(
+                  msg,
+                  history,
+                  ...repoVetFor(profile, deps.config.config.execution?.resident),
+                  ctx.records,
+                ),
+          ).then((resolvedCtx) => resolvedCtx ?? {})
+        : Promise.resolve({}),
+  );
+  repoCtxP.catch(() => {});
+  return { needsRepo, repoCtxP };
 }
 
 /**
@@ -237,7 +274,7 @@ export interface ResolveTargetContext {
  * run whose machine class carries no repository resolves none.
  */
 export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): ResolvedTarget {
-  const { msg, history, profile, resolved, resume, root } = ctx;
+  const { msg, resolved } = ctx;
   const { provider: providerName } = parseModelRef(resolved.modelRef);
   const providers = deps.config.config.providers;
   if (!providers[providerName]) {
@@ -283,36 +320,10 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
     );
   }
 
-  // Target repo/ref for resident environments, resolved BEFORE the model
-  // turn: explicit signals in the message, else the repo this thread
-  // already established (from history — restart-safe, never stored). The
-  // gate belongs with the machine class: a run whose class carries no
-  // checkout (`none`, the general default) never resolves or gates a repo, so
-  // a workspace-less follow-up in a repo-mentioning thread is not wrongly
-  // refused and a PR-URL never triggers a wasted GitHub REST call for it.
-  // The production resolver vets bare `owner/name` tokens against the vet
-  // the machine class names (`repoVetFor`) so prose shaped like a slug can
-  // never bind a repo; an injected resolver (tests) is called as before.
-  // STARTED here (a promise) so the GitHub round trip overlaps the memory
-  // read below; awaited after the ack.
-  const needsRepo = machineNeedsRepo(profile.machine);
-  const repoCtxP: Promise<RepoContext> = root.span("dispatch.repo_context", () =>
-    resume
-      ? Promise.resolve(resume.repoCtx)
-      : needsRepo
-        ? Promise.resolve(
-            deps.resolveRepoContext
-              ? deps.resolveRepoContext(msg, history, ctx.records)
-              : resolveRepoContext(
-                  msg,
-                  history,
-                  ...repoVetFor(profile, deps.config.config.execution?.resident),
-                  ctx.records,
-                ),
-          ).then((ctx) => ctx ?? {})
-        : Promise.resolve({}),
-  );
-  repoCtxP.catch(() => {});
+  // Target repo/ref for resident environments, resolved before the model turn.
+  // Review requests may have started it before admission so a closed PR never
+  // owns the thread; every other request starts it here as before.
+  const { needsRepo, repoCtxP } = ctx.repoTarget ?? resolveRepoTarget(deps, ctx);
   return { needsRepo, repoCtxP, modelCard, decisions };
 }
 

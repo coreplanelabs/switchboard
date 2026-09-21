@@ -174,6 +174,12 @@ export interface RepoContext {
    *  Lets the dispatcher say so in the thread instead of a silent Slack-only
    *  verdict. Never set alongside `pr`. */
   prUnpostable?: { number: number; reason: "closed" | "unreachable" };
+  /** A pull request resolved from the current message or inherited thread that
+   *  GitHub says is closed. `merged` distinguishes a merge from a close, and
+   *  `mergedAt` is GitHub's valid merge timestamp when it supplied one. Review
+   *  admission renders this fact before claiming the thread; coding requests
+   *  still keep the PR's frozen head and description as context. */
+  closedPr?: { number: number; merged: boolean; mergedAt?: string };
   /** The pull request the thread's OWN run opened once it is no longer open —
    *  merged or closed — with the head commit GitHub recorded for it at the
    *  close (never the branch's later tip: `prHead` reads no ref tip for a
@@ -628,6 +634,7 @@ export async function resolveRepoContext(
   let baseRef: string | undefined;
   let prSize: PrSize | undefined;
   let facts: PrFacts | undefined;
+  let closedPr: RepoContext["closedPr"];
   if (s.pr && repo === s.pr.repo) {
     const head = await prHead(s.pr).catch(() => undefined);
     // Only an OPEN pull request contributes the ref hint (issue 1860): a
@@ -647,6 +654,12 @@ export async function resolveRepoContext(
     baseRef = head?.base;
     prSize = head?.size;
     facts = head?.facts;
+    if (head?.state === "closed")
+      closedPr = {
+        number: s.pr.number,
+        merged: head.merged,
+        ...(head.mergedAt !== undefined ? { mergedAt: head.mergedAt } : {}),
+      };
   }
 
   const out: RepoContext = {};
@@ -678,6 +691,7 @@ export async function resolveRepoContext(
     if (baseRef) out.baseRef = baseRef;
     if (prSize) out.prSize = prSize;
     if (facts) out.prDescription = facts;
+    if (closedPr) out.closedPr = closedPr;
   } else if (repo && !s.pr) {
     const inherited = inheritedPr(thread, records, repo);
     if (inherited) {
@@ -703,6 +717,12 @@ export async function resolveRepoContext(
         }
       } else {
         out.prUnpostable = { number: inherited.number, reason: head.reason };
+        if (head.reason === "closed")
+          out.closedPr = {
+            number: inherited.number,
+            merged: head.merged,
+            ...(head.mergedAt !== undefined ? { mergedAt: head.mergedAt } : {}),
+          };
         // The thread's own pull request, merged or closed since: no binding
         // and no review post, but its body still takes the thread's own
         // description — when GitHub still names a head to render it at.
@@ -813,7 +833,7 @@ async function openPrHeadSha(pr: {
   number: number;
 }): Promise<
   | { sha: string; ref?: string; base?: string; size?: PrSize; facts?: PrFacts }
-  | { reason: "closed"; sha?: string; ref?: string; merged: boolean }
+  | { reason: "closed"; sha?: string; ref?: string; merged: boolean; mergedAt?: string }
   | { reason: "unreachable" }
 > {
   const head = await prHead(pr).catch(() => undefined);
@@ -823,6 +843,7 @@ async function openPrHeadSha(pr: {
       ...(head.sha ? { sha: head.sha } : {}),
       ...(head.ref ? { ref: head.ref } : {}),
       merged: head.merged,
+      ...(head.mergedAt !== undefined ? { mergedAt: head.mergedAt } : {}),
     };
   }
   if (head?.state === "open" && head.sha) {
@@ -911,6 +932,8 @@ async function prHead(pr: { repo: string; number: number }): Promise<
       state?: "open" | "closed";
       /** GitHub's `merged`: a closed pull request that was merged, not just closed. */
       merged: boolean;
+      /** GitHub's merge instant, normalized to ISO when valid. */
+      mergedAt?: string;
       facts?: PrFacts;
     }
   | undefined
@@ -929,6 +952,7 @@ async function prHead(pr: { repo: string; number: number }): Promise<
   const data = (await res.json().catch(() => ({}))) as {
     state?: string;
     merged?: unknown;
+    merged_at?: unknown;
     title?: unknown;
     body?: unknown;
     head?: { ref?: string; sha?: string; repo?: { full_name?: string } };
@@ -951,6 +975,10 @@ async function prHead(pr: { repo: string; number: number }): Promise<
   // ref undefined.
   const ref = data.head?.ref && headRepo === pr.repo ? validRef(data.head.ref) : undefined;
   const state = data.state === "open" || data.state === "closed" ? data.state : undefined;
+  const mergedAt =
+    typeof data.merged_at === "string" && !Number.isNaN(Date.parse(data.merged_at))
+      ? new Date(data.merged_at).toISOString()
+      : undefined;
   // The head sha every reader pins to (the attach, the reviewed-head guard,
   // the head-moved settle and note): the REF's tip when the head lives on this
   // repo and the ref can be read, else the PR object's — GitHub's PR object
@@ -978,6 +1006,7 @@ async function prHead(pr: { repo: string; number: number }): Promise<
     ...(size ? { size } : {}),
     state,
     merged: data.merged === true,
+    ...(mergedAt !== undefined ? { mergedAt } : {}),
     ...(facts ? { facts } : {}),
   };
 }
