@@ -17691,6 +17691,31 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(provider.requests).toHaveLength(0);
   });
 
+  it("the same directive reply into a seed thread whose runner finished binds as today — the directive is honoured only in a thread nobody owns (issue 2010)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    // Every unit ended: the pipeline is over, so no unfinished unit owns any
+    // thread and the runner's row is finished — nobody owns the seed thread.
+    await instances.putUnits([
+      unitRow({ threadKey: "slack:CX:99.0", ending: { kind: "merged", report: "merged", at: 1_000 } }),
+    ]);
+    deps.coordinatorInstances = instances;
+    const thread = [
+      { id: "ship-1", startedAt: 0, finished: true, eventCount: 1, agent: "ship", instanceId: INSTANCE },
+    ] as RunView[];
+    const { io, replies } = fakeIO();
+    const ended = await dispatch(deps, msg("agent:coding steer the child about the overlap", "slack:UADMIN"), io, {
+      thread,
+    });
+    // The directive binds exactly as before the owner rule existed: a coding
+    // run starts on the directive's own preset, and nothing is refused.
+    expect(ended.status).not.toBe("refused");
+    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests[0]!.model).toBe("coding-model");
+    expect(replies.join("\n")).not.toContain("pipeline");
+  });
+
   it("a sender who may not run the coding agent is refused by the allowlist before anything is appended — no event, no nudge, no run", async () => {
     const s = await unitOwnedSetup();
     const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
