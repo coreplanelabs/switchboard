@@ -218,6 +218,14 @@ describe("the seeded sandbox wiring (static)", () => {
     expect(dockerfile).toContain("command -v unsquashfs >/dev/null");
   });
 
+  it("gets rg from the image in fresh and seeded sandboxes; seed restore changes disk contents and never downloads the agent's search tool", () => {
+    const dockerfile = read("deploy/cloudflare-sandbox/Dockerfile");
+    expect(dockerfile).toMatch(/apt-get install -y --no-install-recommends [^\n]*ripgrep/);
+    expect(dockerfile).toContain("command -v rg >/dev/null");
+    expect(worker).not.toMatch(/(?:curl|wget|npm|pnpm|bun)[^\n]*(?:ripgrep|BurntSushi)/i);
+    expect(seedFixupScript({ ...seed, checkoutDir: SEED_CHECKOUT_DIR })).not.toMatch(/\brg\b|ripgrep/i);
+  });
+
   it("the template binds the resident's cache bucket and names it, inside a block a profile without a resident drops", () => {
     const template = read("deploy/cloudflare-sandbox/wrangler.template.jsonc");
     const block = template.slice(template.indexOf("// {{#if resident}}"), template.indexOf("// {{/if}}"));

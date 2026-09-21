@@ -25,13 +25,43 @@ function instructions(text: string): string[] {
 }
 
 describe("the cold sandbox image ships a Docker engine", () => {
-  const aptLayer = instructions(dockerfile).find((l) => /^RUN\b.*apt-get install\b/.test(l)) ?? "";
+  const lines = instructions(dockerfile);
+  const aptLayer = lines.find((l) => /^RUN\b.*apt-get install\b/.test(l)) ?? "";
+  const installs = aptLayer.match(/apt-get install -y --no-install-recommends [^&]+/g) ?? [];
+  const packages = installs.flatMap((i) => i.split(/\s+/).slice(4)).filter(Boolean);
 
   it("installs docker.io and iptables in the apt layer, without recommends", () => {
-    const installs = aptLayer.match(/apt-get install -y --no-install-recommends [^&]+/g) ?? [];
-    const packages = installs.flatMap((i) => i.split(/\s+/).slice(4));
     expect(packages).toContain("docker.io");
     expect(packages).toContain("iptables");
+  });
+
+  it("installs ripgrep as an image package and proves rg after install but before cleanup", () => {
+    expect(packages).toContain("ripgrep");
+    const install = aptLayer.indexOf("apt-get install -y --no-install-recommends");
+    const probe = aptLayer.indexOf("command -v rg >/dev/null");
+    const cleanup = aptLayer.indexOf("rm -rf /var/lib/apt/lists/*");
+    expect(probe).toBeGreaterThan(install);
+    expect(cleanup).toBeGreaterThan(probe);
+  });
+
+  it("keeps the pinned sandbox base, Node stage and complete base tool package set", () => {
+    expect(lines).toContain("FROM --platform=linux/amd64 docker.io/library/node:24.21.0-slim AS node");
+    expect(lines).toContain("FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1");
+    expect(packages).toEqual([
+      "git",
+      "curl",
+      "ca-certificates",
+      "docker.io",
+      "iptables",
+      "squashfs-tools",
+      "ripgrep",
+      "gh",
+    ]);
+  });
+
+  it("gets ripgrep only from apt, never a runtime download substitute", () => {
+    expect(lines.filter((line) => /\bripgrep\b/.test(line))).toEqual([aptLayer]);
+    expect(aptLayer).not.toMatch(/(?:^|&&)\s*(?:curl|wget|npm|pnpm|bun)\b[^&;|]*(?:ripgrep|BurntSushi)/i);
   });
 
   it("still drops the apt lists in the same layer", () => {
