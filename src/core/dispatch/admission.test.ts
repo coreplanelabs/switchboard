@@ -19,6 +19,7 @@ import {
 import { NullRunStore } from "../runStore.js";
 import { TransientStoreError } from "../runStoreWorker.js";
 import type { RunRecord } from "../runRecord.js";
+import { RESTART_CLAIM_GRACE_MS } from "../budgets.js";
 import type { PlaneAskAnswer, PlaneOutcomePost } from "../plane/decide.js";
 import type { PlaneAdmitPost } from "../runLedger/ledger.js";
 import type { InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
@@ -884,6 +885,31 @@ describe("followUpFromInbox — a durable inbox item back as a follow-up", () =>
 // cannot even be assembled must not escape a best-effort closer into the
 // dispatcher's finally.
 describe("closeResumedRow / closeRestartRow — one attempt, the final word said (item 54)", () => {
+  it("a restarting close stamps its finish and one central claim deadline from the injected clock", async () => {
+    const row = await rowOf("run-restarting");
+    const puts: RunRecord[] = [];
+    const adopted = new NullLedgerRun("run-restarting", {
+      put: async (record) => void puts.push(record),
+      abandoned: () => {},
+    });
+    const at = 9_000;
+    const closed = await closeResumedRow(
+      adopted,
+      { row, events: [] } as unknown as ResumeContext,
+      "the workspace was lost",
+      "interrupted",
+      { restarting: true, clock: () => at },
+    );
+    expect(closed).toMatchObject({
+      id: "run-restarting",
+      status: "interrupted",
+      finishedAt: at,
+      restarting: true,
+      restartUntil: at + RESTART_CLAIM_GRACE_MS,
+    });
+    expect(puts).toEqual([closed]);
+  });
+
   it("a closer whose put fails says `abandoned` for the record it could not put, once, with the error, and does not throw", async () => {
     const row = await rowOf("run-x");
     const spoken: Array<{ id: string; why: string }> = [];

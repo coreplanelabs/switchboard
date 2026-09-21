@@ -19,6 +19,7 @@ import {
   recordRestartDeath,
 } from "./reattach.js";
 import type { PersonFollowUp } from "./settle.js";
+import { RESTART_CLAIM_GRACE_MS } from "../budgets.js";
 
 // Feature: docs/reference/specs/run-history.md item 54: a resumed run re-attaches
 // where its row says it ran; when it cannot, the run closes saying why and its
@@ -450,11 +451,17 @@ describe("the restarting ending", () => {
   it("a close a restart follows carries `restarting: true` on its record, and one no restart follows does not — the ending says the run carries on, so a waiting parent re-arms instead of ending its unit (run-history item 47a)", async () => {
     const restarts = world(resumeWith(row()));
     expect(await abandonLostWorkspace(restarts.ctx)).toBeDefined();
-    expect(restarts.puts[0]).toMatchObject({ status: "interrupted", restarting: true });
+    expect(restarts.puts[0]).toMatchObject({
+      status: "interrupted",
+      restarting: true,
+      finishedAt: NOW,
+      restartUntil: NOW + RESTART_CLAIM_GRACE_MS,
+    });
     const ends = world(resumeWith(row({}, { request: undefined })));
     expect(await abandonLostWorkspace(ends.ctx)).toBeUndefined();
     expect(ends.puts[0].status).toBe("interrupted");
     expect(ends.puts[0].restarting).toBeUndefined();
+    expect(ends.puts[0].restartUntil).toBeUndefined();
   });
 });
 
@@ -513,6 +520,7 @@ describe("recordRestartDeath: the restart died between the restarting close and 
     expect(ended.id).toBe("run-old");
     expect(ended.status).toBe("interrupted");
     expect(ended.restarting).toBeUndefined();
+    expect(ended.restartUntil).toBeUndefined();
     // The earlier events — the workspace-lost `resumed` note among them — stand
     // untouched, and the death note lands past the highest replayed seq.
     expect(ended.events.slice(0, closed.events.length)).toEqual(closed.events);

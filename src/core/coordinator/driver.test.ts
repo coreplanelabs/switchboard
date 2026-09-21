@@ -836,6 +836,33 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(end.ending.report).toContain("the pipeline stopped");
   });
 
+  it("a fresh process's read-record expiry ends the unit on the recorded container-replacement interruption, never on its wall-clock cap", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [
+        record(
+          { id: "run-c0", finished: true, status: "interrupted", interruption: "container_replaced" },
+          T0 + 5 * MIN,
+        ),
+      ],
+      "pr-check": [prNone(), prNone(T0 + 6 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 6 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 6 * MIN)],
+    });
+
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "interrupted" });
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
+    expect(end.ending.kind).toBe("interrupted");
+    expect(end.ending.report).toContain("The resident container running this pipeline's child was replaced");
+    expect(end.ending.report).not.toContain("wall-clock");
+  });
+
   // Feature: docs/reference/specs/agent-ship.md item 9 (issue 1932) — the
   // transient re-run through the whole driver: the failure by name off the
   // record, the re-run under fresh step names, the `transient` round boundary

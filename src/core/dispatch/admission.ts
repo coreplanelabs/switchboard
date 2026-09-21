@@ -43,6 +43,7 @@ import type { RunRecord, RunStatus } from "../runRecord.js";
 import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { waitingWords, type PlaneAskAnswer } from "../plane/decide.js";
 import { replyAck, replyOutcome, REFUSAL_SENTENCES } from "./reply.js";
+import { RESTART_CLAIM_GRACE_MS } from "../budgets.js";
 
 /** What thread admission reads off the dispatcher's dependencies. `CoreDeps`
  *  extends this; a caller's shape is unchanged. */
@@ -213,17 +214,23 @@ export async function closeResumedRow(
   status: RunStatus = "interrupted",
   opts?: {
     /** The close is a restart, not an end (record 0064; run-history item 47a):
-     *  the record carries `restarting: true`, so a waiting parent keeps
-     *  waiting for `child_resumed` instead of ending its unit on it. */
+     *  the record carries `restarting: true` and one bounded claim deadline,
+     *  so a waiting parent keeps waiting briefly for `child_resumed` instead
+     *  of ending its unit on it. */
     restarting?: true;
+    /** The dispatch clock that stamps both the close and its deadline. */
+    clock?: Clock;
   },
 ): Promise<RunRecord | undefined> {
   try {
     // One attempt, no retry — `putOnce` says the sink's final word on a failure
     // (run-history item 54); the assembly stays inside the try (best-effort).
+    const finishedAt = (opts?.clock ?? systemClock)();
     const record = {
-      ...reclaimedRunRecord({ row: resume.row, events: resume.events, status, finishedAt: systemClock() }),
-      ...(opts?.restarting === true ? { restarting: true as const } : {}),
+      ...reclaimedRunRecord({ row: resume.row, events: resume.events, status, finishedAt }),
+      ...(opts?.restarting === true
+        ? { restarting: true as const, restartUntil: finishedAt + RESTART_CLAIM_GRACE_MS }
+        : {}),
     };
     await putOnce(adopted.sink, record);
     return record;

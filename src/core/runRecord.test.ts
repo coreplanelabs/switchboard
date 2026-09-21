@@ -29,6 +29,7 @@ import {
   type RunRecord,
 } from "./runRecord.js";
 import type { Predicate } from "./authz/types.js";
+import { RESTART_CLAIM_GRACE_MS } from "./budgets.js";
 
 // Feature: docs/reference/specs/run-history.md — the node-free run-record contract shared
 // by the bot and the state Worker: the record shape + structural validator,
@@ -491,6 +492,33 @@ describe("isRunRecord", () => {
     expect(isRunRecord({ ...record(), channelVisibility: 1 })).toBe(false);
     const { events: _events, ...item } = unstamped;
     expect(isRunListItem(item)).toBe(true);
+  });
+
+  it("normalizes a restart deadline only inside the close's central grace: legacy restarting rows stay compatible, while malformed or overlong deadlines fail closed", () => {
+    const finishedAt = 2_000;
+    const legacy = record({ status: "interrupted", restarting: true, finishedAt });
+    expect(normalizeStored(legacy).restarting).toBe(true);
+    expect("restartUntil" in normalizeStored(legacy)).toBe(false);
+
+    const bounded = record({
+      status: "interrupted",
+      restarting: true,
+      finishedAt,
+      restartUntil: finishedAt + RESTART_CLAIM_GRACE_MS,
+    });
+    expect(normalizeStored(bounded)).toMatchObject({
+      restarting: true,
+      restartUntil: finishedAt + RESTART_CLAIM_GRACE_MS,
+    });
+    expect(isRunRecord(bounded)).toBe(true);
+
+    for (const restartUntil of [finishedAt - 1, finishedAt + RESTART_CLAIM_GRACE_MS + 1]) {
+      const normalized = normalizeStored({ ...bounded, restartUntil });
+      expect(normalized.restarting, String(restartUntil)).toBeUndefined();
+      expect("restartUntil" in normalized, String(restartUntil)).toBe(false);
+    }
+    expect(isRunRecord({ ...bounded, restartUntil: "later" })).toBe(false);
+    expect(isRunRecord({ ...bounded, restartUntil: Number.NaN })).toBe(false);
   });
 });
 

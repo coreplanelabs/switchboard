@@ -1058,11 +1058,12 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
         at,
       });
     // The ending itself says a restart follows (`RunRecord.restarting`, record
-    // 0064; run-history item 47a): the reattach path is dispatching the run
-    // again under the same id, so even before the successor's row is readable
-    // the child is answered as still running — the runner keeps waiting for
-    // `child_resumed` instead of ending its unit on a resume that succeeded.
-    if (view.restarting === true)
+    // 0064; run-history item 47a): before its persisted claim deadline the
+    // reattach path may still be dispatching the run under the same id, so the
+    // child reads as running. At the deadline the close becomes the run's real
+    // interrupted ending when no successor exists. A legacy restarting record
+    // has no deadline and keeps the old compatibility behavior.
+    if (view.restarting === true && (view.restartUntil === undefined || at < view.restartUntil))
       return json(200, {
         ok: true,
         ...(instanceRow?.stop !== undefined ? { stopped: true } : {}),

@@ -236,6 +236,13 @@ export const HOSTED_DEADLINE_MARGIN_MINUTES = 60;
  *  and the pause before a busy spawn is asked again. */
 export const SHIP_WAIT = { marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes: 5, busyRetryMinutes: 2 } as const;
 
+/** How long a restarting close gives its replacement dispatch to claim the
+ *  same run before a read with no successor treats the close as final
+ *  (run-history item 47a). One whole coordinator wait chunk lets an ordinary
+ *  replacement claim without shortening the parent's first wait; a successor
+ *  found after this deadline still wins because read-record searches first. */
+export const RESTART_CLAIM_GRACE_MS = minutesToMs(SHIP_WAIT.chunkMinutes);
+
 /** The plane's table (docs/decisions/0064): how long a finished run stays on
  *  it, a reservation's window, and the default re-ask cadence — how often a
  *  silent resident something waits on is probed (`plane.reaskMinutes`

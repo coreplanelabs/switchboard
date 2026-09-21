@@ -13,7 +13,7 @@ import { InMemoryRunStore } from "../core/runStore.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import { createLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
 import { hostKeyOf } from "../core/runLedger/hostKey.js";
-import { HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "../core/budgets.js";
+import { HOSTED_DEADLINE_MARGIN_MINUTES, RESTART_CLAIM_GRACE_MS, minutesToMs } from "../core/budgets.js";
 import { createRunsService } from "../core/runsService.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
@@ -859,14 +859,187 @@ describe("POST /admin/coordinator/read-record — an interrupted child (issues 1
         events: [{ type: "input", messageId: "m1", text: "do the unit", seq: 1 }],
       }),
     );
+    h.deps.clock = () => NOW + 10 * RESTART_CLAIM_GRACE_MS;
     const res = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-cut" }),
       h.deps,
     );
     expect(res).toEqual({
       status: 200,
-      body: { ok: true, run: { id: "run-cut", finished: false }, at: NOW },
+      body: { ok: true, run: { id: "run-cut", finished: false }, at: NOW + 10 * RESTART_CLAIM_GRACE_MS },
     });
+  });
+
+  it("a whole-process death whose interrupted predecessor remains in the registry keeps the bounded restart grace before any successor claims", async () => {
+    const h = harness();
+    let at = NOW + RESTART_CLAIM_GRACE_MS - 1;
+    h.deps.clock = () => at;
+    h.registry.create(
+      "coding · child",
+      {
+        agent: "coding",
+        channelId: INSTANCE.channelId,
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        ...TAG,
+      },
+      { id: "run-cut", startedAt: NOW - 30_000 },
+    );
+    h.registry.finish("run-cut", "interrupted");
+    await h.store.put(
+      record("run-cut", {
+        ...TAG,
+        status: "interrupted",
+        finishedAt: NOW,
+        restarting: true,
+        restartUntil: NOW + RESTART_CLAIM_GRACE_MS,
+      }),
+    );
+
+    const read = () =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-cut" }),
+        h.deps,
+      );
+    expect(await read()).toEqual({
+      status: 200,
+      body: { ok: true, run: { id: "run-cut", finished: false }, at },
+    });
+    at += 1;
+    expect((await read()).body).toMatchObject({
+      ok: true,
+      run: { id: "run-cut", finished: true, status: "interrupted" },
+      at,
+    });
+  });
+
+  it("a whole-process death leaves only the restarting record: fresh read-side dependencies answer running one millisecond before its deadline, then interrupted with the original cause exactly at and after it — never wall_clock_cap", async () => {
+    let at = NOW + RESTART_CLAIM_GRACE_MS - 1;
+    const store = new InMemoryRunStore({ now: () => at });
+    await store.put(
+      record("run-cut", {
+        ...TAG,
+        status: "interrupted",
+        finishedAt: NOW,
+        restarting: true,
+        restartUntil: NOW + RESTART_CLAIM_GRACE_MS,
+        events: [
+          { type: "input", messageId: "m1", text: "do the unit", seq: 1 },
+          {
+            type: "run_note",
+            kind: "resumed",
+            summary:
+              "resumed after a restart: the run's workspace could not be re-attached (workspace lost with the replaced container); the run restarts from its request under the same run id",
+            seq: 2,
+          },
+        ],
+      }),
+    );
+    // A new registry and service model a bot process that knows only the
+    // durable close. No timer or process-local restart correction survives.
+    const registry = new RunRegistry({ now: () => at });
+    const freshDeps: AdminCoordinatorDeps = {
+      ...harness().deps,
+      registry,
+      runs: createRunsService({ registry, store, clock: () => at }),
+      clock: () => at,
+    };
+    const read = () =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-cut" }),
+        freshDeps,
+      );
+
+    for (at of [NOW - 1, NOW + RESTART_CLAIM_GRACE_MS - 1]) {
+      expect(await read()).toEqual({
+        status: 200,
+        body: { ok: true, run: { id: "run-cut", finished: false }, at },
+      });
+    }
+    for (at of [NOW + RESTART_CLAIM_GRACE_MS, NOW + RESTART_CLAIM_GRACE_MS + 1]) {
+      const expired = await read();
+      expect(expired.status).toBe(200);
+      expect(expired.body).toMatchObject({
+        ok: true,
+        run: { id: "run-cut", finished: true, status: "interrupted", interruption: "container_replaced" },
+        at,
+      });
+      expect(JSON.stringify(expired.body)).not.toContain("wall_clock_cap");
+    }
+  });
+
+  it("a successor wins before the restart deadline and when it appears before a later read after expiry; an overlong deadline fails closed but never hides that live successor", async () => {
+    const readWithSuccessor = async (readAt: number, restartUntil: number, createAfterFirstRead: boolean) => {
+      const h = harness();
+      let currentAt = createAfterFirstRead ? NOW + RESTART_CLAIM_GRACE_MS - 1 : readAt;
+      h.deps.clock = () => currentAt;
+      await h.store.put(
+        record("run-cut", {
+          ...TAG,
+          status: "interrupted",
+          finishedAt: NOW,
+          restarting: true,
+          restartUntil,
+          events: [{ type: "input", messageId: "m1", text: "do the unit", seq: 1 }],
+        }),
+      );
+      const read = () =>
+        handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-cut" }),
+          h.deps,
+        );
+      if (createAfterFirstRead) {
+        expect((await read()).body).toMatchObject({ run: { id: "run-cut", finished: false } });
+        currentAt = readAt;
+      }
+      const successor = h.registry.create("coding · child", {
+        agent: "coding",
+        channelId: INSTANCE.channelId,
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        ...TAG,
+      });
+      expect(await read()).toEqual({
+        status: 200,
+        body: { ok: true, run: { id: successor.id, finished: false }, restartedAs: successor.id, at: readAt },
+      });
+    };
+
+    await readWithSuccessor(NOW + RESTART_CLAIM_GRACE_MS - 1, NOW + RESTART_CLAIM_GRACE_MS, false);
+    await readWithSuccessor(NOW + RESTART_CLAIM_GRACE_MS + 1, NOW + RESTART_CLAIM_GRACE_MS, true);
+    await readWithSuccessor(NOW + RESTART_CLAIM_GRACE_MS + 1, NOW + RESTART_CLAIM_GRACE_MS + 1, false);
+  });
+
+  it("a normal same-id restart is the live registry row and can complete; the predecessor's restarting close never replaces either state", async () => {
+    const h = harness();
+    await h.store.put(
+      record("run-cut", {
+        ...TAG,
+        status: "interrupted",
+        finishedAt: NOW,
+        restarting: true,
+        restartUntil: NOW + RESTART_CLAIM_GRACE_MS,
+      }),
+    );
+    h.registry.create(
+      "coding · child",
+      {
+        agent: "coding",
+        channelId: INSTANCE.channelId,
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        ...TAG,
+      },
+      { id: "run-cut", startedAt: NOW + 1 },
+    );
+    const read = () =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-cut" }),
+        h.deps,
+      );
+    expect((await read()).body).toMatchObject({ run: { id: "run-cut", finished: false } });
+    h.registry.finish("run-cut", "completed");
+    expect((await read()).body).toMatchObject({ run: { id: "run-cut", finished: true, status: "completed" } });
   });
 
   it("a restarting record whose restart dispatch died (issue 2081) — `restarting` dropped, a `restart_died` note appended — answers interrupted with the roll's own recorded cause, so the unit ends on the interrupted note instead of walking out its wall clock", async () => {
