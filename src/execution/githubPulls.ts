@@ -1141,35 +1141,148 @@ export async function fetchPullRequestTitleBody(pr: {
   return { title: data.title, body: typeof data.body === "string" ? data.body : "" };
 }
 
+function nextGithubPage(link: string | null): string | undefined {
+  for (const entry of link?.split(",") ?? []) {
+    const target = /<([^>]+)>/.exec(entry)?.[1];
+    const relations = /(?:^|;)\s*rel="([^"]+)"/.exec(entry)?.[1]?.split(/\s+/) ?? [];
+    if (target !== undefined && relations.includes("next")) return target;
+  }
+  return undefined;
+}
+
+function isGithubListPage(url: string, base: string): boolean {
+  let candidate: URL;
+  let requested: URL;
+  try {
+    candidate = new URL(url);
+    requested = new URL(base);
+  } catch {
+    return false;
+  }
+  if (
+    candidate.origin !== requested.origin ||
+    candidate.username !== "" ||
+    candidate.password !== "" ||
+    candidate.hash !== ""
+  )
+    return false;
+  if (candidate.pathname === requested.pathname) return true;
+
+  const requestedParts = requested.pathname.split("/").filter(Boolean);
+  const candidateParts = candidate.pathname.split("/").filter(Boolean);
+  const resourcePath = requestedParts.slice(3);
+  return (
+    requestedParts.length >= 4 &&
+    requestedParts[0] === "repos" &&
+    candidateParts.length === resourcePath.length + 2 &&
+    candidateParts[0] === "repositories" &&
+    /^\d+$/.test(candidateParts[1] ?? "") &&
+    candidateParts.slice(2).every((part, index) => part === resourcePath[index])
+  );
+}
+
+/** Every page of one GitHub list endpoint. Link targets stay on GitHub and
+ * identify the same resource by its repo-name or canonical repository-ID path;
+ * a malformed or cyclic chain fails closed. */
+async function fetchGithubListPages(base: string, token: string | null): Promise<unknown[] | undefined> {
+  const rows: unknown[] = [];
+  const seen = new Set<string>();
+  let url: string | undefined = `${base}?per_page=100`;
+  while (url !== undefined) {
+    if (!isGithubListPage(url, base) || seen.has(url)) return undefined;
+    seen.add(url);
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        headers: apiHeaders(token),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch {
+      return undefined;
+    }
+    if (!res.ok) return undefined;
+    const page = (await res.json().catch(() => null)) as unknown;
+    if (!Array.isArray(page)) return undefined;
+    rows.push(...page);
+    url = nextGithubPage(res.headers.get("link"));
+  }
+  return rows;
+}
+
 export interface PullRequestReview {
   author?: { login?: string; id?: number };
   state: string;
   commitId?: string;
+  submittedAt?: string;
   body: string;
 }
 
-/** GET /repos/{repo}/pulls/{n}/reviews (one page of 100, oldest first as GitHub
- *  lists them) → the reviews, or undefined when the fetch fails or the answer
- *  is not a list. Never throws. */
+export interface PullRequestComment {
+  id: number;
+  author: { login: string; id?: number; type: string };
+  createdAt: string;
+  body: string;
+}
+
+/** Pull-request conversation comments (the issues API's shared thread), every
+ * page included. The author type lets callers accept people and ignore bots. */
+export async function fetchPullRequestComments(pr: {
+  repo: string;
+  number: number;
+}): Promise<PullRequestComment[] | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  const base = `https://api.github.com/repos/${pr.repo}/issues/${pr.number}/comments`;
+  const rows = await fetchGithubListPages(base, token);
+  if (rows === undefined) return undefined;
+  return rows.flatMap((raw) => {
+    const row = raw as {
+      id?: unknown;
+      user?: { login?: unknown; id?: unknown; type?: unknown };
+      created_at?: unknown;
+      body?: unknown;
+    };
+    if (
+      typeof row.id !== "number" ||
+      typeof row.user?.login !== "string" ||
+      typeof row.user.type !== "string" ||
+      typeof row.created_at !== "string" ||
+      typeof row.body !== "string"
+    )
+      return [];
+    return [
+      {
+        id: row.id,
+        author: {
+          login: row.user.login,
+          ...(typeof row.user.id === "number" ? { id: row.user.id } : {}),
+          type: row.user.type,
+        },
+        createdAt: row.created_at,
+        body: row.body,
+      },
+    ];
+  });
+}
+
+/** GET /repos/{repo}/pulls/{n}/reviews (every page, oldest first as GitHub
+ *  lists them) → the reviews, or undefined when a fetch fails or an answer is
+ *  not a list. Never throws. */
 export async function fetchPullRequestReviews(pr: {
   repo: string;
   number: number;
 }): Promise<PullRequestReview[] | undefined> {
   const token = await resolveGithubToken().catch(() => null);
-  let res: Response;
-  try {
-    res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}/reviews?per_page=100`, {
-      headers: apiHeaders(token),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  } catch {
-    return undefined;
-  }
-  if (!res.ok) return undefined;
-  const rows = (await res.json().catch(() => null)) as unknown;
-  if (!Array.isArray(rows)) return undefined;
+  const base = `https://api.github.com/repos/${pr.repo}/pulls/${pr.number}/reviews`;
+  const rows = await fetchGithubListPages(base, token);
+  if (rows === undefined) return undefined;
   return rows.flatMap((r) => {
-    const row = r as { user?: { login?: unknown; id?: unknown }; state?: unknown; commit_id?: unknown; body?: unknown };
+    const row = r as {
+      user?: { login?: unknown; id?: unknown };
+      state?: unknown;
+      commit_id?: unknown;
+      submitted_at?: unknown;
+      body?: unknown;
+    };
     if (typeof row.state !== "string") return [];
     return [
       {
@@ -1183,6 +1296,7 @@ export async function fetchPullRequestReviews(pr: {
           : {}),
         state: row.state,
         ...(typeof row.commit_id === "string" ? { commitId: row.commit_id } : {}),
+        ...(typeof row.submitted_at === "string" ? { submittedAt: row.submitted_at } : {}),
         body: typeof row.body === "string" ? row.body : "",
       },
     ];

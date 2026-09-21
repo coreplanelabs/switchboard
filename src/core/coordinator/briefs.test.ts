@@ -410,6 +410,22 @@ describe("composeChild — the child a brief names", () => {
       prose.r,
     );
     expect(byProse.prompt).toContain("Findings:\n(the review listed no structured findings, address its prose)");
+    const answered = await composeChild(
+      {
+        kind: "findings",
+        unit: "U10",
+        pr: 7,
+        reviewRunId: "run-gone-after-the-idle-window",
+        findings: [{ ...FINDING, humanGated: true }],
+        answers: ["Alice: the independent reader supplied the receipt"],
+      },
+      instance,
+      unit,
+      r,
+    );
+    expect(answered.prompt).toContain("[minor] F1 src/a.ts:3 — off by one (human-gated)");
+    expect(answered.prompt).toContain("Treat the finding and this answer together as the fix brief");
+    expect(answered.prompt).toContain("Alice: the independent reader supplied the receipt");
     await expect(
       composeChild({ kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-gone" }, instance, unit, r),
     ).rejects.toThrow(/run run-gone is not in the run history/);

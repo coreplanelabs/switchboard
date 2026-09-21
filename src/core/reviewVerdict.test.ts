@@ -159,15 +159,15 @@ describe("review verdict → post body", () => {
     );
   });
 
-  it("without a target the Where cell is plain code and the callout names no head; a pipe in a title is escaped so the row holds", () => {
+  it("without a target the Where cell is plain code and the callout names no head; backslashes and pipes in a title are escaped so the row holds", () => {
     const v = parseVerdictInput({
       verdict: "request_changes",
       summary: "s",
-      findings: [{ ...MINOR, title: "a | b" }],
+      findings: [{ ...MINOR, title: "a \\ b | c" }],
     })!;
     const body = buildReviewPostBody("prose", v);
     expect(body).toContain("> **Changes requested** · 1 finding: 1 minor\n");
-    expect(body).toContain("| minor | **F1** a \\| b | `src/data/removed-pages.mjs` |");
+    expect(body).toContain("| minor | **F1** a \\\\ b \\| c | `src/data/removed-pages.mjs` |");
   });
 
   it("a file that is not a path (spaces, a URL) is never linked", () => {
@@ -208,7 +208,15 @@ describe("review verdict → post body", () => {
     expect(JSON.parse(m![1])).toEqual({
       verdict: "approve",
       head: HEAD,
-      findings: [{ id: "F2", severity: "nit", file: "src/pages/prompts/[slug].astro", line: 48 }],
+      findings: [
+        {
+          id: "F2",
+          severity: "nit",
+          file: "src/pages/prompts/[slug].astro",
+          title: "Comment says 34 recipes; there are 32",
+          line: 48,
+        },
+      ],
     });
     expect(buildReviewPostBody("x", undefined).split("\n").at(-1)).toBe(
       '<!-- switchboard:verdict {"verdict":"none"} -->',

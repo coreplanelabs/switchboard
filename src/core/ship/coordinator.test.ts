@@ -1274,7 +1274,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(d.rounds()).toEqual(["0 coding started", "0 coding continued"]);
   });
 
-  it("a blocked hold idles for the person's word when the flag is on — `idle` with `why: held`, the handoff and the run carried — while a gated hold still never idles", () => {
+  it("a blocked hold idles when the flag is on, while a human-gated question parks even without depending on that flag", () => {
     const blocked = fresh(input({ merge: "person", generated: true, idleDays: 7, grant: { renewals: 3 } }));
     blocked.answer({ type: "branch", ok: true, at: T0 });
     runChild(
@@ -1320,7 +1320,10 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       }),
       T0 + 20 * MIN,
     );
-    expect(gated.action).toMatchObject({ type: "end", ending: { kind: "held", verdict: "request_changes" } });
+    expect(gated.action).toMatchObject({
+      type: "end",
+      ending: { kind: "idle", why: "held", idled: { kind: "held", verdict: "request_changes" } },
+    });
   });
 
   it("row 10 — unit end: a round-0 child whose record names a pull request it updated on ANOTHER branch (the thread's own, adopted late) runs the review round on it at the head the child pushed — never 'no pull request' over work that stands (issue 1799)", () => {
@@ -3261,7 +3264,7 @@ describe("the held ending — every finding the round would act on is human-gate
     humanGated: true,
   };
 
-  it("a request_changes round whose only findings are human-gated ends held with no coding child spawned — the report names the row and the person's next step, and the round note stays the verdict's", () => {
+  it("a request_changes round whose only finding is human-gated parks the live unit with the question — it never ends held", () => {
     const d = fresh(input({ merge: "person", generated: true }));
     throughRoundZero(d);
     runChild(
@@ -3278,13 +3281,24 @@ describe("the held ending — every finding the round would act on is human-gate
     expect(d.action).toMatchObject({
       type: "end",
       ending: {
-        kind: "held",
-        pr: { number: 7, url: PR_URL },
-        round: { index: 1, kind: "review" },
-        findings: [HG],
-        verdict: "request_changes",
+        kind: "idle",
+        why: "held",
+        idled: {
+          kind: "held",
+          pr: { number: 7, url: PR_URL },
+          round: { index: 1, kind: "review" },
+          findings: [HG],
+          verdict: "request_changes",
+        },
+        humanGate: {
+          pr: { number: 7, url: PR_URL },
+          round: 1,
+          reviewRunId: "run-r1",
+          findings: [HG],
+        },
       },
     });
+    expect(d.action).not.toMatchObject({ ending: { kind: "held" } });
     expect(d.rounds()).toEqual([
       "0 coding started",
       "0 coding pr_opened",
@@ -3292,18 +3306,10 @@ describe("the held ending — every finding the round would act on is human-gate
       "1 review request_changes",
     ]);
     const report = renderUnitReport(d.state);
-    // The headline keys on the round's verdict: nothing was approved here.
-    expect(report).toContain("⏸️ Changes requested but held after 1 review round: " + PR_URL);
-    expect(report).not.toContain("Approved but held");
+    expect(report).toContain("⏸️ Waiting for a person after 1 review round: " + PR_URL);
     expect(report).toContain("F1 (minor) — the entry replay receipt is human-gated");
-    expect(report).toContain("No fix round was opened");
-    expect(report).toContain("Next step: produce the receipt each finding names and post it on the pull request.");
-    // Only the PR URL, never the task text: re-issuing with the task would
-    // adopt the pull request and run a coding round first (item 10) — the very
-    // round the held ending exists to avoid.
-    expect(report).toContain("re-issue `agent:ship` in this thread with only the PR URL (" + PR_URL + ")");
-    expect(report).not.toContain("with the same text");
-    expect(report).toContain("resumes at the review round");
+    expect(report).toContain("Reply in this unit thread or comment on the pull request");
+    expect(report).toContain("The answer and finding become the fix round's brief");
   });
 
   it("a round mixing one human-gated and one actionable finding still opens the fix round for the actionable one — both ride the findings step", () => {
@@ -3323,7 +3329,239 @@ describe("the held ending — every finding the round would act on is human-gate
     expect(a).toMatchObject({ type: "spawn", round: { index: 1, kind: "findings" }, preset: "coding" });
   });
 
-  it("a gated approve whose gated findings are all human-gated ends held too — the defense-in-depth gate never routes a person's receipt into a fix round", () => {
+  it("an adopted pull request with a newer human answer runs the answered finding as a fix round before review", () => {
+    const d = new Driver(openUnitPipeline(input({ merge: "person", generated: true }), T0));
+    d.answer({
+      type: "pr-check",
+      pr: {
+        state: "open",
+        prNumber: 7,
+        url: PR_URL,
+        headSha: HEAD_A,
+        branchHead: HEAD_A,
+        humanGate: {
+          round: 1,
+          findings: [HG],
+          verdict: "request_changes",
+          answer: "The independent reader supplied the required three-part quote.",
+          author: "alice",
+          commentId: "5766141180",
+        },
+      },
+      at: T0,
+    } as never);
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      preset: "coding",
+      round: { index: 1, kind: "findings" },
+      brief: {
+        kind: "findings",
+        findings: [HG],
+        answers: ["alice: The independent reader supplied the required three-part quote."],
+      },
+    });
+    runChild(d, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_B }), T0 + 5 * MIN);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B },
+      at: T0 + 5 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 2, kind: "review" } });
+  });
+
+  it("a parked unit's next human input resumes directly into the fix round with the finding and attributed answer", () => {
+    const humanGate = {
+      pr: { number: 7, url: PR_URL },
+      round: 1,
+      findings: [HG],
+      verdict: "request_changes" as const,
+      reviewRunId: "run-r1",
+      headSha: HEAD_A,
+    };
+    const d = new Driver(
+      openUnitPipeline(
+        input({
+          merge: "person",
+          generated: true,
+          session: {
+            segment: 1,
+            renewalsSpent: 0,
+            spendUsd: 1,
+            texts: ["alice: The independent reader supplied the required three-part quote."],
+            humanGate,
+            resume: { leaseMs: 240 * MIN, attempt: 1 },
+          },
+        }),
+        T0,
+      ),
+    );
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      preset: "coding",
+      round: { index: 1, kind: "findings" },
+      brief: {
+        kind: "findings",
+        reviewRunId: "run-r1",
+        answers: ["alice: The independent reader supplied the required three-part quote."],
+      },
+    });
+  });
+
+  it("an answer to a gate raised in the last allowed round gets its mandatory re-review beyond the cap and reaches merge-ready", () => {
+    const d = new Driver(
+      openUnitPipeline(
+        input({
+          merge: "person",
+          generated: true,
+          caps: { maxRounds: 1, maxMinutes: 120 },
+          session: {
+            segment: 1,
+            renewalsSpent: 0,
+            spendUsd: 1,
+            texts: ["alice: The independent reader supplied the required three-part quote."],
+            humanGate: {
+              pr: { number: 7, url: PR_URL },
+              round: 1,
+              findings: [HG],
+              verdict: "request_changes",
+              reviewRunId: "run-r1",
+              headSha: HEAD_A,
+            },
+            resume: { leaseMs: 120 * MIN, attempt: 1 },
+          },
+        }),
+        T0,
+      ),
+    );
+
+    runChild(d, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_B }), T0 + 5 * MIN);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B },
+      at: T0 + 5 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 2, kind: "review" } });
+
+    runChild(
+      d,
+      "run-r2",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "the receipt is complete", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_B,
+      }),
+      T0 + 10 * MIN,
+    );
+    greenChecks(d, T0 + 10 * MIN);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready", reviewRounds: 2 } });
+  });
+
+  it("an evidence-only answer at the last allowed round gets re-reviewed on the same head and reaches merge-ready", () => {
+    const d = new Driver(
+      openUnitPipeline(
+        input({
+          merge: "person",
+          generated: true,
+          caps: { maxRounds: 1, maxMinutes: 120 },
+          session: {
+            segment: 1,
+            renewalsSpent: 0,
+            spendUsd: 1,
+            texts: ["alice: The independent reader supplied the required three-part quote."],
+            humanGate: {
+              pr: { number: 7, url: PR_URL },
+              round: 1,
+              findings: [HG],
+              verdict: "request_changes",
+              reviewRunId: "run-r1",
+              headSha: HEAD_A,
+            },
+            resume: { leaseMs: 120 * MIN, attempt: 1 },
+          },
+        }),
+        T0,
+      ),
+    );
+
+    runChild(d, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_A }), T0 + 5 * MIN);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+      at: T0 + 5 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 2, kind: "review" } });
+
+    runChild(
+      d,
+      "run-r2",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "the receipt is complete", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 10 * MIN,
+    );
+    greenChecks(d, T0 + 10 * MIN);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready", reviewRounds: 2 } });
+  });
+
+  it("an answered gate whose findings child dies at the reviewed head keeps the child's interrupted or failed ending — it never skips to re-review", () => {
+    const answeredGate = () =>
+      new Driver(
+        openUnitPipeline(
+          input({
+            merge: "person",
+            generated: true,
+            caps: { maxRounds: 1, maxMinutes: 120 },
+            session: {
+              segment: 1,
+              renewalsSpent: 0,
+              spendUsd: 1,
+              texts: ["alice: The independent reader supplied the required three-part quote."],
+              humanGate: {
+                pr: { number: 7, url: PR_URL },
+                round: 1,
+                findings: [HG],
+                verdict: "request_changes",
+                reviewRunId: "run-r1",
+                headSha: HEAD_A,
+              },
+              resume: { leaseMs: 120 * MIN, attempt: 1 },
+            },
+          }),
+          T0,
+        ),
+      );
+
+    const interrupted = answeredGate();
+    runChild(interrupted, "run-f1", finished({ status: "interrupted" }), T0 + 5 * MIN);
+    interrupted.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+      at: T0 + 5 * MIN,
+    });
+    expect(interrupted.action).toMatchObject({
+      type: "end",
+      ending: { kind: "interrupted", runId: "run-f1", round: { index: 1, kind: "findings" } },
+    });
+
+    const failed = answeredGate();
+    runChild(failed, "run-f1", finished({ status: "failed" }), T0 + 5 * MIN);
+    failed.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+      at: T0 + 5 * MIN,
+    });
+    expect(failed.action).toMatchObject({
+      type: "end",
+      ending: { kind: "aborted", round: { index: 1, kind: "findings" } },
+    });
+    expect(renderUnitReport(failed.state)).toContain("ended `failed`");
+  });
+
+  it("a gated approve whose gated findings are all human-gated parks too — the defense-in-depth gate never routes a person's receipt into an unanswered fix round", () => {
     const d = fresh(input({ merge: "person", generated: true }));
     throughRoundZero(d);
     runChild(
@@ -3337,16 +3575,18 @@ describe("the held ending — every finding the round would act on is human-gate
       }),
       T0 + 20 * MIN,
     );
-    expect(d.action).toMatchObject({ type: "end", ending: { kind: "held", findings: [HG], verdict: "approve" } });
-    // An approve's held headline keeps the approve's own word.
-    expect(renderUnitReport(d.state)).toContain("⏸️ Approved but held after 1 review round");
-    // The gate still fired and says so — held changes the ending, not the detector.
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: { kind: "idle", idled: { kind: "held", findings: [HG], verdict: "approve" } },
+    });
+    expect(renderUnitReport(d.state)).toContain("⏸️ Waiting for a person after 1 review round");
+    // The gate still fired and says so — parking changes the ending, not the detector.
     expect(d.notes.find((n) => n.type === "round" && n.outcome === "approve")).toMatchObject({
       gate: { level: "minor", findings: ["F1 (minor)"] },
     });
   });
 
-  it("held fires before the round cap: a human-gated-only round at the last allowed round ends held, never round_cap", () => {
+  it("parking fires before the round cap: a human-gated-only round at the last allowed round stays live, never round_cap", () => {
     const d = fresh(input({ merge: "person", generated: true, caps: { maxRounds: 1, maxMinutes: 120 } }));
     throughRoundZero(d);
     runChild(
@@ -3360,10 +3600,10 @@ describe("the held ending — every finding the round would act on is human-gate
       }),
       T0 + 20 * MIN,
     );
-    expect(d.action).toMatchObject({ type: "end", ending: { kind: "held" } });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "held" } });
   });
 
-  it("held never idles: at idleDays 7 the ending stands as held — a fix round could change nothing, so there is nothing a reply could continue", () => {
+  it("the human-gated question parks exactly once under the idle state when idleDays is also on", () => {
     const d = fresh(input({ merge: "person", generated: true, idleDays: 7 }));
     throughRoundZero(d);
     runChild(
@@ -3377,7 +3617,10 @@ describe("the held ending — every finding the round would act on is human-gate
       }),
       T0 + 20 * MIN,
     );
-    expect(d.action).toMatchObject({ type: "end", ending: { kind: "held" } });
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: { kind: "idle", why: "held", idled: { kind: "held" }, parkDays: 365 },
+    });
   });
 
   it("a re-issue after the receipt is posted resumes at the review round: the pull request on the row opens the pipeline at review round 1 with no coding child", () => {
@@ -4044,7 +4287,7 @@ describe("the quiet thread report — the ending is ONE line in the user's words
     expect(renderUnitReport(d.state)).toContain("🧢 Ship stopped at a cap: the 1-round cap");
   });
 
-  it("held at quiet: `Held:` with the human-gated row and the pull request link; verbose keeps the full report", () => {
+  it("a parked human question at quiet says it is waiting with the row and pull request link; verbose keeps the full report", () => {
     const d = fresh(input({ merge: "person", generated: true }));
     throughRoundZero(d);
     const HG = { ...F("F1", "minor", "the entry replay receipt is human-gated"), humanGated: true as const };
@@ -4059,11 +4302,11 @@ describe("the quiet thread report — the ending is ONE line in the user's words
       }),
       T0 + 20 * MIN,
     );
-    expect(d.action).toMatchObject({ type: "end", ending: { kind: "held" } });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "held" } });
     const quiet = renderUnitReport(d.state, undefined, "quiet");
-    expect(quiet).toBe(`⏸️ Held: F1 (minor) — the entry replay receipt is human-gated — ${PR_URL}`);
+    expect(quiet).toBe(`⏸️ Waiting for you: F1 (minor) — the entry replay receipt is human-gated — ${PR_URL}`);
     expect(renderUnitReport(d.state, undefined, "verbose")).toBe(renderUnitReport(d.state));
-    expect(renderUnitReport(d.state)).toContain("Next step: produce the receipt");
+    expect(renderUnitReport(d.state)).toContain("Reply in this unit thread or comment on the pull request");
   });
 
   it("stopped at quiet: `Stopped` and the pull request line, nothing about the operator machinery; verbose unchanged", () => {

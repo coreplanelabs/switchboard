@@ -15981,6 +15981,42 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.provider.requests[0]!.model).toBe("review-model");
   });
 
+  it("a directive reply to a parked human-gated question is still the person's answer — one wake event, never a rival run", async () => {
+    const finding = {
+      id: "F2",
+      severity: "minor" as const,
+      file: "docs/receipt.md",
+      title: "independent receipt missing",
+      humanGated: true as const,
+    };
+    const s = await unitOwnedSetup({
+      idle: {
+        why: "held",
+        at: 1,
+        renewalsLeft: 0,
+        spendUsd: 1,
+        wakes: 0,
+        humanGate: {
+          pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+          round: 1,
+          findings: [finding],
+          verdict: "request_changes",
+        },
+      },
+    });
+    const { io } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("agent:coding the independent reader supplied the receipt", "slack:UADMIN"), io);
+    expect(await s.instances.listEvents(s.key)).toEqual([
+      expect.objectContaining({
+        sender: "slack:UADMIN",
+        text: "the independent reader supplied the receipt",
+        mode: "wake",
+      }),
+    ]);
+    expect(s.sends).toHaveLength(1);
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
   it("a directive reply in a live pipeline's seed thread is refused naming the unit thread — never a rival run beside the runner (issue 2010)", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
@@ -17424,6 +17460,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         dependsOn: [],
         rounds: [],
         threadKey: "slack:CX:1.0",
+        idle: { why: "held", at: 1, renewalsLeft: 0, spendUsd: 1, wakes: 0 },
       },
     ]);
     deps.coordinatorInstances = instances;
@@ -17444,7 +17481,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       expect.objectContaining({
         sender: "slack:UADMIN",
         text: "one principle to put at the top of the record",
-        mode: "steer",
+        mode: "wake",
       }),
     ]);
     expect(sends).toEqual([INSTANCE]);

@@ -9,20 +9,32 @@ export const runnerOwnedPullKey = (repo: string, prNumber: number): string => `$
 /** Rebuild the pull requests owned by the named live runner instances. A unit
  * owns its pull request until it has a real ending; idle and segment boundaries
  * deliberately keep `ending` absent and therefore keep ownership. */
-export async function recoverRunnerOwnedPulls(
+export interface RunnerPullOwner {
+  instanceId: string;
+  unit: string;
+}
+
+export async function recoverRunnerOwnedPullOwners(
   instanceIds: Iterable<string>,
   instances: Pick<CoordinatorInstanceStore, "get" | "listUnits">,
-): Promise<Set<string>> {
-  const owned = new Set<string>();
+): Promise<Map<string, RunnerPullOwner>> {
+  const owned = new Map<string, RunnerPullOwner>();
   for (const instanceId of new Set(instanceIds)) {
     const instance = await instances.get(instanceId);
     if (instance === null) continue;
     for (const unit of await instances.listUnits(instanceId)) {
       if (unit.pr !== undefined && unit.ending === undefined)
-        owned.add(runnerOwnedPullKey(instance.repo, unit.pr.number));
+        owned.set(runnerOwnedPullKey(instance.repo, unit.pr.number), { instanceId, unit: unit.unit });
     }
   }
   return owned;
+}
+
+export async function recoverRunnerOwnedPulls(
+  instanceIds: Iterable<string>,
+  instances: Pick<CoordinatorInstanceStore, "get" | "listUnits">,
+): Promise<Set<string>> {
+  return new Set((await recoverRunnerOwnedPullOwners(instanceIds, instances)).keys());
 }
 
 interface OwnershipRecoveryOutcome {
@@ -39,6 +51,8 @@ interface OwnershipRecoveryOutcome {
 export class RunnerOwnershipFence {
   private readonly claimed = new Set<string>();
   private readonly recovered = new Set<string>();
+  private readonly claimedOwners = new Map<string, RunnerPullOwner>();
+  private readonly recoveredOwners = new Map<string, RunnerPullOwner>();
   private readonly localRecoveredInstances = new Set<string>();
   private recoveryComplete: boolean;
 
@@ -46,20 +60,30 @@ export class RunnerOwnershipFence {
     this.recoveryComplete = !requiresRecovery;
   }
 
-  claim(repo: string, prNumber: number): void {
-    this.claimed.add(runnerOwnedPullKey(repo, prNumber));
+  claim(repo: string, prNumber: number, owner?: RunnerPullOwner): void {
+    const key = runnerOwnedPullKey(repo, prNumber);
+    this.claimed.add(key);
+    if (owner !== undefined) this.claimedOwners.set(key, owner);
   }
 
   release(repo: string, prNumber: number): void {
     const key = runnerOwnedPullKey(repo, prNumber);
     this.claimed.delete(key);
     this.recovered.delete(key);
+    this.claimedOwners.delete(key);
+    this.recoveredOwners.delete(key);
   }
 
   owns(repo: string, prNumber: number): boolean {
     if (!this.recoveryComplete) throw new Error("runner ownership recovery is still in progress");
     const key = runnerOwnedPullKey(repo, prNumber);
     return this.claimed.has(key) || this.recovered.has(key);
+  }
+
+  owner(repo: string, prNumber: number): RunnerPullOwner | undefined {
+    if (!this.recoveryComplete) throw new Error("runner ownership recovery is still in progress");
+    const key = runnerOwnedPullKey(repo, prNumber);
+    return this.claimedOwners.get(key) ?? this.recoveredOwners.get(key);
   }
 
   async recover(
@@ -83,9 +107,13 @@ export class RunnerOwnershipFence {
     for (const run of outcome.liveElsewhere) {
       if (run.hosting !== undefined) activeRunnerInstances.add(run.hosting.instanceId);
     }
-    const recovered = await recoverRunnerOwnedPulls(activeRunnerInstances, instances);
+    const recovered = await recoverRunnerOwnedPullOwners(activeRunnerInstances, instances);
     this.recovered.clear();
-    for (const key of recovered) this.recovered.add(key);
+    this.recoveredOwners.clear();
+    for (const [key, owner] of recovered) {
+      this.recovered.add(key);
+      this.recoveredOwners.set(key, owner);
+    }
     this.recoveryComplete = true;
   }
 }

@@ -65,6 +65,7 @@ describe("RunnerOwnershipFence", () => {
 
     await fence.recover({ liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] }, instances);
     expect(fence.owns("acme/api", 77)).toBe(true);
+    expect(fence.owner("acme/api", 77)).toEqual({ instanceId: "runner_live", unit: "unit" });
   });
 
   it("recovers a current-generation hosted runner even when classification omitted it from resumable", async () => {
@@ -109,8 +110,9 @@ describe("RunnerOwnershipFence", () => {
     const fence = new RunnerOwnershipFence(false);
     expect(fence.owns("acme/api", 77)).toBe(false);
 
-    fence.claim("acme/api", 77);
+    fence.claim("acme/api", 77, { instanceId: "runner_live", unit: "unit" });
     expect(fence.owns("acme/api", 77)).toBe(true);
+    expect(fence.owner("acme/api", 77)).toEqual({ instanceId: "runner_live", unit: "unit" });
     fence.release("acme/api", 77);
     expect(fence.owns("acme/api", 77)).toBe(false);
   });

@@ -59,6 +59,7 @@ import { parsePlanUnit, planUnitIds } from "./contract.js";
 import {
   carve,
   DEFAULT_GRANT,
+  IDLE_DAYS_MAX,
   loopPosition,
   MERGE_WAIT_ASK_MINUTES,
   MINUTE_MS,
@@ -494,8 +495,10 @@ export type Brief =
       pr: number;
       headSha?: string;
       round: number;
-      /** The previous review round's run and the coding run that answered its findings, for a re-review. */
-      prior?: { reviewRunId: string; codingRunId?: string };
+      /** The previous review round and the coding run that answered it. A
+       *  recovered posted verdict carries findings by value when no run row
+       *  belongs to this attempt. */
+      prior?: { reviewRunId?: string; codingRunId?: string; findings?: Finding[] };
       /** The previous round's check findings (record 0055): they sit on no
        *  run's record, so the brief carries them beside `prior` by value. */
       checks?: Finding[];
@@ -504,7 +507,12 @@ export type Brief =
       kind: "findings";
       unit: string;
       pr: number;
-      reviewRunId: string;
+      /** The review run normally supplies the findings. An adopted attempt
+       *  can recover them from the last posted verdict marker instead. */
+      reviewRunId?: string;
+      findings?: Finding[];
+      /** Human replies that answered a parked finding, attributed at intake. */
+      answers?: string[];
       /** The round's check findings (record 0055), carried by value — the
        *  review run's record holds only the reviewer's own findings. */
       checks?: Finding[];
@@ -520,6 +528,20 @@ export type Brief =
 export interface PrRef {
   number: number;
   url: string;
+}
+
+/** A human-gated review question parked on its live unit. The review's typed
+ * findings and the pull request survive the wait; `reviewRunId` is absent when
+ * an adopted attempt recovered the question from GitHub's verdict marker. */
+export interface HumanGatePending {
+  pr: PrRef;
+  round: number;
+  findings: Finding[];
+  verdict: "approve" | "request_changes";
+  reviewRunId?: string;
+  headSha?: string;
+  /** When the verdict asked the question, for fencing older unit events. */
+  askedAt?: number;
 }
 
 /** What the coordinator asks for next. `step` is the Workflow step's name, and
@@ -577,6 +599,10 @@ export type ChildFacts =
   | {
       finished: true;
       status: RunStatus;
+      /** The terminal record time; fallback fence for an older review record. */
+      finishedAt?: number;
+      /** When the posted verdict became the person's question. */
+      reviewAskedAt?: number;
       finalReply?: string;
       /** A coding child's `pr_opened`. */
       pr?: { number: number; url: string; created: boolean };
@@ -659,6 +685,16 @@ export type PrCheck =
        *  read beside the checks on the ending's facts read, so a `merge_ready`
        *  report tells the person their merge is queued, never a direct one. */
       baseHasMergeQueue?: boolean;
+      /** A person's newest pull-request comment answered the last posted
+       * human-gated verdict. Entry starts its fix round before any review. */
+      humanGate?: {
+        round: number;
+        findings: Finding[];
+        verdict: "approve" | "request_changes";
+        answer: string;
+        author: string;
+        commentId: string;
+      };
     }
   | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string };
 
@@ -793,12 +829,9 @@ export type UnitEnding =
    *  The unit is done and its dependents start on a base that carries it. */
   | { kind: "already_landed"; landed: HandoffLanded[]; round: RoundRef; runId: string; reviewRounds: number }
   | { kind: "merge_ready"; pr: PrRef; reviewRounds: number }
-  /** Every finding the round would act on is human-gated — a receipt only a
-   *  person can produce (issue 1990; the reviewer set the flag through
-   *  `submit_verdict`, agent-review item 5) — so a fix round could change
-   *  nothing: the unit ends held for a person, the ending carrying the
-   *  human-gated rows, and a re-issue with the pull request resumes at the
-   *  review round once the receipt is posted (item 10's resume path). */
+  /** The report nested inside a parked human-gated question. The unit never
+   *  publishes this as its terminal kind: `parkHumanGate` carries it under an
+   *  idle ending until a person's answer opens the fix round. */
   | {
       kind: "held";
       cause?: undefined;
@@ -938,6 +971,10 @@ export type UnitEnding =
       handoff?: Handoff;
       round?: RoundRef;
       reviewRounds: number;
+      /** A parked human-gated review is always an idle, independent of the
+       * optional idle policy. Its question is the unit's pending state. */
+      humanGate?: HumanGatePending;
+      parkDays?: number;
     };
 
 /** The kinds that idle: every ending but the ended ones — the unit is
@@ -945,10 +982,9 @@ export type UnitEnding =
  *  a reply could continue it. `merged`, `already_landed`, `merge_ready` and
  *  `refused` never idle: the first two are done, merge-ready waits only for a
  *  person's merge, and a refused child would be refused again. A gated or
- *  draft `held` never idles either — it waits only for a person's receipt at
- *  the pull request, which no thread reply can produce — but a blocked hold
- *  (issue 2086) waits for exactly the person's word the idle's wake carries,
- *  so it alone idles; `idleEnding` draws that line by cause. */
+ *  draft `held` never idles either. A blocked hold (issue 2086) follows the
+ *  configured idle policy; a human-gated hold takes `parkHumanGate` instead,
+ *  which always creates the pending idle question. */
 export type IdleWhy =
   Exclude<UnitEnding["kind"], "idle" | "merged" | "already_landed" | "merge_ready" | "refused"> | RenewalWhy;
 
@@ -1014,6 +1050,9 @@ export interface LeaseSegmentProgress {
   previousHandoff?: Handoff;
   /** Words that woke an idle segment, already attributed in arrival order. */
   texts?: string[];
+  /** The human-gated question those words answer. It resumes as a findings
+   * round before another review, without spending a renewal. */
+  humanGate?: HumanGatePending;
   /** A stopped segment reopens under the remainder of its cut lease. Each
    *  reopen gets a fresh attempt so its Workflow steps cannot replay the
    *  stopped attempt's cached answers. */
@@ -1165,6 +1204,8 @@ export interface UnitPipelineState {
    *  ids are unique within one round only. A disposition naming an id the review
    *  never issued is dropped at the match (`matchDispositions`). */
   readonly findingsByRound: Readonly<Record<number, Finding[]>>;
+  /** Human answers folded into a recovered/parked findings brief. */
+  readonly humanAnswersByRound: Readonly<Record<number, string[]>>;
   readonly dispositionsByRound: Readonly<Record<number, FindingDisposition[]>>;
   readonly reviewRunByRound: Readonly<Record<number, string>>;
   /** The coding run each round's findings step dispatched. */
@@ -1208,20 +1249,29 @@ export const BUSY_RETRY_MS = SHIP_WAIT.busyRetryMinutes * MIN;
 // ---- the unit pipeline: opening and the next action -----------------------------------------------
 
 export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipelineState {
+  const pending = input.session?.humanGate;
   const base: UnitPipelineState = {
     input,
     startedAt: at,
     clock: at,
     phase: { at: "pre-check" },
-    reviewRounds: 0,
+    reviewRounds: pending?.round ?? 0,
     rebaseAttempts: 0,
     spentMs: { coding: 0, review: 0, waiting: 0 },
     spendUsd: input.session?.spendUsd ?? 0,
-    findingsByRound: {},
+    findingsByRound: pending ? { [pending.round]: pending.findings } : {},
+    humanAnswersByRound: pending && input.session?.texts !== undefined ? { [pending.round]: input.session.texts } : {},
     dispositionsByRound: {},
-    reviewRunByRound: {},
+    reviewRunByRound: pending?.reviewRunId !== undefined ? { [pending.round]: pending.reviewRunId } : {},
     findingsRunByRound: {},
+    ...(pending !== undefined
+      ? {
+          pr: pending.pr,
+          ...(pending.headSha !== undefined ? { lastReviewHead: pending.headSha } : {}),
+        }
+      : {}),
   };
+  if (pending !== undefined) return enterRound(base, { index: pending.round, kind: "findings" }).state;
   if (!input.resume) return base;
   const url = input.resume.url ?? `https://github.com/${input.repo}/pull/${input.resume.pr}`;
   const resumed: UnitPipelineState = {
@@ -1294,26 +1344,40 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
     return { kind: "rebase", unit, pr, headSha: s.lastReviewHead!, base: s.input.base };
   }
   if (round.kind === "findings") {
-    const checks = checkFindingsOf(s.findingsByRound[round.index]);
+    const issued = s.findingsByRound[round.index] ?? [];
+    const checks = checkFindingsOf(issued);
+    const reviewRunId = s.reviewRunByRound[round.index];
+    const answers = s.humanAnswersByRound[round.index];
     return {
       kind: "findings",
       unit,
       pr,
-      reviewRunId: s.reviewRunByRound[round.index]!,
+      ...(reviewRunId !== undefined ? { reviewRunId } : {}),
+      ...(reviewRunId === undefined || (answers !== undefined && answers.length > 0) ? { findings: issued } : {}),
+      ...(answers !== undefined && answers.length > 0 ? { answers } : {}),
       ...(checks.length > 0 ? { checks } : {}),
     };
   }
+  const priorFindings = s.findingsByRound[round.index - 1] ?? [];
   const priorReview = s.reviewRunByRound[round.index - 1];
   const priorCoding = s.findingsRunByRound[round.index - 1];
-  const priorChecks = checkFindingsOf(s.findingsByRound[round.index - 1]);
+  const priorChecks = checkFindingsOf(priorFindings);
   return {
     kind: "review",
     unit,
     pr,
     ...(s.lastReviewHead !== undefined ? { headSha: s.lastReviewHead } : {}),
     round: round.index,
-    ...(priorReview !== undefined
-      ? { prior: { reviewRunId: priorReview, ...(priorCoding !== undefined ? { codingRunId: priorCoding } : {}) } }
+    ...(priorReview !== undefined || (priorCoding !== undefined && priorFindings.length > 0)
+      ? {
+          prior: {
+            ...(priorReview !== undefined ? { reviewRunId: priorReview } : {}),
+            ...(priorReview === undefined || s.humanAnswersByRound[round.index - 1] !== undefined
+              ? { findings: priorFindings }
+              : {}),
+            ...(priorCoding !== undefined ? { codingRunId: priorCoding } : {}),
+          },
+        }
       : {}),
     ...(priorChecks.length > 0 ? { checks: priorChecks } : {}),
   };
@@ -1454,9 +1518,9 @@ function end(s: UnitPipelineState, ending: UnitEnding, notes: CoordinatorNote[] 
 function idleEnding(s: UnitPipelineState, ending: UnitEnding): Extract<UnitEnding, { kind: "idle" }> | undefined {
   if ((s.input.idleDays ?? 0) <= 0) return undefined;
   if (NEVER_IDLES.has(ending.kind)) return undefined;
-  // A gated or draft hold waits only for a person's receipt at the pull
-  // request — no thread reply can continue it — while a blocked hold (issue
-  // 2086) waits for exactly the person's word the wake carries, so it idles.
+  // A draft hold is not continued by a reply. A blocked hold (issue 2086)
+  // waits for the person's word. Human-gated questions bypass this mapping:
+  // `parkHumanGate` always parks them with their typed pending state.
   if (ending.kind === "held" && ending.cause !== "blocked") return undefined;
   const old = ending as Exclude<UnitEnding, { kind: "idle" | "merged" | "already_landed" | "merge_ready" | "refused" }>;
   const grant = s.input.grant ?? DEFAULT_GRANT;
@@ -1512,7 +1576,7 @@ const heldEnding = (
   round: RoundRef,
   findings: Finding[],
   verdict: "approve" | "request_changes",
-): UnitEnding => ({
+): Extract<UnitEnding, { kind: "held" }> => ({
   kind: "held",
   ...(s.pr !== undefined ? { pr: s.pr } : {}),
   round,
@@ -1520,6 +1584,48 @@ const heldEnding = (
   verdict,
   reviewRounds: s.reviewRounds,
 });
+
+/** A human-gated finding is a question, not a terminal hold. Park the live
+ * unit in record 0051's idle state regardless of the optional idle policy, so
+ * either a thread reply or a pull-request comment can become its fix brief. */
+function parkHumanGate(
+  s: UnitPipelineState,
+  round: RoundRef,
+  findings: Finding[],
+  verdict: "approve" | "request_changes",
+  askedAt: number,
+  notes: CoordinatorNote[],
+): Transition {
+  const held = heldEnding(s, round, findings, verdict);
+  const humanGate: HumanGatePending = {
+    pr: s.pr!,
+    round: round.index,
+    findings,
+    verdict,
+    ...(s.reviewRunByRound[round.index] !== undefined ? { reviewRunId: s.reviewRunByRound[round.index] } : {}),
+    ...(s.lastReviewHead !== undefined ? { headSha: s.lastReviewHead } : {}),
+    askedAt,
+  };
+  const grant = s.input.grant ?? DEFAULT_GRANT;
+  const ending: Extract<UnitEnding, { kind: "idle" }> = {
+    kind: "idle",
+    why: "held",
+    idled: held,
+    renewalsLeft: Math.max(0, grant.renewals - (s.input.session?.renewalsSpent ?? 0)),
+    ...(s.lastReviewHead !== undefined ? { from: s.lastReviewHead } : {}),
+    ...(s.lastCodingRunId !== undefined ? { runId: s.lastCodingRunId } : {}),
+    spendUsd: s.spendUsd,
+    ...(s.lastCodingHandoff !== undefined ? { handoff: s.lastCodingHandoff } : {}),
+    round,
+    reviewRounds: s.reviewRounds,
+    humanGate,
+    parkDays: IDLE_DAYS_MAX,
+  };
+  return {
+    state: { ...s, phase: ENDED, ending },
+    notes: [...notes, { type: "ended", ending }],
+  };
+}
 
 const roundNote = (round: RoundRef, outcome: ShipRoundOutcome): RoundNote => ({
   type: "round",
@@ -1564,10 +1670,11 @@ function enterRound(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNot
   };
 }
 
-/** A rebase changed the approved patch, so review is mandatory even when
- *  the ordinary findings-round count is spent. The run's remaining lease is
- *  the bound: `enterRound` refuses when another review no longer fits. */
-function reviewAfterRebase(s: UnitPipelineState, notes: CoordinatorNote[] = []): Transition {
+/** A rebase changed the approved patch, or a person's answer enabled a
+ *  human-gated fix, so review is mandatory even when the ordinary findings-
+ *  round count is spent. The run's remaining lease is the bound: `enterRound`
+ *  refuses when another review no longer fits. */
+function mandatoryReview(s: UnitPipelineState, notes: CoordinatorNote[] = []): Transition {
   return enterRound(s, { index: s.reviewRounds + 1, kind: "review" }, notes);
 }
 
@@ -1769,9 +1876,10 @@ function settleReview(
           },
           notes,
         );
-      // Every gated finding is human-gated (issue 1990): a fix round could
-      // change nothing, so the unit ends held for a person instead.
-      if (allHumanGated(gated)) return end(next, heldEnding(next, round, gated, "approve"), notes);
+      // Every gated finding is human-gated: ask a person and park the live
+      // unit; an answer later opens the fix round with the question attached.
+      if (allHumanGated(gated))
+        return parkHumanGate(next, round, gated, "approve", facts.reviewAskedAt ?? facts.finishedAt ?? s.clock, notes);
       if (next.reviewRounds >= next.input.caps.maxRounds)
         return end(
           next,
@@ -1800,11 +1908,18 @@ function settleReview(
       },
       notes,
     );
-  // Every finding of the round is human-gated (issue 1990): no fix round can
-  // change anything, so the unit ends held for a person's receipt instead of
-  // spending a coding child — or the round cap — on it.
+  // Every finding of the round is human-gated: no fix round can change
+  // anything yet, so park the live unit for a person's answer before asking
+  // the round cap.
   if (allHumanGated(verdict.findings ?? []))
-    return end(next, heldEnding(next, round, verdict.findings ?? [], "request_changes"), notes);
+    return parkHumanGate(
+      next,
+      round,
+      verdict.findings ?? [],
+      "request_changes",
+      facts.reviewAskedAt ?? facts.finishedAt ?? s.clock,
+      notes,
+    );
   if (next.reviewRounds >= next.input.caps.maxRounds)
     return end(
       next,
@@ -2306,12 +2421,14 @@ function roundOnOpenPr(
         },
         [roundNote(round, "aborted")],
       );
-    return reviewAfterRebase({ ...next, lastReviewHead: pushed }, [roundNote(round, "pr_opened")]);
+    return mandatoryReview({ ...next, lastReviewHead: pushed }, [roundNote(round, "pr_opened")]);
   }
+  const hasHumanAnswer = round.kind === "findings" && (s.humanAnswersByRound[round.index]?.length ?? 0) > 0;
   if (round.kind === "findings") {
     // Nothing repushed → nothing to re-review, unless every finding of the
     // last review was declined on the record: that re-review verifies the
-    // arguments and may concede.
+    // arguments and may concede. A person's answer is itself new evidence for
+    // the mandatory re-review, even when accepting it changes no code.
     const codingHead = normalizeHead(head);
     const reviewedAt = normalizeHead(s.lastReviewHead);
     if (codingHead !== undefined && reviewedAt !== undefined && sameCommit(codingHead, reviewedAt)) {
@@ -2342,27 +2459,30 @@ function roundOnOpenPr(
           },
           [roundNote(round, "aborted")],
         );
-      const findings = s.findingsByRound[round.index] ?? [];
-      const dispositions = s.dispositionsByRound[round.index] ?? [];
-      const allDeclined =
-        findings.length > 0 &&
-        findings.every((f) => dispositions.find((d) => d.findingId === f.id)?.disposition === "declined");
-      if (!allDeclined)
-        return end(
-          next,
-          {
-            kind: "aborted",
-            reason: `⚠️ Round ${round.index}'s findings step produced no new head — the branch still sits at \`${codingHead.slice(0, 7)}\`, the commit the review already read, and not every finding was declined on the record, so there is nothing new to re-review.`,
-            round,
-            reviewRounds: next.reviewRounds,
-          },
-          [roundNote(round, "aborted")],
-        );
+      if (!hasHumanAnswer) {
+        const findings = s.findingsByRound[round.index] ?? [];
+        const dispositions = s.dispositionsByRound[round.index] ?? [];
+        const allDeclined =
+          findings.length > 0 &&
+          findings.every((f) => dispositions.find((d) => d.findingId === f.id)?.disposition === "declined");
+        if (!allDeclined)
+          return end(
+            next,
+            {
+              kind: "aborted",
+              reason: `⚠️ Round ${round.index}'s findings step produced no new head — the branch still sits at \`${codingHead.slice(0, 7)}\`, the commit the review already read, and not every finding was declined on the record, so there is nothing new to re-review.`,
+              round,
+              reviewRounds: next.reviewRounds,
+            },
+            [roundNote(round, "aborted")],
+          );
+      }
     }
   }
-  return nextReview({ ...next, ...(head !== undefined ? { lastReviewHead: head } : {}) }, [
-    roundNote(round, "pr_opened"),
-  ]);
+  const reviewed: UnitPipelineState = { ...next, ...(head !== undefined ? { lastReviewHead: head } : {}) };
+  const notes = [roundNote(round, "pr_opened")];
+  if (hasHumanAnswer) return mandatoryReview(reviewed, notes);
+  return nextReview(reviewed, notes);
 }
 
 /** Move the clock and charge the elapsed time to the budget's bucket: a phase
@@ -2424,6 +2544,20 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
             pr: { number: r.pr.prNumber, url: r.pr.url },
             lastReviewHead: entryHead,
           };
+          const answered = r.pr.humanGate;
+          if (answered !== undefined) {
+            const round = Math.max(1, answered.round);
+            const withAnswer: UnitPipelineState = {
+              ...adopted,
+              reviewRounds: round,
+              findingsByRound: { ...adopted.findingsByRound, [round]: answered.findings },
+              humanAnswersByRound: {
+                ...adopted.humanAnswersByRound,
+                [round]: [`${answered.author}: ${answered.answer}`],
+              },
+            };
+            return enterRound(withAnswer, { index: round, kind: "findings" });
+          }
           const checks = r.pr.checks;
           const green =
             checks !== undefined && checks.total > 0 && checks.failed.length === 0 && checks.pending.length === 0;
@@ -2736,7 +2870,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           reviewRounds: s.reviewRounds,
         });
       const rebased: UnitPipelineState = { ...clocked, lastReviewHead: r.headSha };
-      if (r.outcome === "changed") return reviewAfterRebase(rebased);
+      if (r.outcome === "changed") return mandatoryReview(rebased);
       return enterChecks(rebased, { index: s.reviewRounds, kind: "review" }, []);
     }
     case "merge-wait":
@@ -3007,25 +3141,16 @@ export function renderUnitReport(
           `No renewal was spent and no second coding child ran — a concluded round is not renewed (a renewal continues a budget that ran out mid-work). Next step: your word in this thread — answer what the child raised, and the unit continues from there. ${reissue}`,
         ]);
       }
-      // The person's next step is the report's whole point (issue 1990): the
-      // human-gated rows are named with the reviewer's own words, and the
-      // re-issue line says the attempt resumes at the review round — item 10's
-      // resume path — once the receipt stands on the pull request. That path
-      // fires only when the invocation carries NO new task text: re-issuing
-      // with the task would ADOPT the pull request and run a coding round
-      // first (item 10), the very round this ending exists to avoid — so the
-      // held case renders its own re-issue line instead of the shared one.
+      // A human-gated row is a question to a person. The enclosing idle keeps
+      // this unit live; either answer surface wakes a fix round carrying both
+      // the typed finding and the attributed answer.
       const rows = e.findings.map((f) => `${f.id} (${f.severity}) — ${f.title}`).join("; ");
-      // The quiet copy is the ending in the user's words (record 0066): the
-      // held row named, the pull request linked, nothing about the machinery.
-      if (!shows(verbosity, "verbose")) return `⏸️ Held: ${rows}${e.pr !== undefined ? ` — ${e.pr.url}` : ""}`;
-      const heldReissue = s.input.generated
-        ? `To continue, re-issue \`agent:ship\` in this thread with only the PR URL${e.pr !== undefined ? ` (${e.pr.url})` : ""} — no new task text.`
-        : reissue;
+      if (!shows(verbosity, "verbose"))
+        return `⏸️ Waiting for you: ${rows}${e.pr !== undefined ? ` — ${e.pr.url}` : ""}`;
       return join([
-        `⏸️ ${e.verdict === "approve" ? "Approved but held" : "Changes requested but held"} after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — every finding of review round ${e.round.index} is human-gated, a receipt only a person can produce: ${rows}. No fix round was opened: a coding child cannot produce the receipt.`,
+        `⏸️ Waiting for a person after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — every finding of review round ${e.round.index} is human-gated, a receipt only a person can produce: ${rows}. The unit stays live; no unanswered fix round was opened.`,
         levelLine,
-        `Next step: produce the receipt each finding names and post it on the pull request. ${heldReissue} The re-issued pipeline resumes at the review round — no coding round runs first.`,
+        `Reply in this unit thread or comment on the pull request with the receipt. The answer and finding become the fix round's brief, then review runs again.`,
       ]);
     }
     case "merge_refused":
