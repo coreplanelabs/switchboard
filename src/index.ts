@@ -166,6 +166,7 @@ import {
   mergePullRequest,
   openPullRequest,
   pullRequestChangedPaths,
+  refirePullRequestEvent,
   requiredCheckContexts,
   rerunFailedJobs,
   updatePullRequest,
@@ -1207,6 +1208,7 @@ export async function runBot(): Promise<void> {
         return classifyRoundChecks(runs, changed, required);
       },
       rerunFailedChecks: rerunFailedJobs,
+      refirePullRequest: refirePullRequestEvent,
     });
     // Scheduled jobs arrive through /ingress like any other caller: the
     // Worker shim (deploy/cloudflare/worker.ts) POSTs each `run` schedule's

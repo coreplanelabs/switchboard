@@ -1,0 +1,32 @@
+// Test-only workerd topology. Keep the real SQLite Durable Objects, but omit
+// cross-script service and Workflow bindings: tests install doubles directly
+// on a live object when they exercise those optional production boundaries.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "switchboard-memory-test",
+  "main": "worker.ts",
+  "durable_objects": {
+    "bindings": [
+      { "name": "MEMORY", "class_name": "MemoryDO" },
+      { "name": "SCHEDULES", "class_name": "ScheduleDO" },
+      { "name": "RUNS", "class_name": "RunHistoryDO" },
+      { "name": "CONFIG", "class_name": "ConfigDO" },
+      { "name": "RUN_TRANSCRIPTS", "class_name": "RunTranscriptDO" },
+      { "name": "DELIVERY", "class_name": "DeliveryDO" },
+      { "name": "COSTS", "class_name": "CostsSnapshotDO" },
+      { "name": "SESSION_LOGS", "class_name": "SessionLogDO" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MemoryDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["FrictionDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["ScheduleDO"] },
+    { "tag": "v4", "new_sqlite_classes": ["RunHistoryDO"] },
+    { "tag": "v5", "new_sqlite_classes": ["ConfigDO"] },
+    { "tag": "v6", "new_sqlite_classes": ["RunTranscriptDO"] },
+    { "tag": "v7", "deleted_classes": ["FrictionDO"] },
+    { "tag": "v8", "new_sqlite_classes": ["DeliveryDO"] },
+    { "tag": "v9", "new_sqlite_classes": ["SessionLogDO"] },
+    { "tag": "v10", "new_sqlite_classes": ["CostsSnapshotDO"] }
+  ]
+}

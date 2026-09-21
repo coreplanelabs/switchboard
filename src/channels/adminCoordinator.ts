@@ -331,6 +331,9 @@ export interface AdminCoordinatorDeps {
    *  `rerun-failed-jobs` retry the deploy pipeline documents). Optional:
    *  without it a retry ask answers false and the second read makes the finding. */
   rerunFailedChecks?: (repo: string, sha: string, names: string[]) => Promise<boolean>;
+  /** Empty required-check recovery: close and reopen the pull request once so
+   *  GitHub emits `pull_request` again without moving the reviewed head. */
+  refirePullRequest?: (repo: string, prNumber: number) => Promise<boolean>;
   /** Where the parent's record goes when the instance ends. */
   runHistoryWriter: RunHistoryWriter;
   /** The channel's visibility stamp for that record (dispatch/record.ts `channelVisibilityOf`). */
@@ -1777,6 +1780,7 @@ const ROUND_OUTCOMES = [
   "request_changes",
   "no_verdict",
   "checks_failed",
+  "checks_restarted",
   "transient",
   "enqueued",
   "dequeued",
@@ -2607,8 +2611,9 @@ async function merge(
 
 /** The round's checks step (record 0055, agent-ship item 9): the check runs
  *  at the reviewed head, read with the merge door's own reading and classified
- *  for the flake rule — or, on a `retry` ask, the one re-run of the named
- *  failed checks' jobs. A pending or unreported head registers the instance in
+ *  for the flake rule — or performs one requested recovery effect: the named
+ *  failed checks' re-run, or the empty required-check launch's close/reopen.
+ *  A pending or unreported head registers the instance in
  *  the merge-wait book so the intake's `checks-settled-<head>` event wakes the
  *  machine's bounded wait; an unreadable GitHub leaves `checks` out, which the
  *  machine treats as pending. The machine — never this route — decides what a
@@ -2628,6 +2633,8 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   const unit = await unitRowOf(deps, instance, body.unit);
   if (!unit.ok) return unit.response;
   const log = deps.log ?? console.log;
+  if (body.retry !== undefined && body.refire !== undefined)
+    return json(400, { ok: false, error: "checks recovery must be retry or refire, not both" });
   if (body.retry !== undefined) {
     if (!Array.isArray(body.retry) || body.retry.length === 0 || !body.retry.every((n) => typeof n === "string"))
       return json(400, { ok: false, error: "retry must name the failed checks" });
@@ -2636,6 +2643,14 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
       `[coordinator] ${instance.id} ${body.unit}: flake re-run ${retried ? "dispatched" : "not dispatched"} for ${(body.retry as string[]).join(", ")} at ${headSha.slice(0, 7)}`,
     );
     return json(200, { ok: true, retried, at });
+  }
+  if (body.refire !== undefined) {
+    if (body.refire !== true) return json(400, { ok: false, error: "refire must be true" });
+    const refired = (await deps.refirePullRequest?.(instance.repo, body.prNumber)) ?? false;
+    log(
+      `[coordinator] ${instance.id} ${body.unit}: pull_request event ${refired ? "re-fired" : "not re-fired"} for ${instance.repo}#${body.prNumber} at ${headSha.slice(0, 7)}`,
+    );
+    return json(200, { ok: true, refired, at });
   }
   // The pull request's own facts beside the runs (issue 2063): a draft head
   // is the machine's to hold — never to merge — and the base names the branch

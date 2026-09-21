@@ -7,29 +7,23 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   plugins: [
     cloudflareTest({
-      wrangler: { configPath: "./wrangler.jsonc" },
-      miniflare: {
-        bindings: { MEMORY_TOKEN: "test-token" },
-        // The bot Worker this Worker binds across scripts (wrangler.template.jsonc
-        // `workflows`): in production the bot shim's `ShipCoordinator`; in the
-        // pool a stub under the bot's script name, so the binding resolves in
-        // process and the runtime starts. The tests never run an instance —
-        // `runLedger.test.ts` doubles the binding on the live object.
-        workers: [
-          {
-            name: "switchboard",
-            modules: true,
-            script:
-              'import { WorkflowEntrypoint } from "cloudflare:workers";\n' +
-              "export class ShipCoordinator extends WorkflowEntrypoint { async run() { return { stub: true }; } }\n" +
-              'export default { fetch() { return new Response("bot stub"); } };\n',
-            workflows: { SHIP_COORDINATOR: { name: "switchboard-ship-coordinator", className: "ShipCoordinator" } },
-          },
-        ],
-      },
+      // The test topology keeps every real SQLite Durable Object but omits the
+      // optional cross-script service and Workflow bindings. Coordinator and
+      // bot-delivery tests install synchronous doubles on their live object,
+      // so no engine promise can escape one test and trip workerd's hang
+      // detector during an unrelated later request.
+      wrangler: { configPath: "./wrangler.test.jsonc" },
+      miniflare: { bindings: { MEMORY_TOKEN: "test-token" } },
     }),
   ],
   test: {
+    // Fail a request that really hangs under its own Vitest case before
+    // workerd's later hang detector can cancel a neighbouring case. Keep
+    // console writes out of Vitest's cross-DO RPC queue so teardown cannot
+    // strand an `onUserConsoleLog` call after the cases have settled.
+    testTimeout: 5_000,
+    disableConsoleIntercept: true,
+    setupFiles: ["./testSetup.ts"],
     // One workerd runs every file: in parallel, the shrink test's 500-row
     // delete loop (~17 s of DO work) queues the other files' requests past
     // vitest's 5 s default and fails tests the change never touched. Serial

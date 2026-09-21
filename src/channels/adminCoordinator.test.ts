@@ -160,6 +160,8 @@ function harness(
     roundChecks?: RoundChecks | Error;
     /** What the flake rule's re-run answers (record 0055); absent, the dep is absent too. */
     rerunOk?: boolean;
+    /** What the empty required-check recovery's pull_request re-fire answers. */
+    refireOk?: boolean;
     /** The head's self-declared fix-up commit subjects (the ending's facts read). */
     fixups?: string[] | Error;
     merge?: MergeResult | Error;
@@ -230,6 +232,7 @@ function harness(
   const roundChecksAsked: number[] = [];
   const roundChecksBase: (string | undefined)[] = [];
   const reruns: Array<{ sha: string; names: string[] }> = [];
+  const refires: Array<{ repo: string; prNumber: number }> = [];
   const mergeWaitNotes: Array<{ headSha: string; instanceId: string; at: number }> = [];
   const enqueues: Array<{ pr: { repo: string; number: number }; opts: { sha: string } }> = [];
   let reviewFetches = 0;
@@ -322,6 +325,14 @@ function harness(
           },
         }
       : {}),
+    ...(over.refireOk !== undefined
+      ? {
+          refirePullRequest: async (repo: string, prNumber: number) => {
+            refires.push({ repo, prNumber });
+            return over.refireOk === true;
+          },
+        }
+      : {}),
     noteMergeWait: (headSha, instanceId, at) => void mergeWaitNotes.push({ headSha, instanceId, at }),
     mergePullRequest: async (pr, opts) => {
       merges.push({ pr, opts });
@@ -390,6 +401,7 @@ function harness(
     roundChecksAsked,
     roundChecksBase,
     reruns,
+    refires,
     mergeWaitNotes,
     enqueues,
   };
@@ -3148,6 +3160,16 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       ).status,
     ).toBe(200);
     expect(JSON.stringify(frames[0])).toContain("U10 · Round 1 — review · addressing minor+ (org) · started");
+    await call(h, "round", {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      index: 1,
+      agent: "review",
+      outcome: "checks_restarted",
+    });
+    expect(JSON.stringify(frames.at(-1))).toContain(
+      "U10 · Round 1 — review · addressing minor+ (org) · checks restarted",
+    );
     expect(
       (
         await call(h, "round", {
@@ -4121,6 +4143,20 @@ describe("POST /admin/coordinator/checks — the round's checks read at the revi
     // A malformed retry is a 400, never a silent read.
     expect((await checks(bare, { ...body, retry: [] })).status).toBe(400);
     expect((await checks(bare, { ...body, retry: [7] })).status).toBe(400);
+  });
+
+  it("a refire ask closes and reopens the pull request through the one recovery seam, answers whether it landed, and cannot be combined with a flake retry", async () => {
+    const h = await checksHarness({ refireOk: true });
+    expect(await checks(h, { ...body, refire: true })).toEqual({
+      status: 200,
+      body: { ok: true, refired: true, at: NOW },
+    });
+    expect(h.refires).toEqual([{ repo: "acme/api", prNumber: 7 }]);
+
+    const bare = await checksHarness();
+    expect((await checks(bare, { ...body, refire: true })).body).toEqual({ ok: true, refired: false, at: NOW });
+    expect((await checks(bare, { ...body, refire: false })).status).toBe(400);
+    expect((await checks(bare, { ...body, refire: true, retry: ["ci / bot"] })).status).toBe(400);
   });
 
   it("holds its body to shape: a bad instance, unit, prNumber or head is a 400/404 by name", async () => {

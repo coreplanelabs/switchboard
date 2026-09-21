@@ -432,6 +432,9 @@ export type ShipRoundOutcome =
    *  0055): the failures become check findings and the findings step runs as
    *  for any changes-requested round. */
   | "checks_failed"
+  /** No required check appeared during the checks step's grace chunk, so the
+   *  runner re-fired the pull_request event once by closing and reopening it. */
+  | "checks_restarted"
   /** The round's coding child died on a provider transient with nothing
    *  pushed (issue 1932): the first such boundary marks the round's one
    *  re-run, a second the `transient` ending. */

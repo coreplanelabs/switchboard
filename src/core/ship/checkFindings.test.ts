@@ -81,6 +81,19 @@ describe("classifyRoundChecks — the merge door's reading joined with the class
     ]);
   });
 
+  it("carries every required context beside the unreported subset, so an unrelated check cannot hide an empty required-check launch", () => {
+    expect(
+      classifyRoundChecks([run({ name: "pr title", conclusion: "success" })], [], ["ci / bot", "ci / workers"]),
+    ).toMatchObject({
+      total: 1,
+      required: ["ci / bot", "ci / workers"],
+      expected: ["ci / bot", "ci / workers"],
+    });
+    expect(
+      classifyRoundChecks([run({ name: "ci / bot", conclusion: "success" })], [], ["ci / bot", "ci / workers"]),
+    ).toMatchObject({ required: ["ci / bot", "ci / workers"], expected: ["ci / workers"] });
+  });
+
   it("checkFinding renders a failure as a finding row like a reviewer's: id check:<name>, severity blocking, the conclusion and URL", () => {
     expect(checkFinding({ name: "ci / bot", conclusion: "failure", url: "https://x/1" })).toEqual({
       id: "check:ci / bot",
