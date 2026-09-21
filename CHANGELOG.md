@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.260.2](https://github.com/coreplanelabs/switchboard/compare/v1.260.1...v1.260.2) (2026-09-21)
+
+
+### Bug fixes
+
+* **cli:** refuse stale checkout bundles ([#2143](https://github.com/coreplanelabs/switchboard/issues/2143)) ([9dc78b7](https://github.com/coreplanelabs/switchboard/commit/9dc78b77591a8cdd50a0f528b2195d9bc06a2958))
+* **dispatcher:** refuse unsafe review workspaces ([#2147](https://github.com/coreplanelabs/switchboard/issues/2147)) ([73056dd](https://github.com/coreplanelabs/switchboard/commit/73056dda221bb58f679cc9b00d77a5f905a7454e))
+* fence ship thread replies ([#2155](https://github.com/coreplanelabs/switchboard/issues/2155)) ([cf64c31](https://github.com/coreplanelabs/switchboard/commit/cf64c31a3063ec6e930acd4baa610f8765b3e4ce))
+* **harness:** retry silent model stream interruptions ([#2157](https://github.com/coreplanelabs/switchboard/issues/2157)) ([c5b893f](https://github.com/coreplanelabs/switchboard/commit/c5b893f1c5a2ae12aa8de687503d1f7916200790))
+* **resident:** idle residents report deployed images immediately ([#2151](https://github.com/coreplanelabs/switchboard/issues/2151)) ([933821a](https://github.com/coreplanelabs/switchboard/commit/933821ab08c73201661a6f06f79e81fac305b78b))
+* **runs:** await state worker alarm scheduling ([#2146](https://github.com/coreplanelabs/switchboard/issues/2146)) ([d3f5b70](https://github.com/coreplanelabs/switchboard/commit/d3f5b701c1793342d1f6f4637b294e5242d241fc))
+* **runs:** contain state Worker background tasks ([#2160](https://github.com/coreplanelabs/switchboard/issues/2160)) ([c3f1554](https://github.com/coreplanelabs/switchboard/commit/c3f1554480a1b266c005829df795fc0ebd8287d8))
+* **ship:** keep repeated rebase conflicts with the runner ([#2134](https://github.com/coreplanelabs/switchboard/issues/2134)) ([9504437](https://github.com/coreplanelabs/switchboard/commit/9504437be305ec8f5fcbf4ce3c96d3bf39f058d8))
+
+
+### Documentation
+
+* **docs:** accept and plan one live run state ([#2140](https://github.com/coreplanelabs/switchboard/issues/2140)) ([4bcc7f0](https://github.com/coreplanelabs/switchboard/commit/4bcc7f0776bc25ef49f4143eb5d9b7b0870215c5))
+* **ship:** define orchestrator-composed ship units ([#2156](https://github.com/coreplanelabs/switchboard/issues/2156)) ([1073acc](https://github.com/coreplanelabs/switchboard/commit/1073acc1c5b94524d16aff5b0c0d073f1d45c26a))
+
 ## [1.260.1](https://github.com/coreplanelabs/switchboard/compare/v1.260.0...v1.260.1) (2026-09-21)
 
 
