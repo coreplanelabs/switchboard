@@ -16703,7 +16703,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   // channel that can show a click is offered through the confirmation store
   // exactly like a routed write — same row, same Yes handler, same expiry —
   // and the plain `To run this:` text remains only where no channel can show one.
-  const confirming = () => {
+  const confirming = (line = "config set me --agent review") => {
     const { deps, registry } = operatorDeps(ON_YAML);
     let now = 1_000_000;
     const store = new InMemoryConfirmationStore({ clock: () => now });
@@ -16727,7 +16727,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     };
     deps.operatorModel = decides({
       reason: "the ask",
-      binds: [{ line: "config set me --agent review", reason: "the ask" }],
+      binds: [{ line, reason: "the ask" }],
     });
     return { deps, registry, store, audits, tick: (ms: number) => void (now += ms) };
   };
@@ -16748,7 +16748,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       {
         id: expect.stringMatching(/^[0-9a-f-]{36}$/),
         line: "config set me --agent review",
-        risk: expect.any(String),
+        risk: "changes your own settings until you reset them",
         expiresAt: 1_000_000 + CONFIRMATION_TTL_MS,
       },
     ]);
@@ -16765,6 +16765,20 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const receipt = replies.find((r) => r.includes("bound: `config set me --agent review` — write — the ask"));
     expect(receipt).toBeDefined();
     expect(replies.some((r) => r.includes(HAND_BACK_PREFIX))).toBe(false);
+  });
+
+  it("on: a channel config offer projects its resolved display name into the same stored and shown risk line", async () => {
+    const { deps, store } = confirming("config set channel --agent review");
+    const { io, offers } = offering();
+    await dispatch(
+      deps,
+      { ...msg("set this channel's agent to review", "slack:UADMIN"), channelName: "release-planning" },
+      io,
+    );
+    expect(offers[0]?.risk).toBe(
+      "changes the release-planning channel's settings for everyone who asks there until reset",
+    );
+    expect(store.rows.get(offers[0]!.id)).toMatchObject({ risk: offers[0]!.risk });
   });
 
   it("on: the offered bind's Yes runs it as the requester with source confirm — the routed write's own handler, one record with outcome confirmed", async () => {

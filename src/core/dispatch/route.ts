@@ -23,6 +23,7 @@ import {
   blastRadius,
   boundBlastRadius,
   CommandRegistry,
+  type Caller,
   type CommandDef,
   type CommandEffect,
   type CommandInput,
@@ -518,16 +519,17 @@ export async function mintConfirmationOffer(args: {
   io: ChannelIO;
   store: ConfirmationStore | undefined;
   msg: IncomingMessage;
+  origin?: Caller["origin"];
   def: CommandDef<unknown>;
   input: CommandInput;
   receipt: string;
   model: string;
 }): Promise<ConfirmationMint> {
-  const { io, store, msg, def, input, receipt, model } = args;
+  const { io, store, msg, origin, def, input, receipt, model } = args;
   if (!io.offer || !store) return { kind: "no_click" };
   const line = chatInvocation(def, input);
   if (redactSecrets(line) !== line) return { kind: "unshowable" };
-  const risk = def.annotations?.risk?.(input) ?? "";
+  const risk = def.annotations?.risk?.(input, origin) ?? "";
   let row: Confirmation;
   try {
     row = await store.put(

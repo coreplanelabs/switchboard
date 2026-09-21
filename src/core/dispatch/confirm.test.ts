@@ -106,7 +106,7 @@ const pending = (id: string, user = "slack:UADMIN"): PendingConfirmation => ({
   command: "config.set",
   input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
   receipt: "config set channel --models.coding anthropic/claude-opus-5",
-  risk: "changes the scope's settings for everyone in it until reset",
+  risk: "changes the release-planning channel's settings for everyone who asks there until reset",
   model: "anthropic/general-model",
 });
 

@@ -50,7 +50,7 @@ import { effectiveConfirm } from "../../config/profile.js";
 import { boundBlastRadius, type CommandDef, type CommandInput } from "../commandRegistry.js";
 import { chatInvocation, cliWords, namedToInput } from "../commandSurface.js";
 import { STRUCTURED_RETRIES_MAX } from "../budgets.js";
-import { parseChatCommand, type ChatCommands } from "../commandChat.js";
+import { chatCallerFor, parseChatCommand, type ChatCommands } from "../commandChat.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RequestTrace } from "../requestTrace.js";
@@ -1633,6 +1633,7 @@ export async function executeOperatorDecision(
               io,
               store: deps.confirmations,
               msg,
+              origin: chatCallerFor(msg, deps.config).origin,
               def: bound.def,
               input: parsed.input,
               receipt: routeReceipt(bound.def, parsed.input),

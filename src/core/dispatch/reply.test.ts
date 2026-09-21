@@ -474,7 +474,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
     const shown: ConfirmationOffer = {
       id: "c1",
       line: "config set channel --models.coding anthropic/claude-opus-5",
-      risk: "changes the scope's settings for everyone in it until reset",
+      risk: "changes the release-planning channel's settings for everyone who asks there until reset",
       expiresAt: 1_000,
     };
     const { io, offer, replies } = capture();

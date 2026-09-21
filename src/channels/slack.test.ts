@@ -788,7 +788,7 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
   const ev = { channel: "C1", user: "UA", text: "use opus here", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
   type Client = ConstructorParameters<typeof SlackIO>[0];
   const LINE = "config set channel --models.coding anthropic/claude-opus-5";
-  const RISK = "changes the scope's settings for everyone in it until reset";
+  const RISK = "changes the release-planning channel's settings for everyone who asks there until reset";
   const client = () => {
     const postMessage = vi.fn(async (_o: Record<string, unknown>) => ({ ok: true, ts: "4.0" }));
     return { c: guardOutbound({ chat: { postMessage } } as unknown as Client), postMessage };

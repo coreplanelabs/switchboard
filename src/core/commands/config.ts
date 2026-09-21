@@ -23,6 +23,7 @@ import {
   commandDefiner,
   type Caller,
   type CommandDef,
+  type CommandInput,
   type CommandRegistry,
   type JsonObject,
   type JsonValue,
@@ -129,6 +130,48 @@ const threadOption = z.string().optional().describe("target thread key (default:
  *  write changes what other people run under — destructive. Anything the
  *  enum did not accept never reaches here (`boundBlastRadius` fails closed). */
 const destructiveBeyondMe = (input: ParsedCommandInput): boolean => input.args.scope !== "me";
+
+/** The one platform-neutral confirmation sentence for config writes. The
+ * accepted command input decides ownership; origin contributes only an
+ * adapter-resolved display name. Classification and authorization stay in
+ * `destructiveBeyondMe` and the policy table. */
+export function configRisk(input: CommandInput, origin?: Caller["origin"]): string {
+  const scope = input.args?.[0];
+  switch (scope) {
+    case "me":
+      return "changes your own settings until you reset them";
+    case "channel": {
+      const explicitChannel = input.options?.channel;
+      if (typeof explicitChannel === "string" && explicitChannel !== origin?.channelId) {
+        return "changes the target channel's settings for everyone who asks there until reset";
+      }
+      const channelName = origin?.channelName?.trim();
+      const safeName = channelName && !/[\r\n]/.test(channelName) ? channelName : undefined;
+      const owner = safeName ? `the ${safeName} channel's` : "this channel's";
+      return `changes ${owner} settings for everyone who asks there until reset`;
+    }
+    case "org":
+      return "changes settings for every channel until reset";
+    case "user":
+      return "changes the affected person's GitHub setting until reset";
+    case "repo": {
+      const repo = input.options?.repo;
+      return typeof repo === "string"
+        ? `changes pull-request settings for ${repo} until reset`
+        : "changes repository pull-request settings until reset";
+    }
+    case "thread": {
+      const explicitThread = input.options?.thread;
+      const owner =
+        typeof explicitThread === "string" && explicitThread !== origin?.threadKey
+          ? "the target thread's"
+          : "this thread's";
+      return `changes ${owner} intake setting for everyone who asks there until reset`;
+    }
+    default:
+      return "changes settings until reset";
+  }
+}
 
 const effort = z.enum(EFFORT_LEVELS);
 /** The ladder as the option descriptions print it (`<low|medium|high|xhigh|max>`):
@@ -537,7 +580,7 @@ export const configSet = defineCommand({
   // what other people run under — destructive beyond `me` (record 0057).
   annotations: {
     destructive: destructiveBeyondMe,
-    risk: () => "changes the scope's settings for everyone in it until reset",
+    risk: configRisk,
   },
   describe:
     "Set the agent, model, effort, verbosity, harness, boundary or default repository (`--repo owner/name`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (`config set user --user <id> --github <login>`, identity admins — never your own: it is not yours to type), or the pull-request watch (`config set org|repo --pulls.watch on|off` with its caps, repo taking `--repo <owner/name>`).",
@@ -731,7 +774,7 @@ export const configClear = defineCommand({
   effect: "write",
   annotations: {
     destructive: destructiveBeyondMe,
-    risk: () => "changes the scope's settings for everyone in it until reset",
+    risk: configRisk,
   },
   describe:
     "Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); `config clear user --user <id>` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.",
@@ -792,7 +835,7 @@ export const configInstructions = defineCommand({
   effect: "write",
   annotations: {
     destructive: destructiveBeyondMe,
-    risk: () => "changes the scope's settings for everyone in it until reset",
+    risk: configRisk,
   },
   describe:
     "Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.",
