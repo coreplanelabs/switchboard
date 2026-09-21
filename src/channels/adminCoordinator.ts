@@ -98,6 +98,7 @@ import type { RunRegistry } from "../core/runRegistry.js";
 import type { LedgerRun } from "../core/runLedger/writeThrough.js";
 import type { HostingState } from "../core/runLedger/types.js";
 import type { RunsService, RunView } from "../core/runsService.js";
+import type { SweepReport } from "../core/pullSweep.js";
 import {
   interruptionCauseOfWords,
   parsePlanBranch,
@@ -200,12 +201,16 @@ export interface AdminCoordinatorDeps {
    *  (agent-ship item 12); absent without PUBLIC_BASE_URL — the report names
    *  the run id instead. */
   runPageBase?: string;
-  /** Watch until merge, resolved for one repository (`ConfigStore.mergeWatchOf`,
-   *  record 0071 mechanism three): read by the merge door's conflict refusal so
-   *  the remedy it names is the one that exists — the watching unit's own round
-   *  where the setting is on, the sweep a person runs otherwise. Absent — a
-   *  test of the other paths — the watch reads as off. */
-  mergeWatchOf?: (repo: string) => { watch: boolean };
+  /** Rung one for a pull request this live runner owns. The sweep's git and
+   *  approval-carry rules are reused, but a conflict returns to this runner
+   *  instead of starting a detached fix round. */
+  runnerRebase?: (instance: CoordinatorInstance, prNumber: number) => Promise<SweepReport>;
+  /** Process-local ownership fence shared with the sweep. The durable runner
+   *  remains authoritative; this fence only makes a simultaneous command defer. */
+  runnerOwnership?: {
+    claim(repo: string, prNumber: number): void;
+    release(repo: string, prNumber: number): void;
+  };
   /** The ship grant as the requester's channel and user scopes say now. Idle
    * waits can outlive a config change, so a wake never relies on the grant
    * captured when the instance was created. */
@@ -374,6 +379,7 @@ const PRESETS_OF_KIND: Readonly<Record<Brief["kind"], string>> = {
   contract: "coding",
   review: "review",
   findings: "coding",
+  rebase: "coding",
 };
 
 /** A brief as the coordinator sends it (`Brief`, ship/coordinator.ts): ids only, each shaped. */
@@ -484,8 +490,19 @@ function parseBrief(v: unknown): Parsed<Brief> {
         },
       };
     }
+    case "rebase": {
+      const n = pr();
+      if (!n.ok) return n;
+      if (typeof b.headSha !== "string" || !/^[0-9a-f]{7,40}$/i.test(b.headSha))
+        return invalid("brief.headSha must be a commit sha");
+      if (typeof b.base !== "string" || b.base.length === 0) return invalid("brief.base must be a branch");
+      return {
+        ok: true,
+        value: { kind: "rebase", unit: b.unit, pr: n.value, headSha: b.headSha, base: b.base },
+      };
+    }
     default:
-      return invalid("brief.kind must be contract, review or findings");
+      return invalid("brief.kind must be contract, review, findings or rebase");
   }
 }
 
@@ -1407,6 +1424,7 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     const open = await deps.findOpenPrByHead(instance.repo, branch);
     if (open) {
       await remember({ number: open.number, url: open.htmlUrl });
+      deps.runnerOwnership?.claim(instance.repo, open.number);
       // The entry facts (issue 1689). The branch's tip comes from the pull
       // request's own facts read, which prefers the head ref's tip over the
       // possibly-stale listing sha; the approval and the checks are read at
@@ -2222,6 +2240,8 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
           }),
   };
   await deps.instances.putUnits([updated]);
+  if (segment === undefined && idle === undefined && updated.pr !== undefined)
+    deps.runnerOwnership?.release(instance.repo, updated.pr.number);
   const thread = unitThread(instance, updated, units.length);
   if (host.kind === "host")
     hostPublish(
@@ -2396,6 +2416,50 @@ async function codingHandoffOf(
  * instead: merged from the facts, still `enqueued`, or `removed` with the
  * queue's own reason for the machine's finding round.
  */
+async function rebaseStep(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
+  const id = parseInstanceId(body.parentInstanceId);
+  if (!id.ok) return json(400, { ok: false, error: id.error });
+  if (typeof body.unit !== "string" || !UNIT_ID.test(body.unit))
+    return json(400, { ok: false, error: "unit must be a unit id" });
+  if (typeof body.prNumber !== "number" || !Number.isInteger(body.prNumber) || body.prNumber <= 0)
+    return json(400, { ok: false, error: "prNumber must be a pull request number" });
+  if (typeof body.headSha !== "string" || !/^[0-9a-f]{7,40}$/i.test(body.headSha))
+    return json(400, { ok: false, error: "headSha must be a commit sha" });
+  const at = (deps.clock ?? systemClock)();
+  const instance = await deps.instances.get(id.value);
+  if (!instance) return json(404, { ok: false, error: "unknown_instance", at });
+  const row = (await deps.instances.listUnits(instance.id)).find((u) => u.unit === body.unit);
+  if (!row) return json(404, { ok: false, error: "unknown_unit", at });
+  if (row.pr?.number !== undefined && row.pr.number !== body.prNumber)
+    return json(409, { ok: false, error: "pull_request_moved", at });
+  deps.runnerOwnership?.claim(instance.repo, body.prNumber);
+  if (deps.runnerRebase === undefined)
+    return json(200, { ok: true, outcome: "refused", reason: "the runner's rebase resolver is unavailable", at });
+  try {
+    const report = await deps.runnerRebase(instance, body.prNumber);
+    const result = report.results.find((r) => r.number === body.prNumber);
+    if (result?.outcome === "carried" && result.headSha !== undefined)
+      return json(200, {
+        ok: true,
+        outcome: result.approvalCarried === true ? "carried" : "changed",
+        headSha: result.headSha,
+        at,
+      });
+    if (result?.outcome === "delta-review" && result.headSha !== undefined)
+      return json(200, { ok: true, outcome: "changed", headSha: result.headSha, at });
+    if (result?.outcome === "conflict") return json(200, { ok: true, outcome: "conflict", reason: result.line, at });
+    if (result?.outcome === "skipped") return json(200, { ok: true, outcome: "carried", headSha: body.headSha, at });
+    return json(200, {
+      ok: true,
+      outcome: "refused",
+      reason: result?.line ?? `the rebase of ${instance.repo}#${body.prNumber} returned no result`,
+      at,
+    });
+  } catch (err) {
+    return json(200, { ok: true, outcome: "refused", reason: describe(err), at });
+  }
+}
+
 async function merge(
   body: Record<string, unknown>,
   deps: AdminCoordinatorDeps,
@@ -2499,26 +2563,18 @@ async function merge(
     return refused(
       `the head of ${where} moved: \`${facts.headSha?.slice(0, 7) ?? "?"}\` is not the approved \`${headSha.slice(0, 7)}\``,
     );
-  // A conflicting pull request is refused at once, BEFORE the checks are read
-  // (spec item 9): zero checks stays pending only on a mergeable pull request.
-  // The refusal names the pull request's own base — a stacked unit rebases
-  // onto its parent, not onto the default branch — and the remedy it offers
-  // is the sweep (record 0071, mechanism two): `pulls rebase` runs the
-  // two-rung resolver and an unchanged patch carries the approval. It never
-  // says "re-issue", because a re-issue reads as "run the unit again" and the
-  // approved work is already on the branch.
+  // A conflicting approved head stays owned by this runner. The typed outcome
+  // re-enters rung one; only a conflict git leaves buys a coding child. A
+  // second base move takes this same path again under the run's remaining
+  // lease, never a pull-request-lifetime spend flag or a hand-rebase ending.
   if (facts.mergeableState === "dirty") {
     const base = facts.baseRef ?? "its base";
-    // The remedy named is the one that exists (record 0071, criterion 5): with
-    // the watch on for this repository, the watching unit's own round rebases
-    // it on the next push to the base; otherwise the sweep a person runs.
-    if (deps.mergeWatchOf?.(instance.repo).watch === true)
-      return refused(
-        `${where} conflicts with \`${base}\` at \`${headSha.slice(0, 7)}\` — the watch is on for \`${instance.repo}\`: the waiting unit's own round rebases it on the next push to \`${base}\` (an unchanged patch carries the approval). The approved work stands`,
-      );
-    return refused(
-      `${where} conflicts with \`${base}\` at \`${headSha.slice(0, 7)}\` — \`pulls rebase ${where}\` rebases it onto \`${base}\` (an unchanged patch carries the approval); merge it by hand once the checks are green. The approved work stands`,
-    );
+    return json(200, {
+      ok: true,
+      outcome: "conflict",
+      reason: `${where} conflicts with \`${base}\` at \`${headSha.slice(0, 7)}\``,
+      at,
+    });
   }
   const approved = await reviewPostedAt(deps, pr, "approve", headSha);
   if (approved === undefined)
@@ -2867,6 +2923,7 @@ type Step =
   | "unit-wake"
   | "checks"
   | "merge"
+  | "rebase"
   | "finish";
 const STEPS: readonly Step[] = [
   "authorize",
@@ -2881,6 +2938,7 @@ const STEPS: readonly Step[] = [
   "unit-wake",
   "checks",
   "merge",
+  "rebase",
   "finish",
 ];
 
@@ -2943,6 +3001,8 @@ export async function answerCoordinatorStep(
       return checksStep(parsed.value, deps);
     case "merge":
       return merge(parsed.value, deps, door.subject);
+    case "rebase":
+      return rebaseStep(parsed.value, deps);
     default:
       return finish(parsed.value, deps);
   }

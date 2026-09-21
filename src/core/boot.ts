@@ -87,6 +87,10 @@ export interface LiveElsewhere {
   threadKey: string;
   startedAt: number;
   meta: { agent?: string };
+  /** A hosted runner another live generation still drives. The next
+   *  generation uses its durable instance id to rebuild the pull-ownership
+   *  fence before it accepts a sweep. */
+  hosting?: HostingState;
 }
 
 /** A reclaimed run the resume launcher continues (item 38): its row (ours
@@ -171,6 +175,14 @@ export interface ReclaimOutcome {
   /** Runs another generation still holds a current lease on (a rollout
    *  overlap): their cards must not be swept as orphans. */
   liveElsewhere: LiveElsewhere[];
+  /** Every hosted runner in the complete live-run listing, including rows
+   *  owned by this generation whose classification failed. Ownership recovery
+   *  must not lose those runners merely because they are not resumable. */
+  liveHosted: HostingState[];
+  /** True only when `liveElsewhere` and `liveHosted` came from a complete
+   *  live-run listing. Recovery fences must not treat a partial answer as proof
+   *  that no generation owns work. */
+  liveListingComplete: boolean;
   /** Runs the reclaim could not close (a failed read or finish); their rows
    *  stay ours with a lease, so the next boot takes them again. */
   failed: { runId: string; error: string }[];
@@ -215,7 +227,14 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
   const now = opts.now ?? Date.now;
   const log = opts.log ?? (() => {});
   const warn = opts.warn ?? (() => {});
-  const outcome: ReclaimOutcome = { closed: [], resumable: [], liveElsewhere: [], failed: [] };
+  const outcome: ReclaimOutcome = {
+    closed: [],
+    resumable: [],
+    liveElsewhere: [],
+    liveHosted: [],
+    liveListingComplete: false,
+    failed: [],
+  };
 
   let reclaimed;
   try {
@@ -413,7 +432,9 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
 
   try {
     for (const row of await ledger.listLive()) {
-      if (row.ownerGen !== gen)
+      const hosting = hostingOf(row.state);
+      if (hosting !== undefined) outcome.liveHosted.push(hosting);
+      if (row.ownerGen !== gen) {
         outcome.liveElsewhere.push({
           runId: row.runId,
           ownerGen: row.ownerGen,
@@ -421,10 +442,13 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
           threadKey: row.threadKey,
           startedAt: row.startedAt,
           meta: { ...(row.meta.agent !== undefined ? { agent: row.meta.agent } : {}) },
+          ...(hosting !== undefined ? { hosting } : {}),
         });
+      }
     }
+    outcome.liveListingComplete = true;
   } catch (err) {
-    warn(`[reclaim] listing live runs failed: ${describe(err)} — the card sweep runs without the ledger's guard`);
+    warn(`[reclaim] listing live runs failed: ${describe(err)} — recovery guards remain fenced`);
   }
 
   // The reclaim's outcome is reported to the object (record 0064, "Endings and
@@ -460,7 +484,8 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
 export interface ReclaimSweepOptions extends ReclaimOptions {
   /** Default `LEASE_MS`: an expired lease is noticed within two intervals. */
   intervalMs?: number;
-  /** Called with every non-empty outcome — the launcher, the card closer, the sweep guard. */
+  /** Called with every complete listing or non-empty outcome — the launcher,
+   *  the card closer and recovery guards. */
   onOutcome: (outcome: ReclaimOutcome) => Promise<void> | void;
   /** Injectable timer (tests). */
   setInterval?: (fn: () => void, ms: number) => { unref?(): void };
@@ -478,7 +503,10 @@ export function startReclaimSweep(opts: ReclaimSweepOptions): { stop(): void } {
     running = true;
     try {
       const outcome = await reclaimRuns(opts);
-      if (outcome.closed.length + outcome.resumable.length + outcome.failed.length + outcome.liveElsewhere.length > 0) {
+      if (
+        outcome.liveListingComplete ||
+        outcome.closed.length + outcome.resumable.length + outcome.failed.length + outcome.liveElsewhere.length > 0
+      ) {
         await opts.onOutcome(outcome);
       }
     } catch (err) {

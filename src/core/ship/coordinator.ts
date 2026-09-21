@@ -458,7 +458,7 @@ export function cursorFinished(cursor: PlanCursor): boolean {
  *  findings dispatched into the unit thread as `agent:coding`, so the coding
  *  session there continues with them (record 0034). Never a `fix` child briefed
  *  from the review. */
-export type RoundKind = "coding" | "review" | "findings";
+export type RoundKind = "coding" | "review" | "findings" | "rebase";
 export interface RoundRef {
   /** Round 0 is the coding round; review round n and its findings step share n. */
   index: number;
@@ -508,6 +508,13 @@ export type Brief =
       /** The round's check findings (record 0055), carried by value — the
        *  review run's record holds only the reviewer's own findings. */
       checks?: Finding[];
+    }
+  | {
+      kind: "rebase";
+      unit: string;
+      pr: number;
+      headSha: string;
+      base: string;
     };
 
 export interface PrRef {
@@ -549,6 +556,9 @@ export type CoordinatorAction =
    *  the queue's outcome (merged, still queued, or removed with the reason)
    *  instead of attempting the squash. */
   | { type: "merge"; step: string; prNumber: number; headSha: string; queued?: true }
+  /** Rung one of an approved head's rebase: git first. A conflict alone buys
+   *  the runner's coding round; a clean changed patch returns to review. */
+  | { type: "rebase"; step: string; prNumber: number; headSha: string }
   /** Read the check runs at the reviewed head (record 0055, the round verdict):
    *  the merge door's own reading, folded into the round. `retry` names the
    *  failed checks whose one flake re-run the machine is spending; `refire`
@@ -678,7 +688,15 @@ export type StepReturn =
   | { type: "merge"; step: string; outcome: "merged"; by: "other"; sha: string; mergedAt: string; at: number }
   /** The door enqueued the pull request (or found it still queued), or the
    *  queue removed it — the reason is the queue's own (issue 2011). */
-  | { type: "merge"; step: string; outcome: "pending" | "refused" | "enqueued" | "removed"; reason: string; at: number }
+  | {
+      type: "merge";
+      step: string;
+      outcome: "pending" | "refused" | "conflict" | "enqueued" | "removed";
+      reason: string;
+      at: number;
+    }
+  | { type: "rebase"; step: string; outcome: "carried" | "changed"; headSha: string; at: number }
+  | { type: "rebase"; step: string; outcome: "conflict" | "refused"; reason: string; at: number }
   /** The checks read at the reviewed head; `checks` absent means GitHub could
    *  not be read, which the machine treats as pending (record 0055). Effect
    *  asks answer `retried` or `refired` instead; false still spends that one
@@ -1090,6 +1108,7 @@ type Phase =
    *  only through a merge queue (issue 2011) — so every later ask reads the
    *  queue's outcome instead of attempting the squash again. */
   | { at: "merge"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number; queued?: true }
+  | { at: "rebase"; pr: PrRef; headSha: string; n: number }
   | { at: "merge-wait"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number; queued?: true }
   /** The round's checks step (record 0055): the check runs at the reviewed head
    *  are read after an approve settles, before merge_ready or the merge door.
@@ -1135,6 +1154,9 @@ export interface UnitPipelineState {
   readonly phase: Phase;
   /** Review rounds started so far. */
   readonly reviewRounds: number;
+  /** Approved-head rebases attempted in this run. Each fresh conflict may buy
+   *  one fix round; the run's remaining lease, not pull-request lifetime, is the bound. */
+  readonly rebaseAttempts: number;
   readonly pr?: PrRef;
   readonly lastReviewHead?: string;
   readonly lastVerdictSummary?: string;
@@ -1192,6 +1214,7 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
     clock: at,
     phase: { at: "pre-check" },
     reviewRounds: 0,
+    rebaseAttempts: 0,
     spentMs: { coding: 0, review: 0, waiting: 0 },
     spendUsd: input.session?.spendUsd ?? 0,
     findingsByRound: {},
@@ -1230,11 +1253,8 @@ const loopOf = (s: UnitPipelineState): Loop => ({ maxRounds: s.input.caps.maxRou
  *  A review round `n` and the findings step that follows it share `n`; the
  *  module's positions are the loop's own. */
 function roundCarve(s: UnitPipelineState, round: RoundRef): Carve {
-  return carve(
-    remainingMs(s),
-    { kind: round.kind, index: loopPosition(loopOf(s), round.kind, round.index) },
-    loopOf(s),
-  );
+  const kind = round.kind === "rebase" ? "findings" : round.kind;
+  return carve(remainingMs(s), { kind, index: loopPosition(loopOf(s), kind, round.index) }, loopOf(s));
 }
 
 /** The prefix every step of this pipeline is named under: the unit id, a
@@ -1270,6 +1290,9 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
     };
   }
   const pr = s.pr!.number;
+  if (round.kind === "rebase") {
+    return { kind: "rebase", unit, pr, headSha: s.lastReviewHead!, base: s.input.base };
+  }
   if (round.kind === "findings") {
     const checks = checkFindingsOf(s.findingsByRound[round.index]);
     return {
@@ -1379,6 +1402,13 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         prNumber: p.pr.number,
         headSha: p.headSha,
         ...(p.queued === true ? { queued: true as const } : {}),
+      };
+    case "rebase":
+      return {
+        type: "rebase",
+        step: `${unit}/rebase/${p.n}`,
+        prNumber: p.pr.number,
+        headSha: p.headSha,
       };
     case "merge-wait":
       return {
@@ -1532,6 +1562,13 @@ function enterRound(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNot
     state: { ...s, reviewRounds, phase: { at: "spawn", round, busy: 0, minutes: carved.minutes, holds: carved.holds } },
     notes,
   };
+}
+
+/** A rebase changed the approved patch, so review is mandatory even when
+ *  the ordinary findings-round count is spent. The run's remaining lease is
+ *  the bound: `enterRound` refuses when another review no longer fits. */
+function reviewAfterRebase(s: UnitPipelineState, notes: CoordinatorNote[] = []): Transition {
+  return enterRound(s, { index: s.reviewRounds + 1, kind: "review" }, notes);
 }
 
 /** The next review round, or the round cap. */
@@ -1987,6 +2024,21 @@ function settleChecks(
   }
 }
 
+/** Re-enter the approved head's rebase step. The attempt count belongs to
+ *  this run, not to the pull request: every later base move is a fresh
+ *  conflict, while the one pipeline lease remains the hard bound. */
+export function reenterApprovedRebase(s: UnitPipelineState): UnitPipelineState {
+  if (s.pr === undefined || s.lastReviewHead === undefined)
+    throw new Error("an approved rebase needs the pull request and reviewed head");
+  const { ending: _ending, ...open } = s;
+  const n = s.rebaseAttempts + 1;
+  return {
+    ...open,
+    rebaseAttempts: n,
+    phase: { at: "rebase", pr: s.pr, headSha: s.lastReviewHead, n },
+  };
+}
+
 /** An approve past the checks read: merge_ready for a person, the merge door
  *  under `merge: runner` — the tail the round verdict guards (record 0055). */
 function approveOutcome(next: UnitPipelineState, notes: CoordinatorNote[]): Transition {
@@ -2237,6 +2289,22 @@ function roundOnOpenPr(
   const { round } = phase;
   const head = pr.headSha ?? phase.childHead;
   const next: UnitPipelineState = { ...s, pr: { number: pr.prNumber, url: pr.url } };
+  if (round.kind === "rebase") {
+    const pushed = normalizeHead(head);
+    const approved = normalizeHead(s.lastReviewHead);
+    if (pushed === undefined || (approved !== undefined && sameCommit(pushed, approved)))
+      return end(
+        next,
+        {
+          kind: "aborted",
+          reason: `⚠️ Rebase round ${round.attempt ?? 1} left the approved head unchanged, so the conflict still has no resolution to review.`,
+          round,
+          reviewRounds: next.reviewRounds,
+        },
+        [roundNote(round, "aborted")],
+      );
+    return reviewAfterRebase({ ...next, lastReviewHead: pushed }, [roundNote(round, "pr_opened")]);
+  }
   if (round.kind === "findings") {
     // Nothing repushed → nothing to re-review, unless every finding of the
     // last review was declined on the record: that re-review verifies the
@@ -2577,6 +2645,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
               reviewRounds: s.reviewRounds,
             })
           : end(clocked, { kind: "merged", by: "runner", pr: p.pr, sha: r.sha, reviewRounds: s.reviewRounds });
+      if (r.outcome === "conflict") return { state: reenterApprovedRebase(clocked), notes: [] };
       if (r.outcome === "refused")
         return end(clocked, { kind: "merge_refused", pr: p.pr, reason: r.reason, reviewRounds: s.reviewRounds });
       if (r.outcome === "removed") {
@@ -2640,6 +2709,32 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
             ? [roundNote({ index: s.reviewRounds, kind: "review" }, "enqueued")]
             : [],
       };
+    }
+    case "rebase": {
+      const r = ret as Extract<StepReturn, { type: "rebase" }>;
+      if (r.outcome === "refused")
+        return end(clocked, {
+          kind: "merge_refused",
+          pr: p.pr,
+          reason: r.reason,
+          reviewRounds: s.reviewRounds,
+        });
+      if (r.outcome === "conflict")
+        return enterRound(clocked, {
+          index: s.reviewRounds,
+          kind: "rebase",
+          attempt: p.n,
+        });
+      if (!("headSha" in r))
+        return end(clocked, {
+          kind: "merge_refused",
+          pr: p.pr,
+          reason: "the rebase resolver returned no head",
+          reviewRounds: s.reviewRounds,
+        });
+      const rebased: UnitPipelineState = { ...clocked, lastReviewHead: r.headSha };
+      if (r.outcome === "changed") return reviewAfterRebase(rebased);
+      return enterChecks(rebased, { index: s.reviewRounds, kind: "review" }, []);
     }
     case "merge-wait":
       return {
@@ -2764,7 +2859,7 @@ export interface CommitChecksFacts {
  *  the line is unchanged. */
 function mergeReadyHeadline(rounds: string, url: string, base: string, facts: MergeReadyFacts | undefined): string {
   if (facts?.mergeableState === "dirty")
-    return `⚠️ Approved but not merge-ready after ${rounds}: ${url} — the head conflicts with \`${base}\`: \`pulls rebase ${url}\` rebases it onto \`${base}\` (an unchanged patch carries the approval). The approved work stands.`;
+    return `⚠️ Approved but not merge-ready after ${rounds}: ${url} — the head conflicts with \`${base}\`; the pipeline runner owns the rebase (an unchanged patch carries the approval). The approved work stands.`;
   const fixups = facts?.fixupCommits ?? [];
   if (fixups.length > 0)
     return `⚠️ Approved but not merge-ready after ${rounds}: ${url} — ${fixups.length} unsquashed fix-up commit${fixups.length === 1 ? "" : "s"} on the head (${fixups.join("; ")}): squash into the unit's commit, push, and re-review.`;
