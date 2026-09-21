@@ -37,11 +37,11 @@
     "@earendil-works/pi-ai": "0.85.1",
     "@slack/bolt": "^5.1.0",
     "aws4fetch": "^1.0.20",
-    "e2b": "^2.46.1",
+    "e2b": "^2.49.1",
     "mdast-util-from-markdown": "^2.0.3",
     "undici": "^8.10.2",
-    "yaml": "^2.7.0",
-    "zod": "^4.5.4"
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",
