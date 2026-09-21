@@ -69,8 +69,12 @@ const conn = ref<{ tone: "green" | "amber" | "red"; text: string }>({ tone: "amb
 // below newer healthy ones — then newest-first by the head's start stamp
 // (immutable; the sort is stable, so a repaint only reorders when a row's
 // stall state changes).
-const groups = computed(() => groupRuns([...rows.values()], now.value));
-const liveCount = computed(() => [...rows.values()].filter((r) => !r.finished).length);
+const showBookkeeping = ref(false);
+const visibleRows = computed(() =>
+  [...rows.values()].filter((r) => showBookkeeping.value || (r.agent !== "command" && r.agent !== "door")),
+);
+const groups = computed(() => groupRuns(visibleRows.value, now.value));
+const liveCount = computed(() => visibleRows.value.filter((r) => !r.finished).length);
 
 // The expiry cut (item 20): one divider before the first group whose HEAD
 // leaves within a day — heads are newest-first, so every head under it leaves
@@ -172,6 +176,19 @@ onUnmounted(() => {
       <span id="livecount" class="count font-mono tabular-nums">{{ liveCount }} running</span>
       <span class="filter ml-auto inline-flex items-center gap-4">
         <ViewAsPicker v-if="seed?.viewAs" :people="seed.viewAs.people" />
+        <label
+          class="toggle inline-flex cursor-pointer select-none items-center gap-1.5 text-toned hover:text-highlighted"
+        >
+          <input
+            id="showbookkeeping"
+            v-model="showBookkeeping"
+            type="checkbox"
+            class="accent-(--ui-bg-inverted)"
+            aria-label="Show bookkeeping runs"
+            aria-controls="runs"
+          />
+          Show bookkeeping runs
+        </label>
         <UTooltip :text="mineHint">
           <label
             class="toggle inline-flex cursor-pointer select-none items-center gap-1.5 text-toned hover:text-highlighted"

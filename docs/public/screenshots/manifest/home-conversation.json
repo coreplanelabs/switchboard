@@ -23,7 +23,7 @@
     "web/src/components/ViewAsBanner.vue": "c31f753d698c3c9df6f7643fdff78eee122c2a5bacff2d71e2899dd841b9f474",
     "web/src/components/home/AssistantTurn.vue": "7a672ec6f77f84ca35a41f3450ee76306e40b98626179930abfb2ac21a247972",
     "web/src/components/home/ChatComposer.vue": "27ae7fa98db1ff9b1751f6a2c00938c44bba690dd78c8aaaf556a46e8a47c111",
-    "web/src/components/home/ConversationRail.vue": "22d81a565a3fa4c7e984efa0dee96075cc3fa2ac11f7a961b27a47562fd59010",
+    "web/src/components/home/ConversationRail.vue": "e095994bdec733a7568c1ed699f7559686fc70c7ad6c0b28bed19818d123ec01",
     "web/src/components/home/EmptyState.vue": "f66a93d63e12afac28ad853c7ebbb74d88b1a5a35403d51da1232730a7248733",
     "web/src/components/home/ParentTurn.vue": "a3d5bc569f1e3cdea6b012f506375905c9f7911f29689b4ccd45e16a9d6a7878",
     "web/src/components/home/PersonTurn.vue": "4c0f604599e01551173749a1d4db177967f928a195bc98862ff63bdf05357183",

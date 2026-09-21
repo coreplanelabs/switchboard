@@ -91,6 +91,19 @@ const STANDING_CLS: Record<string, string> = {
 /** The round count the runner drew: distinct round indexes over both threads. */
 const roundCount = computed(() => new Set(view?.rounds.map((r) => r.index) ?? []).size);
 
+/** A later try is said as the pipeline's ordinal, never as the scheduler's counter. */
+const pipelineOrdinal = computed(() => {
+  const n = view?.instance.attempt;
+  if (n === undefined) return undefined;
+  if (n === 1) return "first";
+  if (n === 2) return "second";
+  if (n === 3) return "third";
+  const mod100 = n % 100;
+  const suffix =
+    mod100 >= 11 && mod100 <= 13 ? "th" : n % 10 === 1 ? "st" : n % 10 === 2 ? "nd" : n % 10 === 3 ? "rd" : "th";
+  return `${n}${suffix}`;
+});
+
 /** The sessions the search reads: the working keys `<instance>:<unit>:coding`
  *  and `<instance>:<unit>:review` (session-log item 13) — a run of the lane
  *  that names its own session (a row written before the re-key) still wins,
@@ -234,7 +247,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           <span class="plan font-normal normal-case tracking-normal text-dimmed">
             <template v-if="view.instance.plan">
               of plan <span class="font-mono">{{ view.instance.plan.id }}</span>
-              <template v-if="view.instance.attempt !== undefined"> · attempt {{ view.instance.attempt }}</template>
+              <template v-if="pipelineOrdinal"> · the {{ pipelineOrdinal }} pipeline for this plan</template>
             </template>
             <template v-else>of a ship request</template>
           </span>
@@ -273,8 +286,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       >
         <span>Runs by round</span>
         <span class="count font-normal normal-case tracking-normal text-dimmed">
-          · {{ view.runs.length }} run{{ view.runs.length === 1 ? "" : "s" }} — the coding thread's and the review
-          thread's, as the rounds happened
+          · {{ view.runs.length }} run{{ view.runs.length === 1 ? "" : "s" }} — one unit thread, as the rounds happened
         </span>
       </h2>
       <ol id="unitruns" class="m-0 list-none border-t border-muted p-0">
@@ -288,7 +300,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           :land="landing.get(run.id)"
         />
         <li v-if="view.runs.length === 0" id="empty" class="empty px-2 py-2 text-sm text-muted">
-          No runs yet — the runner has not started this unit.
+          No runs yet — the pipeline has not started this unit.
         </li>
       </ol>
     </div>

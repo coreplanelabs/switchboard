@@ -116,8 +116,5 @@
   },
   "web/src/pages/DeliveryPage.vue": {
     "attempt": 1
-  },
-  "web/src/pages/UnitPage.vue": {
-    "attempt": 1
   }
 }

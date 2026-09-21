@@ -579,7 +579,7 @@ describe("RunPage — history mode", () => {
   // Feature: docs/reference/specs/live-view.md item 33 — a spawned run's page
   // names the way up: the pipeline (or parent) run and, for a ship unit's
   // thread run, the unit it belongs to.
-  it("a spawned run's page links the way up: a ship child links its pipeline run and its unit with the thread named, a conductor's child its parent run alone, a run spawned by nobody draws no lineage; a live seed's parent links too", () => {
+  it("a spawned run's page links the way up: a ship child links its pipeline and its unit with the thread named, a conductor's child its parent run alone, a run spawned by nobody draws no lineage; a live seed's parent links too", () => {
     const shipChild = mountApp(RunPage, {
       seed: historySeed([input] as LiveFrame[], {
         status: "completed",
@@ -592,7 +592,7 @@ describe("RunPage — history mode", () => {
     const strip = shipChild.find("#lineage");
     expect(strip.exists()).toBe(true);
     const parentLink = strip.find('[data-testid="lineage-parent"]');
-    expect(parentLink.text()).toContain("pipeline run");
+    expect(parentLink.text()).toBe("pipeline ›");
     expect(parentLink.attributes("href")).toBe("/runs/ship-parent");
     const unitLink = strip.find('[data-testid="lineage-unit"]');
     expect(unitLink.text()).toContain("unit U16 · The unit page");
@@ -603,7 +603,7 @@ describe("RunPage — history mode", () => {
       seed: historySeed([input] as LiveFrame[], { status: "completed", lineage: { parent: { id: "cond" } } }),
     });
     const kidStrip = kid.find("#lineage");
-    expect(kidStrip.find('[data-testid="lineage-parent"]').text()).toContain("parent run");
+    expect(kidStrip.find('[data-testid="lineage-parent"]').text()).toBe("parent run ›");
     expect(kidStrip.find('[data-testid="lineage-parent"]').attributes("href")).toBe("/runs/cond");
     expect(kidStrip.find('[data-testid="lineage-unit"]').exists()).toBe(false);
 

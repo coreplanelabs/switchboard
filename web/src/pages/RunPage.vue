@@ -596,8 +596,8 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           class="parent text-primary no-underline hover:underline"
           :to="lineageParentHref"
           data-testid="lineage-parent"
-          :title="lineage.unit ? 'the pipeline run this one belongs to' : 'the run that spawned this one'"
-          >{{ lineage.unit ? "pipeline run" : "parent run" }} ›</RouterLink
+          :title="lineage.unit ? 'the pipeline this run belongs to' : 'the run that spawned this one'"
+          >{{ lineage.unit ? "pipeline" : "parent run" }} ›</RouterLink
         >
         <RouterLink
           v-if="lineageUnitHref && lineage.unit"
