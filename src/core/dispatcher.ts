@@ -859,8 +859,9 @@ export async function dispatch(
     // The (agent, model, effort) this request resolves to (dispatch/resolve.ts):
     // a directive, else the thread's sticky agent by transcript — the agent of
     // the thread's newest finished run with a session log (routing-and-config
-    // item 3) — else the config scopes; the model and the effort from the
-    // thread's user turns, then the scopes.
+    // item 3) — else the config scopes; the model and effort from the thread's
+    // user turns, then the scopes. A ledger resume is a fresh lease segment:
+    // it keeps the preset but resolves model and effort from today's scopes.
     const stickyAgent = thread ? stickyAgentOf(thread) : undefined;
     // The same page names the pull request the thread's work lives on
     // (resident-repos item 29): the one its newest finished run opened, for
@@ -882,6 +883,7 @@ export async function dispatch(
           ? { operatorPreset: historicalRoutePreset }
           : {}),
       ...(operatorModel !== undefined ? { operatorModel } : {}),
+      ...(resume !== undefined ? { freshSegment: true } : {}),
     });
     const { sticky, resolved } = settled;
     let { agentSource } = settled;

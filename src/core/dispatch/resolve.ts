@@ -117,6 +117,9 @@ export function resolveRun(
      *  run uses it exactly as the directive path resolves the same ref — and
      *  a typed directive on the message still outranks it. */
     operatorModel?: string;
+    /** A run-ledger resume is a new lease segment (record 0046): keep its
+     *  preset, but do not inherit an earlier user turn's model or effort. */
+    freshSegment?: boolean;
   },
 ): ResolvedRun {
   const { msg, directives, history } = ctx;
@@ -135,8 +138,8 @@ export function resolveRun(
     userId: msg.userId,
     request: {
       agent: directives.agent ?? ctx.operatorPreset ?? sticky.agent,
-      model: directives.model ?? ctx.operatorModel ?? sticky.model,
-      effort: directives.effort ?? sticky.effort,
+      model: directives.model ?? ctx.operatorModel ?? (ctx.freshSegment ? undefined : sticky.model),
+      effort: directives.effort ?? (ctx.freshSegment ? undefined : sticky.effort),
       verbosity: directives.verbosity ?? sticky.verbosity,
     },
   });

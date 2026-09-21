@@ -119,6 +119,33 @@ describe("resolveRun — the (agent, model, effort) triple", () => {
     expect(resolved.effort).toBe("low"); // no effort on this message: the thread's sticky effort still applies
   });
 
+  it("a resumed segment keeps its preset but ignores sticky model and effort, resolving both from the configuration now in force", () => {
+    const configured = configStore(
+      YAML.replace(
+        "    review: anthropic/review-model\n",
+        "    review: anthropic/review-model\n  efforts:\n    general: medium\n",
+      ),
+    );
+    const history: HistoryItem[] = [
+      { role: "user", text: "model:anthropic/review-model effort:high run the old segment" },
+    ];
+    const message = msg("agent:general continue the resumed child");
+
+    const { sticky, resolved } = resolveRun(
+      { config: configured },
+      {
+        msg: message,
+        directives: { agent: "general", text: "continue the resumed child" },
+        history,
+        freshSegment: true,
+      },
+    );
+
+    expect(sticky).toMatchObject({ model: "anthropic/review-model", effort: "high" });
+    expect(resolved.modelRef).toBe("anthropic/general-model");
+    expect(resolved.effort).toBe("medium");
+  });
+
   // The plain-words model unit: a model the operator resolved from a plain-
   // words name ("with astra, …") is the directive's equal — the same ref
   // enters the resolution at the request layer, so the applied model equals

@@ -136,7 +136,11 @@ import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
 import { sendPullMerged } from "./core/coordinator/contract.js";
 import { createMergeReadyBook, createMergeWatch } from "./core/mergeWatch.js";
 import type { PullsCommandDeps } from "./core/commands/pulls.js";
-import { processShimOptions, shimWorkflowSender } from "./core/coordinator/instancesClient.js";
+import {
+  fetchInstanceStatusViaShim,
+  processShimOptions,
+  shimWorkflowSender,
+} from "./core/coordinator/instancesClient.js";
 import { classifyRoundChecks } from "./core/ship/checkFindings.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
 import {
@@ -1764,14 +1768,23 @@ export async function runBot(): Promise<void> {
   // The hosted-row guard's store read (record 0060): the reclaim
   // abandons a hosted row only when the plain store already holds the
   // pipeline's outcome — its `finish` landed there because the ledger refused
-  // the write — and re-hosts every other one within its deadline.
+  // the write — and re-hosts every parent whose deadline, Workflow or child
+  // rows say the pipeline still runs.
   const storedStatus = async (runId: string) => (await runStore.get(runId))?.status;
+  const hostedInstanceLive = async (instanceId: string): Promise<boolean | undefined> => {
+    const answer = await fetchInstanceStatusViaShim(processShimOptions(), instanceId);
+    if (answer.kind !== "status") return answer.kind === "absent" ? false : undefined;
+    if (["queued", "running", "paused", "waiting", "waitingForPause"].includes(answer.status)) return true;
+    if (["complete", "errored", "terminated"].includes(answer.status)) return false;
+    return undefined;
+  };
   let bootReclaim: ReclaimOutcome | undefined;
   if (ledgerReclaim) {
     bootReclaim = await reclaimRuns({
       ledger: ledgerReclaim.client,
       gen: generation,
       storedStatus,
+      hostedInstanceLive,
       log: (l) => console.log(l),
       warn: (w) => console.warn(w),
     });
@@ -1809,6 +1822,7 @@ export async function runBot(): Promise<void> {
         ledger: reclaimClient,
         gen: generation,
         storedStatus,
+        hostedInstanceLive,
         log: (l) => console.log(l),
         warn: (w) => console.warn(w),
       });
@@ -1820,6 +1834,7 @@ export async function runBot(): Promise<void> {
       ledger: ledgerReclaim.client,
       gen: generation,
       storedStatus,
+      hostedInstanceLive,
       log: (l) => console.log(l),
       warn: (w) => console.warn(w),
       onOutcome: async (outcome) => {

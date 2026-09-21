@@ -11,7 +11,7 @@ import type { ChannelIO, IncomingMessage } from "./types.js";
 import type { CoreDeps, DispatchOptions } from "./dispatcher.js";
 import type { ResumeContext } from "./dispatch/admission.js";
 import type { RepoContext } from "./repoContext.js";
-import type { ResumableRun } from "./boot.js";
+import type { RehostRun, ResumableRun } from "./boot.js";
 import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { planResume, type KnownTool } from "./runLedger/resume.js";
 import type { CardHandle, LiveRunRow } from "./runLedger/types.js";
@@ -19,6 +19,8 @@ import { defaultRunRegistry, REPLAY_EVERYTHING } from "./runRegistry.js";
 import type { RunMeta } from "./runRegistry/state.js";
 import { TOOLSETS } from "../tools/toolsets.js";
 import { piBuiltinToolsFor } from "./harness/pi/process.js";
+import { createCardShell } from "./statusCardFrame.js";
+import { shipRoundHeader } from "./shipPipeline.js";
 
 /** pi's own workspace tools that only read (harness-pi item 12): the planner
  *  words their settlement as a lost result, never as an unknown tool. */
@@ -49,18 +51,12 @@ export function inputTextOf(events: readonly { type: string; text?: string }[]):
   return typeof input?.text === "string" ? input.text : "";
 }
 
-/** The message a resumed dispatch runs under: the row's identity, and a text
- *  that pins the agent, model and effort the run had so the dispatcher
- *  resolves the same ones (the text itself is only a label — the model sees the
- *  transcript). */
+/** The message a resumed dispatch runs under: the row pins the preset and
+ *  identity, while model and effort deliberately do not ride. A resumed
+ *  segment is a fresh admission (record 0046), so those two values resolve
+ *  from the configuration in force now; the transcript itself is unchanged. */
 export function resumeMessage(row: LiveRunRow, inputText: string): IncomingMessage {
-  const directives = [
-    row.meta.agent ? `agent:${row.meta.agent}` : "",
-    row.meta.model ? `model:${row.meta.model}` : "",
-    row.meta.effort ? `effort:${row.meta.effort}` : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const directives = row.meta.agent ? `agent:${row.meta.agent}` : "";
   return {
     channelId: row.meta.channelId,
     userId: row.meta.userId,
@@ -73,6 +69,44 @@ export function resumeMessage(row: LiveRunRow, inputText: string): IncomingMessa
     ...(row.meta.postedBy !== undefined ? { postedBy: row.meta.postedBy } : {}),
     ...(row.meta.sourceUrl !== undefined ? { sourceUrl: row.meta.sourceUrl } : {}),
   };
+}
+
+/** The one restart line drawn on a re-hosted parent's existing card. Every
+ *  fact comes from rows reclaimed in the same ledger admission: the parent's
+ *  ship events and its live child rows. It never guesses that no PR exists and
+ *  never tells a person to start a rival pipeline while a child is alive. */
+export function rehostCardDetail(run: RehostRun): string {
+  let latestUnit: Extract<(typeof run.events)[number], { type: "ship_unit" }> | undefined;
+  let latestRound: Extract<(typeof run.events)[number], { type: "ship_round" }> | undefined;
+  for (const event of run.events) {
+    if (event.type === "ship_unit") latestUnit = event;
+    if (event.type === "ship_round") latestRound = event;
+  }
+  let pr: number | undefined;
+  if (latestUnit) {
+    for (let i = run.events.length - 1; i >= 0; i--) {
+      const event = run.events[i]!;
+      if (event.type === "ship_unit" && event.unit === latestUnit.unit && typeof event.pr === "number") {
+        pr = event.pr;
+        break;
+      }
+    }
+  }
+  const expectedStep =
+    latestUnit && latestRound ? `:${latestUnit.unit}/${latestRound.index}/${latestRound.agent}` : undefined;
+  const child =
+    (expectedStep ? run.children.find((candidate) => candidate.idempotencyKey?.endsWith(expectedStep)) : undefined) ??
+    (latestRound ? run.children.find((candidate) => candidate.agent === latestRound.agent) : undefined) ??
+    run.children[0];
+  const parts = ["Resumed from the run ledger"];
+  if (latestUnit) parts.push(latestUnit.unit);
+  if (pr !== undefined) {
+    const url = run.row.meta.repo ? `https://github.com/${run.row.meta.repo}/pull/${pr}` : undefined;
+    parts.push(url ? `PR #${pr}: ${url}` : `PR #${pr}`);
+  }
+  if (latestRound) parts.push(`${shipRoundHeader(latestRound)} · ${latestRound.outcome}`);
+  if (child) parts.push(`live child \`${child.runId}\``);
+  return parts.join(" · ");
 }
 
 /** The registry identity a re-hosted parent's row is recreated with (record
@@ -201,8 +235,27 @@ export async function launchResumes(
         ...REPLAY_EVERYTHING,
       });
       // The parent's card survives the roll: owned again by this generation,
-      // so the orphan sweep leaves it to the runner's redraws and close.
-      if (row.card) opts.keepCardLive?.(row.card);
+      // so the orphan sweep leaves it to the runner's redraws and close. Paint
+      // it once from this admission's ledger facts before a later coordinator
+      // boundary redraws it; a missing/deleted card degrades through the IO.
+      if (row.card) {
+        opts.keepCardLive?.(row.card);
+        const io = opts.ioFor(row);
+        if (io) {
+          try {
+            const shell = createCardShell({
+              label: row.meta.label ?? "*ship*",
+              startedAt: row.startedAt,
+              now: deps.clock ?? Date.now,
+            });
+            await io.status(shell.live({ detail: [rehostCardDetail(run)] }));
+          } catch (err) {
+            warn(
+              `[resume] ${row.runId} ${row.threadKey}: restart card could not be written: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+      }
       log(
         `[resume] ${row.runId} ${row.meta.threadKey}: re-hosted (instance ${run.hosting.instanceId}; ${run.events.length} event(s) replayed)`,
       );

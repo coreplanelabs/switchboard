@@ -9,6 +9,7 @@ import {
   inputTextOf,
   knownToolsFor,
   launchResumes,
+  rehostCardDetail,
   rehostMeta,
   repoContextOf,
   resumeIoTarget,
@@ -18,7 +19,7 @@ import type { RunEvent } from "./runEvents.js";
 import type { AdoptRunRequest } from "./runLedger/writeThrough.js";
 import type { AppendableEvent, LiveRunRow, StepRecord } from "./runLedger/types.js";
 import { RunRegistry } from "./runRegistry.js";
-import type { ChannelIO, IncomingMessage } from "./types.js";
+import type { ChannelIO, IncomingMessage, StatusUpdate } from "./types.js";
 
 // The resume launcher (docs/reference/specs/run-history.md item 38): plans each reclaimed
 // run and dispatches it with a ResumeContext, or closes it with the reason.
@@ -99,12 +100,12 @@ describe("the pure pieces", () => {
     expect(inputTextOf([])).toBe("");
   });
 
-  it("resumeMessage pins the agent, model and effort the run had, carries the row's identity, and drops what the row lacks", () => {
+  it("resumeMessage pins only the agent and identity: model and effort resolve from the configuration in force for the fresh segment", () => {
     expect(resumeMessage(row(), "please review")).toEqual({
       channelId: "slack:C1",
       userId: "slack:UALICE",
       threadKey: "slack:C1:1.0",
-      text: "agent:review model:anthropic/review-model effort:high please review",
+      text: "agent:review please review",
       userName: "alice",
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
     });
@@ -202,7 +203,7 @@ describe("launchResumes", () => {
     expect(h.dispatched).toHaveLength(1);
     const { msg, opts } = h.dispatched[0];
     expect(msg.threadKey).toBe("slack:C1:1.0");
-    expect(msg.text).toBe("agent:review model:anthropic/review-model effort:high please review");
+    expect(msg.text).toBe("agent:review please review");
     const ctx = opts.resume!;
     expect(ctx.row.runId).toBe("r1");
     expect(ctx.lastStep.step).toBe(1);
@@ -415,6 +416,34 @@ describe("launchResumes — the rehost branch (record 0060)", () => {
     { type: "run_meta", agent: "ship", model: "p/m", instanceId: "i7", at: 2, seq: 2 },
   ];
 
+  it("rehostCardDetail reads the interrupted review's unit, PR, step and live child only from the reclaimed ledger rows", () => {
+    const detail = rehostCardDetail({
+      kind: "rehost",
+      row: { ...hostedRow(), meta: { ...hostedRow().meta, repo: "acme/api" } },
+      reclaimedFrom: "handoff",
+      hosting,
+      events: [
+        { type: "ship_unit", unit: "task", state: "pr_opened", pr: 42, at: 2_000, seq: 1 },
+        { type: "ship_round", index: 1, agent: "review", outcome: "started", at: 2_001, seq: 2 },
+        { type: "ship_unit", unit: "task", state: "started", pr: 42, at: 2_001, seq: 3 },
+      ],
+      children: [
+        {
+          runId: "child-review",
+          threadKey: "slack:C1:1.0",
+          agent: "review",
+          idempotencyKey: "i7:task/1/review",
+        },
+      ],
+    });
+    expect(detail).toContain("task");
+    expect(detail).toContain("https://github.com/acme/api/pull/42");
+    expect(detail).toContain("Round 1 — review");
+    expect(detail).toContain("child-review");
+    expect(detail).not.toContain("re-issue");
+    expect(detail).not.toContain("no PR was opened yet");
+  });
+
   it("rehostMeta keeps the ship branch's identity — hosted, the METADATA's thread, never the ledger's `#host` key — and drops what the row lacks", () => {
     expect(rehostMeta(hostedRow())).toEqual({
       hosted: true,
@@ -425,6 +454,72 @@ describe("launchResumes — the rehost branch (record 0060)", () => {
       model: "p/m",
       repo: "acme/api",
     });
+  });
+
+  it("launches the reclaimed parent and review child as a pair and rewrites the existing restart card once with the ledger's PR, step and live child", async () => {
+    const registry = new RunRegistry();
+    const runLedger = { adopt: () => ({ event: () => {} }) };
+    const deps = { runRegistry: registry, runLedger } as unknown as CoreDeps;
+    const cards: StatusUpdate[] = [];
+    const dispatched: string[] = [];
+    const parent: ResumableRun = {
+      kind: "rehost",
+      row: {
+        ...hostedRow(),
+        card: { channel: "C1", ts: "1.1" },
+        meta: { ...hostedRow().meta, repo: "acme/api" },
+      },
+      reclaimedFrom: "handoff",
+      hosting,
+      events: [
+        { type: "ship_unit", unit: "task", state: "pr_opened", pr: 42, at: 2_000, seq: 1 },
+        { type: "ship_round", index: 1, agent: "review", outcome: "started", at: 2_001, seq: 2 },
+        { type: "ship_unit", unit: "task", state: "started", pr: 42, at: 2_001, seq: 3 },
+      ],
+      children: [
+        {
+          runId: "child-review",
+          threadKey: "slack:C1:1.0",
+          agent: "review",
+          idempotencyKey: "i7:task/1/review",
+        },
+      ],
+    };
+    const child = resumable({
+      row: row({
+        runId: "child-review",
+        meta: { ...row().meta, agent: "review", parentInstanceId: "i7", idempotencyKey: "i7:task/1/review" },
+      }),
+    });
+    const io: ChannelIO = {
+      reply: async () => {},
+      status: async (initial) => {
+        cards.push(initial);
+        return { update: (frame) => void cards.push(frame), done: async (frame) => void cards.push(frame) };
+      },
+      history: async () => [],
+    };
+
+    const outcome = await launchResumes(deps, [parent, child], {
+      ioFor: () => io,
+      close: async () => {
+        throw new Error("both rows resume");
+      },
+      agentFor: () => reviewAgent,
+      dispatchFn: async (_deps, msg) => void dispatched.push(msg.threadKey),
+    });
+
+    expect(outcome).toEqual({
+      launched: ["r-ship", "child-review"],
+      closed: [],
+    });
+    expect(dispatched).toEqual(["slack:C1:1.0"]);
+    expect(cards).toHaveLength(1);
+    const card = `${cards[0].title}\n${cards[0].detail ?? ""}`;
+    expect(card).toContain("https://github.com/acme/api/pull/42");
+    expect(card).toContain("Round 1 — review");
+    expect(card).toContain("child-review");
+    expect(card).not.toContain("re-issue");
   });
 
   it("recreates the registry row under the run's id — the original start, the label, a fresh live token, the events replayed — adopts the ledger row with the row's state and the highest replayed seq, mirrors only this generation's publishes, dispatches nothing, and onDone fires at once", async () => {
@@ -438,7 +533,14 @@ describe("launchResumes — the rehost branch (record 0060)", () => {
     const done: string[] = [];
     const logs: string[] = [];
     const kept: { channel: string; ts: string }[] = [];
-    const rehost: ResumableRun = { kind: "rehost", row: hostedRow(), reclaimedFrom: "handoff", hosting, events };
+    const rehost: ResumableRun = {
+      kind: "rehost",
+      row: hostedRow(),
+      reclaimedFrom: "handoff",
+      hosting,
+      events,
+      children: [],
+    };
     const outcome = await launchResumes(deps, [rehost], {
       ioFor: () => undefined, // the rehost needs no channel handle…
       close: async () => {
@@ -500,6 +602,7 @@ describe("launchResumes — the rehost branch (record 0060)", () => {
       reclaimedFrom: "handoff",
       hosting,
       events,
+      children: [],
     };
     try {
       const outcome = await launchResumes(deps, [rehost], {

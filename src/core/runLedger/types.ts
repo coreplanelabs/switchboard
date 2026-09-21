@@ -128,9 +128,9 @@ export interface LiveRunMeta {
 export type RunState = Record<string, unknown>;
 
 /** A hosted ship parent's hosting fact on the row's state (record 0060): the
- *  runner instance the run hosts and the deadline past which a reclaim closes
- *  the row `interrupted` instead of re-hosting it. Set by the ship branch once
- *  the instance exists; read by the boot reclaim. */
+ *  runner instance the run hosts and its original wall-clock estimate. Reclaim
+ *  may outlive that estimate while the Workflow or one of its child rows is
+ *  live; only no durable owner beyond it closes the row. */
 export interface HostingState {
   instanceId: string;
   /** Epoch ms: the hand-off time plus the instance's `caps.maxMinutes` plus
