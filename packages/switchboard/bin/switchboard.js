@@ -1,22 +1,26 @@
 #!/usr/bin/env node
-// The `switchboard` bin: this file hands the process to dist/cli.js, the bundle
-// the build writes (build.mts; docs/reference/specs/packaging.md item 1). A
-// committed entry rather than the bundle itself, because npm links a bin only
-// when its target exists at install time, and the gitignored dist/ does not
-// until the build runs: with dist/cli.js as the bin, `npx <the package>` inside
-// the checkout — where npx prefers the workspace over the registry — found no
-// link and died with `sh: switchboard: command not found`. The published package
-// always carries the bundle, so there this is one extra module load; a checkout
-// that has not built the package is told what to run.
+// The published `switchboard` bin hands the process to the bundle beside it.
+// In a repository checkout npm resolves the package name to this workspace too,
+// but an ignored dist/ may be older than source. The checkout therefore never
+// trusts dist: operators run the root source script, while a tarball runs only
+// the bundle that its build packed.
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const bundle = new URL("../dist/cli.js", import.meta.url);
+const checkoutRoot = new URL("../../../", import.meta.url);
+const runsFromCheckout =
+  existsSync(new URL("project.json", checkoutRoot)) && existsSync(new URL("src/cli.ts", checkoutRoot));
+
+if (runsFromCheckout) {
+  console.error(
+    "switchboard: npx resolved the package name to this checkout; its ignored dist/ is not authoritative. Run `npm run --silent cli -- <group> <verb> …` from the checkout root instead.",
+  );
+  process.exit(1);
+}
 
 if (!existsSync(bundle)) {
-  console.error(
-    `switchboard: ${fileURLToPath(bundle)} is missing — the package is not built. Inside the checkout, npx runs this workspace, not the published package: run \`npm run build -w packages/switchboard\` first, or use the checkout's CLI, \`npm run cli -- <group> <verb> …\`.`,
-  );
+  console.error(`switchboard: ${fileURLToPath(bundle)} is missing — the published package is incomplete.`);
   process.exit(1);
 }
 

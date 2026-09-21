@@ -9,6 +9,8 @@ Replace a credential on a running installation, no image build or release: put t
 - The new value where the profile's `secretsSource` reads it: a `<NAME>` file in the secrets directory (`~/.secrets/switchboard` by default) or a field of the profile's 1Password item.
 - For the restart, an ingress bearer whose subject holds `deploy:write`, in `SWITCHBOARD_DEPLOY_TOKEN`.
 
+Run the commands below from the operator directory with the released CLI version you operate. If the profile is elsewhere, name it with `SWITCHBOARD_DEPLOY_PROFILE`.
+
 ## Find every Worker that holds it
 
 `deploy/secrets.manifest.json` lists each Worker's secrets. A **shared** bearer (`MEMORY_TOKEN`, `SANDBOX_TOKEN`, `RESIDENT_*_TOKEN`) must be the same value on every Worker listed for it; rotate it everywhere.
@@ -16,7 +18,7 @@ Replace a credential on a running installation, no image build or release: put t
 ## Put the new value
 
 ```bash
-npx @coreplane/switchboard deploy secrets <memory|bot|resident|sandbox> --only <NAME>
+npx --yes @coreplane/switchboard@<version> deploy secrets <memory|bot|resident|sandbox> --only <NAME>
 ```
 
 The command refuses before any upload when a required name is absent from the source, then passes each value to `wrangler secret put` on stdin; nothing is printed. It renders the Worker's `wrangler.jsonc` itself, so no `deploy init` first.
@@ -24,7 +26,7 @@ The command refuses before any upload when a required name is absent from the so
 ## Restart the bot
 
 ```bash
-SWITCHBOARD_DEPLOY_TOKEN=<token> npx @coreplane/switchboard deploy restart
+SWITCHBOARD_DEPLOY_TOKEN=<token> npx --yes @coreplane/switchboard@<version> deploy restart
 ```
 
 A put does not restart the container; it keeps the environment it started with. `deploy restart` drains it and starts the next request on the new environment; runs in flight hand off to the next container. It is done once `/healthz` reports a later `startedAt`, about 30 seconds.

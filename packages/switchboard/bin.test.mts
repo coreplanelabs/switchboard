@@ -1,19 +1,26 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { invokedAsScript } from "../../src/invokedAsScript.js";
 
-// Feature: docs/reference/specs/packaging.md item 1 — the bin is a committed
-// file that hands the process to dist/cli.js. npm links a bin only when its
-// target exists at install time, and the gitignored dist/ does not until the
-// build runs: with dist/cli.js as the bin, `npx <the package>` inside the
-// checkout — where npx prefers the workspace over the registry — died with
-// `sh: switchboard: command not found`. Now the link always exists, and an
-// unbuilt workspace says what to run.
+// Feature: docs/reference/specs/packaging.md item 1 — the committed bin
+// refuses every checkout invocation before an ignored dist can run, while a
+// published package hands the process to the bundle that its tarball carries.
 
 const SHIM = join(import.meta.dirname, "bin", "switchboard.js");
+const PACKAGE_NAME = (JSON.parse(readFileSync(join(import.meta.dirname, "package.json"), "utf8")) as { name: string })
+  .name;
 
 /** A package directory holding a copy of the bin and, when given, a `dist/cli.js` with `bundle` as its text. */
 function packageDir(bundle?: string): string {
@@ -56,16 +63,50 @@ describe("the bin", () => {
     return dir;
   };
 
-  it("with no dist/cli.js beside it refuses on stderr — the build command and the checkout's `npm run cli` — exit 1, nothing on stdout", () => {
+  it("with no dist/cli.js beside a published package refuses on stderr naming the missing build — exit 1, nothing on stdout", () => {
     const r = run(join(pkg(), "bin", "switchboard.js"), "ask", "what can you do?");
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("dist/cli.js");
-    expect(r.stderr).toContain("npm run build -w packages/switchboard");
-    expect(r.stderr).toContain("npm run cli");
+    expect(r.stderr).toContain("package is incomplete");
     expect(r.stdout).toBe("");
   });
 
-  it("with dist/cli.js beside it hands the process over: the bundle is the script (its entry claim holds), the arguments pass through unchanged, its exit code is the process's", () => {
+  it("after a supported workspace install, npx refuses the checkout path and names the source command without executing a deliberately stale bundle", () => {
+    const root = pkg();
+    mkdirSync(join(root, "packages", "switchboard", "bin"), { recursive: true });
+    mkdirSync(join(root, "packages", "switchboard", "dist"), { recursive: true });
+    copyFileSync(SHIM, join(root, "packages", "switchboard", "bin", "switchboard.js"));
+    writeFileSync(join(root, "packages", "switchboard", "dist", "cli.js"), 'console.log("STALE BUNDLE EXECUTED");\n');
+    writeFileSync(join(root, "project.json"), '{ "displayName": "fixture" }\n');
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "cli.ts"), "// checkout source marker\n");
+    writeFileSync(
+      join(root, "package.json"),
+      '{ "name": "fixture", "private": true, "workspaces": ["packages/switchboard"] }\n',
+    );
+    writeFileSync(
+      join(root, "packages", "switchboard", "package.json"),
+      `${JSON.stringify({ name: PACKAGE_NAME, version: "0.0.0", type: "module", bin: { switchboard: "bin/switchboard.js" } })}\n`,
+    );
+    const install = spawnSync(
+      "npm",
+      ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", "--loglevel=error"],
+      { cwd: root, encoding: "utf8" },
+    );
+    expect(install.status, install.stderr).toBe(0);
+
+    const r = spawnSync("npx", ["--no-install", PACKAGE_NAME, "--help"], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, NO_COLOR: "1" },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("checkout");
+    expect(r.stderr).toContain("npm run --silent cli -- <group> <verb> …");
+    expect(r.stdout).not.toContain("STALE BUNDLE EXECUTED");
+  });
+
+  it("with dist/cli.js beside a published package hands the process over: the bundle is the script (its entry claim holds), the arguments pass through unchanged, its exit code is the process's", () => {
     const r = run(join(pkg(REPORTING_BUNDLE), "bin", "switchboard.js"), "ask", "what can you do?", "--json");
     expect(r.status, r.stderr).toBe(7);
     expect(r.stderr).toBe("");

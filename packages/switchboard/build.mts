@@ -24,6 +24,7 @@
 //   npm run build -w packages/switchboard
 
 import { execFileSync } from "node:child_process";
+import { isBuiltin } from "node:module";
 import {
   copyFileSync,
   existsSync,
@@ -36,7 +37,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { build } from "esbuild";
+import { build, type BuildResult, type Metafile } from "esbuild";
 import { buildStamp } from "../../deploy/bin/build-stamp.mjs";
 import { WEB_DIST_DIR } from "../../src/channels/webAssets.js";
 import { importClosure, INERT_RULES } from "../../src/deploy/affected.js";
@@ -184,19 +185,83 @@ export function packageReadme(readme: string, repository: string): string {
   );
 }
 
-async function main(): Promise<void> {
+/** Bundle the CLI to a caller-selected path and retain esbuild's emitted import graph for dependency checks. */
+export async function buildCli(
+  outfile: string,
+  entryPoint = join(REPO_ROOT, "src/cli.ts"),
+): Promise<BuildResult & { metafile: Metafile }> {
   const nodeMajor = readFileSync(join(REPO_ROOT, ".nvmrc"), "utf8").trim();
-  rmSync(DIST, { recursive: true, force: true });
-  await build({
-    entryPoints: [join(REPO_ROOT, "src/cli.ts")],
-    outfile: join(DIST, "cli.js"),
+  return (await build({
+    entryPoints: [entryPoint],
+    outfile,
     bundle: true,
     platform: "node",
     format: "esm",
     target: `node${nodeMajor}`,
     packages: "external",
+    metafile: true,
     logLevel: "warning",
-  });
+  })) as BuildResult & { metafile: Metafile };
+}
+
+function packageName(specifier: string): string | undefined {
+  if (isBuiltin(specifier) || specifier.startsWith(".") || specifier.startsWith("/")) return undefined;
+  const [scope, name] = specifier.split("/");
+  return scope.startsWith("@") ? (name ? `${scope}/${name}` : undefined) : scope;
+}
+
+/** Every external in the emitted bundle is declared once, and every declaration matches the root installation. */
+export function packageDependencyProblems(
+  metafile: Metafile,
+  packageDependencies: Readonly<Record<string, string>>,
+  rootDependencies: Readonly<Record<string, string>>,
+): string[] {
+  const imported = new Set<string>();
+  for (const output of Object.values(metafile.outputs)) {
+    for (const dependency of output.imports) {
+      if (!dependency.external) continue;
+      const name = packageName(dependency.path);
+      if (name) imported.add(name);
+    }
+  }
+
+  const problems: string[] = [];
+  for (const name of [...imported].sort()) {
+    if (!(name in packageDependencies))
+      problems.push(`${name} is imported by the emitted bundle but is not declared in the package dependencies`);
+  }
+  for (const name of Object.keys(packageDependencies).sort()) {
+    if (!imported.has(name))
+      problems.push(`${name} is declared in the package dependencies but is not imported by the emitted bundle`);
+    if (packageDependencies[name] !== rootDependencies[name])
+      problems.push(
+        `${name} has package range ${packageDependencies[name]} but root range ${rootDependencies[name] ?? "<missing>"}`,
+      );
+  }
+  return problems;
+}
+
+/** Refuse a package whose emitted dependency closure and manifests disagree. */
+export function assertPackageDependencies(
+  metafile: Metafile,
+  packageDependencies: Readonly<Record<string, string>>,
+  rootDependencies: Readonly<Record<string, string>>,
+): void {
+  const problems = packageDependencyProblems(metafile, packageDependencies, rootDependencies);
+  if (problems.length > 0) throw new Error(`package dependency closure is invalid:\n- ${problems.join("\n- ")}`);
+}
+
+async function main(): Promise<void> {
+  const nodeMajor = readFileSync(join(REPO_ROOT, ".nvmrc"), "utf8").trim();
+  rmSync(DIST, { recursive: true, force: true });
+  const bundle = await buildCli(join(DIST, "cli.js"));
+  const packageManifest = JSON.parse(readFileSync(join(PACKAGE_DIR, "package.json"), "utf8")) as {
+    dependencies: Record<string, string>;
+  };
+  const rootManifest = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+    dependencies: Record<string, string>;
+  };
+  assertPackageDependencies(bundle.metafile, packageManifest.dependencies, rootManifest.dependencies);
   const readTree = async (path: string) => {
     const abs = join(REPO_ROOT, path);
     return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;

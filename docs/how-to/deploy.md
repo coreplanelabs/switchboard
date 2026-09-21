@@ -18,7 +18,7 @@ By the end, Switchboard runs in production on Cloudflare: the bot as a container
 ## Write the profile
 
 ```bash
-npx @coreplane/switchboard init --organization <org> --anthropic-key <key> --slack-app-token <xapp-token> --slack-bot-token <xoxb-token> --cloudflare <account id> --zone <zone>
+npx --yes @coreplane/switchboard@<version> init --organization <org> --anthropic-key <key> --slack-app-token <xapp-token> --slack-bot-token <xoxb-token> --cloudflare <account id> --zone <zone>
 ```
 
 You should see:
@@ -70,8 +70,8 @@ openssl rand -hex 32 > ~/.secrets/switchboard/MEMORY_TOKEN
 Add `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` and `ANTHROPIC_API_KEY` the same way. Then:
 
 ```bash
-npx @coreplane/switchboard deploy secrets memory
-npx @coreplane/switchboard deploy secrets bot
+npx --yes @coreplane/switchboard@<version> deploy secrets memory
+npx --yes @coreplane/switchboard@<version> deploy secrets bot
 ```
 
 - An absent required value refuses before any upload; an absent optional one is skipped, by name. Nothing is printed.
@@ -80,8 +80,8 @@ npx @coreplane/switchboard deploy secrets bot
 ## Deploy
 
 ```bash
-npx @coreplane/switchboard deploy plan --only memory,bot
-MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx @coreplane/switchboard deploy all --only memory,bot
+npx --yes @coreplane/switchboard@<version> deploy plan --only memory,bot
+MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx --yes @coreplane/switchboard@<version> deploy all --only memory,bot
 ```
 
 `deploy plan` executes nothing; its `Images:` line reads `0 of 1 present; deploy all copies the rest`, or `not probed (<why>)` without a token. `deploy all` checks the account, copies the missing images into your registry, deploys the state Worker, pushes your config to it, deploys the bot, and waits until `/healthz` answers from the new container.
@@ -154,7 +154,7 @@ gh workflow run deploy-switchboard.yml                  # afterwards: only what 
 Without the Workers every optional capability is off. On any machine with Node and the installation `init` wrote:
 
 ```bash
-npx @coreplane/switchboard start
+npx --yes @coreplane/switchboard@<version> start
 ```
 
 The same bot as a container:

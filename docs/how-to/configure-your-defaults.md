@@ -7,7 +7,7 @@ A plain message picks its own agent; the model and effort it runs on come from t
 - Switchboard answering you in Slack or on the CLI.
 - For a channel's defaults, the `config:write` grant ([Restrict who can do what](restrict-who-can-do-what.md)); your own need none.
 
-Examples are chat messages; the same commands work on the CLI (`npx @coreplane/switchboard config set me --model openai/gpt-5`), HTTP and MCP.
+Examples are chat messages; the same commands work on the published CLI (`npx --yes @coreplane/switchboard@<version> config set me --model openai/gpt-5`), HTTP and MCP. In a checkout, the CLI form is `npm run --silent cli -- config set me --model openai/gpt-5`.
 
 ## See what is in force
 
