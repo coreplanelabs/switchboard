@@ -636,6 +636,10 @@ export type PrCheck =
       /** The head's self-declared fix-up commit subjects (`fixup!`/`squash!`/`amend!`),
        *  when the read asked for the facts — a head carrying one is not in the ready state. */
       fixupCommits?: string[];
+      /** The base branch takes changes only through a merge queue (issue 2011):
+       *  read beside the checks on the ending's facts read, so a `merge_ready`
+       *  report tells the person their merge is queued, never a direct one. */
+      baseHasMergeQueue?: boolean;
     }
   | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string };
 
@@ -2612,6 +2616,10 @@ export interface MergeReadyFacts {
    *  (git's autosquash prefixes `fixup!`, `squash!`, `amend!`): a head
    *  carrying one is by its own words not in the ready state. */
   fixupCommits?: string[];
+  /** The base branch takes changes only through a merge queue (issue 2011):
+   *  the merge:person path names "queued" in its line — the person's merge
+   *  enqueues the pull request and the queue merges it on its own. */
+  baseHasMergeQueue?: boolean;
 }
 
 /** The check runs at one commit: how many, which still run, which failed. */
@@ -2733,7 +2741,12 @@ export function renderUnitReport(
             ? `Already merged: ${e.pr.url} (merge commit \`${facts.merged.sha.slice(0, 7)}\`, merged ${facts.merged.mergedAt}) — auto-merge or a person merged it after the approval; the pipeline merged nothing.`
             : facts?.autoMergeEnabled
               ? "Auto-merge is on for this pull request: the approval merges it once checks pass."
-              : "Remaining gate: a person's merge — the pipeline merges only when the plan's `merge` setting says so, and ship never approves.",
+              : facts?.baseHasMergeQueue === true
+                ? // The merge:person path names "queued" in its line (issue 2011):
+                  // the base takes changes only through a merge queue, so the
+                  // person's merge enqueues — never a direct merge.
+                  `Remaining gate: a person's merge, queued — \`${s.input.base}\` takes changes only through a merge queue, so the merge enqueues the pull request (\`gh pr merge --auto\`) and the queue merges it on its own; the pipeline merges only when the plan's \`merge\` setting says so, and ship never approves.`
+                : "Remaining gate: a person's merge — the pipeline merges only when the plan's `merge` setting says so, and ship never approves.",
         ),
       ]
         .filter(Boolean)

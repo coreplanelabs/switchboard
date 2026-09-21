@@ -2698,6 +2698,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       // request's own mergeable state and the head's self-declared fix-ups.
       prFacts: { state: "open", sameRepoHead: true, mergeableState: "dirty" },
       fixups: ["fixup! fix the login"],
+      // The base's merge-queue rule rides the same read (issue 2011): the
+      // merge:person report says the person's merge is queued.
+      queueRule: true,
     });
     expect(
       (await call(withChecks, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", checks: true })).body,
@@ -2707,6 +2710,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       checks: { total: 3, pending: ["ci / web"], failed: ["ci / package"] },
       mergeableState: "dirty",
       fixupCommits: ["fixup! fix the login"],
+      baseHasMergeQueue: true,
     });
     // Without the flag nothing is asked: the plain answer above carried none of
     // the fact fields even though the harness could have answered them.
@@ -2714,11 +2718,13 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(plain.body).not.toHaveProperty("checks");
     expect(plain.body).not.toHaveProperty("mergeableState");
     expect(plain.body).not.toHaveProperty("fixupCommits");
+    expect(plain.body).not.toHaveProperty("baseHasMergeQueue");
     const unreadable = await planHarness({
       pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },
       checks: new Error("GitHub 502"),
       prFacts: new Error("GitHub 502"),
       fixups: new Error("GitHub 502"),
+      queueRule: new Error("GitHub 502"),
     });
     const noChecks = await call(unreadable, "pr-check", {
       parentInstanceId: PLAN_INSTANCE.id,
@@ -2729,6 +2735,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(noChecks.body).not.toHaveProperty("checks");
     expect(noChecks.body).not.toHaveProperty("mergeableState");
     expect(noChecks.body).not.toHaveProperty("fixupCommits");
+    expect(noChecks.body).not.toHaveProperty("baseHasMergeQueue");
   });
 
   it("pr-check for a unit whose branch only a merged pull request heads answers merged and remembers that pull request on the row, so the row reads like a unit the runner merged", async () => {

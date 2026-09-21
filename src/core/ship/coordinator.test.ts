@@ -3737,6 +3737,41 @@ describe("the merge queue — the door enqueues instead of merging (issue 2011)"
     return d;
   }
 
+  it("the merge:person path names `queued` in its line too: with the base's merge-queue fact on the ending's facts read, the remaining-gate line says the merge enqueues and the queue merges on its own; without the fact (or with it false) the line is unchanged", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    greenChecks(d, T0 + 20 * MIN);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+    const green = { total: 3, pending: [], failed: [] };
+    const queued = renderUnitReport(d.state, { baseHasMergeQueue: true, checks: green });
+    expect(queued).toContain("Remaining gate: a person's merge, queued");
+    expect(queued).toContain("`main` takes changes only through a merge queue");
+    expect(queued).toContain("`gh pr merge --auto`");
+    expect(queued).toContain("the queue merges it on its own");
+    // Without the fact — or with the rules read answering no queue — the
+    // remaining-gate line is byte for byte today's.
+    const plain = renderUnitReport(d.state, { checks: green });
+    expect(plain).toContain("Remaining gate: a person's merge — the pipeline merges only");
+    expect(plain).not.toContain("queued");
+    expect(renderUnitReport(d.state, { baseHasMergeQueue: false, checks: green })).toBe(plain);
+    // A merge that already happened, or the pull request's own auto-merge,
+    // outranks the queue line: there is no person's merge left to queue.
+    const autoMerge = renderUnitReport(d.state, { baseHasMergeQueue: true, autoMergeEnabled: true, checks: green });
+    expect(autoMerge).toContain("Auto-merge is on for this pull request");
+    expect(autoMerge).not.toContain("Remaining gate");
+  });
+
   it("an enqueued answer records the boundary once, waits like pending with every later ask marked `queued`, and the queue's merge ends the unit merged as today", () => {
     const d = atMergeDoor();
     d.answer({ type: "merge", outcome: "enqueued", reason: "enqueued at `a1b2c3d`", at: T0 + 21 * MIN });
