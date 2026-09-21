@@ -18,6 +18,8 @@ import type { Handoff } from "./handoff.js";
 export interface PushedHeadFact {
   ref: string;
   sha: string;
+  /** Mechanical WIP checkpoints are preserved work, not a completed agent push. */
+  by?: "push" | "salvage";
   at?: number;
 }
 

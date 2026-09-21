@@ -294,6 +294,10 @@ export type RunNoteKind =
    *  there was nothing to push), so a re-issue starts from the partial work
    *  (docs/reference/specs/agent-ship.md item 8). */
   | "budget_salvage"
+  /** A coordinator's coding child ended failed, stopped or interrupted with
+   *  work in its tree: before teardown the run loop made a WIP commit and
+   *  pushed the unit branch, or recorded why no push was possible. */
+  | "work_salvage"
   /** A pi run's compaction failed for good — the provider refused the summary
    *  (harness-pi.md item 7) — and the run loop treated it as a checkpoint
    *  signal: the tracked changes were committed and pushed to the run's own
@@ -363,6 +367,7 @@ export const RUN_NOTE_KINDS = [
   "tool_unnamed",
   "directory_reached",
   "budget_salvage",
+  "work_salvage",
   "compaction_salvage",
   "stuck_loop",
   "decline_cascade",
