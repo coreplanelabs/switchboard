@@ -157,12 +157,25 @@ export { DURABLE_INBOX_MAX_BYTES, durableInboxMessage } from "../runLedger/inbox
  *  screenshot on a between-rounds reply reaches the child the fold feeds and
  *  the fresh turn the leftovers run as, never only the text beside it. */
 export function foldThreadAttachments(
-  events: ReadonlyArray<{ attachments?: ReadonlyArray<{ mediaType: string; data: string; name?: string }> }>,
-): Pick<IncomingMessage, "images" | "documents"> {
+  events: ReadonlyArray<{
+    attachments?: ReadonlyArray<{
+      mediaType: string;
+      data: string;
+      name?: string;
+      staged?: NonNullable<IncomingMessage["staged"]>[number];
+    }>;
+  }>,
+): Pick<IncomingMessage, "images" | "documents" | "staged"> {
   const all = events.flatMap((e) => e.attachments ?? []);
-  const images = all.filter((a) => a.mediaType.startsWith("image/")).map((a) => ({ ...a }));
-  const documents = all.filter((a) => !a.mediaType.startsWith("image/")).map((a) => ({ ...a }));
-  return { ...(images.length > 0 ? { images } : {}), ...(documents.length > 0 ? { documents } : {}) };
+  const attachments = all.map(({ staged: _staged, ...attachment }) => attachment);
+  const images = attachments.filter((a) => a.mediaType.startsWith("image/")).map((a) => ({ ...a }));
+  const documents = attachments.filter((a) => !a.mediaType.startsWith("image/")).map((a) => ({ ...a }));
+  const staged = all.flatMap((a) => (a.staged === undefined ? [] : [{ ...a.staged }]));
+  return {
+    ...(images.length > 0 ? { images } : {}),
+    ...(documents.length > 0 ? { documents } : {}),
+    ...(staged.length > 0 ? { staged } : {}),
+  };
 }
 
 /** A durable inbox item back as a follow-up for the resumed run, on the

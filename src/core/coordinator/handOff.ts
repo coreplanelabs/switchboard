@@ -35,7 +35,7 @@ import {
   type ShipCaps,
 } from "../ship/coordinator.js";
 import type { AgentSource } from "../runEvents.js";
-import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
+import type { CoordinatorInstance, CoordinatorUnit, ThreadEventAttachment } from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
 
@@ -52,6 +52,11 @@ export interface HandOffInput {
     postedBy?: string;
     threadKey: string;
     sourceUrl?: string;
+    /** Inline media the channel accepted on the ship request. A generated
+     *  task seeds it onto its unit after that row is durable, so the first
+     *  coding spawn receives the same bytes through the thread-event fold. */
+    images?: ThreadEventAttachment[];
+    documents?: ThreadEventAttachment[];
   };
   /** How the ship preset was chosen (`run_meta.agentSource`): a routed ship
    *  (`route`) runs generated plans alone — the seeded form is refused naming
@@ -514,6 +519,33 @@ async function start(
       "plan_history_unavailable",
       "⚠️ The plan runner needs run history on the state Worker: the unit rows could not be written, so nothing ran.",
     );
+  // A generated task's accepted inline media enters the same durable event
+  // list as a later thread reply. The unit row exists first, and the Workflow
+  // starts only after the append, so its first coding spawn can fold the bytes.
+  // `appendEvent` deduplicates the stable id: a re-issue after create failed
+  // cannot make the retry stage the same file twice. Seeded plans do not copy
+  // one request's media onto several independent units.
+  const accepted = [...(input.msg.images ?? []), ...(input.msg.documents ?? [])];
+  if (instance.plan?.path === undefined && accepted.length > 0) {
+    const unit = units[0]!;
+    const seeded = await deps.instances.appendEvent(
+      { instanceId: instance.id, unit: unit.unit },
+      {
+        id: `${instance.id}:${unit.unit}:ship-request`,
+        sender: input.msg.userId,
+        ...(input.msg.userName !== undefined ? { senderName: input.msg.userName } : {}),
+        text: "Attachments from the ship request.",
+        attachments: accepted,
+        mode: "steer",
+        at: input.now,
+      },
+    );
+    if (!seeded.ok)
+      return refused(
+        "plan_history_unavailable",
+        "⚠️ The plan runner needs run history on the state Worker: the ship request's attachments could not be written, so nothing ran.",
+      );
+  }
   let answer: CreateInstanceAnswer;
   try {
     answer = await deps.create(instance.id);

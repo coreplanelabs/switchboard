@@ -1085,10 +1085,18 @@ describe("steerRun — a run steers a live run through the inbox a thread reply 
 });
 
 describe("foldThreadAttachments — the stored attachments as one message's images and documents", () => {
-  it("splits by media type in arrival order and adds neither key when there is nothing to carry", () => {
+  it("splits by media type, promotes a staging source and adds no key when there is nothing to carry", () => {
+    const staged = {
+      name: "shot.png",
+      size: 2,
+      type: "image/png",
+      url: "https://files.slack.com/shot.png",
+      messageId: "1.0",
+      workspaceIndex: 0,
+    };
     expect(
       foldThreadAttachments([
-        { attachments: [{ mediaType: "image/png", data: "aGk=", name: "shot.png" }] },
+        { attachments: [{ mediaType: "image/png", data: "aGk=", name: "shot.png", staged }] },
         {},
         {
           attachments: [
@@ -1103,6 +1111,7 @@ describe("foldThreadAttachments — the stored attachments as one message's imag
         { mediaType: "image/jpeg", data: "eA==" },
       ],
       documents: [{ mediaType: "text/plain", data: "bm90ZQ==" }],
+      staged: [staged],
     });
     expect(foldThreadAttachments([{ text: "x" } as { attachments?: never }])).toEqual({});
   });

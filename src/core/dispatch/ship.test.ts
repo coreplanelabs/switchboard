@@ -243,6 +243,55 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     });
   });
 
+  it("a Slack task carrying one PNG hands its accepted bytes and staging source to the generated unit as one durable seed event", async () => {
+    const s = setup("slack:UADMIN");
+    const shot = {
+      mediaType: "image/png",
+      data: "iVBORw0KGgo=",
+      name: "brief.png",
+      staged: {
+        name: "brief.png",
+        size: 8,
+        type: "image/png",
+        url: "https://files.slack.com/files-pri/T1-F1/brief.png",
+        messageId: "1.0",
+        workspaceIndex: 0,
+      },
+    };
+    (s.msg as typeof s.msg & { images: (typeof shot)[]; messageId: string }).images = [shot];
+    (s.msg as typeof s.msg & { images: (typeof shot)[]; messageId: string }).messageId = "1.0";
+
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+
+    const instanceId = s.created[0]!;
+    const unit = ["U", "1"].join("");
+    expect(await s.instances.listEvents({ instanceId, unit })).toEqual([
+      {
+        seq: 1,
+        id: `${instanceId}:${unit}:ship-request`,
+        sender: "slack:UADMIN",
+        text: "Attachments from the ship request.",
+        attachments: [shot],
+        mode: "steer",
+        at: NOW,
+      },
+    ]);
+  });
+
+  it("a Slack attachment the inline path skipped stays named in the hosted request, while a request with no accepted media appends no seed event", async () => {
+    const skipped = "(Note: 1 attachment(s) could not be passed through: archive.zip — unsupported type)";
+    const s = setup("slack:UADMIN", {
+      text: `agent:ship in acme/api: inspect the archive\n\n${skipped}`,
+    });
+
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+
+    const instanceId = s.created[0]!;
+    const input = s.registry.snapshot("run-s", "tok")?.events.find((event) => event.type === "input");
+    expect(input).toMatchObject({ type: "input", text: expect.stringContaining(skipped) });
+    expect(await s.instances.listEvents({ instanceId, unit: ["U", "1"].join("") })).toEqual([]);
+  });
+
   // agent-ship.md item 8: the runner's wall clock is the parent's EFFECTIVE
   // profile's minutes — the preset's declared budget as the gate clipped it —
   // never the `ship` config block read again; the rounds cap is the block's.

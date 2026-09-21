@@ -76,8 +76,11 @@ function workerDouble() {
     const eventKey = `${body.instanceId as string}/${body.unit as string}`;
     if (path === "/runs/coordinator/events/append") {
       const list = events.get(eventKey) ?? [];
+      const event = body.event as Omit<ThreadEvent, "seq">;
+      const existing = event.id !== undefined ? list.find((e) => e.id === event.id) : undefined;
+      if (existing !== undefined) return Response.json({ ok: true, seq: existing.seq });
       const seq = (list[list.length - 1]?.seq ?? 0) + 1;
-      list.push(capThreadEvent({ ...(body.event as Omit<ThreadEvent, "seq">), seq }));
+      list.push(capThreadEvent({ ...event, seq }));
       events.set(eventKey, list);
       return Response.json({ ok: true, seq });
     }
@@ -168,13 +171,21 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
     it("appendEvent assigns sequences in order and caps per event; listEvents filters unconsumed; markConsumed is idempotent; a put of the unit row leaves the events untouched", async () => {
       const store = make();
       const key = { instanceId: instance.id, unit: "U12" };
-      const event = (text: string): Parameters<CoordinatorInstanceStore["appendEvent"]>[1] => ({
+      const event = (
+        text: string,
+        over: Partial<Parameters<CoordinatorInstanceStore["appendEvent"]>[1]> = {},
+      ): Parameters<CoordinatorInstanceStore["appendEvent"]>[1] => ({
         sender: "slack:UALICE",
         text,
         mode: "steer",
         at: 5_000,
+        ...over,
       });
-      expect(await store.appendEvent(key, event("first"))).toEqual({ ok: true, seq: 1 });
+      const seeded = event("first", { id: `${instance.id}:U12:ship-request` });
+      expect(await store.appendEvent(key, seeded)).toEqual({ ok: true, seq: 1 });
+      // The hand-off can be re-issued after its Workflow create failed. The
+      // stable seed id returns its original row instead of appending the file twice.
+      expect(await store.appendEvent(key, seeded)).toEqual({ ok: true, seq: 1 });
       expect(await store.appendEvent(key, event("second"))).toEqual({ ok: true, seq: 2 });
       // Over the cap: attachments dropped whole, the row saying how many.
       const heavy = {
@@ -222,6 +233,40 @@ contract(
 );
 
 describe("WorkerCoordinatorInstanceStore — the wire", () => {
+  it("caps an attachment event before the Worker's request-body fence, so accepted over-cap media becomes a dropped-count row instead of HTTP 413", async () => {
+    let sent: Record<string, unknown> | undefined;
+    const store = new WorkerCoordinatorInstanceStore({
+      baseUrl: "https://memory.test",
+      token: "secret-token",
+      storeKey: "runs:default",
+      fetch: async (_input, init) => {
+        const raw = String(init?.body);
+        if (new TextEncoder().encode(raw).byteLength > 512 * 1024)
+          return Response.json({ error: "request body too large" }, { status: 413 });
+        sent = JSON.parse(raw) as Record<string, unknown>;
+        return Response.json({ ok: true, seq: 1 });
+      },
+    });
+
+    await expect(
+      store.appendEvent(
+        { instanceId: instance.id, unit: "U12" },
+        {
+          sender: "slack:UALICE",
+          text: "Attachments from the ship request.",
+          attachments: [{ mediaType: "image/png", data: "x".repeat(1024 * 1024), name: "brief.png" }],
+          mode: "steer",
+          at: 5_000,
+        },
+      ),
+    ).resolves.toEqual({ ok: true, seq: 1 });
+    expect(sent?.event).toMatchObject({
+      text: "Attachments from the ship request.",
+      attachmentsDropped: 1,
+    });
+    expect(sent?.event).not.toHaveProperty("attachments");
+  });
+
   it("posts the store key and the record with the bearer; a Worker answer it cannot read is thrown, never guessed", async () => {
     const w = workerDouble();
     const store = new WorkerCoordinatorInstanceStore({

@@ -1393,6 +1393,7 @@ export async function dispatch(
             store: deps.artifacts!,
             threadKey: msg.threadKey,
             nextIndex: nextStagedIndex,
+            preserveWorkspaceIndexes: true,
             publish: (e) => registry.publish(runId, e),
           })
         : undefined;

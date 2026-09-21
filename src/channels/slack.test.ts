@@ -1324,6 +1324,37 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     expect(gated.calls).toContain("download");
   });
 
+  it("an accepted PNG keeps its zero-based Slack staging source when the artifact path is configured", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const ev = followUp();
+    const out = await receiveSlackMessage(
+      s.client,
+      ev,
+      spanStub().span,
+      { staging: true, maxBytesPerMessage: 1_000_000 },
+      [],
+    );
+    expect(out?.message.images).toEqual([
+      {
+        mediaType: "image/png",
+        data: "BwcHBw==",
+        name: "a.png",
+        staged: {
+          name: "a.png",
+          size: 4,
+          type: "image/png",
+          url: "https://f.test/a",
+          messageId: ev.ts,
+          workspaceIndex: 0,
+        },
+      },
+    ]);
+    // The triggering turn still uses the inline image. Only a coordinator fold
+    // promotes its source into IncomingMessage.staged for a later child.
+    expect(out?.message.staged).toBeUndefined();
+  });
+
   it("a caught-up message under always keeps its golden too: 👀, the ⏱ delay note, then the downloads", async () => {
     const s = gateClient();
     stubDownloads(s.calls);

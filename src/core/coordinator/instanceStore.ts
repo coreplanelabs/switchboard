@@ -63,7 +63,9 @@ export interface CoordinatorInstanceStore {
   markStopped(instanceId: string, at: number): Promise<MarkStoppedResult>;
   /** A thread event onto the unit's list (record 0051's reply-as-event rule): the store assigns
    *  the next sequence and enforces the per-event cap (attachments dropped
-   *  whole, the row saying how many). A sibling of the unit rows, never a
+   *  whole, the row saying how many). An `id` already on the unit returns its
+   *  original sequence without appending, so a retried hand-off is stable. A
+   *  sibling of the unit rows, never a
    *  field on them: `putUnits` replaces a row whole, and an append landing
    *  between a route's read and its put would be lost (record 0051). */
   appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult>;
@@ -125,6 +127,11 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   }
   async appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult> {
     const list = this.events.get(unitKey(key)) ?? [];
+    // A channel message id and the ship hand-off's seed id are durable event
+    // identities. Returning the first row makes an append retry idempotent;
+    // events without an id retain the append-every-time behavior.
+    const existing = event.id !== undefined ? list.find((e) => e.id === event.id) : undefined;
+    if (existing !== undefined) return { ok: true, seq: existing.seq };
     const seq = (list[list.length - 1]?.seq ?? 0) + 1;
     list.push(capThreadEvent({ ...event, seq }));
     this.events.set(unitKey(key), list);
@@ -282,7 +289,12 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
   }
 
   async appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult> {
-    const r = await this.post("/runs/coordinator/events/append", { ...key, event });
+    // The state Worker caps again after assigning the sequence, but its HTTP
+    // request-body fence runs first. Cap here too so an accepted 5–10 MB file
+    // reaches that boundary as the small dropped-count row the store contract
+    // promises, never as a transport-level 413.
+    const capped = capThreadEvent(event);
+    const r = await this.post("/runs/coordinator/events/append", { ...key, event: capped });
     const d = r.data as { ok?: unknown; seq?: unknown };
     if (d.ok === true && typeof d.seq === "number") return { ok: true, seq: d.seq };
     throw new Error(`coordinator store /runs/coordinator/events/append: unexpected answer (HTTP ${r.status})`);

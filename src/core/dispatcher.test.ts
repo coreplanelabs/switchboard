@@ -38,6 +38,7 @@ import {
   createSteerSender,
   defaultAdmission,
   durableInboxMessage,
+  foldThreadAttachments,
   STEER_OWNER_REFUSED,
   type DispatchFollowUp,
 } from "./dispatch/admission.js";
@@ -14779,6 +14780,93 @@ describe("inbound staging (record 0033)", () => {
     expect(pull).toMatch(/^mkdir -p attachments && curl -fsS -o 'attachments\/1-clip\.mp4' 'memory:\/\/test\/threads/);
     expect(lastUserText(provider)).toMatch(
       /Attached files are in \.\/attachments\/: 1-clip\.mp4 \(3 KB, video\/mp4\)$/,
+    );
+  });
+
+  it("a coordinator coding child stages a folded accepted PNG at its zero-based path, appends that path to the prompt and records it in the asset catalogue", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const store = new InMemoryArtifactStore({
+      bucket: "test",
+      fetch: (async () =>
+        new Response(new Uint8Array([104, 105]), {
+          status: 200,
+          headers: { "content-type": "image/png" },
+        })) as unknown as typeof fetch,
+    });
+    deps.artifacts = store;
+    const registry = new RunRegistry({ genId: () => "run-child", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    const { commands, executor } = recordingExecutor();
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
+    const seedSource = {
+      name: "brief.png",
+      size: 2,
+      type: "image/png",
+      url: "https://files.slack.com/files-pri/T1-F1/brief.png",
+      messageId: "1700000000.000100",
+      workspaceIndex: 0,
+    };
+    const replySource = {
+      ...seedSource,
+      url: "https://files.slack.com/files-pri/T1-F2/brief.png",
+      messageId: "1700000000.000900",
+    };
+    const folded = foldThreadAttachments([
+      { attachments: [{ mediaType: "image/png", data: "aGk=", name: "brief.png", staged: seedSource }] },
+      { attachments: [{ mediaType: "image/png", data: "aGk=", name: "brief.png", staged: replySource }] },
+    ]);
+    const { io } = fakeIO();
+
+    const parentInstanceId = ["p", "lan-fix-login"].join("");
+    await dispatch(
+      deps,
+      {
+        ...msg("agent:coding match the screenshots", "slack:UADMIN"),
+        ...folded,
+      },
+      io,
+      {
+        coordinator: {
+          parentInstanceId,
+          idempotencyKey: `${parentInstanceId}:u1/0/coding`,
+          base: "main",
+        },
+      },
+    );
+
+    expect(commands.filter((command) => command.includes("attachments/"))).toEqual([
+      expect.stringMatching(
+        /^mkdir -p attachments && curl -fsS -o 'attachments\/0-brief\.png' 'memory:\/\/test\/threads/,
+      ),
+      expect.stringMatching(
+        /^mkdir -p attachments && curl -fsS -o 'attachments\/2-brief\.png' 'memory:\/\/test\/threads/,
+      ),
+    ]);
+    expect(lastUserText(provider)).toMatch(
+      /\[image\][\s\S]*\[image\][\s\S]*Attached files are in \.\/attachments\/: 0-brief\.png \(2 B, image\/png\), 2-brief\.png \(2 B, image\/png\)$/,
+    );
+    expect(registry.snapshotById("run-child")?.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "artifact",
+          direction: "in",
+          key: "threads/slack-CX-1.0/in/1700000000.000100/0-brief.png",
+          name: "brief.png",
+          size: 2,
+          contentType: "image/png",
+        }),
+        expect.objectContaining({
+          type: "artifact",
+          direction: "in",
+          key: "threads/slack-CX-1.0/in/1700000000.000900/2-brief.png",
+          name: "brief.png",
+          size: 2,
+          contentType: "image/png",
+        }),
+      ]),
     );
   });
 
