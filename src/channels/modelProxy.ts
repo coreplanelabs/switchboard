@@ -17,6 +17,7 @@
 
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { once } from "node:events";
+import { MODEL_STREAM_HEARTBEAT_MS } from "../core/budgets.js";
 import type { RunBearerGrant, RunBearerStore, RunMarks } from "../core/modelProxy/runBearers.js";
 import type { SpanAttrs } from "../core/trace/attrs.js";
 import type { Clock } from "../core/trace/types.js";
@@ -631,23 +632,53 @@ function pickResponseHeaders(headers: Headers): Record<string, string> {
   return out;
 }
 
-/** The provider's stream forwarded chunk for chunk, each chunk observed on the
- *  way; `onDone` once at the end, `onError` once on a broken or cancelled stream. */
+const MODEL_STREAM_HEARTBEAT = new TextEncoder().encode(": switchboard keepalive\n\n");
+
+/** Every provider chunk preserved in order and observed on the way. During
+ *  provider silence an SSE comment keeps the public container hop
+ *  and pi's between-byte timer alive; comments are not model events and never
+ *  enter the meter. `onDone` runs once at the end, `onError` once on a broken
+ *  or cancelled stream. */
 function meteredStream(
   source: ReadableStream<Uint8Array>,
   hooks: { onChunk: (chunk: Uint8Array) => void; onDone: () => void; onError: (err: unknown) => void },
 ): ReadableStream<Uint8Array> {
   const reader = source.getReader();
+  let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>> | undefined;
+  let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+  let wakeHeartbeat: (() => void) | undefined;
   let settled = false;
+  const clearHeartbeat = () => {
+    if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
+    heartbeatTimer = undefined;
+    wakeHeartbeat = undefined;
+  };
   const settle = (fn: () => void) => {
     if (settled) return;
     settled = true;
+    clearHeartbeat();
     fn();
   };
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
-        const { done, value } = await reader.read();
+        pendingRead ??= reader.read();
+        const heartbeat = new Promise<{ kind: "heartbeat" }>((resolve) => {
+          wakeHeartbeat = () => resolve({ kind: "heartbeat" });
+          heartbeatTimer = setTimeout(() => wakeHeartbeat?.(), MODEL_STREAM_HEARTBEAT_MS);
+        });
+        const next = await Promise.race([
+          pendingRead.then((result) => ({ kind: "provider" as const, result })),
+          heartbeat,
+        ]);
+        clearHeartbeat();
+        if (settled) return;
+        if (next.kind === "heartbeat") {
+          controller.enqueue(MODEL_STREAM_HEARTBEAT);
+          return;
+        }
+        pendingRead = undefined;
+        const { done, value } = next.result;
         if (done) {
           settle(hooks.onDone);
           controller.close();
@@ -661,7 +692,9 @@ function meteredStream(
       }
     },
     cancel(reason) {
+      const wake = wakeHeartbeat;
       settle(() => hooks.onError(reason ?? new Error("cancelled")));
+      wake?.();
       void reader.cancel(reason).catch(() => {});
     },
   });

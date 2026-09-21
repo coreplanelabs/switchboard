@@ -348,14 +348,19 @@ describe("PiHarness — pi as the contract's object", () => {
 
   it("open carries the deployment's compaction thresholds into pi's settings; without them the settings file is what the loop writes on its own", async () => {
     const thresholds = { reserveTokens: 1000, keepRecentTokens: 200 };
+    const modelStreamTimeoutMs = agent.maxMinutes * 60_000;
     const w = world();
     const s = await new PiHarness({ compaction: thresholds }).open(w.deps, w.run);
     await s.end();
-    expect(w.container.files.get(`${paths.agentDir}/settings.json`)).toBe(piSettingsJson(thresholds));
+    expect(w.container.files.get(`${paths.agentDir}/settings.json`)).toBe(
+      piSettingsJson(thresholds, modelStreamTimeoutMs),
+    );
     const plain = world();
     const t = await new PiHarness().open(plain.deps, plain.run);
     await t.end();
-    expect(plain.container.files.get(`${paths.agentDir}/settings.json`)).toBe(piSettingsJson());
+    expect(plain.container.files.get(`${paths.agentDir}/settings.json`)).toBe(
+      piSettingsJson(undefined, modelStreamTimeoutMs),
+    );
   });
 
   it("find: a row naming another container is another-container with no pid probed; this container's word, or none, or a container that cannot name itself, probes the pid — alive-here while pi runs, dead once it exited", async () => {

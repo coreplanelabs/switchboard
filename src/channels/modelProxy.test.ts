@@ -4,7 +4,7 @@
 // forwarded to the real provider with the real key — which never leaves this
 // process. A fake upstream stands in for the provider; nothing here reaches
 // the network.
-import { provisionalBearerExpiresAt } from "../core/budgets.js";
+import { MODEL_STREAM_HEARTBEAT_MS, provisionalBearerExpiresAt } from "../core/budgets.js";
 import { describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { EventEmitter } from "node:events";
@@ -745,6 +745,48 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
       ttftMs: 250,
     });
     expect(h.bearers.grantOf("run-1")?.turns).toBe(1);
+  });
+
+  it("a 60 s reasoning pause inside the turn bound stays open through SSE heartbeats", async () => {
+    vi.useFakeTimers();
+    try {
+      const upstream = new TransformStream<Uint8Array>();
+      const writer = upstream.writable.getWriter();
+      const h = harness({
+        answer: () =>
+          new Response(upstream.readable, {
+            status: 200,
+            headers: { "content-type": "text/event-stream; charset=utf-8" },
+          }),
+      });
+      const token = h.bearers.mint(h.grant("run-1"));
+      const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, h.deps);
+      if (typeof res.body === "string") throw new Error("expected a streamed answer");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      const pauseMs = 60_000;
+      expect(MODEL_STREAM_HEARTBEAT_MS).toBeLessThan(pauseMs);
+
+      for (let elapsed = MODEL_STREAM_HEARTBEAT_MS; elapsed <= pauseMs; elapsed += MODEL_STREAM_HEARTBEAT_MS) {
+        const next = reader.read();
+        await vi.advanceTimersByTimeAsync(MODEL_STREAM_HEARTBEAT_MS);
+        const beat = await next;
+        expect(beat.done).toBe(false);
+        expect(decoder.decode(beat.value)).toMatch(/^: .+\n\n$/);
+      }
+      expect(h.ends.filter((s) => s.name === "model.turn")).toHaveLength(0);
+
+      const providerChunk = new TextEncoder().encode(anthropicStreamChunks().join(""));
+      const providerRead = reader.read();
+      await writer.write(providerChunk);
+      expect(decoder.decode((await providerRead).value)).toBe(anthropicStreamChunks().join(""));
+      const done = reader.read();
+      await writer.close();
+      await expect(done).resolves.toMatchObject({ done: true });
+      expect(h.ends.filter((s) => s.name === "model.turn")[0].status).toBe("ok");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a non-streamed Anthropic reply is forwarded as one body; stop_sequence reads as end_turn and refusal as other, the way the provider adapter maps them", async () => {

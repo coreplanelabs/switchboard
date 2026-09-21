@@ -34,6 +34,7 @@ const spec: PiLaunchSpec = {
   paths: piRunPaths("run-7"),
   model: { id: "claude-fable-5", providerType: "anthropic", maxTokens: 64000 },
   harnessUrl: "https://bot.example.com/",
+  modelStreamTimeoutMs: 90 * 60_000,
   effort: "high",
   identity: "write",
   system: "You are the coding agent.\n",
@@ -495,6 +496,7 @@ describe("piLaunchFiles", () => {
       defaultProjectTrust: "never",
       checkForUpdates: false,
       shellCommandPrefix: PI_SHELL_COMMAND_PREFIX,
+      httpIdleTimeoutMs: 90 * 60_000,
     });
     expect(files[2].content.startsWith("You are the coding agent.\n\nHARNESS NOTE:")).toBe(true);
     expect(files[2].content).toContain("`update_status`, `submit_pr_description`");
@@ -502,13 +504,15 @@ describe("piLaunchFiles", () => {
     for (const f of files) expect(f.content).not.toContain("s3cret");
   });
   // harness-pi item 4: the deployment's compaction thresholds ride pi's own
-  // settings key; without them the file is exactly what it was.
+  // settings key beside the lease-backed model stream timeout; without the
+  // thresholds the rest of the file is byte-identical.
   it("carries the deployment's compaction thresholds under pi's `compaction` key when set — each alone or both — and is byte-identical without them", () => {
     const both = piLaunchFiles({ ...spec, compaction: { reserveTokens: 150_000, keepRecentTokens: 8_000 } });
     expect(JSON.parse(both[0].content)).toEqual({
       defaultProjectTrust: "never",
       checkForUpdates: false,
       shellCommandPrefix: PI_SHELL_COMMAND_PREFIX,
+      httpIdleTimeoutMs: 90 * 60_000,
       compaction: { reserveTokens: 150_000, keepRecentTokens: 8_000 },
     });
     expect(JSON.parse(piSettingsJson({ reserveTokens: 150_000 }))).toEqual({
@@ -518,7 +522,7 @@ describe("piLaunchFiles", () => {
       compaction: { reserveTokens: 150_000 },
     });
     expect(piSettingsJson({})).toBe(piSettingsJson());
-    expect(piLaunchFiles(spec)[0].content).toBe(piSettingsJson());
+    expect(piLaunchFiles(spec)[0].content).toBe(piSettingsJson(undefined, spec.modelStreamTimeoutMs));
     expect(piSettingsJson()).not.toContain("compaction");
   });
   it("the harness note maps the native tool names onto pi's and names the relayed tools", () => {

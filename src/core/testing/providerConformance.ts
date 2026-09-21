@@ -98,6 +98,7 @@ export function piCapturedBody(card: ModelCard, asked: AskedControls): Record<st
     paths: piRunPaths("conformance"),
     model: { id: card.model, providerType: providerTypeOf(card), maxTokens: 4096 },
     harnessUrl: "http://bot.internal",
+    modelStreamTimeoutMs: 5 * 60_000,
     identity: "write",
     system: "",
     relayTools: [],
