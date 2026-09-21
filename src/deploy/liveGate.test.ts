@@ -204,6 +204,25 @@ describe("decideRestarted", () => {
     expect(decideRestarted(at("not a date"), before, 0).kind).toBe("waiting");
   });
 
+  it("a later refusal-only generation is never live; the config sentence from /healthz is the wait reason", () => {
+    expect(
+      decideRestarted(
+        {
+          ok: false,
+          config: "missing base document — push one with `deploy config`",
+          inFlight: 0,
+          draining: false,
+          startedAt: after,
+        },
+        before,
+        0,
+      ),
+    ).toEqual({
+      kind: "waiting",
+      reason: "config: missing base document — push one with `deploy config`",
+    });
+  });
+
   it("a draining container with a LATER startedAt is restarted — the restart landed and a further stop is draining it (run-history item 39)", () => {
     expect(decideRestarted(at(after, { draining: true, inFlight: 1 }), before, 0)).toEqual({
       kind: "live",

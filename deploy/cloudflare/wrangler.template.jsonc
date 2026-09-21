@@ -31,6 +31,12 @@
     "ACCESS_TEAM_DOMAIN": "{{access.teamDomain}}",
     "ACCESS_AUD": "{{access.aud}}",
     // {{/if}}
+    // The restart route's deployment-side grant. The Worker authenticates a
+    // bearer through SWITCHBOARD_INGRESS_TOKENS and compares its subject here;
+    // it never asks the runtime config it may be restarting to repair.
+    // {{#if restart}}
+    "SWITCHBOARD_RESTART_DEPLOYER": "{{restart.deployer}}",
+    // {{/if}}
     // The state Worker (deploy/cloudflare-memory/): where worker.ts records each
     // scheduled firing for the /runs Scheduled panel, with MEMORY_TOKEN.
     // A profile without a memory Worker renders no var: firings go unrecorded.

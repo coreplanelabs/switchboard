@@ -545,6 +545,7 @@ describe("deploy.restart", () => {
     kind: "ran",
     ok: true,
     target: plan.target,
+    configGeneration: "base v7",
     previousStartedAt: BEFORE,
     startedAt: AFTER,
     waitedMs: 41_000,
@@ -579,6 +580,11 @@ describe("deploy.restart", () => {
         target: "bot",
         adminUrl: BOT_ADMIN_RESTART_URL,
         healthUrl: BOT_HEALTH_URL,
+        config: {
+          source: TEST_PROFILE.configSource,
+          document: "base",
+          stateWorkerUrl: "https://switchboard-memory.example.test",
+        },
         tokenEnv: RESTART_TOKEN_ENV,
         force: false,
         waitMaxMs: 10 * 60_000,
@@ -587,7 +593,7 @@ describe("deploy.restart", () => {
       },
     ]);
     const text = renderText(commands.get("deploy.restart")!, res.ok ? res.value : null);
-    expect(text).toContain("bot restarted");
+    expect(text).toContain("bot restarted onto config base v7");
     expect(text).toContain(`startedAt ${AFTER} (was ${BEFORE})`);
     expect(text).toContain("41s");
     const bound = parseInvocation(commands.get("deploy.restart")!, [

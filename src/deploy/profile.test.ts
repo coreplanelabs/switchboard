@@ -120,7 +120,11 @@ describe("parseProfile", () => {
     if (withDocs.ok) expect(Object.keys(withDocs.profile.workers)).toEqual(["memory", "bot", "resident", "sandbox"]);
   });
 
-  it("the secrets source is optional; access is optional and strict when present", () => {
+  it("the restart deployer is an optional deployment grant, strict when present; secrets and Access stay optional", () => {
+    expect(parseProfile(TEST_PROFILE).ok).toBe(true);
+    expect(parseProfile({ ...TEST_PROFILE, restart: { deployer: "" } }).ok).toBe(false);
+    expect(parseProfile({ ...TEST_PROFILE, restart: { deployer: "ops team" } }).ok).toBe(false);
+    expect(parseProfile({ ...TEST_PROFILE, restart: undefined }).ok).toBe(true);
     expect(parseProfile({ ...TEST_PROFILE, secretsSource: "op://Vault/Switchboard" }).ok).toBe(true);
     expect(parseProfile({ ...TEST_PROFILE, access: { teamDomain: "team.cloudflareaccess.com", aud: "x" } }).ok).toBe(
       false,

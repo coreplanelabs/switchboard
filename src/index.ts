@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
 import { openConfigStore } from "./config.js";
+import { parseConfigLocation } from "./configDocument.js";
+import { configRefusalReason, createConfigRefusalServer } from "./configBoot.js";
 import { intakeCompletion } from "./intakeModel.js";
 import { providerModelsReader } from "./core/dispatch/providerModels.js";
 import { configuredModelRefs } from "./core/commands/providers.js";
@@ -113,8 +115,6 @@ import { HarnessRegistry } from "./core/harness/pi/relay.js";
 import { createHarnessRoutesHandler, isHarnessPath } from "./channels/harnessRoutes.js";
 import { handleAdminTraceLog, TRACE_LOG_PATH } from "./channels/adminTraceLog.js";
 import { createSpanLog } from "./core/trace/spanLog.js";
-import { handleAdminRestartAuthorize } from "./channels/adminRestartAuthorize.js";
-import { RESTART_AUTHORIZE_PATH } from "./deploy/restart.js";
 import {
   DRAIN_DEADLINE_MS,
   drainHoldLine,
@@ -129,7 +129,11 @@ import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
 import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
-import { createAdminCoordinatorHandler, isCoordinatorAdminPath } from "./channels/adminCoordinator.js";
+import {
+  createAdminCoordinatorHandler,
+  createCoordinatorChildAdmission,
+  isCoordinatorAdminPath,
+} from "./channels/adminCoordinator.js";
 import { resolveGrant } from "./core/shipPipeline.js";
 import { createGithubWebhookHandler, GITHUB_WEBHOOK_PATH } from "./channels/githubWebhook.js";
 import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
@@ -238,12 +242,30 @@ export async function runBot(): Promise<void> {
   // says — the state Worker's ConfigDO in prod, so a container restart keeps
   // them (docs/reference/specs/routing-and-config.md item 12); the JSON file otherwise.
   // The command groups are what an Access browser session's baseline reads span.
-  const config = await openConfigStore(CONFIG_PATH, {
-    overridesPath: OVERRIDES_PATH,
-    env: publicEnv(),
-    secrets: processSecrets,
-    commandGroups: coreCommandGroups(),
-  });
+  let config: Awaited<ReturnType<typeof openConfigStore>>;
+  try {
+    config = await openConfigStore(CONFIG_PATH, {
+      overridesPath: OVERRIDES_PATH,
+      env: publicEnv(),
+      secrets: processSecrets,
+      commandGroups: coreCommandGroups(),
+    });
+  } catch (err) {
+    // The production image has no local fallback: a missing or invalid base
+    // document starts only a refusal probe, never a bare bot. Keeping /healthz
+    // reachable lets the rollout hold the previous generation and tells the
+    // deploy CLI exactly what must be repaired.
+    if (parseConfigLocation(CONFIG_PATH).kind !== "state" || !process.env.PORT) throw err;
+    const problem = configRefusalReason(err);
+    console.error(`[config] REFUSED: ${problem}`);
+    const server = createConfigRefusalServer({ problem, startedAt: PROCESS_STARTED_AT });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(Number(process.env.PORT), resolve);
+    });
+    console.error(`config refusal health server on :${process.env.PORT} — no runtime routes are serving`);
+    return;
+  }
   console.log(`[config] runtime overrides: ${config.overridesLocation()}`);
   // The confirmation a routed write is offered as (record 0044; routing-and-config
   // item 25) lives where the overrides live: the same ConfigDO in prod — a row
@@ -965,6 +987,7 @@ export async function runBot(): Promise<void> {
   const pendingHistoryWrites = () => runHistoryWriter.pending();
   const inFlight = () => activeRunCount() + pendingReflectionCount() + pendingHistoryWrites();
   let draining = false;
+  const coordinatorChildAdmission = createCoordinatorChildAdmission(() => draining);
   // The runs the drain's handoff marked for the next generation — they stop
   // holding the drain the moment they are marked (run-history item 39).
   const handedOff = new Set<string>();
@@ -1100,6 +1123,7 @@ export async function runBot(): Promise<void> {
     });
     const coordinatorAdmin = createAdminCoordinatorHandler({
       tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
+      childAdmission: coordinatorChildAdmission,
       grantsFor: (id) => config.grantsFor(id),
       instances: coordinatorInstances,
       // The spawn's tier gate reads the current app config.
@@ -1447,16 +1471,6 @@ export async function runBot(): Promise<void> {
           tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
           grantsFor: (id) => config.grantsFor(id),
           bearers: runBearers,
-        });
-        return;
-      }
-      // The Worker shim's question before `deploy restart` stops this container
-      // (deploy/cloudflare/worker.ts): does the bearer's actor hold `deploy:write`?
-      // The Worker holds the token map; the grants are this config's.
-      if (path === RESTART_AUTHORIZE_PATH) {
-        handleAdminRestartAuthorize(req, res, {
-          tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
-          grantsFor: (id) => config.grantsFor(id),
         });
         return;
       }
@@ -1876,24 +1890,36 @@ export async function runBot(): Promise<void> {
     // fenced the moment the next generation reclaims them. Only the runs a
     // resume cannot continue (an untracked run) hold the drain, up to the old
     // deadline.
-    const handoff = await runLedger.handoff();
-    for (const id of handoff.marked) handedOff.add(id);
+    let handoffFailure: string | undefined;
+    const handoffNow = async () => {
+      const handoff = await runLedger.handoff();
+      const newlyMarked = handoff.marked.filter((id) => !handedOff.has(id));
+      for (const id of newlyMarked) handedOff.add(id);
+      if (handoff.failed && handoff.failed !== handoffFailure) {
+        handoffFailure = handoff.failed;
+        console.warn(`[drain] handoff failed (${handoff.failed}) — waiting for the runs instead`);
+      }
+      if (newlyMarked.length > 0)
+        console.log(`[drain] handed ${newlyMarked.length} run(s) to the next generation: ${newlyMarked.join(", ")}`);
+    };
+    await handoffNow();
     const handed = handedOff;
-    if (handoff.failed) console.warn(`[drain] handoff failed (${handoff.failed}) — waiting for the runs instead`);
-    if (handed.size > 0)
-      console.log(`[drain] handed ${handed.size} run(s) to the next generation: ${[...handed].join(", ")}`);
     // Counted by registry id, not by the write-through's live set: a handed run
     // that gets fenced mid-drain (the next generation took it) leaves that set
     // but is still handed — it must not start holding the drain again. The hold
     // line names each held run and why — never the dispatcher's in-flight count,
     // which can read 0 while a registry row holds the drain.
     const runsHeld = () => heldRuns().length;
+    const admissionsHeld = () => coordinatorChildAdmission.pending();
+    const drainHolds = () => runsHeld() + admissionsHeld();
     if (runsHeld() > 0) console.log(drainHoldLine(heldRuns()));
-    const stillHere = () => runsHeld() + pendingReflectionCount() + pendingHistoryWrites();
-    // The bound is re-read each poll: full deadline while a run holds the
-    // drain, collapsing to the handoff grace the moment the last one ends —
-    // the deadline is the bound for a run that will not end, never the
-    // schedule (src/core/drain.ts, createDrainDeadline).
+    if (admissionsHeld() > 0)
+      console.log(`[drain] waiting for ${admissionsHeld()} coordinator child admission(s) to register`);
+    const stillHere = () => drainHolds() + pendingReflectionCount() + pendingHistoryWrites();
+    // The bound is re-read each poll: full deadline while a run or an admission
+    // holds the drain, collapsing to the handoff grace when the last one ends —
+    // the deadline is the bound for work that will not end, never the schedule
+    // (src/core/drain.ts, createDrainDeadline).
     const deadlineAt = createDrainDeadline(drainStartedAt);
     // The hold names what it waits on: the registry runs still active and not
     // handed off — not the dispatcher's `inFlight` counter, which a run whose
@@ -1908,13 +1934,18 @@ export async function runBot(): Promise<void> {
         `[drain] waiting up to ${Math.round(DRAIN_DEADLINE_MS / MINUTE_MS)} min for ${held.length} run(s) still active and not handed off: ${held.join(", ")}`,
       );
     }
-    let wasHeld = runsHeld() > 0;
-    while (stillHere() > 0 && systemClock() < deadlineAt(systemClock(), runsHeld())) {
+    let wasHeld = drainHolds() > 0;
+    while (stillHere() > 0 && systemClock() < deadlineAt(systemClock(), drainHolds())) {
       await new Promise((r) => setTimeout(r, 500));
-      if (wasHeld && runsHeld() === 0) {
+      // A dispatch that crossed the signal boundary may have registered before
+      // `draining` flipped but reached the durable ledger only after the first
+      // handoff pass. Re-scan every poll: once resumable, it is handed to the
+      // next generation instead of holding this one to the 15-minute deadline.
+      await handoffNow();
+      if (wasHeld && drainHolds() === 0) {
         wasHeld = false;
         console.log(
-          `[drain] last held run ended — exiting within the ${HANDOFF_BUDGET_MS} ms handoff grace, not at the deadline`,
+          `[drain] last held run or child admission ended — exiting within the ${HANDOFF_BUDGET_MS} ms handoff grace, not at the deadline`,
         );
       }
     }

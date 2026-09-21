@@ -1544,7 +1544,15 @@ describe("finishing and finish", () => {
     expect(ledger.live.get("r2")!.phase).toBe("live");
     expect(a.handedOff).toBe(true);
     expect(hosted.handedOff).toBe(true);
-    expect(await wt.handoff()).toEqual({ marked: [] }); // already handed off
+    // A run that crossed the signal boundary can reach the ledger after the
+    // drain's first pass. Its next pass finds and hands it; older rows are not
+    // marked twice.
+    const late = (await openRun(wt, openReq({ runId: "r5", threadKey: "t5" })))!;
+    expect(await wt.handoff()).toEqual({ marked: ["r5"] });
+    expect(late.handedOff).toBe(true);
+    expect(await late.finishing()).toBe("ok");
+    await late.sink.put(record("r5"));
+    expect(await wt.handoff()).toEqual({ marked: [] });
     // Finished inside its own handoff window, before any reclaim: the owner
     // replies itself — finishing from `handoff` is allowed for the owner.
     expect(await a.finishing()).toBe("ok");

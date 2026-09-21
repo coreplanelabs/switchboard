@@ -86,6 +86,16 @@ describe("the coordinator holds no credential", () => {
   });
 });
 
+describe("the restart route's recovery grant stays outside runtime config", () => {
+  it("authorizes the token-map subject against the deployment-profile Worker var and stops directly, never asking the container", () => {
+    const source = read("worker.ts");
+    expect(source).toContain("authorizeRestartDeployer(authn.identity.subject, env.SWITCHBOARD_RESTART_DEPLOYER)");
+    expect(source).toContain("getContainer(env.SWITCHBOARD, INSTANCE).restart({ force: parsed.force })");
+    expect(source).not.toContain(".restartAuthorized(");
+    expect(read("wrangler.template.jsonc")).toContain('"SWITCHBOARD_RESTART_DEPLOYER": "{{restart.deployer}}"');
+  });
+});
+
 describe("the state Worker's template binds this class across scripts", () => {
   it("names the same class and the same Workflow name pattern as the shim's own binding, by the bot's script", () => {
     const memory = readFileSync(

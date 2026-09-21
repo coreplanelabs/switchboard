@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { baseConfigDocument } from "../configDocument.js";
 import { planRestart } from "./restart.js";
 import { runBotRestart, type RestartRunnerDeps } from "./run.js";
 import { TEST_PROFILE } from "./testing/profile.js";
@@ -20,15 +21,42 @@ interface Scripted {
   restart: { status: number; body: string }[];
 }
 
-function harness(script: Scripted, env: Record<string, string> = { SWITCHBOARD_DEPLOY_TOKEN: "tok-deployer" }) {
+function harness(
+  script: Scripted,
+  env: Record<string, string> = { SWITCHBOARD_DEPLOY_TOKEN: "tok-deployer", MEMORY_TOKEN: "memory-token" },
+  config: {
+    sourceText?: string;
+    sourceModifiedAt?: string;
+    documentText?: string;
+    version?: number;
+    missing?: boolean;
+  } = {},
+) {
   const calls: { method: string; url: string; auth?: string; body?: string }[] = [];
   const lines: string[] = [];
   let clock = 0;
   let healthIdx = 0;
   let restartIdx = 0;
   const next = <T>(arr: T[], i: number) => arr[Math.min(i, arr.length - 1)];
+  const sourceText = config.sourceText ?? "organization: acme\n";
+  const document = baseConfigDocument(
+    config.documentText ?? sourceText,
+    TEST_PROFILE.configSource,
+    new Date("2026-08-30T09:00:00.000Z"),
+  );
   const deps: RestartRunnerDeps = {
     env,
+    readConfig: async () => ({
+      ok: true,
+      text: sourceText,
+      how: `config from ${TEST_PROFILE.configSource}`,
+      ...(config.sourceModifiedAt !== undefined ? { modifiedAt: config.sourceModifiedAt } : {}),
+    }),
+    readBase: async () => ({
+      ok: true,
+      document: config.missing ? null : document,
+      version: config.version ?? 7,
+    }),
     now: () => clock,
     sleep: async (ms) => {
       clock += ms;
@@ -75,6 +103,42 @@ describe("runBotRestart", () => {
     expect(h.calls).toEqual([]);
   });
 
+  it("refuses before POST when the base document is missing or its digest is older than the current source, naming deploy config and the generation", async () => {
+    const stale = harness({ health: [healthz(0, BEFORE)], restart: [stopping(BEFORE)] }, undefined, {
+      sourceText: "organization: newer\n",
+      documentText: "organization: old\n",
+      version: 6,
+    });
+    expect(await runBotRestart(plan(), stale.io, stale.deps)).toEqual({
+      kind: "refused",
+      problems: [expect.stringMatching(/base document "base" v6.*older than.*run `deploy config` first/)],
+    });
+    expect(stale.calls).toEqual([]);
+
+    const touched = harness({ health: [healthz(0, BEFORE)], restart: [stopping(BEFORE)] }, undefined, {
+      sourceModifiedAt: "2026-08-30T09:30:00.000Z",
+      version: 7,
+    });
+    expect(await runBotRestart(plan(), touched.io, touched.deps)).toEqual({
+      kind: "refused",
+      problems: [
+        expect.stringMatching(
+          /base document "base" v7 \(pushed 2026-08-30T09:00:00.000Z\).*source changed 2026-08-30T09:30:00.000Z.*run `deploy config` first/,
+        ),
+      ],
+    });
+    expect(touched.calls).toEqual([]);
+
+    const missing = harness({ health: [healthz(0, BEFORE)], restart: [stopping(BEFORE)] }, undefined, {
+      missing: true,
+    });
+    expect(await runBotRestart(plan(), missing.io, missing.deps)).toEqual({
+      kind: "refused",
+      problems: ['config: missing base document "base" — run `deploy config` first'],
+    });
+    expect(missing.calls).toEqual([]);
+  });
+
   it("happy path: POSTs with the bearer and {force:false}, then polls /healthz until a LATER startedAt answers; the old startedAt keeps it waiting", async () => {
     // Old container answers twice more after SIGTERM (draining, then still up), then restarts, then the new one.
     const h = harness({
@@ -82,7 +146,14 @@ describe("runBotRestart", () => {
       restart: [stopping(BEFORE)],
     });
     const r = await runBotRestart(plan(), h.io, h.deps);
-    expect(r).toMatchObject({ kind: "ran", ok: true, previousStartedAt: BEFORE, startedAt: AFTER });
+    expect(r).toMatchObject({
+      kind: "ran",
+      ok: true,
+      previousStartedAt: BEFORE,
+      startedAt: AFTER,
+      configGeneration: "base v7",
+    });
+    expect(h.lines[0]).toContain("config: base v7");
     expect(h.calls[0]).toMatchObject({
       method: "POST",
       url: "https://switchboard.example.test/admin/restart",

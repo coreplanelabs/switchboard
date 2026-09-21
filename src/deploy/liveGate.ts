@@ -22,6 +22,9 @@ export interface HealthzBody {
   build?: { commit?: unknown; builtAt?: unknown } | unknown;
   /** ISO process start — `deploy restart`'s identity (the image, hence `build.commit`, is unchanged). */
   startedAt?: unknown;
+  /** A refusal-only production boot's public reason. Such a generation owns a
+   *  port so the operator can diagnose it, but is never live. */
+  config?: unknown;
 }
 
 /** Parse a `/healthz` response body; undefined when it is not a JSON object
@@ -83,6 +86,11 @@ function decideReady<Identity>(
   let reason: string;
   if (!body) {
     reason = "/healthz not answering with JSON (container restarting, or unreachable)";
+  } else if (body.ok !== true) {
+    reason =
+      typeof body.config === "string" && body.config !== ""
+        ? `config: ${body.config}`
+        : "/healthz reports this container is not ready";
   } else {
     const verdict = identify(body);
     if (verdict.live) return { kind: "live", ...verdict.identity };

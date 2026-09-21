@@ -5,18 +5,16 @@ import { TEST_PROFILE } from "./testing/profile.js";
 import {
   authenticateRestart,
   authorizeRestart,
+  authorizeRestartDeployer,
   authorizeRestartSubject,
-  RESTART_SUBJECT_HEADER,
-  stripRestartSubject,
   constantTimeEqual,
   lookupConstantTime,
   classifyRestartResponse,
   decideRestart,
   formatRestartPlan,
-  parseRestartAuthorization,
   parseRestartRequest,
   planRestart,
-  RESTART_AUTHORIZE_PATH,
+  RESTART_DEPLOYER_ENV,
   RESTART_SCOPE,
   RESTART_TOKEN_ENV,
   restartResponse,
@@ -63,6 +61,22 @@ describe("decideRestart", () => {
       problems: [expect.stringMatching(/impossible inFlight/)],
     });
     expect(decideRestart(undefined, { force: true }).allow).toBe(true);
+  });
+});
+
+describe("authorizeRestartDeployer", () => {
+  it("reads the deployer grant from the Worker's deployment env, never runtime config", () => {
+    expect(authorizeRestartDeployer("ops", "ops")).toEqual({ ok: true, subject: "ops" });
+    expect(authorizeRestartDeployer("reader", "ops")).toEqual({
+      ok: false,
+      status: 403,
+      reason: `forbidden: identity "reader" is not the restart deployer named by ${RESTART_DEPLOYER_ENV}`,
+    });
+    expect(authorizeRestartDeployer("ops", undefined)).toEqual({
+      ok: false,
+      status: 503,
+      reason: `restart disabled: ${RESTART_DEPLOYER_ENV} is not set by the deployment profile or Worker env`,
+    });
   });
 });
 
@@ -125,7 +139,7 @@ describe("authorizeRestart", () => {
     expect(JSON.stringify(authenticateRestart("Bearer tok-secret-value", tokens))).not.toContain("tok-secret-value");
   });
 
-  it("authorizeRestartSubject (the bot's half for a subject the Worker already authenticated) decides on the grants alone — no token map involved, so a rotation in flight cannot refuse it", () => {
+  it("authorizeRestartSubject is the bot's runtime-grant half for its own admin routes", () => {
     expect(authorizeRestartSubject("ops", grantsFor)).toEqual({ ok: true, subject: "ops" });
     expect(authorizeRestartSubject("reader", grantsFor)).toMatchObject({ ok: false, status: 403 });
     expect(authorizeRestartSubject("unknown", grantsFor)).toMatchObject({ ok: false, status: 403 });
@@ -134,43 +148,6 @@ describe("authorizeRestart", () => {
     expect(authorizeRestart("Bearer tok-deployer", tokens, grantsFor)).toEqual(
       authorizeRestartSubject("ops", grantsFor),
     );
-  });
-
-  it("stripRestartSubject removes only the subject header from what the Worker proxies — a caller can never assert a subject to the container", () => {
-    const req = new Request("https://bot.example/admin/restart/authorize", {
-      method: "POST",
-      headers: { [RESTART_SUBJECT_HEADER]: "ops", authorization: "Bearer x", "x-other": "kept" },
-    });
-    const stripped = stripRestartSubject(req);
-    expect(stripped.headers.has(RESTART_SUBJECT_HEADER)).toBe(false);
-    expect(stripped.headers.get("authorization")).toBe("Bearer x");
-    expect(stripped.headers.get("x-other")).toBe("kept");
-    expect(stripped.method).toBe("POST");
-    const plain = new Request("https://bot.example/healthz");
-    expect(stripRestartSubject(plain)).toBe(plain); // untouched when the header is absent
-  });
-
-  it("parseRestartAuthorization (the Worker reading the bot's /admin/restart/authorize): 200 ok+subject → allowed; 401/403/503 with an error → relayed as they are; anything else → 503, fail-closed", () => {
-    expect(RESTART_AUTHORIZE_PATH).toBe("/admin/restart/authorize");
-    expect(parseRestartAuthorization(200, JSON.stringify({ ok: true, subject: "ops" }))).toEqual({
-      ok: true,
-      subject: "ops",
-    });
-    for (const status of [401, 403, 503] as const)
-      expect(parseRestartAuthorization(status, JSON.stringify({ ok: false, error: "nope" }))).toEqual({
-        ok: false,
-        status,
-        reason: "nope",
-      });
-    // A bot without the route (404), an HTML 500, a 200 without a subject, or a non-JSON body never restarts anything.
-    for (const [status, text] of [
-      [404, "not found"],
-      [500, "<html>"],
-      [200, JSON.stringify({ ok: true })],
-      [200, JSON.stringify({ ok: false, error: "x" })],
-      [403, "forbidden"],
-    ] as const)
-      expect(parseRestartAuthorization(status, text), `${status} ${text}`).toMatchObject({ ok: false, status: 503 });
   });
 });
 
@@ -239,6 +216,11 @@ describe("planRestart / formatRestartPlan", () => {
       target: "bot",
       adminUrl: "https://switchboard.example.test/admin/restart",
       healthUrl: "https://switchboard.example.test/healthz",
+      config: {
+        source: "config/config.production.yaml",
+        document: "base",
+        stateWorkerUrl: "https://switchboard-memory.example.test",
+      },
       tokenEnv: RESTART_TOKEN_ENV,
       force: false,
       waitMaxMs: 30 * 60_000,

@@ -28,14 +28,10 @@ import {
 import {
   authenticateIngressBearer,
   authenticateRestart,
+  authorizeRestartDeployer,
   decideRestart,
-  parseRestartAuthorization,
   parseRestartRequest,
-  RESTART_AUTHORIZE_PATH,
-  RESTART_SUBJECT_HEADER,
   restartResponse,
-  stripRestartSubject,
-  type RestartAuth,
   type RestartOutcome,
 } from "../../src/deploy/restart.ts";
 import {
@@ -89,7 +85,8 @@ export interface Env {
   ACCESS_TEAM_DOMAIN?: string; // live-view SSO gate: Cloudflare Access team domain (JWKS + iss)
   ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
   DASHBOARD_TOKEN?: string; // dashboard auth `token` strategy: the bearer (the default env name; config may name another)
-  SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map); the `cron` entry is what scheduled runs present; an entry whose `http:<subject>` actor holds `deploy:write` in the bot's config may POST /admin/restart
+  SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map); the `cron` entry is what scheduled runs present
+  SWITCHBOARD_RESTART_DEPLOYER?: string; // deployment-profile grant: the token-map subject allowed to POST /admin/restart; Worker-only, never runtime config
   BRAVE_SEARCH_API_KEY?: string; // web_search backend (Brave); web_fetch works without it
   GITHUB_WEBHOOK_SECRET?: string; // check-run intake: signs POST /webhooks/github; absent, the intake answers 503 disabled
   CF_ANALYTICS_TOKEN?: string; // costs dash: Cloudflare API token, Account Analytics:Read only
@@ -211,37 +208,6 @@ export class SwitchboardServer extends Container<Env> {
     return this.restartRunning(opts);
   }
 
-  /**
-   * `deploy restart`, authorized: the Worker knows WHO the bearer is (the token
-   * map); WHETHER that identity may restart is the bot's config (`grants` —
-   * authorization.md item 9), which only the container holds. So ask it —
-   * `POST /admin/restart/authorize` with the authenticated subject in
-   * `RESTART_SUBJECT_HEADER` (never the bearer: the container may still hold the
-   * token map from before a rotation) — and stop only on a 200. A container that
-   * is not running is started first (the bot must answer): if the bearer is
-   * allowed, that start already put the current env live, so nothing is
-   * stopped and the outcome is `not-running`, exactly as before; if not, the
-   * refusal is relayed and the started container simply keeps serving.
-   */
-  async restartAuthorized(
-    subject: string,
-    opts: { force: boolean },
-  ): Promise<{ auth: RestartAuth; outcome?: RestartOutcome }> {
-    const wasRunning = this.ctx.container?.running === true;
-    await this.startBot();
-    const answer = await this.containerFetch(
-      new Request(`${INTERNAL}${RESTART_AUTHORIZE_PATH}`, {
-        method: "POST",
-        headers: { [RESTART_SUBJECT_HEADER]: subject },
-      }),
-      this.defaultPort,
-    );
-    const auth = parseRestartAuthorization(answer.status, await answer.text().catch(() => ""));
-    if (!auth.ok) return { auth };
-    if (!wasRunning) return { auth, outcome: { kind: "not-running" } };
-    return { auth, outcome: await this.restartRunning(opts) };
-  }
-
   /** The stop itself, for a running container: the preflight's refusal rules over `/healthz`, then SIGTERM. */
   private async restartRunning(opts: { force: boolean }): Promise<RestartOutcome> {
     const health = await this.containerFetch(new Request(`${INTERNAL}/healthz`), this.defaultPort);
@@ -265,12 +231,12 @@ export class SwitchboardServer extends Container<Env> {
   }
 }
 
-/** `POST /admin/restart` — the operator surface behind `deploy restart`
- *  (src/deploy/restart.ts documents the authorization choice: a
- *  SWITCHBOARD_INGRESS_TOKENS bearer whose `http:<subject>` actor holds
- *  `deploy:write` in the bot's config). The Worker authenticates the bearer
- *  against the map it holds — an unknown bearer never touches the container —
- *  and the Container DO asks the bot for the grant before stopping anything.
+/** `POST /admin/restart` — the operator surface behind `deploy restart`.
+ *  The Worker authenticates the bearer against its token map, then authorizes
+ *  that subject against SWITCHBOARD_RESTART_DEPLOYER, rendered from the
+ *  deployment profile (or set directly as a Worker var). Runtime config is
+ *  never consulted: this route must remain usable when that document is what
+ *  the restart is repairing.
  *  Body `{ "force": true }` bypasses the fail-closed refusals (no JSON body,
  *  impossible `inFlight`); runs in flight or a drain warn and never refuse. */
 async function handleAdminRestart(request: Request, env: Env): Promise<Response> {
@@ -283,14 +249,16 @@ async function handleAdminRestart(request: Request, env: Env): Promise<Response>
     console.warn(`[restart] ${authn.status} — ${authn.reason}`);
     return json(authn.status, { ok: false, error: authn.reason });
   }
+  const auth = authorizeRestartDeployer(authn.identity.subject, env.SWITCHBOARD_RESTART_DEPLOYER);
+  if (!auth.ok) {
+    console.warn(`[restart] ${auth.status} — ${auth.reason}`);
+    return json(auth.status, { ok: false, error: auth.reason });
+  }
   const parsed = parseRestartRequest(await request.text().catch(() => ""));
   if (!parsed.ok) return json(400, { ok: false, error: parsed.reason });
-  let auth: RestartAuth;
-  let outcome: RestartOutcome | undefined;
+  let outcome: RestartOutcome;
   try {
-    ({ auth, outcome } = await getContainer(env.SWITCHBOARD, INSTANCE).restartAuthorized(authn.identity.subject, {
-      force: parsed.force,
-    }));
+    outcome = await getContainer(env.SWITCHBOARD, INSTANCE).restart({ force: parsed.force });
   } catch (err) {
     // The container's /healthz probe or the DO call threw (container mid-transition,
     // port not answering): fail closed in the route's own JSON shape so the CLI reads
@@ -298,11 +266,6 @@ async function handleAdminRestart(request: Request, env: Env): Promise<Response>
     const reason = err instanceof Error ? err.message : String(err);
     console.error(`[restart] ${authn.identity.subject} → error before stop: ${reason}`);
     return json(500, { ok: false, error: `restart failed before stopping anything: ${reason}` });
-  }
-  if (!auth.ok || outcome === undefined) {
-    const refusal = auth.ok ? { status: 503 as const, reason: "restart disabled: no outcome" } : auth;
-    console.warn(`[restart] ${refusal.status} — ${refusal.reason}`);
-    return json(refusal.status, { ok: false, error: refusal.reason });
   }
   console.log(
     `[restart] ${auth.subject} → ${outcome.kind}${outcome.kind === "refused" ? `: ${outcome.problems.join("; ")}` : ""}`,
@@ -494,9 +457,7 @@ export default {
     // caller sent is stripped, and what the container sees carries this
     // Worker's own root. A static asset or the live view's SSE stream gets no
     // root; a refusal's line is dropped by the sink's filter.
-    // The restart-subject header is the Worker's own word to the container (the
-    // authorize call below); a caller cannot be allowed to speak it.
-    const inbound = stripRestartSubject(stripTraceContext(request));
+    const inbound = stripTraceContext(request);
     const route = shimRoute(pathname);
     if (route === undefined) return withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(inbound));
     const root = tracer.start("bot-shim.fetch", { sinks: traceSinks, attrs: { route } });

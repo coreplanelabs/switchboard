@@ -63,6 +63,10 @@ export interface TemplateView {
   };
   /** The Cloudflare Access application in front of the bot, when the installation has one. */
   access: { teamDomain: string; aud: string } | undefined;
+  /** The Worker-side restart grant. Only the bot template consumes it; keeping
+   *  it in the deployment view keeps recovery authorization independent of
+   *  the runtime config document. */
+  restart: { deployer: string } | undefined;
   /** The artifacts bucket the bot Worker binds (`{{#if artifacts}}` around its `r2_buckets`
    *  block and the `ARTIFACTS_BUCKET_NAME` var), when the profile names one. */
   artifacts: { bucket: string } | undefined;
@@ -102,6 +106,7 @@ export function templateView(
     ...(hasImage(kind) ? { image: containerImage(kind, profile, published) } : {}),
     urls: { publicBaseUrl: urls.publicBaseUrl, stateWorkerUrl: urls.stateWorkerUrl },
     access: profile.access,
+    restart: profile.restart,
     artifacts: profile.artifacts,
     metrics: profile.metrics,
     bot: { script: profile.workers.bot.script },

@@ -394,7 +394,7 @@ export const deployRestart = defineCommand({
     "Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.",
   render: (output) => {
     const o = output as JsonObject;
-    return `${o.target} restarted — startedAt ${o.startedAt} (was ${o.previousStartedAt ?? "unknown"}), live after ${Math.round((o.waitedMs as number) / 1000)}s`;
+    return `${o.target} restarted onto config ${o.configGeneration} — startedAt ${o.startedAt} (was ${o.previousStartedAt ?? "unknown"}), live after ${Math.round((o.waitedMs as number) / 1000)}s`;
   },
   handler: async ({ options, deps }) => {
     const loaded = await loadProfile(deps);
@@ -419,6 +419,7 @@ export const deployRestart = defineCommand({
       throw new CommandError("unavailable", `${plan.target} NOT restarted — ${result.reason ?? "unknown reason"}`);
     return {
       target: result.target,
+      configGeneration: result.configGeneration ?? "unknown",
       previousStartedAt: result.previousStartedAt ?? null,
       startedAt: result.startedAt ?? null,
       waitedMs: result.waitedMs,

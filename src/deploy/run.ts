@@ -15,7 +15,7 @@ import {
   undrainUrl,
   type PostAnswer,
 } from "./residentDrain.js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import { startProcessRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
@@ -50,8 +50,14 @@ import {
   type WorkerDef,
   type WorkerName,
 } from "./plan.js";
-import { parseAppConfigText } from "../config.js";
-import { baseConfigDocument, ConfigDocumentClient, STATE_WORKER_TOKEN_ENV } from "../configDocument.js";
+import { parseAppConfigText, validateProductionConfig } from "../config.js";
+import {
+  baseConfigDocument,
+  ConfigDocumentClient,
+  sha256Hex,
+  STATE_WORKER_TOKEN_ENV,
+  type ReadBaseOutcome,
+} from "../configDocument.js";
 import { BUILD_COMMIT_ENV } from "./buildStamp.js";
 import { cliVersionOnHost, ensureWorkAreaOnHost, OPERATOR_ROOT, packageSourceOnHost } from "./host.js";
 import { assetPath, installationPath, workPath, type OperatorRoot } from "./operatorRoot.js";
@@ -470,9 +476,17 @@ function hostConfigSourceIO(): ConfigSourceIO {
       const abs = isAbsolute(path) ? path : installationPath(OPERATOR_ROOT, path);
       return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
     },
+    pathModifiedAt: async (path) => {
+      const abs = isAbsolute(path) ? path : installationPath(OPERATOR_ROOT, path);
+      try {
+        return statSync(abs).mtime.toISOString();
+      } catch {
+        return undefined;
+      }
+    },
     fetch: async (url, init) => {
       const res = await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) });
-      return { status: res.status, text: () => res.text() };
+      return { status: res.status, text: () => res.text(), headers: res.headers };
     },
     opRead: async (ref) => {
       const r = await run("op", ["read", ref], { cwd: OPERATOR_ROOT.root });
@@ -483,7 +497,7 @@ function hostConfigSourceIO(): ConfigSourceIO {
 }
 
 /** A config read from a `configSource` and validated — what `deploy all` and `deploy config` push. */
-export type ConfigRead = { ok: true; text: string; how: string } | { ok: false; problem: string };
+export type ConfigRead = { ok: true; text: string; how: string; modifiedAt?: string } | { ok: false; problem: string };
 
 /**
  * Read the bot's config from a `configSource` and validate it. `deploy all`
@@ -500,14 +514,19 @@ export async function readConfigForPush(
   const read = await readConfigSource(parsed.source, sourceIO);
   if (!read.ok) return { ok: false, problem: read.problem };
   try {
-    parseAppConfigText(read.text);
+    validateProductionConfig(parseAppConfigText(read.text));
   } catch (err) {
     return {
       ok: false,
       problem: `configSource ${source}: the config does not validate — ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  return { ok: true, text: read.text, how: read.how };
+  return {
+    ok: true,
+    text: read.text,
+    how: read.how,
+    ...(read.modifiedAt !== undefined ? { modifiedAt: read.modifiedAt } : {}),
+  };
 }
 
 export type ConfigPushOutcome =
@@ -1379,6 +1398,8 @@ export type RestartRunResult =
       kind: "ran";
       ok: boolean;
       target: string;
+      /** The durable config document this run proved current before POSTing. */
+      configGeneration?: string;
       previousStartedAt?: string;
       startedAt?: string;
       waitedMs: number;
@@ -1388,6 +1409,13 @@ export type RestartRunResult =
 /** The runner's I/O, injectable so the loop is unit-tested without a network or a clock. */
 export interface RestartRunnerDeps {
   env: Record<string, string | undefined>;
+  /** The profile's current config source, validated exactly as deploy config reads it. */
+  readConfig: (source: string) => Promise<ConfigRead>;
+  /** The durable base document and its ConfigDO version. */
+  readBase: (
+    target: { stateWorkerUrl: string; key: string },
+    env: Record<string, string | undefined>,
+  ) => Promise<ReadBaseOutcome>;
   fetch: (url: string, init?: RequestInit) => Promise<Response>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
@@ -1395,6 +1423,16 @@ export interface RestartRunnerDeps {
 
 export const defaultRestartRunnerDeps: RestartRunnerDeps = {
   env: process.env,
+  readConfig: (source) => readConfigForPush(source),
+  readBase: async (target, env) => {
+    const token = env[STATE_WORKER_TOKEN_ENV];
+    if (!token)
+      return {
+        ok: false,
+        problem: `${STATE_WORKER_TOKEN_ENV} is not set — deploy restart reads document "${target.key}" from ${target.stateWorkerUrl}`,
+      };
+    return new ConfigDocumentClient({ baseUrl: target.stateWorkerUrl, token }).readBase(target.key);
+  },
   fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(20_000) }),
   sleep,
   now: Date.now,
@@ -1406,6 +1444,53 @@ async function fetchHealthzWith(deps: RestartRunnerDeps, url: string): Promise<H
   } catch {
     return undefined;
   }
+}
+
+export type RestartConfigReadiness =
+  { ok: true; generation: string; pushedAt: string; source: string } | { ok: false; problem: string };
+
+/** Prove the durable base is the config source this command would push now.
+ * Compare both clocks when the source exposes one (filesystem mtime or the
+ * remote Last-Modified) and always compare the digest: neither a preserved
+ * timestamp nor a changed-then-restored source can silently restart stale. */
+export async function restartConfigReadiness(
+  plan: RestartPlan,
+  deps: Pick<RestartRunnerDeps, "env" | "readConfig" | "readBase">,
+): Promise<RestartConfigReadiness> {
+  const stateWorkerUrl = plan.config.stateWorkerUrl;
+  if (stateWorkerUrl === undefined)
+    return {
+      ok: false,
+      problem: "the deployment profile has no state Worker — `deploy restart` cannot identify a base config generation",
+    };
+  const source = await deps.readConfig(plan.config.source);
+  if (!source.ok) return source;
+  const base = await deps.readBase({ stateWorkerUrl, key: plan.config.document }, deps.env);
+  if (!base.ok) return base;
+  if (!base.document)
+    return {
+      ok: false,
+      problem: `config: missing base document "${plan.config.document}" — run \`deploy config\` first`,
+    };
+  const generation = `${plan.config.document} v${base.version}`;
+  const sourceModifiedAt = source.modifiedAt;
+  const pushedAtMs = Date.parse(base.document.pushedAt);
+  const modifiedAtMs = sourceModifiedAt === undefined ? Number.NaN : Date.parse(sourceModifiedAt);
+  const sourceIsNewer = Number.isFinite(modifiedAtMs) && Number.isFinite(pushedAtMs) && modifiedAtMs > pushedAtMs;
+  if (sourceIsNewer || base.document.sha256 !== sha256Hex(source.text))
+    return {
+      ok: false,
+      problem:
+        `base document "${plan.config.document}" v${base.version} (pushed ${base.document.pushedAt}) is older than ` +
+        `${source.how}${sourceIsNewer ? ` (source changed ${sourceModifiedAt})` : " (content differs)"} — ` +
+        "run `deploy config` first",
+    };
+  return {
+    ok: true,
+    generation,
+    pushedAt: base.document.pushedAt,
+    source: base.document.source,
+  };
 }
 
 /**
@@ -1430,7 +1515,13 @@ export async function runBotRestart(
         `${plan.tokenEnv} is not set in the environment — a SWITCHBOARD_INGRESS_TOKENS bearer whose identity carries deploy:write`,
       ],
     };
+  const config = await restartConfigReadiness(plan, deps);
+  if (!config.ok) return { kind: "refused", problems: [config.problem] };
+  const configGeneration = config.generation;
   const tag = "deploy:restart";
+  io.log(
+    `[${tag}] config: ${configGeneration} from ${config.source} (pushed ${config.pushedAt}) — restarting onto this generation`,
+  );
   const started = deps.now();
   const deadline = started + plan.waitMaxMs;
   if (plan.force)
@@ -1456,6 +1547,7 @@ export async function runBotRestart(
         kind: "ran",
         ok: false,
         target: plan.target,
+        configGeneration,
         waitedMs: deps.now() - started,
         reason: `POST ${plan.adminUrl} failed: ${err instanceof Error ? err.message : String(err)}`,
       };
@@ -1481,6 +1573,7 @@ export async function runBotRestart(
           kind: "ran",
           ok: false,
           target: plan.target,
+          configGeneration,
           waitedMs: deps.now() - started,
           reason: preflightGaveUpLine(plan.waitMaxMs, outcome.reason, RESTART_GAVE_UP_WORDS),
         };
@@ -1490,7 +1583,14 @@ export async function runBotRestart(
       await deps.sleep(plan.pollMs);
       continue;
     }
-    return { kind: "ran", ok: false, target: plan.target, waitedMs: deps.now() - started, reason: outcome.reason };
+    return {
+      kind: "ran",
+      ok: false,
+      target: plan.target,
+      configGeneration,
+      waitedMs: deps.now() - started,
+      reason: outcome.reason,
+    };
   }
 
   const gateStarted = deps.now();
@@ -1510,6 +1610,7 @@ export async function runBotRestart(
         kind: "ran",
         ok: true,
         target: plan.target,
+        configGeneration,
         previousStartedAt,
         startedAt: d.startedAt,
         waitedMs: deps.now() - started,
@@ -1520,6 +1621,7 @@ export async function runBotRestart(
         kind: "ran",
         ok: false,
         target: plan.target,
+        configGeneration,
         previousStartedAt,
         waitedMs: deps.now() - started,
         reason: `${d.reason} — gave up after ${Math.round(elapsed / 60_000)} min (drain deadline ${plan.liveDeadlineMs / 60_000} min)`,

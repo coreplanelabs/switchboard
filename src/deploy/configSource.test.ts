@@ -60,9 +60,17 @@ describe("readConfigSource", () => {
   it("a path source reads the file, and names it when it is absent", async () => {
     const ok = await readConfigSource(
       { kind: "path", path: "config/x.yaml" },
-      io({ readFile: async (p) => (p === "config/x.yaml" ? "providers: {}\n" : undefined) }),
+      io({
+        readFile: async (p) => (p === "config/x.yaml" ? "providers: {}\n" : undefined),
+        pathModifiedAt: async () => "2026-09-20T17:00:00.000Z",
+      }),
     );
-    expect(ok).toEqual({ ok: true, text: "providers: {}\n", how: "config from config/x.yaml" });
+    expect(ok).toEqual({
+      ok: true,
+      text: "providers: {}\n",
+      how: "config from config/x.yaml",
+      modifiedAt: "2026-09-20T17:00:00.000Z",
+    });
     const missing = await readConfigSource({ kind: "path", path: "config/none.yaml" }, io());
     expect(missing).toEqual({ ok: false, problem: "configSource: config/none.yaml does not exist or cannot be read" });
   });
@@ -80,7 +88,11 @@ describe("readConfigSource", () => {
         env: { [CONFIG_REPO_TOKEN_ENV]: "ghp_x" },
         fetch: async (url, init) => {
           calls.push({ url, headers: init.headers });
-          return { status: 200, text: async () => "memory:\n  enabled: true\n" };
+          return {
+            status: 200,
+            text: async () => "memory:\n  enabled: true\n",
+            headers: new Headers({ "last-modified": "Sat, 20 Sep 2026 17:00:00 GMT" }),
+          };
         },
       }),
     );
@@ -88,6 +100,7 @@ describe("readConfigSource", () => {
       ok: true,
       text: "memory:\n  enabled: true\n",
       how: "config from github://acme/infra/sb/config.yaml@v1",
+      modifiedAt: "Sat, 20 Sep 2026 17:00:00 GMT",
     });
     expect(calls[0].url).toBe("https://api.github.com/repos/acme/infra/contents/sb/config.yaml?ref=v1");
     // Each path segment is URL-encoded; the slashes between them are not.

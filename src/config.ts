@@ -835,6 +835,18 @@ export function parseAppConfigText(text: string): AppConfig {
   return config;
 }
 
+/** The extra floor for the production `state://` profile. Local file configs
+ *  may deliberately run without durable history or grants; a production
+ *  container may not silently become that bare local mode when its base
+ *  document is wrong. */
+export function validateProductionConfig(config: AppConfig): void {
+  if (config.runHistory?.worker === undefined)
+    throw new Error("production config requires runHistory.worker so runs survive a container generation");
+  if (Object.keys(config.providers).length === 0) throw new Error("production config requires at least one provider");
+  if (config.grants === undefined || Object.keys(config.grants).length === 0)
+    throw new Error("production config requires at least one grants entry");
+}
+
 /** Read + validate `config.yaml` once. */
 export function loadAppConfig(configPath: string): AppConfig {
   return parseAppConfigText(readFileSync(resolve(configPath), "utf8"));
@@ -867,10 +879,12 @@ export async function loadAppConfigFrom(
     throw new Error(
       `SWITCHBOARD_CONFIG=${location}: no "${parsed.key}" document on ${client.describe()} — push one with \`deploy config\``,
     );
+  const config = parseAppConfigText(read.document.yaml);
+  validateProductionConfig(config);
   opts.warn(
     `[config] base document "${parsed.key}" v${read.version} from ${read.document.source} (sha256 ${read.document.sha256.slice(0, 12)}, pushed ${read.document.pushedAt})`,
   );
-  return parseAppConfigText(read.document.yaml);
+  return config;
 }
 
 /** What the grants table needs beyond config.yaml: the registered command
