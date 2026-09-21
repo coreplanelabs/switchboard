@@ -35,7 +35,14 @@ import { costsFromConfig, NullCostsService, type CostsService } from "./costsSer
 import { AnalyticsEngineSqlSource, parseMetricsConfig } from "./metrics.js";
 import { createMetricsService, NullMetricsService, type MetricsService } from "./metricsService.js";
 import { createPlaneService, type PlaneService } from "./planeService.js";
-import { fetchCommitChecks, fetchPullRequestFacts, fetchPullRequestReviews } from "../execution/githubPulls.js";
+import type { MergeDoorService } from "./commands/merge.js";
+import {
+  enqueuePullRequest,
+  fetchCommitChecks,
+  fetchPullRequestFacts,
+  fetchPullRequestReviews,
+  mergePullRequest,
+} from "../execution/githubPulls.js";
 import { createDeliveryService, NullDeliveryService, parseDeliveryConfig, type DeliveryService } from "./delivery.js";
 import { SnapshottingDeliverySource } from "./deliverySnapshot.js";
 import {
@@ -345,6 +352,30 @@ export function buildCoreCommands(
       ...(wiring.now ? { clock: wiring.now } : {}),
     });
   });
+  // ONE merge door per binding: `pulls merge|enqueue` over the merge door's own
+  // GitHub reads and writes (src/execution/githubPulls.ts), the person resolved
+  // from their stored binding (record 0062) — never the App acting as nobody.
+  const merge = once(async (): Promise<MergeDoorService> => ({
+    facts: async (pr) => {
+      const facts = await fetchPullRequestFacts(pr);
+      if (!facts) return undefined;
+      return {
+        state: facts.state,
+        ...(facts.headSha !== undefined ? { headSha: facts.headSha } : {}),
+        ...(facts.headRef !== undefined ? { headRef: facts.headRef } : {}),
+        ...(facts.title !== undefined ? { title: facts.title } : {}),
+        ...(facts.htmlUrl !== undefined ? { htmlUrl: facts.htmlUrl } : {}),
+      };
+    },
+    checks: fetchCommitChecks,
+    reviews: fetchPullRequestReviews,
+    merge: mergePullRequest,
+    enqueue: enqueuePullRequest,
+    githubLogin: async (userId) => {
+      const binding = (await cfg()).userGithubBinding(userId);
+      return binding === undefined ? undefined : typeof binding === "string" ? binding : binding.login;
+    },
+  }));
   const deps: CoreCommandDeps = {
     help: {
       agents: () =>
@@ -444,6 +475,9 @@ export function buildCoreCommands(
     costs: { service: costs },
     metrics: { service: metrics },
     plane: { service: plane },
+    // The merge door (record 0070, criterion 4): `pulls merge|enqueue` over the
+    // door's own GitHub reads and writes, the person named by their binding.
+    merge: { service: merge },
     ...(wiring.steer ? { steer: wiring.steer() } : {}),
     ...(wiring.pulls ? { pulls: wiring.pulls() } : {}),
     // `providers check`: the loaded blocks and refs, the installed pi registry

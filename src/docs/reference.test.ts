@@ -270,6 +270,8 @@ describe("the real catalogue", () => {
       "memory.forget",
       "memory.sweep",
       "plane.stop",
+      "pulls.enqueue",
+      "pulls.merge",
       "pulls.rebase",
       "repo.offboard",
       "repo.rebuild",

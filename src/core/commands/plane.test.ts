@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CommandRegistry, renderText } from "../commandRegistry.js";
+import { boundBlastRadius, CommandRegistry, renderText } from "../commandRegistry.js";
 import type { PlaneService } from "../planeService.js";
 import type { PlaneTable } from "../plane/table.js";
 import type { RunView } from "../runsService.js";
@@ -258,5 +258,49 @@ describe("plane.stop — the runner_stop move in one command (record 0064)", () 
     } as unknown as Parameters<typeof renderPlaneStop>[0]);
     expect(text).toContain("the stop mark could not be written");
     expect(text).toContain("no live child was running");
+  });
+});
+
+// Feature: docs/reference/specs/orchestration-plane.md item 13 — a write typed
+// in the orchestrator thread runs through the same door the Slack channel runs
+// (record 0070, criterion 4): the registry authorizes the PERSON the session
+// names against the one policy table, and the blast-radius class the web
+// chat's confirm card renders from is the class the Slack door confirms —
+// no surface has its own fence, and no service actor's authority rides in.
+describe("a move from the orchestrator thread is fenced like the Slack door", () => {
+  const webPerson = (grants: readonly string[]) => callerWith("chat", "web:alice", grants);
+
+  function moveSetup() {
+    const stops: string[] = [];
+    const service: PlaneService = {
+      table: async () => TABLE,
+      stop: async (instanceId) => {
+        stops.push(instanceId);
+        return { kind: "stopped", instanceId, runnerStopped: true, children: [] };
+      },
+    };
+    const registry = new CommandRegistry<PlaneCommandDeps>({ audit: () => {} });
+    registerPlaneCommands(registry);
+    const deps: PlaneCommandDeps = { plane: { service: async () => service } };
+    return { registry, deps, stops };
+  }
+
+  it("a grant-less person on the web thread is refused by the policy table before the service is asked — the thread can do what its person can do, nothing more", async () => {
+    const { registry, deps, stops } = moveSetup();
+    const res = await registry.invoke("plane.stop", { args: ["plan-x"], options: {} }, webPerson([]), deps);
+    expect(res).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(stops).toEqual([]);
+  });
+
+  it("the same person holding the grant runs the move — the same policy row that admits the Slack door admits the thread", async () => {
+    const { registry, deps, stops } = moveSetup();
+    const res = await registry.invoke("plane.stop", { args: ["plan-x"], options: {} }, webPerson(["runs:write"]), deps);
+    expect(res).toMatchObject({ ok: true, value: { kind: "stopped", instanceId: "plan-x" } });
+    expect(stops).toEqual(["plan-x"]);
+  });
+
+  it("the move's blast radius is destructive at every input, so the confirm card renders the class the Slack door confirms (record 0044)", () => {
+    expect(boundBlastRadius(planeCommands[1]!, { args: ["plan-x"], options: {} })).toBe("destructive");
+    expect(planeCommands[1]!.annotations?.risk?.({ args: ["plan-x"], options: {} })).toContain("pipeline");
   });
 });

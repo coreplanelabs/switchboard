@@ -86,6 +86,8 @@ const GATES: Record<string, (c: Capabilities) => boolean> = {
   "schedule.list": (c) => c.schedules,
   "delivery.report": (c) => c.github,
   "pulls.rebase": (c) => c.github,
+  "pulls.merge": (c) => c.github,
+  "pulls.enqueue": (c) => c.github,
   "costs.by": (c) => c.costs,
   "costs.snapshot": (c) => c.costs,
   "metrics.trend": (c) => c.metrics,

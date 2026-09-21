@@ -159,6 +159,8 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 | Command | What it does | Who can run it |
 |---|---|---|
 | `pulls rebase [pr] [--repo <string>]` | Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request. | admins |
+| `pulls merge <pr> [--repo <string>]` | Squash-merge one approved pull request at exactly its reviewed head, under your own name: refused when no review approves the head, when a review there requests changes, when a check at it is red, still running or none has reported yet, and for the release pull request, which is answered with its card — that merge stays a person's click. | admins |
+| `pulls enqueue <pr> [--repo <string>]` | Put one approved pull request at exactly its reviewed head in the base branch's merge queue, recorded under your own name: refused when no review approves the head, when a review there requests changes, when a check at it is red, or when the head moves before enqueue, and for the release pull request, which is answered with its card — that merge stays a person's click; the queue runs the still-pending checks itself. | admins |
 
 ### `plane`
 

@@ -237,6 +237,22 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
       options: { repo: "acme/api" },
     },
   ),
+  f("c42h", "happy", "merge acme/api#42", "pulls.merge", {
+    args: ["acme/api#42"],
+    options: {},
+  }),
+  f("c42p", "paraphrase", "the review approved acme/api#42 and it is green — land it", "pulls.merge", {
+    args: ["acme/api#42"],
+    options: {},
+  }),
+  f("c43h", "happy", "put acme/api#42 in the merge queue", "pulls.enqueue", {
+    args: ["acme/api#42"],
+    options: {},
+  }),
+  f("c43p", "paraphrase", "queue acme/api#42 so it merges once its checks pass", "pulls.enqueue", {
+    args: ["acme/api#42"],
+    options: {},
+  }),
 ];
 
 const d = (id: string, text: string, command: string, allow?: readonly string[]): RouteCommandDecoy => ({
@@ -299,6 +315,8 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c37d", "which openrouter model should the coding preset run on?", "providers.check"),
   // Asks why the pull request conflicts, not for it to be rebased.
   d("c40d", "why is acme/api#42 conflicting with main?", "pulls.rebase", ["runs.findings"]),
+  d("c42d", "is acme/api#42 ready to merge?", "pulls.merge", ["plane.show", "runs.findings"]),
+  d("c43d", "how long is the merge queue on acme/api right now?", "pulls.enqueue", ["plane.show"]),
 ];
 
 /** Every example of the command half, fixtures then decoys, for one replay. */

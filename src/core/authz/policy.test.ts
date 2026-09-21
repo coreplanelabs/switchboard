@@ -237,6 +237,18 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.browser, command("pulls.rebase")],
     ],
   },
+  // `pulls merge|enqueue` (record 0070, criterion 4): a person's merge through
+  // the door — the grant alone, never a chat or browser baseline, so a
+  // grant-less person has a thread that reads everything and merges nothing.
+  "merge:write command [has-grant(merge:write)]": {
+    allow: [[A.admin, command("pulls.merge")]],
+    deny: [
+      [A.member, command("pulls.merge")],
+      [A.noGrants, command("pulls.merge")],
+      [A.chatUser, command("pulls.enqueue")],
+      [A.browser, command("pulls.enqueue")],
+    ],
+  },
   "friction:write command [has-grant(friction:write)]": {
     allow: [
       [A.schedule, command("friction.propose")],

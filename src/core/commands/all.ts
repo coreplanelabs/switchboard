@@ -10,6 +10,7 @@ import { registerFrictionCommands, type FrictionCommandDeps } from "./friction.j
 import { registerHelpCommands, type HelpCommandDeps } from "./help.js";
 import { registerMcpCommands, type McpCommandDeps } from "./mcp.js";
 import { registerMemoryCommands, type MemoryCommandDeps } from "./memory.js";
+import { registerMergeCommands, type MergeCommandDeps } from "./merge.js";
 import { registerMetricsCommands, type MetricsCommandDeps } from "./metrics.js";
 import { registerPlaneCommands, type PlaneCommandDeps } from "./plane.js";
 import { registerProvidersCommands, type ProvidersCommandDeps } from "./providers.js";
@@ -49,6 +50,7 @@ export type CoreCommandDeps = HelpCommandDeps &
   MetricsCommandDeps &
   ProvidersCommandDeps &
   PullsCommandDeps &
+  MergeCommandDeps &
   ArtifactsCommandDeps &
   PlaneCommandDeps &
   SteerCommandDeps;
@@ -74,6 +76,7 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerMetricsCommands(registry);
   registerProvidersCommands(registry);
   registerPullsCommands(registry);
+  registerMergeCommands(registry);
   registerArtifactsCommands(registry);
   registerPlaneCommands(registry);
 }
