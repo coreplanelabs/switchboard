@@ -104,7 +104,7 @@ const columns = computed(() => (showCloud.value ? 6 : 5));
         >
       </label>
       <p class="coverage font-mono text-xs tabular-nums text-muted">
-        <template v-if="!report.coverage.historyOn">run history is off — no runs to attribute</template>
+        <template v-if="!report.coverage.historyOn">history is off — no runs to attribute</template>
         <template v-else>
           runs from {{ monthDayOf(report.coverage.from) }} to {{ monthDayOf(report.range.to)
           }}<template v-if="report.coverage.clamped">
@@ -217,7 +217,7 @@ const columns = computed(() => (showCloud.value ? 6 : 5));
       <template v-else>no day in range has a workspace LLM figure to compare against</template>
       <template v-if="report.reconciliation.uncomparedDays > 0">
         · {{ dayCount(report.reconciliation.uncomparedDays) }} with {{ usd(report.reconciliation.uncomparedLlmUsd) }} of
-        run tokens but no workspace figure (billed outside this workspace) not compared</template
+        tokens from runs but no workspace figure (billed outside this workspace) not compared</template
       >
       <template v-if="showCloud">
         · cloud allocated {{ usd(report.reconciliation.cloudAllocatedUsd)

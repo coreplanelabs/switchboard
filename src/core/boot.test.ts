@@ -198,7 +198,7 @@ describe("reclaimRuns", () => {
         card: { channel: "C1", ts: "r1.1" },
         events: 3,
         agent: "review",
-        note: expect.stringContaining("Re-send your request"),
+        note: expect.stringContaining("This is a bug"),
       },
     ]);
     const record = ledger.finished.get("r1")!;
@@ -298,7 +298,7 @@ describe("reclaimRuns", () => {
     expect(ledger.live.get("bare")).toBeUndefined();
   });
 
-  it("an interrupted closure carries what its card and thread say next: a ship pipeline's note names the PR its events recorded and the re-issue that continues the loop (the task when no PR exists); any other agent's says to re-send; a run that replied gets no note", async () => {
+  it("an interrupted closure narrates durable continuation for ship and names a non-resumable ordinary run as a bug; a run that replied gets no note", async () => {
     const { ledger, run } = harness();
     await ledger.claim(claim("ship-pr", "slack:C1:1.0", "g1", { meta: { ...claim("x", "t").meta, agent: "ship" } }));
     await ledger.append("ship-pr", "g1", [
@@ -317,11 +317,11 @@ describe("reclaimRuns", () => {
       prUrl: "https://github.com/acme/api/pull/12",
     });
     expect(byId["ship-pr"].note).toContain("https://github.com/acme/api/pull/12");
-    expect(byId["ship-pr"].note).toContain("re-issue `agent:ship` in this thread with only the PR URL");
+    expect(byId["ship-pr"].note).toContain("the next reply in this thread continues the review loop");
     expect(byId["ship-bare"].prUrl).toBeUndefined();
     expect(byId["ship-bare"].note).toContain("no PR was opened yet");
-    expect(byId["ship-bare"].note).toContain("round 0 runs again on the same branch");
-    expect(byId.plain.note).toContain("Re-send your request");
+    expect(byId["ship-bare"].note).toContain("the next reply in this thread starts round 0 again on that branch");
+    expect(byId.plain.note).toContain("This is a bug");
     expect(byId.replied.note).toBeUndefined();
     // The boot gap IS a bot restart — the one closure that may claim it (issue 1876).
     expect(closureNote("ship", "https://x/pull/1")).toBe(shipInterruptedNote("https://x/pull/1", "bot_restart"));
@@ -764,7 +764,7 @@ describe("reclaimRuns — the hosted parent's classification (record 0060)", () 
       status: "interrupted",
       agent: "ship",
       why: expect.stringMatching(/hosted past its deadline/),
-      note: expect.stringContaining("agent:ship"),
+      note: expect.stringContaining("the next reply in this thread starts round 0 again"),
     });
     expect(ledger.finished.get("r-ship")).toMatchObject({ id: "r-ship", threadKey: "web:s:c9", status: "interrupted" });
     expect(ledger.live.has("r-ship")).toBe(false);
@@ -847,7 +847,7 @@ describe("reclaimRuns — the reclaim's outcome reported to the plane", () => {
     expect(ledger.planeEndings.has("att")).toBe(false);
     // The note RENDERS the plane's word (endingCauseWords), never composes one.
     expect(outcome.closed[0].note).toContain("its lease lapsed with no heartbeat");
-    expect(outcome.closed[0].note).toContain("Re-send your request");
+    expect(outcome.closed[0].note).toContain("This is a bug");
   });
 
   it("an older state Worker without the route is one warning and today's words — the notes stand as written", async () => {
@@ -861,7 +861,7 @@ describe("reclaimRuns — the reclaim's outcome reported to the plane", () => {
     await ledger.claim(claim("dead", "slack:C1:1.0"));
     const outcome = await run();
     expect(outcome.closed[0].note).toBe(closureNote(undefined, undefined));
-    expect(outcome.closed[0].note).toContain("The bot restarted while this run was in flight");
+    expect(outcome.closed[0].note).toContain("the bot restarted while this run was in flight");
     expect(warnings.some((w) => w.includes("outcome report not recorded"))).toBe(true);
   });
 });

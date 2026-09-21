@@ -234,7 +234,7 @@ describe("the sandbox-starting answer shapes the Worker sends", () => {
     expect(SANDBOX_START_WAIT_MAX_MS).toBeGreaterThan(30_000 + 90_000); // instance grant + port ready, the SDK's defaults
     expect(SANDBOX_START_BACKOFF_MS).toEqual([5_000, 10_000, 15_000]);
     expect(startWaitExhaustedMessage(300_000)).toBe(
-      "sandbox not ready — the thread's container did not finish starting within 300s; try again in a few minutes",
+      "this is a bug: the thread's sandbox did not finish starting within 300s, and no automatic start wait remained",
     );
   });
 });
@@ -251,7 +251,7 @@ describe("the executor's bounded wait", () => {
 
   it("the exhausted message names the wait in seconds and the knob (max_instances)", () => {
     expect(fleetBusyExhaustedMessage(300_000)).toBe(
-      "sandbox fleet busy — no free per-thread sandbox after waiting 300s (the fleet's max_instances is reached); try again in a few minutes",
+      "this is a bug: the sandbox fleet had no free per-thread sandbox after waiting 300s (the fleet's max_instances is reached), and no automatic queue remained",
     );
     expect(fleetBusyExhaustedMessage(60_000)).toContain("after waiting 60s");
   });

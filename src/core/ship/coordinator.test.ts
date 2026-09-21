@@ -1130,13 +1130,13 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         kind: "aborted",
         renewal: {
           decision: { renew: false, why: "no_progress", renewalsLeft: 6 },
-          line: "no progress on the last budget; 6 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; re-issue the request to try again",
+          line: "no progress on the last budget; 6 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; the next reply in this thread continues the original task",
         },
       },
     });
     expect(stuck.rounds()).toEqual(["0 coding started", "0 coding aborted"]);
     expect(renderUnitReport(stuck.state)).toContain(
-      "🔁 Not renewed: no progress on the last budget; 6 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; re-issue the request to try again.",
+      "🔁 Not renewed: no progress on the last budget; 6 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; the next reply in this thread continues the original task.",
     );
 
     // The cap: progress, but the session's spend reached it.
@@ -1610,7 +1610,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     const report = renderUnitReport(d.state);
     expect(report).toContain("the approval could not be posted");
     expect(report).toContain("digest covered 3 of 5 files");
-    expect(report).toContain("the unit runs again when the plan is re-issued");
+    expect(report).toContain("the next run of this plan recognizes the unit's branch and pull request");
     expect(report).not.toMatch(/Re-run ship/);
   });
 
@@ -1631,7 +1631,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
     const report = renderUnitReport(d.state);
     expect(report).toContain("the pull request carries no approving review");
-    expect(report).toContain("re-issue `agent:ship` in this thread with the same text and include the PR URL");
+    expect(report).toContain("the next reply in this thread continues it from the open pull request");
     // The re-issue line for a generated instance names the same text, never a plan path.
     expect(report).not.toContain(".md");
   });
@@ -1655,11 +1655,11 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       return renderUnitReport(d.state);
     };
     const seeded = silent(false);
-    expect(seeded).toContain("the unit runs again when the plan is re-issued");
-    expect(seeded).not.toContain("with the same text");
+    expect(seeded).toContain("the next run of this plan recognizes the unit's branch and pull request");
+    expect(seeded).not.toContain("the next reply in this thread");
     const generated = silent(true);
-    expect(generated).toContain("re-issue `agent:ship` in this thread with the same text");
-    expect(generated).not.toContain("when the plan is re-issued");
+    expect(generated).toContain("the next reply in this thread continues it from the open pull request");
+    expect(generated).not.toContain("the next run of this plan");
   });
 
   it("a resume at review (an open pull request of ship's own named by the requester) skips the branch and round 0", () => {
@@ -1733,7 +1733,7 @@ describe("the transient re-run — round 0 dies on a provider transient with not
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
     const report = renderUnitReport(d.state);
     expect(report).toContain(`the branch carries the interrupted work at \`${HEAD_A.slice(0, 7)}\``);
-    expect(report).toContain("Re-issue");
+    expect(report).toContain("The next reply in this thread resumes from that checkpoint");
     expect(report).not.toContain("Bad Gateway");
   });
 
@@ -1757,7 +1757,7 @@ describe("the transient re-run — round 0 dies on a provider transient with not
     const report = renderUnitReport(d.state);
     expect(report).toContain(`branch carries the interrupted work at \`${HEAD_A.slice(0, 7)}\``);
     expect(report).toContain(`\`${d.state.input.unit.branch}\``);
-    expect(report).toContain("Re-issue");
+    expect(report).toContain("The next reply in this thread resumes from that checkpoint");
     expect(report).not.toContain("discarded");
   });
 
@@ -1946,7 +1946,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     runChild(withPr, "run-r1", finished({ status: "interrupted" }), T0 + 20 * MIN);
     expect(withPr.action).toMatchObject({ type: "end", ending: { kind: "interrupted", runId: "run-r1" } });
     expect(renderUnitReport(withPr.state)).toBe(shipInterruptedNote(PR_URL));
-    expect(shipInterruptedNote(PR_URL, undefined, true)).toContain("reply in this thread to continue");
+    expect(shipInterruptedNote(PR_URL, undefined, true)).toContain("The next reply in this thread continues the unit");
     expect(shipInterruptedNote(PR_URL, undefined, true)).not.toContain("re-issue `agent:ship`");
   });
 
@@ -2202,12 +2202,11 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     expect(refused.action).toMatchObject({ type: "end", ending: { kind: "merge_refused", reason: "head moved" } });
     const refusedReport = renderUnitReport(refused.state);
     expect(refusedReport).toContain("head moved");
-    // The approved work is on the branch: the remedy is a person's rebase or
-    // fix and a hand merge, after which a re-issue finds the merge and does
-    // not run the unit again — never a re-run of the unit from scratch.
-    expect(refusedReport).toContain("merge it by hand");
-    expect(refusedReport).toContain("not run again");
-    expect(refusedReport).not.toContain("the unit runs again when the plan is re-issued");
+    // The approved work remains on the branch, but the pipeline delegates no
+    // recovery: the missing automatic path is named as the bug.
+    expect(refusedReport).toContain("The approved work remains on the branch");
+    expect(refusedReport).toContain("This is a bug: the pipeline has no automatic recovery");
+    expect(refusedReport).not.toContain("merge it by hand");
   });
 
   it("a merge answered merged with by other — the door found the pull request already merged after the approval — ends the unit merged by other with the merge commit and the time, and the report reads the Already-merged sentence", () => {
@@ -2982,7 +2981,9 @@ describe("the round verdict — the checks step at the reviewed head (record 005
     held.answer({ type: "wait-checks", outcome: "timeout" });
     held.answer({ type: "checks", checks: { total: 3, pending: [], failed: [] }, draft: true, at: T0 + 81 * MIN });
     expect(held.state.ending).toMatchObject({ kind: "held", cause: "draft", pr: { number: 7 } });
-    expect(renderUnitReport(held.state, undefined, "quiet")).toContain("Held: draft — mark it ready to continue");
+    expect(renderUnitReport(held.state, undefined, "quiet")).toContain(
+      "Held: draft — GitHub still marks the pull request as draft",
+    );
     expect(renderUnitReport(held.state)).toContain("the pull request is a draft");
 
     // A red check on a draft still opens its fix round: the work stands
@@ -3308,8 +3309,10 @@ describe("the held ending — every finding the round would act on is human-gate
     const report = renderUnitReport(d.state);
     expect(report).toContain("⏸️ Waiting for a person after 1 review round: " + PR_URL);
     expect(report).toContain("F1 (minor) — the entry replay receipt is human-gated");
-    expect(report).toContain("Reply in this unit thread or comment on the pull request");
-    expect(report).toContain("The answer and finding become the fix round's brief");
+    expect(report).toContain("no unanswered fix round was opened");
+    expect(report).toContain("The next reply in this unit thread or authorized pull request comment");
+    expect(report).toContain("review then runs again");
+    expect(report).not.toContain("Reply in this unit thread");
   });
 
   it("a round mixing one human-gated and one actionable finding still opens the fix round for the actionable one — both ride the findings step", () => {
@@ -3656,7 +3659,7 @@ describe("the held ending — every finding the round would act on is human-gate
 describe("the unit report — the child's write-up is pointed at, never repeated (issue 1806)", () => {
   const BASE = "https://bot.example/runs";
 
-  it("an abort's report drops the coding child's final reply and points at its run page, with the reason, the ending and the re-issue lines still there", () => {
+  it("an abort's report drops the coding child's final reply and points at its run page, with the reason, ending and continuation still there", () => {
     const d = fresh(input({ merge: "person", generated: true, runPageBase: BASE }));
     d.answer({ type: "branch", ok: true, at: T0 });
     runChild(d, "run-c0", finished({ status: "completed", finalReply: "Which login flow?" }), T0 + 5 * MIN);
@@ -3667,7 +3670,9 @@ describe("the unit report — the child's write-up is pointed at, never repeated
     expect(report).toContain(`${BASE}/run-c0`);
     expect(report).toContain("⚠️ Ship ended at round 0: the coding round ended without opening a pull request");
     expect(report).toContain("⚠️ Ship aborted after 0 review rounds.");
-    expect(report).toContain("To continue, re-issue `agent:ship` in this thread");
+    expect(report).toContain(
+      "The pipeline kept this unit's task and branch; the next reply in this thread continues it",
+    );
   });
 
   it("without a runPageBase the pointer names the run id and never fabricates a link", () => {
@@ -3803,7 +3808,7 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
     // The report is the old kind's sentence, unchanged.
     const report = renderUnitReport(d.state);
     expect(report).toContain("⏹ Ship stopped by operator (soft stop) after 0 review rounds.");
-    expect(report).toContain("reply in this thread to continue");
+    expect(report).toContain("the next run of this plan recognizes the unit's branch and pull request");
     expect(d.notes.at(-1)).toMatchObject({ type: "ended", ending: { kind: "idle", why: "stopped" } });
   });
 
@@ -3837,7 +3842,7 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
       },
     });
     expect(renderUnitReport(d.state)).toContain("🔁 The unit's budget ran out with the unit unfinished");
-    expect(renderUnitReport(d.state)).toContain("reply in this thread to continue");
+    expect(renderUnitReport(d.state)).toContain("The next reply in this thread continues it");
   });
 
   it("every other idling kind maps to `idle` with itself as `why` and its report intact: the caps, review_pending, merge_refused, no_verdict, an abort and an interrupt", () => {
@@ -4306,7 +4311,9 @@ describe("the quiet thread report — the ending is ONE line in the user's words
     const quiet = renderUnitReport(d.state, undefined, "quiet");
     expect(quiet).toBe(`⏸️ Waiting for you: F1 (minor) — the entry replay receipt is human-gated — ${PR_URL}`);
     expect(renderUnitReport(d.state, undefined, "verbose")).toBe(renderUnitReport(d.state));
-    expect(renderUnitReport(d.state)).toContain("Reply in this unit thread or comment on the pull request");
+    expect(renderUnitReport(d.state)).toContain(
+      "The next reply in this unit thread or authorized pull request comment becomes the fix round's answer",
+    );
   });
 
   it("stopped at quiet: `Stopped` and the pull request line, nothing about the operator machinery; verbose unchanged", () => {

@@ -378,7 +378,7 @@ describe("composeChild — the child a brief names", () => {
     );
     expect(child).toMatchObject({ preset: "coding", ref: unit.branch });
     expect(child.prompt).toContain("approved pull request https://github.com/acme/api/pull/7 conflicts with `main`");
-    expect(child.prompt).toContain("run the changed-set fast gates, and push with lease");
+    expect(child.prompt).toContain("make the lease-protected push only after the changed-set fast gates pass");
     expect(child.prompt).toContain("Never merge and never approve");
     expect(child.contract).toBeUndefined();
   });
@@ -428,7 +428,7 @@ describe("composeChild — the child a brief names", () => {
     expect(answered.prompt).toContain("Alice: the independent reader supplied the receipt");
     await expect(
       composeChild({ kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-gone" }, instance, unit, r),
-    ).rejects.toThrow(/run run-gone is not in the run history/);
+    ).rejects.toThrow(/the run run-gone is not in history/);
     await expect(
       composeChild({ kind: "fix", unit: "U10", pr: 7, reviewRunId: "run-r1" } as unknown as Brief, instance, unit, r),
     ).rejects.toThrow(/brief kind/);

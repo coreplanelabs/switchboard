@@ -164,15 +164,15 @@ export function refusalMessage(
 ): string {
   switch (r.kind) {
     case "not_authorizing":
-      return "This sign-in did not start from a connect link, or the link was opened again since. Open the connect link and try again.";
+      return "This is a bug: this sign-in did not start from a live connect link, and no fresh connect link was opened automatically.";
     case "oauth_failed":
       return `Sign-in with the server did not complete: ${r.reason}.`;
     case "not_found":
-      return "This connect link is not known. Ask for a new one with `mcp connect <name>`.";
+      return "This is a bug: this connect link is not known, and no fresh connect link was opened automatically.";
     case "expired":
-      return "This connect link has expired (links last 10 minutes). Ask for a new one with `mcp connect <name>`.";
+      return "This is a bug: this connect link expired after 10 minutes, and no fresh connect link was opened automatically.";
     case "used":
-      return "This connect link was already used. If the credential needs replacing, ask for a new one with `mcp connect <name>`.";
+      return "This connect link was already used; no credential was changed by this visit.";
     case "cancelled":
       return "This connect link was cancelled.";
     case "wrong_identity":

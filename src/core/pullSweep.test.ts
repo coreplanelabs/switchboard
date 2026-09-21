@@ -144,7 +144,9 @@ describe("the sweep — one line per pull request, in user words", () => {
       spent: () => true,
     });
     const report = await service.sweep({ repo: "acme/api" });
-    expect(report.results[0]?.line).toBe("#7 conflict in provision.ts, its fix round is spent — rebase it by hand");
+    expect(report.results[0]?.line).toBe(
+      "#7 this is a bug: the conflict in provision.ts remained after the sweep's fix round, and no automatic recovery remains",
+    );
     expect(calls.some((c) => c.startsWith("round"))).toBe(false);
   });
   it("a model round that will not start ends the line with the reason — no retry loop", async () => {
@@ -166,7 +168,7 @@ describe("the sweep — one line per pull request, in user words", () => {
     const { calls, service } = fixture({ prs: [pr({ number: 9, mergeableState: "unknown" })] });
     const report = await service.sweep({ repo: "acme/api" });
     expect(report.results[0]?.outcome).toBe("skipped");
-    expect(report.results[0]?.line).toBe("#9 mergeability still computing — run the sweep again in a minute");
+    expect(report.results[0]?.line).toBe("#9 mergeability still computing — no rebase was attempted");
     expect(calls).toEqual([]);
   });
   it("one named pull request sweeps that one alone; an unknown number answers one honest line", async () => {

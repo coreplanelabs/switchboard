@@ -118,7 +118,7 @@ export type ProfileGate = { kind: "allowed"; profile: RunProfile } | { kind: "re
  * profile leaves no card, no run, no row and no workspace. The resolve stage
  * already computed preset ∩ boundary; this gate turns a refusal — an identity
  * or a machine class above a boundary's cap, never clipped — into one named
- * reply: the axis, the cap, the scope that set it, and how to get it raised. A
+ * reply: the axis, the cap, the scope that set it, and the resulting state. A
  * clipped budget is allowed; the clip rides the profile to the card and the
  * record.
  */
@@ -162,67 +162,39 @@ function boundaryOf(scope: BoundaryScope): string {
   }
 }
 
-/** One way forward per scope that refused, lowercase so the clauses join. */
-function wayForward(scope: BoundaryScope, axis: string, needs: string, adminsHint: string): string {
+/** The unchanged state after a boundary refusal. The reply narrates what
+ * Switchboard did instead of delegating the policy change to the person. */
+function boundaryOutcome(scope: BoundaryScope): string {
   switch (scope) {
     case "channel":
-      return `run it in a channel that allows \`${needs}\`, or ask ${adminsHint} to raise this channel's boundary`;
+      return "Switchboard left this channel's boundary unchanged";
     case "user":
-      return `raise your own boundary with \`config set me --boundary.${axis} ${needs}\`, or drop your overrides with \`config clear me\``;
+      return "Switchboard left your boundary and overrides unchanged";
     case "defaults":
-      return `ask ${adminsHint} to raise \`defaults.boundary\` in the configuration`;
+      return "Switchboard left the installation's default boundary unchanged";
     case "directive":
-      return "send the message again without the budget directive";
+      return "Switchboard applied this message's budget directive";
     case "parent":
-      // A parent bounds the minutes alone (`boundedByParent`): the one axis it
-      // reaches is the lease minimum's.
-      return `spawn it from a run with at least ${needs} left`;
-  }
-}
-
-/** The minutes axis: the minimum, the lease and whose clip, then the way
- *  forward — the same scopes as the other axes, worded for minutes. */
-function minutesWayForward(scope: BoundaryScope, needs: number, adminsHint: string): string {
-  switch (scope) {
-    case "directive":
-      return `send the message again with \`budget:${needs}\` or more`;
-    case "user":
-      return `raise your own boundary with \`config set me --boundary.maxMinutes ${needs}\`, or drop your overrides with \`config clear me\``;
-    case "channel":
-      return `run it in a channel whose boundary allows ${needs} minutes, or ask ${adminsHint} to raise this channel's boundary`;
-    case "defaults":
-      return `ask ${adminsHint} to raise \`defaults.boundary\` in the configuration`;
-    case "parent":
-      return `spawn it from a run with at least ${needs} minutes left`;
+      return "Switchboard left the parent run's remaining budget unchanged";
   }
 }
 
 /** The 🚫 reply of a bounded profile, in record 0026's wording: what the preset
- *  needs, what the boundary allows and whose it is, then the way forward. */
-export function profileRefusalReply(agentName: string, refusal: ProfileRefusal, adminsHint: string): string {
-  const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+ * needs, what the boundary allows and whose it is, then the resulting state. */
+export function profileRefusalReply(agentName: string, refusal: ProfileRefusal, _adminsHint: string): string {
   if (refusal.axis === "identity") {
-    const how = wayForward(refusal.scope, "maxIdentity", refusal.needs, adminsHint);
-    return `🚫 \`${agentName}\` needs a \`${refusal.needs}\` credential; ${boundaryOf(refusal.scope)} caps runs at \`${refusal.cap}\`. ${capitalize(how)}.`;
+    const outcome = boundaryOutcome(refusal.scope);
+    return `🚫 \`${agentName}\` needs a \`${refusal.needs}\` credential; ${boundaryOf(refusal.scope)} caps runs at \`${refusal.cap}\`. ${outcome} and did not start the run.`;
   }
   if (refusal.axis === "minutes") {
-    const how = minutesWayForward(refusal.scope, refusal.needs, adminsHint);
-    return `🚫 \`${agentName}\` needs at least ${refusal.needs} minutes — a turn, then its write-up and post-step — and ${boundaryOf(refusal.scope)} gives it ${refusal.have}. ${capitalize(how)}.`;
+    const outcome = boundaryOutcome(refusal.scope);
+    return `🚫 \`${agentName}\` needs at least ${refusal.needs} minutes — a turn, then its write-up and post-step — and ${boundaryOf(refusal.scope)} gives it ${refusal.have}. ${outcome} and did not start the run.`;
   }
   const scopes = refusal.scopes.map(boundaryOf);
   const who = scopes.length > 1 ? `${scopes.join(" and ")} allow` : `${scopes[0] ?? "the boundary"} allows`;
   const allowed = refusal.allowed.map((m) => `\`${m}\``).join(", ");
-  const how = refusal.scopes
-    .map((scope) =>
-      wayForward(
-        scope,
-        "machines",
-        scope === "user" ? `<classes including ${refusal.needs}>` : refusal.needs,
-        adminsHint,
-      ),
-    )
-    .join("; ");
-  return `🚫 \`${agentName}\` runs on a \`${refusal.needs}\` machine; ${who} only ${allowed}. ${capitalize(how)}.`;
+  const outcomes = refusal.scopes.map(boundaryOutcome).join("; ");
+  return `🚫 \`${agentName}\` runs on a \`${refusal.needs}\` machine; ${who} only ${allowed}. ${outcomes}; it did not start the run.`;
 }
 
 /** Escape a literal for a regular expression. */

@@ -19,7 +19,7 @@ import { defaultAdmission, type AdmissionDeps, type DispatchFollowUp } from "./a
 /** The note a follow-up's sender gets when the run it was folded into was
  *  stopped by an operator before its next step read it. */
 export const FOLLOW_UP_DROPPED_BY_STOP =
-  "⛔ The run this was folded into was stopped before it read this follow-up, so it was not run. Re-send it to run it fresh.";
+  "⛔ This is a bug: the run was stopped before it read this folded follow-up, and the follow-up was not replayed as a fresh request.";
 
 /** What the settle stage reads off the dispatch when the request is over. */
 export interface SettleContext {
@@ -81,7 +81,7 @@ export function settleThread(deps: Pick<AdmissionDeps, "admission">, ctx: Settle
   // to the inbox, run fresh like those of a run that ended by itself.
   const stopMode: StopMode | undefined = stopCounts ? control?.requested : undefined;
   if (pending.length > 0 && stopMode) {
-    console.log(`[dispatch] ${msg.threadKey} ${pending.length} follow-up(s) dropped: run stopped (${stopMode})`);
+    console.log(`[dispatch] ${msg.threadKey} ${pending.length} follow-up(s) dropped: the run stopped (${stopMode})`);
     return { kind: "dropped", stopMode, pending };
   }
   if (pending.length > 0 && admitted) {

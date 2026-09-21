@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { secretsFrom } from "../secrets.js";
 import { ConfigStore, InMemoryOverridesBacking } from "../config.js";
 import { fakeAuthorizationServer, InMemoryMcpClient, type FakeAuthorizationServerOptions } from "../mcp/fake.js";
@@ -131,15 +131,26 @@ describe("GET /mcp/connect/<nonce>", () => {
     }
   });
 
-  it("503 when MCP is off; 405 on other methods", async () => {
+  it("503 when MCP is off or its registry read fails; 405 on other methods", async () => {
     const off = await serve(createMcpConnectViewHandler({ registry: () => undefined }));
     const on = await serve(harness().handler);
+    const brokenHarness = harness();
+    vi.spyOn(brokenHarness.service, "openTicket").mockRejectedValueOnce(new Error("registry down"));
+    const broken = await serve(brokenHarness.handler);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       expect((await fetch(`${off.base}/mcp/connect/${"n".repeat(24)}`)).status).toBe(503);
+      const unavailable = await fetch(`${broken.base}/mcp/connect/${"n".repeat(24)}`);
+      expect(unavailable.status).toBe(503);
+      expect(await unavailable.text()).toContain(
+        "This is a bug: the MCP registry could not be reached and no automatic retry was scheduled.",
+      );
       expect((await fetch(`${on.base}/mcp/connect/${"n".repeat(24)}`, { method: "PUT" })).status).toBe(405);
     } finally {
+      error.mockRestore();
       off.server.close();
       on.server.close();
+      broken.server.close();
     }
   });
 });
@@ -173,6 +184,7 @@ describe("POST /mcp/connect/<nonce>", () => {
       expect(rejected.status).toBe(400);
       const html = await rejected.text();
       expect(html).toContain("rejected the token");
+      expect(html).toContain("This is a bug: the token was refused and no fresh sign-in was opened automatically.");
       expect(html).toContain("<form");
       expect(await h.secrets.getCredential(KEY_ID)).toBeNull();
       const empty = await post(base, NONCE1, "token=");

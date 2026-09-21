@@ -325,7 +325,7 @@ const BUDGET_ENDING_ROWS: ScenarioRow[] = (
       branch: "unpushed work in a workspace that is torn down",
       facts: { workspace: { kind: "left", uncommitted: 2, unpushed: 1, fate: "torn_down" } },
       established:
-        "2 uncommitted change(s) and 1 unpushed commit(s) were left in the tree, which is torn down since a command may still be running in it — narrow the task and try again.",
+        "2 uncommitted change(s) and 1 unpushed commit(s) were left in the tree, which is torn down since a command may still be running in it.",
     },
   ] satisfies Array<{ id: string; branch: string; facts: EndingFacts; established: string }>
 ).map(({ id, branch, facts, established }): ScenarioRow => ({

@@ -369,7 +369,9 @@ describe("attach_file through the artifact store", () => {
     expect(small.commands.map((c) => c.timeoutMs)).toEqual([30_000, 120_000, 120_000]);
     // Inside the write-up reserve nothing runs at all.
     const spent = harness({ remainingMs: 30_000 });
-    expect(await attachFileTool.run({ path: "shots/page.png" }, spent.ctx)).toMatch(/^error: run budget exhausted/);
+    expect(await attachFileTool.run({ path: "shots/page.png" }, spent.ctx)).toMatch(
+      /^error: the run budget is exhausted/,
+    );
     expect(spent.log).toEqual(["stat"]);
   });
 

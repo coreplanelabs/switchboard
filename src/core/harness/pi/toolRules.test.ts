@@ -375,11 +375,11 @@ describe("judgeToolCall — bash: an explicit timeout against the loop's end", (
   const timed = (command: string, timeout: unknown, rules: ToolRuleContext = nearEnd) =>
     judgeToolCall("bash", { command, timeout }, rules);
 
-  it("refuses a timeout that reaches past the loop's end with the exact sentence — the seconds left, the seconds asked, re-issue inside what is left or push and write up", () => {
+  it("refuses a timeout that reaches past the loop's end with the exact sentence — the seconds left, the seconds asked and what can still finish", () => {
     expect(timed("npm run verify", 600)).toEqual({
       verdict: "refused",
       reason:
-        "budget — this command asked for a 600 s timeout and the loop ends in 384 s, so it could never finish: re-issue it with a timeout inside the 384 s left if it finishes sooner, or push what you have and write up — the full verification is CI's.",
+        "budget — this command asked for a 600 s timeout and the loop ends in 384 s, so it could never finish. A timeout inside the 384 s left can still finish; otherwise the current work and write-up stand, and CI owns full verification.",
     });
     expect(timed("npm run verify", 600)).toEqual({
       verdict: "refused",

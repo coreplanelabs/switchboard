@@ -219,7 +219,7 @@ describe("patternSignature", () => {
     );
     expect(
       patternSignature(
-        f({ category: "infra_failure", summary: "no result for tool call (run ended mid-tool): $ npm test" }),
+        f({ category: "infra_failure", summary: "no result for tool call (the run ended mid-tool): $ npm test" }),
       ),
     ).toBe("infra_failure:mid-tool npm test");
     expect(

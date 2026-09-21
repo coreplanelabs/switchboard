@@ -267,20 +267,20 @@ describe("renderRenewal — the card's words, as the record's trace has them", (
     ).toBe("budget renewed, 1 of 3, continues the branch's head, with 2 messages from Ada, Lin");
   });
 
-  it("the stop sentence follows the idle flag and otherwise keeps today's re-issue words", () => {
+  it("the stop sentence follows the idle flag and narrates how the thread continues", () => {
     const decision = { renew: false, why: "unfit", detail: "the pipeline no longer fits", renewalsLeft: 2 } as const;
     expect(renderRenewal(decision, { renewals: 3 }, { idle: true })).toBe(
-      "the pipeline no longer fits; reply in this thread to continue",
+      "the pipeline no longer fits; the next reply in this thread continues the unit",
     );
     expect(renderRenewal(decision, { renewals: 3 })).toBe("the pipeline no longer fits");
   });
 
   it("a stop names the clause and, when renewals remain, what actually spends one — no keyword the router does not have", () => {
     expect(renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 5 }, { renewals: 6 })).toBe(
-      "no progress on the last budget; 5 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; re-issue the request to try again",
+      "no progress on the last budget; 5 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; the next reply in this thread continues the original task",
     );
     expect(renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 1 }, { renewals: 6 })).toBe(
-      "no progress on the last budget; 1 renewal left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; re-issue the request to try again",
+      "no progress on the last budget; 1 renewal left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; the next reply in this thread continues the original task",
     );
     // The line teaches no keyword: follow-ups route by thread context
     // (routing-and-config item 3), so no rendered stop may say "reply continue".

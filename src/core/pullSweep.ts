@@ -147,7 +147,7 @@ async function sweepOne(pr: SweepPullRequest, deps: PullSweepDeps, owner: "runne
   // moment the sweep exists for — so an unknown state is named, never claimed
   // current: the next sweep reads the settled answer.
   if (!dirty && (pr.mergeableState === "unknown" || pr.mergeableState === ""))
-    return at("skipped", "mergeability still computing — run the sweep again in a minute");
+    return at("skipped", "mergeability still computing — no rebase was attempted");
   // A stale-but-clean pull request is never rebased: it merges as it is.
   if (!dirty) return at("skipped", "skipped, already current");
   try {
@@ -161,7 +161,10 @@ async function sweepOne(pr: SweepPullRequest, deps: PullSweepDeps, owner: "runne
     switch (decision.action) {
       case "end":
         // An unowned second conflict ends with the conflict named in one line.
-        return at("conflict", `conflict in ${decision.file}, its fix round is spent — rebase it by hand`);
+        return at(
+          "conflict",
+          `this is a bug: the conflict in ${decision.file} remained after the sweep's fix round, and no automatic recovery remains`,
+        );
       case "model-round": {
         if (owner === "runner")
           return at("conflict", `conflict in ${decision.file}, the pipeline runner's fix round will resolve it`);

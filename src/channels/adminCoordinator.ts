@@ -2276,7 +2276,7 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
       } else {
         answer = {
           kind: "answered",
-          reply: `${renderRenewal(decision, grantFact.grant, { idle: true })} (grant from ${grantFact.source}); run \`runs stop ${instance.id}:${row.unit}\` to end this idle unit.`,
+          reply: `${renderRenewal(decision, grantFact.grant, { idle: true })} (grant from ${grantFact.source}); the idle unit remains open, and \`runs stop ${instance.id}:${row.unit}\` is its stop command.`,
         };
       }
     }
@@ -2796,7 +2796,7 @@ async function merge(
   const enqueue = async (): Promise<IngressResponse> => {
     if (deps.enqueuePullRequest === undefined)
       return refused(
-        `\`${facts.baseRef ?? "the base"}\` takes changes only through a merge queue and the door cannot enqueue — enqueue ${where} by hand (\`gh pr merge --auto\`); the approved work stands`,
+        `\`${facts.baseRef ?? "the base"}\` takes changes only through a merge queue and the door cannot enqueue — this is a bug: automatic merge-queue enqueue is unavailable; the approved work stands`,
       );
     let queued: EnqueueResult;
     try {
@@ -2948,7 +2948,7 @@ export function planSummary(units: readonly CoordinatorUnit[], generated = false
     const how = u.ending
       ? endingWordOf(u.ending.kind)
       : u.threadKey
-        ? "no ending was recorded — re-issue `agent:ship` in its thread to continue"
+        ? "no ending was recorded — the next reply in its thread continues the unit"
         : kind;
     const pr = u.pr ? ` — ${u.pr.url}` : "";
     return generated

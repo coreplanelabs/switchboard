@@ -207,8 +207,12 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
     const w = world(resumeOf(row({}, { request: { text: 12 } })));
     expect(await abandonLostWorkspace(w.ctx)).toBeUndefined();
     const note = w.registry.snapshotById("run-old")!.events.find((e) => e.type === "run_note") as { summary: string };
-    expect(note.summary).toMatch(/the row's request cannot be read, so the run ends here; re-send it to run it again$/);
-    expect(JSON.stringify(w.closes)).toContain("workspace lost across the restart; re-send to run again");
+    expect(note.summary).toMatch(
+      /this is a bug: the row's request cannot be read, so the run ends here and no replacement run starts$/,
+    );
+    expect(JSON.stringify(w.closes)).toContain(
+      "this is a bug: the workspace was lost across the restart, the request could not be read, and no replacement run starts",
+    );
     expect(w.puts[0]).toMatchObject({ id: "run-old", status: "interrupted" });
   });
 

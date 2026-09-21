@@ -266,7 +266,7 @@ describe("exchangeCode + refreshCredential", () => {
     const c2 = await exchangeCode(rotating.fetch, pending(), await rotating.codeFor(VERIFIER), NOW);
     expect((await refreshCredential(rotating.fetch, c2, later)).refreshToken).toBe("rt-2");
     await expect(refreshCredential(as.fetch, { ...cred, refreshToken: undefined }, later)).rejects.toThrow(
-      /no refresh token/,
+      "this is a bug: the access token expired, the server issued no refresh token, and no fresh sign-in was opened automatically",
     );
     await expect(refreshCredential(as.fetch, { ...cred, refreshToken: "revoked" }, later)).rejects.toThrow(
       /invalid_grant/,

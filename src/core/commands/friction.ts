@@ -74,7 +74,7 @@ const positiveInt = z.coerce.number().int().positive();
 const repoSlug = z.string().refine((s) => /^[\w.-]+\/[\w.-]+$/.test(s), "expected an owner/name slug");
 
 export const NO_LEDGER_MESSAGE =
-  "Run history is not configured in this deployment (`runHistory`), so there are no recent runs to analyze.";
+  "History is not configured in this deployment (`runHistory`), so there are no recent runs to analyze.";
 export const NO_REPO_MESSAGE =
   "Set `selfImprovement.repo` (an `owner/name`) in config.yaml to tell `friction propose` where to file issues.";
 
@@ -166,7 +166,7 @@ export const frictionPropose = defineCommand({
     risk: (input) => (dryRunRequested(input) ? PLAN_ONLY_RISK : "files issues on the tracker"),
   },
   describe:
-    "Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.",
+    "Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.",
   render,
   handler: async ({ options, caller, deps }) => {
     const ledger = await ledgerOf(deps);
@@ -203,7 +203,7 @@ export const frictionPropose = defineCommand({
 export function inProgressHint(diagnosis: FrictionDiagnosis, finished: boolean): string | undefined {
   if (!finished) return undefined;
   const midTool = diagnosis.findings.some(
-    (f) => f.category === "infra_failure" && f.summary.includes("run ended mid-tool"),
+    (f) => f.category === "infra_failure" && f.summary.includes("the run ended mid-tool"),
   );
   return midTool
     ? "(hint: the stream ends on a tool call with no result — if this capture was taken mid-run, pass --in-progress)"

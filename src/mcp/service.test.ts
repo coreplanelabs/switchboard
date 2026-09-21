@@ -491,7 +491,7 @@ describe("McpService — the run-time view (item 17)", () => {
     await h.service.add(alice, ME(alice), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "bearer" });
     expect(await h.service.resolveForRun("general", { userId: alice.id })).toEqual([
       expect.objectContaining({ spec: expect.anything() }),
-      { name: "vanta", unavailable: "no credential stored — run `mcp connect`" },
+      { name: "vanta", unavailable: "no credential is stored, so this server is unavailable" },
     ]);
     await h.service.completeTicket("nonce-00000000000000000001", ada, "tok");
     const sealed = (await h.secrets.getCredential("user:slack:UALICE/vanta"))!;

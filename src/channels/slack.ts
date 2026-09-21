@@ -142,9 +142,10 @@ const SLACK_SECTION_LIMIT = 3000;
 
 /** What the offer message reads when the adapter itself could not carry the
  *  click into the core or its answer back — the core's own refusals are its
- *  named lines (dispatch/confirm.ts); this one is the adapter's. The line stays
- *  on the message above it, so the person can still type it. */
-export const CLICK_FAILED_LINE = "this click could not be handled; type the line to run it";
+ *  named lines (dispatch/confirm.ts); this one is the adapter's. The offered
+ *  line remains visible, but a failed click never delegates recovery. */
+export const CLICK_FAILED_LINE =
+  "this click could not be handled; nothing ran, and the command line remains visible in the offer";
 
 // Rotating inline-status phrases (assistant.threads.setStatus loading_messages).
 // Switchboard-flavored; Slack cycles through them while a turn runs.
@@ -1220,8 +1221,8 @@ export class SlackIO implements ChannelIO {
       return;
     }
     // The click's answer: the offer message becomes its outcome. Its own
-    // blocks stay minus the buttons — the line above the answer, because the
-    // core's refusals say "type the line to run it" — and the answer is one
+    // blocks stay minus the buttons — the offered line above the answer keeps
+    // the refused command visible without delegating recovery — and the answer is one
     // section under them; an answer longer than a section carries continues
     // in the thread. Completed once: a later reply is a follow-up, posted.
     this.offerCompleted = true;

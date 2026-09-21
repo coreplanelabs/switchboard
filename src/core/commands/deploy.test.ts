@@ -750,7 +750,12 @@ describe("deploy.init", () => {
     const missing = await commands.invoke("deploy.init", { options: { check: true } }, cli);
     expect(missing).toMatchObject({ ok: false, error: "conflict" });
     expect(missing.ok ? "" : missing.message).toContain("deploy/cloudflare-memory/wrangler.jsonc (missing)");
-    expect(missing.ok ? "" : missing.message).toContain("run `npm run deploy:gen` and commit the result");
+    expect(missing.ok ? "" : missing.message).toContain(
+      "this is a bug: Worker configs are not the render of their templates",
+    );
+    expect(missing.ok ? "" : missing.message).toContain(
+      "deploy did not repair or commit the generated files automatically",
+    );
     expect(writes).toEqual([]);
     // Generate, then the check passes …
     await commands.invoke("deploy.init", {}, cli);

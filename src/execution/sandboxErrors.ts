@@ -194,11 +194,11 @@ export function fleetBusyRunEndedLine(run: string | undefined, thread: string, e
 }
 
 /** The message `ExecCapacityError` carries once the wait is spent: names the
- *  wait and the knob, and tells the reader this is a retry-later condition. */
+ *  wait and the missing automatic queue as a bug, never delegates a retry. */
 export function fleetBusyExhaustedMessage(waitedMs: number): string {
   return (
-    `sandbox fleet busy — no free per-thread sandbox after waiting ${Math.round(waitedMs / 1000)}s ` +
-    "(the fleet's max_instances is reached); try again in a few minutes"
+    `this is a bug: the sandbox fleet had no free per-thread sandbox after waiting ${Math.round(waitedMs / 1000)}s ` +
+    "(the fleet's max_instances is reached), and no automatic queue remained"
   );
 }
 
@@ -273,11 +273,11 @@ export function sandboxStartingExecAnswer(cause: string): {
 }
 
 /** The message `ExecCapacityError` carries when a container did not start
- *  inside the start budget: the wait, and what to do. */
+ *  inside the start budget: the wait and the missing automatic recovery. */
 export function startWaitExhaustedMessage(waitedMs: number): string {
   return (
-    `sandbox not ready — the thread's container did not finish starting within ${Math.round(waitedMs / 1000)}s; ` +
-    "try again in a few minutes"
+    `this is a bug: the thread's sandbox did not finish starting within ${Math.round(waitedMs / 1000)}s, ` +
+    "and no automatic start wait remained"
   );
 }
 

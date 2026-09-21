@@ -137,7 +137,7 @@ describe("artifacts.lifecycle", () => {
       ok: false,
       error: "unavailable",
       message: expect.stringMatching(
-        /were applied .* but reading them back failed — GET … answered HTTP 502; run `artifacts lifecycle` again/,
+        /this is a bug: the rules were applied .* but their read-back failed \(GET … answered HTTP 502\) and no automatic confirmation was completed/,
       ),
     });
     const differs = bind(CONFIG, {

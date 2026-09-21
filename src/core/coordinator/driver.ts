@@ -806,7 +806,7 @@ async function tellStepThrew(
         : `in round ${at.round.index} (\`${at.step}\`)`;
   const report =
     `⚠️ The runner failed ${where}: ${line}\n\n` +
-    "Re-issue `agent:ship` in this thread to continue — a pull request already approved with green checks resumes at the checks step, never at a fresh coding round.";
+    "The unit remains bound to this thread; the next reply continues it, and a pull request already approved with green checks resumes at the checks step, never at a fresh coding round.";
   const body = {
     ...tag,
     ending: {
@@ -1041,14 +1041,14 @@ async function runUnit(
 
 /** The report of a unit the hard stop ended before it ran (record 0060; issue 1924). */
 function stoppedReport(unit: string): string {
-  return `⏹ Stopped: the pipeline's hosted parent was hard-stopped, so ${unit} was ended without running. Re-issue the plan naming the remaining units to run them.`;
+  return `⏹ Stopped: the pipeline's hosted parent was hard-stopped, so ${unit} was ended without running. The original plan remains the durable task for any later pipeline.`;
 }
 
 function blockedReport(unit: string, dep: string, depEnding: string): string {
   if (depEnding === "blocked")
-    return `⛔ Blocked: ${unit} waits on ${dep}, which is blocked itself. Re-issue the plan naming the remaining units once it is resolved.`;
+    return `⛔ Blocked: ${unit} waits on ${dep}, which is blocked itself. A later pipeline recognizes both units once the dependency is resolved.`;
   const person = depEnding === "merge_ready";
-  return `⛔ Blocked: ${unit} waits on ${dep}, which ended ${depEnding}${person ? " — a person's merge" : ""}. Re-issue the plan naming the remaining units once it is ${person ? "merged" : "resolved"}.`;
+  return `⛔ Blocked: ${unit} waits on ${dep}, which ended ${depEnding}${person ? " — a person's merge" : ""}. A later pipeline recognizes the dependency once it is ${person ? "merged" : "resolved"}.`;
 }
 
 /** End a unit that never entered `runUnit` under the same failure net. */

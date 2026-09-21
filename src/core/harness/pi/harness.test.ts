@@ -989,7 +989,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     const answer = await w.start();
     expect(answer).toBe(
-      "Stopped at the 20-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.",
+      "Stopped at the 20-minute budget without finishing. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.",
     );
     expect(w.container.commands().some((c) => c.type === "abort")).toBe(true);
     expect(w.notes).toContain("finale timed out — closing the run without a write-up");
@@ -1027,7 +1027,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     const answer = await w.start();
     // The wind-down's own words, naming the failed call where the write-up would have been.
     expect(answer).toBe(
-      "Stopped at the 20-minute budget without finishing; the model call failed during the wind-down (This operation was aborted), so no write-up came. Partial work may exist in the workspace — narrow the task and try again.",
+      "Stopped at the 20-minute budget without finishing; the model call failed during the wind-down (This operation was aborted), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.",
     );
     expect(w.notes.some((note) => note.includes("the loop's time is up while a model call was in flight"))).toBe(true);
     expect(
@@ -3055,7 +3055,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
     });
     const answer = await w.start();
     expect(answer).toBe(
-      "Stopped at the 20-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.",
+      "Stopped at the 20-minute budget without finishing. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.",
     );
     expect(w.notes).toContain("finale timed out — closing the run without a write-up");
     expect(noteKinds(w)).not.toContain("sandbox_restarted");

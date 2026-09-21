@@ -366,7 +366,7 @@ describe("gates (fail-closed) and scopes", () => {
     expect((await commands.invoke("repo.test", { args: ["acme/api"] }, mcp("repo:exec"))).ok).toBe(true);
   });
 
-  it("an op failure the backend typed as the platform's transient is `unavailable` with this reader's words for the blip — the resident was unavailable for a moment, re-run — while an untyped failure keeps the backend's message alone", async () => {
+  it("an op failure the backend typed as the platform's transient is `unavailable` with this reader's words for the blip and settled outcome, while an untyped failure keeps the backend's message alone", async () => {
     const transient = bind({
       ops: fakeOps({ kind: "error", message: "resident /op: op-failed: Network connection lost.", transient: true })
         .ops,
@@ -374,7 +374,7 @@ describe("gates (fail-closed) and scopes", () => {
     const blip = await transient.invoke("repo.test", { args: ["acme/api"] }, mcp("repo:exec"));
     expect(blip).toMatchObject({ ok: false, error: "unavailable" });
     expect(JSON.stringify(blip)).toContain(
-      "resident /op: op-failed: Network connection lost. — the resident was unavailable for a moment; re-run the command",
+      "resident /op: op-failed: Network connection lost. — the resident was unavailable for a moment; Switchboard ended the command as unavailable",
     );
     const plain = bind({ ops: fakeOps({ kind: "error", message: "resident /op: op-failed at test: exit 1" }).ops });
     const failed = await plain.invoke("repo.test", { args: ["acme/api"] }, mcp("repo:exec"));
@@ -682,7 +682,7 @@ describe("repo offboard / rebuild (--dry-run)", () => {
     expect(text).toContain("🧪 *Dry run* — offboarding `acme/api` would remove:");
     expect(text).toContain("• 4 snapshot backup object(s) in R2 (ids m1, c1)");
     expect(text).toContain("• 3 thread binding(s) and the container (currently `warm`)");
-    expect(text).toContain("Nothing was changed. Run `repo offboard acme/api` to execute.");
+    expect(text).toContain("Nothing was changed. Without `--dry-run`, `repo offboard acme/api` performs this removal.");
   });
 
   it("real offboard calls with dryRun=false and renders the teardown result", async () => {
@@ -713,7 +713,7 @@ describe("repo offboard / rebuild (--dry-run)", () => {
     expect(dry).toContain("🧪 *Dry run* — rebuilding `acme/api` (currently `warm`) would:");
     expect(dry).toContain("• discard the snapshot from 2026-08-26T00:00:00Z (4 backup object(s); ids m1, c1)");
     expect(dry).toContain("• reprovision from scratch on `master` (budget 300000ms)");
-    expect(dry).toContain("Nothing was changed. Run `repo rebuild acme/api` to execute.");
+    expect(dry).toContain("Nothing was changed. Without `--dry-run`, `repo rebuild acme/api` performs this rebuild.");
     const real = mockClient();
     const { text } = await say(bind({ admin: real }), "repo rebuild acme/api", admin);
     expect(real.rebuild).toHaveBeenCalledWith("repo:acme/api", false);

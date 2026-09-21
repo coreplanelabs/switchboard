@@ -133,11 +133,17 @@ describe("the named lines and the clicker's ids", () => {
     expect(refusalLine("expired", { kind: "redispatch" })).toBe(QUESTION_EXPIRED_LINE);
     expect(refusalLine("foreign")).toBe(OFFER_FOREIGN_LINE);
     expect(refusalLine("used")).toBe(OFFER_USED_LINE);
-    expect(OFFER_EXPIRED_LINE).toBe("this offer expired; its ten minutes passed — type the line to run it");
-    expect(QUESTION_EXPIRED_LINE).toBe("this question expired; its day passed — type the line to run it");
+    expect(OFFER_EXPIRED_LINE).toBe(
+      "this offer expired after ten minutes; nothing ran, and a later request may receive a fresh confirmation",
+    );
+    expect(QUESTION_EXPIRED_LINE).toBe(
+      "this question expired after one day; nothing ran, and a later request may receive a fresh question",
+    );
     expect(OFFER_FOREIGN_LINE).toBe("only the requester can confirm this");
     expect(OFFER_USED_LINE).toBe("this offer was already used");
-    expect(OFFER_UNREADABLE_LINE).toBe("the confirmation could not be read; type the line to run it");
+    expect(OFFER_UNREADABLE_LINE).toBe(
+      "this is a bug: the confirmation could not be read, so nothing ran and no replacement offer was minted",
+    );
     expect(OFFER_CANCELLED_LINE).toBe("Cancelled; nothing ran");
   });
 
