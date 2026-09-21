@@ -5596,6 +5596,10 @@ describe("runPiHarness — a read-identity preset", () => {
       identity: "write",
       checkout: "/workspace/threads/t/main",
       protectedBranches: ["main"],
+      pushGuard: { pendingFormatting: new Map(), receiptRevision: 0 },
+      inspectTree: expect.any(Function),
+      inspectRefTree: expect.any(Function),
+      inspectPush: expect.any(Function),
       loopEndsIn: expect.any(Function),
     });
     expect(rules!.loopEndsIn!()).toBe(loopClock(NOW, 45 * MINUTE_MS, "coding").loopEnd - NOW);

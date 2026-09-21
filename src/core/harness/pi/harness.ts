@@ -110,7 +110,15 @@ import {
 import { piApiFor } from "../piAi.js";
 import { parsePiLine } from "./protocol.js";
 import { RELAY_POLL_WINDOW_MS, stillRunningNote, type LiveHarness, type RelayedToolAnswer } from "./relay.js";
-import type { ToolRuleContext } from "./toolRules.js";
+import {
+  createPushGuard,
+  inspectGitPush,
+  inspectGitRefTree,
+  inspectGitTree,
+  recordToolResult,
+  type PushRefspec,
+  type ToolRuleContext,
+} from "./toolRules.js";
 import { PiRpcTransport } from "./transport.js";
 
 /** What pi's loop needs beyond what every harness is handed (`HarnessDeps`,
@@ -512,12 +520,31 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     });
     return new ModelPolicyRefusedError(explanation);
   };
+  // The push receipt belongs to this live process. A resume starts unproved:
+  // it cannot claim a formatting result observed by a bot generation that died.
+  const rules: ToolRuleContext = {
+    ...run.rules,
+    identity: run.agent.identity,
+    ...(run.agent.identity === "write"
+      ? {
+          pushGuard: createPushGuard(),
+          inspectTree: () => inspectGitTree(run.toolContext.executor),
+          inspectRefTree: (ref: string) => inspectGitRefTree(run.toolContext.executor, ref),
+          inspectPush: (remote: string, explicit?: readonly PushRefspec[]) =>
+            run.rules.repository === undefined
+              ? Promise.resolve(undefined)
+              : inspectGitPush(run.toolContext.executor, remote, run.rules.repository, explicit),
+        }
+      : {}),
+    loopEndsIn: () => loopEnd - now(),
+  };
   const bridge = new PiBridge({
     emit,
     onProgress: run.onProgress,
     agentSpan,
     clock,
     textFailing: new Set(run.tools.filter((t) => t.failsInText).map((t) => t.name)),
+    onToolSettled: (callId, ok) => void recordToolResult(rules, callId, ok),
   });
   // Where pi's files are: the root the row recorded for a pi another build
   // started (the re-attach below), else the root the container makes for a
@@ -647,10 +674,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       return "the run has hit its turn guard: no more tool calls — write your final answer now";
     return "an operator asked this run to stop: no more tool calls — write your final answer now";
   };
-  // The loop's clock rides on the rules: a bash call whose explicit timeout
-  // reaches past `loopEnd` — the moment the cut below fires — is refused at
-  // the gate before it runs (harness-pi item 7), not cut at the end.
-  const rules: ToolRuleContext = { ...run.rules, identity: run.agent.identity, loopEndsIn: () => loopEnd - now() };
+  // The loop's clock rides on the rules above: a bash call whose explicit
+  // timeout reaches past `loopEnd` is refused before it runs, not cut at the end.
   // The waits on the bridge pace with the log poll: a test that polls every millisecond is not made to wait fifty.
   const seenTick = Math.min(CALL_SEEN_TICK_MS, deps.pollMs ?? CALL_SEEN_TICK_MS);
   const live: LiveHarness = {

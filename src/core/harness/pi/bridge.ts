@@ -125,6 +125,9 @@ export interface BridgeDeps {
    *  `error:`-opening results are recorded `ok:false`. Absent, only pi's
    *  `isError` decides for a non-bash tool. */
   textFailing?: ReadonlySet<string>;
+  /** A harness-owned policy receipt that needs the settled outcome, not merely
+   *  the authorization ask. */
+  onToolSettled?: (callId: string, ok: boolean) => void;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
@@ -411,6 +414,7 @@ export class PiBridge {
     // item 13: a `cut` result is a command that may run on). Only a marked
     // call's failed end is the abort's.
     const cut = marked && !ok;
+    this.deps.onToolSettled?.(callId, ok);
     this.emit({
       type: "tool_result",
       tool,

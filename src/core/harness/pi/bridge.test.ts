@@ -19,7 +19,14 @@ import type { PiEvent } from "./protocol.js";
 
 const NOW = 1_700_000_000_000;
 
-function harness(opts: { withSpans?: boolean; clock?: () => number; textFailing?: ReadonlySet<string> } = {}) {
+function harness(
+  opts: {
+    withSpans?: boolean;
+    clock?: () => number;
+    textFailing?: ReadonlySet<string>;
+    onToolSettled?: (callId: string, ok: boolean) => void;
+  } = {},
+) {
   const events: RunEvent[] = [];
   const notes: string[] = [];
   const sink = recordingSink();
@@ -32,6 +39,7 @@ function harness(opts: { withSpans?: boolean; clock?: () => number; textFailing?
     agentSpan,
     clock,
     ...(opts.textFailing ? { textFailing: opts.textFailing } : {}),
+    ...(opts.onToolSettled ? { onToolSettled: opts.onToolSettled } : {}),
   });
   return { bridge, events, notes, sink, agentSpan };
 }
@@ -83,6 +91,35 @@ const comparable = (events: RunEvent[]) =>
       const { at: _at, spanId: _spanId, ...rest } = e as RunEvent & { at?: number; spanId?: string };
       return rest;
     });
+
+describe("PiBridge — settled tool receipts", () => {
+  it("reports a clean and failed bash result to the harness policy by call id", () => {
+    const settled: Array<[string, boolean]> = [];
+    const h = harness({ onToolSettled: (callId, ok) => settled.push([callId, ok]) });
+    for (const [id, text, isError] of [
+      ["clean", "Checking formatting...\nAll matched files use Prettier code style!", false],
+      ["failed", "Command exited with code 1", true],
+    ] as const) {
+      h.bridge.observe({
+        type: "tool_execution_start",
+        toolCallId: id,
+        toolName: "bash",
+        args: { command: "npx prettier --check src/x.ts" },
+      });
+      h.bridge.observe({
+        type: "tool_execution_end",
+        toolCallId: id,
+        toolName: "bash",
+        result: { content: [{ type: "text", text }] },
+        isError,
+      });
+    }
+    expect(settled).toEqual([
+      ["clean", true],
+      ["failed", false],
+    ]);
+  });
+});
 
 describe("PI_EVENT_DISPOSITION — every event kind pi's protocol documents is decided", () => {
   it("covers exactly the kinds the spike's home table knows, and every one has a disposition", () => {

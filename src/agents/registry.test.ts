@@ -547,7 +547,11 @@ describe("coding prompts: the fast gates before every push (agent-coding item 13
     expect(FAST_GATES_BEFORE_PUSH).toContain(
       "`tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`",
     );
-    expect(FAST_GATES_BEFORE_PUSH).toContain("`npx prettier --check` on the changed files");
+    expect(FAST_GATES_BEFORE_PUSH).toContain(
+      "canonical complete changed-set formatter `set -o pipefail && git diff --name-only --diff-filter=ACMR -z " +
+        "origin/<base>...HEAD -- | xargs -0 -r npx prettier --check --ignore-unknown --`",
+    );
+    expect(FAST_GATES_BEFORE_PUSH).toContain("with `<base>` replaced by the fetched base branch");
     expect(FAST_GATES_BEFORE_PUSH).toContain("`npm run hygiene:check`");
     expect(FAST_GATES_BEFORE_PUSH).toContain("`npm run specs:check`");
     // each scoped to the changed set; judgement beyond the list, never a longer checklist

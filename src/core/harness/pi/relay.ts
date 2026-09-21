@@ -29,7 +29,7 @@ import type { Backend } from "../../trace/attrs.js";
 import { redactAndCap, type RunEvent } from "../../runEvents.js";
 import type { Span } from "../../trace/types.js";
 import { pointerSummary, type CompactionAnswer, type CompactionAsk } from "./compactionFallback.js";
-import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
+import { judgeToolCall, judgeToolCallWithTree, type ToolRuleContext } from "./toolRules.js";
 
 /** One run driving a pi, as the routes see it. */
 export interface LiveHarness {
@@ -316,7 +316,7 @@ export function relayedToolDefinitions(harness: LiveHarness): ToolDef[] {
 
 /** The gate: a write-up refuses every tool; a relayed tool runs under the
  *  bot's own gates when it runs; pi's own tools are judged by the tool rules
- *  for the run's identity from the call alone. A refusal is a `tool_refused` note and
+ *  for the run's identity from the call and its settled gate receipts. A refusal is a `tool_refused` note and
  *  the reason the model reads. Whatever the answer, the harness is told the
  *  gate saw the call first. */
 export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): AuthorizeAnswer {
@@ -332,7 +332,28 @@ export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): Autho
   };
   if (blocked !== undefined) return refuse(blocked);
   if (harness.tools.some((t) => t.name === ask.tool)) return { allow: true };
-  const verdict = judgeToolCall(ask.tool, ask.input, harness.rules);
+  const verdict = judgeToolCall(ask.tool, ask.input, harness.rules, ask.toolCallId);
+  if (verdict.verdict === "allowed") return { allow: true };
+  return refuse(verdict.reason);
+}
+
+/** Runtime authorization waits for the executor-backed tree observation before
+ *  deciding a formatter or push. The synchronous form remains the pure preview
+ *  used by the load harness and rule-table tests. */
+export async function authorizeToolCallWithTree(harness: LiveHarness, ask: ToolCallAsk): Promise<AuthorizeAnswer> {
+  harness.gateSaw(ask.toolCallId);
+  const blocked = harness.toolsBlocked();
+  const refuse = (reason: string): AuthorizeAnswer => {
+    harness.emit({
+      type: "run_note",
+      kind: "tool_refused",
+      summary: redactAndCap(`${ask.tool} refused: ${reason}`, 300),
+    });
+    return { allow: false, reason };
+  };
+  if (blocked !== undefined) return refuse(blocked);
+  if (harness.tools.some((t) => t.name === ask.tool)) return { allow: true };
+  const verdict = await judgeToolCallWithTree(ask.tool, ask.input, harness.rules, ask.toolCallId);
   if (verdict.verdict === "allowed") return { allow: true };
   return refuse(verdict.reason);
 }

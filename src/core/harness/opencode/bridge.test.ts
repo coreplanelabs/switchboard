@@ -9,6 +9,7 @@ import type { StepReport } from "../../runLedger/stepReport.js";
 import { ExecInfraError } from "../../../execution/executor.js";
 import { identityChangedCondition } from "../container.js";
 import { HarnessContainerReplacedError } from "../contract.js";
+import { createPushGuard } from "../pi/toolRules.js";
 import { piDriver } from "../pi/testing/driver.js";
 import { TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import type { DrivenRun, RunScript } from "../testing/scenarios.js";
@@ -51,7 +52,9 @@ const FINALE_MS = loopClock(0, CONFORMANCE_MAX_MINUTES * MINUTE_MS, "conformance
 
 const NOW = 1_700_000_000_000;
 
-function harness(opts: { identity?: "write" | "read" | "none"; relayed?: string[] } = {}) {
+function harness(
+  opts: { identity?: "write" | "read" | "none"; relayed?: string[]; tree?: () => Promise<string | undefined> } = {},
+) {
   const events: RunEvent[] = [];
   const steps: StepReport[] = [];
   const progress: string[] = [];
@@ -59,7 +62,12 @@ function harness(opts: { identity?: "write" | "read" | "none"; relayed?: string[
     emit: (e) => void events.push(e),
     onProgress: (n) => void progress.push(n),
     clock: () => NOW,
-    rules: { identity: opts.identity ?? "write", checkout: "/workspace/threads/t/main", protectedBranches: ["main"] },
+    rules: {
+      identity: opts.identity ?? "write",
+      checkout: "/workspace/threads/t/main",
+      protectedBranches: ["main"],
+      ...(opts.tree ? { pushGuard: createPushGuard(), inspectTree: opts.tree } : {}),
+    },
     relayedToolNames: new Set(opts.relayed ?? ["update_status"]),
     onStep: async (r) => void steps.push(r),
     seedLength: 1,
@@ -278,6 +286,26 @@ describe("the gate's honest cannot, the compaction row, the budget stop, the unk
     const ask = bridge.observe(asked("per_1", "c1", "shell", "ls"));
     expect(ask.replies).toEqual([{ requestID: "per_1", callId: "c1", stepID: "msg_a0", reply: "once" }]);
     expect(bridge.observe(replied("per_1", "once")).bypass).toBeUndefined();
+  });
+
+  it("a shell push waits for the live tree observation before the bot replies", async () => {
+    const { bridge } = harness({ tree: async () => "tree-a:clean" });
+    const ask = bridge.observe(asked("per_tree", "c-tree", "shell", "git push origin feat/x"));
+    expect(ask.replies).toEqual([]);
+    expect(ask.treePermissions).toHaveLength(1);
+
+    await bridge.resolveTreePermissions(ask);
+
+    expect(ask.treePermissions).toBeUndefined();
+    expect(ask.replies).toEqual([
+      {
+        requestID: "per_tree",
+        callId: "c-tree",
+        stepID: "msg_a0",
+        reply: "reject",
+        message: "the tree changed since the gates ran; run them on this tree, then push",
+      },
+    ]);
   });
 
   it("the refusals held for a step — what a withdrawn sibling's note is explained by — are dropped when the step ends or fails, so the map never grows over a long run", () => {

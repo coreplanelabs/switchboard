@@ -272,7 +272,9 @@ export const FAST_GATES_BEFORE_PUSH =
   "THE FAST GATES, before every push — each scoped to the changed set, never the whole project: " +
   `${TOUCHED_TESTS_COMMAND} once (never \`--changed\`, never a directory: on a moving base that is most of the suite), ` +
   "`tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`, " +
-  "`npx prettier --check` on the changed files, `npm run hygiene:check` and `npm run specs:check` — " +
+  "the canonical complete changed-set formatter `set -o pipefail && git diff --name-only --diff-filter=ACMR -z " +
+  "origin/<base>...HEAD -- | xargs -0 -r npx prettier --check --ignore-unknown --` with `<base>` replaced by the " +
+  "fetched base branch, `npm run hygiene:check` and `npm run specs:check` — " +
   "then your judgement on what else this change needs, not a longer checklist. The full verification is " +
   "CI's gate — `npm run verify` runs there on your push, never here: push a head early and let CI judge it, " +
   "fixing forward with further commits and pushes.";

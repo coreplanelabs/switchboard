@@ -1237,6 +1237,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               : {}),
             rules: {
               checkout: binding?.workspace ?? "/workspace",
+              ...(repoCtx.repo !== undefined ? { repository: repoCtx.repo } : {}),
               ...(ownBranch !== undefined ? { branch: ownBranch } : {}),
               protectedBranches,
             },

@@ -74,9 +74,16 @@ import { describePiToolCall, piBashExit } from "../pi/bridge.js";
 import { PiMirror } from "../pi/mirror.js";
 import { PiRpcTransport } from "../pi/transport.js";
 import {
+  createPushGuard,
+  inspectGitPush,
+  inspectGitRefTree,
+  inspectGitTree,
   judgeToolCall,
+  judgeToolCallWithTree,
   OPENCODE_ACTION_TO_TOOL_WORD,
   openCodeToolWord,
+  recordToolResult,
+  type PushRefspec,
   type ToolRuleContext,
 } from "../pi/toolRules.js";
 import {
@@ -331,6 +338,12 @@ export type OpenCodeReplyResolution =
 export interface OpenCodeBridgeObservation {
   /** Permission replies to POST — `once` or `reject`, never `always`. */
   replies: OpenCodeReply[];
+  /** Shell asks whose verdict waits for an executor-backed tree observation. */
+  treePermissions?: Array<{
+    request: OpenCodePermissionRequest;
+    callId: string;
+    stepID?: string;
+  }>;
   /** The run's loop is idle: its execution ended (or the run was interrupted). */
   settled: boolean;
   /** A tool ran with no decision, or a reply the bot did not send: fail closed. */
@@ -393,6 +406,7 @@ export function judgeOpenCodeAsk(
   resources: readonly string[],
   rules: ToolRuleContext,
   relayedToolNames: ReadonlySet<string>,
+  callId?: string,
 ): { reply: "once" | "reject"; message?: string; tool: string } {
   // OpenCode's repeat guard: the same call, made over and over with the same
   // input whatever it returned, and the server asks whether to go on. The gate
@@ -423,7 +437,7 @@ export function judgeOpenCodeAsk(
   }
   if (word === "bash") {
     for (const command of resources.length > 0 ? resources : [""]) {
-      const verdict = judgeToolCall("bash", { command }, rules);
+      const verdict = judgeToolCall("bash", { command }, rules, callId);
       if (verdict.verdict !== "allowed") return refuse(verdict.reason);
     }
     return { reply: "once", tool };
@@ -431,7 +445,7 @@ export function judgeOpenCodeAsk(
   // A path tool judges its one path; a search tool (`find`/`grep`) judges its
   // reach with the pattern defaulting to the checkout, as pi's does.
   const input = word === "read" || word === "edit" || word === "write" ? { path: resources[0] } : {};
-  const verdict = judgeToolCall(word, input, rules);
+  const verdict = judgeToolCall(word, input, rules, callId);
   if (verdict.verdict !== "allowed") return refuse(verdict.reason);
   return { reply: "once", tool };
 }
@@ -1342,6 +1356,7 @@ export class OpenCodeBridge {
       ...(open?.span ? { spanId: open.span.id } : {}),
       ...(cut ? { cut: true as const } : {}),
     });
+    void recordToolResult(this.deps.rules, callId, settledOk);
     open?.span?.end(settledOk ? "ok" : "error", { callId, ok: settledOk });
     // A call that settled before this generation attached settled under the
     // dead generation's watch: its narration is said again, its vetting is not
@@ -1561,19 +1576,55 @@ export class OpenCodeBridge {
       this.decidedReplies.set(request.id, { reply: undefined, callId, echoed: false, unattributable });
       return;
     }
+    const stepID = typeof request.source?.messageID === "string" ? request.source.messageID : undefined;
+    if (openCodeToolWord(request.action) === "bash" && this.deps.rules.inspectTree !== undefined) {
+      (out.treePermissions ??= []).push({ request, callId, ...(stepID !== undefined ? { stepID } : {}) });
+      return;
+    }
     const verdict = judgeOpenCodeAsk(
       request.action,
       Array.isArray(request.resources) ? request.resources : [],
       this.deps.rules,
       this.deps.relayedToolNames,
+      callId,
     );
+    this.finishPermission(request, callId, stepID, verdict, out);
+  }
+
+  /** Resolve the shell permissions that need the live checkout identity before
+   *  the harness posts their reply to OpenCode. */
+  async resolveTreePermissions(out: OpenCodeBridgeObservation): Promise<void> {
+    for (const pending of out.treePermissions ?? []) {
+      const resources = Array.isArray(pending.request.resources) ? pending.request.resources : [];
+      let verdict: { reply: "once" | "reject"; message?: string; tool: string } = {
+        reply: "once",
+        tool: TOOL_NAME_WORD[pending.request.action] ?? openCodeToolWord(pending.request.action),
+      };
+      for (const command of resources.length > 0 ? resources : [""]) {
+        const judged = await judgeToolCallWithTree("bash", { command }, this.deps.rules, pending.callId);
+        if (judged.verdict !== "allowed") {
+          verdict = { reply: "reject", message: judged.reason, tool: verdict.tool };
+          break;
+        }
+      }
+      this.finishPermission(pending.request, pending.callId, pending.stepID, verdict, out);
+    }
+    delete out.treePermissions;
+  }
+
+  private finishPermission(
+    request: OpenCodePermissionRequest,
+    callId: string,
+    stepID: string | undefined,
+    verdict: { reply: "once" | "reject"; message?: string; tool: string },
+    out: OpenCodeBridgeObservation,
+  ): void {
     // One decision per call, the strictest standing: a refusal is never lifted
     // by a later allowance (the tool's own ask after the repeat guard's), so a
     // success executed anyway is still the gate bypassed; a later refusal does
     // overwrite an allowance.
     if (this.answered.get(callId) !== "reject") this.answered.set(callId, verdict.reply);
     this.decidedReplies.set(request.id, { reply: verdict.reply, callId, echoed: false });
-    const stepID = typeof request.source?.messageID === "string" ? request.source.messageID : undefined;
     if (verdict.reply === "reject") {
       this.note("tool_refused", `${verdict.tool} refused: ${redactAndCap(verdict.message ?? "", 300)}`);
       if (stepID !== undefined) {
@@ -2166,12 +2217,27 @@ export async function driveOpenCode(
   };
   /** Which request this loop's prompt is, for the record: the fresh run's, a resume's continue, a post-turn's. */
   const promptPhase = kind === "turn" ? "follow-up turn's prompt" : run.resume !== undefined ? "continue" : "prompt";
+  const rules: ToolRuleContext = {
+    ...run.rules,
+    identity: run.agent.identity,
+    ...(run.agent.identity === "write"
+      ? {
+          pushGuard: createPushGuard(),
+          inspectTree: () => inspectGitTree(run.toolContext.executor),
+          inspectRefTree: (ref: string) => inspectGitRefTree(run.toolContext.executor, ref),
+          inspectPush: (remote: string, explicit?: readonly PushRefspec[]) =>
+            run.rules.repository === undefined
+              ? Promise.resolve(undefined)
+              : inspectGitPush(run.toolContext.executor, remote, run.rules.repository, explicit),
+        }
+      : {}),
+  };
   const bridge = new OpenCodeBridge({
     emit,
     ...(run.onProgress ? { onProgress: run.onProgress } : {}),
     clock: deps.clock,
     ...(agentSpan ? { agentSpan } : {}),
-    rules: { ...run.rules, identity: run.agent.identity },
+    rules,
     relayedToolNames: new Set(run.tools.map((t) => t.name)),
     ...(run.onStep ? { onStep: run.onStep } : {}),
     // The mirror skips the seed's rows: a fresh run's is the thread's turns plus
@@ -2909,6 +2975,7 @@ export async function driveOpenCode(
         reason: "reattach",
         data: conn.reattach.pendingAsks,
       });
+      await bridge.resolveTreePermissions(pendingObs);
       const unposted = await postReplies(pendingObs);
       if (unposted !== undefined) throw unposted;
     }
@@ -3068,6 +3135,7 @@ export async function driveOpenCode(
       // (before the loop's own has started), or the loop's own.
       bridge.observing = reattachCatchUp ? "catching-up" : executionOwned ? "own" : "earlier";
       const obs = bridge.observe(record);
+      await bridge.resolveTreePermissions(obs);
       // A step boundary this generation's feed reading reached (the bridge
       // says which records are one) — never one replayed from the dead
       // generation's records while catching up: a steer this generation posts

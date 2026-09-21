@@ -3951,6 +3951,18 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
       // The push itself prints the block; so does `cat push.log` — a transcript
       // of it, which must NOT count as a push.
       if (/^git push\b/.test(cmd) || /^cat push\.log\b/.test(cmd)) return pushBlock;
+      if (cmd.includes("__SWITCHBOARD_PUSH_URLS__")) {
+        const sources = cmd.includes("__SWITCHBOARD_PUSH_DEFAULT__") ? "__SWITCHBOARD_PUSH_DEFAULT__simple\0" : "";
+        return (
+          `__SWITCHBOARD_PUSH_URLS__\0https://github.com/acme/api.git\0__SWITCHBOARD_PUSH_URLS_END__\0` +
+          `__SWITCHBOARD_PUSH_BRANCH__${opts.pushed?.branch ?? opts.branch ?? ""}\0${sources}`
+        );
+      }
+      if (cmd.includes("__SWITCHBOARD_TREE__")) {
+        if (!opts.head) return notARepo;
+        const state = (opts.leftBehind?.uncommitted ?? 0) > 0 ? "dirty" : "clean";
+        return `__SWITCHBOARD_TREE__${opts.head}:${state}\n`;
+      }
       if (/status --porcelain -uno/.test(cmd)) {
         if (!opts.head) return notARepo;
         return Array.from({ length: opts.leftBehind?.uncommitted ?? 0 }, (_, i) => ` M file-${i}.ts\n`).join("");
@@ -4191,6 +4203,10 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(events.some((e) => e.type === "pr_description")).toBe(true);
   });
 
+  const FORMAT_MAIN =
+    "set -o pipefail && git diff --name-only --diff-filter=ACMR -z origin/main...HEAD -- | " +
+    "xargs -0 -r npx prettier --check --ignore-unknown --";
+
   /** A coding-agent provider that runs `steps` as bash commands in order, then
    *  submits the description, then answers — the shape of a run that pushes
    *  and keeps working in the checkout afterwards. */
@@ -4230,7 +4246,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   it("HEAD moved to another branch after the push → the PR still opens from the PUSHED branch, the body rendered at that branch's tip", async () => {
     const OTHER = "0123456789abcdef0123456789abcdef01234567";
     const deps = codingDeps(
-      bashThenDescribe(["git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION),
+      bashThenDescribe([FORMAT_MAIN, "git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION),
     );
     // The checkout ended on chore/other at a different commit; feat/login-fix was pushed at HEAD.
     codingExecutor({
@@ -4362,7 +4378,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
 
   it("the pushed branch is gone from the remote while the checkout moved on → the note names BOTH branches, no PR call", async () => {
     const deps = codingDeps(
-      bashThenDescribe(["git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION),
+      bashThenDescribe([FORMAT_MAIN, "git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION),
     );
     // Neither branch is on the remote any more: the checkout never was, the pushed one was deleted after the push.
     codingExecutor({

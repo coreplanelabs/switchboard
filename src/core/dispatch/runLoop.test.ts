@@ -75,7 +75,7 @@ import { scriptOpenCodeServe } from "../harness/opencode/testing/driver.js";
 import { openCodeReplacedCallNote } from "../harness/opencode/session.js";
 import { FakeHarnessContainer } from "../harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
-import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
+import { judgeToolCallWithTree, recordToolResult, type ToolRuleContext } from "../harness/pi/toolRules.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { RepoContext } from "../repoContext.js";
@@ -1963,8 +1963,29 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       await runLoop(s.deps, s.ctx);
       return seen.pop()!;
     };
-    const push = (rules: ToolRuleContext, branch: string) =>
-      judgeToolCall("bash", { command: `git push origin ${branch}` }, rules).verdict;
+    const push = async (rules: ToolRuleContext, branch: string) => {
+      rules.inspectPush = async (remote, explicit) => ({
+        remote,
+        remoteUrl: "https://github.com/o/r.git",
+        refspecs: explicit ?? [{ source: "HEAD" }],
+      });
+      return (await judgeToolCallWithTree("bash", { command: `git push origin HEAD:${branch}` }, rules)).verdict;
+    };
+    const passFormatting = async (rules: ToolRuleContext, base: string, id: string) => {
+      expect(
+        await judgeToolCallWithTree(
+          "bash",
+          {
+            command:
+              `set -o pipefail && git diff --name-only --diff-filter=ACMR -z origin/${base}...HEAD -- | ` +
+              "xargs -0 -r npx prettier --check --ignore-unknown --",
+          },
+          rules,
+          id,
+        ),
+      ).toEqual({ verdict: "allowed" });
+      await recordToolResult(rules, id, true);
+    };
 
     // A fix round: the thread came from a pull request and the resident is bound at its head branch.
     const fixRound = await rulesOf({
@@ -1974,12 +1995,20 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(fixRound).toEqual({
       identity: "write",
       checkout: "/srv/wt/the-pr",
+      repository: "o/r",
       branch: "fix/the-pr-head",
       protectedBranches: ["main"],
+      pushGuard: { pendingFormatting: new Map(), receiptRevision: 0 },
+      inspectTree: expect.any(Function),
+      inspectRefTree: expect.any(Function),
+      inspectPush: expect.any(Function),
       loopEndsIn: expect.any(Function),
     });
-    expect(push(fixRound, "fix/the-pr-head")).toBe("allowed");
-    expect(push(fixRound, "main")).toBe("refused");
+    fixRound.inspectTree = async () => "fix-tree:clean";
+    expect(await push(fixRound, "fix/the-pr-head")).toBe("refused");
+    expect(await push(fixRound, "main")).toBe("refused");
+    await passFormatting(fixRound, "main", "fix-format");
+    expect(await push(fixRound, "fix/the-pr-head")).toBe("allowed");
     // A coordinator's unit child: dispatched at its unit branch, the tag naming the base.
     const child = await rulesOf({
       repoCtx: { repo: "o/r", ref: "unit/u26" },
@@ -1988,12 +2017,20 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(child).toEqual({
       identity: "write",
       checkout: "/workspace",
+      repository: "o/r",
       branch: "unit/u26",
       protectedBranches: ["feat/trunk"],
+      pushGuard: { pendingFormatting: new Map(), receiptRevision: 0 },
+      inspectTree: expect.any(Function),
+      inspectRefTree: expect.any(Function),
+      inspectPush: expect.any(Function),
       loopEndsIn: expect.any(Function),
     });
-    expect(push(child, "unit/u26")).toBe("allowed");
-    expect(push(child, "feat/trunk")).toBe("refused");
+    child.inspectTree = async () => "child-tree:clean";
+    expect(await push(child, "unit/u26")).toBe("refused");
+    expect(await push(child, "feat/trunk")).toBe("refused");
+    await passFormatting(child, "feat/trunk", "child-format");
+    expect(await push(child, "unit/u26")).toBe("allowed");
     // A unit child resumed from a row written before the tag carried a base
     // (run-history item 48a's second guard): the base is read from the
     // coordinator store BEFORE the session opens, so the push rules see it —
@@ -2019,22 +2056,38 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(recovered).toEqual({
       identity: "write",
       checkout: "/workspace",
+      repository: "o/r",
       branch: "unit/u27",
       protectedBranches: ["feat/trunk"],
+      pushGuard: { pendingFormatting: new Map(), receiptRevision: 0 },
+      inspectTree: expect.any(Function),
+      inspectRefTree: expect.any(Function),
+      inspectPush: expect.any(Function),
       loopEndsIn: expect.any(Function),
     });
-    expect(push(recovered, "unit/u27")).toBe("allowed");
-    expect(push(recovered, "feat/trunk")).toBe("refused");
+    recovered.inspectTree = async () => "recovered-tree:clean";
+    expect(await push(recovered, "unit/u27")).toBe("refused");
+    expect(await push(recovered, "feat/trunk")).toBe("refused");
+    await passFormatting(recovered, "feat/trunk", "recovered-format");
+    expect(await push(recovered, "unit/u27")).toBe("allowed");
     // A plain thread bound at the repository's base: the run pushes a branch of its own making.
     const plain = await rulesOf({ repoCtx: { repo: "o/r", ref: "main" }, binding: { ref: "main", sha: "def" } });
     expect(plain).toEqual({
       identity: "write",
       checkout: "/workspace",
+      repository: "o/r",
       protectedBranches: ["main"],
+      pushGuard: { pendingFormatting: new Map(), receiptRevision: 0 },
+      inspectTree: expect.any(Function),
+      inspectRefTree: expect.any(Function),
+      inspectPush: expect.any(Function),
       loopEndsIn: expect.any(Function),
     });
-    expect(push(plain, "feat/anything")).toBe("allowed");
-    expect(push(plain, "main")).toBe("refused");
+    plain.inspectTree = async () => "plain-tree:clean";
+    expect(await push(plain, "feat/anything")).toBe("refused");
+    expect(await push(plain, "main")).toBe("refused");
+    await passFormatting(plain, "main", "plain-format");
+    expect(await push(plain, "feat/anything")).toBe("allowed");
   });
 
   it("a preset in a process without the harness roster, a public URL or a bearer fails the run naming what is missing", async () => {

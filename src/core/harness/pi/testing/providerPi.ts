@@ -29,7 +29,7 @@ import { isEffort, type Effort } from "../../../../effort.js";
 import { chatMessageOf } from "../mirror.js";
 import { PI_BUILTIN_TOOLS, piRunPathsAt } from "../process.js";
 import {
-  authorizeToolCall,
+  authorizeToolCallWithTree,
   relayToolCall,
   relayedToolDefinitions,
   type HarnessRegistry,
@@ -503,7 +503,7 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
     // A broken harness runs its own tool without the gate's verdict: the bridge
     // must catch the call that ended unvetted and fail the run closed.
     if (opts.bypassGate && s.builtins.includes(ask.tool)) return runBuiltin(entry.toolContext.executor, ask, signal);
-    const verdict = authorizeToolCall(entry, ask);
+    const verdict = await authorizeToolCallWithTree(entry, ask);
     if (!verdict.allow) return { content: text(verdict.reason), isError: true };
     // The test holds this call open: the gate decided, the tool started, and
     // its result never comes back — as pi and its tool die with a container
