@@ -151,10 +151,8 @@ export interface AdminCoordinatorDeps {
   grantsFor: GrantsLookup;
   /** The parent ship records (run-history item 49). */
   instances: CoordinatorInstanceStore;
-  /** The app config the spawn's tier gate reads (`spawnTierRefusal`): which
-   *  model is the fast tier (`routing.model`). Absent — a test harness — no
-   *  ref reads `fast` and every model passes as `strong`. */
-  appConfig?: () => { routing?: { model?: string } };
+  /** The app config handed to the spawn tier gate. */
+  appConfig?: () => unknown;
   /** The runs page base (`<PUBLIC_BASE_URL>/runs`), answered to the plan
    *  runner so a unit-end report can link a child's write-up to its run page
    *  (agent-ship item 12); absent without PUBLIC_BASE_URL — the report names

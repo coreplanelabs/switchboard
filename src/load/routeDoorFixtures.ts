@@ -37,8 +37,8 @@ export const DOOR_MERGED_UNITS: readonly DoorUnit[] = ["E2", "E3", "W1", "MW1", 
  *  `bind` and `refusal` are judged over the operator's decision as the replay
  *  already asks it (`operate(text)`); the other kinds — a typed line that
  *  runs, a write offered as one click, a reply folded into the thread's
- *  owner, a parked question's answer rebinding, a no-tool-call turn floored
- *  to the route — need the seam the fixture's unit builds, so that unit
+ *  owner or a parked question's answer rebinding — need the seam the
+ *  fixture's unit builds, so that unit
  *  extends the replay's judge when it flips its fixtures to scored. */
 export type DoorExpectation =
   /** A binds decision whose first bind names `preset` and carries the
@@ -48,7 +48,15 @@ export type DoorExpectation =
    *  through the catalogue (the plain-words model unit) — and `noModel`
    *  holds a bind to carrying none: a request naming no model binds with no
    *  model, never a silent default. */
-  | { kind: "bind"; preset: string; carries?: string; forbids?: string; model?: string; noModel?: true }
+  | {
+      kind: "bind";
+      preset: string;
+      carries?: string;
+      forbids?: string;
+      reason?: string;
+      model?: string;
+      noModel?: true;
+    }
   /** A refusal from the policy table whose text carries `naming` — the row
    *  it stands on or the remedy — whole, never cut at a quote or bracket. */
   | { kind: "refusal"; naming: string }
@@ -63,9 +71,6 @@ export type DoorExpectation =
   /** The parked question's answer rebinds the original request joined with
    *  the question; `carries` must appear in the rebound request. */
   | { kind: "rebind"; carries: string }
-  /** A turn that ends with no tool call floors to the readers' route on the
-   *  person's own request — never a line to retype. */
-  | { kind: "route" }
   /** One question (the write-intent cell, issue 2088; the plain-words model
    *  unit's ambiguous word): the decision is a question — when `proposes` is
    *  set its proposal carries it, a line that would do the asked work, and
@@ -236,16 +241,15 @@ export const ROUTE_DOOR_FIXTURES: readonly RouteDoorFixture[] = [
     text: "set the coding model on this channel to acme/fast-1",
     expected: { kind: "click", line: "config set channel --models.coding acme/fast-1" },
   },
-  // D14 (issue 1993): the verifier's failure mode was a hand-back rather than
-  // a floor. The verifier retired with the loop unit (`renderVerifierHandBack`
-  // deleted); a turn that ends with no tool call floors to the route on the
-  // person's own request.
+  // D14 (issue 1993): a no-call turn once fell into the readers' router. The
+  // door now re-asks once; a second no-call binds general itself and records
+  // the typed reason on the run's operator field.
   {
     id: "d14",
     defect: "D14",
     unit: "E2",
     text: "can you sort out the thing from before? same as last time.",
-    expected: { kind: "route" },
+    expected: { kind: "bind", preset: "general", carries: "same as last time", reason: "no_decision" },
   },
   // N1 (issue 2043): a plain-words docs ask flipping a record's status was
   // refused as "privileged administrative updates to control plane records" —

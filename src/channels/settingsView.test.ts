@@ -57,7 +57,7 @@ const DESCRIPTION: ConfigDescription = {
 };
 
 const INSTALLATION: InstallationView = {
-  settings: [{ key: "routing.auto", value: "true", isDefault: true, how: "config", note: "the router" }],
+  settings: [{ key: "references.enabled", value: "false", isDefault: true, how: "config", note: "linked threads" }],
   capabilities: [{ key: "mcp", on: true, how: "an mcp block" }],
 };
 

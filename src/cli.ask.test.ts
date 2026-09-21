@@ -127,10 +127,9 @@ describe("the CLI process running `ask` against a provider", () => {
     // At the default (quiet) verbosity the card label is the bare agent name; the model ref joins at verbose.
     expect(r.stderr).toMatch(/✅ \*general\* ·/);
     expect(r.stderr).toMatch(/^\[run\] cli:\d+ user=cli:local agent=general model=fake\/m$/m);
-    // The CLI is a channel like any other: with no `routing` block the router
-    // ran here too, on `defaults.models.general` — and the fake's prose
-    // answer, no route, left the request on `defaults.agent` (routing-and-config item 21).
-    expect(r.stderr).toMatch(/^\[route\] cli:\d+ not routed \(not a single JSON object: four\) — running general$/m);
+    // The CLI is a channel like any other: the one door's typed bind runs
+    // `general` directly, with no retired route receipt (routing-and-config item 21).
+    expect(r.stderr).not.toMatch(/^\[route\] /m);
   }, 60_000);
 
   it("a run the provider refuses (a 401 on the key) exits 1 — the code every failed command exits with — with the refusal on the terminal", async () => {

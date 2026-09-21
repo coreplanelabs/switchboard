@@ -5,7 +5,7 @@ import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
 import { intakeModelRef, openConfigStore } from "./config.js";
 import { parseModelRef } from "./core/provider.js";
-import { providerRouteModel } from "./core/dispatch/route.js";
+import { providerStructuredModel } from "./core/dispatch/route.js";
 import { providerModelsReader } from "./core/dispatch/providerModels.js";
 import { configuredModelRefs } from "./core/commands/providers.js";
 import type { IntakeReceipt } from "./core/runLedger/types.js";
@@ -822,7 +822,7 @@ export async function runBot(): Promise<void> {
       slackIntake = wireIntakeGate({
         intakeModeFor: (threadKey, userId, channelId) => config.intakeModeFor(threadKey, userId, channelId),
         deps: {
-          model: providerRouteModel(completions.get(ref.provider), ref.model),
+          model: providerStructuredModel(completions.get(ref.provider), ref.model),
           ledger: intakeLedger,
           now: systemClock,
         },
@@ -833,7 +833,7 @@ export async function runBot(): Promise<void> {
       });
     } else {
       console.warn(
-        "[intake] no model ref resolves (intake.model, routing.model, defaults.models.general) — thread replies run as always",
+        "[intake] no model ref resolves (intake.model, defaults.models.general) — thread replies run as always",
       );
     }
   } catch (err) {
@@ -1087,7 +1087,7 @@ export async function runBot(): Promise<void> {
       tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
       grantsFor: (id) => config.grantsFor(id),
       instances: coordinatorInstances,
-      // The spawn's tier gate reads which model is the fast tier (routing.model).
+      // The spawn's tier gate reads the current app config.
       appConfig: () => config.config,
       // The merge door's conflict refusal (record 0071 criterion 5): where the
       // watch is on for the repository, the refusal names the watching unit's

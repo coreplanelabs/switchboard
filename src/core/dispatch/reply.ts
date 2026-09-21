@@ -35,7 +35,7 @@ import type { Span } from "../trace/types.js";
 import type { HistoryItem, IncomingMessage, StatusActivity, StatusHandle } from "../types.js";
 import { refusalLine, type Refusal } from "../refusal.js";
 import type { ProvisionDeps } from "./provision.js";
-import type { RouteDeps } from "./route.js";
+import type { ProviderTable } from "../harness/piAi.js";
 
 /** The external live-view capability URL for a run, or undefined when
  *  PUBLIC_BASE_URL is unset/blank — the feature degrades gracefully (no link,
@@ -608,7 +608,8 @@ export async function replyCommandOutput(io: ChannelIO, parsed: ParsedChatComman
 /** What the reply stage's post-run step reads off the dispatcher's
  *  dependencies: the memory store and providers for the reflection pass.
  *  `CoreDeps` extends this; a caller's shape is unchanged. */
-export interface ReplyDeps extends Pick<ProvisionDeps, "memory">, Pick<RouteDeps, "completions"> {
+export interface ReplyDeps extends Pick<ProvisionDeps, "memory"> {
+  completions: ProviderTable;
   config: ConfigStore;
 }
 

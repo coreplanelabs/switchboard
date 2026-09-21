@@ -20,7 +20,6 @@ import {
   planeColdFallbackOf,
   planeReaskMinutesOf,
   referencesOn,
-  routingOn,
   WorkerOverridesBacking,
   type AppConfig,
   type ConfigStoreOptions,
@@ -885,24 +884,9 @@ describe("selfImprovement", () => {
 // Feature: docs/reference/specs/routing-and-config.md item 21 — the `routing`
 // block: the router's switch and its model, validated at load so a value that
 // is not a boolean can never read as on or as off.
-describe("routing block (routing.auto, routing.model)", () => {
-  it("parses auto and model; an absent block leaves the field unset", () => {
-    const s = store(YAML_FIXTURE + "routing:\n  auto: true\n  model: anthropic/fast-model\n");
-    expect(s.config.routing).toEqual({ auto: true, model: "anthropic/fast-model" });
-    expect(store(YAML_FIXTURE + "routing:\n  auto: false\n").config.routing).toEqual({ auto: false });
-    expect(store().config.routing).toBeUndefined();
-  });
-
-  it("the router is on by default: no block, or a block naming only the model, routes; `auto: false` is the one way off", () => {
-    expect(routingOn(store().config)).toBe(true);
-    expect(routingOn(store(YAML_FIXTURE + "routing:\n  model: anthropic/fast-model\n").config)).toBe(true);
-    expect(routingOn(store(YAML_FIXTURE + "routing:\n  auto: true\n").config)).toBe(true);
-    expect(routingOn(store(YAML_FIXTURE + "routing:\n  auto: false\n").config)).toBe(false);
-  });
-
+describe("routing block (the one door's operator mode)", () => {
   it("the operator is on by default (routing-and-config item 29): a silent config resolves `on`; `off` is the rollback lever, `shadow` stays shadow, anything else is refused by name", () => {
     expect(operatorModeOf(store().config)).toBe("on");
-    expect(operatorModeOf(store(YAML_FIXTURE + "routing:\n  model: anthropic/fast-model\n").config)).toBe("on");
     expect(operatorModeOf(store(YAML_FIXTURE + "routing:\n  operator: off\n").config)).toBe("off");
     expect(operatorModeOf(store(YAML_FIXTURE + "routing:\n  operator: shadow\n").config)).toBe("shadow");
     expect(operatorModeOf(store(YAML_FIXTURE + "routing:\n  operator: on\n").config)).toBe("on");
@@ -911,26 +895,10 @@ describe("routing block (routing.auto, routing.model)", () => {
     );
   });
 
-  it("refuses a non-boolean auto by name, whatever it spells", () => {
-    for (const value of ['"yes"', "1", '"true"', "on"])
-      expect(() => store(YAML_FIXTURE + `routing:\n  auto: ${value}\n`)).toThrow(/routing\.auto must be true or false/);
-  });
-
-  it("refuses a model that is not a <provider>/<model> ref or names a provider the config does not define", () => {
-    expect(() => store(YAML_FIXTURE + "routing:\n  model: fast-model\n")).toThrow(
-      /routing\.model must be a <provider>\/<model> ref/,
-    );
-    expect(() => store(YAML_FIXTURE + "routing:\n  model: openai/gpt-5\n")).toThrow(
-      /routing\.model names provider "openai", which providers does not define/,
-    );
-  });
-
-  it("routing.answer is `tool` or `text` — the escape hatch for a provider without forced tool calls; anything else is refused by name", () => {
-    expect(store(YAML_FIXTURE + "routing:\n  answer: text\n").config.routing).toEqual({ answer: "text" });
-    expect(store(YAML_FIXTURE + "routing:\n  answer: tool\n").config.routing).toEqual({ answer: "tool" });
-    for (const value of ['"json"', "true", '"Text"'])
-      expect(() => store(YAML_FIXTURE + `routing:\n  answer: ${value}\n`)).toThrow(
-        /routing\.answer must be tool or text/,
+  it("refuses the retired readers' router keys with the migration sentence", () => {
+    for (const key of ["model: anthropic/fast-model", "effort: low", "auto: false", "answer: text"])
+      expect(() => store(YAML_FIXTURE + `routing:\n  ${key}\n`)).toThrow(
+        /the readers' router is retired — the door now re-asks a no-call turn once and then binds general; remove routing\.(model|effort|auto|answer) \(docs\/reference\/migrations\.md\)/,
       );
   });
 
@@ -991,17 +959,11 @@ describe("intake block and Scope.intake (routing-and-config item 27)", () => {
     expect(defaultIntakeMode(store().config)).toBe("classify");
   });
 
-  it("the intake model resolves intake.model, else routing.model, else defaults.models.general", () => {
+  it("the intake model resolves intake.model, else defaults.models.general — never a retired router hand-off", () => {
     expect(intakeModelRef(store().config)).toBe("anthropic/general-model");
-    expect(intakeModelRef(store(YAML_FIXTURE + "routing:\n  model: anthropic/fast-model\n").config)).toBe(
-      "anthropic/fast-model",
+    expect(intakeModelRef(store(YAML_FIXTURE + "intake:\n  model: anthropic/gate-model\n").config)).toBe(
+      "anthropic/gate-model",
     );
-    expect(
-      intakeModelRef(
-        store(YAML_FIXTURE + "routing:\n  model: anthropic/fast-model\nintake:\n  model: anthropic/gate-model\n")
-          .config,
-      ),
-    ).toBe("anthropic/gate-model");
   });
 
   it("refuses an unknown mode by name — a typo can never read as a working setting", () => {

@@ -87,11 +87,10 @@ export interface SpawnRequest {
   effort?: Effort;
 }
 
-/** Which tier a model ref is (the one-door plan's tiers rule): `fast` when it
- *  is the router's own model (`routing.model`), else `strong`. A deployment
- *  without `routing.model` has no fast tier, and every ref reads `strong`. */
-export function tierOfModel(modelRef: string, cfg: { routing?: { model?: string } }): ModelTier {
-  return cfg.routing?.model !== undefined && modelRef === cfg.routing.model ? "fast" : "strong";
+/** Which tier a model ref is at spawn. The fast classifier model retired
+ *  with the readers' router, so every run model is on the strong tier. */
+export function tierOfModel(_modelRef: string, _cfg: unknown): ModelTier {
+  return "strong";
 }
 
 /** The tier gate every spawn passes (`spawn_tier`): the message when the
@@ -100,10 +99,7 @@ export function tierOfModel(modelRef: string, cfg: { routing?: { model?: string 
  *  unknown (the pipeline's agent gate names that refusal) or the tier is
  *  allowed. Shared with the plan runner's spawn route, whose children do not
  *  go through `spawnChild`. */
-export function spawnTierRefusal(
-  request: Pick<SpawnRequest, "preset" | "model">,
-  cfg: { routing?: { model?: string } },
-): string | undefined {
+export function spawnTierRefusal(request: Pick<SpawnRequest, "preset" | "model">, cfg: unknown): string | undefined {
   if (request.model === undefined) return undefined;
   const def = AGENTS[request.preset];
   if (!def) return undefined;

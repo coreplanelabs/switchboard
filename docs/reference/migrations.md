@@ -4,6 +4,10 @@ What an operator changes when a release breaks something: one section per such r
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
+## 1.260.0
+
+- The readers' router is retired. A door turn that ends without a tool call is re-asked once; a second no-call turn binds `general` itself with `no_decision` on the run's operator record, so there is no second classifier model. Remove `routing.model`, `routing.effort`, `routing.auto` and `routing.answer` from `config.yaml`; a load that still carries one fails with the migration sentence. The thread-reply gate's `model` now falls straight back to `defaults.models.general`.
+
 ## 1.250.0
 
 - The bot says less by default ([routing-and-config](specs/routing-and-config.md) item 28). What used to be every message is now the `verbose` level of a three-step ladder — `quiet` (the new default: answers, verdicts, refusals, questions, results, the card's progress), `verbose` (plus every acknowledgement: a follow-up folded into a live run, `📌 Noted for unit …`, `🧭 Handed to the plan runner.`, the routed command's `routed:` receipt, the workspace and budget notes on the card) and `debug` (plus the router's reason, `route reason: <reason>`, in place of the card's `routed: <reason>` line, and `untracked by the ledger`). Removed for everyone: the routed card's `wrong preset? reply agent:<preset> …` footer — a reply with a directive still runs the request on that preset. To hear what you heard before: `config set me --verbosity verbose` (or `config set channel --verbosity verbose` for a channel, `defaults.verbosity: verbose` in `config.yaml` for the installation); `verbosity:debug` on one message for the router's reason. The reply that hands a ship ask to the pipeline is bullets now, one per fact; the pipeline's id moved under it at `debug`.

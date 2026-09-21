@@ -1,6 +1,6 @@
 // A registry command run from the dispatcher, as a run (docs/decisions/0008-one-command-definition-every-surface.md;
 // docs/reference/specs/command-registry.md item 18): the machinery the two fast
-// paths and the request router's command branch share. A chat command — typed
+// paths and the operator's command branch share. A chat command — typed
 // as `<group> <verb> …` (stage A), translated from a conservative op form, or
 // bound from prose by the router (record 0036, unit 2) — is invoked through the
 // registry as the message's user; the commands that do work are recorded as

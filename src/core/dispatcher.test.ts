@@ -30,21 +30,8 @@ import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusUpdate 
 import { activeRunCount, dispatch, dispatchClick, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
 import { CONFIRMATION_TTL_MS, MINUTE_MS, QUESTION_TTL_MS } from "./budgets.js";
 import type { AuditEntry } from "./commandRegistry.js";
-import {
-  InMemoryConfirmationStore,
-  renderOffer,
-  STORE_UNREACHABLE_LINE,
-  UNSHOWABLE_LINE,
-  type ConfirmationStore,
-} from "./confirmations.js";
-import {
-  OFFER_CANCELLED_LINE,
-  OFFER_EXPIRED_LINE,
-  OFFER_FOREIGN_LINE,
-  OFFER_UNREADABLE_LINE,
-  OFFER_USED_LINE,
-  QUESTION_EXPIRED_LINE,
-} from "./dispatch/confirm.js";
+import { InMemoryConfirmationStore, STORE_UNREACHABLE_LINE } from "./confirmations.js";
+import { OFFER_EXPIRED_LINE, QUESTION_EXPIRED_LINE } from "./dispatch/confirm.js";
 import { setShutdownNotice } from "./dispatch/run.js";
 import { HAND_BACK_PREFIX } from "./dispatch/handBack.js";
 import {
@@ -106,13 +93,13 @@ import { FakeHarnessContainer } from "./harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "./harness/pi/testing/providerPi.js";
 import { SOFT_STOP_INSTRUCTION } from "./harness/windDown.js";
 import { ThreadsElsewhere, type ThreadElsewhere } from "./runLedger/threadsElsewhere.js";
-import type { ClaimRequest, LiveRunRow, StepRecord } from "./runLedger/types.js";
+import type { ClaimRequest, StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
-import { cliWords, mcpToolName } from "./commandSurface.js";
+import { mcpToolName } from "./commandSurface.js";
 import { parseChatCommand } from "./commandChat.js";
 import { presetBindOf } from "./dispatch/operator.js";
-import { ROUTE_RECEIPT_CAP, routablePresets, type RouteModel, type RoutePrompt } from "./dispatch/route.js";
+import { routablePresets, type RouteModel, type RoutePrompt } from "./dispatch/route.js";
 import { capabilitiesFrom } from "./capabilities.js";
 import { NO_FLEET } from "./residentFleet.js";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
@@ -301,19 +288,11 @@ grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
 restrict:
   agents: [coding]
-# The router and the operator are each on by default; these tests prove the
-# reader paths under them, so both are turned off here — the router's and the
-# operator's own suites turn each back on (or leave the config silent).
-routing: { auto: false, operator: off }
+# The operator is on by default; most suites exercise stages after the door,
+# so they turn it off and its own suite turns it back on.
+routing: { operator: off }
 workspaceDir: __WORKDIR__
 `;
-
-/** The same fixture with the router on: the door's suites script `deps.routeModel`
- *  and prove what a plain message reaches through it. */
-const ROUTING_ON_YAML = YAML_FIXTURE.replace(
-  "routing: { auto: false, operator: off }\n",
-  "routing: { auto: true, operator: off }\n",
-);
 
 /** The thread's newest run, finished with a session log: what a follow-up
  *  continues (routing-and-config item 3, by transcript — never an `agent:`
@@ -1173,7 +1152,7 @@ grants:
 restrict:
   agents: [coding]
   repos: ["acme/api"]
-routing: { auto: false, operator: off }
+routing: { operator: off }
 workspaceDir: __WORKDIR__
 `;
 
@@ -1258,7 +1237,7 @@ describe("resident repo dispatch", () => {
     expect(replies[0]).toContain("not onboarded");
     expect(replies[0]).toContain("repo onboard acme/try-catch");
     expect(replies[0]).not.toContain("Ask "); // an admin can run `repo onboard` themselves
-    expect(replies[0]).toMatch(/github\.com/); // the URL form still binds a real repo
+    expect(replies[0]).toContain("name the repository by URL"); // the URL form still binds a real repo
     expect(provider.requests).toHaveLength(0); // no model turn
     expect(makeExecutor).not.toHaveBeenCalled(); // no workspace of any kind
     expect(statuses[statuses.length - 1].title).toContain("not started");
@@ -1508,7 +1487,7 @@ describe("resident repo dispatch", () => {
     expect(replies[0]).toContain("couldn't verify");
     expect(replies[0]).toContain("acme/web");
     expect(replies[0]).not.toContain("not onboarded"); // silence is not a refusal
-    expect(replies[0]).toMatch(/github\.com/); // the URL form still binds a real repo
+    expect(replies[0]).toContain("name the repository by URL"); // the URL form still binds a real repo
     expect(provider.requests).toHaveLength(0);
     expect(makeExecutor).not.toHaveBeenCalled();
     expect(statuses[statuses.length - 1].title).toContain("could not be verified");
@@ -1526,7 +1505,7 @@ describe("resident repo dispatch", () => {
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("not onboarded");
     expect(replies[0]).toContain("Ask slack:UADMIN to onboard it (`repo onboard acme/try-catch`)");
-    expect(replies[0]).toMatch(/github\.com/); // the self-serve path stays
+    expect(replies[0]).toContain("name the repository by URL"); // the self-serve path stays
     expect(provider.requests).toHaveLength(0);
   });
 
@@ -1740,395 +1719,6 @@ describe("repo management commands", () => {
 // — never a fall-through to the agent, never a second
 // model call. Only the model call differs between the doors; the gates (the
 // `agentRun` registry gate, `canUseRepo` inside) apply on both.
-describe("deterministic ops: the typed form is stage A, the natural forms reach repo.test through the door", () => {
-  afterEach(() => {
-    vi.mocked(makeExecutor).mockClear();
-  });
-
-  const RECEIPT = "routed: repo test acme/api main";
-
-  function fakeOps(result: import("./operations.js").OperationResult) {
-    return {
-      calls: [] as Array<{ op: string; req: { repo: string; ref?: string } }>,
-      async run(op: import("./operations.js").OpName, req: { repo: string; ref?: string }) {
-        this.calls.push({ op, req });
-        return result;
-      },
-    };
-  }
-
-  const OK_RESULT = {
-    kind: "result",
-    ok: true,
-    summary: "test passed on repo:acme/api @ main (abc12345) in 3s",
-    output: "1 passing",
-  } as const;
-
-  /** A scripted router that binds `repo_test` to the slug and ref as a person said them. */
-  const bindsRepoTest = (slug: string, ref: string) =>
-    vi.fn<RouteModel>(async () => ({ tool: "repo_test", input: { slug, ref } }));
-
-  /** The dispatcher with the router on, an ops backend scripted with one
-   *  result, and a run registry whose ids count up so a second run would show. */
-  function routed(result: import("./operations.js").OperationResult) {
-    const provider = capturingProvider();
-    const deps = makeDeps(ROUTING_ON_YAML, provider);
-    let n = 0;
-    const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
-    deps.runRegistry = registry;
-    deps.admission = new ThreadAdmission();
-    const ops = fakeOps(result);
-    deps.operations = ops;
-    return { deps, provider, registry, ops };
-  }
-
-  it('"run the tests on main in acme/api" reaches repo.test through the door: one model call, the receipt line first, then the op\'s result — the op an inline run carrying the decision, no card, no agent run', async () => {
-    const { deps, provider, registry, ops } = routed(OK_RESULT);
-    deps.routeModel = bindsRepoTest("acme/api", "main");
-    const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(deps.invoked).toEqual(["repo.test"]);
-    expect(ops.calls).toEqual([{ op: "test", req: { repo: "acme/api", ref: "main" } }]);
-    expect(replies).toHaveLength(1);
-    const lines = replies[0]!.split("\n");
-    expect(lines[0]).toBe(RECEIPT);
-    expect(lines[1]).toContain("✅");
-    expect(lines[1]).toContain("test passed");
-    expect(replies[0]).toContain("1 passing");
-    expect(statuses).toEqual([]);
-    expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
-    const snap = registry.snapshotById("r1");
-    expect(snap?.finished).toBe(true);
-    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
-      command: "repo.test",
-      receipt: "repo test acme/api main",
-    });
-    expect(registry.snapshotById("r2")).toBeNull();
-  });
-
-  it('"run the tests on main" as a reply in a thread whose earlier turns name acme/api: the router is shown the thread\'s repository and the bound repo_test runs against it', async () => {
-    const { deps, provider, ops } = routed(OK_RESULT);
-    // The scripted router binds the repository from the line the stage adds to
-    // its user turn — nothing in the request itself names one.
-    const router = vi.fn<RouteModel>(async (prompt) => {
-      const repo = /The thread's repository: (\S+)/.exec(prompt.user)?.[1];
-      return { tool: "repo_test", input: { slug: repo, ref: "main" } };
-    });
-    deps.routeModel = router;
-    const { io, replies } = fakeIO([
-      { role: "user", text: "agent:coding fix the login bug in acme/api" },
-      { role: "assistant", text: "done" },
-    ]);
-    await dispatch(deps, msg("run the tests on main", "slack:UADMIN"), io);
-    expect(router).toHaveBeenCalledTimes(1);
-    expect(router.mock.calls[0]![0].user).toContain("The thread's repository: acme/api");
-    expect(ops.calls).toEqual([{ op: "test", req: { repo: "acme/api", ref: "main" } }]);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]!.split("\n")[0]).toBe(RECEIPT);
-    expect(replies[0]).toContain("✅");
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it('a repository with no resident: the bound repo_test answers not_found, and the reply is the receipt, the command\'s own "not onboarded" line — one sealed failed command run, no sandbox, no second model call, no agent run', async () => {
-    const { deps, provider, registry, ops } = routed({ kind: "not-onboarded" });
-    deps.routeModel = bindsRepoTest("acme/api", "main");
-    const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(ops.calls).toHaveLength(1); // the backend was asked once and said there is no resident
-    expect(replies).toHaveLength(1);
-    const lines = replies[0]!.split("\n");
-    expect(lines[0]).toBe(RECEIPT);
-    expect(lines[1]).toBe(
-      "⚠️ `repo test`: `acme/api` is not onboarded as a resident, so `repo test` has nothing to run against — `repo onboard acme/api` first, or ask the coding agent directly.",
-    );
-    expect(statuses).toEqual([]);
-    expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
-    const snap = registry.snapshotById("r1");
-    expect(snap?.finished).toBe(true);
-    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({ command: "repo.test" });
-    expect(registry.snapshotById("r2")).toBeNull(); // no agent run followed the failed command
-  });
-
-  it("an op backend failure (unavailable) through the door has the same shape: the receipt, the ⚠️ line with the backend's message — never a fall-through to the agent", async () => {
-    const { deps, provider, ops } = routed({ kind: "error", message: "resident /op HTTP 500" });
-    deps.routeModel = bindsRepoTest("acme/api", "main");
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
-    expect(ops.calls).toHaveLength(1);
-    expect(replies).toHaveLength(1);
-    const lines = replies[0]!.split("\n");
-    expect(lines[0]).toBe(RECEIPT);
-    expect(lines[1]).toBe("⚠️ `repo test`: resident /op HTTP 500");
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("a failing suite through the door is a result, not an error: ❌ with the named summary under the receipt, no footer", async () => {
-    const { deps, provider } = routed({
-      kind: "result",
-      ok: false,
-      summary: "test failed (exit 1) on repo:acme/api @ main (abc12345)",
-      output: "1 failing",
-    });
-    deps.routeModel = bindsRepoTest("acme/api", "main");
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
-    const lines = replies[0]!.split("\n");
-    expect(lines[0]).toBe(RECEIPT);
-    expect(lines[1]).toContain("❌");
-    expect(lines[1]).toContain("test failed (exit 1)");
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("a mutating command-table entry is refused through the door with the named reason under the receipt", async () => {
-    const { deps, provider } = routed({
-      kind: "refused",
-      reason:
-        'op-refused: the "test" command-table entry is marked effects: mutating — the modelless op path executes readonly entries only',
-    });
-    deps.routeModel = bindsRepoTest("acme/api", "main");
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
-    const lines = replies[0]!.split("\n");
-    expect(lines[0]).toBe(RECEIPT);
-    expect(lines[1]).toMatch(/^⚠️ `repo test`: op-refused/);
-    expect(lines[1]).toContain("mutating");
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("a user without coding-agent access: the router binds repo_test, the registry's `agentRun` gate refuses with the shared restricted line under the receipt, and the op never executes", async () => {
-    const { deps, provider, ops } = routed(OK_RESULT);
-    deps.routeModel = bindsRepoTest("acme/api", "main");
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UX"), io);
-    expect(replies).toEqual([`${RECEIPT}\n🚫 \`repo test\` is restricted. Ask slack:UADMIN.`]);
-    expect(ops.calls).toHaveLength(0);
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("a hostile ref the router binds fails the schema at invoke: the receipt and the named refusal; no backend is reached", async () => {
-    const { deps, provider, ops } = routed(OK_RESULT);
-    deps.routeModel = bindsRepoTest("acme/api", "main;rm");
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("run the tests on main;rm in acme/api", "slack:UADMIN"), io);
-    expect(replies).toHaveLength(1);
-    const lines = replies[0]!.split("\n");
-    expect(lines[0]).toMatch(/^routed: repo test acme\/api /);
-    expect(lines[1]).toMatch(/^⚠️ `repo test`: ref/);
-    expect(ops.calls).toHaveLength(0);
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it('prose that names no op ("can you check the tests seem fine?") is routed to a preset like any plain message: no command binds, no op runs, the agent serves it', async () => {
-    const { deps, provider, ops } = routed(OK_RESULT);
-    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "general", reason: "a question about the tests" }));
-    const { io, replies } = fakeIO([{ role: "user", text: "we are looking at acme/api" }]);
-    await dispatch(deps, msg("can you check the tests seem fine?", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(deps.invoked).toEqual([]);
-    expect(ops.calls).toHaveLength(0);
-    expect(provider.requests).toHaveLength(1);
-    expect(replies).toContain("answer");
-  });
-
-  it("an agent: directive skips the door: the router is never asked, no command binds, no op runs, the named agent serves the request", async () => {
-    const { deps, provider, ops } = routed(OK_RESULT);
-    deps.routeModel = bindsRepoTest("acme/api", "main");
-    const { io } = fakeIO();
-    await dispatch(deps, msg("agent:coding run the tests on main in acme/api", "slack:UADMIN"), io);
-    expect(deps.routeModel).not.toHaveBeenCalled();
-    expect(deps.invoked).toEqual([]);
-    expect(ops.calls).toHaveLength(0);
-    expect(provider.requests).toHaveLength(1);
-  });
-
-  it("the typed `repo test acme/api main` still answers inline in stage A: no model call, the router never asked, no history fetch, no receipt line", async () => {
-    const { deps, provider, ops } = routed(OK_RESULT);
-    deps.routeModel = bindsRepoTest("acme/api", "main");
-    const { io, replies } = fakeIO();
-    const history = vi.fn(io.history);
-    io.history = history;
-    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
-    expect(deps.routeModel).not.toHaveBeenCalled();
-    expect(history).not.toHaveBeenCalled();
-    expect(ops.calls).toEqual([{ op: "test", req: { repo: "acme/api", ref: "main" } }]);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("✅");
-    expect(replies[0]).not.toMatch(/^routed:/);
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("a canUseRepo refusal on the typed form names the repo; the op never executes", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(REPO_PERMS_YAML, provider); // acme/api restricted to UADMIN; UDEV may run coding
-    const ops = fakeOps(OK_RESULT);
-    deps.operations = ops;
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("repo test acme/api main", "slack:UDEV"), io);
-    expect(replies[0]).toContain("🚫");
-    expect(replies[0]).toContain("acme/api");
-    expect(ops.calls).toHaveLength(0);
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("a typed `repo test` with a hostile ref is a NAMED refusal before any backend", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const ops = fakeOps(OK_RESULT);
-    deps.operations = ops;
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("repo test acme/api main;rm", "slack:UADMIN"), io);
-    expect(replies[0]).toMatch(/ref/i);
-    expect(ops.calls).toHaveLength(0);
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("a typed `repo test` on a non-onboarded repo gets a named reply (config-family commands never silently become a model turn)", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const ops = fakeOps({ kind: "not-onboarded" });
-    deps.operations = ops;
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
-    expect(replies[0]).toContain("not onboarded");
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("a typed `repo test` whose op returns kind:error gets a named ⚠️ reply (never silently a model turn)", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    deps.operations = fakeOps({ kind: "error", message: "resident /op request failed (timeout)" });
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
-    expect(replies[0]).toContain("⚠️");
-    expect(replies[0]).toContain("resident /op request failed (timeout)");
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("a THROWING op on the typed form is caught (.catch → kind:error) and reported as ⚠️, never an unhandled crash", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const ops = {
-      calls: [] as Array<{ op: string; req: { repo: string; ref?: string } }>,
-      async run(op: import("./operations.js").OpName, req: { repo: string; ref?: string }) {
-        this.calls.push({ op, req });
-        throw new Error("backend exploded");
-      },
-    };
-    deps.operations = ops;
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
-    expect(ops.calls).toHaveLength(1);
-    expect(replies[0]).toContain("⚠️");
-    expect(replies[0]).toContain("backend exploded");
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  // Feature: docs/reference/specs/routing-and-config.md item 21 (record 0054's Yes on a
-  // command refusal) — when the router binds `repo test` with a near-matching slug,
-  // the refusal carries a `Guess` so the channel shows Yes and No.
-  describe("a not-onboarded typo through the door renders Yes and No on an offering channel (routing-and-config item 21, record 0054)", () => {
-    const now = 1_000_000;
-
-    /** Router, ops backend, registry and deps wired for the near-match case:
-     *  `acme/switchboar` is the typo; `acme/switchboard` is onboarded. */
-    function wiredNearMatch() {
-      const provider = capturingProvider();
-      const deps = makeDeps(ROUTING_ON_YAML, provider);
-      let n = 0;
-      const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
-      deps.runRegistry = registry;
-      deps.admission = new ThreadAdmission();
-      deps.clock = () => now;
-      // The "not-onboarded" backend result; `onboardedSlugs` asks the admin client.
-      deps.operations = fakeOps({ kind: "not-onboarded" });
-      deps.residentAdmin = {
-        onboard: vi.fn(),
-        offboard: vi.fn(),
-        reconfigure: vi.fn(),
-        rebuild: vi.fn(),
-        residents: vi.fn(async () => ({
-          status: 200,
-          data: {
-            cap: 8,
-            count: 1,
-            residents: [{ resource: "repo:acme/switchboard", defaultRef: "main", live: { state: "warm", reason: "" } }],
-          },
-        })),
-        status: vi.fn(),
-      } as unknown as ResidentAdminClient;
-      deps.routeModel = bindsRepoTest("acme/switchboar", "main");
-      const store = new InMemoryConfirmationStore({ clock: () => now });
-      deps.confirmations = store;
-      return { deps, registry, provider, store };
-    }
-
-    it("with `offer`: the routed typo renders Yes and No — the receipt as one reply, then the offer with the question sentence, the corrected line and the evidence; one redispatch row whose proposal is `repo test acme/switchboard main`", async () => {
-      const { deps, store } = wiredNearMatch();
-      const f = fakeIO();
-      const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
-      f.io.offer = vi.fn(async (o) => void offers.push(o));
-      await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), f.io);
-      // First reply: the receipt (no error text in this reply).
-      expect(f.replies).toHaveLength(1);
-      expect(f.replies[0]).toContain("routed: repo test acme/switchboar main");
-      // Then the offer with Yes/No.
-      expect(offers).toHaveLength(1);
-      const offer = offers[0]!;
-      expect(offer.line).toBe("repo test acme/switchboard main");
-      expect(offer.question?.text).toContain("not onboarded");
-      expect(offer.question?.evidence).toContain("which is onboarded");
-      // The redispatch row: proposal text is the corrected line.
-      expect(store.rows.size).toBe(1);
-      const row = [...store.rows.values()][0]!;
-      expect(row.kind).toBe("redispatch");
-      if (row.kind === "redispatch") {
-        expect(row.message.text).toBe("repo test acme/switchboard main");
-        expect(row.line).toBe("repo test acme/switchboard main");
-        expect(row.code).toBe("command_not_found");
-      }
-    });
-
-    it("without `offer`: the text question goes out as a second reply — the receipt first, then `Did you mean:` with the corrected line — no row minted", async () => {
-      const { deps, store } = wiredNearMatch();
-      const { io, replies } = fakeIO();
-      await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), io);
-      // Two replies: the receipt, then the text question.
-      expect(replies).toHaveLength(2);
-      expect(replies[0]).toContain("routed: repo test acme/switchboar main");
-      expect(replies[1]).toContain("Did you mean:");
-      expect(replies[1]).toContain("`repo test acme/switchboard main`");
-      expect(replies[1]).toContain("which is onboarded");
-      expect(store.rows.size).toBe(0);
-    });
-
-    it("the error sentence stays byte-identical whether the channel offers or not", async () => {
-      const { deps } = wiredNearMatch();
-      const withOffer = fakeIO();
-      const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
-      withOffer.io.offer = vi.fn(async (o) => void offers.push(o));
-      await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), withOffer.io);
-      const { io: plainIO, replies: plainReplies } = fakeIO();
-      const { deps: deps2 } = wiredNearMatch();
-      await dispatch(deps2, msg("run the tests on acme/switchboar", "slack:UADMIN"), plainIO);
-      // The error sentence in the offer's question text equals the error sentence
-      // in the plain text reply's first line.
-      const offerText = offers[0]!.question?.text ?? "";
-      const plainText = plainReplies[1]!.split("\n")[0] ?? "";
-      expect(offerText).toBe(plainText);
-    });
-  });
-});
-
-// Coverage gap (testing P1): defaultOperations() — the REAL backend picker
-// behind the modelless fast-path — is otherwise never exercised (every test in
-// the fast-path describe injects deps.operations). Driven here through
-// dispatch() WITHOUT injecting deps.operations, so the real selection logic
-// runs: resident-backed when execution.resident is configured, local for local
-// execution, none for a per-thread remote backend.
 describe("defaultOperations backend selection (real, not injected)", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -4155,7 +3745,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(target.body).toContain(`](https://github.com/acme/api/blob/${HEAD}/src/login.ts#L10-L20)`);
     expect(target.body).toContain("**Why:**");
     // the reply carries the returned URL with the created wording
-    expect(replies.some((r) => r.includes("https://github.com/acme/api/pull/7") && /PR opened/.test(r))).toBe(true);
+    expect(replies.some((r) => /^🔀 PR opened: https:\/\/github\.com\/acme\/api\/pull\/7(?: |$)/m.test(r))).toBe(true);
   });
 
   it("on the repository that carries the title gate, the tool refuses a title CI's `title` check would refuse — the gate's sentence in the tool result — and the corrected resubmit opens the PR; the same title on another repository opens as before", async () => {
@@ -4390,10 +3980,10 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(updated[0]).toMatchObject({ repo: "acme/api", number: 41, title: "Fix the login redirect" });
     expect(updated[0].body).toContain(`https://github.com/acme/api/blob/${PR_HEAD}/src/login.ts#L10-L20`);
     expect(updated[0].body).not.toContain(HEAD);
-    // The link is matched as a regex with a digit guard, never as a URL substring check.
-    expect(
-      replies.some((r) => /PR updated/.test(r) && /https:\/\/github\.com\/acme\/api\/pull\/41(?!\d)/.test(r)),
-    ).toBe(true);
+    // The trailing separator guards the pull number, never accepting 410 as 41.
+    expect(replies.some((r) => /^🔀 PR updated: https:\/\/github\.com\/acme\/api\/pull\/41(?: —|$)/m.test(r))).toBe(
+      true,
+    );
     expect(replies.some((r) => /base branch/.test(r))).toBe(false);
   });
 
@@ -4529,7 +4119,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding address the review findings", "slack:UADMIN"), io);
     expect(spy.calls).toHaveLength(1);
-    const note = replies.find((r) => r.includes("https://github.com/acme/api/pull/7"));
+    const note = replies.find((r) => /^🔀 PR updated: https:\/\/github\.com\/acme\/api\/pull\/7(?: —|$)/m.test(r));
     expect(note).toBeDefined();
     expect(note).toContain("PR updated");
     expect(note).not.toContain("PR opened");
@@ -4848,7 +4438,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(spy.calls).toHaveLength(0);
     // The compare URL is offered only after GitHub said no open PR heads the branch.
     expect(deps.findOpenPrByHead).toHaveBeenCalledWith("acme/api", "feat/login-fix");
-    const note = replies.find((r) => r.includes("https://github.com/acme/api/compare/feat/login-fix"));
+    const note = replies.find((r) => r.endsWith("https://github.com/acme/api/compare/feat/login-fix"));
     expect(note).toBeDefined();
     expect(note).toContain("no PR description");
     expect(note).toContain("No PR was opened");
@@ -4871,7 +4461,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     await dispatch(deps, msg("agent:coding consistency check failing on acme/api#700", "slack:UADMIN"), io);
     expect(spy.calls).toHaveLength(0); // nothing to render — the body is not touched
     expect(deps.findOpenPrByHead).toHaveBeenCalledWith("acme/api", "dependabot/github_actions/actions-4c45254bbe");
-    const note = replies.find((r) => r.includes("https://github.com/acme/api/pull/700"));
+    const note = replies.find((r) =>
+      /^⚠️ PR updated by the push: https:\/\/github\.com\/acme\/api\/pull\/700(?: —|$)/m.test(r),
+    );
     expect(note).toBeDefined();
     expect(note).toContain("PR updated by the push");
     expect(note).toContain(HEAD.slice(0, 7));
@@ -4899,7 +4491,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(spy.calls).toHaveLength(0);
-    const note = replies.find((r) => r.includes("https://github.com/acme/api/compare/feat/login-fix"));
+    const note = replies.find((r) => r.endsWith("https://github.com/acme/api/compare/feat/login-fix"));
     expect(note).toBeDefined();
     expect(note).toContain("No PR was opened");
     expect(note).not.toContain("/pull/");
@@ -4948,7 +4540,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
       title: DESCRIPTION.title,
     });
     expect(spy.calls[0].body).toContain(`blob/${HEAD}/`);
-    const note = replies.find((r) => r.includes("https://github.com/acme/api/pull/700"));
+    const note = replies.find((r) => /^🔀 PR updated: https:\/\/github\.com\/acme\/api\/pull\/700(?: —|$)/m.test(r));
     expect(note).toContain("PR updated:");
     expect(note).toContain("body re-rendered");
     expect(note).not.toContain("not resubmitted");
@@ -4975,7 +4567,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(spy.calls).toHaveLength(0);
-    const note = replies.find((r) => r.includes("https://github.com/acme/api/pull/700"));
+    const note = replies.find((r) =>
+      /^⚠️ PR updated by the push: https:\/\/github\.com\/acme\/api\/pull\/700(?: —|$)/m.test(r),
+    );
     expect(note).toContain("⚠️ PR updated by the push");
     expect(note).toContain("even in the dedicated description turn this run was given");
     const events = registry.snapshot("r702", "t702")?.events ?? [];
@@ -5398,7 +4992,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(spy.calls).toHaveLength(1);
     expect(spy.calls[0].headBranch).toBe("feat/login-fix");
     expect(spy.calls[0].body).toContain(`/blob/${HEAD}/`); // rendered at the head observed IN the clone
-    expect(replies.some((r) => r.includes("https://github.com/acme/api/pull/7") && /PR opened/.test(r))).toBe(true);
+    expect(replies.some((r) => /^🔀 PR opened: https:\/\/github\.com\/acme\/api\/pull\/7(?: |$)/m.test(r))).toBe(true);
   });
 
   it("no git repository anywhere in the workspace → honest note, no PR call", async () => {
@@ -8740,227 +8334,6 @@ describe("run history write path", () => {
 // item 10 — the registry chat parse is the ONE text-only fast path: the whole
 // of stage A, before io.history() and before the router is asked. EVERY chat
 // command is registry-owned; the adapter is the only chat parser.
-describe("registry chat commands in the fast-path chain", () => {
-  function withCommands(deps: TestDeps) {
-    const reg = new RunRegistry({ genId: () => "live0001", genToken: () => "tok-secret" });
-    reg.create("coding · acme/api <!channel>", {
-      agent: "coding",
-      channelId: "slack:D0PRIV",
-      userId: "slack:UOWNER",
-      threadKey: "slack:D0PRIV:t",
-    });
-    deps.runRegistry = reg;
-    return wireCommands(deps);
-  }
-
-  it("`runs list` from an admin replies inline with the compact list — no model turn, no history fetch, no identifying fields", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const { invoked } = withCommands(deps);
-    const { io, replies } = fakeIO();
-    const history = vi.fn(io.history);
-    io.history = history;
-    await dispatch(deps, msg("runs list --status active", "slack:UADMIN"), io);
-    expect(invoked).toEqual(["runs.list"]);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toMatch(/^• `live0001` — coding · active · \d+s$/);
-    expect(replies[0]).not.toMatch(/slack:D|UOWNER|<!channel>|tok-secret/);
-    expect(provider.requests).toHaveLength(0);
-    expect(history).not.toHaveBeenCalled();
-  });
-
-  it("`runs list` from a non-admin gets the restricted refusal, never a model turn", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    withCommands(deps);
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("runs list --status active", "slack:UX"), io);
-    expect(replies).toEqual(["🚫 `runs list` is restricted. Ask slack:UADMIN."]);
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("`runs get <id>` is not a chat command (surfaces.chat false): it falls through to the agent", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const { invoked } = withCommands(deps);
-    const { io } = fakeIO();
-    await dispatch(deps, msg("runs get live0001", "slack:UADMIN"), io);
-    expect(invoked).toEqual([]);
-    expect(provider.requests).toHaveLength(1);
-  });
-
-  it("`friction report --min-runs 2` and `friction report --limit 5` (one grammar, kebab flags) both reach `friction.report` exactly once, for a non-admin", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    deps.frictionLedger = new InMemoryFrictionLedger();
-    const { invoked } = withCommands(deps);
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("friction report --min-runs 2", "slack:UX"), io);
-    await dispatch(deps, msg("friction report --limit 5", "slack:UX"), io);
-    expect(replies).toEqual([
-      "🔍 0 runs analyzed — no recurring friction pattern found (a pattern must recur across ≥2 distinct runs).",
-      "🔍 0 runs analyzed — no recurring friction pattern found (a pattern must recur across ≥2 distinct runs).",
-    ]);
-    expect(invoked).toEqual(["friction.report", "friction.report"]);
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("every repo verb is the registry's: `repo onboard x` is the schema's named refusal (no resident call), `repo onboard acme/api` and `repo list` invoke — the registry's adapter is the only chat parser", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const admin: ResidentAdminClient = {
-      onboard: vi.fn(async () => ({ status: 202, data: {} })),
-      offboard: vi.fn(async () => ({ status: 200, data: {} })),
-      reconfigure: vi.fn(async () => ({ status: 200, data: {} })),
-      rebuild: vi.fn(async () => ({ status: 200, data: {} })),
-      residents: vi.fn(async () => ({ status: 200, data: { cap: 8, count: 0, residents: [] } })),
-      status: vi.fn(async () => ({ status: 200, data: { state: "warm", reason: "", inFlight: 0 } })),
-    };
-    deps.residentAdmin = admin;
-    const { invoked } = withCommands(deps);
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("repo onboard x", "slack:UADMIN"), io);
-    expect(replies).toEqual(["⚠️ `repo onboard`: slug: expected a GitHub owner/name slug"]);
-    expect(invoked).toEqual(["repo.onboard"]);
-    expect(admin.onboard).not.toHaveBeenCalled();
-    await dispatch(deps, msg("repo onboard acme/api", "slack:UADMIN"), io);
-    expect(admin.onboard).toHaveBeenCalledTimes(1);
-    expect(replies[1]).toMatch(/^🏗️ Onboarding `acme\/api` on `main`/);
-    // Item 52: the accepted onboard settles (here: warm at the first poll) as a
-    // SECOND reply in the thread, off the request path.
-    await vi.waitFor(() => expect(replies[2]).toBe("✅ `acme/api` is warm — provisioned and attach-ready."));
-    expect(admin.status).toHaveBeenCalledWith("repo:acme/api");
-    await dispatch(deps, msg("repo list", "slack:UADMIN"), io);
-    expect(invoked).toEqual(["repo.onboard", "repo.onboard", "repo.list"]);
-    expect(admin.residents).toHaveBeenCalledTimes(1);
-    expect(replies[3]).toBe("No repos onboarded (0/8). Onboard one with `repo onboard <owner/name>`.");
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("item 52: a provisioning that fails after the acknowledgement is reported in the thread with the resident's reason; a dry-run rebuild posts no follow-up", async () => {
-    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
-    const admin: ResidentAdminClient = {
-      onboard: vi.fn(async () => ({ status: 202, data: {} })),
-      offboard: vi.fn(async () => ({ status: 200, data: {} })),
-      reconfigure: vi.fn(async () => ({ status: 200, data: {} })),
-      rebuild: vi.fn(async () => ({
-        status: 200,
-        data: { dryRun: true, from: { state: "warm" }, discards: {}, reprovision: {}, keeps: {} },
-      })),
-      residents: vi.fn(async () => ({ status: 200, data: { cap: 8, count: 0, residents: [] } })),
-      status: vi.fn(async () => ({
-        status: 200,
-        data: {
-          state: "down",
-          reason: "provision-failed at install: exit 254: npm error enoent Could not read package.json",
-          inFlight: 0,
-        },
-      })),
-    };
-    deps.residentAdmin = admin;
-    withCommands(deps);
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("repo onboard acme/infra", "slack:UADMIN"), io);
-    expect(replies).toHaveLength(1);
-    await vi.waitFor(() =>
-      expect(replies[1]).toBe(
-        "❌ `acme/infra` failed to provision: provision-failed at install: exit 254: npm error enoent Could not read package.json\n" +
-          'Fix the command table with `repo reconfigure acme/infra --install "…" --build "…" --test "…"`, then `repo rebuild acme/infra`.',
-      ),
-    );
-    await dispatch(deps, msg("repo rebuild acme/infra --dry-run", "slack:UADMIN"), io);
-    expect(replies[2]).toMatch(/^🧪 \*Dry run\*/);
-    await new Promise((r) => setTimeout(r, 20));
-    expect(replies).toHaveLength(3);
-    expect(admin.status).toHaveBeenCalledTimes(1);
-  });
-
-  it("a mutating repo verb is an inline run with a receipt; `repo list` and a usage reply are not", async () => {
-    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
-    deps.residentAdmin = {
-      onboard: vi.fn(async () => ({ status: 202, data: {} })),
-      offboard: vi.fn(async () => ({ status: 200, data: { registryRemoved: true } })),
-      reconfigure: vi.fn(async () => ({ status: 200, data: {} })),
-      rebuild: vi.fn(async () => ({ status: 200, data: {} })),
-      residents: vi.fn(async () => ({ status: 200, data: { cap: 8, count: 0, residents: [] } })),
-      status: vi.fn(async () => ({ status: 200, data: { state: "warm", reason: "", inFlight: 0 } })),
-    };
-    let n = 0;
-    deps.runRegistry = new RunRegistry({ genId: () => `repo-${++n}`, genToken: () => "tok" });
-    wireCommands(deps);
-    const receipts: RunReceipt[] = [];
-    const { io } = fakeIO();
-    io.runFinished = (r) => void receipts.push(r);
-    await dispatch(deps, msg("repo list", "slack:UADMIN"), io);
-    await dispatch(deps, msg("repo offboard --nope", "slack:UADMIN"), io);
-    expect(receipts).toEqual([]);
-    await dispatch(deps, msg("repo offboard acme/api", "slack:UADMIN"), io);
-    expect(receipts).toEqual([{ id: "repo-1", status: "completed" }]);
-    expect(
-      deps.runRegistry.listActive()[0]?.label ?? deps.runRegistry.snapshot("repo-1", "tok")?.events[0],
-    ).toBeTruthy();
-    await dispatch(deps, msg("repo offboard acme/api", "slack:UX"), io); // refused → a failed run, still a receipt
-    expect(receipts[1]).toEqual({ id: "repo-2", status: "failed" });
-  });
-
-  it("prose that mentions a command mid-sentence is not a command: it goes to the model", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    const { invoked } = withCommands(deps);
-    const { io } = fakeIO();
-    await dispatch(deps, msg("can you run runs list for me", "slack:UADMIN"), io);
-    expect(invoked).toEqual([]);
-    expect(provider.requests).toHaveLength(1);
-  });
-
-  it("the typed `repo test` form (stage A: no history fetch, no router) and the natural form (through the door: one router call, the thread read once) reach the SAME registry command (`repo.test`), once each; the ops backend runs once per ask", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(ROUTING_ON_YAML, provider);
-    const { invoked } = withCommands(deps);
-    deps.admission = new ThreadAdmission();
-    deps.routeModel = vi.fn<RouteModel>(async () => ({ tool: "repo_test", input: { slug: "acme/api", ref: "main" } }));
-    const ops = {
-      calls: [] as string[],
-      async run(op: string) {
-        this.calls.push(op);
-        return { kind: "result", ok: true, summary: "test passed", output: "" } as const;
-      },
-    };
-    deps.operations = ops as unknown as Operations;
-    const { io, replies } = fakeIO();
-    const history = vi.fn(io.history);
-    io.history = history;
-    await dispatch(deps, msg("repo test acme/api main", "slack:UADMIN"), io);
-    expect(ops.calls).toEqual(["test"]);
-    expect(invoked).toEqual(["repo.test"]);
-    expect(history).not.toHaveBeenCalled(); // the typed form is stage A: no history fetch
-    expect(deps.routeModel).not.toHaveBeenCalled(); // and no router
-    await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
-    expect(ops.calls).toEqual(["test", "test"]);
-    expect(invoked).toEqual(["repo.test", "repo.test"]);
-    expect(history).toHaveBeenCalledTimes(1); // prose needs the thread: the router reads it once
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    await dispatch(deps, msg("runs list --status all", "slack:UADMIN"), io);
-    expect(invoked).toEqual(["repo.test", "repo.test", "runs.list"]);
-    expect(replies).toHaveLength(3);
-    expect(replies[1]).toBe(`routed: repo test acme/api main\n${replies[0]}`); // the same text, under the receipt
-    expect(provider.requests).toHaveLength(0);
-  });
-
-  it("without a bound command set, every text is ordinary prose: `runs list`, `help`, `config show`, and the natural op form all go to the model", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    deps.commands = undefined;
-    const { io } = fakeIO();
-    for (const text of ["runs list --status all", "help", "config show", "run the tests on main in acme/api"])
-      await dispatch(deps, msg(text, "slack:UADMIN"), io);
-    expect(provider.requests).toHaveLength(4);
-  });
-});
-
-// Feature: docs/reference/specs/reading-diff.md item 4 — a PR review run publishes ONE
-// `review_artifact` reading diff into its own stream (before the answer, so it
-// lands in the run record); a coding run never does, and `off` disables it.
 describe("reading-diff artifact on review runs", () => {
   function reviewRun(
     env: string | undefined,
@@ -9216,7 +8589,7 @@ grants:
 restrict:
   agents: [coding]
   repos: ["acme/api"]
-routing: { auto: false, operator: off }
+routing: { operator: off }
 workspaceDir: __WORKDIR__
 `;
 
@@ -9579,66 +8952,9 @@ workspaceDir: __WORKDIR__
     expect(replies[replies.length - 1]).not.toContain("adopts");
   });
 
-  // The routed door (routing-and-config item 21; agent-ship item 16): ship is
-  // in the router's table, a routed ship runs the request as a generated plan
-  // whose merge is a person's, and the seeded form stays behind the directive.
-  const SHIP_ROUTED_YAML = SHIP_YAML.replace(
-    "routing: { auto: false, operator: off }",
-    "routing: { auto: true, operator: off }",
-  );
-  const shipRouter = () => vi.fn(async () => JSON.stringify({ preset: "ship", reason: "a change to land" }));
-
-  it("a routed ship on a task hands off merge: person — the card's route note (`route reason:` at debug) and the instance is the generated plan's", async () => {
-    const { deps, instances, created } = shipDeps(SHIP_ROUTED_YAML);
-    deps.routeModel = shipRouter();
-    const registry = new RunRegistry({ genId: () => "run-shiprouted", genToken: () => "tok" });
-    deps.runRegistry = registry;
-    const { io, statuses } = fakeIO();
-    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
-    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
-    await dispatch(deps, msg("fix the login redirect", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(statuses[0].title).toContain("*ship*");
-    expect(statuses[0].title).toContain("route reason: a change to land");
-    const { instance, unit } = await handed(instances, "run-shiprouted");
-    expect(instance).toMatchObject({ merge: "person" });
-    expect(instance?.plan?.id).toBe(
-      generatedPlanId(shipUnitText("fix the login redirect", "acme/api"), "slack:CX:1.0"),
-    );
-    expect(unit).toBeDefined();
-    expect(created).toHaveLength(1);
-    const meta = registry.snapshotById("run-shiprouted")?.events.find((e) => e.type === "run_meta") as
-      { agentSource?: string } | undefined;
-    expect(meta?.agentSource).toBe("route");
-  });
-
-  it("a routed seeded request (`plan <path>.md`) is refused naming `agent:ship`, nothing written", async () => {
-    const { deps, instances, created } = shipDeps(SHIP_ROUTED_YAML);
-    deps.githubApi = new InMemoryGithubApi({
-      "acme/api": { files: { "docs/plans/fixture.md": "### U10. First unit\n- **Dependencies**: none\n" } },
-    });
-    deps.routeModel = shipRouter();
-    const registry = new RunRegistry({ genId: () => "run-shiproutedseed", genToken: () => "tok" });
-    deps.runRegistry = registry;
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("plan docs/plans/fixture.md", "slack:UADMIN"), io);
-    expect(replies[replies.length - 1]).toContain("🚫");
-    expect(replies[replies.length - 1]).toContain("`agent:ship plan docs/plans/fixture.md`");
-    expect(created).toEqual([]);
-    const { instance } = await handed(instances, "run-shiproutedseed");
-    expect(instance).toBeNull();
-  });
-
-  // The operator's ship (routing-and-config item 29): a bind of `ship` from
-  // prose is a model's decision like the router's, so the seeded-plan guard
-  // holds it too, and a task ask hands off `merge: person` with the decision's
-  // event on the ship run.
-  const SHIP_OPERATOR_YAML = SHIP_YAML.replace(
-    "routing: { auto: false, operator: off }",
-    "routing: { auto: false, operator: on }",
-  );
-  // The bound line carries the request's own words: a bare `ship` is the
-  // seam's violation now (record 0067 as amended), never a decision.
+  // The one door's ship bind runs a task as a person-merged generated plan;
+  // the seeded form stays behind the person's typed directive.
+  const SHIP_OPERATOR_YAML = SHIP_YAML.replace("routing: { operator: off }", "routing: { operator: on }");
   const shipOperator = (request: string) =>
     vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
@@ -11043,7 +10359,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(warnings).toEqual([]);
   });
 
-  it("a restarted routed run (item 42) reuses the row's decision: the card carries the route note at debug, the record gets its route event and run_meta says route, and the router is never asked again", async () => {
+  it("a restarted historical route reuses the row's preset and repaints its reason without a model call or new route event", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     const request = durableInboxMessage({ ...msg("what is this repo") }, "what is this repo", 5_000);
     await ledger.claim({
@@ -11076,7 +10392,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
     };
     const { deps, writer } = wired(provider, { ledger });
-    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "general", reason: "never asked" }));
+    deps.operatorModel = vi.fn<RouteModel>(async () => "never asked");
     const statuses: StatusUpdate[] = [];
     const io: ChannelIO = {
       reply: async () => {},
@@ -11095,18 +10411,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
     await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, inbox: reclaimed.inbox } });
     await writer.settled();
-    expect(deps.routeModel).not.toHaveBeenCalled();
+    expect(deps.operatorModel).not.toHaveBeenCalled();
     expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · route reason: a review ask");
     const record = ledger.finished.get("run-routed")!;
     expect(record.agent).toBe("review");
-    expect(record.events.filter((e) => e.type === "route")).toEqual([
-      expect.objectContaining({
-        type: "route",
-        preset: "review",
-        reason: "a review ask",
-        model: "anthropic/general-model",
-      }),
-    ]);
+    expect(record.events.filter((e) => e.type === "route")).toEqual([]);
     expect((record.events.find((e) => e.type === "run_meta") as { agentSource?: string }).agentSource).toBe("route");
   });
 
@@ -11141,37 +10450,6 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(registry.listActive()).toEqual([]);
     expect(ledger.live.has("run-old")).toBe(false);
     expect(ledger.finished.get("run-old")).toMatchObject({ status: "interrupted", startedAt: 5_000 });
-  });
-
-  it("a routed run's row carries the router's decision (item 35), written at the claim, so another generation can repaint the card from the row alone", async () => {
-    let rowAtCall: LiveRunRow | undefined;
-    const ledger = new InMemoryRunLedger(() => 10_000);
-    const provider: Provider = {
-      name: "fake",
-      async complete(): Promise<CompletionResult> {
-        rowAtCall ??= structuredClone([...ledger.live.values()][0]);
-        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
-      },
-    };
-    const { deps, writer } = wired(provider, {
-      ledger,
-      yaml: YAML_FIXTURE.replace(
-        "routing: { auto: false, operator: off }\n",
-        "routing: { auto: true, operator: off }\n",
-      ),
-    });
-    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "review", reason: "a review ask" }));
-    const { io } = ioWithCard();
-    await dispatch(deps, msg("review it for me"), io);
-    await writer.settled();
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(rowAtCall?.meta.agent).toBe("review");
-    expect(rowAtCall?.meta.route).toEqual({
-      preset: "review",
-      reason: "a review ask",
-      model: "anthropic/general-model",
-      attempts: [{ outcome: "accepted" }],
-    });
   });
 
   it("a resumed run whose row carries the route repaints the route note at debug from the first frame (items 38 and routing-and-config 21); the router is not asked again and no second route event is published", async () => {
@@ -11241,7 +10519,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
     };
     const { deps, writer } = wired(provider, { ledger });
-    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "review", reason: "never asked" }));
+    deps.operatorModel = vi.fn<RouteModel>(async () => "never asked");
     const plan = planResume({
       transcript: { complete: true, turns: 2, messages: transcript, compactions: [] },
       lastStep: reclaimed.lastStep!,
@@ -11268,7 +10546,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       resume: { row: reclaimed.row, lastStep: reclaimed.lastStep!, plan, events, lastSeq: 3, repoCtx: {}, inbox: [] },
     });
     await writer.settled();
-    expect(deps.routeModel).not.toHaveBeenCalled();
+    expect(deps.operatorModel).not.toHaveBeenCalled();
     expect(statuses[0].title).toContain("*general* on `anthropic/general-model` · route reason: a plain question");
     const closed = statuses.at(-1)!;
     expect(closed.title).toContain("✅");
@@ -14040,7 +13318,7 @@ channels:
       machines: [none]
 grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
-routing: { auto: false, operator: off }
+routing: { operator: off }
 workspaceDir: __WORKDIR__
 `;
   const inChannel = (channel: string, text: string, user = "slack:UADMIN") => ({
@@ -14242,7 +13520,7 @@ channels:
       maxMinutes: 45
 grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
-routing: { auto: false, operator: off }
+routing: { operator: off }
 workspaceDir: __WORKDIR__
 `;
   const inChannel = (channel: string, text: string) => ({
@@ -14457,7 +13735,7 @@ grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
 restrict:
   agents: [explore]
-routing: { auto: false, operator: off }
+routing: { operator: off }
 workspaceDir: __WORKDIR__
 `;
   const PARENT_THREAD = "slack:CX:1.0";
@@ -15417,491 +14695,6 @@ describe("the model proxy's run bearer through dispatch()", () => {
   });
 });
 
-// Feature: docs/reference/specs/routing-and-config.md item 21 — the request
-// router through dispatch(): off is today; a directive always wins; a plain
-// message runs as the routed preset with the reason on the card and the
-// `route` event on the record; every routed preset dispatches at once.
-describe("the request router (docs/reference/specs/routing-and-config.md item 21)", () => {
-  const ROUTING_OFF = "routing: { auto: false, operator: off }\n";
-  /** The fixture with the router turned on by name. */
-  const routingOn = (yaml: string) => yaml.replace(ROUTING_OFF, "routing: { auto: true, operator: off }\n");
-  /** The fixture with `auto` unset — the router's default, on. The operator
-   *  stays off by name: its own default (also on) is item 29's suite, and a
-   *  block naming only `operator` leaves `auto` at its default like no block. */
-  const routingUnset = (yaml: string) => yaml.replace(ROUTING_OFF, "routing: { operator: off }\n");
-  const ROUTED_YAML = routingOn(YAML_FIXTURE);
-  /** A scripted router: a change to make is coding, a review ask is review, anything else general. */
-  const router = () =>
-    vi.fn(async (prompt: { user: string }) => {
-      const text = prompt.user;
-      const preset = /fix|implement/i.test(text) ? "coding" : /review/i.test(text) ? "review" : "general";
-      return JSON.stringify({ preset, reason: `${preset} fits the request` });
-    });
-  const routeEvents = (registry: RunRegistry, id: string) =>
-    (registry.snapshotById(id)?.events ?? []).filter((e) => e.type === "route");
-  const metaOf = (registry: RunRegistry, id: string) =>
-    (registry.snapshotById(id)?.events ?? []).find((e) => e.type === "run_meta") as
-      { agentSource?: string } | undefined;
-
-  afterEach(() => {
-    vi.unstubAllEnvs();
-    vi.mocked(makeExecutor).mockClear();
-  });
-
-  it("turned off (`routing: { auto: false }`): a plain message runs defaults.agent as before the router — never called, no route event, no route note", async () => {
-    let ids = 0;
-    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    deps.runRegistry = registry;
-    deps.routeModel = router();
-    const { io, statuses } = fakeIO();
-    await dispatch(deps, msg("review it for me"), io);
-    expect(deps.routeModel).not.toHaveBeenCalled();
-    expect(provider.requests[0].model).toBe("general-model");
-    expect(routeEvents(registry, "r1")).toEqual([]);
-    expect(metaOf(registry, "r1")?.agentSource).toBe("default");
-    expect(statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
-  });
-
-  it("on by default: with `auto` unset a plain message routes — to review on its own model, the route note on the card at debug, the route event on the record", async () => {
-    let ids = 0;
-    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(routingUnset(YAML_FIXTURE), provider);
-    expect(deps.config.config.routing?.auto).toBeUndefined();
-    deps.runRegistry = registry;
-    deps.routeModel = router();
-    const { io, statuses, replies } = fakeIO();
-    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
-    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
-    await dispatch(deps, msg("review it for me"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(provider.requests[0].model).toBe("review-model");
-    expect(replies).toContain("answer");
-    expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · route reason: review fits the request");
-    expect(routeEvents(registry, "r1")).toEqual([
-      expect.objectContaining({ type: "route", preset: "review", model: "anthropic/general-model" }),
-    ]);
-    expect(metaOf(registry, "r1")?.agentSource).toBe("route");
-    const closed = statuses.at(-1)!;
-    expect(closed.title).toContain("✅");
-  });
-
-  it("at quiet — the default — the same routed run's card is `*review*` and nothing more: no model, no route note on any frame, the route still on the record (routing-and-config item 28)", async () => {
-    let ids = 0;
-    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(routingUnset(YAML_FIXTURE), provider);
-    deps.runRegistry = registry;
-    deps.routeModel = router();
-    const { io, statuses, replies } = fakeIO();
-    // The fixture speaks at debug; a person on the default hears less.
-    await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
-    await dispatch(deps, msg("review it for me"), io);
-    expect(replies).toContain("answer");
-    expect(statuses[0].title).toBe("👀 *review* · preparing workspace…");
-    expect(statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
-    expect(statuses.every((s) => !s.title.includes("anthropic/review-model"))).toBe(true);
-    expect(statuses.at(-1)!.title).toBe("✅ *review* · 0s");
-    expect(metaOf(registry, "r1")?.agentSource).toBe("route");
-    expect(routeEvents(registry, "r1")).toHaveLength(1);
-  });
-
-  it("routing on, a directive on the message: untouched — the router is never called and the run is the directive's", async () => {
-    let ids = 0;
-    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(ROUTED_YAML, provider);
-    deps.runRegistry = registry;
-    deps.routeModel = router();
-    const { io } = fakeIO();
-    await dispatch(deps, msg("agent:general review it for me"), io);
-    expect(deps.routeModel).not.toHaveBeenCalled();
-    expect(provider.requests[0].model).toBe("general-model");
-    expect(metaOf(registry, "r1")?.agentSource).toBe("directive");
-    expect(routeEvents(registry, "r1")).toEqual([]);
-  });
-
-  it("routing on, a bare message: routed to review — its own model, the card's route note (`route reason:` at debug) from the first paint, the record's route event, and it runs at once", async () => {
-    let ids = 0;
-    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(ROUTED_YAML, provider);
-    deps.runRegistry = registry;
-    deps.routeModel = router();
-    const { io, statuses, replies } = fakeIO();
-    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
-    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
-    await dispatch(deps, msg("review it for me"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(provider.requests[0].model).toBe("review-model");
-    expect(replies).toContain("answer");
-    expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · route reason: review fits the request");
-    expect(routeEvents(registry, "r1")).toEqual([
-      expect.objectContaining({
-        type: "route",
-        preset: "review",
-        reason: "review fits the request",
-        model: "anthropic/general-model",
-      }),
-    ]);
-    expect(metaOf(registry, "r1")?.agentSource).toBe("route");
-  });
-
-  it("a route to ship is a real route: the router answering ship resolves the ship preset — the route event, agentSource route, the routed card line — and the ship pipeline takes it (its own gate refuses here, never a silent fall to the default)", async () => {
-    let ids = 0;
-    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(ROUTED_YAML, provider);
-    deps.runRegistry = registry;
-    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "ship", reason: "land it" }));
-    const { io, statuses } = fakeIO();
-    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
-    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
-    await dispatch(deps, msg("land the login fix", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    // Ship never runs a provider turn of its own; this harness has none of the
-    // runner's seams, so the pipeline's own gate closes the card — the route
-    // itself is on the record. The full hand-off (merge: person) is proven in
-    // the ship suite.
-    expect(provider.requests).toHaveLength(0);
-    expect(statuses[0].title).toContain("*ship*");
-    expect(statuses[0].title).toContain("route reason: land it");
-    // The record-level route event and `agentSource: route` on a routed ship
-    // run are proven in the ship suite, where the ledger the ship path claims
-    // on is wired.
-  });
-
-  it("coding is never routed: a router answering coding leaves an admin's change request on defaults.agent, with no route event", async () => {
-    let ids = 0;
-    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(ROUTED_YAML, provider);
-    deps.runRegistry = registry;
-    deps.routeModel = router(); // fix → coding, which left the table when ship took its seat
-    const { io, statuses } = fakeIO();
-    await dispatch(deps, msg("fix the flaky login test", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(provider.requests[0].model).toBe("general-model");
-    expect(routeEvents(registry, "r1")).toEqual([]);
-    expect(metaOf(registry, "r1")?.agentSource).toBe("default");
-    expect(statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
-  });
-
-  it("a route the requester may not run is no route: ship restricted for the plain user runs defaults.agent", async () => {
-    const provider = capturingProvider();
-    const deps = makeDeps(ROUTED_YAML.replace("agents: [coding]", "agents: [coding, ship]"), provider);
-    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "ship", reason: "land it" }));
-    const { io, statuses } = fakeIO();
-    await dispatch(deps, msg("land the login fix"), io); // slack:UX may not run the restricted ship preset
-    expect(provider.requests[0].model).toBe("general-model");
-    expect(statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
-  });
-
-  // The compound form (routing-and-config item 21, "Compound requests";
-  // agent-conductor item 9): a plain message with two independent parts runs
-  // as one conductor whose brief lists the parts; the conductor spawns one
-  // child per part through `dispatch()`, each on its part's preset with a
-  // directive of its own, under the requester's permissions and the parent's
-  // clock. The card and the record say what was split and why.
-  describe("a compound request routes to the conductor", () => {
-    const COMPOUND_YAML = routingOn(
-      YAML_FIXTURE.replace(
-        "    review: anthropic/review-model\n",
-        "    review: anthropic/review-model\n    conductor: anthropic/conductor-model\n    research: anthropic/research-model\n",
-      ),
-    );
-    const PARTS = [
-      { text: "summarize the open issues in acme/api", preset: "general" },
-      { text: "find out why the staging resident went down last night", preset: "research" },
-    ];
-    /** A router that splits a message carrying "and also" into the two parts above, else routes general. */
-    const splitter = () =>
-      vi.fn(async (prompt: { user: string }) =>
-        /and also/.test(prompt.user)
-          ? JSON.stringify({ preset: "conductor", parts: PARTS, reason: "two independent asks" })
-          : JSON.stringify({ preset: "general", reason: "general fits" }),
-      );
-    /** The texts of a request's tool results. */
-    const toolResultTexts = (req: CompletionRequest): string[] => {
-      const last = req.messages.at(-1);
-      if (!last || typeof last.content === "string") return [];
-      return last.content
-        .filter((p) => p.type === "tool_result")
-        .map((p) => (typeof p.content === "string" ? p.content : JSON.stringify(p.content)));
-    };
-    const firstUserText = (req: CompletionRequest): string => {
-      const first = req.messages[0];
-      if (!first) return "";
-      return typeof first.content === "string"
-        ? first.content
-        : first.content.map((p) => (p.type === "text" ? p.text : "")).join("");
-    };
-    /**
-     * A conductor that does what its brief says: the first turn reads the
-     * numbered `<preset>`: <text> lines under the compound heading and spawns
-     * exactly those; the next turn echoes the tool results. A child (no
-     * spawn_run tool) answers with one line.
-     */
-    function briefFollowingProvider() {
-      const requests: CompletionRequest[] = [];
-      const provider: Provider = {
-        name: "fake",
-        async complete(req): Promise<CompletionResult> {
-          requests.push(req);
-          const conducts = req.tools?.some((t) => t.name === "spawn_run") ?? false;
-          if (conducts && toolResultTexts(req).length === 0) {
-            const lines = [...firstUserText(req).matchAll(/^\d+\. `(\w+)`: (.+)$/gm)];
-            return {
-              content: lines.map((m, i) => ({
-                type: "tool_use" as const,
-                id: `t${i + 1}`,
-                name: "spawn_run",
-                input: { preset: m[1], prompt: m[2] },
-              })),
-              stopReason: "tool_use",
-            };
-          }
-          if (conducts)
-            return { content: [{ type: "text", text: toolResultTexts(req).join("\n") }], stopReason: "end_turn" };
-          return { content: [{ type: "text", text: "child done" }], stopReason: "end_turn" };
-        },
-      };
-      return { provider, requests };
-    }
-    /** A parent channel whose `openThread` hands out one recording child channel per call. */
-    function treeIO() {
-      const parent = fakeIO();
-      const children: Array<ReturnType<typeof fakeIO> & { threadKey: string }> = [];
-      const leads: string[] = [];
-      parent.io.openThread = async (lead) => {
-        leads.push(lead);
-        const child = { ...fakeIO(), threadKey: `slack:CX:9.${children.length + 1}` };
-        children.push(child);
-        return { thread: { threadKey: child.threadKey }, io: child.io };
-      };
-      return { parent, children, leads };
-    }
-    function treeDeps(yaml: string, provider: Provider) {
-      const ids = ["run-parent", "run-child-1", "run-child-2", "run-child-3"];
-      const registry = new RunRegistry({ genId: () => ids.shift() ?? "run-more", genToken: () => "tok" });
-      const store = new InMemoryRunStore();
-      const writer = createRunHistoryWriter({
-        store,
-        warn: () => {},
-        onPersisted: (id) => registry.markPersisted(id),
-        sleep: async () => {},
-      });
-      const deps = makeDeps(yaml, provider);
-      deps.runRegistry = registry;
-      deps.runHistoryWriter = writer;
-      deps.admission = new ThreadAdmission<DispatchFollowUp>();
-      deps.runStore = store;
-      const ledger = new InMemoryRunLedger();
-      deps.runLedger = createLedgerWriteThrough({
-        ledger,
-        gen: "gen-C",
-        fallback: { put: async () => {}, abandoned: () => {} },
-        warn: () => {},
-      });
-      deps.runs = createRunsService({ registry, store: ledgerBackedStore(ledger, store), ledger });
-      return { deps, registry, store, writer, ledger };
-    }
-    const compoundMsg = (user = "slack:UADMIN") => ({
-      ...msg(
-        "summarize the open issues in acme/api and also look into why the staging resident went down last night",
-        user,
-      ),
-      userName: "alice",
-    });
-
-    it("two independent parts: one conductor run with the route note and the parts on its card, the route event with the parts, and two children spawned through dispatch() — each on its part's preset with a directive of its own, parentRunId set, the router never asked again", async () => {
-      const { provider, requests } = briefFollowingProvider();
-      const t = treeDeps(COMPOUND_YAML, provider);
-      t.deps.routeModel = splitter();
-      const { parent, children, leads } = treeIO();
-      // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
-      await t.deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
-      await dispatch(t.deps, compoundMsg(), parent.io);
-      for (const id of ["run-child-1", "run-child-2"])
-        await vi.waitFor(() => expect(t.registry.getById(id)?.finished).toBe(true));
-      await t.writer.settled();
-
-      // One router call — the parent's; a child carries its directive and is never routed.
-      expect(t.deps.routeModel).toHaveBeenCalledTimes(1);
-      // The parent ran as the conductor on its own model; its brief is the message then the parts.
-      const parentRequest = requests.find((r) => r.tools?.some((tool) => tool.name === "spawn_run"))!;
-      expect(parentRequest.model).toBe("conductor-model");
-      const brief = firstUserText(parentRequest);
-      expect(
-        brief.startsWith(
-          "summarize the open issues in acme/api and also look into why the staging resident went down last night\n",
-        ),
-      ).toBe(true);
-      expect(brief).toContain("Routed as a compound request: 2 independent parts");
-      expect(brief).toContain("1. `general`: summarize the open issues in acme/api");
-      expect(brief).toContain("2. `research`: find out why the staging resident went down last night");
-      // The card: the route note in the label, one line per part under it, from the first paint.
-      expect(parent.statuses[0].title).toContain(
-        "*conductor* on `anthropic/conductor-model` · route reason: two independent asks",
-      );
-      expect(parent.statuses[0].detail).toBe(
-        "general: summarize the open issues in acme/api\nresearch: find out why the staging resident went down last night",
-      );
-      // The record: run_meta says route, the route event carries the parts.
-      expect(metaOf(t.registry, "run-parent")?.agentSource).toBe("route");
-      expect(routeEvents(t.registry, "run-parent")).toEqual([
-        expect.objectContaining({
-          type: "route",
-          preset: "conductor",
-          reason: "two independent asks",
-          model: "anthropic/general-model",
-          parts: PARTS,
-        }),
-      ]);
-      expect((await t.ledger.finished.get("run-parent"))!.events.filter((e) => e.type === "input")).toEqual([
-        expect.objectContaining({
-          text: "summarize the open issues in acme/api and also look into why the staging resident went down last night",
-        }),
-      ]);
-      // Two children, one per part, each on its part's preset with its directive, as the requester, under the parent.
-      expect(leads).toHaveLength(2);
-      expect(leads[0]).toContain("*general*");
-      expect(leads[1]).toContain("*research*");
-      const kids = await Promise.all([t.ledger.finished.get("run-child-1"), t.ledger.finished.get("run-child-2")]);
-      expect(kids.map((k) => k!.agent).sort()).toEqual(["general", "research"]);
-      for (const kid of kids) {
-        expect(kid).toMatchObject({ userId: "slack:UADMIN", parentRunId: "run-parent", status: "completed" });
-        // The parent's remaining clock is one more boundary on the child; these
-        // presets' own budgets (5 and 8 min) are the tighter ones under a fresh conductor.
-        expect(kid!.profile).toMatchObject({ preset: kid!.agent, minutes: AGENTS[kid!.agent!].maxMinutes });
-        // The child's message carried `agent:<preset>` (the record's input is
-        // directive-stripped, so it is the part's text alone) and resolved as
-        // a directive: the router was never asked and no route event exists.
-        const part = PARTS.find((p) => p.preset === kid!.agent)!;
-        expect(kid!.events.find((e) => e.type === "input")).toMatchObject({ text: part.text });
-        expect(kid!.events.find((e) => e.type === "run_meta")).toMatchObject({ agentSource: "directive" });
-        expect(kid!.events.some((e) => e.type === "route")).toBe(false);
-      }
-      expect(children.map((c) => c.replies)).toEqual([["child done"], ["child done"]]);
-      expect(
-        vi
-          .mocked(makeExecutor)
-          .mock.calls.map((c) => c[1].agent.name)
-          .sort(),
-      ).toEqual(["conductor", "general", "research"]);
-      // The parent's answer echoes both spawns.
-      expect(parent.replies[0]).toContain("spawned a general run: run-child-1");
-      expect(parent.replies[0]).toContain("spawned a research run: run-child-2");
-    });
-
-    it("a requester who may not run the conductor is never offered the form: the message runs defaults.agent, no child is spawned, and the record's route event keeps the rejection", async () => {
-      const { provider, requests } = briefFollowingProvider();
-      const t = treeDeps(COMPOUND_YAML.replace("agents: [coding]", "agents: [coding, conductor]"), provider);
-      t.deps.routeModel = splitter();
-      const { parent, children } = treeIO();
-      await dispatch(t.deps, compoundMsg("slack:UX"), parent.io);
-      expect(t.deps.routeModel).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(t.deps.routeModel).mock.calls[0][0].system).not.toMatch(/conductor|compound/i);
-      expect(requests[0].model).toBe("general-model");
-      expect(children).toHaveLength(0);
-      expect(parent.statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
-      expect(metaOf(t.registry, "run-parent")?.agentSource).toBe("default");
-      expect(routeEvents(t.registry, "run-parent")).toEqual([
-        expect.objectContaining({
-          type: "route",
-          preset: "general",
-          reason: "compound_rejected: the compound form was not offered",
-          model: "anthropic/general-model",
-        }),
-      ]);
-    });
-
-    it("a part on a preset the requester may not run rejects the whole compound: the plain user's message runs defaults.agent with the rejection recorded", async () => {
-      const { provider, requests } = briefFollowingProvider();
-      const t = treeDeps(COMPOUND_YAML, provider);
-      t.deps.routeModel = vi.fn(async () =>
-        JSON.stringify({
-          preset: "conductor",
-          parts: [PARTS[0], { text: "fix the flaky login test", preset: "coding" }],
-          reason: "a review and a fix",
-        }),
-      );
-      const { parent, children } = treeIO();
-      await dispatch(t.deps, compoundMsg("slack:UX"), parent.io);
-      expect(requests[0].model).toBe("general-model");
-      expect(children).toHaveLength(0);
-      expect(routeEvents(t.registry, "run-parent")[0]).toMatchObject({
-        preset: "general",
-        reason: 'compound_rejected: part 2 names "coding", which is not in the table',
-      });
-    });
-
-    it("a compound answer with a ship part collapses to one ship run: no child is spawned, the card names the collapse, the route event carries it and no parts", async () => {
-      const { provider, requests } = briefFollowingProvider();
-      const t = treeDeps(COMPOUND_YAML, provider);
-      t.deps.routeModel = vi.fn(async () =>
-        JSON.stringify({
-          preset: "conductor",
-          parts: [
-            { text: "review the login PR", preset: "review" },
-            { text: "fix the flaky login test", preset: "ship" },
-          ],
-          reason: "a review and a fix",
-        }),
-      );
-      const { parent, children } = treeIO();
-      const text = "review the login PR and fix the flaky login test it touches";
-      // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
-      await t.deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
-      await dispatch(t.deps, { ...msg(text, "slack:UADMIN"), userName: "alice" }, parent.io);
-      await t.writer.settled();
-      expect(t.deps.routeModel).toHaveBeenCalledTimes(1);
-      // Ship runs the plan runner, never a provider turn of its own; this
-      // harness carries none of the runner's seams, so its own gate closes the
-      // run — the collapse decision is what this scenario proves, and the full
-      // routed hand-off (merge: person) is the ship suite's.
-      expect(requests).toHaveLength(0);
-      expect(children).toHaveLength(0);
-      // The card: the routed line names the collapse; no part lines under it.
-      expect(parent.statuses[0].title).toContain("*ship*");
-      expect(parent.statuses[0].title).toContain("route reason: a review and a fix (compound collapsed: review+ship)");
-      expect(parent.statuses[0].detail).toBeUndefined();
-      // The collapse decision itself (the event's `collapsed.presets`, no
-      // `parts`) is proven at the route stage in route.test.ts; the routed
-      // hand-off's record (merge: person, agentSource route) in the ship
-      // suite. This harness has no repository bound, so the ship pipeline
-      // refuses before a run is claimed — no record to read here.
-    });
-
-    it("a decoy — one ask with several steps — the router keeps single: no conductor, no parts, the single route's card and event", async () => {
-      const { provider } = briefFollowingProvider();
-      const t = treeDeps(COMPOUND_YAML, provider);
-      t.deps.routeModel = splitter();
-      const { parent, children } = treeIO();
-      // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
-      await t.deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
-      await dispatch(
-        t.deps,
-        { ...msg("clone acme/api, run the suite, then tell me what fails", "slack:UADMIN") },
-        parent.io,
-      );
-      expect(children).toHaveLength(0);
-      expect(parent.statuses[0].title).toContain("*general* on `anthropic/general-model` · route reason: general fits");
-      expect(parent.statuses[0].detail).toBeUndefined();
-      expect(routeEvents(t.registry, "run-parent")[0]).not.toHaveProperty("parts");
-    });
-  });
-});
-
-// Feature: docs/reference/specs/execution.md item 20 (record 0033) — inbound staging
-// through the dispatcher: a file the message carries by reference is copied
-// into the store after admission (overlapping the workspace attach) and pulled
-// into `attachments/` over the run's executor before the model's first read,
-// whose turn ends with the line naming it; a workspace-less agent copies
-// nothing and is told where the file can be worked with; a refused steer
-// copies nothing; without a store nothing is staged.
 describe("inbound staging (record 0033)", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -16697,892 +15490,6 @@ describe("the references step in dispatch (record 0037)", () => {
 // prose is handed back when it writes, run through the registry when it reads,
 // answered with the receipt first, and ended on any failure with the command's
 // own line; one model call, never a second route.
-describe("the command menu through dispatch() (record 0036 unit 2; record 0039)", () => {
-  /** A scripted router that calls one command tool with one input. */
-  const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
-  const wired = (yaml = ROUTING_ON_YAML) => {
-    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(yaml, provider);
-    deps.runRegistry = registry;
-    deps.admission = new ThreadAdmission();
-    return { deps, registry, provider };
-  };
-
-  it("a routed write is handed back as the line to paste: nothing invoked, no card, no thread claim, no agent turn — the decision itself is a command record (record 0044)", async () => {
-    const { deps, registry, provider } = wired();
-    deps.routeModel = call("config_set", { scope: "channel", models: { coding: "anthropic/claude-opus-5" } });
-    const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(replies).toEqual(["To run this: config set channel --models.coding anthropic/claude-opus-5"]);
-    expect(deps.invoked).toEqual([]);
-    expect(statuses).toEqual([]);
-    expect(provider.requests).toEqual([]);
-    // The one run is the decision's record, no agent's: the door's counts suite proves its shape.
-    expect(registry.getById("r1")).toMatchObject({ agent: "command", finished: true, status: "completed" });
-    expect(deps.admission!.size).toBe(0);
-    // Nothing was written: the channel's config is as the fixture left it.
-    expect(
-      deps.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef,
-    ).not.toBe("anthropic/claude-opus-5");
-  });
-
-  it("a routed read runs through the registry as the message's user and the reply leads with the receipt line — a log-only command makes no run; the audit line carries source: route", async () => {
-    const { deps, registry, provider } = wired();
-    deps.routeModel = call("config_show", {});
-    const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("show me the config for this channel", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(deps.invoked).toEqual(["config.show"]);
-    expect(replies).toHaveLength(1);
-    const [first, ...rest] = replies[0]!.split("\n");
-    expect(first).toBe("routed: config show");
-    expect(rest.join("\n")).toContain("agent");
-    expect(statuses).toEqual([]);
-    expect(provider.requests).toEqual([]);
-    expect(registry.snapshotById("r1")).toBeNull();
-  });
-
-  it("the text the router binds from has Slack's link wrapping undone, so a URL binds bare", async () => {
-    const { deps } = wired();
-    const router = call("config_show", {});
-    deps.routeModel = router;
-    const { io } = fakeIO();
-    await dispatch(
-      deps,
-      msg("what does <https://acme.test/x|acme.test/x> say about this channel's config", "slack:UADMIN"),
-      io,
-    );
-    const prompt: RoutePrompt = router.mock.calls[0]![0];
-    expect(prompt.user).toContain("https://acme.test/x");
-    expect(prompt.user).not.toContain("<https://");
-  });
-
-  it("every write command whose action class is not exec is handed back and nothing is invoked; the exec-class writes (repo test, repo build) and every read run through the registry", async () => {
-    const { deps } = wired();
-    const chatExposed = deps.commands!.list().filter((c) => c.surfaces?.chat !== false);
-    const handedBack = chatExposed.filter((c) => c.effect === "write" && !c.action.endsWith(":exec"));
-    const runs = chatExposed.filter((c) => c.effect === "read" || c.action.endsWith(":exec"));
-    expect(handedBack.length).toBeGreaterThan(5);
-    expect(runs.filter((c) => c.effect === "read").length).toBeGreaterThan(5);
-    // The carve-out is exactly the two deterministic ops: a test or build run changes nothing of Switchboard's own.
-    expect(
-      runs
-        .filter((c) => c.effect === "write")
-        .map((c) => c.id)
-        .sort(),
-    ).toEqual(["repo.build", "repo.test"]);
-    for (const cmd of handedBack) {
-      deps.routeModel = call(mcpToolName(cmd.id), {});
-      const { io, replies } = fakeIO();
-      await dispatch(deps, msg(`please ${cmd.id}`, "slack:UADMIN"), io);
-      expect(replies, cmd.id).toHaveLength(1);
-      expect(replies[0], cmd.id).toMatch(/^To run this: /);
-      expect(replies[0], cmd.id).toContain(cliWords(cmd.id).join(" "));
-    }
-    expect(deps.invoked).toEqual([]);
-    for (const cmd of runs) {
-      deps.routeModel = call(mcpToolName(cmd.id), {});
-      const { io, replies } = fakeIO();
-      await dispatch(deps, msg(`please ${cmd.id}`, "slack:UADMIN"), io);
-      expect(replies, cmd.id).toHaveLength(1);
-      expect(replies[0]!.split("\n")[0], cmd.id).toBe(`routed: ${cliWords(cmd.id).join(" ")}`);
-      expect(replies[0], cmd.id).not.toMatch(/^To run this: /);
-    }
-    expect([...new Set(deps.invoked)].sort()).toEqual(runs.map((c) => c.id).sort());
-  });
-
-  it("a routed read that does work (friction_report) runs as an inline command run carrying the route event right after run_meta, and the reply is the receipt then the command's own text — no card, no agent turn", async () => {
-    const { deps, registry, provider } = wired();
-    deps.routeModel = call("friction_report", { limit: 5 });
-    const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("what friction keeps coming back in the last five runs", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(deps.invoked).toEqual(["friction.report"]);
-    expect(replies).toHaveLength(1);
-    const lines = replies[0]!.split("\n");
-    expect(lines[0]).toBe("routed: friction report --limit 5");
-    expect(lines[1]).toContain("runs analyzed");
-    expect(statuses).toEqual([]);
-    expect(provider.requests).toEqual([]);
-    const snap = registry.snapshotById("r1");
-    expect(snap?.finished).toBe(true);
-    const types = (snap?.events ?? []).map((e) => e.type);
-    expect(types.indexOf("route")).toBe(types.indexOf("run_meta") + 1);
-    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
-      preset: "command",
-      command: "friction.report",
-      input: { args: [], options: { limit: 5 } },
-      receipt: "friction report --limit 5",
-      model: "anthropic/general-model",
-    });
-    expect(snap?.events.filter((e) => e.type === "answer")).toHaveLength(1);
-  });
-
-  it("a routed read whose invoke fails (a value the schema refuses) seals one failed command run and replies the receipt and the command's own error line — one model call, no second route, no agent run", async () => {
-    const { deps, registry, provider } = wired();
-    deps.routeModel = call("friction_report", { limit: "lots" });
-    const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("what friction keeps coming back, lots of runs please", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(deps.invoked).toEqual(["friction.report"]);
-    expect(replies).toHaveLength(1);
-    const lines = replies[0]!.split("\n");
-    expect(lines[0]).toBe("routed: friction report --limit lots");
-    expect(lines[1]).toMatch(/^⚠️ `friction report`/);
-    expect(statuses).toEqual([]);
-    expect(provider.requests).toEqual([]);
-    const snap = registry.snapshotById("r1");
-    expect(snap?.finished).toBe(true);
-    expect(snap?.events.filter((e) => e.type === "answer")).toHaveLength(1);
-    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({ command: "friction.report" });
-  });
-
-  it("a bound value carrying a token-shaped string is redacted from the receipt, and the receipt is cut at its cap — on a hand-back too", async () => {
-    const { deps } = wired();
-    const token = `ghp_${"a".repeat(36)}`;
-    const long = "x".repeat(400);
-    deps.routeModel = call("config_set", { scope: "channel", models: { coding: `${token}-${long}` } });
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("use that model for coding here", "slack:UADMIN"), io);
-    expect(replies).toHaveLength(1);
-    const [line] = replies[0]!.split("\n");
-    expect(line).toMatch(/^To run this: config set channel --models\.coding /);
-    expect(replies[0]).not.toContain(token);
-    expect(line!.length).toBeLessThanOrEqual("To run this: ".length + ROUTE_RECEIPT_CAP + 1);
-    expect(deps.invoked).toEqual([]);
-  });
-
-  it("a hand-back whose chat form was cut at the cap is one line, the capped form — the cut note retired with the paste (record 0069's plan)", async () => {
-    const { deps } = wired();
-    const long = `anthropic/${"x".repeat(ROUTE_RECEIPT_CAP + 100)}`;
-    deps.routeModel = call("config_set", { scope: "channel", models: { coding: long } });
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("use that long model name for coding here", "slack:UADMIN"), io);
-    expect(replies).toHaveLength(1);
-    const lines = replies[0]!.split("\n");
-    expect(lines).toHaveLength(1);
-    // The line is exactly the capped hand-back and the record keeps the same capped receipt.
-    expect(lines[0]).toMatch(/^To run this: config set channel --models\.coding anthropic\/x+…$/);
-    expect(lines[0]!.length).toBe("To run this: ".length + ROUTE_RECEIPT_CAP + 1);
-    expect(deps.invoked).toEqual([]);
-  });
-
-  it("a hand-back under the cap has no second line", async () => {
-    const { deps } = wired();
-    deps.routeModel = call("config_set", { scope: "channel", models: { coding: "anthropic/claude-opus-5" } });
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io);
-    expect(replies).toEqual(["To run this: config set channel --models.coding anthropic/claude-opus-5"]);
-    expect(replies[0]).not.toContain("\n");
-  });
-
-  it("a thread naming a repository puts it in the router's user turn as a fact", async () => {
-    const { deps } = wired();
-    const router = call("config_show", {});
-    deps.routeModel = router;
-    const { io } = fakeIO([
-      { role: "user", text: "<@bot> review https://github.com/acme/api/pull/7", at: 1 },
-      { role: "assistant", text: "done", at: 2 },
-    ]);
-    await dispatch(deps, msg("exercise the suite at main please", "slack:UADMIN"), io);
-    const prompt: RoutePrompt = router.mock.calls[0]![0];
-    expect(prompt.user).toContain("The thread's repository: acme/api");
-  });
-
-  it("a live thread and a directive are not routed to a command: the router is never asked", async () => {
-    const { deps } = wired();
-    deps.routeModel = call("config_show", {});
-    deps.admission!.claim("slack:CX:1.0", { agent: "general" });
-    const { io } = fakeIO();
-    await dispatch(deps, msg("show me the config", "slack:UADMIN"), io);
-    expect(deps.routeModel).not.toHaveBeenCalled();
-    deps.admission = new ThreadAdmission();
-    const second = fakeIO();
-    await dispatch(deps, msg("agent:general show me the config", "slack:UADMIN"), second.io);
-    expect(deps.routeModel).not.toHaveBeenCalled();
-  });
-
-  it("the typed `config show` still answers inline through stage A with no model call — the grammar stays the exact path, the door is the natural-language one", async () => {
-    const { deps, provider } = wired();
-    deps.routeModel = call("config_show", {});
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("config show", "slack:UADMIN"), io);
-    expect(deps.routeModel).not.toHaveBeenCalled();
-    expect(provider.requests).toEqual([]);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).not.toMatch(/^routed:/);
-    expect(deps.invoked).toEqual(["config.show"]);
-  });
-});
-
-// Feature: docs/reference/specs/run-history.md item 2 and
-// docs/reference/specs/routing-and-config.md item 21 (record 0044; record
-// 0069's plan, the retirement unit): a door decision about a state change is a
-// run record — the hand-back invokes nothing and tells no surface. The paste
-// machinery retired with the chat hand-back: a typed line runs as typed with
-// no thread read and no second record, whatever came before it in the thread.
-describe("the door's counts through dispatch(): a hand-back is a run record and a typed line runs unrecorded (record 0044)", () => {
-  const HAND_BACK_LINE = "To run this: config set channel --models.coding anthropic/claude-opus-5";
-  const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
-  const contentTypes = (events: readonly RunEvent[]) => events.filter((e) => !isSpanRecord(e)).map((e) => e.type);
-  /** The routed deps with a counting registry, a store the records land in and
-   *  the one runs service the dispatcher and stage A read the thread through. */
-  const wired = () => {
-    let n = 0;
-    const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(ROUTING_ON_YAML, provider);
-    deps.runRegistry = registry;
-    deps.admission = new ThreadAdmission();
-    const store = new InMemoryRunStore();
-    deps.runStore = store;
-    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
-    const runs = createRunsService({ registry, store });
-    deps.runs = runs;
-    return { deps, registry, provider, store, runs };
-  };
-  /** The channel with the two run signals spied, so a test can say what the surface was told. */
-  const spiedIO = () => {
-    const f = fakeIO();
-    const started = vi.fn();
-    const finished = vi.fn();
-    f.io.runStarted = started;
-    f.io.runFinished = finished;
-    return { ...f, started, finished };
-  };
-  const handBack = async (deps: TestDeps) => {
-    deps.routeModel = call("config_set", { scope: "channel", models: { coding: "anthropic/claude-opus-5" } });
-    const io = spiedIO();
-    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io.io);
-    return io;
-  };
-
-  it("a routed write handed back leaves one command record — completed, invoked nothing, route.outcome hand_back — and the channel is told of no run; the reply is the line it always was", async () => {
-    const { deps, registry, provider, runs } = wired();
-    const { replies, statuses, started, finished } = await handBack(deps);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(replies).toEqual([HAND_BACK_LINE]);
-    expect(deps.invoked).toEqual([]);
-    expect(statuses).toEqual([]);
-    expect(provider.requests).toEqual([]);
-    expect(deps.admission!.size).toBe(0);
-    expect(started).not.toHaveBeenCalled();
-    expect(finished).not.toHaveBeenCalled();
-    const snap = registry.snapshotById("r1");
-    expect(snap?.finished).toBe(true);
-    expect(registry.getById("r1")).toMatchObject({ status: "completed", agent: "command", threadKey: "slack:CX:1.0" });
-    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
-    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
-      type: "route",
-      preset: "command",
-      reason: "command config.set",
-      model: "anthropic/general-model",
-      command: "config.set",
-      input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
-      receipt: "config set channel --models.coding anthropic/claude-opus-5",
-      outcome: "hand_back",
-    });
-    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: HAND_BACK_LINE });
-    // It lists where the report will read it: `runs list agent=command`, the thread's newest.
-    const page = await runs.listRuns({
-      status: "finished",
-      visibleTo: { kind: "all" },
-      agent: "command",
-      threadKey: "slack:CX:1.0",
-      limit: 1,
-    });
-    expect(page.runs.map((r) => r.id)).toEqual(["r1"]);
-    // Nothing was written: the channel's config is as the fixture left it.
-    expect(
-      deps.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef,
-    ).not.toBe("anthropic/claude-opus-5");
-  });
-
-  it("the same thread's typed line runs the command with no second record — the paste machinery retired with the chat hand-back (record 0069's plan)", async () => {
-    const { deps, registry } = wired();
-    await handBack(deps);
-    const { io, replies, started, finished } = spiedIO();
-    await dispatch(deps, msg("config set channel --models.coding anthropic/claude-opus-5", "slack:UADMIN"), io);
-    expect(deps.invoked).toEqual(["config.set"]);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).not.toMatch(/^routed: |^To run this: /);
-    expect(
-      deps.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef,
-    ).toBe("anthropic/claude-opus-5");
-    // A no-work typed command leaves no record: nothing names the hand-back.
-    expect(registry.snapshotById("r2")).toBeNull();
-    expect(started).not.toHaveBeenCalled();
-    expect(finished).not.toHaveBeenCalled();
-  });
-
-  it("a different typed line in the thread runs and leaves no record — today's rule for a no-work command", async () => {
-    const { deps, registry } = wired();
-    await handBack(deps);
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("config set channel --models.review anthropic/claude-opus-5", "slack:UADMIN"), io);
-    expect(deps.invoked).toEqual(["config.set"]);
-    expect(replies).toHaveLength(1);
-    expect(registry.snapshotById("r2")).toBeNull();
-  });
-
-  it("a typed command costs no thread read: the store is never asked about the thread's earlier runs", async () => {
-    const { deps, registry, runs } = wired();
-    await handBack(deps);
-    const listRuns = vi.fn(runs.listRuns.bind(runs));
-    const getRunEvents = vi.fn(runs.getRunEvents.bind(runs));
-    deps.runs = { ...runs, listRuns, getRunEvents };
-    const { io } = fakeIO();
-    await dispatch(deps, msg("config set channel --models.coding anthropic/claude-opus-5", "slack:UADMIN"), io);
-    expect(deps.invoked).toEqual(["config.set"]);
-    expect(listRuns).not.toHaveBeenCalled();
-    expect(getRunEvents).not.toHaveBeenCalled();
-    expect(registry.snapshotById("r2")).toBeNull();
-  });
-
-  it("a routed read records nothing new: its route carries no outcome, so a log-only command stays log-only", async () => {
-    const { deps, registry, runs } = wired();
-    deps.routeModel = call("config_show", {});
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("show me the config for this channel", "slack:UADMIN"), io);
-    expect(deps.invoked).toEqual(["config.show"]);
-    expect(replies[0]!.split("\n")[0]).toBe("routed: config show");
-    expect(registry.snapshotById("r1")).toBeNull();
-    const page = await runs.listRuns({ status: "finished", visibleTo: { kind: "all" }, agent: "command" });
-    expect(page.runs).toEqual([]);
-  });
-});
-
-// Feature: docs/reference/specs/routing-and-config.md items 2 and 21 (record
-// 0044, the confirm axis): the door's decision reads `boundary.confirm` off the
-// request's path — the earliest class any layer named, the built-in `write`
-// when none did — and hands a command back when its blast radius is at or
-// after it. Under the default this is exactly the door as it was; a channel
-// that sets `destructive` is the one setting that lets a routed write run.
-describe("the confirm axis through dispatch(): the door hands back at or after the effective confirm class (record 0044)", () => {
-  const HAND_BACK_LINE = "To run this: config set channel --models.coding anthropic/claude-opus-5";
-  const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
-  /** The routed fixture with a confirm on the layers named: the defaults' block, the request's channel, the requesting user. */
-  const confirmYaml = (layers: { defaults?: string; channel?: string; user?: string }) =>
-    ROUTING_ON_YAML.replace(
-      "defaults:\n",
-      layers.defaults ? `defaults:\n  boundary:\n    confirm: ${layers.defaults}\n` : "defaults:\n",
-    ) +
-    (layers.channel ? `channels:\n  "slack:CX":\n    boundary:\n      confirm: ${layers.channel}\n` : "") +
-    (layers.user ? `users:\n  "slack:UADMIN":\n    boundary:\n      confirm: ${layers.user}\n` : "");
-  const wired = (yaml: string) => {
-    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(yaml, provider);
-    deps.runRegistry = registry;
-    deps.admission = new ThreadAdmission();
-    return { deps, registry, provider };
-  };
-  const bindsConfigSet = () => call("config_set", { scope: "channel", models: { coding: "anthropic/claude-opus-5" } });
-  const codingModelIn = (deps: TestDeps) =>
-    deps.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef;
-
-  it("an org `write` is a floor: a routed write is handed back with the line as it always was even when the user set `destructive`, and nothing is written", async () => {
-    const { deps, provider } = wired(confirmYaml({ defaults: "write", user: "destructive" }));
-    deps.routeModel = bindsConfigSet();
-    const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io);
-    expect(replies).toEqual([HAND_BACK_LINE]);
-    expect(deps.invoked).toEqual([]);
-    expect(statuses).toEqual([]);
-    expect(provider.requests).toEqual([]);
-    expect(codingModelIn(deps)).toBe("anthropic/coding-model");
-  });
-
-  it("a channel `destructive` is the one setting that lets a routed write run — and the class reads the bound input (record 0057): `config set me` runs at once as the requester with the receipt first, while the same command bound at `channel` scope is destructive and handed back", async () => {
-    const { deps, provider, registry } = wired(confirmYaml({ channel: "destructive" }));
-    deps.routeModel = call("config_set", { scope: "me", models: { coding: "anthropic/claude-opus-5" } });
-    const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("use opus for my coding runs", "slack:UADMIN"), io);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(deps.invoked).toEqual(["config.set"]);
-    expect(replies).toHaveLength(1);
-    const [first, ...rest] = replies[0]!.split("\n");
-    expect(first).toBe("routed: config set me --models.coding anthropic/claude-opus-5");
-    // The command's own reply: the caller's effective scope with the new model.
-    expect(rest.join("\n")).toBe("Updated your scope: models `coding=anthropic/claude-opus-5`.");
-    expect(replies[0]).not.toMatch(/^To run this: /);
-    expect(statuses).toEqual([]);
-    expect(provider.requests).toEqual([]);
-    // No card, no agent run: the command is a log-only one, so no run either.
-    expect(registry.snapshotById("r1")).toBeNull();
-    expect(codingModelIn(deps)).toBe("anthropic/claude-opus-5");
-
-    // The same declaration classes `channel` scope destructive over the parsed
-    // input, so under the channel's `destructive` confirm it is handed back.
-    const shared = wired(confirmYaml({ channel: "destructive" }));
-    shared.deps.routeModel = bindsConfigSet();
-    const second = fakeIO();
-    await dispatch(shared.deps, msg("use opus for coding in this channel", "slack:UADMIN"), second.io);
-    expect(second.replies).toEqual([HAND_BACK_LINE]);
-    expect(shared.deps.invoked).toEqual([]);
-    expect(codingModelIn(shared.deps)).toBe("anthropic/coding-model");
-  });
-
-  it("a destructive command is handed back under every settable class — `destructive` on the channel included — with today's line", async () => {
-    for (const channel of ["write", "destructive"] as const) {
-      const { deps } = wired(confirmYaml({ channel }));
-      deps.routeModel = call("mcp_remove", { name: "linear" });
-      const { io, replies } = fakeIO();
-      await dispatch(deps, msg("remove the linear server", "slack:UADMIN"), io);
-      expect(replies, channel).toEqual(["To run this: mcp remove linear"]);
-      expect(deps.invoked, channel).toEqual([]);
-    }
-  });
-
-  it("`repo test` runs at once under every settable class and under the built-in default: an exec is never on the asking side of the ladder", async () => {
-    for (const layers of [
-      {},
-      { defaults: "write" },
-      { channel: "destructive" },
-      { defaults: "write", user: "destructive" },
-    ]) {
-      const { deps } = wired(confirmYaml(layers));
-      const calls: Array<{ op: string; repo: string }> = [];
-      deps.operations = {
-        async run(op: import("./operations.js").OpName, req: { repo: string; ref?: string }) {
-          calls.push({ op, repo: req.repo });
-          return { kind: "result", ok: true, summary: "test passed", output: "1 passing" } as const;
-        },
-      } as unknown as Operations;
-      deps.routeModel = call("repo_test", { slug: "acme/api", ref: "main" });
-      const { io, replies } = fakeIO();
-      await dispatch(deps, msg("run the tests on main in acme/api", "slack:UADMIN"), io);
-      const label = JSON.stringify(layers);
-      expect(deps.invoked, label).toEqual(["repo.test"]);
-      expect(calls, label).toEqual([{ op: "test", repo: "acme/api" }]);
-      expect(replies[0]!.split("\n")[0], label).toBe("routed: repo test acme/api main");
-    }
-  });
-
-  it("a read runs under every settable class: `config show` is never on the ladder", async () => {
-    for (const layers of [{ defaults: "write" }, { channel: "destructive" }]) {
-      const { deps } = wired(confirmYaml(layers));
-      deps.routeModel = call("config_show", {});
-      const { io, replies } = fakeIO();
-      await dispatch(deps, msg("show me the config for this channel", "slack:UADMIN"), io);
-      expect(deps.invoked, JSON.stringify(layers)).toEqual(["config.show"]);
-      expect(replies[0]!.split("\n")[0], JSON.stringify(layers)).toBe("routed: config show");
-    }
-  });
-});
-
-// Feature: docs/reference/specs/routing-and-config.md item 25 (record 0044, the
-// confirmation): on a channel that can show an offer, the door stores one row
-// in the confirmation store and offers the full line; `dispatchClick` consumes
-// it once for the requester and runs the stored input through the typed path
-// with `source: confirm`; every refusal is a named line; without `offer`, or
-// without the store, the hand-back is byte for byte what it was.
-describe("the confirmation through dispatch() and dispatchClick(): offered when the channel can show one, consumed once for the requester (record 0044)", () => {
-  const HAND_BACK_LINE = "To run this: config set channel --models.coding anthropic/claude-opus-5";
-  const LINE = "config set channel --models.coding anthropic/claude-opus-5";
-  const RISK = "changes the scope's settings for everyone in it until reset";
-  const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
-  const contentTypes = (events: readonly RunEvent[]) => events.filter((e) => !isSpanRecord(e)).map((e) => e.type);
-  const requester: Actor = { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS };
-  const stranger: Actor = { kind: "user", id: "slack:UOTHER", grants: NO_GRANTS };
-  /** A browser session the identity record binds to the requester (record 0042): another surface's id, the requester in `self`. */
-  const requesterInBrowser: Actor = {
-    kind: "user",
-    id: "access:sub-1",
-    grants: NO_GRANTS,
-    self: ["access:sub-1", "slack:UADMIN"],
-  };
-  const codingModelIn = (deps: TestDeps) =>
-    deps.config.resolve({ channelId: "slack:CX", userId: "slack:UADMIN", request: { agent: "coding" } }).modelRef;
-  /** The routed deps with a counting registry, an in-memory confirmation store
-   *  on a clock the test advances, and the catalogue re-bound with an audit
-   *  spy, so a test can read `source` off the audit line. */
-  const wired = (yaml = ROUTING_ON_YAML) => {
-    let n = 0;
-    let now = 1_000_000;
-    const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
-    const provider = capturingProvider();
-    const deps = makeDeps(yaml, provider);
-    deps.runRegistry = registry;
-    deps.admission = new ThreadAdmission();
-    deps.clock = () => now;
-    const store = new InMemoryConfirmationStore({ clock: () => now });
-    deps.confirmations = store;
-    const audits: AuditEntry[] = [];
-    const bound = buildCoreCommands(deps.config, null, {
-      registry,
-      secrets: processSecrets,
-      dataDir: deps.dataDir!,
-      warn: () => {},
-      audit: (e) => void audits.push(e),
-    });
-    const invoked: string[] = [];
-    deps.invoked = invoked;
-    deps.commands = {
-      ...bound,
-      invoke: (id, raw, caller, trace) => {
-        invoked.push(id);
-        return bound.invoke(id, raw, caller, trace);
-      },
-    };
-    return { deps, registry, provider, store, audits, tick: (ms: number) => void (now += ms), now: () => now };
-  };
-  /** The channel with `offer` and the two run signals spied. */
-  const offeringIO = () => {
-    const f = fakeIO();
-    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
-    const started = vi.fn();
-    const finished = vi.fn();
-    f.io.offer = vi.fn(async (o) => void offers.push(o));
-    f.io.runStarted = started;
-    f.io.runFinished = finished;
-    return { ...f, offers, started, finished };
-  };
-  const bindsConfigSet = () => call("config_set", { scope: "channel", models: { coding: "anthropic/claude-opus-5" } });
-  /** The sentence through the door on an offering channel: the offer it minted. */
-  const offered = async (deps: TestDeps) => {
-    deps.routeModel = bindsConfigSet();
-    const io = offeringIO();
-    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io.io);
-    return io;
-  };
-  const click = (deps: TestDeps, kind: "confirm" | "cancel", id: string, actor: Actor) => {
-    const io = fakeIO();
-    return dispatchClick(deps, { kind, id, actor, io: io.io }).then((outcome) => ({ outcome, ...io }));
-  };
-
-  it("a routed write on a channel with `offer` mints one row and offers the full line and the risk line — no footer; one record with outcome offered, nothing invoked, no run signal and no plain reply", async () => {
-    const { deps, registry, provider, store, now } = wired();
-    const { offers, replies, statuses, started, finished } = await offered(deps);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(offers).toEqual([
-      {
-        id: expect.stringMatching(/^[0-9a-f-]{36}$/),
-        line: LINE,
-        risk: RISK,
-        expiresAt: now() + CONFIRMATION_TTL_MS,
-      },
-    ]);
-    expect(replies).toEqual([]);
-    expect(deps.invoked).toEqual([]);
-    expect(statuses).toEqual([]);
-    expect(provider.requests).toEqual([]);
-    expect(started).not.toHaveBeenCalled();
-    expect(finished).not.toHaveBeenCalled();
-    expect(store.rows.size).toBe(1);
-    expect(store.rows.get(offers[0]!.id)).toMatchObject({
-      command: "config.set",
-      input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
-      message: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:1.0" },
-      model: "anthropic/general-model",
-    });
-    const snap = registry.snapshotById("r1");
-    expect(registry.getById("r1")).toMatchObject({ status: "completed", agent: "command", threadKey: "slack:CX:1.0" });
-    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
-    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
-      preset: "command",
-      reason: "command config.set",
-      command: "config.set",
-      receipt: LINE,
-      outcome: "offered",
-    });
-    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: renderOffer(offers[0]!) });
-    expect(registry.snapshotById("r2")).toBeNull();
-    expect(codingModelIn(deps)).toBe("anthropic/coding-model");
-  });
-
-  it("the offer's line is the full chat form where the record's receipt is capped", async () => {
-    const { deps, registry } = wired();
-    const long = `anthropic/${"x".repeat(ROUTE_RECEIPT_CAP + 100)}`;
-    deps.routeModel = call("config_set", { scope: "channel", models: { coding: long } });
-    const { offers } = offeringIO();
-    const io = offeringIO();
-    await dispatch(deps, msg("use that long model name for coding here", "slack:UADMIN"), io.io);
-    expect(offers).toEqual([]);
-    expect(io.offers[0]!.line).toBe(`config set channel --models.coding ${long}`);
-    expect(registry.snapshotById("r1")?.events.find((e) => e.type === "route")).toMatchObject({
-      outcome: "offered",
-      receipt: expect.stringMatching(/^config set channel --models\.coding anthropic\/x+…$/),
-    });
-  });
-
-  it("without `offer` on the channel the hand-back is byte for byte today's and no row is minted", async () => {
-    const { deps, registry, store } = wired();
-    deps.routeModel = bindsConfigSet();
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io);
-    expect(replies).toEqual([HAND_BACK_LINE]);
-    expect(store.rows.size).toBe(0);
-    expect(registry.snapshotById("r1")?.events.find((e) => e.type === "route")).toMatchObject({ outcome: "hand_back" });
-  });
-
-  it("with `offer` on the channel but no store in the process the refusal names the store and nothing is offered (the one-execution-path plan's E3)", async () => {
-    const { deps } = wired();
-    deps.confirmations = undefined;
-    const { offers, replies } = await offered(deps);
-    expect(replies).toEqual([STORE_UNREACHABLE_LINE]);
-    expect(replies.some((r) => r.includes("To run this:"))).toBe(false);
-    expect(offers).toEqual([]);
-  });
-
-  it("a token-shaped argument mints nothing: the refusal names the unshowable value — never a line to retype — recorded as a hand-back; no offer", async () => {
-    const { deps, registry, store } = wired();
-    deps.routeModel = call("config_set", {
-      scope: "channel",
-      models: { coding: "sk-ant-abcdefghijklmnopqrstuvwxyz0123" },
-    });
-    const io = offeringIO();
-    await dispatch(deps, msg("use my key for coding here", "slack:UADMIN"), io.io);
-    expect(io.replies).toEqual([UNSHOWABLE_LINE]);
-    expect(io.offers).toEqual([]);
-    expect(store.rows.size).toBe(0);
-    expect(deps.invoked).toEqual([]);
-    const snap = registry.snapshotById("r1");
-    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({ outcome: "hand_back" });
-    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: UNSHOWABLE_LINE });
-  });
-
-  it("a store that throws at mint refuses naming the store — never a line to retype — recorded as a hand-back; no offer (the one-execution-path plan's E3)", async () => {
-    const { deps, registry, store } = wired();
-    const throwing: ConfirmationStore = {
-      put: async () => {
-        throw new Error("object unreachable");
-      },
-      consume: (id, ids) => store.consume(id, ids),
-      cancel: (id, ids) => store.cancel(id, ids),
-      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
-      pendingByThread: (key) => store.pendingByThread(key),
-      describe: () => "throwing",
-    };
-    deps.confirmations = throwing;
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const { offers, replies } = await offered(deps);
-      expect(replies).toEqual([STORE_UNREACHABLE_LINE]);
-      expect(replies.some((r) => r.includes("To run this:"))).toBe(false);
-      expect(offers).toEqual([]);
-      expect(registry.snapshotById("r1")?.events.find((e) => e.type === "route")).toMatchObject({
-        outcome: "hand_back",
-      });
-      expect(warn.mock.calls.some((c) => String(c[0]).includes("object unreachable"))).toBe(true);
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it("the confirm click runs the stored input as the requester with source confirm: exactly one record with outcome confirmed, the reply's first line the receipt, the setting changed; a second click reads already used", async () => {
-    const { deps, registry, audits, store } = wired();
-    const { offers } = await offered(deps);
-    const id = offers[0]!.id;
-    const first = await click(deps, "confirm", id, requester);
-    expect(first.outcome).toEqual({ status: "completed" });
-    expect(first.replies).toEqual([
-      `routed: ${LINE}\nUpdated channel scope: models \`coding=anthropic/claude-opus-5\`.`,
-    ]);
-    expect(deps.invoked).toEqual(["config.set"]);
-    expect(audits).toEqual([
-      expect.objectContaining({ commandId: "config.set", callerId: "slack:UADMIN", outcome: "ok", source: "confirm" }),
-    ]);
-    expect(codingModelIn(deps)).toBe("anthropic/claude-opus-5");
-    expect(store.rows.size).toBe(0);
-    const snap = registry.snapshotById("r2");
-    expect(registry.getById("r2")).toMatchObject({ status: "completed", agent: "command", threadKey: "slack:CX:1.0" });
-    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
-    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
-      preset: "command",
-      reason: "confirmed after offer",
-      model: "anthropic/general-model",
-      command: "config.set",
-      input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
-      receipt: LINE,
-      outcome: "confirmed",
-    });
-    expect(registry.snapshotById("r3")).toBeNull();
-    const second = await click(deps, "confirm", id, requester);
-    expect(second.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
-    expect(second.replies).toEqual([OFFER_USED_LINE]);
-    expect(deps.invoked).toEqual(["config.set"]);
-    expect(registry.snapshotById("r3")).toBeNull();
-  });
-
-  it("a click after the expiry reads expired, judged on the store's clock; nothing runs", async () => {
-    const { deps, tick } = wired();
-    const { offers } = await offered(deps);
-    tick(CONFIRMATION_TTL_MS);
-    const late = await click(deps, "confirm", offers[0]!.id, requester);
-    expect(late.outcome).toEqual({ status: "refused", refusal: "confirmation_expired", cause: "request" });
-    expect(late.replies).toEqual([OFFER_EXPIRED_LINE]);
-    expect(deps.invoked).toEqual([]);
-    expect(codingModelIn(deps)).toBe("anthropic/coding-model");
-  });
-
-  it("a refused click whose store refusal names the row is a run record: expired writes one with outcome refused, the code and the row's command; nothing runs (record 0054)", async () => {
-    const { deps, registry, tick } = wired();
-    const { offers } = await offered(deps);
-    tick(CONFIRMATION_TTL_MS);
-    const late = await click(deps, "confirm", offers[0]!.id, requester);
-    expect(late.outcome).toEqual({ status: "refused", refusal: "confirmation_expired", cause: "request" });
-    expect(late.replies).toEqual([OFFER_EXPIRED_LINE]);
-    expect(deps.invoked).toEqual([]);
-    const snap = registry.snapshotById("r2");
-    expect(registry.getById("r2")).toMatchObject({ status: "completed", agent: "command", threadKey: "slack:CX:1.0" });
-    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
-    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
-      preset: "command",
-      reason: "refused after offer",
-      model: "anthropic/general-model",
-      command: "config.set",
-      input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
-      receipt: LINE,
-      outcome: "refused",
-      refusalCode: "confirmation_expired",
-    });
-    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: OFFER_EXPIRED_LINE });
-    expect(registry.snapshotById("r3")).toBeNull();
-  });
-
-  it("a foreign click's refusal is recorded with its code and the row stays; a used click and an unreadable store name no row and write no record", async () => {
-    const { deps, registry, store } = wired();
-    const { offers } = await offered(deps);
-    const foreign = await click(deps, "confirm", offers[0]!.id, stranger);
-    expect(foreign.replies).toEqual([OFFER_FOREIGN_LINE]);
-    expect(registry.snapshotById("r2")?.events.find((e) => e.type === "route")).toMatchObject({
-      outcome: "refused",
-      refusalCode: "confirmation_foreign",
-    });
-    const own = await click(deps, "confirm", offers[0]!.id, requester);
-    expect(own.outcome).toEqual({ status: "completed" });
-    // r3 is the confirmed run; the used click that follows writes no record.
-    const used = await click(deps, "confirm", offers[0]!.id, requester);
-    expect(used.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
-    expect(registry.snapshotById("r4")).toBeNull();
-    deps.confirmations = {
-      put: (row, ttl) => store.put(row, ttl),
-      cancel: (id, ids) => store.cancel(id, ids),
-      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
-      pendingByThread: (key) => store.pendingByThread(key),
-      describe: () => "throwing",
-      consume: async () => {
-        throw new Error("object unreachable");
-      },
-    };
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const unreadable = await click(deps, "confirm", offers[0]!.id, requester);
-      expect(unreadable.outcome).toEqual({ status: "refused", refusal: "confirmation_unreadable", cause: "system" });
-      expect(registry.snapshotById("r4")).toBeNull();
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it("a clicker whose id and `self` miss the requester is refused and nothing runs; the requester still can", async () => {
-    const { deps, audits } = wired();
-    const { offers } = await offered(deps);
-    const foreign = await click(deps, "confirm", offers[0]!.id, stranger);
-    expect(foreign.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign", cause: "policy" });
-    expect(foreign.replies).toEqual([OFFER_FOREIGN_LINE]);
-    expect(deps.invoked).toEqual([]);
-    expect(audits).toEqual([]);
-    const own = await click(deps, "confirm", offers[0]!.id, requester);
-    expect(own.outcome).toEqual({ status: "completed" });
-    expect(deps.invoked).toEqual(["config.set"]);
-  });
-
-  it("a clicker whose `self` holds the requester confirms from another surface's id, and the command runs as the requester", async () => {
-    const { deps, audits } = wired();
-    const { offers } = await offered(deps);
-    const own = await click(deps, "confirm", offers[0]!.id, requesterInBrowser);
-    expect(own.outcome).toEqual({ status: "completed" });
-    expect(own.replies[0]!.split("\n")[0]).toBe(`routed: ${LINE}`);
-    expect(audits).toEqual([expect.objectContaining({ callerId: "slack:UADMIN", source: "confirm", outcome: "ok" })]);
-    expect(codingModelIn(deps)).toBe("anthropic/claude-opus-5");
-  });
-
-  it("a cancel and a confirm on one id cannot both succeed, in either order; a stranger cannot cancel", async () => {
-    const one = wired();
-    const first = await offered(one.deps);
-    const strangerCancel = await click(one.deps, "cancel", first.offers[0]!.id, stranger);
-    expect(strangerCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign", cause: "policy" });
-    expect(strangerCancel.replies).toEqual([OFFER_FOREIGN_LINE]);
-    const cancelled = await click(one.deps, "cancel", first.offers[0]!.id, requester);
-    expect(cancelled.outcome).toEqual({ status: "completed" });
-    expect(cancelled.replies).toEqual([OFFER_CANCELLED_LINE]);
-    const afterCancel = await click(one.deps, "confirm", first.offers[0]!.id, requester);
-    expect(afterCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
-    expect(one.deps.invoked).toEqual([]);
-    expect(codingModelIn(one.deps)).toBe("anthropic/coding-model");
-    const two = wired();
-    const second = await offered(two.deps);
-    expect((await click(two.deps, "confirm", second.offers[0]!.id, requester)).outcome).toEqual({
-      status: "completed",
-    });
-    const afterConfirm = await click(two.deps, "cancel", second.offers[0]!.id, requester);
-    expect(afterConfirm.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
-    expect(afterConfirm.replies).toEqual([OFFER_USED_LINE]);
-    expect(two.deps.invoked).toEqual(["config.set"]);
-  });
-
-  it("a store that cannot be read at the click answers its line and runs nothing", async () => {
-    const { deps, store } = wired();
-    const { offers } = await offered(deps);
-    deps.confirmations = {
-      put: (row, ttl) => store.put(row, ttl),
-      cancel: (id, ids) => store.cancel(id, ids),
-      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
-      pendingByThread: (key) => store.pendingByThread(key),
-      describe: () => "throwing",
-      consume: async () => {
-        throw new Error("object unreachable");
-      },
-    };
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const res = await click(deps, "confirm", offers[0]!.id, requester);
-      expect(res.outcome).toEqual({ status: "refused", refusal: "confirmation_unreadable", cause: "system" });
-      expect(res.replies).toEqual([OFFER_UNREADABLE_LINE]);
-      expect(deps.invoked).toEqual([]);
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it("a click is counted in flight for the shutdown drain while it runs and released when it ends, as a dispatch is", async () => {
-    const { deps, store } = wired();
-    const { offers } = await offered(deps);
-    expect(activeRunCount()).toBe(0);
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    deps.confirmations = {
-      put: (row, ttl) => store.put(row, ttl),
-      cancel: (id, ids) => store.cancel(id, ids),
-      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
-      pendingByThread: (key) => store.pendingByThread(key),
-      describe: () => "gated",
-      consume: async (id, ids) => {
-        await gate;
-        return store.consume(id, ids);
-      },
-    };
-    const pending = click(deps, "confirm", offers[0]!.id, requester);
-    await realSleep(5);
-    expect(activeRunCount()).toBe(1);
-    release();
-    const res = await pending;
-    expect(res.outcome).toEqual({ status: "completed" });
-    expect(activeRunCount()).toBe(0);
-  });
-});
-
-// Feature: record 0051's reply-as-event and gone-instance rules (thread-admission; routing-and-config item 21)
-// — a plain reply into a thread owned by an unfinished unit with no live run is
-// one thread event on the unit: appended with mode `steer`, the instance
-// nudged, the sender acked; the router is never called and no run starts. A
-// directive naming an agent keeps today's meaning; a gone instance ends the
-// row `terminated` and routes fresh; any other send failure keeps the event
-// and acks it as queued.
 describe("a unit-owned thread (record 0051's reply-as-event and gone-instance rules)", () => {
   const INSTANCE = "plan-fix-the-login-6435ec";
   const THREAD = "slack:CX:1.0";
@@ -17898,20 +15805,14 @@ describe("every refusal is a run record (record 0054, as amended)", () => {
 });
 
 describe("the operator behind routing.operator (record 0057; routing-and-config item 29)", () => {
-  const SHADOW_YAML = YAML_FIXTURE.replace(
-    "routing: { auto: false, operator: off }\n",
-    "routing: { auto: false, operator: shadow }\n",
-  );
-  const ON_YAML = YAML_FIXTURE.replace(
-    "routing: { auto: false, operator: off }\n",
-    "routing: { auto: false, operator: on }\n",
-  );
+  const SHADOW_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: shadow }\n");
+  const ON_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
 
   /** A scripted operator, in the loop's typed tools (record 0069, as
    *  amended): the old decide-shape is translated onto one typed call — a
    *  preset line becomes `bind_preset`, a command line the command's own tool
    *  (its input bound through the test registry), a question an `ask`; no
-   *  binds and no question is an ended turn (the floor). */
+   *  binds and no question is a no-call turn for the loop to repair. */
   let parseRegistry: NonNullable<TestDeps["commands"]> | undefined;
   const parseOnlyCommands = () => (parseRegistry ??= operatorDeps(ON_YAML).deps.commands!);
   const decides = (input: {
@@ -18131,7 +16032,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(presetIO.replies[0]).toBe("bound: `agent:general what changed this week?` — read — the ask");
   });
 
-  it("on: a question renders with the marker — the model can author no refusal; its cannot is an ask or an ended turn", async () => {
+  it("on: a question renders with the marker — the model can author no refusal; its cannot is an ask or a repaired no-call turn", async () => {
     const { deps } = operatorDeps(ON_YAML);
     deps.operatorModel = decides({
       reason: "ambiguous",
@@ -18237,30 +16138,21 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(events.find((e) => e.type === "operator")).toMatchObject({ outcome: "binds" });
   });
 
-  it("on: the seam floors on a pending question's answer — the readers' route sees the joined ask, never the bare fragment, so the reply is never 'unclear' (issue 2046)", async () => {
-    const FALLBACK_YAML = YAML_FIXTURE.replace(
-      "routing: { auto: false, operator: off }\n",
-      "routing: { auto: true, operator: on }\n",
-    );
+  it("on: a pending question's no-call answer is re-asked once, then the door binds general on the joined ask without a reader hand-off (issue 2046)", async () => {
+    const FALLBACK_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
     const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);
     deps.operatorModel = vi.fn<RouteModel>(async () => "sure, acme/tools it is");
-    const routePrompts: RoutePrompt[] = [];
-    deps.routeModel = vi.fn(async (prompt: RoutePrompt) => {
-      routePrompts.push(prompt);
-      return JSON.stringify({ preset: "review", reason: "a write ask on a named repository" });
-    });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread: questionThread() });
-    // The router judged the joined ask — the thread's parent request with the
-    // question and its answer — never the fragment alone.
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(routePrompts[0]!.user).toContain(JOINED);
-    // The routed run carries the joined request and answers as ever.
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(provider.requests[0])).toContain(JOINED);
+    expect(provider.requests[0].model).toBe("general-model");
     expect(replies).toContain("answer");
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
       mode: "on",
-      outcome: "non_decision",
+      outcome: "binds",
+      reason: "no_decision",
+      binds: [{ line: expect.stringContaining(JOINED) as unknown as string, reason: "no_decision" }],
     });
   });
 
@@ -19206,7 +17098,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   });
 
   it("the default is on: a config that never names routing.operator runs the operator's decision, not the readers'", async () => {
-    const SILENT_YAML = YAML_FIXTURE.replace("routing: { auto: false, operator: off }\n", "routing: { auto: false }\n");
+    const SILENT_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "");
     const { deps, provider } = operatorDeps(SILENT_YAML);
     deps.operatorModel = decides({ reason: "one listing", binds: [{ line: "config show", reason: "the scopes" }] });
     const { io } = fakeIO();
@@ -19217,66 +17109,50 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("on: a turn ending with no tool call floors to the readers' route — one call, the event marked floored on the run that runs, never a rendered sentence", async () => {
-    const FALLBACK_YAML = YAML_FIXTURE.replace(
-      "routing: { auto: false, operator: off }\n",
-      "routing: { auto: true, operator: on }\n",
-    );
+  it("on: a turn ending with no tool call is re-asked once, then binds general with no_decision on the run's operator field", async () => {
+    const FALLBACK_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
     const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);
-    // A text answer is an ended turn — the loop's one floor cause: nothing to
-    // repair, the readers' route runs the person's own request.
     deps.operatorModel = vi.fn<RouteModel>(async () => "sure, I will run that for you");
-    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "review", reason: "review fits the request" }));
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("review it for me", "slack:UADMIN"), io);
-    // No re-ask: an ended turn is a decision to floor, not a violation.
-    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
-    // The route stage ran as under `off`: the router bound review and the agent run answered.
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(provider.requests[0].model).toBe("review-model");
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
+    expect(provider.requests[0].model).toBe("general-model");
     expect(replies).toContain("answer");
-    // The floor never reached the person; the decision is on the run that ran.
     expect(replies.every((r) => !r.includes("no tool call") && !r.includes("non_decision"))).toBe(true);
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
       mode: "on",
-      outcome: "non_decision",
-      floored: true,
-      reason: expect.stringContaining("no tool call") as unknown as string,
+      outcome: "binds",
+      reason: "no_decision",
+      binds: [{ line: "agent:general review it for me", reason: "no_decision" }],
     });
   });
 
-  it("on: a refusal is unrepresentable — a refuse call is an unoffered tool, re-asked and floored to the readers' route; the docs ask runs and no invented authority is ever rendered (issue 2043)", async () => {
-    const FALLBACK_YAML = YAML_FIXTURE.replace(
-      "routing: { auto: false, operator: off }\n",
-      "routing: { auto: true, operator: on }\n",
-    );
+  it("on: a refusal is unrepresentable — a refuse call is re-asked and the request falls to the configured default with no second model", async () => {
+    const FALLBACK_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
     const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);
     // The incident's shape, in the loop's vocabulary: the model tries to
     // refuse a plain-words docs ask. No refuse tool exists — only the policy
-    // table refuses — so the call is a violation, re-asked and then floored:
-    // the readers' route runs the request, marked floored on the event.
+    // table refuses — so the call is a violation, re-asked and then resolved
+    // on the configured default with no second model.
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "refuse",
       input: { text: "privileged administrative updates to control plane records require admin access" },
     }));
-    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "review", reason: "review fits the request" }));
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("in acme/api: record 0070 — flip the record's status to accepted", "slack:UADMIN"), io);
     expect(deps.operatorModel).toHaveBeenCalledTimes(3);
-    expect(deps.routeModel).toHaveBeenCalledTimes(1);
-    expect(provider.requests[0].model).toBe("review-model");
+    expect(provider.requests[0].model).toBe("general-model");
     expect(replies).toContain("answer");
     // The invented authority never reached the person.
     expect(replies.every((r) => !r.includes("admin access"))).toBe(true);
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
       mode: "on",
       outcome: "non_decision",
-      floored: true,
       reason: expect.stringContaining("does not offer") as unknown as string,
     });
   });
 
-  it("off is the rollback lever: `routing.operator: off` never calls the operator and the route stage is untouched", async () => {
+  it("off is the rollback lever: `routing.operator: off` never calls the operator and typed stage A is unchanged", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });

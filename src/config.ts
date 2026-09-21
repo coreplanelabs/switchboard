@@ -49,7 +49,6 @@ import {
   type IntakeMode,
   type OperatorMode,
   type PlaneAdmissionMode,
-  type RouteAnswerMode,
 } from "./config/validate.js";
 export type { IntakeMode } from "./config/validate.js";
 import type { HarnessName } from "./core/harness/contract.js";
@@ -197,32 +196,22 @@ export interface Scope {
 export interface IntakeConfig {
   /** The default mode; `classify` when unset (`defaultIntakeMode`). */
   threadReplies?: IntakeMode;
-  /** The verdict's model, `<provider>/<model>`; default `routing.model`, else
+  /** The verdict's model, `<provider>/<model>`; default
    *  `defaults.models.general` (`intakeModelRef`). */
   model?: string;
 }
 
 /** The gate's default mode and the verdict's model ref (routing-and-config
  *  item 27): `defaultIntakeMode` is `intake.threadReplies` else `classify`,
- *  `intakeModelRef` is `intake.model`, else `routing.model`, else
- *  `defaults.models.general`. Each lives once, beside the validator that
- *  checks the card under them at load, so the load-time check and the runtime
- *  call cannot drift; re-exported here for every other caller. */
+ *  `intakeModelRef` is `intake.model`, else `defaults.models.general`. Each
+ *  lives once, beside the validator that checks the card under them at load,
+ *  so the load-time check and the runtime call cannot drift; re-exported here
+ *  for every other caller. */
 export { defaultIntakeMode, intakeModelRef } from "./config/validate.js";
 export type { OperatorMode, PlaneAdmissionMode } from "./config/validate.js";
 
-/** The `routing` block (`AppConfig.routing`). */
+/** The `routing` block (`AppConfig.routing`), now only the door's mode. */
 export interface RoutingConfig {
-  /** Route a plain message to a preset through the fast model. Default true;
-   *  `false` is the one way off (`routingOn`). */
-  auto?: boolean;
-  /** The router's model, `<provider>/<model>`; default `defaults.models.general`. */
-  model?: string;
-  /** How the router's model answers. `tool` (default): the model is forced to
-   *  call the `route` tool, whose schema is the answer — prose cannot occur.
-   *  `text`: the one-JSON-object text contract alone — the escape hatch for a
-   *  provider or model that cannot take a forced tool call. */
-  answer?: RouteAnswerMode;
   /** The operator (record 0057; routing-and-config item 29): `on` (default)
    *  — its decision is what runs; `shadow` — called once per admitted chat
    *  event ahead of stage A, its decision written beside the routed request
@@ -260,22 +249,10 @@ export interface OpenCodeConfig {
   compaction?: OpenCodeCompactionConfig;
 }
 
-/** Whether the request router runs (docs/reference/specs/routing-and-config.md
- *  item 21): `routing.auto` where the block sets it, else on — a deployment
- *  with no `routing` block, or one naming only `model`, routes a plain
- *  message from its first day, and `routing: { auto: false }` is the one line
- *  that keeps every plain message on `defaults.agent`. The one place the
- *  default lives: the stage asks this, never the field. */
-export function routingOn(config: AppConfig): boolean {
-  return config.routing?.auto ?? true;
-}
-
 /** The operator's mode (record 0057; routing-and-config item 29):
  *  `routing.operator` where the block sets it, else `on` — a deployment whose
  *  config never names the flag runs the operator as the one door, and `off`
- *  is the rollback lever, never a setting to offer; `shadow` and `on` run
- *  even where `routing.auto` is off (the flag is independent of the route
- *  stage's own switch). */
+ *  is the rollback lever, never a setting to offer. */
 export function operatorModeOf(config: AppConfig): OperatorMode {
   return config.routing?.operator ?? "on";
 }
@@ -482,15 +459,7 @@ export interface AppConfig {
    * `ship`; validated at load.
    */
   spawn?: SpawnConfig;
-  /**
-   * The request router (docs/decisions/0026-capability-profiles-and-request-routing.md;
-   * docs/reference/specs/routing-and-config.md item 21): a plain message — no
-   * directive, no sticky preset, no user or channel `agent` — asks `model`
-   * (default: `defaults.models.general`, the fast model) to pick its preset
-   * from the registry's table. On by default (`routingOn`): a deployment that
-   * sets nothing here routes; `auto: false` keeps every plain message on
-   * `defaults.agent`, exactly as before the router.
-   */
+  /** The one door's operator mode (record 0069; routing-and-config item 29). */
   routing?: RoutingConfig;
   /**
    * The thread-reply intake gate's defaults layer (docs/decisions/
@@ -793,9 +762,8 @@ export interface ResolvedMcpServer {
 }
 
 /** The config layer that set a request's agent (`resolve()`'s ladder): the
- *  request itself — a directive or the thread's sticky preset — the user scope,
- *  the channel scope, or `defaults.agent`. The route stage runs only for
- *  `default` (docs/reference/specs/routing-and-config.md item 21). */
+ *  request itself — a directive, the thread's sticky preset or the door's
+ *  bind — the user scope, the channel scope, or `defaults.agent`. */
 export type AgentLayer = "request" | "user" | "channel" | "default";
 
 /** The harness word the scopes resolved for a request's preset and the scope

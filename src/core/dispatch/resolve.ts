@@ -81,8 +81,8 @@ export async function readRequest(
 
 /** The run this request resolves to: the thread's sticky directives, the
  *  (agent, model, effort) triple the config layers settled on, and how the
- *  agent was chosen — the route stage runs only for `default`, and the record's
- *  `run_meta` carries it. */
+ *  agent was chosen — including an operator bind at request precedence — and
+ *  the record's `run_meta` carries it. */
 export interface ResolvedRun {
   sticky: ThreadDirectives;
   resolved: ResolvedRequest;

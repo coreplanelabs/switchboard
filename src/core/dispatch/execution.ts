@@ -16,8 +16,8 @@ export type Surface = "chat" | "typed";
 /** How one operator turn ended — the loop's whole vocabulary of acts, closed.
  *  A malformed act is unrepresentable: the typed tool schema carries the
  *  preset and the person's request as arguments, so there is no line to
- *  mangle, and the model authors no refusal — its "cannot" is an `ask` or an
- *  ended turn, and a refusal exists only where the policy table made one. */
+ *  mangle, and the model authors no refusal — its "cannot" is an `ask` or a
+ *  no-call turn the loop repairs, while policy alone makes refusals. */
 export type TurnOutcome =
   /** `run_command`: a registry command with typed arguments. `confirm` is the
    *  class ladder's verdict over the PARSED input against the path's
@@ -40,8 +40,6 @@ export type TurnOutcome =
    *  that exist, so "yes" runs it through the click path and the person's
    *  next words refine it. */
   | { kind: "unresolvable_write" }
-  /** A turn that ended with no tool call: the model had nothing to act on. */
-  | { kind: "ended" }
   /** A line the person's own chat grammar parses: their typed decision — it
    *  never enters the loop and is never re-spelled. */
   | { kind: "typed_line" }
@@ -62,9 +60,7 @@ export type ExecutionCell =
   /** Record 0044's row, minted by the one offer path, the full bound line on
    *  the button. */
   | { cell: "click" }
-  /** The readers' route runs the person's own request — the one last-resort
-   *  floor, terminal for the event: a floored request never re-enters the
-   *  loop, and the router reads the thread's parent as the request. */
+  /** Resolve and run the typed preset bind on the person's own request. */
   | { cell: "route" }
   /** One question, parked as the thread's pending question; the next words in
    *  the thread are its answer and rebind the original request. */
@@ -86,10 +82,9 @@ export type ExecutionCell =
  * question — and so is a write-class call the deployment cannot run as typed
  * (a required argument missing, or a provider it does not have), its proposal
  * built from what exists (issue 2088's cell: a write intent never executes as
- * a read command); a turn ending with no tool call floors to the route; a typed
- * registry line runs as typed; a steer into an owned thread runs as
- * admission's fold; and a refusal comes only from the policy table, naming
- * its row.
+ * a read command); a typed registry line runs as typed; a steer into an owned
+ * thread runs as admission's fold; and a refusal comes only from the policy
+ * table, naming its row.
  */
 export function decideExecution(outcome: TurnOutcome, surface: Surface): ExecutionCell {
   switch (outcome.kind) {
@@ -103,8 +98,6 @@ export function decideExecution(outcome: TurnOutcome, surface: Surface): Executi
       return { cell: "question" };
     case "unresolvable_write":
       return { cell: "question" };
-    case "ended":
-      return { cell: "route" };
     case "typed_line":
       return { cell: "run" };
     case "steer_owned":

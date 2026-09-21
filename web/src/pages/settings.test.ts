@@ -116,7 +116,7 @@ describe("SettingsPage", () => {
           tab: "installation",
           installation: {
             settings: [
-              { key: "routing.auto", value: "true", isDefault: true, how: "config", note: "the router" },
+              { key: "references.enabled", value: "false", isDefault: true, how: "config", note: "linked threads" },
               { key: "ship.maxRounds", value: "5", isDefault: false, how: "config", note: "rounds" },
               { key: "defaults.agent", value: "general", isDefault: false, how: "runtime", note: "the preset" },
             ],
@@ -130,7 +130,11 @@ describe("SettingsPage", () => {
       ),
     });
     const rows = wrapper.findAll("tr.setting");
-    expect(rows.map((r) => r.attributes("data-key"))).toEqual(["routing.auto", "ship.maxRounds", "defaults.agent"]);
+    expect(rows.map((r) => r.attributes("data-key"))).toEqual([
+      "references.enabled",
+      "ship.maxRounds",
+      "defaults.agent",
+    ]);
     expect(rows[0].text()).toContain("default");
     expect(rows[1].text()).not.toContain("default");
     expect(rows[2].text()).toContain("Channels tab");
