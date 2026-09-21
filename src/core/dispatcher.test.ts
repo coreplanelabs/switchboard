@@ -10873,7 +10873,12 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         userId: "slack:UX",
         threadKey: "slack:CX:1.0",
         agent: "general",
-        model: "anthropic/general-model",
+        // The segment before the restart ran on a model that is still valid but
+        // is no longer this preset's configured default.
+        model: "anthropic/review-model",
+        effort: "high",
+        parentInstanceId: "instance-review",
+        idempotencyKey: "instance-review:task/1/review",
       },
       card: { channel: "CX", ts: "1.2" },
       system: "the stored prompt, verbatim",
@@ -10907,7 +10912,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     );
     await ledger.append("run-old", "gen-OLD", [
       { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
-      { type: "run_meta", agent: "general", model: "anthropic/general-model", at: 2, seq: 2 },
+      { type: "run_meta", agent: "general", model: "anthropic/review-model", at: 2, seq: 2 },
       { type: "tool_call", tool: "update_status", summary: "s", at: 3, seq: 3 },
       { type: "tool_call", tool: "bash", summary: "make", at: 4, seq: 4 },
     ]);
@@ -10934,6 +10939,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
     const events = await ledger.readEvents("run-old");
     const { io, replies } = ioWithCard();
+    io.history = async () => [
+      { role: "user", text: "model:anthropic/review-model effort:high run the old child segment" },
+    ];
     await dispatch(deps, resumeMessage(reclaimed.row, "hello there"), io, {
       resume: { row: reclaimed.row, lastStep: reclaimed.lastStep!, plan, events, lastSeq: 4, repoCtx: {}, inbox: [] },
     });
@@ -10957,6 +10965,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.live.has("run-old")).toBe(false);
     const record = ledger.finished.get("run-old")!;
     expect(record.status).toBe("completed");
+    expect(record.model).toBe("anthropic/general-model"); // the current default, not the prior segment's model
+    expect(record.parentInstanceId).toBe("instance-review"); // this is a resumed coordinator child
     expect(record.startedAt).toBe(5_000); // the original start, not the resume
     expect(record.events.slice(0, 4).map((e) => e.type)).toEqual(["input", "run_meta", "tool_call", "tool_call"]);
     expect(record.events.map((e) => e.seq)).toEqual(

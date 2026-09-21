@@ -115,17 +115,27 @@ export interface RestartRun {
   inbox: InboxItem[];
 }
 
-/** A hosted ship parent's row (record 0060) taken within its deadline with no
- *  pipeline outcome in the store: no process of its own to resume — the plan
- *  runner drives the pipeline — so the launcher re-hosts it: the registry row
- *  recreated under the run's id with the events replayed, the ledger row
- *  adopted, the write-through subscribed for the runner's later publishes. */
+/** A hosted ship parent's row (record 0060) whose deadline, live Workflow
+ *  or children that remain live say the pipeline still runs: no process of its own to resume —
+ *  the plan runner drives it — so the launcher re-hosts the registry/ledger
+ *  owner beside the children and subscribes later runner publishes. */
+export interface RehostChild {
+  runId: string;
+  threadKey: string;
+  agent?: string;
+  idempotencyKey?: string;
+}
+
 export interface RehostRun {
   kind: "rehost";
   row: LiveRunRow;
   reclaimedFrom: LivePhase;
   hosting: HostingState;
   events: AppendableEvent[];
+  /** Children the same ledger still holds for this instance. A parent is
+   *  alive whenever one of these rows is alive, even after its old wall-clock
+   *  estimate passed: the Workflow is waiting for that child. */
+  children: RehostChild[];
 }
 
 export type ResumableRun = ResumeRun | RestartRun | RehostRun;
@@ -174,10 +184,14 @@ export interface ReclaimOptions {
    *  in the plain store because the ledger refused its write, so the row is
    *  abandoned instead of re-hosted; the provisional `interrupted` record the
    *  ship branch writes at start is the normal state of a hosted run and never
-   *  abandons it. Absent (or failing — one warning), a hosted row within its
-   *  deadline is re-hosted: re-hosting a finished row is bounded by its
-   *  deadline, where abandoning a live one would kill the pipeline's parent. */
+   *  abandons it. Absent (or failing — one warning), a row whose deadline or
+   *  Workflow says live is re-hosted; a live child row is authoritative even
+   *  over a stale plain-store projection, because abandoning its parent would
+   *  orphan the unit. */
   storedStatus?: (runId: string) => Promise<RunStatus | undefined>;
+  /** Whether the Workflow instance still runs. `undefined` means the platform
+   *  could not answer; a live child row remains sufficient on its own. */
+  hostedInstanceLive?: (instanceId: string) => Promise<boolean | undefined>;
   now?: () => number;
   log?: (line: string) => void;
   warn?: (line: string) => void;
@@ -215,7 +229,40 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
     return outcome;
   }
 
-  for (const run of reclaimed) {
+  // Reclaim is one plane admission. Read the newly owned rows together, but
+  // classify children before hosted parents: a child taken from `finishing` or
+  // rejected by the transcript rule closes in this admission and must not keep
+  // its parent alive. Children another generation still owns, children this
+  // admission will actually resume, and children whose classification failed
+  // while their row stayed live remain durable liveness facts.
+  let rowsAtAdmission: LiveRunRow[] = reclaimed.map((run) => run.row);
+  try {
+    rowsAtAdmission = await ledger.listLive();
+  } catch (err) {
+    warn(`[reclaim] listing the admission's live rows failed (${describe(err)}) — using the reclaimed rows`);
+  }
+  const admissionOrder = new Map(reclaimed.map((run, index) => [run.row.runId, index]));
+  const reclaimedIds = new Set(reclaimed.map((run) => run.row.runId));
+  const resumingIds = new Set<string>();
+  const failedIds = new Set<string>();
+  const childrenOf = (instanceId: string): RehostChild[] =>
+    rowsAtAdmission
+      .filter(
+        (candidate) =>
+          candidate.meta.parentInstanceId === instanceId &&
+          (!reclaimedIds.has(candidate.runId) || resumingIds.has(candidate.runId) || failedIds.has(candidate.runId)),
+      )
+      .map((candidate) => ({
+        runId: candidate.runId,
+        threadKey: candidate.meta.threadKey,
+        ...(candidate.meta.agent !== undefined ? { agent: candidate.meta.agent } : {}),
+        ...(candidate.meta.idempotencyKey !== undefined ? { idempotencyKey: candidate.meta.idempotencyKey } : {}),
+      }));
+  const classificationOrder = [...reclaimed].sort(
+    (left, right) => Number(hostingOf(left.row.state) !== undefined) - Number(hostingOf(right.row.state) !== undefined),
+  );
+
+  for (const run of classificationOrder) {
     const { row } = run;
     try {
       let status: RunStatus;
@@ -233,6 +280,7 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         // this build cannot read), closed like any run with nothing to resume.
         if (typeof row.meta.request === "object" && row.meta.request !== null) {
           outcome.resumable.push({ kind: "restart", row, reclaimedFrom: "attaching", inbox: run.inbox });
+          resumingIds.add(row.runId);
           log(
             `[reclaim] ${row.runId} ${row.threadKey} restartable (from attaching; killed before its prompt existed; ${run.inbox.length} follow-up(s) pending) — handed to the launcher`,
           );
@@ -240,45 +288,59 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         }
         status = "interrupted";
         why = "reserved at admission without its request: nothing to restart from";
-      } else if (hostingOf(row.state) !== undefined && hostingOf(row.state)!.until > now()) {
-        // A hosted parent within its deadline (record 0060): the plan runner
-        // drives the pipeline, so there is no transcript to judge. The store's
-        // record decides: a pipeline outcome (`completed` or `failed`)
-        // means `finish` landed in the plain store because the ledger refused
-        // its write — the row is stale and is abandoned, no record written;
-        // anything else — the ship branch's provisional `interrupted`
-        // tombstone, no record, or a store that cannot be asked (one warning;
-        // re-hosting a finished row is bounded by the deadline, abandoning a
-        // live one would kill the pipeline's parent) — re-hosts.
+      } else if (hostingOf(row.state) !== undefined) {
+        // A hosted parent has no transcript of its own: its Workflow and
+        // children that remain live are the durable liveness facts. The old
+        // `until` is only a final bound when neither exists. Child classification
+        // already removed finishing and non-resumable rows from this answer.
         const hosting = hostingOf(row.state)!;
-        let stored: RunStatus | undefined;
-        try {
-          stored = await opts.storedStatus?.(row.runId);
-        } catch (err) {
-          warn(`[reclaim] ${row.runId} ${row.threadKey}: store read failed (${describe(err)}) — re-hosting`);
+        const children = childrenOf(hosting.instanceId);
+        let instanceLive: boolean | undefined;
+        if (children.length === 0 && hosting.until <= now() && opts.hostedInstanceLive) {
+          try {
+            instanceLive = await opts.hostedInstanceLive(hosting.instanceId);
+          } catch (err) {
+            warn(
+              `[reclaim] ${row.runId} ${row.threadKey}: instance status failed (${describe(err)}) — falling back to the ledger deadline`,
+            );
+          }
         }
-        if (stored === "completed" || stored === "failed") {
-          const gone = await ledger.abandon(row.runId, gen);
-          if (!gone.ok) {
-            outcome.failed.push({ runId: row.runId, error: `abandon refused (${gone.reason})` });
-            warn(`[reclaim] ${row.runId} ${row.threadKey}: abandon refused (${gone.reason})`);
+        const shouldRehost = hosting.until > now() || children.length > 0 || instanceLive === true;
+        if (shouldRehost) {
+          // With no child proving liveness, a terminal plain-store record says
+          // finish landed there while the ledger write failed: abandon the
+          // stale row. A live child wins over that stale projection — closing
+          // its owner is the orphan bug this admission prevents.
+          let stored: RunStatus | undefined;
+          if (children.length === 0) {
+            try {
+              stored = await opts.storedStatus?.(row.runId);
+            } catch (err) {
+              warn(`[reclaim] ${row.runId} ${row.threadKey}: store read failed (${describe(err)}) — re-hosting`);
+            }
+          }
+          if (stored === "completed" || stored === "failed") {
+            const gone = await ledger.abandon(row.runId, gen);
+            if (!gone.ok) {
+              outcome.failed.push({ runId: row.runId, error: `abandon refused (${gone.reason})` });
+              warn(`[reclaim] ${row.runId} ${row.threadKey}: abandon refused (${gone.reason})`);
+              continue;
+            }
+            log(
+              `[reclaim] ${row.runId} ${row.threadKey} abandoned (hosted; the store already holds its ${stored} record — the pipeline's finish landed there)`,
+            );
             continue;
           }
+          const events = await ledger.readEvents(row.runId);
+          outcome.resumable.push({ kind: "rehost", row, reclaimedFrom: run.reclaimedFrom, hosting, events, children });
+          resumingIds.add(row.runId);
           log(
-            `[reclaim] ${row.runId} ${row.threadKey} abandoned (hosted; the store already holds its ${stored} record — the pipeline's finish landed there)`,
+            `[reclaim] ${row.runId} ${row.threadKey} rehost (from ${run.reclaimedFrom}; instance ${hosting.instanceId}; ${children.length} live child(ren); ${events.length} event(s)) — handed to the launcher`,
           );
           continue;
         }
-        const events = await ledger.readEvents(row.runId);
-        outcome.resumable.push({ kind: "rehost", row, reclaimedFrom: run.reclaimedFrom, hosting, events });
-        log(
-          `[reclaim] ${row.runId} ${row.threadKey} rehost (from ${run.reclaimedFrom}; instance ${hosting.instanceId}; ${events.length} event(s)) — handed to the launcher`,
-        );
-        continue;
-      } else if (hostingOf(row.state) !== undefined) {
-        // Past its deadline: the runner died without `finish`, and re-hosting
-        // it again would hold the thread's host key forever (record 0060).
-        const hosting = hostingOf(row.state)!;
+        // Past its deadline with no live Workflow or child: the runner died
+        // without `finish`, and re-hosting again would hold the host key forever.
         status = "interrupted";
         why = `hosted past its deadline (${new Date(hosting.until).toISOString()}): the pipeline's runner never finished it`;
       } else {
@@ -296,6 +358,7 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
             events,
             inbox: run.inbox,
           });
+          resumingIds.add(row.runId);
           log(
             `[reclaim] ${row.runId} ${row.threadKey} resumable (from ${run.reclaimedFrom}; ${verdict.why}; ${events.length} event(s)) — handed to the launcher`,
           );
@@ -307,6 +370,10 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
       const events = await ledger.readEvents(row.runId);
       const closed = await closeReclaimed(ledger, gen, { row, events, status, finishedAt: now() });
       if (!closed.ok) {
+        // A fence proves the row still exists under another generation. Keep
+        // that durable child in its hosted parent's liveness facts just as we
+        // do when classification throws while the row remains ours.
+        if (closed.reason === "fenced") failedIds.add(row.runId);
         outcome.failed.push({ runId: row.runId, error: `finish refused (${closed.reason})` });
         warn(`[reclaim] ${row.runId} ${row.threadKey}: finish refused (${closed.reason})`);
         continue;
@@ -331,10 +398,18 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         `[reclaim] ${row.runId} ${row.threadKey} closed ${status} (from ${run.reclaimedFrom}; ${why}; ${events.length} event(s))`,
       );
     } catch (err) {
+      failedIds.add(row.runId);
       outcome.failed.push({ runId: row.runId, error: describe(err) });
       warn(`[reclaim] ${row.runId} ${row.threadKey}: ${describe(err)} — left on the ledger for the next boot`);
     }
   }
+
+  // Classification is dependency-ordered; callers still receive the ledger's
+  // admission order, as they did before parent and child liveness were coupled.
+  const orderOf = (runId: string): number => admissionOrder.get(runId) ?? Number.MAX_SAFE_INTEGER;
+  outcome.closed.sort((left, right) => orderOf(left.runId) - orderOf(right.runId));
+  outcome.resumable.sort((left, right) => orderOf(left.row.runId) - orderOf(right.row.runId));
+  outcome.failed.sort((left, right) => orderOf(left.runId) - orderOf(right.runId));
 
   try {
     for (const row of await ledger.listLive()) {

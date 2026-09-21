@@ -66,7 +66,11 @@ function overriding(inner: InMemoryRunLedger, over: Partial<RunLedger>): RunLedg
  *  t = 100 000, past every default lease (1 000 + LEASE_MS). */
 function harness(
   wrap?: (inner: InMemoryRunLedger) => RunLedger,
-  over: { storedStatus?: (runId: string) => Promise<RunStatus | undefined>; gen?: string } = {},
+  over: {
+    storedStatus?: (runId: string) => Promise<RunStatus | undefined>;
+    hostedInstanceLive?: (instanceId: string) => Promise<boolean | undefined>;
+    gen?: string;
+  } = {},
 ) {
   let clock = 1_000;
   const inner = new InMemoryRunLedger(() => clock);
@@ -79,6 +83,7 @@ function harness(
       ledger,
       gen: over.gen ?? "g2",
       ...(over.storedStatus ? { storedStatus: over.storedStatus } : {}),
+      ...(over.hostedInstanceLive ? { hostedInstanceLive: over.hostedInstanceLive } : {}),
       now: () => clock,
       log: (l) => logs.push(l),
       warn: (w) => warnings.push(w),
@@ -446,9 +451,9 @@ describe("reclaimRuns", () => {
 
 // The hosted parent at reclaim (record 0060; run-history items 36 and 38): a
 // row whose state carries `hosting` is classified before the transcript rule —
-// past its deadline it closes `interrupted`, with a pipeline outcome already in
-// the plain store it is abandoned, otherwise it is `rehost` for the launcher —
-// and a `rehost` row puts nothing in the elsewhere map.
+// its deadline, Workflow and children decide liveness; with a pipeline outcome
+// already in the plain store it is abandoned, otherwise a live owner is
+// `rehost` for the launcher — and a `rehost` row puts nothing in the elsewhere map.
 describe("reclaimRuns — the hosted parent's classification (record 0060)", () => {
   const hosting = (until: number) => ({ instanceId: "i7", until });
 
@@ -479,9 +484,11 @@ describe("reclaimRuns — the hosted parent's classification (record 0060)", () 
     expect(r.events.map((e) => e.type)).toEqual(["input", "run_meta"]);
     expect(ledger.live.has("r-ship")).toBe(true);
     expect(ledger.finished.has("r-ship")).toBe(false);
-    expect(logs.some((l) => l.includes("r-ship web:s:c9#host rehost (from handoff; instance i7; 2 event(s))"))).toBe(
-      true,
-    );
+    expect(
+      logs.some((l) =>
+        l.includes("r-ship web:s:c9#host rehost (from handoff; instance i7; 0 live child(ren); 2 event(s))"),
+      ),
+    ).toBe(true);
   });
 
   it("the same row whose store record has a pipeline outcome (completed or failed: the finish landed in the plain store) is abandoned — the live row gone, no record written; a store that cannot be asked is one warning and the row re-hosts", async () => {
@@ -510,6 +517,190 @@ describe("reclaimRuns — the hosted parent's classification (record 0060)", () 
     const outcome = await down.run();
     expect(outcome.resumable.map((r) => r.kind)).toEqual(["rehost"]);
     expect(down.warnings.some((w) => w.includes("store read failed (HTTP 503) — re-hosting"))).toBe(true);
+  });
+
+  it("a parent and its review child interrupted after the hosting deadline are reclaimed as one live pipeline: the parent rehosts beside the resumable child, and no re-issue closure exists while that child is live", async () => {
+    const { ledger, run } = harness(undefined, {
+      storedStatus: async () => "interrupted",
+      hostedInstanceLive: async () => false,
+    });
+    await ledger.claim(hostedClaim("parent-review", "slack:C1:1.0"));
+    await ledger.setState("parent-review", "g1", { hosting: hosting(50_000) });
+    await ledger.append("parent-review", "g1", [
+      { type: "ship_unit", unit: "task", state: "pr_opened", pr: 42, at: 2_000, seq: 1 },
+      { type: "ship_round", index: 1, agent: "review", outcome: "started", at: 2_001, seq: 2 },
+      { type: "ship_unit", unit: "task", state: "started", pr: 42, at: 2_001, seq: 3 },
+    ]);
+    const child = claim("child-review", "slack:C1:1.0", "g1", {
+      meta: {
+        ...claim("x", "t").meta,
+        threadKey: "slack:C1:1.0",
+        agent: "review",
+        parentInstanceId: "i7",
+        idempotencyKey: "i7:task/1/review",
+      },
+    });
+    await ledger.claim(child);
+    await ledger.seed(child.runId, "g1", [{ idx: 0, message: user("review PR 42") }]);
+    await ledger.step(child.runId, "g1", seedRecord(1), []);
+
+    const outcome = await run();
+
+    expect(outcome.closed).toEqual([]);
+    expect(outcome.resumable.map((r) => [r.kind ?? "resume", r.row.runId])).toEqual([
+      ["rehost", "parent-review"],
+      ["resume", "child-review"],
+    ]);
+    const parent = outcome.resumable[0];
+    if (parent?.kind !== "rehost") throw new Error("the parent rehosts");
+    expect(parent.children).toEqual([
+      {
+        runId: "child-review",
+        threadKey: "slack:C1:1.0",
+        agent: "review",
+        idempotencyKey: "i7:task/1/review",
+      },
+    ]);
+  });
+
+  it("a child whose classification fails stays live and keeps its past-deadline parent alive, so recovery never posts a re-issue closure while owning the child", async () => {
+    const { ledger, run } = harness(
+      (inner) =>
+        overriding(inner, {
+          readEvents: async (runId: string) => {
+            if (runId === "child-review") throw new TransientStoreError("HTTP 503");
+            return inner.readEvents(runId);
+          },
+        }),
+      {
+        storedStatus: async () => "interrupted",
+        hostedInstanceLive: async () => false,
+      },
+    );
+    await ledger.claim(hostedClaim("parent-review", "slack:C1:1.0"));
+    await ledger.setState("parent-review", "g1", { hosting: hosting(50_000) });
+    const child = claim("child-review", "slack:C1:1.0", "g1", {
+      meta: {
+        ...claim("x", "t").meta,
+        threadKey: "slack:C1:1.0",
+        agent: "review",
+        parentInstanceId: "i7",
+        idempotencyKey: "i7:task/1/review",
+      },
+    });
+    await ledger.claim(child);
+    await ledger.seed(child.runId, "g1", [{ idx: 0, message: user("review PR 42") }]);
+    await ledger.step(child.runId, "g1", seedRecord(1), []);
+
+    const outcome = await run();
+
+    expect(outcome.failed).toEqual([{ runId: "child-review", error: "HTTP 503" }]);
+    expect(outcome.closed).toEqual([]);
+    expect(outcome.resumable.map((r) => [r.kind, r.row.runId])).toEqual([["rehost", "parent-review"]]);
+    const parent = outcome.resumable[0];
+    if (parent?.kind !== "rehost") throw new Error("the parent rehosts");
+    expect(parent.children.map((liveChild) => liveChild.runId)).toEqual(["child-review"]);
+    expect(ledger.live.get("parent-review")?.ownerGen).toBe("g2");
+    expect(ledger.live.get("child-review")?.ownerGen).toBe("g2");
+  });
+
+  it("a refused child finish stays a live liveness fact after another generation fences recovery, so its past-deadline parent rehosts without re-issue guidance", async () => {
+    const { ledger, run } = harness(
+      (inner) =>
+        overriding(inner, {
+          finish: async (runId, gen, record) => {
+            if (runId === "child-review") {
+              const live = inner.live.get(runId);
+              if (!live) throw new Error("the child remains live until finish");
+              live.ownerGen = "g3";
+            }
+            return inner.finish(runId, gen, record);
+          },
+        }),
+      {
+        storedStatus: async () => "interrupted",
+        hostedInstanceLive: async () => false,
+      },
+    );
+    await ledger.claim(hostedClaim("parent-review", "slack:C1:1.0"));
+    await ledger.setState("parent-review", "g1", { hosting: hosting(50_000) });
+    await ledger.claim(
+      claim("child-review", "slack:C1:1.0", "g1", {
+        meta: {
+          ...claim("x", "t").meta,
+          threadKey: "slack:C1:1.0",
+          agent: "review",
+          parentInstanceId: "i7",
+          idempotencyKey: "i7:task/1/review",
+        },
+      }),
+    );
+
+    const outcome = await run();
+
+    expect(outcome.failed).toEqual([{ runId: "child-review", error: "finish refused (fenced)" }]);
+    expect(outcome.closed).toEqual([]);
+    expect(outcome.resumable.map((r) => [r.kind, r.row.runId])).toEqual([["rehost", "parent-review"]]);
+    const parent = outcome.resumable[0];
+    if (parent?.kind !== "rehost") throw new Error("the parent rehosts");
+    expect(parent.children.map((liveChild) => liveChild.runId)).toEqual(["child-review"]);
+    expect(ledger.live.get("child-review")?.ownerGen).toBe("g3");
+    expect(outcome.liveElsewhere.map(({ runId, ownerGen }) => [runId, ownerGen])).toEqual([["child-review", "g3"]]);
+  });
+
+  it.each([
+    ["finishing", "completed"],
+    ["non-resumable", "interrupted"],
+  ] as const)(
+    "a past-deadline parent does not rehost for a %s child that closes in the same admission",
+    async (childState, childStatus) => {
+      const { ledger, run } = harness(undefined, {
+        storedStatus: async () => "interrupted",
+        hostedInstanceLive: async () => false,
+      });
+      await ledger.claim(hostedClaim("parent-review", "slack:C1:1.0"));
+      await ledger.setState("parent-review", "g1", { hosting: hosting(50_000) });
+      const child = claim("child-review", "slack:C1:1.0", "g1", {
+        meta: {
+          ...claim("x", "t").meta,
+          threadKey: "slack:C1:1.0",
+          agent: "review",
+          parentInstanceId: "i7",
+          idempotencyKey: "i7:task/1/review",
+        },
+      });
+      await ledger.claim(child);
+      if (childState === "finishing") await ledger.finishing(child.runId, "g1");
+
+      const outcome = await run();
+
+      expect(outcome.resumable).toEqual([]);
+      expect(outcome.closed.map((closed) => [closed.runId, closed.status])).toEqual([
+        ["parent-review", "interrupted"],
+        ["child-review", childStatus],
+      ]);
+      expect(ledger.live.has("parent-review")).toBe(false);
+      expect(ledger.live.has("child-review")).toBe(false);
+    },
+  );
+
+  it("a hosted parent past its old deadline rehosts when its Workflow instance is still live, even between children", async () => {
+    const asked: string[] = [];
+    const { ledger, run } = harness(undefined, {
+      storedStatus: async () => "interrupted",
+      hostedInstanceLive: async (instanceId) => {
+        asked.push(instanceId);
+        return true;
+      },
+    });
+    await ledger.claim(hostedClaim("r-ship", "web:s:c9"));
+    await ledger.setState("r-ship", "g1", { hosting: hosting(50_000) });
+
+    const outcome = await run();
+
+    expect(asked).toEqual(["i7"]);
+    expect(outcome.closed).toEqual([]);
+    expect(outcome.resumable.map((r) => [r.kind, r.row.runId])).toEqual([["rehost", "r-ship"]]);
   });
 
   it("the same row past its deadline closes interrupted under the metadata's thread, the live row goes, and a later agent:ship in the thread claims the host key", async () => {
