@@ -813,8 +813,8 @@ export interface SteerSendCaller {
  *  `onBehalfOf` the person — the fold carries `postedBy` — and a bound
  *  credential's actor IS the credential with the person as `asUser` — it
  *  carries `authenticatedAs`. Both ride the fold, the durable row and the
- *  ended-run redispatch whole, so a leftover's fresh turn and the durable
- *  copy re-resolve the same intersection, never the bare person. */
+ *  durable copy whole, so a leftover's fresh turn re-resolves the same
+ *  intersection, never the bare person. */
 function steerCredentialOf(caller: SteerSendCaller): { authenticatedAs?: string; postedBy?: string } {
   const actor = caller.actor;
   if (actor.onBehalfOf) return { postedBy: actor.id };
@@ -834,10 +834,9 @@ export const STEER_OWNER_REFUSED =
  * `authorizeSteerOwner` — the requester, any id their identity record links,
  * or a `runs:write` grant), then `steerRun`'s own gates and pushes exactly as
  * a run's steer takes them: the live agent's allowlist, the durable copy
- * first, the slot matched by run id. A steer into a run that ended is
- * re-dispatched as a bind of the same words — a fresh request in the run's
- * own thread, under the caller's identity — through the `redispatch` hook;
- * without one wired, the reply says the run ended and what to do.
+ * first, the slot matched by run id. A run that has ended is a terminal
+ * target: the command fails by name and never turns its own words into a new
+ * request, so one undeliverable steer cannot feed the door again.
  */
 export function createSteerSender(deps: {
   config: Pick<ConfigStore, "canRunAgent" | "grantsFor">;
@@ -845,10 +844,6 @@ export function createSteerSender(deps: {
   /** The run the id names, as the process knows it (the registry's live row). */
   runs: { getById(id: string): SteerableRun | null };
   admission: Pick<ThreadAdmission<DispatchFollowUp>, "get">;
-  clock?: Clock;
-  /** Run the words as a fresh request (a bind of the same words) when the
-   *  target ended: the dispatcher's own door, on the target's thread. */
-  redispatch?: (msg: IncomingMessage) => Promise<void>;
 }): { send(runId: string, words: string, caller: SteerSendCaller): Promise<string> } {
   return {
     async send(runId, words, caller) {
@@ -865,29 +860,12 @@ export function createSteerSender(deps: {
       });
       if (owner.kind === "refused") throw new CommandError("unauthorized", STEER_OWNER_REFUSED);
       const credential = steerCredentialOf(caller);
-      const at = (deps.clock ?? systemClock)();
       const ended = run.finished || run.threadKey === undefined || run.agent === undefined;
-      const fresh = async (): Promise<string> => {
-        // A steer into a run that ended is re-dispatched as a bind of the same
-        // words (the one-door plan's admission unit): the words still run, as
-        // their own request in the run's thread, never dropped with the row.
-        if (!deps.redispatch || run.threadKey === undefined)
-          throw new CommandError(
-            "unavailable",
-            `run ${runId} has ended — re-send the words in its thread to run them fresh.`,
-          );
-        await deps.redispatch({
-          channelId: run.channelId ?? caller.origin?.channelId ?? "",
-          userId: caller.id,
-          ...(caller.name !== undefined ? { userName: caller.name } : {}),
-          ...credential,
-          threadKey: run.threadKey,
-          text: words,
-          receivedAt: at,
-        });
-        return `run ${runId} had ended — the words ran as a fresh request in its thread instead.`;
-      };
-      if (ended) return fresh();
+      if (ended) {
+        const when =
+          run.finishedAt !== undefined ? `at ${new Date(run.finishedAt).toISOString()}` : "before this steer arrived";
+        throw new CommandError("conflict", `run ${runId} ended ${when}; nothing to steer.`);
+      }
       const out = await steerRun(
         deps,
         {
@@ -917,7 +895,10 @@ export function createSteerSender(deps: {
               : `you may not run the ${run.agent} agent, so its run cannot hear you.`,
           );
         case "not_live":
-          return fresh();
+          throw new CommandError(
+            "conflict",
+            `run ${runId} ended while the steer was being delivered; nothing to steer.`,
+          );
       }
     },
   };
@@ -928,6 +909,7 @@ export function createSteerSender(deps: {
 export interface SteerableRun {
   id: string;
   finished: boolean;
+  finishedAt?: number;
   agent?: string;
   threadKey?: string;
   channelId?: string;

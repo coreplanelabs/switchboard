@@ -44,7 +44,11 @@ beforeEach(() => resetRelayParentCache());
 
 describe("parseRelayFooter", () => {
   it("reads the source channel and the thread from the footer's permalink, unescaping Slack's &amp;", () => {
-    expect(parseRelayFooter(RELAY)).toEqual({ channel: "C0PROMPT", threadTs: "1789504919.942589" });
+    expect(parseRelayFooter(RELAY)).toEqual({
+      channel: "C0PROMPT",
+      messageTs: "1789504919.942589",
+      threadTs: "1789504919.942589",
+    });
   });
 
   it("the current footer names the person — on behalf of <@U…>, with or without a display name — and that is read alongside the thread", () => {
@@ -52,14 +56,23 @@ describe("parseRelayFooter", () => {
       parseRelayFooter(
         "x\nSent by Claude in <#C0PROMPT|alice-prompting> on behalf of <@U0ALICE|alice> · <https://acme.slack.com/archives/C0PROMPT/p1789504919942589|thread>",
       ),
-    ).toEqual({ channel: "C0PROMPT", threadTs: "1789504919.942589", onBehalfOf: "U0ALICE" });
+    ).toEqual({
+      channel: "C0PROMPT",
+      messageTs: "1789504919.942589",
+      threadTs: "1789504919.942589",
+      onBehalfOf: "U0ALICE",
+    });
     expect(parseRelayFooter(RELAY)).not.toHaveProperty("onBehalfOf");
   });
 
   it("a bare p<ts> permalink names the thread's parent itself", () => {
     const text =
       "hi\nSent by Claude in <#C0PROMPT> · <https://acme.slack.com/archives/C0PROMPT/p1789504919942589|thread>";
-    expect(parseRelayFooter(text)).toEqual({ channel: "C0PROMPT", threadTs: "1789504919.942589" });
+    expect(parseRelayFooter(text)).toEqual({
+      channel: "C0PROMPT",
+      messageTs: "1789504919.942589",
+      threadTs: "1789504919.942589",
+    });
   });
 
   it("is a whole trailing footer or nothing: mid-text mentions of the phrase, a non-archives link, a bad ts and a malformed URL parse to nothing", () => {
@@ -169,6 +182,7 @@ describe("textOfBlocks / rawTextOf", () => {
     ).toBe("see <https://acme.example/x|the doc>");
     expect(parseRelayFooter(raw)).toEqual({
       channel: "C0PROMPT",
+      messageTs: "1789506812.453899",
       threadTs: "1789506812.453899",
       onBehalfOf: "U0B0RIS",
     });

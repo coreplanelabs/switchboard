@@ -359,6 +359,24 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
     expect(await ownerOf([child], async () => [endedMergeReady], THREAD)).toEqual({ kind: "none" });
   });
 
+  it("an ended ship pipeline still owns its generated unit's thread until that unit merges", async () => {
+    const aborted = unit({ ending: { kind: "aborted", report: "aborted", at: 2_000 } });
+    const ship = run({
+      id: "ship-parent",
+      agent: "ship",
+      instanceId: "ship_acme_api_1",
+      finished: true,
+    });
+    expect(await ownerOf([ship], async () => [aborted], THREAD)).toEqual({
+      kind: "pipeline",
+      instanceId: "ship_acme_api_1",
+      run: ship,
+      unit: aborted,
+    });
+    const merged = unit({ ending: { kind: "merged", report: "merged", at: 2_000 } });
+    expect(await ownerOf([ship], async () => [merged], THREAD)).toEqual({ kind: "none" });
+  });
+
   it("a unit row for another thread is not the owner, and an empty page owns nothing", async () => {
     const ship = run({ id: "r-ship", agent: "ship", instanceId: "ship_acme_api_1", session: closed });
     expect(await ownerOf([ship], async () => [unit({ threadKey: "slack:C1:9.9" })], THREAD)).toEqual({

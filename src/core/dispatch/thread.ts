@@ -172,14 +172,18 @@ export function instanceOf(runs: readonly RunView[]): string | undefined {
  *  run while one is in flight; the unfinished unit of the page's instance
  *  whose row names this thread (however the page names the instance — the
  *  ship run's own `ship_handoff`, or a child's `parentInstanceId`); the
- *  newest continuable session a person addressed (`stickyAgentOf` — a
- *  coordinator's child is never the owner); none. A unit with an ending never
- *  owns: the thread is the router's again. `unitsOf` is the caller's one
- *  extra read, asked only when the page names an instance; a read that fails
- *  leaves the unit out rather than guessing. */
+ *  ended generated pipeline whose same-thread unit has not merged; the newest
+ *  continuable session a person addressed (`stickyAgentOf` — a coordinator's
+ *  child is never the owner); none. `unitsOf` is the caller's one extra read,
+ *  asked only when the page names an instance; a read that fails leaves the
+ *  unit out rather than guessing. */
 export type ThreadOwner =
   | { kind: "live"; run: RunView }
   | { kind: "unit"; instanceId: string; unit: CoordinatorUnit }
+  /** A generated unit whose runner ended without merging it: the thread still
+   *  owns that pipeline's task, branch and pull request, so its next plain
+   *  reply re-issues the same plan instead of becoming a new task. */
+  | { kind: "pipeline"; instanceId: string; run: RunView; unit: CoordinatorUnit }
   | { kind: "session"; agent: string }
   | { kind: "none" };
 
@@ -195,10 +199,29 @@ export async function ownerOf(
     const units = await unitsOf(instanceId).catch(() => [] as CoordinatorUnit[]);
     const unit = units.find((u) => u.threadKey === threadKey && u.ending === undefined);
     if (unit !== undefined) return { kind: "unit", instanceId, unit };
+    const ended = units.find(
+      (u) =>
+        u.threadKey === threadKey &&
+        u.ending !== undefined &&
+        u.ending.kind !== "merged" &&
+        u.ending.kind !== "already_landed",
+    );
+    const ship = runs.find((r) => r.instanceId === instanceId && r.finished);
+    if (ended !== undefined && ship !== undefined) return { kind: "pipeline", instanceId, run: ship, unit: ended };
   }
   const agent = stickyAgentOf(runs);
   if (agent !== undefined) return { kind: "session", agent };
   return { kind: "none" };
+}
+
+/** The original task a generated ship parent recorded as its first input.
+ *  The coordinator's brief composer reads the same source: the run record,
+ *  never a reconstruction from a later reply or a truncated unit title. */
+export async function shipRequestOf(service: Pick<RunsService, "getRun">, runId: string): Promise<string | undefined> {
+  const result = await service.getRun(runId, { include: "messages" }).catch(() => undefined);
+  if (result === undefined || !result.ok) return undefined;
+  const input = (result.value.events ?? []).find((event) => event.type === "input");
+  return input?.type === "input" ? input.text : undefined;
 }
 
 /** The pull request the thread's work lives on (docs/reference/specs/

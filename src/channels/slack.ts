@@ -50,9 +50,22 @@ import {
   MAX_IMAGES_PER_MESSAGE,
   type SlackFile,
 } from "./slack/attachments.js";
-import { dedupeDelivery, markHandledHere, wasHandledHere } from "./slack/dedupe.js";
+import {
+  dedupeDelivery,
+  markBotSourceHere,
+  markHandledHere,
+  wasBotSourceHere,
+  wasHandledHere,
+} from "./slack/dedupe.js";
 import { resolveChannelName, resolveTeamUrl, resolveUserName, slackPermalink } from "./slack/lookups.js";
-import { rawTextOf, resolveSlackRequester, type SlackBlock, type SlackPoster } from "./slack/requester.js";
+import {
+  parseRelayFooter,
+  rawTextOf,
+  resolveSlackRequester,
+  type RelayFooter,
+  type SlackBlock,
+  type SlackPoster,
+} from "./slack/requester.js";
 import { isLiveCard, liveCardKey, liveCards, refreshForeignLiveCards, render } from "./slack/statusCard.js";
 import { ACK_EMOJI, catchUpMissedMentions, tsMs, type MissedMessage } from "./slackCatchUp.js";
 import { processSecrets, type Secret } from "../secrets.js";
@@ -599,6 +612,42 @@ function relayAppsOf(deps: CoreDeps): readonly string[] {
   return deps.config.config.slack?.relayApps ?? [];
 }
 
+/** Whether a configured relay copied one of this bot's own Slack messages.
+ *  The in-process source set is the zero-call path; the source permalink is
+ *  the durable fallback after a restart. */
+async function relaySourceWasBotOutput(
+  client: SlackClient,
+  source: RelayFooter,
+  botUserId: string | undefined,
+): Promise<boolean> {
+  if (wasBotSourceHere(source.channel, source.messageTs)) return true;
+  if (botUserId === undefined) return false;
+  try {
+    const page = await client.conversations.replies({
+      channel: source.channel,
+      ts: source.threadTs,
+      oldest: source.messageTs,
+      latest: source.messageTs,
+      inclusive: true,
+      limit: 1,
+    });
+    const message = (page.messages as SlackThreadMessage[] | undefined)?.find(
+      (candidate) => candidate.ts === source.messageTs,
+    );
+    if (message?.user !== botUserId) return false;
+    markBotSourceHere(source.channel, source.messageTs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Remember the native id Slack assigned to one bot-authored post, so a relay
+ *  copy is fenced by its source rather than by the copy's new event id. */
+function markPostedSource(channel: string, posted: { ts?: unknown }): void {
+  if (typeof posted.ts === "string" && posted.ts !== "") markBotSourceHere(channel, posted.ts);
+}
+
 /** What the thread-reply intake gate runs on (record 0058; docs/reference/specs/
  *  slack-channel.md item 15), wired by the composition root (`wireIntakeGate`
  *  in src/index.ts) and handed whole by tests: the mode resolver
@@ -654,6 +703,20 @@ export async function receiveSlackMessage(
   relayApps: readonly string[],
   intake?: SlackIntakeGate,
 ): Promise<ReceivedSlackMessage | undefined> {
+  // A configured relay gives its copy a new Slack event id, so ordinary
+  // `(channel, ts)` dedupe cannot recognize a loop. Its footer still names the
+  // native source message. Drop a source this process posted, or one Slack
+  // confirms was authored by this bot, before the intake gate or any visible
+  // acknowledgement: the bot's answer is not a new person's request.
+  const footer =
+    ev.poster?.botId !== undefined && relayApps.includes(ev.poster.botId)
+      ? parseRelayFooter(ev.rawText ?? ev.text)
+      : undefined;
+  if (footer !== undefined && (await relaySourceWasBotOutput(client, footer, ev.botUserId))) {
+    console.log(`[relay] ${ev.channel}:${ev.ts} dropped: source ${footer.channel}:${footer.messageTs} is this bot's`);
+    span.setAttrs({ dedupe: "duplicate", caughtUp: ev.caughtUp === true, files: ev.files?.length ?? 0 });
+    return undefined;
+  }
   // Redelivery guard: claim (channel, ts) and drop the event when it
   // demonstrably ran already — in this process, or (for a stale delivery)
   // visibly answered in its own thread. Before the ack: a dropped redelivery
@@ -1181,12 +1244,13 @@ export class SlackIO implements ChannelIO {
    *  Cancel whose value is the offer's id — with the offer's text as the
    *  fallback, so a client without blocks still shows the line to type. */
   async offer(offer: ConfirmationOffer): Promise<void> {
-    await this.client.chat.postMessage({
+    const posted = await this.client.chat.postMessage({
       channel: this.ev.channel,
       thread_ts: this.ev.threadTs,
       text: escapeMrkdwn(renderOffer(offer)),
       blocks: offerBlocks(offer),
     });
+    markPostedSource(this.ev.channel, posted);
   }
 
   /** Long command output as a file in the thread: Slack renders an uploaded
@@ -1252,11 +1316,12 @@ export class SlackIO implements ChannelIO {
 
   private async post(mrkdwn: string): Promise<void> {
     for (const chunk of chunkText(mrkdwn, SLACK_MSG_LIMIT)) {
-      await this.client.chat.postMessage({
+      const posted = await this.client.chat.postMessage({
         channel: this.ev.channel,
         thread_ts: this.ev.threadTs,
         text: chunk,
       });
+      markPostedSource(this.ev.channel, posted);
     }
   }
 
@@ -1269,6 +1334,7 @@ export class SlackIO implements ChannelIO {
    *  the team URL is known. */
   async openThread(lead: string): Promise<OpenedThread> {
     const posted = await this.client.chat.postMessage({ channel: this.ev.channel, text: mdToMrkdwn(lead) });
+    markPostedSource(this.ev.channel, posted);
     // The thread is keyed by the lead's `ts`: an answer without one is refused
     // by name (the spawn relays it as `spawn_failed`), never a thread on `undefined`.
     const ts = posted.ts;
@@ -1338,6 +1404,7 @@ export class SlackIO implements ChannelIO {
         thread_ts: this.ev.threadTs,
         ...render(initial),
       });
+      markPostedSource(this.ev.channel, posted);
       ts = posted.ts as string;
     }
     liveCards.add(liveCardKey(this.ev.channel, ts));

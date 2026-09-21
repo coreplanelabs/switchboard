@@ -1190,6 +1190,7 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
     "run-done": {
       id: "run-done",
       finished: true,
+      finishedAt: 1_790_000_431_000,
       agent: "general",
       threadKey: U2_THREAD,
       channelId: "slack:CX",
@@ -1217,10 +1218,6 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
       runLedger: ledger,
       runs,
       admission,
-      clock: () => NOW,
-      redispatch: async (m) => {
-        redispatched.push(m);
-      },
     });
     return { admission, ledger, sender, redispatched };
   }
@@ -1238,8 +1235,8 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
     expect(item.from).toBeUndefined(); // a person's steer, not a run's
   });
 
-  it("a caller behind a bound credential (authorization item 15) rides authenticatedAs onto the fold, the durable row and the ended-run redispatch", async () => {
-    const { admission, ledger, sender, redispatched } = senderDeps();
+  it("a caller behind a bound credential (authorization item 15) rides authenticatedAs onto the live fold and durable row", async () => {
+    const { admission, ledger, sender } = senderDeps();
     const u2 = admission.claim(U2_THREAD, { agent: "general" });
     u2.live.runId = "run-u2";
     // The actor IS the credential, the person its `self` and `asUser` (record 0042).
@@ -1256,12 +1253,10 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
     expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "http:t1" });
     const [item] = u2.live.inbox.drain();
     expect(item).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "http:t1" });
-    await sender.send("run-done", "and check the migration", bound);
-    expect(redispatched[0]).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "http:t1" });
   });
 
-  it("a relay's caller (the app acting onBehalfOf the person, item 14) rides postedBy onto the fold and the redispatch", async () => {
-    const { admission, ledger, sender, redispatched } = senderDeps();
+  it("a relay's caller (the app acting onBehalfOf the person, item 14) rides postedBy onto the live fold", async () => {
+    const { admission, ledger, sender } = senderDeps();
     const u2 = admission.claim(U2_THREAD, { agent: "general" });
     u2.live.runId = "run-u2";
     const writeGrants = { actions: new Set(["runs:write"]), channels: new Set<string>(), repos: new Set<string>() };
@@ -1278,8 +1273,6 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
     expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UREQ", postedBy: "slack:bot:B0CLAUDE" });
     const [item] = u2.live.inbox.drain();
     expect(item).toMatchObject({ userId: "slack:UREQ", postedBy: "slack:bot:B0CLAUDE" });
-    await sender.send("run-done", "and check the migration", relayed);
-    expect(redispatched[0]).toMatchObject({ userId: "slack:UREQ", postedBy: "slack:bot:B0CLAUDE" });
   });
 
   it("a member's steer into the requester's run is refused with the owner rule's reason, and nothing is pushed anywhere", async () => {
@@ -1308,19 +1301,13 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
     await expect(granted && sender.send("run-u2", "narrow it", granted)).resolves.toContain("Folded into");
   });
 
-  it("a steer into a run that ended is re-dispatched as a bind of the same words — a fresh request in the run's own thread under the caller's identity", async () => {
+  it("a steer whose named run ended fails once with the run and its end time — no inbox push and no fresh redispatch", async () => {
     const { sender, redispatched, ledger } = senderDeps();
-    const receipt = await sender.send("run-done", "and check the migration", requester);
-    expect(receipt).toContain("ran as a fresh request");
-    expect(redispatched).toEqual([
-      {
-        channelId: "slack:CX",
-        userId: "slack:UREQ",
-        threadKey: U2_THREAD,
-        text: "and check the migration",
-        receivedAt: NOW,
-      },
-    ]);
+    const endedAt = new Date(rows["run-done"]!.finishedAt!).toISOString();
+    await expect(sender.send("run-done", "and check the migration", requester)).rejects.toThrow(
+      `run run-done ended at ${endedAt}; nothing to steer.`,
+    );
+    expect(redispatched).toEqual([]);
     expect(ledger.pushes).toEqual([]);
   });
 

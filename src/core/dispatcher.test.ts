@@ -152,12 +152,10 @@ function wireCommands(deps: TestDeps): { invoked: string[] } {
         runLedger: deps.runLedger,
         runs: { getById: (id) => (deps.runRegistry ?? defaultRunRegistry).getById(id) },
         admission: { get: (k) => (deps.admission ?? defaultAdmission).get(k) },
-        redispatch: async (m) => {
-          (deps.redispatched ??= []).push(m);
-        },
       }),
   });
   deps.invoked = [];
+  deps.redispatched = [];
   const invoked = deps.invoked;
   deps.commands = {
     ...bound,
@@ -16063,7 +16061,68 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.provider.requests[0]!.model).toBe("general-model");
   });
 
-  it("a reply into a thread whose unit has ended routes fresh", async () => {
+  it("a reply after an aborted generated pipeline re-issues that pipeline from its branch with the original task, never a new task made from the reply", async () => {
+    const branch = "plan/fix-the-login-6435ec/u12";
+    const originalTask = "in acme/api: fix the login redirect and its regression";
+    const s = await unitOwnedSetup({
+      branch,
+      ending: { kind: "aborted", report: "aborted after review", at: 1_000 },
+    });
+    await s.instances.put({
+      id: INSTANCE,
+      kind: "ship",
+      userId: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey: THREAD,
+      repo: "acme/api",
+      branch,
+      base: "main",
+      createdAt: 500,
+      plan: { id: "fix-the-login-6435ec" },
+      merge: "person",
+      runId: "ship-parent",
+    });
+    const shipParent: RunView = {
+      id: "ship-parent",
+      startedAt: 500,
+      finishedAt: 1_000,
+      finished: true,
+      status: "failed",
+      eventCount: 3,
+      agent: "ship",
+      repo: "acme/api",
+      threadKey: THREAD,
+      userId: "slack:UADMIN",
+      instanceId: INSTANCE,
+    };
+    s.deps.runs = {
+      listRuns: vi.fn(async () => ({ runs: [shipParent] })),
+      getRun: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          ...shipParent,
+          events: [{ type: "input" as const, text: originalTask, messageId: "source", at: 500 }],
+        },
+      })),
+    } as unknown as NonNullable<CoreDeps["runs"]>;
+    let reissued: { agent: string; task: string; planId?: string } | undefined;
+    s.deps.shipBranch = async (_deps, _msg, _io, ctx) => {
+      reissued = {
+        agent: ctx.agent.name,
+        task: ctx.directives.text,
+        ...(ctx.reissuePlanId !== undefined ? { planId: ctx.reissuePlanId } : {}),
+      };
+      return { hostedLive: false };
+    };
+
+    await dispatch(s.deps, msg("hold after this round", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] });
+
+    expect(reissued).toEqual({ agent: "ship", task: originalTask, planId: "fix-the-login-6435ec" });
+    expect(await s.instances.listUnits(INSTANCE)).toMatchObject([{ branch }]);
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
+  it("a reply into a thread whose merged unit has ended routes fresh", async () => {
     const s = await unitOwnedSetup({ ending: { kind: "merged", report: "merged", at: 1_000 } });
     const { io } = fakeIO([{ role: "user", text: "hi" }]);
     await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
@@ -16635,6 +16694,122 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(replies.some((r) => r.includes("To run this:"))).toBe(false);
   });
 
+  it("on: a plain reply's steer resolves to the thread's live owner, never the finished run id the model copied from its transcript", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const ended = registry.create("the prior review", {
+      agent: "review",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    registry.finish(ended.id, "completed");
+    const owner = registry.create("the current coding round", {
+      agent: "coding",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "coding" });
+    slot.live.runId = owner.id;
+    deps.operatorModel = decides({
+      reason: "continue the thread's work",
+      binds: [{ line: `steer run ${ended.id} keep going`, reason: "copied the prior review id" }],
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("keep going", "slack:UADMIN"), io);
+    expect(deps.redispatched).toEqual([]);
+    expect(slot.live.inbox.drain()).toMatchObject([{ text: "keep going", userId: "slack:UADMIN" }]);
+    expect(replies.some((r) => r.includes(`run ${owner.id}`))).toBe(true);
+    expect(replies.some((r) => r.includes(`run ${ended.id} ended`))).toBe(false);
+  });
+
+  it("on: an ended pipeline folds a stale steer decision into re-issuing its original task, never the ended transcript run", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const threadKey = "slack:CX:1.0";
+    const instanceId = "plan-fix-the-login-6435ec";
+    const originalTask = "in acme/api: fix the login redirect and its regression";
+    const stale = registry.create("the ended review round", {
+      agent: "review",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey,
+    });
+    registry.finish(stale.id, "completed");
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put({
+      id: instanceId,
+      kind: "ship",
+      userId: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey,
+      repo: "acme/api",
+      branch: "plan/fix-the-login-6435ec/u12",
+      base: "main",
+      createdAt: 500,
+      plan: { id: "fix-the-login-6435ec" },
+      merge: "person",
+      runId: "ship-parent",
+    });
+    await instances.putUnits([
+      {
+        instanceId,
+        unit: "U12",
+        slug: "u12",
+        branch: "plan/fix-the-login-6435ec/u12",
+        dependsOn: [],
+        rounds: [],
+        threadKey,
+        ending: { kind: "aborted", report: "aborted after review", at: 1_000 },
+      },
+    ]);
+    deps.coordinatorInstances = instances;
+    const shipParent: RunView = {
+      id: "ship-parent",
+      startedAt: 500,
+      finishedAt: 1_000,
+      finished: true,
+      status: "failed",
+      eventCount: 3,
+      agent: "ship",
+      repo: "acme/api",
+      threadKey,
+      userId: "slack:UADMIN",
+      instanceId,
+    };
+    deps.runs = {
+      listRuns: vi.fn(async () => ({ runs: [shipParent] })),
+      getRun: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          ...shipParent,
+          events: [{ type: "input" as const, text: originalTask, messageId: "source", at: 500 }],
+        },
+      })),
+    } as unknown as NonNullable<CoreDeps["runs"]>;
+    deps.operatorModel = decides({
+      reason: "continue the pipeline",
+      binds: [{ line: `steer run ${stale.id} keep going`, reason: "copied the ended review id" }],
+    });
+    let reissued: { agent: string; task: string; planId?: string } | undefined;
+    deps.shipBranch = async (_deps, _msg, _io, ctx) => {
+      reissued = {
+        agent: ctx.agent.name,
+        task: ctx.directives.text,
+        ...(ctx.reissuePlanId !== undefined ? { planId: ctx.reissuePlanId } : {}),
+      };
+      return { hostedLive: false };
+    };
+    const { io, replies } = fakeIO();
+
+    await dispatch(deps, msg("keep going", "slack:UADMIN"), io, { thread: [shipParent] });
+
+    expect(deps.invoked).toEqual([]);
+    expect(reissued).toEqual({ agent: "ship", task: originalTask, planId: "fix-the-login-6435ec" });
+    expect(replies.some((r) => r.includes(`run ${stale.id} ended`))).toBe(false);
+  });
+
   it("on: admission runs after the operator — a reply into a thread whose run is live executes the decision instead of folding, and the live run's inbox stays empty", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
     wireCommands(deps);
@@ -16679,7 +16854,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(replies.some((r) => r.includes(STEER_OWNER_REFUSED))).toBe(true);
   });
 
-  it("on: a steer into a run that ended is re-dispatched as a bind of the same words in the run's own thread", async () => {
+  it("on: a steer to a run that ended fails its command run once, names when the run ended and emits no fresh request", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
     wireCommands(deps);
     const run = registry.create("an ended run", {
@@ -16689,16 +16864,16 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       threadKey: "slack:CX:23.0",
     });
     registry.finish(run.id, "completed");
+    const endedAt = new Date(registry.getById(run.id)!.finishedAt!).toISOString();
     deps.operatorModel = decides({
       reason: "a nudge into ended work",
       binds: [{ line: `steer run ${run.id} and check the migration`, reason: "names the run" }],
     });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("tell it to also check the migration", "slack:UADMIN"), io);
-    expect(deps.redispatched).toEqual([
-      expect.objectContaining({ threadKey: "slack:CX:23.0", userId: "slack:UADMIN", text: "and check the migration" }),
-    ]);
-    expect(replies.some((r) => r.includes("ran as a fresh request"))).toBe(true);
+    expect(deps.redispatched).toEqual([]);
+    expect(replies.filter((r) => r.includes(`run ${run.id} ended at ${endedAt}; nothing to steer.`))).toHaveLength(1);
+    expect(registry.getById("r2")).toMatchObject({ finished: true, status: "failed", agent: "command" });
   });
 
   it("on: a typo'd directive head naming the bound preset is stripped — the verifier judges and the route runs the request without the mangled token", async () => {
