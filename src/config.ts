@@ -199,6 +199,10 @@ export interface IntakeConfig {
   /** The verdict's model, `<provider>/<model>`; default
    *  `defaults.models.general` (`intakeModelRef`). */
   model?: string;
+  /** How hard the verdict's model thinks, one of the five tiers; unset → the
+   *  model's own default. Applied through the model card like a preset's
+   *  effort (`turnEffort`, routing-and-config item 2). */
+  effort?: Effort;
 }
 
 /** The gate's default mode and the verdict's model ref (routing-and-config
@@ -1514,6 +1518,11 @@ export class ConfigStore {
         ...(this.config.defaults.verbosity ? { verbosity: this.config.defaults.verbosity } : {}),
         ...(this.config.harness ? { harness: this.config.harness } : {}),
       },
+      installationEfforts: {
+        ...(this.config.defaults.efforts?.general ? { operator: this.config.defaults.efforts.general } : {}),
+        ...(this.config.intake?.effort ? { intake: this.config.intake.effort } : {}),
+        ...(this.config.memory?.effort ? { memory: this.config.memory.effort } : {}),
+      },
       channel,
       user,
       org: this.orgScope(),
@@ -1586,6 +1595,13 @@ export interface ConfigDescription {
     verbosity?: Verbosity;
     harness?: Record<string, HarnessName>;
   };
+  /** Installation-level effort for each model turn that is not a preset run.
+   *  An absent key means that turn uses its model provider's own default. */
+  installationEfforts?: {
+    operator?: Effort;
+    intake?: Effort;
+    memory?: Effort;
+  };
   channel: Scope;
   user: Scope;
   /** The org tier's runtime-visible settings (today `mcpServers`), for `config show`. */
@@ -1614,12 +1630,22 @@ export function formatConfigDescription(d: ConfigDescription): string {
           .map((n) => `\`${n}\``)
           .join(" ")}`
       : "";
+  const installationEfforts = (
+    [
+      ["defaults.efforts.general", "operator"],
+      ["intake.effort", "intake"],
+      ["memory.effort", "memory"],
+    ] as const
+  )
+    .map(([key, turn]) => `\`${key}=${d.installationEfforts?.[turn] ?? "the model's own default"}\``)
+    .join(", ");
   const lines = [
     `*Effective for you in this channel:* ${effective}`,
     ...(d.effective.boundary ? [`*Effective boundary:* ${fmtEffectiveBoundary(d.effective.boundary)}`] : []),
     ...(d.effective.confirm ? [`*Effective confirm:* ${fmtConfirm(d.effective.confirm)}`] : []),
     ...(d.effective.harness ? [`*Effective harness:* ${fmtEffectiveHarness(d.effective.harness)}`] : []),
     `*Defaults:* ${defaults}${orgMcp}`,
+    `*Installation efforts:* ${installationEfforts}`,
     `*Channel scope:* ${fmtScope(d.channel)}`,
     `*Your scope:* ${fmtScope(d.user)}`,
   ];

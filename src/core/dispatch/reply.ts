@@ -796,6 +796,7 @@ export function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): void {
       // The extractor's one call goes through pi's model library
       // (harness-pi.md item 13), never the loop's own provider adapters.
       providers: deps.completions,
+      providerBlocks: deps.config.config.providers,
       runModelRef: resolved.modelRef,
       gate: { toolCalls, historyTurns: history.length, agentName: resolved.agentName },
       threadKey: msg.threadKey,

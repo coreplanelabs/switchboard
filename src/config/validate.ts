@@ -357,6 +357,13 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.spawn !== undefined) validateSpawn(cfg.spawn);
   if (cfg.routing !== undefined) validateRouting(cfg.routing, cfg.providers);
   validateIntake(cfg);
+  // The reflection extractor's effort (memory.md item 11): one of the five
+  // tiers wherever the memory block names one, refused at load by name like
+  // the intake key — the block's other keys stay the memory module's to read.
+  if (cfg.memory?.effort !== undefined && !isEffort(cfg.memory.effort))
+    throw new Error(
+      `config.yaml: memory.effort is "${String(cfg.memory.effort)}" — valid efforts: ${EFFORT_LEVELS_HINT}`,
+    );
   if (cfg.references !== undefined) validateReferences(cfg.references);
   if (cfg.plane !== undefined) validatePlane(cfg.plane);
   if (cfg.artifacts !== undefined) validateArtifacts(cfg.artifacts);
@@ -725,7 +732,7 @@ function validateRouting(routing: RoutingConfig, _providers: Record<string, unkn
 }
 
 /** The `intake` block's keys, held equal to `IntakeConfig` the way the top-level keys are. */
-const INTAKE_KEYS: Record<keyof IntakeConfig, true> = { threadReplies: true, model: true };
+const INTAKE_KEYS: Record<keyof IntakeConfig, true> = { threadReplies: true, model: true, effort: true };
 
 /** The thread-reply gate's modes (routing-and-config item 27, record 0058). */
 export const INTAKE_MODES = ["mention", "classify", "always"] as const;
@@ -774,6 +781,10 @@ function validateIntake(cfg: AppConfig): void {
       if (!cfg.providers || !Object.hasOwn(cfg.providers, provider))
         throw new Error(`config.yaml: intake.model names provider "${provider}", which providers does not define`);
     }
+    if (intake.effort !== undefined && !isEffort(intake.effort))
+      throw new Error(
+        `config.yaml: intake.effort is "${String(intake.effort)}" — valid efforts: ${EFFORT_LEVELS_HINT}`,
+      );
   }
   // The classify card check: under the default mode intake will make a model
   // call, so a card the operator declared unable to answer either shape must

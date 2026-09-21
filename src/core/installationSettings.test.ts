@@ -19,8 +19,13 @@ const MANIFEST_SECRETS: string[] = (
 
 /** A config that fills in every behaviour knob the projection names, beside the
  *  cloud-full fixture's Workers and env var names — the worst case for a leak. */
-const EVERYTHING_YAML = `${CLOUD_FULL.yaml}routing:
+const EVERYTHING_YAML = `${CLOUD_FULL.yaml.replace(
+  "    general: anthropic/general-model\n",
+  "    general: anthropic/general-model\n  efforts:\n    general: xhigh\n",
+)}routing:
   operator: shadow
+intake:
+  effort: medium
 references:
   enabled: true
 ship:
@@ -63,6 +68,9 @@ describe("installationSettings", () => {
     expect(rows.has("routing.effort")).toBe(false);
     expect(rows.has("routing.auto")).toBe(false);
     expect(rows.has("routing.answer")).toBe(false);
+    expect(rows.get("intake.effort")).toMatchObject({ value: "medium", isDefault: false });
+    expect(rows.get("memory.effort")).toMatchObject({ value: "the model's own default", isDefault: true });
+    expect(rows.get("defaults.efforts.general")).toMatchObject({ value: "xhigh", isDefault: false, how: "runtime" });
     expect(rows.get("references.enabled")).toMatchObject({ value: "true", isDefault: false });
     expect(rows.get("ship.maxRounds")).toMatchObject({ value: "5", isDefault: false });
     expect(rows.get("spawn.maxChildren")).toMatchObject({ value: "2", isDefault: false });
@@ -83,6 +91,11 @@ describe("installationSettings", () => {
     expect(view.settings.every((r) => r.key.startsWith("defaults.") || r.isDefault)).toBe(true);
     expect(rowsByKey(view.settings).has("routing.model")).toBe(false);
     expect(rowsByKey(view.settings).get("memory.enabled")).toMatchObject({ value: "false", isDefault: true });
+    expect(rowsByKey(view.settings).get("defaults.efforts.general")).toMatchObject({
+      value: "the model's own default",
+      isDefault: true,
+      how: "runtime",
+    });
     const caps = new Map(view.capabilities.map((c) => [c.key, c]));
     expect(caps.get("mcp")).toMatchObject({ on: false });
     expect(caps.get("execution")).toMatchObject({ on: "local" });

@@ -62,6 +62,7 @@ import type { FastPathDeps } from "./fastPath.js";
 import { recordOperatorDecision, runChatCommand, type OperatorEventFields } from "./commandRun.js";
 import { renderConfirmationOffer, renderOperatorReceipt } from "./reply.js";
 import { OPERATOR_TAIL_BYTES, operatorTail, type OperatorTailTurn } from "./seed.js";
+import { turnEffort } from "./turnEffort.js";
 import {
   providerStructuredModel,
   quoteRequest,
@@ -1231,7 +1232,14 @@ export async function operatorStage(
     }
     try {
       const ref = parseModelRef(modelRef);
-      model = providerStructuredModel(deps.completions.get(ref.provider), ref.model, {});
+      // The operator's effort key sits beside its model key (routing-and-config
+      // item 29): `defaults.efforts.general`, decided against the same card; a
+      // degraded or dropped tier is a log line, never a skipped operator.
+      const effort = turnEffort(modelRef, cfg.defaults.efforts?.["general"], cfg.providers);
+      if (effort.note) console.log(`[operator] ${msg.threadKey} effort: ${effort.note}`);
+      model = providerStructuredModel(deps.completions.get(ref.provider), ref.model, {
+        ...(effort.request ? { effort: effort.request } : {}),
+      });
     } catch (err) {
       console.log(`[operator] ${msg.threadKey} not run: ${err instanceof Error ? err.message : String(err)}`);
       return undefined;

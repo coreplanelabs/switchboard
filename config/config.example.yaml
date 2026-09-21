@@ -97,7 +97,8 @@ defaults:
   # thinks per turn; lower = much faster turns). Same layering as models —
   # per-channel/user `effort` / `efforts.<agent>` and a per-request `effort:`
   # directive override these; unset → the agent's built-in effort, else the
-  # provider default. Skipped for models without effort support.
+  # provider default. Skipped for models without effort support. The `general`
+  # entry also controls the operator turn on `defaults.models.general`.
   # efforts:
   #   coding: medium
   # How much the bot says about its own doing (docs/reference/specs/routing-and-config.md
@@ -368,7 +369,10 @@ workspaceDir: ./workspaces
 #                       # records (soft delete, status `evicted`) in the same write.
 #   model: anthropic/claude-haiku-4-5
 #                       # <provider>/<model> for the reflection pass — pick a
-#                       # cheap tier. Absent → the run's own resolved model.
+#                       # cheap level. Absent → the run's own resolved model.
+#   effort: low         # how hard the reflection model thinks per distillation —
+#                       # low | medium | high | xhigh | max, applied through the
+#                       # model card; unset → the model's own default.
 
 # Self-improvement proposals (docs/reference/specs/run-friction.md). Every finished run's friction
 # diagnosis (docs/reference/specs/run-friction.md) is stored with its run record, so the
@@ -497,14 +501,17 @@ workspaceDir: ./workspaces
 # model call) or `always` (today's answer-every-reply path, byte for byte).
 # Also settable per channel and per user: `intake: { threadReplies: <mode> }`
 # on a `channels.<id>` or `users.<id>` scope, user over channel over here.
-# `model` is the verdict's model; default `defaults.models.general`. A mention,
-# a DM and a top-level post never pass
-# through the gate in any mode. A model whose operator card (`providers.<p>.
+# `model` is the verdict's model; default `defaults.models.general`. `effort`
+# is how hard that model thinks per verdict — low | medium | high | xhigh |
+# max, applied through the model card; unset → the model's own default. A
+# mention, a DM and a top-level post never pass through the gate in any mode.
+# A model whose operator card (`providers.<p>.
 # models.<id>.answers`) declares it answers neither a forced tool call nor the
 # text contract is refused at load when the default mode is `classify`.
 # intake:
 #   threadReplies: classify
 #   model: anthropic/claude-haiku-4-5
+#   effort: low
 
 # The orchestration plane (docs/decisions/0064-the-plane-owns-every-runs-state-a-refusal-becomes-a-queue-position-an-ending-is-judged-by-the-ledger-that-saw-it-and-a-release-is-a-quiet-window-a-person-closes.md;
 # docs/reference/specs/routing-and-config.md item 31; orchestration-plane.md).

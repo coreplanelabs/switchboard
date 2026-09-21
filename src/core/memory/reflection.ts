@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Provider } from "../provider.js";
+import type { Effort } from "../../effort.js";
 import { authorize } from "../authz/index.js";
 import type { Actor, ChannelVisibility, Resource } from "../authz/types.js";
 import { redactSecrets } from "../runEvents.js";
@@ -284,6 +285,11 @@ export interface ReflectDeps extends ReflectionProvenance {
   /** Bare model id (provider prefix already stripped) — resolved by the caller
    *  from `memory.model` (AGENTS.md invariant 7: never hardcoded here). */
   model: string;
+  /** `memory.effort` as the caller card-decided it (`turnEffort`, memory.md
+   *  item 5): the tier and the wire word ride the one completion; absent →
+   *  the model's own default. */
+  effort?: Effort;
+  effortWord?: string;
   store: MemoryStore;
   /** The run's scopes: the org's, plus the repo's / channel's / the requesting
    *  user's own when the run has them. */
@@ -441,6 +447,8 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
       system: REFLECTION_SYSTEM,
       messages: [{ role: "user", content: [{ type: "text", text }] }],
       maxTokens: REFLECTION_MAX_TOKENS,
+      ...(deps.effort !== undefined ? { effort: deps.effort } : {}),
+      ...(deps.effortWord !== undefined ? { effortWord: deps.effortWord } : {}),
     });
     const reply = result.content
       .filter((p): p is { type: "text"; text: string } => p.type === "text")

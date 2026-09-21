@@ -37,6 +37,7 @@ import {
   type ConfirmationStore,
 } from "../confirmations.js";
 import type { StructuredAttempt } from "./structured.js";
+import type { TurnEffortRequest } from "./turnEffort.js";
 
 /** The most a door reason may say on a record. */
 export const ROUTE_REASON_CAP = 120;
@@ -420,7 +421,7 @@ function tidyReason(reason: string): string {
 export function providerStructuredModel(
   provider: Provider,
   model: string,
-  opts: { answer?: StructuredAnswerMode } = {},
+  opts: { answer?: StructuredAnswerMode; effort?: TurnEffortRequest } = {},
 ): RouteModel {
   const forced = (opts.answer ?? "tool") === "tool";
   return async (prompt, call) => {
@@ -451,6 +452,10 @@ export function providerStructuredModel(
       messages,
       maxTokens: call.maxTokens,
       signal: call.signal,
+      // The caller's configured effort, card-decided (`turnEffort`): intake's
+      // `intake.effort` or the operator's `defaults.efforts.general`. Absent →
+      // the model's own default.
+      ...(opts.effort ? { effort: opts.effort.effort, effortWord: opts.effort.effortWord } : {}),
       ...(forced ? { tools, toolChoice } : {}),
     });
     if (result.stopReason === "max_tokens") throw new Error(`answer cut at the output cap (${call.maxTokens} tokens)`);

@@ -1,6 +1,10 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   answerOperatorRead,
+  operatorStage,
   bindFromAnswer,
   buildOperatorPrompt,
   isOperatorReadTool,
@@ -32,7 +36,9 @@ import {
   type RouteModel,
   type RouteToolCall,
 } from "./route.js";
-import type { ToolDef } from "../provider.js";
+import { ConfigStore } from "../../config.js";
+import type { CompletionRequest, Provider, ToolDef } from "../provider.js";
+import type { IncomingMessage } from "../types.js";
 import type { CommandDef } from "../commandRegistry.js";
 import { mcpToolName } from "../commandSurface.js";
 
@@ -926,5 +932,65 @@ describe("the write-intent cell (issue 2088)", () => {
       },
     );
     expect(asked[1].retries![0].violation).toContain("catalogue down");
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 29 — the operator's
+// effort key sits beside its model key: `defaults.efforts.general`,
+// card-decided (`turnEffort`) and riding the operator's completion; unset
+// sends nothing.
+describe("operatorStage — the operator's effort from defaults.efforts.general", () => {
+  const yamlOf = (efforts: string) => `
+organization: acme
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+${efforts}
+`;
+
+  const configOf = (yaml: string): ConfigStore => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-operator-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(path, yaml);
+    return new ConfigStore(path, join(dir, "overrides.json"));
+  };
+
+  const msg: IncomingMessage = {
+    channelId: "slack:CX",
+    userId: "slack:UX",
+    userName: "UX",
+    text: "list the runs",
+    threadKey: "slack:CX:1.0",
+  };
+
+  const completionsOf = (requests: CompletionRequest[]) => ({
+    get: (): Provider => ({
+      name: "anthropic",
+      async complete(req) {
+        requests.push(req);
+        return { content: [], stopReason: "end_turn" as const };
+      },
+    }),
+  });
+
+  it("the configured tier rides the operator's completion with its card-decided word; unset sends no effort", async () => {
+    const requests: CompletionRequest[] = [];
+    const out = await operatorStage(
+      { config: configOf(yamlOf("  efforts:\n    general: low")), completions: completionsOf(requests) },
+      { msg, mode: "shadow" },
+    );
+    expect(out).toBeDefined();
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests[0].effort).toBe("low");
+    expect(requests[0].effortWord).toBe("low");
+
+    const bare: CompletionRequest[] = [];
+    await operatorStage({ config: configOf(yamlOf("")), completions: completionsOf(bare) }, { msg, mode: "shadow" });
+    expect(bare[0].effort).toBeUndefined();
+    expect(bare[0].effortWord).toBeUndefined();
   });
 });

@@ -163,6 +163,12 @@ describe("PiAiProviders — the provider table config.yaml names, built on pi's 
       maxTokens: 333,
     });
   });
+
+  it("a request carrying an effort is handed a reasoning model — thinking on, the word riding the options — and one without stays reasoning: false", () => {
+    const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK });
+    expect(table.get("openrouter").model("anthropic/claude-sonnet-4", 333, true).reasoning).toBe(true);
+    expect(table.get("openrouter").model("anthropic/claude-sonnet-4", 333).reasoning).toBe(false);
+  });
 });
 
 describe("complete — one request through pi's own adapter, on the wire", () => {
@@ -561,6 +567,24 @@ describe("piStreamOptions — what rides beside the context, per dialect", () =>
       cacheRetention: "short",
       toolChoice: { type: "function", function: { name: "route" } },
     });
+  });
+
+  it("a request's effort rides per dialect — anthropic-messages as thinkingEnabled plus the card's word, both OpenAI dialects as reasoningEffort — and no effort sends nothing (routing-and-config item 2)", () => {
+    const withEffort: CompletionRequest = { ...req, effort: "xhigh", effortWord: "deep" };
+    expect(piStreamOptions("anthropic-messages", withEffort, "k")).toMatchObject({
+      thinkingEnabled: true,
+      effort: "deep",
+    });
+    expect(piStreamOptions("openai-completions", withEffort, "k")).toMatchObject({ reasoningEffort: "deep" });
+    expect(piStreamOptions("openai-responses", withEffort, "k")).toMatchObject({ reasoningEffort: "deep" });
+    // No card-decided word (a caller that resolved no card): the tier's own word goes out.
+    expect(piStreamOptions("openai-completions", { ...req, effort: "low" }, "k")).toMatchObject({
+      reasoningEffort: "low",
+    });
+    const bare = piStreamOptions("anthropic-messages", req, "k") as Record<string, unknown>;
+    expect(bare).not.toHaveProperty("thinkingEnabled");
+    expect(bare).not.toHaveProperty("effort");
+    expect(piStreamOptions("openai-completions", req, "k")).not.toHaveProperty("reasoningEffort");
   });
 
   it('the any choice: anthropic-messages spells it "any", openai-completions "required", each with the payload hook that switches parallel calls off', () => {
