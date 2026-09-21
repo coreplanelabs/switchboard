@@ -7,7 +7,7 @@ import { AGENTS, type AgentDef } from "../agents/registry.js";
 import { declaredProfile } from "../config/profile.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ExecInfraError, LocalExecutor } from "./executor.js";
-import { ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
+import { DRAIN_FALLBACK_WAIT_MS, DRAIN_POLL_MS, ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
 import {
   gitIdentityEnvs,
   makeExecutor,
@@ -866,6 +866,42 @@ describe("makeExecutor resident selection", () => {
   // /status probe and /attach (503 mirror-busy, 429 pool-exhausted). Any attach
   // failure that is NOT needs-ref must fall back to the per-thread backend with
   // a NAMED note — never a silent stall or a raw ⚠️.
+  // Issue 2101: the first attach has the sandbox fallback below to fall to, so
+  // a drained fleet is waited for under the FALLBACK's own cost — never the
+  // deploy's — and the drain's wait rides the selection so the run's
+  // `drain_wait` note still publishes (the incident's run counted zero).
+  it("a drained fleet's first attach falls to the sandbox after the fallback's own bound, the wait riding the selection as drainWaitMs (issue 2101)", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const draining = {
+        status: 503,
+        body: {
+          error: "draining: the resident fleet is closed to new runs for deploy 62e4e9a — the run waits at its attach",
+          status: 503,
+          draining: { since: "2026-09-18T05:00:00.000Z", until: "2026-09-18T06:00:00.000Z", by: "deploy all" },
+        },
+      };
+      const polls = DRAIN_FALLBACK_WAIT_MS / DRAIN_POLL_MS;
+      const { calls } = stubFetch(
+        { body: { state: "warm", reason: "" } },
+        ...Array.from({ length: polls + 1 }, () => draining),
+      );
+      const p = makeExecutor(residentOpts(), repoCtx());
+      await vi.advanceTimersByTimeAsync(DRAIN_FALLBACK_WAIT_MS + 1_000);
+      const { executor, resident, note, drainWaitMs } = await p;
+      expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+      expect(resident).toBeFalsy();
+      expect(drainWaitMs).toBe(DRAIN_FALLBACK_WAIT_MS);
+      expect(note).toMatch(
+        /^resident attach failed \(.*did not reopen within the 180s this run could wait.*\) — using fresh sandbox$/,
+      );
+      expect(calls).toEqual(["/status", ...Array.from({ length: polls + 1 }, () => "/attach")]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("warm probe then a NON-needs-ref attach failure → per-thread executor WITH a named 'resident attach failed' note", async () => {
     stubEnvs();
     const { calls } = stubFetch(

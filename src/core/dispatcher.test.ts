@@ -993,6 +993,30 @@ describe("executor provisioning by agent resources", () => {
     expect(quietEvents.some((e) => e.type === "run_note" && e.kind === "drain_wait")).toBe(false);
   });
 
+  // Feature: docs/reference/specs/resident-repos.md item 69 (issue 2101) — a run
+  // the drain sent to the sandbox fallback carries the wait on the SELECTION
+  // (no binding exists), and the dispatcher publishes the same `drain_wait`
+  // note: the incident's run fell cold and `runs friction` counted zero.
+  it("a selection that carries drainWaitMs without a binding — the drain's sandbox fallback — publishes the run's drain_wait note too", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const registry = new RunRegistry({ genId: () => "run-fell-cold", genToken: () => "tok" });
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, capturingProvider());
+    deps.runRegistry = registry;
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+    vi.mocked(makeExecutor).mockImplementationOnce(async () => ({
+      executor: fake,
+      backend: "sandbox" as const,
+      note: "resident attach failed (… drained …) — using fresh sandbox",
+      drainWaitMs: 3 * 60_000,
+    }));
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    const events = registry.snapshot("run-fell-cold", "tok")!.events;
+    expect(events.find((e) => e.type === "run_note" && e.kind === "drain_wait")).toMatchObject({
+      summary: "waited 3 min at the fleet drain for a deploy to finish",
+    });
+  });
+
   // Feature: docs/reference/specs/tracing.md item 19 — a resident attach that FAILS still
   // grafts the steps it ran under the (failed) attach span; no run exists, so
   // they reach the process sinks.
