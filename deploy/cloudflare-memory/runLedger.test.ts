@@ -1484,6 +1484,40 @@ describe("the plane's resident stage — /plane/level, /plane/observe, the re-as
       ...over,
     });
 
+  it("a queued admission awaits its alarm scheduling before the RPC response returns", async () => {
+    const key = storeKey();
+    await level(key, "owner/repo", "seat", "above");
+    let awaited = false;
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const alarm = inst as unknown as { ensurePlaneReaskAlarm(now: number): Promise<void> };
+      alarm.ensurePlaneReaskAlarm = () =>
+        ({
+          then(resolve: () => void) {
+            awaited = true;
+            resolve();
+          },
+        }) as Promise<void>;
+    });
+
+    expect((await residentAsk(key, "slack:C10:0.0", "owner/repo")).data.kind).toBe("queued");
+    expect(awaited).toBe(true);
+  });
+
+  it("a queued admission returns its committed answer when alarm scheduling fails", async () => {
+    const key = storeKey();
+    await level(key, "owner/repo", "seat", "above");
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const alarm = inst as unknown as { ensurePlaneReaskAlarm(now: number): Promise<void> };
+      alarm.ensurePlaneReaskAlarm = () => Promise.reject(new Error("alarm unavailable"));
+    });
+
+    const asked = await residentAsk(key, "slack:C10:0.1", "owner/repo");
+    expect(asked).toMatchObject({ status: 200, data: { kind: "queued", position: 1 } });
+    expect((await post("/plane/queued", { storeKey: key, runId: asked.data.id })).data.row).toMatchObject({
+      state: "waiting",
+    });
+  });
+
   it("a level report lands in plane_levels; an above seat queues a resident ask holding no reservation; the below report admits it with its attaching row", async () => {
     const key = storeKey();
     const t = "slack:C10:1.0";
@@ -1522,6 +1556,17 @@ describe("the plane's resident stage — /plane/level, /plane/observe, the re-as
     expect((await level(key, "owner/repo", "seat", "below")).data).toEqual({ admitted: 1 });
     // The bot took the offer and acked it done; then the attach met the pool refusal.
     await post("/plane/ack", { storeKey: key, id: `admit:${q}`, outcome: "done" });
+    let alarmAwaited = false;
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const alarm = inst as unknown as { ensurePlaneReaskAlarm(now: number): Promise<void> };
+      alarm.ensurePlaneReaskAlarm = () =>
+        ({
+          then(resolve: () => void) {
+            alarmAwaited = true;
+            resolve();
+          },
+        }) as Promise<void>;
+    });
     const observed = await post("/plane/observe", {
       storeKey: key,
       runId: q,
@@ -1529,6 +1574,7 @@ describe("the plane's resident stage — /plane/level, /plane/observe, the re-as
       refusal: "user-pool-exhausted: no free worker user",
     });
     expect(observed.data).toEqual({ reentered: true });
+    expect(alarmAwaited).toBe(true);
     await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
       const sql = (inst as unknown as { sql: SqlStorage }).sql;
       // The refusal is evidence: the seat level is written back above.
@@ -1555,6 +1601,28 @@ describe("the plane's resident stage — /plane/level, /plane/observe, the re-as
         })
       ).data,
     ).toEqual({ reentered: false });
+  });
+
+  it("an observation returns its committed re-entry when alarm scheduling fails", async () => {
+    const key = storeKey();
+    await level(key, "owner/repo", "seat", "above");
+    const q = (await residentAsk(key, "slack:C11:1.1", "owner/repo")).data.id as string;
+    expect((await level(key, "owner/repo", "seat", "below")).data).toEqual({ admitted: 1 });
+    await post("/plane/ack", { storeKey: key, id: `admit:${q}`, outcome: "done" });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const alarm = inst as unknown as { ensurePlaneReaskAlarm(now: number): Promise<void> };
+      alarm.ensurePlaneReaskAlarm = () => Promise.reject(new Error("alarm unavailable"));
+    });
+
+    expect(
+      await post("/plane/observe", {
+        storeKey: key,
+        runId: q,
+        resident: "owner/repo",
+        refusal: "draining",
+      }),
+    ).toMatchObject({ status: 200, data: { reentered: true } });
+    expect((await post("/plane/queued", { storeKey: key, runId: q })).data.row).toMatchObject({ state: "waiting" });
   });
 
   it("a drain post opens the resident-drain window — an ask queues on it, a restartOf passes — and the below post lifts it, admitting the queued run", async () => {
@@ -1587,9 +1655,10 @@ describe("the plane's resident stage — /plane/level, /plane/observe, the re-as
 
   it("the re-ask alarm probes a silent resident within the cadence, pulls the sweep alarm forward, and re-offers the probe after its ack", async () => {
     const key = storeKey();
+    const cadence = 60_000;
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
     await level(key, "owner/repo", "memory", "above");
-    // reaskMs: 1 — the report is already older than the cadence by alarm time.
-    const asked = await residentAsk(key, "slack:C13:1.0", "owner/repo", { reaskMs: 1 });
+    const asked = await residentAsk(key, "slack:C13:1.0", "owner/repo", { reaskMs: cadence });
     expect(asked.data).toMatchObject({
       kind: "queued",
       waiting: [{ kind: "memory", resident: "owner/repo", met: false }],
@@ -1603,46 +1672,36 @@ describe("the plane's resident stage — /plane/level, /plane/observe, the re-as
       sql: SqlStorage;
       ensurePlaneReaskAlarm(now: number): Promise<void>;
     };
-    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+    await runInDurableObject(stub, async (inst: RunHistoryDO) => {
       const priv = inst as unknown as WithAlarm;
       const now = Date.now();
       await priv.ctx.storage.setAlarm(now + 6 * 3_600_000);
       await priv.ensurePlaneReaskAlarm(now);
-      expect(((await priv.ctx.storage.getAlarm()) as number) - now).toBeLessThan(60_000);
+      expect(((await priv.ctx.storage.getAlarm()) as number) - now).toBeLessThanOrEqual(cadence);
 
-      // Use a cadence that cannot fire while this assertion is reading the
-      // slot. At the live 1 ms cadence, workerd may consume `sooner` between
-      // setAlarm and getAlarm and correctly re-arm it one millisecond later.
-      const assertionCadence = 60_000;
-      priv.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_reask_ms', ?)`, assertionCadence);
-      const sooner = now + assertionCadence / 2;
+      const sooner = now + cadence / 2;
       await priv.ctx.storage.setAlarm(sooner);
       await priv.ensurePlaneReaskAlarm(now);
       expect(await priv.ctx.storage.getAlarm()).toBe(sooner);
 
-      // Restore the live cadence and pull the slot forward for the native-alarm
-      // half below.
-      priv.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_reask_ms', '1')`);
-      await priv.ensurePlaneReaskAlarm(now);
+      // Make the report old enough for a probe without installing a native,
+      // one-millisecond alarm that can still be in flight after this case.
+      priv.sql.exec(`UPDATE plane_levels SET reported_at = ? WHERE resident = ?`, now - cadence - 1, "owner/repo");
     });
-    // Alarms fire natively in the pool and the 1 ms cadence re-arms on every
-    // firing, so the trigger is not forced — the offered probe is polled for.
     const openIds = () =>
-      runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) =>
-        inst.openPlaneEffects().map((e) => e.id),
-      );
-    await vi.waitFor(async () => expect(await openIds()).toEqual(["probe:owner/repo"]), { timeout: 5_000 });
-    // The probe's answer was acked; a still-silent resident is probed again —
-    // the acked row under probe:<resident> never swallows the re-offer.
-    await post("/plane/ack", { storeKey: key, id: "probe:owner/repo", outcome: "done" });
-    await vi.waitFor(async () => expect(await openIds()).toEqual(["probe:owner/repo"]), { timeout: 5_000 });
+      runInDurableObject(stub, async (inst: RunHistoryDO) => inst.openPlaneEffects().map((e) => e.id));
 
-    // End the one-millisecond native alarm loop before this case releases its
-    // RPC worker. Otherwise teardown can race a pending alarm response and
-    // report its failure under the next file in the shared workerd process.
+    // The helper consumes and awaits the alarm handler. Its re-armed future
+    // slot is then consumed the same way, so no handler crosses the test edge.
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await openIds()).toEqual(["probe:owner/repo"]);
+    await post("/plane/ack", { storeKey: key, id: "probe:owner/repo", outcome: "done" });
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await openIds()).toEqual(["probe:owner/repo"]);
+
     await post("/plane/ack", { storeKey: key, id: "probe:owner/repo", outcome: "done" });
     expect((await level(key, "owner/repo", "memory", "below")).data).toEqual({ admitted: 1 });
-    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+    await runInDurableObject(stub, async (inst: RunHistoryDO) => {
       await (inst as unknown as WithAlarm).ctx.storage.deleteAlarm();
     });
   });
