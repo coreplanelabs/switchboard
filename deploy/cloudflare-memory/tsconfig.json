@@ -7,11 +7,23 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "lib": ["esnext"],
-    "types": ["@cloudflare/workers-types/experimental", "@cloudflare/vitest-pool-workers/types"],
+    "types": ["@cloudflare/workers-types/experimental", "@cloudflare/vitest-pool-workers/types", "node"],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["worker.ts", "worker.test.ts", "friction.test.ts", "schedules.test.ts", "test-env.d.ts"]
+  "include": [
+    "worker.ts",
+    "worker.test.ts",
+    "schedules.test.ts",
+    "backgroundTasks.ts",
+    "backgroundTasks.test.ts",
+    "testDiagnostics.ts",
+    "testDiagnosticsProtocol.ts",
+    "testDiagnosticsReporter.ts",
+    "testSetup.ts",
+    "vitest.config.ts",
+    "test-env.d.ts"
+  ]
 }

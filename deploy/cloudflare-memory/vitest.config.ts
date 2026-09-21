@@ -1,5 +1,6 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
+import { MemoryDiagnosticsReporter } from "./testDiagnosticsReporter.ts";
 
 // Tests run INSIDE workerd against the real Durable Object + SQLite (FTS5
 // included) — the same runtime as production, so what passes here is what
@@ -17,6 +18,7 @@ export default defineConfig({
     }),
   ],
   test: {
+    reporters: ["default", new MemoryDiagnosticsReporter()],
     // Fail a request that really hangs under its own Vitest case before
     // workerd's later hang detector can cancel a neighbouring case. Keep
     // console writes out of Vitest's cross-DO RPC queue so teardown cannot

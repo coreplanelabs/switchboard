@@ -11,6 +11,7 @@ build.json
 
 # Load-harness receipts (npm run load:*) are posted to the tracker, never committed.
 load-results/
+deploy/cloudflare-memory/artifacts/
 
 # The docs site is built in place (docs/.vitepress/dist is covered by dist/
 # above); its dev-server cache is not.

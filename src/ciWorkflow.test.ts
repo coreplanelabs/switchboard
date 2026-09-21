@@ -159,6 +159,23 @@ describe("the gate workflows run only the repository's own scripts", () => {
     expect(github.jobs).toEqual(ci.jobs);
   });
 
+  it("uploads memory Worker diagnostics after green and red verify runs", () => {
+    const workers = ci.jobs["workers-each"];
+    const upload = workers.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@"));
+
+    expect(upload).toEqual(
+      expect.objectContaining({
+        name: "upload memory test diagnostics",
+        if: "${{ always() && matrix.worker == 'deploy/cloudflare-memory' }}",
+        with: expect.objectContaining({
+          name: "memory-test-diagnostics-${{ github.run_attempt }}",
+          path: "deploy/cloudflare-memory/artifacts/memory-test-diagnostics.json",
+          "if-no-files-found": "error",
+        }),
+      }),
+    );
+  });
+
   it("pr-title.yml re-runs when a title is edited and is present in the merge queue", () => {
     const wf = parse(read(".depot/workflows/pr-title.yml")) as Workflow & {
       on: { pull_request: { types: string[] } };
