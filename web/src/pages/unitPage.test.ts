@@ -210,7 +210,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
 
     const contract = w.find("#contract");
     expect(contract.find("h2").text()).toContain("Unit U16");
-    expect(contract.find(".plan").text()).toContain("of plan p · attempt 2");
+    expect(contract.find(".plan").text()).toContain("of plan p · the second pipeline for this plan");
     expect(contract.find("a.parent").attributes("href")).toBe("/runs/ship-parent");
     expect(contract.find(".title").text()).toBe("The unit page composes both threads at the round boundaries");
     expect(contract.find(".report").text()).toBe("✅ Merge-ready after 2 review rounds");
@@ -218,6 +218,17 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     // The header prints the user's word for the ending (record 0066), never the internal kind.
     expect(w.find("#standing .chip").text()).toBe("merge-ready");
     expect(w.find("#standing .chip").classes()).toContain("text-ok");
+  });
+
+  it("names the unit's one thread, phrases the pipeline ordinal, and credits the pipeline before the unit starts", () => {
+    const active = mountApp(UnitPage, { seed: seed() });
+    expect(active.find("#rounds .count").text()).toBe("· 4 runs — one unit thread, as the rounds happened");
+    expect(active.find("#contract .plan").text()).toContain("of plan p · the second pipeline for this plan");
+
+    const notStarted = mountApp(UnitPage, {
+      seed: seed({ threads: {}, sourceUrls: {}, ending: undefined, pr: undefined, rounds: [] }, []),
+    });
+    expect(notStarted.find("#empty").text()).toBe("No runs yet — the pipeline has not started this unit.");
   });
 
   it("a row opens to the run's own timeline in place: the stored replay is read once from the run's events route and folded into the Where the time went card; a Longest-steps link opens the run's page at that row", async () => {
@@ -294,7 +305,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     const notStarted = mountApp(UnitPage, {
       seed: seed({ threads: {}, sourceUrls: {}, ending: undefined, pr: undefined, rounds: [], title: undefined }, []),
     });
-    expect(notStarted.find("#empty").text()).toBe("No runs yet — the runner has not started this unit.");
+    expect(notStarted.find("#empty").text()).toBe("No runs yet — the pipeline has not started this unit.");
     expect(notStarted.find("#standing .chip").text()).toBe("not started");
     expect(notStarted.find("#search").exists()).toBe(false);
     expect(notStarted.find("#contract .title").text()).toContain("its branch is plan/p/the-unit-page");

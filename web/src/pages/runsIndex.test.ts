@@ -103,6 +103,31 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     expect(wrapper.find("h1 .title").text()).toBe("Live runs");
   });
 
+  it("hides command and door rows by default; the named toggle reveals the bookkeeping runs", async () => {
+    const { wrapper } = mountIndex(
+      seed([
+        live("ordinary", { agent: "coding", startedAt: 9 }),
+        live("command-row", { agent: "command", startedAt: 8 }),
+        live("door-row", { agent: "door", startedAt: 7 }),
+      ]),
+    );
+    expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual(["ordinary"]);
+    expect(wrapper.find("#livecount").text()).toBe("1 running");
+
+    const toggle = wrapper.find("#showbookkeeping");
+    expect(toggle.attributes("aria-label")).toBe("Show bookkeeping runs");
+    expect(toggle.attributes("aria-controls")).toBe("runs");
+    expect(toggle.element.parentElement?.textContent?.trim()).toBe("Show bookkeeping runs");
+    await toggle.setValue(true);
+
+    expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual([
+      "ordinary",
+      "command-row",
+      "door-row",
+    ]);
+    expect(wrapper.find("#livecount").text()).toBe("3 running");
+  });
+
   // Feature: docs/reference/specs/live-view.md item 32 — stalled
   // runs sort first: a live row with no tool call for the whole pace window
   // rises above newer healthy rows, so the stall is the first thing seen.

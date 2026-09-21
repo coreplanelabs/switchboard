@@ -119,6 +119,7 @@ describe("DeliveryPage", () => {
     expect(weeks[1].findAll("td")[1].text()).toBe("2");
     // The mutex unit: one pull request, two verdicts, one blocking finding, resolved by an agent, ten agent-run minutes in its week.
     const units = w.findAll("table.units tbody tr");
+    expect(w.findAll("table.units thead th")[0].text()).toBe("Issue");
     expect(units.map((r) => r.findAll("td")[0].text())).toEqual([hash(825), hash(830), "—"]);
     const mutex = units[0];
     expect(mutex.find('a[href="https://github.com/acme/api/issues/825"]').exists()).toBe(true);

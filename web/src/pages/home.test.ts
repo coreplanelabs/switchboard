@@ -358,7 +358,7 @@ describe("HomePage — the rail follows the viewer's live feed (item 7)", () => 
     const wrapper = mountApp(HomePage, { seed: seed() });
     const note = wrapper.find("aside [data-testid=what-is-a-thread]");
     expect(note.text()).toBe(
-      "A thread is a conversation; each message you send is a run. Runs lists every run across everyone's threads.",
+      "A thread holds the runs its messages start. Runs lists every run across everyone's threads.",
     );
     expect(note.find("a").attributes("href")).toBe("/runs");
   });
