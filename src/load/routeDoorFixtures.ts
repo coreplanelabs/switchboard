@@ -1,12 +1,13 @@
 // The checked-in door set of `load:route` (docs/reference/specs/load-harness.md
-// item 17): the door row of twenty-five fixtures — record 0069's fourteen
+// item 17): the door row of twenty-seven fixtures — record 0069's fourteen
 // defects D1 to D14 from one day under `routing.operator: on` (issues 1993,
 // 2010, 2025), the first night's four door failures N1 to N4 (issues 2043,
 // 2045, 2046), the one loop's first defect N5 (issue 2088, the write ask a
-// read answered) and the plain-words model set M1 to M6 (a person names a
-// model in plain words and the run uses it) — each the failure's message
-// shape with the amended table's expected outcome and the unit that turns it
-// green.
+// read answered), the long-ask pair N6 and N7 (issue 2099, the plain-words
+// asks the loop floored at the output cap or on several calls), and the
+// plain-words model set M1 to M6 (a person names a model in plain words and
+// the run uses it) — each the failure's message shape with the amended
+// table's expected outcome and the unit that turns it green.
 // The replay scores a fixture only once its unit is on `DOOR_MERGED_UNITS`
 // and prints the rest as pending, so the row is green at head while the
 // units land one pull request at a time. Neutral names only (acme/…, plan
@@ -19,14 +20,16 @@
  *  write-intent question cell (a write-class intent never executes as a read
  *  command — record 0069's amendment); MW1 is the plain-words model unit (a
  *  model named in plain words rides `bind_preset`'s `model` and the run uses
- *  it at directive precedence). */
-export type DoorUnit = "E2" | "E3" | "W1" | "MW1";
+ *  it at directive precedence); W2 is issue 2099's long-ask fix (the bind rides
+ *  the request by reference so the output cap never cuts it, and a multi-call
+ *  answer is re-asked, the one action call taken past the retries). */
+export type DoorUnit = "E2" | "E3" | "W1" | "MW1" | "W2";
 
 /** The units already merged, read by the row's scorer: a fixture whose unit
  *  is not on this list is printed as pending, never replayed and never a
  *  failure. The unit that lands appends itself here in its own pull request,
  *  turning its fixtures from pending to scored. */
-export const DOOR_MERGED_UNITS: readonly DoorUnit[] = ["E2", "E3", "W1", "MW1"];
+export const DOOR_MERGED_UNITS: readonly DoorUnit[] = ["E2", "E3", "W1", "MW1", "W2"];
 
 /** The amended table's expected outcome for one fixture — what the door must
  *  do with the message once the fixture's unit is merged.
@@ -363,5 +366,30 @@ export const ROUTE_DOOR_FIXTURES: readonly RouteDoorFixture[] = [
     unit: "W1",
     text: "change my default models to openai",
     expected: { kind: "question", proposes: "config set me", forbids: "config show" },
+  },
+  // N6 (issue 2099): a 1,900-character plain-words write ask floored as
+  // `non_decision` — the bind carried the request verbatim as an argument and
+  // the 374-token output cap cut the call mid-argument. The bind now rides the
+  // request by reference, so the ask binds whatever its length; a floor (a
+  // `non_decision`) misses this fixture, since a bind expectation needs the
+  // bound line.
+  {
+    id: "n06",
+    defect: "N6",
+    unit: "W2",
+    text: "in acme/api: the nightly export job needs one coherent change, landed with tests — please read the whole ask before starting, because the parts only make sense together. First, the checkpoint file the job writes after every batch is truncated and rewritten in place, so a crash between the truncate and the write loses the whole checkpoint and the next run starts from zero; write the new checkpoint to a temporary file beside it and rename it over the old one, so the file is always either the old checkpoint or the new one and never empty. Second, the batch size is read once at startup from an environment variable and never validated: a value of zero sends the job into a spin that writes the same empty page forever, and a negative value throws deep inside the pager with a stack trace nobody can act on — validate it at startup, refuse zero and negatives by name with a message that says what the variable held and what the job accepts, and default to five hundred when the variable is unset. Third, the summary line the job posts when it finishes counts pages, not rows, which has confused everyone who read it this month; make it count rows, keep the page count in parentheses for continuity, and cover the new wording with a test so the next refactor cannot silently flip it back. While you are in there, the retry loop around the upload call catches every error including the auth failures it should surface immediately — narrow the catch to the transient network errors, let an auth failure end the run with its own message, and add a test for each branch. Land all of this as one change with a changelog-style title, run the export job's own test file before pushing, and say in the description which of the parts you could not prove with a test, if any, rather than claiming everything is covered. Do not touch the importer, even where it shares helpers with the exporter — if a shared helper must change, copy it into the exporter first and note the duplication in the description so the follow-up that unifies them again has both call sites named.",
+    expected: { kind: "bind", preset: "ship", carries: "nightly export job" },
+  },
+  // N7 (issue 2099): a multi-part write ask whose answer carried several tool
+  // calls at once — the loop floored it as `non_decision` instead of re-asking
+  // with the violation named. The loop now re-asks once ("one tool call per
+  // turn") and takes the one action call present past the bounded retries, so
+  // the ask binds; a floor misses.
+  {
+    id: "n07",
+    defect: "N7",
+    unit: "W2",
+    text: "in acme/api: no production code path may hard-code a specific model name — every model a job uses must come from configuration. Three requirements, one change: (1) add a lookup that reads the model for each task from the config file and fails at startup, by key name, when a task's model is missing rather than falling back to a literal; (2) sweep the tree for the remaining hard-coded model names and move each one into the config file's defaults section, leaving the price table alone since its rows are keyed by model on purpose; (3) add a check that greps the production sources for new model literals so the next one fails the build, with the price table and the test fixtures exempted by path. Update the example config so every key the lookup reads is documented, and keep the docs' examples provider-neutral.",
+    expected: { kind: "bind", preset: "ship", carries: "hard-code a specific model name" },
   },
 ];

@@ -504,6 +504,20 @@ export interface RouteToolCall {
   input: unknown;
 }
 
+/** A provider answer that carried several tool calls in one turn. Parallel
+ *  calls are switched off on the wire, so a provider that sends them anyway
+ *  (Haiku and the OpenAI models routinely do) did not answer the question: a
+ *  closed prompt's caller fails on it as ever — the router's no-route — and
+ *  the operator's open loop catches it and re-asks with the violation named
+ *  (issue 2099), taking the one action call present after the bounded retries
+ *  rather than flooring once the ordinary post-parse guards accept it. */
+export class MultiToolCallError extends Error {
+  constructor(readonly calls: readonly RouteToolCall[]) {
+    super(`answer carried ${calls.length} tool calls; the route is one call`);
+    this.name = "MultiToolCallError";
+  }
+}
+
 /** The one seam to the model: the prompt in, the model's one tool call —
  *  `{ tool, input }` — or its text out. Production wraps a provider
  *  (`providerRouteModel`); tests script one. */
@@ -1195,8 +1209,10 @@ export function providerRouteModel(
       (p): p is { type: "tool_use"; id: string; name: string; input: unknown } => p.type === "tool_use",
     );
     // Parallel calls are switched off on the wire (piStreamOptions' payload
-    // hook); a provider that sends two anyway did not answer the question.
-    if (calls.length > 1) throw new Error(`answer carried ${calls.length} tool calls; the route is one call`);
+    // hook); a provider that sends two anyway did not answer the question. The
+    // throw is typed and carries the calls (issue 2099): the operator's open
+    // loop re-asks it as a violation; every closed caller fails as before.
+    if (calls.length > 1) throw new MultiToolCallError(calls.map((c) => ({ tool: c.name, input: c.input })));
     if (calls.length === 1) return { tool: calls[0]!.name, input: calls[0]!.input };
     return result.content
       .filter((p): p is { type: "text"; text: string } => p.type === "text")

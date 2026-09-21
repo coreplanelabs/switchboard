@@ -19,6 +19,7 @@ import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
 import {
   buildRoutePrompt,
   COMPOUND_BRIEF_HEADING,
+  MultiToolCallError,
   compoundBrief,
   parseRouteAnswer,
   providerRouteModel,
@@ -740,6 +741,11 @@ describe("providerRouteModel — the live seam over a provider", () => {
     });
     const model = providerRouteModel(provider, "fast-model");
     await expect(model(prompt, opts())).rejects.toThrow(/answer carried 2 tool calls/);
+    // The throw is typed and carries the calls (issue 2099), so the operator's
+    // open loop can re-ask it as a violation; here the closed caller fails.
+    const thrown = await model(prompt, opts()).catch((err: unknown) => err);
+    expect(thrown).toBeInstanceOf(MultiToolCallError);
+    expect((thrown as MultiToolCallError).calls.map((c) => c.tool)).toEqual([ROUTE_TOOL_NAME, ROUTE_TOOL_NAME]);
     const d = await route({ text: "x", recentDirectives: {}, presets, allowed: allNames, fallback: "general" }, model);
     expect(d.preset).toBeUndefined();
     expect(d.reason).toMatch(/^router failed: answer carried 2 tool calls/);

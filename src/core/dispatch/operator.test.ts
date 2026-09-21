@@ -25,7 +25,13 @@ import {
   type OperatorInput,
   type OperatorTurnContext,
 } from "./operator.js";
-import { routablePresets, type RoutableCommand, type RouteModel, type RouteToolCall } from "./route.js";
+import {
+  MultiToolCallError,
+  routablePresets,
+  type RoutableCommand,
+  type RouteModel,
+  type RouteToolCall,
+} from "./route.js";
 import type { ToolDef } from "../provider.js";
 import type { CommandDef } from "../commandRegistry.js";
 import { mcpToolName } from "../commandSurface.js";
@@ -261,6 +267,101 @@ describe("runOperator — the loop over a scripted model", () => {
     const prompt = buildOperatorPrompt(input());
     expect(prompt.open).toBe(true);
     expect([prompt.tool, ...(prompt.tools ?? [])].map((t) => t.name)).toContain(OPERATOR_BIND_TOOL);
+  });
+});
+
+describe("long asks and multi-call answers (issue 2099)", () => {
+  it("bind_preset carries no request argument — the admitted message rides by reference, so the call's size never grows with the ask", () => {
+    const bind = operatorTools(input()).find((t) => t.name === OPERATOR_BIND_TOOL)!;
+    const schema = bind.inputSchema as { required: string[]; properties: Record<string, unknown> };
+    expect(schema.required).toEqual(["preset", "reason"]);
+    expect(schema.properties).not.toHaveProperty("request");
+  });
+
+  it("a 1,900-character ask binds the person's own words off the executor — never floored at the output cap", () => {
+    const ask =
+      `fix the export job: ${"the checkpoint file is rewritten in place and a crash loses it. ".repeat(30)}`.trim();
+    expect(ask.length).toBeGreaterThanOrEqual(1900);
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "write ask" } },
+      ctxOf({ requestText: ask }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].line.startsWith("agent:general fix the export job:")).toBe(true);
+  });
+
+  it("a multi-call answer is one re-ask naming the violation, then the corrected single call binds", async () => {
+    let calls = 0;
+    const prompts: { retries?: readonly { answer: string; violation: string }[] }[] = [];
+    const model: RouteModel = async (prompt) => {
+      prompts.push(prompt);
+      if (calls++ === 0)
+        throw new MultiToolCallError([
+          { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "r" } },
+          { tool: OPERATOR_READ_TOOLS.repoFacts, input: {} },
+        ]);
+      return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "r" } };
+    };
+    const answer = await runOperator(input(), model);
+    expect(answer.decision.kind).toBe("binds");
+    expect(answer.attempts).toEqual([
+      { outcome: "violation", violation: "the answer carried 2 tool calls; one tool call per turn" },
+      { outcome: "accepted" },
+    ]);
+    expect(prompts[1].retries![0].violation).toContain("one tool call per turn");
+  });
+
+  it("past the bounded retries the one action call present is taken before any floor — the model chose an act, only the packaging broke the rule", async () => {
+    let calls = 0;
+    const answer = await runOperator(input(), async () => {
+      calls++;
+      throw new MultiToolCallError([
+        { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "r" } },
+        { tool: OPERATOR_READ_TOOLS.threadState, input: {} },
+      ]);
+    });
+    expect(calls).toBe(3);
+    expect(answer.decision).toMatchObject({ kind: "binds" });
+    expect(answer.attempts).toHaveLength(4);
+    expect(answer.attempts![3]).toEqual({ outcome: "accepted" });
+  });
+
+  it("the exhausted multi-call fallback holds its sole action against the model catalogue before accepting it", async () => {
+    const answer = await runOperator(
+      input({
+        providers: ["openrouter"],
+        providerModels: {
+          read: async () => "Model refs this deployment can run:\n- `openrouter/openai/gpt-5.6`",
+        },
+      }),
+      async () => {
+        throw new MultiToolCallError([
+          {
+            tool: OPERATOR_BIND_TOOL,
+            input: { preset: "general", model: "openrouter/openai/not-real", reason: "r" },
+          },
+          { tool: OPERATOR_READ_TOOLS.threadState, input: {} },
+        ]);
+      },
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "non_decision",
+      reason: expect.stringContaining("is not in the provider catalogue") as unknown as string,
+    });
+    expect(answer.attempts).not.toContainEqual({ outcome: "accepted" });
+  });
+
+  it("a multi-call answer with two action calls floors past the retries — there is no one act to take", async () => {
+    const answer = await runOperator(input(), async () => {
+      throw new MultiToolCallError([
+        { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "r" } },
+        { tool: OPERATOR_ASK_TOOL, input: { text: "which?", reason: "r" } },
+      ]);
+    });
+    expect(answer.decision).toMatchObject({
+      kind: "non_decision",
+      reason: expect.stringContaining("2 tool calls") as unknown as string,
+    });
   });
 });
 
