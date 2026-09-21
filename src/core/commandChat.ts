@@ -170,7 +170,7 @@ export interface HandleChatCommandArgs {
  *  name — not the channel it speaks in (authorization.md item 7), so one token
  *  gets one answer on every surface. */
 export function chatCallerFor(
-  msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey" | "userName">,
+  msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey" | "channelName" | "userName">,
   config: Pick<ConfigStore, "grantsFor">,
   resolveRepo?: () => Promise<string | undefined>,
 ): Caller {
@@ -178,7 +178,12 @@ export function chatCallerFor(
     kind: "chat",
     id: msg.userId,
     actor: resolveChatActor(msg, (id) => config.grantsFor(id)),
-    origin: { channelId: msg.channelId, threadKey: msg.threadKey, ...(resolveRepo ? { repo: resolveRepo } : {}) },
+    origin: {
+      channelId: msg.channelId,
+      threadKey: msg.threadKey,
+      ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
+      ...(resolveRepo ? { repo: resolveRepo } : {}),
+    },
     // The adapter's resolved display name rides along as identity (what a stamp
     // credits by name), never as authority: nothing below decides on it.
     ...(msg.userName !== undefined ? { name: msg.userName } : {}),

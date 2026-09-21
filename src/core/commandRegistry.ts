@@ -65,9 +65,10 @@ export type CommandSurfaces = Partial<Record<SurfaceName, false>>;
  *  stopped, a record forgotten, issues filed), false when one command reverses
  *  it. `idempotent`: a repeat with the same input changes nothing more.
  *  `openWorld`: the run reaches outside Switchboard's own state (provisions
- *  billable compute, files issues on a tracker). `risk(input)` is the one line
- *  a channel shows beside an offer to run the command — what THIS parsed input
- *  changes; a `--dry-run` input answers `PLAN_ONLY_RISK`. The MCP listing
+ *  billable compute, files issues on a tracker). `risk(input, origin)` is the
+ *  one line a channel shows beside an offer to run the command — what THIS
+ *  accepted input changes, with optional display-only chat origin; a `--dry-run`
+ *  input answers `PLAN_ONLY_RISK`. The MCP listing
  *  renders these in MCP's own hint names (`src/channels/mcp.ts`), and the
  *  conformance suite refuses a chat-exposed write that declares none, so the
  *  fence is presence: the label itself is a judgement made in the record.
@@ -83,7 +84,7 @@ export interface CommandAnnotations {
   destructive: boolean | ((input: ParsedCommandInput) => boolean);
   idempotent?: boolean;
   openWorld?: boolean;
-  risk?: (input: CommandInput) => string;
+  risk?: (input: CommandInput, origin?: Caller["origin"]) => string;
 }
 
 /** The shape a destructive predicate classes over: `parseInput`'s accepted
@@ -124,7 +125,13 @@ export interface Caller {
    *  bound to (the repo memory scope; costs a history fetch and a GitHub call).
    *  Context, NOT authority (authorization.md item 1). Absent for machine
    *  surfaces. */
-  origin?: { channelId: string; threadKey: string; repo?: () => Promise<string | undefined> };
+  origin?: {
+    channelId: string;
+    threadKey: string;
+    /** Display-only channel name resolved by the adapter; never authority. */
+    channelName?: string;
+    repo?: () => Promise<string | undefined>;
+  };
   /** The email a browser session is signed in with (`access` callers with an identity email
    *  only): what a connect ticket the session mints binds to, linked to a person or not
    *  (record 0042). Identity, NOT authority — read by no gate. */

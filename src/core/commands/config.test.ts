@@ -8,6 +8,7 @@ import { chatCallerFor, handleChatCommand, parseChatCommand } from "../commandCh
 import {
   CommandRegistry,
   bindCommands,
+  boundBlastRadius,
   renderText,
   type AuditEntry,
   type Caller,
@@ -20,7 +21,10 @@ import { EFFORT_LEVELS } from "../../effort.js";
 import { HARNESS_NAMES } from "../harness/roster.js";
 import { helpRows, parseInvocation, tokenize } from "../commandSurface.js";
 import {
+  configClear,
   configCommands,
+  configInstructions,
+  configRisk,
   configSet,
   ME_GITHUB_MESSAGE,
   ME_ON_SERVICE_TOKEN_MESSAGE,
@@ -396,6 +400,88 @@ describe("config show --channel is bound by the target channel's visibility", ()
     expect(
       await peek(bind(config, visibilityOf({ "slack:COTHER": "private" })), chat(config, "slack:UX", "slack:COTHER")),
     ).toMatchObject({ ok: true, value: { action: "show", instructions: "Secret channel rules." } });
+  });
+});
+
+describe("configRisk — confirmation copy names the setting owner", () => {
+  const namedOrigin = {
+    channelId: "slack:CX",
+    threadKey: "slack:CX:1.0",
+    channelName: "release-planning",
+  };
+
+  it("names `me` as your own settings until you reset them, without shared-setting language", () => {
+    const risk = configRisk({ args: ["me"], options: { verbosity: "verbose" } }, namedOrigin);
+    expect(risk).toBe("changes your own settings until you reset them");
+    expect(risk).not.toMatch(/everyone|scope|release-planning/);
+  });
+
+  it("uses one owner sentence for channel set, clear and instructions; a missing safe name falls back to this channel", () => {
+    const commands = [configSet, configClear, configInstructions];
+    const inputs = [
+      { args: ["channel"], options: { model: "openai/gpt-5" } },
+      { args: ["channel"], options: {} },
+      { args: ["channel", "Be brief"], options: {} },
+    ];
+    for (const [index, command] of commands.entries()) {
+      const risk = command.annotations!.risk!(inputs[index]!, namedOrigin);
+      expect(risk).toBe("changes the release-planning channel's settings for everyone who asks there until reset");
+      expect(risk.endsWith("until reset")).toBe(true);
+    }
+    expect(configRisk(inputs[0]!, { channelId: "slack:CX", threadKey: "slack:CX:1.0" })).toBe(
+      "changes this channel's settings for everyone who asks there until reset",
+    );
+    expect(configRisk(inputs[0]!, { ...namedOrigin, channelName: "  \n  " })).toBe(
+      "changes this channel's settings for everyone who asks there until reset",
+    );
+  });
+
+  it("uses display origin only for its own channel and names explicit channel and thread targets neutrally", () => {
+    expect(configRisk({ args: ["channel"], options: { channel: "slack:CX", agent: "review" } }, namedOrigin)).toBe(
+      "changes the release-planning channel's settings for everyone who asks there until reset",
+    );
+    expect(configRisk({ args: ["channel"], options: { channel: "slack:COTHER", agent: "review" } }, namedOrigin)).toBe(
+      "changes the target channel's settings for everyone who asks there until reset",
+    );
+    expect(configRisk({ args: ["thread"], options: { thread: namedOrigin.threadKey, intake: {} } }, namedOrigin)).toBe(
+      "changes this thread's intake setting for everyone who asks there until reset",
+    );
+    expect(configRisk({ args: ["thread"], options: { thread: "slack:COTHER:2.0", intake: {} } }, namedOrigin)).toBe(
+      "changes the target thread's intake setting for everyone who asks there until reset",
+    );
+    expect(configRisk({ args: ["thread"], options: { thread: "http:thread:2", intake: {} } })).toBe(
+      "changes the target thread's intake setting for everyone who asks there until reset",
+    );
+  });
+
+  it("names organization-wide config and another person's GitHub setting without calling either the caller's own", () => {
+    expect(configRisk({ args: ["org"], options: { pulls: { watch: "on" } } })).toBe(
+      "changes settings for every channel until reset",
+    );
+    for (const input of [
+      { args: ["user"], options: { user: "slack:UOTHER", github: "other" } },
+      { args: ["user"], options: { user: "slack:UOTHER" } },
+    ]) {
+      const risk = configRisk(input);
+      expect(risk).toBe("changes the affected person's GitHub setting until reset");
+      expect(risk).not.toContain("your own");
+    }
+  });
+
+  it("has the same platform-neutral meaning for CLI, HTTP and MCP callers; classification stays separate", () => {
+    const input = { args: ["channel"], options: { verbosity: "debug" } };
+    const machineCallers = [
+      callerWith("cli", "cli:local", "all"),
+      callerWith("access", "access:svc:operator", "all"),
+      callerWith("mcp", "mcp:operator", "all"),
+    ];
+    expect(machineCallers.map((caller) => configRisk(input, caller.origin))).toEqual([
+      "changes this channel's settings for everyone who asks there until reset",
+      "changes this channel's settings for everyone who asks there until reset",
+      "changes this channel's settings for everyone who asks there until reset",
+    ]);
+    expect(boundBlastRadius(configSet, { args: ["me"], options: {} })).toBe("write");
+    expect(boundBlastRadius(configSet, input)).toBe("destructive");
   });
 });
 

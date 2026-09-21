@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { CompletionResult, Provider } from "../provider.js";
-import { MultiToolCallError, providerStructuredModel, type RoutePrompt } from "./route.js";
+import { InMemoryConfirmationStore } from "../confirmations.js";
+import { configSet } from "../commands/config.js";
+import type { ChannelIO, IncomingMessage } from "../types.js";
+import { mintConfirmationOffer, MultiToolCallError, providerStructuredModel, type RoutePrompt } from "./route.js";
 
 const source = (path: string): string => readFileSync(new URL(path, import.meta.url), "utf8");
 
@@ -36,5 +39,45 @@ describe("the readers' router is retired", () => {
 
     expect(thrown).toBeInstanceOf(MultiToolCallError);
     expect((thrown as MultiToolCallError).calls.map((call) => call.tool)).toEqual(["bind_preset", "thread_state"]);
+  });
+});
+
+describe("mintConfirmationOffer — risk projection", () => {
+  it("renders config risk from accepted input and the caller origin, then stores and offers the same line", async () => {
+    const msg: IncomingMessage = {
+      channelId: "slack:CX",
+      userId: "slack:UREQ",
+      threadKey: "slack:CX:1.0",
+      text: "set my verbosity to verbose",
+      channelName: "release-planning",
+    };
+    const origin = {
+      channelId: msg.channelId,
+      threadKey: msg.threadKey,
+      channelName: msg.channelName,
+    };
+    const store = new InMemoryConfirmationStore({ clock: () => 1_000 });
+    const io = { reply: async () => {}, offer: async () => {} } as unknown as ChannelIO;
+    const input = { args: ["me"], options: { verbosity: "verbose" } };
+
+    const minted = await mintConfirmationOffer({
+      io,
+      store,
+      msg,
+      origin,
+      def: configSet,
+      input,
+      receipt: "config set me --verbosity verbose",
+      model: "anthropic/general-model",
+    });
+
+    expect(minted).toMatchObject({
+      kind: "offered",
+      shown: { risk: "changes your own settings until you reset them" },
+    });
+    expect(await store.pendingByThread(msg.threadKey)).toMatchObject({
+      kind: "run",
+      risk: "changes your own settings until you reset them",
+    });
   });
 });

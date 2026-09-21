@@ -332,12 +332,17 @@ describe("parseChatCommand", () => {
 });
 
 describe("chatCallerFor", () => {
-  it("carries the message's channel + thread as `origin` (context, never authority) and the lazy repo resolver when given", async () => {
+  it("carries the message's channel + thread and optional display name as `origin` (context, never authority), plus the lazy repo resolver", async () => {
     const { chatCallerFor } = await import("./commandChat.js");
     const config = configStore(ADMIN_YAML);
     const c = chatCallerFor(msg("x", "slack:UX"), config);
     expect(c.origin).toEqual({ channelId: "slack:CX", threadKey: "slack:CX:1.0" });
     expect(c).not.toHaveProperty("channel");
+    expect(chatCallerFor({ ...msg("x"), channelName: "general" }, config).origin).toMatchObject({
+      channelId: "slack:CX",
+      threadKey: "slack:CX:1.0",
+      channelName: "general",
+    });
     const resolve = async () => "acme/api";
     expect(chatCallerFor(msg("x"), config, resolve).origin?.repo).toBe(resolve);
   });
