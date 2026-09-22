@@ -159,6 +159,11 @@ export interface RunRecord {
   record?: string;
   /** Stable text-free key for a direct task's re-issue. */
   recordTaskKey?: string;
+  /** The final workspace head the run loop independently observed (7 to 40
+   *  lowercase hex), after every tail step and mechanical salvage. Present
+   *  only when the workspace had a readable Git HEAD; absent on older records
+   *  and runs without a Git workspace. */
+  headSha?: string;
   /** The typed handoff a coding child submitted (docs/reference/specs/agent-ship.md
    *  item 14): its deviations from the plan unit, its follow-ups and the
    *  criteria it could not prove — redacted like every stored string. Present
@@ -1036,6 +1041,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.record !== undefined && (typeof r.record !== "string" || !/^\d{4}$/.test(r.record))) return false;
   if (r.recordTaskKey !== undefined && (typeof r.recordTaskKey !== "string" || !/^[0-9a-f]{16}$/.test(r.recordTaskKey)))
     return false;
+  if (r.headSha !== undefined && (typeof r.headSha !== "string" || !REVIEW_HEAD_PATTERN.test(r.headSha))) return false;
   // The handoff is checked for shape, not bounds (docs/reference/specs/agent-ship.md
   // item 14): redaction may lengthen a stored string past the tool's limit.
   if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;

@@ -1921,6 +1921,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       diagnosis,
       root,
       ledgerRun,
+      ...(observedHead !== undefined ? { headSha: observedHead } : {}),
       ...(handoff !== undefined ? { handoff } : {}),
       ...(verdict !== undefined ? { verdict } : {}),
       ...(reviewHead !== undefined ? { reviewHead } : {}),

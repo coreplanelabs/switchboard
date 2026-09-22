@@ -226,6 +226,15 @@ describe("assembleRunRecord — the handoff on the record", () => {
     for (const key of ["verdict", "reviewHead", "dispositions"]) expect(key in record).toBe(false);
   });
 
+  it("carries the independently observed final workspace head, validates it, and omits it when the workspace had no head", () => {
+    const headSha = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const record = assembleRunRecord({ ...base(), headSha });
+    expect(record).toMatchObject({ headSha });
+    expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
+    expect("headSha" in assembleRunRecord(base())).toBe(false);
+    expect(isRunRecord({ ...record, headSha: "not-a-commit" })).toBe(false);
+  });
+
   it("carries the decision-record reservation and direct-task key from run_meta", () => {
     const record = assembleRunRecord({
       ...base(),

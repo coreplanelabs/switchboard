@@ -539,6 +539,8 @@ export interface CoordinatorRunView {
   /** The generation driving a live run elsewhere (run-history item 41). */
   ownerGen?: string;
   finalReply?: string;
+  /** The final Git head independently observed by the run loop. */
+  headSha?: string;
 }
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -1025,6 +1027,7 @@ function coordinatorRunView(
     ...(view.idempotencyKey !== undefined ? { idempotencyKey: view.idempotencyKey } : {}),
     ...(view.ownerGen !== undefined ? { ownerGen: view.ownerGen } : {}),
     ...(finalReply !== undefined ? { finalReply } : {}),
+    ...(view.headSha !== undefined ? { headSha: view.headSha } : {}),
   };
 }
 

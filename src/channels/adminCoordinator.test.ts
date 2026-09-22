@@ -7,7 +7,14 @@ import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { CoordinatorInstance, CoordinatorTag, CoordinatorUnit } from "../core/coordinator/contract.js";
 import type { ChildContract } from "../core/ship/contract.js";
-import type { RoundChecks } from "../core/ship/coordinator.js";
+import {
+  applyReturn,
+  nextAction,
+  openUnitPipeline,
+  type ChildFacts,
+  type RoundChecks,
+  type StepReturn,
+} from "../core/ship/coordinator.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { REPLAY_EVERYTHING, RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
@@ -1295,6 +1302,104 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
     ).body as { run: Record<string, unknown> };
     expect(unpriced.run.costUsd).toBeNull();
     expect(unpriced.run.pushed).toBeUndefined();
+  });
+
+  const salvageScenario = async (observedHead: string, salvageHead: string) => {
+    const branch = INSTANCE.branch;
+    const h = harness({ openPr: { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", created: true } });
+    const child = h.registry.create("coding · child", {
+      agent: "coding",
+      channelId: INSTANCE.channelId,
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      ...TAG,
+    });
+    h.registry.finish(child.id, "completed");
+    const runId = child.id;
+    await h.instances.put(INSTANCE);
+    await h.instances.putUnits([
+      {
+        instanceId: INSTANCE.id,
+        unit: "U12",
+        slug: "u12",
+        title: "Warm the cache on wake",
+        branch,
+        dependsOn: [],
+        rounds: [],
+      },
+    ]);
+    await h.store.put(
+      record(runId, {
+        ...TAG,
+        handoff: { deviations: [], followUps: [], unproven: [] },
+        pushed: [{ ref: branch, sha: salvageHead, by: "salvage" }],
+        headSha: observedHead,
+      }),
+    );
+    h.registry.markPersisted(runId);
+
+    const driver = {
+      state: openUnitPipeline(
+        {
+          unit: { id: "U12", branch },
+          repo: INSTANCE.repo,
+          base: INSTANCE.base!,
+          caps: { maxRounds: 3, maxMinutes: 240 },
+          merge: "person",
+          generated: false,
+        },
+        NOW - 60_000,
+      ),
+    };
+    const feed = (answer: Record<string, unknown>) => {
+      const action = nextAction(driver.state);
+      if (action.type === "end") throw new Error("the unit ended before the scripted answer");
+      driver.state = applyReturn(driver.state, { ...answer, step: action.step } as StepReturn).state;
+    };
+    feed({ type: "pr-check", pr: { state: "none" }, at: NOW - 60_000 });
+    feed({ type: "branch", ok: true, at: NOW - 59_000 });
+    feed({ type: "spawn", outcome: "spawned", runId, at: NOW - 58_000 });
+    feed({ type: "wait", outcome: "event" });
+
+    const read = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId, unit: "U12" }),
+      h.deps,
+    );
+    expect(read.status).toBe(200);
+    const run = (read.body as { run: ChildFacts }).run;
+    expect(run).toMatchObject({ headSha: observedHead, handoff: true, pushed: [{ sha: salvageHead, by: "salvage" }] });
+    feed({ type: "read-record", run, at: NOW });
+    return { h, driver, feed, runId };
+  };
+
+  it("a completed child's production read-record view carries its observed final head, so same-head salvage opens the pull request and enters review", async () => {
+    const HEAD = "a".repeat(40);
+    const { h, driver, feed, runId } = await salvageScenario(HEAD, HEAD);
+    const recover = nextAction(driver.state);
+    expect(recover).toMatchObject({ type: "pr-check", recover: { runId } });
+    if (recover.type !== "pr-check") throw new Error("expected the pull-request recovery step");
+    const opened = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        ...(recover.recover !== undefined ? { recover: recover.recover } : {}),
+      }),
+      h.deps,
+    );
+    expect(h.opens).toHaveLength(1);
+    expect(opened.body).toMatchObject({ ok: true, state: "open", prNumber: 77 });
+    feed({ type: "pr-check", pr: opened.body, at: NOW });
+    expect(nextAction(driver.state)).toMatchObject({
+      type: "spawn",
+      preset: "review",
+      round: { index: 1, kind: "review" },
+    });
+  });
+
+  it("a completed child whose salvage differs from the head returned by production read-record still aborts at the checkpoint", async () => {
+    const { h, driver } = await salvageScenario("b".repeat(40), "a".repeat(40));
+    expect(nextAction(driver.state)).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    expect(h.opens).toHaveLength(0);
   });
 
   // Issue 1932: the failure by name rides the answer, so the machine can tell
