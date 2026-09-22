@@ -92,6 +92,47 @@ describe("ResidentExecutor.attach over a heartbeat stream (item 59: an attach th
     });
   });
 
+  it("a re-issued child after an aborted attempt rejects the previous sticky ref, while an unnamed ask may keep it", async () => {
+    const { calls } = stubFetch(
+      { body: { ...ATTACH_OK, ref: "plan/previous/u1" } },
+      { body: { ...ATTACH_OK, ref: "plan/previous/u1" } },
+    );
+    const named = new ResidentExecutor({ ...OPTS, refHint: "plan/current/u1" });
+    await expect(named.attach()).rejects.toThrow(
+      'resident attach: named ref mismatch for repo:jshttp/vary (asked for "plan/current/u1", got "plan/previous/u1")',
+    );
+    expect(sentBody(calls[0])).toMatchObject({ refHint: "plan/current/u1" });
+
+    const fallback = new ResidentExecutor({ ...OPTS, refHint: "master", refByDefault: true });
+    await expect(fallback.attach()).resolves.toMatchObject({ ref: "plan/previous/u1" });
+  });
+
+  it("rejects a stale returned record for a mismatched named ref, while an own-PR-derived return remains valid", async () => {
+    stubFetch(
+      {
+        body: {
+          ...ATTACH_OK,
+          returned: { from: "fix/x", to: "master", pr: 7, at: "2026-01-01T00:00:00.000Z" },
+        },
+      },
+      {
+        body: {
+          ...ATTACH_OK,
+          returned: { from: "fix/x", to: "master", pr: 7, at: "2026-01-01T00:00:00.000Z" },
+        },
+      },
+    );
+    await expect(new ResidentExecutor({ ...OPTS, refHint: "fix/x" }).attach()).rejects.toThrow(
+      'resident attach: named ref mismatch for repo:jshttp/vary (asked for "fix/x", got "master")',
+    );
+    await expect(
+      new ResidentExecutor({ ...OPTS, refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } }).attach(),
+    ).resolves.toMatchObject({
+      ref: "master",
+      returned: { from: "fix/x", to: "master", pr: 7 },
+    });
+  });
+
   // Feature: docs/reference/specs/tracing.md item 19 — the resident's step trace rides the
   // binding, rebuilt from the allowlist; a Worker without one binds as before.
   it("carries the resident's step trace on the binding, sanitized: hostile names and malformed steps never survive, and a trace-less answer has no trace", async () => {
@@ -721,7 +762,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
   // branch, and the bound-by-default flag — so an older resident, and every
   // attach without a reason, see the body they always did.
   it("sends ownPr and refByDefault in the attach body only when set", async () => {
-    const { calls } = stubFetch({ body: ATTACH_OK }, { body: ATTACH_OK }, { body: ATTACH_OK });
+    const { calls } = stubFetch({ body: { ...ATTACH_OK, ref: "fix/x" } }, { body: ATTACH_OK }, { body: ATTACH_OK });
     await ResidentExecutor.open({ ...OPTS, refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } });
     expect(sentBody(calls[0])).toMatchObject({ refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } });
     expect(sentBody(calls[0])).not.toHaveProperty("refByDefault");

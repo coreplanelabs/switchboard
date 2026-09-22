@@ -523,10 +523,11 @@ export interface ResidentExecutorOptions {
   /** Resource id, e.g. "repo:jshttp/vary". */
   resource: string;
   threadKey: string;
-  /** Ref for a first attach. An existing thread binding wins over it, with one
-   *  exception: a thread bound to the repo default for want of a named branch
-   *  moves onto the head branch of the pull request its own run opened when
-   *  `ownPr` names that PR (docs/reference/specs/resident-repos.md item 16). */
+  /** Ref for an attach. A ref the request names is authoritative and replaces
+   *  an older sticky binding; the sticky binding is only a fallback when the
+   *  request names none (`refByDefault` is true, `ownPr` derived the hint, or
+   *  this field is absent). The resident persists the named ref on the binding
+   *  (item 16). */
   refHint?: string;
   /** The pull request the thread's OWN run opened, and its head branch — the
    *  reason `refHint` is that branch (`ownPrOf`, resident-repos item 29). The
@@ -1125,10 +1126,11 @@ export class ResidentExecutor implements Executor {
 
   /** Bind/reuse this thread's worktree. Legible errors for every named
    *  refusal the service can answer with. Answers the binding the resident
-   *  reported: the bound ref — the resident's word, not the hint's: a differing
-   *  refHint is ignored unless `ownPr` names it as the thread's own pull
-   *  request and the resident moves a default-bound thread onto it (item 16;
-   *  `rebound` / `rebindRefused` say which) — and the sha the worktree is at. A
+   *  reported: the bound ref — a named `refHint` must be that ref, while the
+   *  sticky binding may answer a different ref only when the caller named none
+   *  (`refByDefault` or an `ownPr`-derived hint). The Worker also persists a named ref as the new sticky
+   *  binding (item 16). `rebound` / `rebindRefused` report the legacy own-PR
+   *  movement, and the sha says which commit the worktree is at. A
    *  200 without both fields is a malformed resident (the attach contract
    *  always carries them) and is an error, never a half-bound executor. A
    *  refusal the Worker typed as the platform's transient (`isTransientRefusal`:
@@ -1304,10 +1306,26 @@ export class ResidentExecutor implements Executor {
     if (typeof data.ref !== "string" || typeof data.sha !== "string") {
       throw new Error(`resident attach: malformed answer for ${this.opts.resource} (missing ref/sha)`);
     }
+    const returned = returnedOf(data.returned);
+    // A named ref is the spawn's branch, not a hint an older sticky binding may
+    // override. Fail closed against a Worker predating that invariant rather
+    // than let the child work and push from another attempt's branch. The two
+    // typed fallback cases are not named-ref authority: ownPr may leave a
+    // default-bound thread where it stood, and refByDefault names the resident's
+    // fallback rather than a branch the requester chose.
+    if (
+      this.opts.refHint !== undefined &&
+      !this.opts.refByDefault &&
+      this.opts.ownPr === undefined &&
+      data.ref !== this.opts.refHint
+    ) {
+      throw new Error(
+        `resident attach: named ref mismatch for ${this.opts.resource} (asked for ${JSON.stringify(this.opts.refHint)}, got ${JSON.stringify(data.ref)})`,
+      );
+    }
     const trace = sanitizeGraftedSteps(data.trace);
     const rebound = reboundOf(data.rebound);
     const rebindRefused = rebindRefusedOf(data.rebindRefused);
-    const returned = returnedOf(data.returned);
     this.lastBinding = {
       ref: data.ref,
       sha: data.sha,

@@ -58,10 +58,10 @@ describe("ensureThreadWorktree keeps a reusing attach's tree and wipes only on a
 
   it("takes the flag, measures the tree as WorktreeFacts and asks decideWorktree", () => {
     expect(source).toMatch(/import \{[^}]*decideWorktree[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentReuse\.js";/);
-    expect(ensure).toMatch(/opts: \{ detached: boolean; reuse: boolean \}/);
+    expect(ensure).toMatch(/opts: \{ detached: boolean; reuse: boolean; refChanged: boolean \}/);
     expect(ensure).toMatch(/const facts: WorktreeFacts = \{ exists: false \};/);
     expect(ensure).toMatch(
-      /const decision = decideWorktree\(\{ reuse: opts\.reuse, modeSwitch, sha, worktreePath: wt, facts \}\);/,
+      /const decision = decideWorktree\(\{[\s\S]*?reuse: opts\.reuse,[\s\S]*?modeSwitch,[\s\S]*?refChanged: opts\.refChanged,[\s\S]*?sha,[\s\S]*?worktreePath: wt,[\s\S]*?facts,[\s\S]*?\}\);/,
     );
   });
 

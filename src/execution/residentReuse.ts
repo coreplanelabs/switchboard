@@ -55,21 +55,37 @@ export type WorktreeDecision =
   /** Keep the tree exactly as it stands. */
   | { kind: "reuse" }
   /** Wipe it and clone afresh (a provisioning attach only). */
-  | { kind: "recreate"; why: "mode-switch" | "missing" | "unreadable" | "dirty" | "stale" }
+  | { kind: "recreate"; why: "mode-switch" | "ref-changed" | "missing" | "unreadable" | "dirty" | "stale" }
   /** A reusing attach cannot keep this tree, and must not replace it. */
   | { kind: "refuse"; why: string };
+
+/** A named-ref replacement is built beside the checkout its sticky binding
+ * still names. Once the attach settles, discard the superseded checkout on
+ * success or the provisional checkout on failure; either outcome leaves the
+ * persisted binding and the one surviving checkout saying the same ref. */
+export function replacementWorktreeCleanup(input: {
+  priorPath: string;
+  replacementPath: string;
+  succeeded: boolean;
+}): string | null {
+  if (input.priorPath === input.replacementPath) return null;
+  return input.succeeded ? input.priorPath : input.replacementPath;
+}
 
 export function decideWorktree(input: {
   /** True for a resumed run's attach: keep the tree, never wipe it. */
   reuse: boolean;
   /** The tree was built for the other mode (read-only against writable). */
   modeSwitch: boolean;
+  /** The binding moved to another ref. Even equal tips need a fresh clone so
+   *  the checked-out branch is the ref the caller named. */
+  refChanged?: boolean;
   /** The commit a provisioning attach checks out: the ref's tip, or the expected head. */
   sha: string;
   worktreePath: string;
   facts: WorktreeFacts;
 }): WorktreeDecision {
-  const { reuse, modeSwitch, sha, worktreePath, facts } = input;
+  const { reuse, modeSwitch, refChanged = false, sha, worktreePath, facts } = input;
   if (modeSwitch) {
     return reuse
       ? {
@@ -77,6 +93,11 @@ export function decideWorktree(input: {
           why: `the worktree at ${worktreePath} was built for the other mode (read-only against writable)`,
         }
       : { kind: "recreate", why: "mode-switch" };
+  }
+  if (refChanged) {
+    return reuse
+      ? { kind: "refuse", why: `the worktree at ${worktreePath} is attached to another ref` }
+      : { kind: "recreate", why: "ref-changed" };
   }
   if (!facts.exists) {
     return reuse

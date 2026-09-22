@@ -2877,6 +2877,34 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(noPlan.dispatched).toEqual([]);
   });
 
+  it("after pr_opened the pipeline row records the ref the coding child's push status named, matching the pull request head", async () => {
+    const h = await planHarness();
+    await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    const actualRef = "plan/reissued/u10";
+    await h.store.put(
+      record("run-c0", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        idempotencyKey: "plan-fixture:U10/0/coding",
+        threadKey: "slack:C1:2.0",
+        pushed: [{ ref: actualRef, sha: "a".repeat(40), by: "push" }],
+        events: [
+          {
+            type: "pr_opened",
+            number: 2168,
+            url: "https://github.com/acme/api/pull/2168",
+            created: true,
+            head: actualRef,
+            seq: 1,
+          },
+        ],
+      }),
+    );
+
+    await call(h, "read-record", { parentInstanceId: PLAN_INSTANCE.id, runId: "run-c0", unit: "U10" });
+
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({ branch: actualRef });
+  });
+
   it("spawn's body validation: a brief beside a prompt, a brief of the wrong preset, a malformed brief and a bad unit are 400", async () => {
     const h = await planHarness();
     const bad = async (over: Record<string, unknown>) =>

@@ -1028,12 +1028,19 @@ function coordinatorRunView(
   };
 }
 
-/** The pull request a finished coding child opened or edited (`pr_opened`), from its events. */
+/** The pull request a finished coding child opened or edited (`pr_opened`), from its events. `head` is the branch the post-step paired with the push status; it stays internal to the runner's row update. */
 function prOpenedOf(
   events: readonly RunEvent[] | undefined,
-): { number: number; url: string; created: boolean } | undefined {
+): { number: number; url: string; created: boolean; head?: string } | undefined {
   const last = [...(events ?? [])].reverse().find((e) => e.type === "pr_opened");
-  return last && last.type === "pr_opened" ? { number: last.number, url: last.url, created: last.created } : undefined;
+  return last && last.type === "pr_opened"
+    ? {
+        number: last.number,
+        url: last.url,
+        created: last.created,
+        ...(last.head !== undefined ? { head: last.head } : {}),
+      }
+    : undefined;
 }
 
 /** How many times `read-record` looks at GitHub's review list for a review
@@ -1309,9 +1316,26 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   const record = full.ok ? full.value : view;
   const finalReply = finalReplyOf(record.events);
   const reviewAskedAt = reviewAskedAtOf(record.events);
-  const pr = prOpenedOf(record.events);
+  const opened = prOpenedOf(record.events);
+  const pr = opened !== undefined ? { number: opened.number, url: opened.url, created: opened.created } : undefined;
   // The hard stop's mark (record 0060; issue 1924): a finished child's unit
   // ends stopped on it, whatever the child's own status.
+  // The post-step's PR head is accepted as the pipeline ref only when the run's
+  // own push record names that same ref. `RunRecord.pushed` is folded from the
+  // push-status block, so a stale resident binding can no longer leave the row
+  // naming one attempt while the pull request heads another.
+  let coordinatorUnit: CoordinatorUnit | undefined;
+  if (instanceRow !== null && typeof body.unit === "string") {
+    coordinatorUnit = (await deps.instances.listUnits(instanceRow.id)).find((u) => u.unit === body.unit);
+    const pushedPrRef =
+      opened?.head !== undefined && record.pushed?.some((pushed) => pushed.ref === opened.head)
+        ? opened.head
+        : undefined;
+    if (coordinatorUnit !== undefined && pushedPrRef !== undefined && coordinatorUnit.branch !== pushedPrRef) {
+      coordinatorUnit = { ...coordinatorUnit, branch: pushedPrRef };
+      await deps.instances.putUnits([coordinatorUnit]);
+    }
+  }
   // An interrupted child that restarted from its request (issue 1903: a
   // replaced container's child resumes by itself) is not the round's end: the
   // successor — a run of the same instance and idempotency key in the same
@@ -1352,9 +1376,8 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   let posted: { reviewPosted: boolean; reviewPostReason?: string } | undefined;
   if (record.verdict !== undefined && record.reviewHead !== undefined && typeof body.unit === "string") {
     const instance = instanceRow;
-    const row = instance ? (await deps.instances.listUnits(instance.id)).find((u) => u.unit === body.unit) : undefined;
-    if (instance && row?.pr !== undefined) {
-      const unitPr = { repo: instance.repo, number: row.pr.number };
+    if (instance && coordinatorUnit?.pr !== undefined) {
+      const unitPr = { repo: instance.repo, number: coordinatorUnit.pr.number };
       posted = reviewPostedByRecord(record, unitPr);
       if (posted === undefined) {
         const seen = await reviewPostedAtPatiently(deps, unitPr, record.verdict.verdict, record.reviewHead);

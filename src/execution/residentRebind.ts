@@ -170,6 +170,21 @@ export function boundByOf(binding: { ref: string; boundBy?: BoundBy }, defaultRe
   return binding.boundBy ?? (binding.ref === defaultRef ? "default" : "name");
 }
 
+/** Disk admission runs after an evicted binding's replacement reserves its
+ * pool user in storage. Restore the prior binding before an admission throw
+ * escapes, so a failed attach never publishes its provisional replacement. */
+export async function admitThreadDiskWithRollback<T>(
+  admitThreadDisk: () => Promise<T>,
+  rollback: () => Promise<void>,
+): Promise<T> {
+  try {
+    return await admitThreadDisk();
+  } catch (err) {
+    await rollback();
+    throw err;
+  }
+}
+
 /** The record a rebind leaves on the binding and in the attach answer: from
  *  which ref, onto which branch, for which pull request, when. `returnedAt`:
  *  that branch was gone from the mirror at a later attach and the binding

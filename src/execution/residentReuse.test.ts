@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideWorktree, parseReuse, type WorktreeFacts } from "./residentReuse.js";
+import { decideWorktree, parseReuse, replacementWorktreeCleanup, type WorktreeFacts } from "./residentReuse.js";
 
 // Feature: docs/reference/specs/resident-repos.md item 66: a resumed run's attach
 // reuses the thread's worktree as it stands: a dirty or stale tree is the run's
@@ -82,6 +82,51 @@ describe("decideWorktree: a reuse-only attach keeps the tree as it stands", () =
       why: `the worktree at ${WT} was built for the other mode (read-only against writable)`,
     });
   });
+
+  it("a refChanged tree is refused even when it is readable at the same commit", () => {
+    expect(
+      decideWorktree({
+        reuse: true,
+        modeSwitch: false,
+        refChanged: true,
+        sha: SHA,
+        worktreePath: WT,
+        facts: readable(),
+      }),
+    ).toEqual({
+      kind: "refuse",
+      why: `the worktree at ${WT} is attached to another ref`,
+    });
+  });
+});
+
+describe("a named-ref replacement is provisional until the attach succeeds", () => {
+  it("an attach that fails after recreating discards the new checkout and leaves the old binding on its matching checkout", () => {
+    const oldPath = "/workspace/threads/slack-CX-1.0-abcd1234/plan-old";
+    const newPath = "/workspace/threads/slack-CX-1.0-abcd1234/plan-new";
+    const checkouts = new Map([
+      [oldPath, "plan/old"],
+      [newPath, "plan/new"], // the replacement was recreated before deps failed
+    ]);
+    const binding = { ref: "plan/old", worktreePath: oldPath };
+
+    const discard = replacementWorktreeCleanup({ priorPath: oldPath, replacementPath: newPath, succeeded: false });
+    if (discard) checkouts.delete(discard);
+
+    expect(binding).toEqual({ ref: "plan/old", worktreePath: oldPath });
+    expect(checkouts.get(binding.worktreePath)).toBe(binding.ref);
+    expect(checkouts.has(newPath)).toBe(false);
+  });
+
+  it("a successful attach commits the replacement checkout and discards the superseded one", () => {
+    expect(
+      replacementWorktreeCleanup({
+        priorPath: "/workspace/threads/t/old",
+        replacementPath: "/workspace/threads/t/new",
+        succeeded: true,
+      }),
+    ).toBe("/workspace/threads/t/old");
+  });
 });
 
 // A provisioning attach's discipline is one rule (resident-repos item 17): a
@@ -101,6 +146,19 @@ describe("decideWorktree: a fresh attach keeps the dirty/stale discipline", () =
       kind: "recreate",
       why: "mode-switch",
     });
+  });
+
+  it("a named ref replacing the sticky ref recreates even when both refs point at the same commit", () => {
+    expect(
+      decideWorktree({
+        reuse: false,
+        modeSwitch: false,
+        refChanged: true,
+        sha: SHA,
+        worktreePath: WT,
+        facts: readable(),
+      }),
+    ).toEqual({ kind: "recreate", why: "ref-changed" });
   });
 
   it("an unreadable tree is recreated", () => {
