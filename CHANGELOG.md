@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.260.5](https://github.com/coreplanelabs/switchboard/compare/v1.260.4...v1.260.5) (2026-09-22)
+
+
+### Bug fixes
+
+* **core:** stop ship work when pull requests become terminal ([#2206](https://github.com/coreplanelabs/switchboard/issues/2206)) ([a8fe55d](https://github.com/coreplanelabs/switchboard/commit/a8fe55df50ef9ae8cbc4d4adb52c40805d34e1f4))
+* **dispatcher:** keep a bind alive when reasoning fills the output cap ([#2231](https://github.com/coreplanelabs/switchboard/issues/2231)) ([7216cbf](https://github.com/coreplanelabs/switchboard/commit/7216cbfdd4a5a86b6b7a8a03df19e58c60db448b))
+* **harness:** keep a child's model wire aligned with its run ([#2222](https://github.com/coreplanelabs/switchboard/issues/2222)) ([3dd0af6](https://github.com/coreplanelabs/switchboard/commit/3dd0af6209b36e4b3954de6be9aa17da4fa31517))
+* **providers:** classify every model failure once ([#2195](https://github.com/coreplanelabs/switchboard/issues/2195)) ([1ee9f2b](https://github.com/coreplanelabs/switchboard/commit/1ee9f2b087a728b1c15ba9c3562bdf0f9e88830b))
+* **providers:** shape tool schemas to the wire so the door survives ([#2227](https://github.com/coreplanelabs/switchboard/issues/2227)) ([ac2252d](https://github.com/coreplanelabs/switchboard/commit/ac2252d19c0153c4281996f8ce5f1b59f011010f))
+* **resident:** honor named refs over sticky bindings ([#2192](https://github.com/coreplanelabs/switchboard/issues/2192)) ([1f053d4](https://github.com/coreplanelabs/switchboard/commit/1f053d4d0feb13149c9aba0e805e1451636cbf1a))
+* **ship:** recheck pull requests before transition dispatch ([#2234](https://github.com/coreplanelabs/switchboard/issues/2234)) ([32873f4](https://github.com/coreplanelabs/switchboard/commit/32873f4e6ecbc6b714447b116c0a60182096d37e))
+* **ship:** reserve decision record numbers at admission ([#2205](https://github.com/coreplanelabs/switchboard/issues/2205)) ([60f45b7](https://github.com/coreplanelabs/switchboard/commit/60f45b754e3d71ccbe29680351a999aaa71bdba1))
+* **ship:** review completed same-head salvage ([#2221](https://github.com/coreplanelabs/switchboard/issues/2221)) ([e144096](https://github.com/coreplanelabs/switchboard/commit/e1440968407fbd7094c95b9fbc0e2ba90d813fdc))
+
+
+### Documentation
+
+* **docs:** accept typed effect seam and plan rollout ([#2201](https://github.com/coreplanelabs/switchboard/issues/2201)) ([9f6516d](https://github.com/coreplanelabs/switchboard/commit/9f6516d0fd998890c4bb785cb4a1b672c111e416))
+* **review:** tie verdicts to pull request heads ([#2207](https://github.com/coreplanelabs/switchboard/issues/2207)) ([8bb5ead](https://github.com/coreplanelabs/switchboard/commit/8bb5ead4746bf377ad5ba1de11d4883f297af821))
+* **ship:** propose record 0074, a side effect crosses one typed seam ([#2194](https://github.com/coreplanelabs/switchboard/issues/2194)) ([57a0e07](https://github.com/coreplanelabs/switchboard/commit/57a0e07afaa89583bebd5cf5acc94e621c7f8b88))
+
 ## [1.260.4](https://github.com/coreplanelabs/switchboard/compare/v1.260.3...v1.260.4) (2026-09-22)
 
 
