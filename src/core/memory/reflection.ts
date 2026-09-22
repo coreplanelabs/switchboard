@@ -5,6 +5,7 @@ import { authorize } from "../authz/index.js";
 import type { Actor, ChannelVisibility, Resource } from "../authz/types.js";
 import { redactSecrets } from "../runEvents.js";
 import { jsonOutput } from "../llmOutput/index.js";
+import { outputCapWithReasoning } from "../dispatch/route.js";
 import type { HistoryItem } from "../types.js";
 import type { MemoryCandidate, MemoryRecord, MemoryScope, MemoryStore, WriteCounts } from "./types.js";
 import { rejectionMarkers } from "./engine.js";
@@ -290,6 +291,9 @@ export interface ReflectDeps extends ReflectionProvenance {
    *  the model's own default. */
   effort?: Effort;
   effortWord?: string;
+  /** The resolved model card's cap field. Reasoning-counting wires need room
+   * for hidden reasoning in addition to the visible reflection JSON. */
+  capField?: string;
   store: MemoryStore;
   /** The run's scopes: the org's, plus the repo's / channel's / the requesting
    *  user's own when the run has them. */
@@ -442,13 +446,14 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
     const seen = new Set<string>();
     const existing = [...(await windowP), ...hits].filter((r) => !seen.has(r.id) && (seen.add(r.id), true));
     const text = buildReflectionInput({ history: deps.history, request: deps.request, answer: deps.answer, existing });
+    const maxTokens = outputCapWithReasoning(REFLECTION_MAX_TOKENS, { capField: deps.capField });
     let result: CompletionResult;
     try {
       result = await deps.provider.complete({
         model: deps.model,
         system: REFLECTION_SYSTEM,
         messages: [{ role: "user", content: [{ type: "text", text }] }],
-        maxTokens: REFLECTION_MAX_TOKENS,
+        maxTokens,
         ...(deps.effort !== undefined ? { effort: deps.effort } : {}),
         ...(deps.effortWord !== undefined ? { effortWord: deps.effortWord } : {}),
       });
@@ -457,17 +462,20 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
       warn(`reflection skipped: ${renderProviderFailure(failure.cause)}`);
       return;
     }
+    const truncated = result.stopReason === "max_tokens" ? `truncated at ${maxTokens} max tokens` : undefined;
+    if (truncated) {
+      warn(`reflection output rejected (${truncated}); nothing written`);
+      return;
+    }
     const reply = result.content
       .filter((p): p is { type: "text"; text: string } => p.type === "text")
       .map((p) => p.text)
       .join("");
     const prov: ReflectionProvenance = { sourceThreadKey: deps.sourceThreadKey, sourceRunId: deps.sourceRunId };
     const parsed = parseReflection(reply, prov, new Set(existing.map((r) => r.id)));
-    const truncated =
-      result.stopReason === "max_tokens" ? `truncated at ${REFLECTION_MAX_TOKENS} max tokens` : undefined;
-    const stopNote = truncated ?? (result.stopReason === "end_turn" ? undefined : `stop: ${result.stopReason}`);
+    const stopNote = result.stopReason === "end_turn" ? undefined : `stop: ${result.stopReason}`;
     if (!parsed.ok) {
-      const why = truncated ?? (stopNote ? `${parsed.error}; ${stopNote}` : parsed.error);
+      const why = stopNote ? `${parsed.error}; ${stopNote}` : parsed.error;
       warn(`reflection output rejected (${why}); nothing written`);
       return;
     }

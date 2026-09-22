@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CompletionRequest, CompletionResult, Provider } from "../provider.js";
+import { REASONING_OUTPUT_TOKEN_ALLOWANCE } from "../dispatch/route.js";
 import { actor } from "../authz/testing.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";
@@ -448,6 +449,27 @@ describe("reflect (one extractor call → store.write)", () => {
     expect(provider.requests[0].effortWord).toBe("quick");
   });
 
+  it("cap conformance: a reasoning-counting wire carries reasoning plus the reflection answer on its first call", async () => {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "openai",
+      async complete(req) {
+        requests.push(req);
+        if (req.maxTokens < REASONING_OUTPUT_TOKEN_ALLOWANCE + 1_024) {
+          return { content: [], stopReason: "max_tokens" };
+        }
+        return { content: [{ type: "text", text: goodReply }], stopReason: "end_turn" };
+      },
+    };
+    const store = new InMemoryMemoryStore();
+
+    await reflect({ ...base, provider, store, capField: "max_output_tokens" });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.maxTokens).toBeGreaterThanOrEqual(REASONING_OUTPUT_TOKEN_ALLOWANCE + 1_024);
+    expect(await store.retrieve({ scopeKey: SCOPE, query: "deploy ship", limit: 10 })).not.toEqual([]);
+  });
+
   it("shows the extractor the scope's relevant existing records, then writes with supersede applied", async () => {
     const provider = fakeProvider(goodReply);
     const store = new InMemoryMemoryStore([existing()]);
@@ -568,17 +590,20 @@ describe("reflect (one extractor call → store.write)", () => {
     expect(rejectedWarn).toHaveLength(1);
   });
 
-  it("the outcome line names how the model stopped when that was not a normal end — a cap the object survived, an unexpected reason", async () => {
-    const cut: string[] = [];
+  it("every capped response is rejected even when the object is complete; another unusual stop is named", async () => {
+    const cutInfo: string[] = [];
+    const cutWarn: string[] = [];
+    const cutStore = new InMemoryMemoryStore();
     await reflect({
       ...base,
       provider: fakeProvider("```json\n" + goodReply, "max_tokens"),
-      store: new InMemoryMemoryStore(),
-      onInfo: (m) => cut.push(m),
+      store: cutStore,
+      onInfo: (m) => cutInfo.push(m),
+      onWarn: (m) => cutWarn.push(m),
     });
-    expect(cut).toEqual([
-      "reflection offered 1, rejected 0, restated 0, inserted 2, deduped 0, summary (truncated at 1024 max tokens)",
-    ]);
+    expect(cutInfo).toEqual([]);
+    expect(cutWarn).toEqual(["reflection output rejected (truncated at 1024 max tokens); nothing written"]);
+    expect(await cutStore.retrieve({ scopeKey: SCOPE, query: "deploy ship", limit: 10 })).toEqual([]);
 
     const odd: string[] = [];
     await reflect({

@@ -6,7 +6,7 @@ import { installationPath } from "./deploy/operatorRoot.js";
 import { openConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
 import { configRefusalReason, createConfigRefusalServer } from "./configBoot.js";
-import { intakeCompletion } from "./intakeModel.js";
+import { intakeCompletion, intakeDecisionDeps } from "./intakeModel.js";
 import { providerModelsReader } from "./core/dispatch/providerModels.js";
 import { configuredModelRefs } from "./core/commands/providers.js";
 import { LEASE_MS, type IntakeReceipt } from "./core/runLedger/types.js";
@@ -872,9 +872,7 @@ export async function runBot(): Promise<void> {
       slackIntake = wireIntakeGate({
         intakeModeFor: (threadKey, userId, channelId) => config.intakeModeFor(threadKey, userId, channelId),
         deps: {
-          model: intake.model,
-          ledger: intakeLedger,
-          now: systemClock,
+          ...intakeDecisionDeps(intake, { ledger: intakeLedger, now: systemClock }),
         },
         modelRef: intake.modelRef,
         gen: PROCESS_STARTED_AT,

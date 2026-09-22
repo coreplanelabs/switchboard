@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import type { RouteModel, RoutePrompt, RouteToolCall } from "./dispatch/route.js";
+import {
+  OutputCapError,
+  REASONING_OUTPUT_TOKEN_ALLOWANCE,
+  type RouteModel,
+  type RoutePrompt,
+  type RouteToolCall,
+} from "./dispatch/route.js";
 import { classifyProviderFailure, providerFailureParks } from "./provider.js";
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from "./untrusted.js";
 import {
@@ -105,6 +111,57 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
       deps({ model: scripted(JSON.stringify({ answer: "addressed", reason: "a follow-up ask" })) }),
     );
     expect(decision).toMatchObject({ verdict: "addressed", source: "model", reason: "a follow-up ask" });
+  });
+
+  it("cap conformance: a reasoning-counting wire carries reasoning plus the intake verdict on its first call", async () => {
+    const caps: number[] = [];
+    const model: RouteModel = async (_prompt, opts) => {
+      caps.push(opts.maxTokens);
+      if (opts.maxTokens < REASONING_OUTPUT_TOKEN_ALLOWANCE + 200) throw new OutputCapError(opts.maxTokens);
+      return toolAnswer("addressed", "asks the bot");
+    };
+
+    const decision = await decideIntake(input(), deps({ model, capField: "max_output_tokens" }));
+
+    expect(decision).toMatchObject({ verdict: "addressed", source: "model" });
+    expect(caps).toHaveLength(1);
+    expect(caps[0]).toBeGreaterThanOrEqual(REASONING_OUTPUT_TOKEN_ALLOWANCE + 200);
+  });
+
+  it("an answer cut at the output cap is recorded as an error receipt, not a silent model verdict", async () => {
+    const l = ledger();
+    const model: RouteModel = async (_prompt, opts) => {
+      throw new OutputCapError(opts.maxTokens);
+    };
+
+    const decision = await decideIntake(input(), deps({ model, ledger: l }));
+
+    expect(decision).toMatchObject({ verdict: "silent", source: "error", receipt: "inserted" });
+    expect(decision.reason).toContain("answer cut at the output cap");
+    expect(l.writes[0]?.receipt).toMatchObject({ verdict: "silent", source: "error" });
+    expect(l.writes[0]?.receipt.reason).toContain("answer cut at the output cap");
+  });
+
+  it("an output-cap cut after a malformed answer stays an output-cap error and keeps the structured attempt", async () => {
+    const l = ledger();
+    let calls = 0;
+    const model: RouteModel = async (_prompt, opts) => {
+      calls += 1;
+      if (calls === 1) return "not json";
+      throw new OutputCapError(opts.maxTokens);
+    };
+
+    const decision = await decideIntake(input(), deps({ model, ledger: l }));
+
+    expect(decision).toMatchObject({
+      verdict: "silent",
+      source: "error",
+      receipt: "inserted",
+      attempts: [{ outcome: "violation", violation: expect.stringContaining("not a single JSON object") }],
+    });
+    expect(decision.reason).toContain("answer cut at the output cap");
+    expect(decision.providerFailure).toBeUndefined();
+    expect(l.writes[0]?.receipt).toMatchObject({ source: "error", attempts: decision.attempts });
   });
 
   it("a timeout crosses the typed provider-failure seam as transient; a thrown provider error is silent with source: error", async () => {
