@@ -310,6 +310,9 @@ export function assembleRunRecord(input: {
    *  and seal are appended, the published total takes the larger count, and the
    *  two seal stamps ride the record — omitted when the seal has none. */
   seal?: SealResult;
+  /** The final workspace head the run loop observed independently of the
+   *  model and push events. Omitted when this run had no readable Git head. */
+  headSha?: string;
   /** The typed handoff the run submitted (docs/reference/specs/agent-ship.md item 14),
    *  as the tool accepted it; redacted HERE, the one assembly, so no caller
    *  can forget. Omitted (not set undefined) when the run submitted none. */
@@ -420,6 +423,7 @@ export function assembleRunRecord(input: {
     ...(referencesOfEvents(events).length > 0 ? { references: referencesOfEvents(events) } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(input.headSha !== undefined ? { headSha: input.headSha } : {}),
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
     ...(input.verdict !== undefined ? { verdict: redactVerdict(input.verdict) } : {}),
     ...(input.reviewHead !== undefined ? { reviewHead: input.reviewHead } : {}),
@@ -572,6 +576,8 @@ export interface FinishRecordContext {
   diagnosis: FrictionDiagnosis;
   root: Span;
   ledgerRun: LedgerRun | undefined;
+  /** The final Git head the run loop observed after its tail settled. */
+  headSha?: string;
   /** The handoff the run loop captured from `submit_handoff`, when one was submitted. */
   handoff?: Handoff;
   /** The verdict a review run submitted and the head it reviewed; the dispositions a fix round submitted. */
@@ -617,6 +623,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     diagnosis,
     root,
     ledgerRun,
+    headSha,
     handoff,
     verdict,
     reviewHead,
@@ -648,6 +655,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           status: failedAfterFinish && status === "completed" ? "failed" : status,
           diagnosis,
           seal,
+          ...(headSha !== undefined ? { headSha } : {}),
           ...(handoff !== undefined ? { handoff } : {}),
           ...(verdict !== undefined ? { verdict } : {}),
           ...(reviewHead !== undefined ? { reviewHead } : {}),

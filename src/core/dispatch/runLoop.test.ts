@@ -1091,7 +1091,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     s.ending.drain(undefined);
     await s.writer.settled();
     const rec = (await s.store.get("run-l"))!;
-    expect(rec.pushed).toEqual([{ ref: BRANCH, sha: HEAD, by: "salvage" }]);
+    expect(rec).toMatchObject({ headSha: HEAD, pushed: [{ ref: BRANCH, sha: HEAD, by: "salvage" }] });
     expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
   });
 

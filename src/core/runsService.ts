@@ -174,10 +174,12 @@ export interface RunView {
    *  on a run without ship facts and on records written before the field. */
   pipeline?: PipelineSummary;
   /** The typed artifacts a finished run's record carries (run-history item 2) —
-   *  the review's verdict, reviewed head and post, the fix round's dispositions,
-   *  the coding child's handoff. A live view has none yet; a finished row the
-   *  registry still holds carries them from the store the moment the store
+   *  the final workspace head, the review's verdict, reviewed head and post,
+   *  the fix round's dispositions, and the coding child's handoff. A live view
+   *  has none yet; a finished row the registry still holds carries them from
+   *  the store the moment the store
    *  holds its record (`getRun`, item 21); a persisted row carries its own. */
+  headSha?: RunRecord["headSha"];
   verdict?: RunRecord["verdict"];
   reviewHead?: string;
   reviewPost?: RunRecord["reviewPost"];
@@ -808,6 +810,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   ): Promise<
     Pick<
       RunView,
+      | "headSha"
       | "verdict"
       | "reviewHead"
       | "reviewPost"
@@ -831,6 +834,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     }
     if (!row) return {};
     return {
+      ...(row.headSha !== undefined ? { headSha: row.headSha } : {}),
       ...(row.verdict !== undefined ? { verdict: row.verdict } : {}),
       ...(row.reviewHead !== undefined ? { reviewHead: row.reviewHead } : {}),
       ...(row.reviewPost !== undefined ? { reviewPost: row.reviewPost } : {}),

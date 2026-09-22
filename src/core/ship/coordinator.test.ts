@@ -1737,6 +1737,8 @@ describe("the transient re-run — round 0 dies on a provider transient with not
       finished({
         status: "failed",
         failure: { kind: "provider_transient" },
+        handoff: true,
+        headSha: HEAD_A,
         pushed: [{ ref: d.state.input.unit.branch, sha: HEAD_A, by: "salvage" }],
       }),
       T0 + 5 * MIN,
@@ -1744,8 +1746,29 @@ describe("the transient re-run — round 0 dies on a provider transient with not
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
     const report = renderUnitReport(d.state);
     expect(report).toContain(`the branch carries the interrupted work at \`${HEAD_A.slice(0, 7)}\``);
+    expect(report).toContain("the model provider's transport retry budget was spent");
     expect(report).toContain("The next reply in this thread resumes from that checkpoint");
     expect(report).not.toContain("Bad Gateway");
+  });
+
+  it("a stopped child keeps its same-head salvage checkpoint even when it submitted a handoff", () => {
+    const d = fresh(input({ merge: "person" }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      d,
+      "run-c0",
+      finished({
+        status: "stopped_soft",
+        handoff: true,
+        headSha: HEAD_A,
+        pushed: [{ ref: d.state.input.unit.branch, sha: HEAD_A, by: "salvage" }],
+      }),
+      T0 + 5 * MIN,
+    );
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: { kind: "stopped", checkpoint: { branch: d.state.input.unit.branch, sha: HEAD_A } },
+    });
   });
 
   it("a completed coding child whose ending checkpoint reached the unit branch aborts with the resumable head", () => {

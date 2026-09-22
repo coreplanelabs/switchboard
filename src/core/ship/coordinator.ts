@@ -1211,6 +1211,10 @@ type Phase =
       childPushed?: PushedHeadFact[];
       childLeaseStartedAt?: number;
       childHandoff?: Handoff;
+      /** Open or recover a pull request from the branch. A completed child
+       *  whose same-head salvage merely republished ready work needs this path
+       *  without being classified as dead. */
+      recover?: true;
       /** The coding child died (`failed` or `interrupted`) after it may have
        *  pushed: the pr-check recovers a pushed branch by opening its pull
        *  request; with nothing pushed the unit ends with the child's own reason. */
@@ -1557,7 +1561,7 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
       return {
         type: "pr-check",
         step: `${roundStep(s, p.round)}/pr-check`,
-        ...(p.dead !== undefined ? { recover: { runId: p.runId } } : {}),
+        ...(p.dead !== undefined || p.recover === true ? { recover: { runId: p.runId } } : {}),
         // The adopted pull request rides the check so the bot can follow it
         // when nothing heads the unit's branch (issue 1799).
         ...(s.pr !== undefined ? { pr: s.pr.number } : {}),
@@ -1810,14 +1814,37 @@ function nextReview(s: UnitPipelineState, notes: CoordinatorNote[] = []): Transi
 const stopMode = (status: RunStatus): "soft" | "hard" | undefined =>
   status === "stopped_soft" ? "soft" : status === "stopped_hard" ? "hard" : undefined;
 
+/** The last mechanical salvage push to this unit branch. */
+function salvagePush(s: UnitPipelineState, pushed: readonly PushedHeadFact[] | undefined): PushedHeadFact | undefined {
+  return pushed?.filter((p) => p.ref === s.input.unit.branch && p.by === "salvage").at(-1);
+}
+
+/** A completed child independently witnessed at the same head and carrying its
+ * handoff already declared the work ready; salvage merely republished its commit. */
+function completedSameHeadSalvage(
+  s: UnitPipelineState,
+  pushed: readonly PushedHeadFact[] | undefined,
+  child?: { status: RunStatus; handoff?: boolean; headSha?: string },
+): boolean {
+  if (child === undefined) return false;
+  const found = salvagePush(s, pushed);
+  const salvageHead = normalizeHead(found?.sha);
+  const childHead = normalizeHead(child.headSha);
+  return (
+    child.status === "completed" && child.handoff === true && salvageHead !== undefined && salvageHead === childHead
+  );
+}
+
 /** The last mechanical WIP push to this unit branch. Unlike an ordinary push,
- *  it says the child ended before its work was ready for review. */
+ * it says the child ended before its work was ready for review. */
 function interruptedCheckpoint(
   s: UnitPipelineState,
   pushed: readonly PushedHeadFact[] | undefined,
+  child?: { status: RunStatus; handoff?: boolean; headSha?: string },
 ): { branch: string; sha: string } | undefined {
-  const found = pushed?.filter((p) => p.ref === s.input.unit.branch && p.by === "salvage").at(-1);
-  return found ? { branch: found.ref, sha: found.sha } : undefined;
+  const found = salvagePush(s, pushed);
+  if (found === undefined || completedSameHeadSalvage(s, pushed, child)) return undefined;
+  return { branch: found.ref, sha: found.sha };
 }
 
 /** A coding run's confirmed end: round 0's child, or the run a findings step dispatched. */
@@ -1847,7 +1874,8 @@ function settleCoding(
         }
       : {}),
   };
-  const checkpoint = interruptedCheckpoint(next, facts.pushed);
+  const readySalvage = completedSameHeadSalvage(next, facts.pushed, facts);
+  const checkpoint = interruptedCheckpoint(next, facts.pushed, facts);
   const mode = stopMode(facts.status);
   if (mode !== undefined)
     return end(
@@ -1909,6 +1937,7 @@ function settleCoding(
       round,
       runId,
       ...(facts.headSha !== undefined ? { childHead: facts.headSha } : {}),
+      ...(readySalvage ? { recover: true as const } : {}),
       ...(facts.finalReply !== undefined ? { finalReply: facts.finalReply } : {}),
       ...(facts.pushed !== undefined ? { childPushed: facts.pushed } : {}),
       ...(facts.leaseStartedAt !== undefined ? { childLeaseStartedAt: facts.leaseStartedAt } : {}),
