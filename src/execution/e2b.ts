@@ -4,6 +4,7 @@ import { Sandbox } from "e2b";
 import { bashTimeoutNote, clampBashTimeout } from "./bashTimeout.js";
 import {
   ExecInfraError,
+  renderSuccessfulExec,
   truncate,
   type ExecOptions,
   type Executor,
@@ -227,7 +228,7 @@ export class E2BExecutor implements Executor {
     if (result.exitCode !== 0) {
       return `exit ${result.exitCode}:\n${parts}`;
     }
-    return parts || "(no output)";
+    return renderSuccessfulExec(result.stdout, result.stderr);
   }
 
   async readFile(path: string): Promise<string> {

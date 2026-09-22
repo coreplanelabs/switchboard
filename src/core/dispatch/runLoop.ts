@@ -117,6 +117,7 @@ import {
   RecordingRunEffects,
   type EffectEnvelope,
   type EffectResult,
+  type PreparedPushIntent,
   type PushReceipt,
 } from "../runEffects.js";
 import { gitRunEffectsDeps } from "../runEffectsGit.js";
@@ -1001,7 +1002,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         table: async () => (await deps.plane!()).table(predicateFor(chatActorOf(deps.config, msg), "runs:read", "run")),
       }
     : undefined;
-  type StoredEffects = { envelopes: Record<string, EffectEnvelope>; results: Record<string, EffectResult> };
+  type StoredEffects = {
+    envelopes: Record<string, EffectEnvelope>;
+    prepared: Record<string, PreparedPushIntent>;
+    results: Record<string, EffectResult>;
+  };
   const restoredEffects =
     typeof restored.effects === "object" && restored.effects !== null
       ? (restored.effects as Partial<StoredEffects>)
@@ -1011,6 +1016,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       typeof restoredEffects.envelopes === "object" && restoredEffects.envelopes !== null
         ? restoredEffects.envelopes
         : {},
+    prepared:
+      typeof restoredEffects.prepared === "object" && restoredEffects.prepared !== null ? restoredEffects.prepared : {},
     results:
       typeof restoredEffects.results === "object" && restoredEffects.results !== null ? restoredEffects.results : {},
   };
@@ -1045,7 +1052,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   runnerPublication = latestRunnerPublication(effectState.results, publishedBranch, admittedHead);
   const actor = chatActorOf(deps.config, msg);
   const effects =
-    isCodingPrRun && admittedRepository !== undefined && ledgerRun !== undefined
+    isCodingPrRun && admittedRepository !== undefined && (effectMode === "shadow" || ledgerRun !== undefined)
       ? (() => {
           const effectDeps = gitRunEffectsDeps({
             executor,
@@ -1067,22 +1074,39 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 if (standing !== undefined) return standing;
                 const next: StoredEffects = {
                   envelopes: { ...effectState.envelopes, [envelope.effectId]: envelope },
+                  prepared: { ...effectState.prepared },
                   results: { ...effectState.results },
                 };
-                if (!(await ledgerRun.setStateDurable({ effects: next })))
+                if (ledgerRun && !(await ledgerRun.setStateDurable({ effects: next })))
                   throw new Error("the effect envelope was not durably persisted");
                 effectState.envelopes = next.envelopes;
                 return envelope;
               }),
             priorResult: async (effectId) => effectState.results[effectId],
+            persistPrepared: (intent) =>
+              serializeEffectState(async () => {
+                const standing = effectState.prepared[intent.effectId];
+                if (standing !== undefined) return standing;
+                const next: StoredEffects = {
+                  envelopes: { ...effectState.envelopes },
+                  prepared: { ...effectState.prepared, [intent.effectId]: intent },
+                  results: { ...effectState.results },
+                };
+                if (ledgerRun && !(await ledgerRun.setStateDurable({ effects: next })))
+                  throw new Error("the prepared effect was not durably persisted");
+                effectState.prepared = next.prepared;
+                return intent;
+              }),
+            priorPrepared: async (effectId) => effectState.prepared[effectId],
             auditResult: async (result) => void onEvent({ type: "effect", result }),
             recordResult: (result) =>
               serializeEffectState(async () => {
                 const next: StoredEffects = {
                   envelopes: { ...effectState.envelopes },
+                  prepared: { ...effectState.prepared },
                   results: { ...effectState.results, [result.effectId]: result },
                 };
-                if (!(await ledgerRun.setStateDurable({ effects: next })))
+                if (ledgerRun && !(await ledgerRun.setStateDurable({ effects: next })))
                   throw new Error("the effect result was not durably persisted");
                 effectState.results = next.results;
                 onEvent({ type: "effect", result });

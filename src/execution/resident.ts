@@ -46,6 +46,7 @@ import {
   infraReasonOfRequestFailure,
   infraReasonOfStatus,
   requestFailedMessage,
+  renderSuccessfulExec,
   type ExecInfraReason,
   truncate,
   type ExecOptions,
@@ -1942,7 +1943,7 @@ export class ResidentExecutor implements Executor {
     const parts = [data.stdout, data.stderr].filter(Boolean).join("\n--- stderr ---\n");
     const exitCode = Number(data.exitCode ?? 0);
     if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);
-    return truncate(parts || "(no output)");
+    return truncate(renderSuccessfulExec(String(data.stdout ?? ""), String(data.stderr ?? "")));
   }
 
   async publishGit(

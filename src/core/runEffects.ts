@@ -108,6 +108,15 @@ export interface PublishPushRequest {
   lease?: string;
 }
 
+/** The exact authorized and gated publication intent retained before transport.
+ * A retry with no result reconciles this commit before consulting the caller's
+ * pre-rebase expectedHead. */
+export interface PreparedPushIntent {
+  effectId: string;
+  facts: PushFacts;
+  gates: PushGateReceipt[];
+}
+
 /** Operation adapters owned by the runner. Tests and dry runs provide fakes;
  * production binds them to the admitted checkout, policy table, gate runner,
  * git transport and durable run ledger. */
@@ -115,6 +124,9 @@ export interface RunEffectsDeps {
   /** Atomically stores the first envelope for this id and returns that standing envelope. */
   persistEnvelope(envelope: EffectEnvelope): Promise<EffectEnvelope>;
   priorResult(effectId: string): Promise<unknown>;
+  /** Durably stores the exact post-gate intent before publication. */
+  persistPrepared(intent: PreparedPushIntent): Promise<PreparedPushIntent>;
+  priorPrepared(effectId: string): Promise<unknown>;
   resolvePush(command: PushCommand): Promise<PushFacts>;
   authorizePush(facts: PushFacts, command: PushCommand): Promise<boolean>;
   rebasePush(facts: PushFacts, command: PushCommand): Promise<PushFacts>;
@@ -155,6 +167,22 @@ function sameCommand(a: PushCommand, b: PushCommand): boolean {
   );
 }
 
+function isPreparedPushIntent(value: unknown, effectId: string): value is PreparedPushIntent {
+  if (typeof value !== "object" || value === null) return false;
+  const intent = value as Partial<PreparedPushIntent>;
+  return (
+    intent.effectId === effectId &&
+    typeof intent.facts === "object" &&
+    intent.facts !== null &&
+    typeof intent.facts.head === "string" &&
+    typeof intent.facts.tree === "string" &&
+    typeof intent.facts.endpoint === "string" &&
+    typeof intent.facts.repository === "string" &&
+    typeof intent.facts.branch === "string" &&
+    Array.isArray(intent.gates)
+  );
+}
+
 function endpointRepository(endpoint: string): string | undefined {
   const scp = /^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/.exec(endpoint.trim());
   if (scp) return scp[1];
@@ -191,6 +219,14 @@ abstract class BaseRunEffects implements RunEffects {
     return undefined;
   }
 
+  protected retainsPreparedIntent(): boolean {
+    return false;
+  }
+
+  protected async recoverPrepared(envelope: EffectEnvelope, intent: PreparedPushIntent): Promise<EffectResult> {
+    return this.performAndRecord(envelope, intent.facts, intent.gates);
+  }
+
   async execute(envelope: EffectEnvelope): Promise<EffectResult> {
     // The durable store keeps the first envelope immutable. No fact resolution,
     // gate or transport may run until that write has been acknowledged.
@@ -202,6 +238,15 @@ abstract class BaseRunEffects implements RunEffects {
     }
     const prior = await this.deps.priorResult(envelope.effectId);
     if (isStoredEffectResult(prior, envelope.effectId) && this.priorIsAuthoritative(prior)) return prior;
+
+    // Publication may already have moved both the checkout and destination
+    // before its receipt write failed. The durable post-gate intent is the
+    // recovery authority; consult it before comparing HEAD with the caller's
+    // necessarily pre-rebase expectedHead.
+    if (this.retainsPreparedIntent()) {
+      const prepared = await this.deps.priorPrepared(envelope.effectId);
+      if (isPreparedPushIntent(prepared, envelope.effectId)) return this.recoverPrepared(envelope, prepared);
+    }
 
     const { command } = envelope;
     const initial = await this.deps.resolvePush(command);
@@ -236,9 +281,20 @@ abstract class BaseRunEffects implements RunEffects {
     if (current.remoteHead !== prepared.remoteHead)
       return this.refuse(envelope, "base_moved", current, prepared.remoteHead, current.remoteHead);
 
+    const intent = this.retainsPreparedIntent()
+      ? await this.deps.persistPrepared({ effectId: envelope.effectId, facts: current, gates })
+      : { effectId: envelope.effectId, facts: current, gates };
+    return this.performAndRecord(envelope, intent.facts, intent.gates);
+  }
+
+  protected async performAndRecord(
+    envelope: EffectEnvelope,
+    facts: PushFacts,
+    gates: PushGateReceipt[],
+  ): Promise<EffectResult> {
     let performed: { before?: string; after: string; shadow?: true };
     try {
-      performed = await this.perform(current, command, gates);
+      performed = await this.perform(facts, envelope.command, gates);
     } catch {
       // A transport can update the ref and lose its response. The ref and
       // intended commit are canonical reconciliation facts for git effects.
@@ -246,24 +302,24 @@ abstract class BaseRunEffects implements RunEffects {
       // only a successful mismatching read is authoritative refusal evidence.
       let reconciled: string | undefined;
       try {
-        reconciled = await this.reconcileAfterFailure(current);
+        reconciled = await this.reconcileAfterFailure(facts);
       } catch {
-        return this.retryable(envelope, current);
+        return this.retryable(envelope, facts);
       }
-      if (reconciled?.toLowerCase() === current.head.toLowerCase())
-        return this.succeed(envelope, current, gates, {
-          ...(current.remoteHead !== undefined ? { before: current.remoteHead } : {}),
+      if (reconciled?.toLowerCase() === facts.head.toLowerCase())
+        return this.succeed(envelope, facts, gates, {
+          ...(facts.remoteHead !== undefined ? { before: facts.remoteHead } : {}),
           after: reconciled,
         });
-      return this.refuse(envelope, "transport_refused", current);
+      return this.refuse(envelope, "transport_refused", facts);
     }
     // Receipt persistence is intentionally outside the transport catch. Once
     // publication succeeded, a ledger failure must propagate unrecorded so
     // recovery reconciles it; it must never be rewritten as transport_refused.
-    return this.succeed(envelope, current, gates, performed);
+    return this.succeed(envelope, facts, gates, performed);
   }
 
-  private async succeed(
+  protected async succeed(
     envelope: EffectEnvelope,
     facts: PushFacts,
     gates: PushGateReceipt[],
@@ -290,7 +346,7 @@ abstract class BaseRunEffects implements RunEffects {
     return receipt;
   }
 
-  private retryable(envelope: EffectEnvelope, facts?: PushFacts): EffectRetryable {
+  protected retryable(envelope: EffectEnvelope, facts?: PushFacts): EffectRetryable {
     return {
       effectId: envelope.effectId,
       kind: "push",
@@ -324,7 +380,7 @@ abstract class BaseRunEffects implements RunEffects {
     };
   }
 
-  private async refuse(
+  protected async refuse(
     envelope: EffectEnvelope,
     reason: EffectRefusalReason,
     facts?: PushFacts,
@@ -340,6 +396,28 @@ abstract class BaseRunEffects implements RunEffects {
 export class ProductionRunEffects extends BaseRunEffects {
   protected override priorIsAuthoritative(result: PushReceipt | EffectRefusal): boolean {
     return result.outcome !== "succeeded" || result.shadow !== true;
+  }
+
+  protected override retainsPreparedIntent(): boolean {
+    return true;
+  }
+
+  protected override async recoverPrepared(
+    envelope: EffectEnvelope,
+    intent: PreparedPushIntent,
+  ): Promise<EffectResult> {
+    let reconciled: string | undefined;
+    try {
+      reconciled = await this.reconcileAfterFailure(intent.facts);
+    } catch {
+      return this.retryable(envelope, intent.facts);
+    }
+    if (reconciled?.toLowerCase() === intent.facts.head.toLowerCase())
+      return this.succeed(envelope, intent.facts, intent.gates, {
+        ...(intent.facts.remoteHead !== undefined ? { before: intent.facts.remoteHead } : {}),
+        after: reconciled,
+      });
+    return this.performAndRecord(envelope, intent.facts, intent.gates);
   }
 
   protected override async reconcileAfterFailure(facts: PushFacts): Promise<string | undefined> {

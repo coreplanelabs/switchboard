@@ -140,6 +140,12 @@ describe("E2BExecutor credential file refresh", () => {
 });
 
 describe("E2BExecutor per-call timeout", () => {
+  // Feature: docs/reference/specs/execution.md item 30 — executor output conformance.
+  it("renders a successful empty command as (no output)", async () => {
+    const { ex } = e2bWith(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    await expect(ex.exec("true")).resolves.toBe("(no output)");
+  });
+
   it("runs under the 5-min default when no timeoutMs is passed (today's behavior)", async () => {
     const { ex, run } = e2bWith(async () => OK);
     await expect(ex.exec("ls")).resolves.toBe("ok");

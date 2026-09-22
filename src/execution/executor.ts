@@ -350,6 +350,11 @@ export function truncate(s: string): string {
   return s.length > MAX_OUTPUT ? s.slice(0, MAX_OUTPUT) + `\n...[truncated ${s.length - MAX_OUTPUT} chars]` : s;
 }
 
+/** The output contract shared by every executor for a successful command. */
+export function renderSuccessfulExec(stdout: string, stderr: string): string {
+  return [stdout, stderr].filter(Boolean).join("\n--- stderr ---\n") || "(no output)";
+}
+
 /** Runs everything on the local host inside a confined workspace directory.
  *  A factory-created local executor resolves the run profile's identity for
  *  every command, just like the remote backends. Direct construction keeps
@@ -391,7 +396,7 @@ export class LocalExecutor implements Executor {
     if (r.error) {
       return truncate(`exit ${r.error.code ?? "error"}: ${r.error.message}\n${parts}`);
     }
-    return truncate(parts || "(no output)");
+    return truncate(renderSuccessfulExec(r.stdout, r.stderr));
   }
 
   async readFile(path: string): Promise<string> {

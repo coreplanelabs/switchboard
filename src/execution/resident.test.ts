@@ -250,6 +250,13 @@ describe("ResidentExecutor.exec", () => {
     await expect(ex.exec("false")).resolves.toMatch(/^exit 2:\nboom/);
   });
 
+  // Feature: docs/reference/specs/execution.md item 30 — executor output conformance.
+  it("renders a successful empty command as (no output)", async () => {
+    stubFetch({ body: { stdout: "", stderr: "", exitCode: 0, truncated: false } });
+    const ex = new ResidentExecutor(OPTS);
+    await expect(ex.exec("true")).resolves.toBe("(no output)");
+  });
+
   // docs/reference/specs/harness-pi.md item 4: a caller's extra environment
   // rides in the /exec body as `env` — the channel the pi harness hands the
   // run bearer through — and only when the caller gave one, so an older

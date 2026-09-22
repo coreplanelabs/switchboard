@@ -476,6 +476,83 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(commands).not.toContain("pytest -q");
   });
 
+  it("binds shadow effects without a run ledger and records the complete decision", async () => {
+    const A = "a".repeat(40);
+    const C = "c".repeat(40);
+    const TREE = "1".repeat(40);
+    let head = A;
+    const executor: Partial<Executor> = {
+      exec: async (command) => {
+        if (command === "git remote get-url --push origin") return "https://github.com/acme/api.git\n";
+        if (command === "git symbolic-ref --quiet --short HEAD") return "feat/x\n";
+        if (command === "git rev-parse HEAD") return `${head}\n`;
+        if (command === "git rev-parse 'HEAD^{tree}'") return `${TREE}\n`;
+        if (command.startsWith("status=$(git status --porcelain")) return "__SWITCHBOARD_CLEAN__\n";
+        if (command.startsWith("git ls-remote")) return `${A}\trefs/heads/feat/x\n`;
+        if (command === "git fetch origin 'main'") return "(no output)";
+        if (command === "git rebase 'origin/main'") {
+          head = C;
+          return "Successfully rebased\n";
+        }
+        if (command === "pytest -q") return "passed\n";
+        return "(no output)";
+      },
+    };
+    const effectHarness: Harness = {
+      name: piHarness.name,
+      history: piHarness.history,
+      dispositions: piHarness.dispositions,
+      effort: (tier) => piHarness.effort(tier),
+      builtinTools: (identity) => piHarness.builtinTools(identity),
+      open: async (_deps, harnessRun) => {
+        const result = await harnessRun.toolContext.effects!.execute({
+          effectId: "push-shadow",
+          command: {
+            kind: "push",
+            repository: "acme/api",
+            branch: "feat/x",
+            expectedHead: A,
+            base: "main",
+            gateSet: "changed-set",
+          },
+        });
+        return {
+          answer: JSON.stringify(result),
+          followUp: async () => "",
+          remainingMs: () => 60_000,
+          end: async () => {},
+        };
+      },
+      find: async () => "alive-here",
+      end: async () => {},
+    };
+    const s = setup("", {
+      agent: "coding",
+      coding: true,
+      userId: "slack:UADMIN",
+      executor,
+      harness: {
+        ...({} as HarnessProcessDeps),
+        harnesses: roster(effectHarness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      repoCtx: { repo: "acme/api", ref: "feat/x", baseRef: "main" },
+      binding: { ref: "feat/x", sha: A, verification: [{ name: "test", command: "pytest -q" }] },
+    });
+
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(JSON.parse(out.answer)).toMatchObject({ outcome: "succeeded", after: C, shadow: true });
+    const events: unknown[] = [];
+    s.registry.subscribe("run-l", "tok", { onEvent: (event) => void events.push(event) });
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "effect", result: expect.objectContaining({ shadow: true }) }),
+    );
+    expect(events).toContainEqual(expect.objectContaining({ type: "run_note", kind: "effect_decision" }));
+  });
+
   // docs/reference/specs/agent-coding.md item 10: the thread's file upload
   // rides the tool context only when the channel has one — a coding run's
   // `attach_file` posts through the requesting thread's `attachFile`.

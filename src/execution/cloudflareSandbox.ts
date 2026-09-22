@@ -7,6 +7,7 @@ import {
   infraReasonOfRequestFailure,
   requestFailedMessage,
   infraReasonOfStatus,
+  renderSuccessfulExec,
   truncate,
   type ExecOptions,
   type Executor,
@@ -438,7 +439,9 @@ export class CloudflareSandboxExecutor implements Executor {
       const r = await this.call("/exec", body, opts?.signal, clampBashTimeout(opts?.timeoutMs), opts?.span);
       const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
       const exitCode = Number(r.exitCode ?? 0);
-      return exitCode !== 0 ? `exit ${exitCode}:\n${parts}` : parts || "(no output)";
+      return exitCode !== 0
+        ? `exit ${exitCode}:\n${parts}`
+        : renderSuccessfulExec(String(r.stdout ?? ""), String(r.stderr ?? ""));
     };
     let out = await run();
     // A push the remote refused for its credential is a credential fault, not

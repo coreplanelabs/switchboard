@@ -9,12 +9,13 @@ const C = "c".repeat(40);
 const TREE_A = "1".repeat(40);
 const TREE_C = "3".repeat(40);
 
-function gitWorld() {
+function gitWorld(opts: { publishError?: Error; remoteReadErrorAfterPublish?: string } = {}) {
   const commands: string[] = [];
   const results: EffectResult[] = [];
   let head = A;
   let tree = TREE_A;
   let remote = B;
+  let remoteReadError: string | undefined;
   const executor: Executor = {
     async exec(command) {
       commands.push(command);
@@ -22,9 +23,10 @@ function gitWorld() {
       if (command === "git symbolic-ref --quiet --short HEAD") return "feat/exact-tree\n";
       if (command === "git rev-parse HEAD") return `${head}\n`;
       if (command === "git rev-parse 'HEAD^{tree}'") return `${tree}\n`;
-      if (command === "git status --porcelain") return "";
-      if (command.startsWith("git ls-remote")) return remote ? `${remote}\trefs/heads/feat/exact-tree\n` : "exit 2:\n";
-      if (command === "git fetch origin 'main'") return "";
+      if (command.startsWith("status=$(git status --porcelain")) return "__SWITCHBOARD_CLEAN__\n";
+      if (command.startsWith("git ls-remote"))
+        return remoteReadError ?? (remote ? `${remote}\trefs/heads/feat/exact-tree\n` : "exit 2:\n");
+      if (command === "git fetch origin 'main'") return "(no output)";
       if (command === "git rebase 'origin/main'") {
         head = C;
         tree = TREE_C;
@@ -37,6 +39,8 @@ function gitWorld() {
     },
     async publishGit(request) {
       commands.push(`runner publish ${request.source}:${request.destination}`);
+      remoteReadError = opts.remoteReadErrorAfterPublish;
+      if (opts.publishError) throw opts.publishError;
       remote = request.source;
       return { previous: request.lease, published: request.source };
     },
@@ -60,6 +64,8 @@ function gitWorld() {
     authorize: () => true,
     persistEnvelope: async (value) => value,
     priorResult: async () => undefined,
+    persistPrepared: async (value) => value,
+    priorPrepared: async () => undefined,
     recordResult: async (result) => void results.push(result),
     occurredAt: () => 1,
   });
@@ -79,7 +85,7 @@ const envelope: EffectEnvelope = {
 };
 
 describe("gitRunEffectsDeps — production exact-tree publication", () => {
-  it("rebases before the repository-declared changed-set gates, then lease-pushes the gated commit and reconciles it", async () => {
+  it("classifies a clean checkout through the real no-output executor contract, then rebases, gates and lease-pushes", async () => {
     const world = gitWorld();
     const result = await new ProductionRunEffects(world.deps).execute(envelope);
     expect(result).toMatchObject({ outcome: "succeeded", before: B, after: C, tree: TREE_C, by: "runner" });
@@ -109,6 +115,8 @@ describe("gitRunEffectsDeps — production exact-tree publication", () => {
       authorize: () => true,
       persistEnvelope: async (value) => value,
       priorResult: async () => undefined,
+      persistPrepared: async (value) => value,
+      priorPrepared: async () => undefined,
       recordResult: async () => {},
       occurredAt: () => 1,
     });
@@ -140,6 +148,8 @@ describe("gitRunEffectsDeps — production exact-tree publication", () => {
       authorize: () => true,
       persistEnvelope: async (value) => value,
       priorResult: async () => undefined,
+      persistPrepared: async (value) => value,
+      priorPrepared: async () => undefined,
       recordResult: async () => {},
       auditResult: async () => {},
       occurredAt: () => 1,
@@ -158,6 +168,8 @@ describe("gitRunEffectsDeps — production exact-tree publication", () => {
         authorize: () => true,
         persistEnvelope: async (value) => value,
         priorResult: async () => undefined,
+        persistPrepared: async (value) => value,
+        priorPrepared: async () => undefined,
         recordResult: async () => {},
         auditResult: async () => {},
         occurredAt: () => 1,
@@ -165,5 +177,15 @@ describe("gitRunEffectsDeps — production exact-tree publication", () => {
     ).execute({ ...envelope, command: { ...envelope.command, branch: "main" } });
     expect(protectedResult).toMatchObject({ outcome: "refused", reason: "wrong_ref" });
     expect(protectedWorld.commands.some((command) => command.startsWith("runner publish "))).toBe(false);
+  });
+
+  it("keeps an ambiguous publication retryable when ls-remote fails instead of proving a mismatch", async () => {
+    const world = gitWorld({
+      publishError: new Error("push response lost"),
+      remoteReadErrorAfterPublish: "exit 128:\nfatal: could not read from remote repository",
+    });
+    const result = await new ProductionRunEffects(world.deps).execute(envelope);
+    expect(result).toMatchObject({ outcome: "retryable", reason: "reconciliation_unavailable" });
+    expect(world.results).toEqual([]);
   });
 });

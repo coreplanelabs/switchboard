@@ -80,6 +80,15 @@ function ops(dir: string): LocalOperations {
   return new LocalOperations(dir);
 }
 
+// Feature: docs/reference/specs/execution.md item 30 — every executor renders a
+// successful empty command by the same shared output contract.
+describe("LocalExecutor output conformance", () => {
+  it("renders a successful empty command as (no output)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-local-output-"));
+    await expect(new LocalExecutor(dir).exec("true")).resolves.toBe("(no output)");
+  });
+});
+
 // Feature: docs/reference/specs/harness-pi.md item 6 — a hard stop's AbortSignal kills
 // the local child process instead of waiting out its 5-minute budget.
 describe("LocalExecutor exec abort", () => {

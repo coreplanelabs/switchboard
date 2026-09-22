@@ -8,6 +8,7 @@ import { parseExitPrefix } from "./runEvents.js";
 import type {
   EffectEnvelope,
   EffectResult,
+  PreparedPushIntent,
   PublishPushRequest,
   PushCommand,
   PushFacts,
@@ -26,10 +27,19 @@ export interface GitRunEffectsOptions {
   authorize(repository: string): Promise<boolean> | boolean;
   persistEnvelope(envelope: EffectEnvelope): Promise<EffectEnvelope>;
   priorResult(effectId: string): Promise<unknown>;
+  persistPrepared(intent: PreparedPushIntent): Promise<PreparedPushIntent>;
+  priorPrepared(effectId: string): Promise<unknown>;
   recordResult(result: EffectResult): Promise<void>;
   auditResult?(result: EffectResult): Promise<void>;
   occurredAt(): number;
 }
+
+const CLEAN_STATUS_MARKER = "__SWITCHBOARD_CLEAN__";
+const DIRTY_STATUS_MARKER = "__SWITCHBOARD_DIRTY__";
+const STATUS_COMMAND =
+  `status=$(git status --porcelain) || exit $?; ` +
+  `if [ -z "$status" ]; then printf '${CLEAN_STATUS_MARKER}\\n'; ` +
+  `else printf '%s\\n${DIRTY_STATUS_MARKER}\\n' "$status"; fi`;
 
 const outputLine = (output: string): string | undefined => {
   if (parseExitPrefix(output).failed) return undefined;
@@ -39,6 +49,26 @@ const outputLine = (output: string): string | undefined => {
     .find((part) => part.trim().length > 0);
   return line?.trim();
 };
+
+function cleanStatus(output: string): boolean {
+  if (parseExitPrefix(output).failed) throw new Error("git status failed while resolving publication facts");
+  const lines = output.split(/\r?\n/).map((line) => line.trim());
+  if (lines.includes(CLEAN_STATUS_MARKER)) return true;
+  if (lines.includes(DIRTY_STATUS_MARKER)) return false;
+  throw new Error("git status did not return its machine-readable cleanliness marker");
+}
+
+function remoteHeadFrom(output: string): string | undefined {
+  const exit = parseExitPrefix(output);
+  if (exit.failed) {
+    // git ls-remote --exit-code reserves 2 for a successful query whose
+    // pattern matched no ref. Every other non-zero is an unavailable read.
+    if (exit.exitCode === 2) return undefined;
+    throw new Error(`git ls-remote failed${exit.exitCode !== undefined ? ` with exit ${exit.exitCode}` : ""}`);
+  }
+  const published = outputLine(output)?.split(/\s+/)[0];
+  return published && /^[0-9a-f]{40}$/i.test(published) ? published.toLowerCase() : undefined;
+}
 
 async function required(executor: Executor, command: string): Promise<string> {
   const output = await executor.exec(command);
@@ -54,7 +84,7 @@ async function facts(executor: Executor, command: PushCommand): Promise<PushFact
     executor.exec("git symbolic-ref --quiet --short HEAD"),
     executor.exec("git rev-parse HEAD"),
     executor.exec("git rev-parse 'HEAD^{tree}'"),
-    executor.exec("git status --porcelain"),
+    executor.exec(STATUS_COMMAND),
     executor.exec(`git ls-remote --exit-code origin ${shellQuote(`refs/heads/${command.branch}`)}`),
   ]);
   const endpoint = outputLine(endpointOut);
@@ -63,16 +93,15 @@ async function facts(executor: Executor, command: PushCommand): Promise<PushFact
   const tree = outputLine(treeOut);
   if (!endpoint || !branch || !head || !tree)
     throw new Error("the admitted checkout's push facts could not be resolved");
-  const remoteLine = outputLine(remoteOut);
-  const remoteHead = remoteLine?.split(/\s+/)[0];
+  const remoteHead = remoteHeadFrom(remoteOut);
   return {
     repository: command.repository,
     endpoint,
     branch,
     head,
     tree,
-    clean: !parseExitPrefix(statusOut).failed && statusOut.trim() === "",
-    ...(remoteHead && /^[0-9a-f]{40}$/i.test(remoteHead) ? { remoteHead: remoteHead.toLowerCase() } : {}),
+    clean: cleanStatus(statusOut),
+    ...(remoteHead ? { remoteHead } : {}),
   };
 }
 
@@ -81,9 +110,7 @@ async function configuredBase(opts: GitRunEffectsOptions): Promise<string | unde
 }
 
 async function remoteHead(executor: Executor, destination: string): Promise<string | undefined> {
-  const remote = outputLine(await executor.exec(`git ls-remote --exit-code origin ${shellQuote(destination)}`));
-  const published = remote?.split(/\s+/)[0];
-  return published && /^[0-9a-f]{40}$/i.test(published) ? published.toLowerCase() : undefined;
+  return remoteHeadFrom(await executor.exec(`git ls-remote --exit-code origin ${shellQuote(destination)}`));
 }
 
 function changedSetGateCommands(opts: GitRunEffectsOptions): readonly { name: string; command: string }[] {
@@ -102,6 +129,8 @@ export function gitRunEffectsDeps(opts: GitRunEffectsOptions): RunEffectsDeps {
     occurredAt: opts.occurredAt,
     persistEnvelope: opts.persistEnvelope,
     priorResult: opts.priorResult,
+    persistPrepared: opts.persistPrepared,
+    priorPrepared: opts.priorPrepared,
     recordResult: opts.recordResult,
     ...(opts.auditResult ? { auditResult: opts.auditResult } : {}),
     resolvePush: (command) => facts(opts.executor, command),

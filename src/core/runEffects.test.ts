@@ -37,6 +37,7 @@ interface WorldOptions {
   publishError?: Error;
   reconciliationError?: Error;
   recordError?: Error;
+  recordFailures?: number;
   reconciledHead?: string;
 }
 
@@ -47,6 +48,9 @@ function world(opts: WorldOptions = {}) {
   const persisted: EffectEnvelope[] = [];
   const envelopes = new Map<string, EffectEnvelope>();
   const receipts = new Map<string, unknown>();
+  const preparedIntents = new Map<string, unknown>();
+  let recordFailures = opts.recordFailures ?? (opts.recordError ? Number.POSITIVE_INFINITY : 0);
+  let reconciledHead = opts.reconciledHead;
   const initial: PushFacts = {
     repository: "acme/api",
     endpoint: "https://github.com/acme/api.git",
@@ -74,6 +78,14 @@ function world(opts: WorldOptions = {}) {
       return value;
     },
     priorResult: async (effectId) => receipts.get(effectId),
+    persistPrepared: async (intent) => {
+      calls.push("prepare");
+      const prior = preparedIntents.get(intent.effectId);
+      if (prior) return prior as typeof intent;
+      preparedIntents.set(intent.effectId, intent);
+      return intent;
+    },
+    priorPrepared: async (effectId) => preparedIntents.get(effectId),
     resolvePush: async () => {
       calls.push("resolve");
       resolves++;
@@ -94,16 +106,20 @@ function world(opts: WorldOptions = {}) {
     publishPush: async (request) => {
       calls.push("publish");
       if (opts.publishError) throw opts.publishError;
+      reconciledHead = request.source;
       return { previous: request.lease, published: request.source };
     },
     reconcilePush: async () => {
       calls.push("reconcile");
       if (opts.reconciliationError) throw opts.reconciliationError;
-      return opts.reconciledHead;
+      return reconciledHead;
     },
     recordResult: async (result) => {
       calls.push("record");
-      if (opts.recordError) throw opts.recordError;
+      if (recordFailures > 0) {
+        recordFailures--;
+        throw opts.recordError ?? new Error("ledger unavailable");
+      }
       recorded.push(result);
       receipts.set(result.effectId, result);
     },
@@ -114,7 +130,7 @@ function world(opts: WorldOptions = {}) {
     occurredAt: () => 1_700_000_000_000,
     actor: "chat:user",
   };
-  return { deps, calls, recorded, audited, persisted, envelopes, receipts };
+  return { deps, calls, recorded, audited, persisted, envelopes, receipts, preparedIntents };
 }
 
 describe.each([
@@ -138,7 +154,7 @@ describe.each([
       "rebase",
       "gates",
       "resolve",
-      ...(publishes ? ["publish"] : []),
+      ...(publishes ? ["prepare", "publish"] : []),
       "record",
     ]);
     expect(result).toMatchObject({ effectId: "effect-push-1", kind: "push" });
@@ -264,6 +280,24 @@ describe("ProductionRunEffects — push owns one exact gated tree", () => {
     expect(w.calls).not.toContain("reconcile");
     expect(w.recorded).toEqual([]);
     expect(w.receipts.has("effect-push-1")).toBe(false);
+    expect(w.preparedIntents.has("effect-push-1")).toBe(true);
+  });
+
+  it("recovers a receipt on retry after publication succeeded but its first durable write failed", async () => {
+    const w = world({ recordFailures: 1 });
+    const effects = new ProductionRunEffects(w.deps);
+
+    await expect(effects.execute(envelope())).rejects.toThrow("ledger unavailable");
+    expect(w.calls.filter((call) => call === "publish")).toHaveLength(1);
+    expect(w.receipts.has("effect-push-1")).toBe(false);
+
+    w.calls.length = 0;
+    const recovered = await effects.execute(envelope());
+    expect(recovered).toMatchObject({ outcome: "succeeded", before: B, after: C, tree: TREE_B, by: "runner" });
+    expect(w.calls).toEqual(["persist", "reconcile", "record"]);
+    expect(w.calls).not.toContain("resolve");
+    expect(w.calls).not.toContain("publish");
+    expect(w.receipts.get("effect-push-1")).toEqual(recovered);
   });
 
   it("does not mistake a shadow observation for publication after cutover", async () => {
