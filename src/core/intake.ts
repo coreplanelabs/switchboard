@@ -218,8 +218,8 @@ export async function decideIntake(input: IntakeInput, deps: IntakeDeps): Promis
  *  closed: a malformed answer — another tool, prose, an answer outside the
  *  enum — is re-asked with the violation named, at most the bounded retries,
  *  and after them the floor is `silent`/`error` with the last violation as
- *  the reason; a timeout is `silent`/`timeout` and any other throw
- *  `silent`/`error`, neither re-asked. */
+ *  the reason; a timeout is `silent`/`timeout` with the typed transient
+ *  provider failure and any other throw `silent`/`error`, neither re-asked. */
 async function askModel(
   input: IntakeInput,
   deps: IntakeDeps,
@@ -257,8 +257,9 @@ async function askModel(
     if (timedOut) {
       return {
         verdict: "silent",
-        reason: tidyReason("the intake call timed out"),
+        reason: renderProviderFailure("transient", "ended"),
         source: "timeout",
+        providerFailure: "transient",
         ...(attempts ? { attempts } : {}),
       };
     }

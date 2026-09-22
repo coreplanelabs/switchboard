@@ -12,6 +12,7 @@ import {
   phaseTransition,
   reclaimPhase,
   selectReclaim,
+  unreadInbox,
 } from "./decisions.js";
 import type { FinishResult, HeartbeatFacts, HeartbeatResult, RunLedger } from "./ledger.js";
 import {
@@ -599,12 +600,12 @@ export class InMemoryRunLedger implements RunLedger {
       if (row.meta.session) this.session(row.meta.session.key).owner = { runId: row.runId, gen };
       const steps = this.steps.get(row.runId) ?? [];
       const lastStep = steps.length ? steps[steps.length - 1] : null;
-      const consumed = lastStep?.inboxConsumedSeq ?? 0;
+      const unread = unreadInbox(lastStep);
       out.push({
         row,
         reclaimedFrom,
         lastStep,
-        inbox: (this.inbox.get(row.runId) ?? []).filter((i) => i.seq > consumed),
+        inbox: (this.inbox.get(row.runId) ?? []).filter(unread),
         jobs: this.jobs.get(row.runId) ?? [],
       });
     }

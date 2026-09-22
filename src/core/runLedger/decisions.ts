@@ -2,7 +2,7 @@
 // Durable Object applies them inside one transaction; the in-memory ledger
 // applies them in tests; both agree because this is the only copy.
 
-import type { ClaimResult, FenceResult, IntakeReceipt, IntakeWriteResult, LivePhase } from "./types.js";
+import type { ClaimResult, FenceResult, IntakeReceipt, IntakeWriteResult, LivePhase, StepRecord } from "./types.js";
 
 /** One live run per thread. The existing row, if any, is what `live_runs` holds
  *  for the thread; the same run re-claimed by its owner is idempotent (a retry
@@ -78,6 +78,15 @@ export function selectReclaim<T extends { leaseUntil: number; phase: LivePhase; 
   gen: string,
 ): T[] {
   return rows.filter((r) => r.ownerGen !== gen && (r.phase === "handoff" || r.leaseUntil <= now));
+}
+
+/** Which inbox rows a reclaim hands the next generation (run-history item 40):
+ *  every row past the last record's cursor, and the rows at or below it the
+ *  record names deferred — handed to the run, never read by its model. */
+export function unreadInbox(lastStep: Pick<StepRecord, "inboxConsumedSeq" | "inboxDeferredSeqs"> | null) {
+  const consumed = lastStep?.inboxConsumedSeq ?? 0;
+  const deferred = new Set(lastStep?.inboxDeferredSeqs ?? []);
+  return (item: { seq: number }): boolean => item.seq > consumed || deferred.has(item.seq);
 }
 
 /** The compare-and-swap table for a run's phase. `attaching → live` (the

@@ -76,6 +76,7 @@ import {
   phaseTransition,
   reclaimPhase,
   selectReclaim,
+  unreadInbox,
 } from "../../src/core/runLedger/decisions.ts";
 import { INTAKE_DELIVERY_CLAIM_MS, intakeReceiptRetentionMs, minutesToMs, PLANE } from "../../src/core/budgets.ts";
 import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause } from "../../src/core/provider.ts";
@@ -3256,15 +3257,22 @@ export class RunHistoryDO extends DurableObject<Env> {
           .exec<{ json: string }>(`SELECT json FROM run_steps WHERE run_id = ? ORDER BY step DESC LIMIT 1`, row.runId)
           .toArray()[0];
         const lastStep = stepRow ? (JSON.parse(stepRow.json) as StepRecord) : null;
-        const consumed = lastStep?.inboxConsumedSeq ?? 0;
+        // Past the cursor, plus the deferred rows at or below it: the lowest
+        // deferred seq bounds the read, and the record's predicate filters.
+        const unread = unreadInbox(lastStep);
+        const from = Math.min(
+          lastStep?.inboxConsumedSeq ?? 0,
+          ...(lastStep?.inboxDeferredSeqs ?? []).map((s) => s - 1),
+        );
         const inbox = this.sql
           .exec<{ seq: number; json: string }>(
             `SELECT seq, json FROM run_inbox WHERE run_id = ? AND seq > ? ORDER BY seq ASC`,
             row.runId,
-            consumed,
+            from,
           )
           .toArray()
-          .map((r) => ({ seq: r.seq, message: JSON.parse(r.json) as Record<string, unknown> }));
+          .map((r) => ({ seq: r.seq, message: JSON.parse(r.json) as Record<string, unknown> }))
+          .filter(unread);
         const jobs = this.sql
           .exec<{ kind: string; json: string }>(`SELECT kind, json FROM run_jobs WHERE run_id = ?`, row.runId)
           .toArray()
@@ -5484,6 +5492,12 @@ function parseStep(v: unknown): Validated<StepRecord> {
       return invalid(`record.${k} must be a non-negative integer`);
     }
   }
+  if (
+    s.inboxDeferredSeqs !== undefined &&
+    (!Array.isArray(s.inboxDeferredSeqs) ||
+      !s.inboxDeferredSeqs.every((seq) => typeof seq === "number" && Number.isInteger(seq) && seq > 0))
+  )
+    return invalid("record.inboxDeferredSeqs must be an array of positive integers");
   if (!Array.isArray(s.inFlight)) return invalid("record.inFlight must be an array");
   for (const c of s.inFlight) {
     const call = c as Record<string, unknown>;

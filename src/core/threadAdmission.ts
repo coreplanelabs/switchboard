@@ -123,6 +123,11 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
   get size(): number {
     return this.pending.length;
   }
+
+  /** The ledger seqs of the follow-ups still pending, oldest first. */
+  get pendingSeqs(): number[] {
+    return this.pending.flatMap((input) => (input.ledgerSeq !== undefined ? [input.ledgerSeq] : []));
+  }
 }
 
 /** The run a thread is currently occupied by, as admission sees it. */

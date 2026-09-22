@@ -179,6 +179,9 @@ export interface StepRecord {
   inFlight: InFlightCall[];
   /** The inbox `seq` the run has consumed up to (0 = none). */
   inboxConsumedSeq: number;
+  /** Seqs at or below `inboxConsumedSeq` the run has not consumed yet: a
+   *  reclaim offers them again with every row past the cursor. */
+  inboxDeferredSeqs?: number[];
   remainingMs: number;
   turn: number;
   iteration: number;
