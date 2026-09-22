@@ -103,6 +103,32 @@ describe("decideWorktree: a fresh attach keeps the dirty/stale discipline", () =
     });
   });
 
+  it("a named ref replacing the sticky ref recreates even when both refs point at the same commit", () => {
+    expect(
+      decideWorktree({
+        reuse: false,
+        modeSwitch: false,
+        refChanged: true,
+        sha: SHA,
+        worktreePath: WT,
+        facts: readable(),
+      }),
+    ).toEqual({ kind: "recreate", why: "ref-changed" });
+    expect(
+      decideWorktree({
+        reuse: true,
+        modeSwitch: false,
+        refChanged: true,
+        sha: SHA,
+        worktreePath: WT,
+        facts: readable(),
+      }),
+    ).toEqual({
+      kind: "refuse",
+      why: `the worktree at ${WT} is attached to another ref`,
+    });
+  });
+
   it("an unreadable tree is recreated", () => {
     expect(
       decideWorktree({

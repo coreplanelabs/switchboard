@@ -31,6 +31,39 @@ function functionOf(name: string): string {
   return source.slice(start, end + 3);
 }
 
+describe("a named ref replaces the sticky fallback before the worktree is provisioned", () => {
+  it("a refHint not marked as the default fallback wins over a prior binding and is written back as the sticky named ref", () => {
+    const body = method("attachThreadBody");
+    expect(body).toMatch(/const namedRef = refHint !== null && !reason\.refByDefault;/);
+    expect(body).toMatch(/const ref = namedRef \? refHint : \(prior\?\.ref \?\? refHint\);/);
+    expect(body).toMatch(
+      /allocateThreadUser\([\s\S]*?threadKey,[\s\S]*?ref,[\s\S]*?worktreePath,[\s\S]*?boundByFor\([\s\S]*?\),[\s\S]*?namedRef,[\s\S]*?\);/,
+    );
+
+    const allocate = method("allocateThreadUser");
+    expect(allocate).toMatch(/replaceRef = false,/);
+    expect(allocate).toMatch(/const replacingRef = existing !== undefined && replaceRef && existing\.ref !== ref;/);
+    expect(allocate).toMatch(/if \(existing && !existing\.evicted && existing\.user && !replacingRef\)/);
+    expect(allocate).toMatch(/ref: replacingRef \? ref : \(existing\?\.ref \?\? ref\),/);
+    expect(allocate).toMatch(/replacingRef\s*\? \{ boundBy \}/);
+  });
+
+  it("a changed named ref forces the old tree to be recreated even when both refs currently have the same commit", () => {
+    const body = method("attachThreadBody");
+    expect(body).toMatch(/refChanged: storedPrior !== undefined && storedPrior\.ref !== binding\.ref,/);
+    const create = method("attachThreadCreate");
+    expect(create).toMatch(
+      /const returnable = input\.namedRef \? false : canReturnToDefault\(binding, facts\.defaultRef\);/,
+    );
+    expect(create).toMatch(/let refChanged = input\.refChanged;/);
+    expect(create).toMatch(/refChanged = true;/);
+    expect(create).toMatch(/\{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,?\s*\}/);
+    expect(method("ensureThreadWorktree")).toMatch(
+      /decideWorktree\(\{[\s\S]*?reuse: opts\.reuse,[\s\S]*?modeSwitch,[\s\S]*?refChanged: opts\.refChanged,[\s\S]*?sha,[\s\S]*?worktreePath: wt,[\s\S]*?facts,[\s\S]*?\}\)/,
+    );
+  });
+});
+
 describe("the `ownPr` and `refByDefault` body fields reach the binding decision", () => {
   it("handleAttach parses both with the pure parsers, checks the PR's ref against the one ref pattern, refuses a malformed field 400, and hands the reason to attachThread", () => {
     expect(source).toMatch(/import \{[^}]*parseOwnPr[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentRebind\.js";/);
@@ -48,25 +81,27 @@ describe("the `ownPr` and `refByDefault` body fields reach the binding decision"
     );
   });
 
-  it("attachThread carries the reason through the traced body, which asks rebindPlan BEFORE the binding's ref is chosen and records boundBy on a new binding", () => {
+  it("attachThread carries the reason through the traced body, decides named authority before the legacy own-PR plan, and records boundBy on a new binding", () => {
     expect(method("attachThread")).toMatch(/reason: RefHintReason = NO_REF_HINT_REASON,/);
     expect(method("attachThreadTraced")).toMatch(
       /attachThreadBody\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*resourceId,\s*t0,\s*record,\s*reason,?\s*\)/,
     );
     const body = method("attachThreadBody");
-    const rebind = body.search(/await this\.rebindToOwnPr\(\s*stored\.get\(threadBindingKey\(threadKey\)\)/);
-    const ref = body.indexOf("const ref = prior?.ref ?? refHint;");
-    expect(rebind).toBeGreaterThan(-1);
+    const named = body.indexOf("const namedRef = refHint !== null && !reason.refByDefault;");
+    const rebind = body.indexOf("await this.rebindToOwnPr(storedPrior, reason.ownPr, reuse, facts.defaultRef, slug)");
+    const ref = body.indexOf("const ref = namedRef ? refHint : (prior?.ref ?? refHint);");
+    expect(named).toBeGreaterThan(-1);
+    expect(rebind).toBeGreaterThan(named);
     expect(ref).toBeGreaterThan(rebind);
     expect(body).toMatch(/const prior = rebind\.binding;/);
-    // A NEW binding records how its ref was chosen; an existing one keeps its own record.
+    // A new or explicitly replaced binding records how its ref was chosen; a sticky fallback keeps its record.
     expect(body).toMatch(
-      /allocateThreadUser\(\s*threadKey,\s*ref,\s*worktreePath,\s*boundByFor\(\{ refByDefault: reason\.refByDefault, ref, defaultRef: facts\.defaultRef \}\),?\s*\)/,
+      /allocateThreadUser\([\s\S]*?threadKey,[\s\S]*?ref,[\s\S]*?worktreePath,[\s\S]*?boundByFor\(\{ refByDefault: reason\.refByDefault, ref, defaultRef: facts\.defaultRef \}\),[\s\S]*?namedRef,[\s\S]*?\);/,
     );
     const alloc = method("allocateThreadUser");
     expect(alloc).toMatch(/boundBy: BoundBy,/);
     expect(alloc).toMatch(/: \{ boundBy \}\),/);
-    expect(alloc).toMatch(/\{ boundBy: existing\.boundBy \}/);
+    expect(alloc).toMatch(/existing\.boundBy !== undefined \? \{ boundBy: existing\.boundBy \} : \{\}/);
     expect(alloc).toMatch(/\{ rebound: existing\.rebound \}/);
   });
 });
@@ -181,21 +216,21 @@ describe("moveOntoOwnBranch: the mirror must hold the branch, then the row moves
 
 // The tree after a move is item 17's business, and item 17 has one rule: a
 // provisioning attach's tree is clean at the bound ref's tip, or recreated.
-// No word from the rebind reaches the worktree step.
+// The refChanged fact makes equal-tip branch moves recreate too.
 describe("the attach after a rebind provisions the tree at the moved ref as it provisions any tree", () => {
   const body = method("attachThreadBody");
   const create = method("attachThreadCreate");
   const ensure = method("ensureThreadWorktree");
 
-  it("no flag about the tree rides from the rebind to the worktree step: the outcome is the moved row alone", () => {
+  it("the ref-change fact reaches the worktree decision so even an equal-tip move recreates", () => {
     expect(source).toMatch(/\| \{ kind: "rebound"; moved: ThreadBinding; rebound: Rebound \};/);
     for (const m of [body, create, ensure]) expect(m).not.toMatch(/keepTree/);
     expect(create).toMatch(
-      /this\.ensureThreadWorktree\(binding, sha, mode\.originUrl, mode\.modeSwitch, \{\s*detached: target\.kind === "sha",\s*reuse,?\s*\}\)/,
+      /this\.ensureThreadWorktree\(binding, sha, mode\.originUrl, mode\.modeSwitch, \{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,?\s*\}\)/,
     );
-    expect(ensure).toMatch(/opts: \{ detached: boolean; reuse: boolean \}/);
+    expect(ensure).toMatch(/opts: \{ detached: boolean; reuse: boolean; refChanged: boolean \}/);
     expect(ensure).toMatch(
-      /const decision = decideWorktree\(\{ reuse: opts\.reuse, modeSwitch, sha, worktreePath: wt, facts \}\);/,
+      /const decision = decideWorktree\(\{[\s\S]*?reuse: opts\.reuse,[\s\S]*?modeSwitch,[\s\S]*?refChanged: opts\.refChanged,[\s\S]*?sha,[\s\S]*?worktreePath: wt,[\s\S]*?facts,[\s\S]*?\}\);/,
     );
   });
 
@@ -263,7 +298,7 @@ describe("a binding whose own branch is gone from the mirror returns to the defa
     expect(create).toMatch(/let returned: Returned \| undefined;/);
   });
 
-  it("a returnable ref the mirror still holds is verified against the origin at every attach: the fetch decision is handed canReturnToDefault, computed once before the mutex, so the prune runs and the ref is re-read for real; a verification fetch that fails is one log line and the mirror's ref, while a fetch for a missing or stale ref fails as before", () => {
+  it("an unnamed attach's returnable ref is verified against the origin at every attach, while a named ref cannot fall back: the fetch decision is computed once before the mutex, so the prune runs and the ref is re-read for real", () => {
     expect(source).toMatch(
       /import \{[^}]*mirrorFetchReason[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentHead\.js";/,
     );
@@ -274,8 +309,11 @@ describe("a binding whose own branch is gone from the mirror returns to the defa
     );
     expect(decision).toMatch(/return mirrorFetchReason\(\{ refExists, mirrorSha, wantSha, returnable \}\);/);
     // One predicate, read once off the binding before the lock, drives the mint
-    // pre-check, the fetch under the lock and the return gate alike.
-    const returnable = create.indexOf("const returnable = canReturnToDefault(binding, facts.defaultRef);");
+    // pre-check, the fetch under the lock and the return gate alike. A named
+    // ref is never converted to the default when it is missing.
+    const returnable = create.indexOf(
+      "const returnable = input.namedRef ? false : canReturnToDefault(binding, facts.defaultRef);",
+    );
     const mint = create.indexOf("(await this.mirrorFetchReasonFor(binding.ref, want, returnable))");
     const lockStart = create.indexOf("await this.withMirrorLock(");
     const why = create.indexOf("const why = await this.mirrorFetchReasonFor(binding.ref, want, returnable);");

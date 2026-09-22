@@ -5397,20 +5397,24 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Storage-only allocation (atomic under the DO input gate: get → list →
    *  put touches nothing but this object's storage, so two concurrent
-   *  attaches cannot both claim the same user). Sticky: an existing live
-   *  binding is reused as-is; an evicted binding keeps its ref and
-   *  gets a fresh user from the pool. */
+   *  attaches cannot both claim the same user). A hint that names no branch
+   *  keeps the sticky ref. An explicit named ref replaces it in the same row;
+   *  the attach then provisions the existing path at that ref. */
   private async allocateThreadUser(
     threadKey: string,
     ref: string,
     worktreePath: string,
-    /** How a NEW binding's ref was chosen (item 16); an existing binding keeps its own record. */
+    /** How the requested ref was chosen (item 16). */
     boundBy: BoundBy,
+    /** An explicit named ref is authoritative; false is the sticky fallback. */
+    replaceRef = false,
   ): Promise<{ binding: ThreadBinding; wrote: boolean } | ThreadErr> {
     const key = threadBindingKey(threadKey);
     const existing = await this.ctx.storage.get<ThreadBinding>(key);
-    if (existing && !existing.evicted && existing.user) return { binding: existing, wrote: false };
-    const user = await this.findFreePoolUser(threadKey);
+    const replacingRef = existing !== undefined && replaceRef && existing.ref !== ref;
+    if (existing && !existing.evicted && existing.user && !replacingRef) return { binding: existing, wrote: false };
+    const user =
+      existing && !existing.evicted && existing.user ? existing.user : await this.findFreePoolUser(threadKey);
     if (!user) {
       return {
         error: `user-pool-exhausted: all ${THREAD_USERS.length} thread users are allocated; wait for the inactivity sweep or evict a thread`,
@@ -5420,20 +5424,24 @@ export class ResidentDO extends Sandbox<Env> {
     const now = new Date(systemClock()).toISOString();
     const binding: ThreadBinding = {
       threadKey,
-      ref: existing?.ref ?? ref, // sticky across eviction
+      ref: replacingRef ? ref : (existing?.ref ?? ref),
       user,
       worktreePath: existing?.worktreePath ?? worktreePath,
       boundAt: existing?.boundAt ?? now,
       lastAttachAt: now,
       evicted: false,
-      // An evicted binding's own history: how its ref was chosen (absent on
-      // one made before the field — never overwritten by this attach's flag),
-      // the one move it may have made and its last move back.
+      // A named ref starts a new binding choice, so stale move/return records
+      // do not make it look default-bound. The thread's pushed-branch memory
+      // remains its history across every ref choice.
       ...(existing
         ? {
-            ...(existing.boundBy !== undefined ? { boundBy: existing.boundBy } : {}),
-            ...(existing.rebound !== undefined ? { rebound: existing.rebound } : {}),
-            ...(existing.returned !== undefined ? { returned: existing.returned } : {}),
+            ...(replacingRef
+              ? { boundBy }
+              : {
+                  ...(existing.boundBy !== undefined ? { boundBy: existing.boundBy } : {}),
+                  ...(existing.rebound !== undefined ? { rebound: existing.rebound } : {}),
+                  ...(existing.returned !== undefined ? { returned: existing.returned } : {}),
+                }),
             ...(existing.ownBranches !== undefined ? { ownBranches: existing.ownBranches } : {}),
           }
         : { boundBy }),
@@ -5612,24 +5620,20 @@ export class ResidentDO extends Sandbox<Env> {
         cause: "system",
       };
 
-    // The binding's ref wins for the thread's whole life, with one exception
-    // (item 16): a thread bound to the repo default for want of a named branch
-    // moves, once per pull request, onto the branch its own run opened a pull
-    // request on — when that branch is the thread's own and the mirror holds
-    // it. A decision about the binding alone, made here, before the ref is
-    // chosen, so the rest of the attach (fetch, the worktree step that
-    // provisions the tree clean at the moved ref, deps, credentials) runs on
-    // the moved ref.
-    const rebind = await this.rebindToOwnPr(
-      stored.get(threadBindingKey(threadKey)) as ThreadBinding | undefined,
-      reason.ownPr,
-      reuse,
-      facts.defaultRef,
-      slug,
-    );
+    // A ref the request names is authoritative. The sticky binding is only a
+    // fallback when the request names none (`refHint` absent, or the bot's
+    // explicit by-default resolution). This keeps a re-issued coordinator
+    // child on the branch its new spawn names instead of an earlier attempt's
+    // branch. The own-PR move remains for callers that name no branch of their
+    // own but carry the typed follow-up fact.
+    const storedPrior = stored.get(threadBindingKey(threadKey)) as ThreadBinding | undefined;
+    const namedRef = refHint !== null && !reason.refByDefault;
+    const rebind = namedRef
+      ? { binding: storedPrior }
+      : await this.rebindToOwnPr(storedPrior, reason.ownPr, reuse, facts.defaultRef, slug);
     if ("error" in rebind) return rebind;
     const prior = rebind.binding;
-    const ref = prior?.ref ?? refHint;
+    const ref = namedRef ? refHint : (prior?.ref ?? refHint);
     if (!ref) {
       // Name the default branch so the bot can bind to it (loudly) instead of
       // asking the user when the message named no branch; the binding is still
@@ -5652,6 +5656,7 @@ export class ResidentDO extends Sandbox<Env> {
       ref,
       worktreePath,
       boundByFor({ refByDefault: reason.refByDefault, ref, defaultRef: facts.defaultRef }),
+      namedRef,
     );
     if ("error" in alloc) return alloc;
     const binding = alloc.binding;
@@ -5683,6 +5688,8 @@ export class ResidentDO extends Sandbox<Env> {
         binding,
         mode,
         rollback,
+        namedRef,
+        refChanged: storedPrior !== undefined && storedPrior.ref !== binding.ref,
         ...(rebind.rebound !== undefined ? { rebound: rebind.rebound } : {}),
         ...(rebind.rebindRefused !== undefined ? { rebindRefused: rebind.rebindRefused } : {}),
       });
@@ -5903,6 +5910,10 @@ export class ResidentDO extends Sandbox<Env> {
     binding: ThreadBinding;
     mode: ReturnType<typeof planReadonlyAttach>;
     rollback: () => Promise<void>;
+    /** This ask named the ref; a missing named branch may not fall back. */
+    namedRef: boolean;
+    /** The row moved to another ref before provisioning. */
+    refChanged: boolean;
     /** What `rebindToOwnPr` decided (item 16), for the answer. */
     rebound?: Rebound;
     rebindRefused?: RebindRefused;
@@ -5914,6 +5925,7 @@ export class ResidentDO extends Sandbox<Env> {
     // movement): everything after the lock — deps, credentials, the row's
     // final write, the answer — then speaks of the returned binding.
     let binding = input.binding;
+    let refChanged = input.refChanged;
     let returned: Returned | undefined;
 
     // Command-level token mint — before the lock so mint latency
@@ -5954,7 +5966,7 @@ export class ResidentDO extends Sandbox<Env> {
     // cycle's prune caught up. One predicate, read once here, drives the mint
     // pre-check, the fetch under the lock and the return gate alike.
     let want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });
-    const returnable = canReturnToDefault(binding, facts.defaultRef);
+    const returnable = input.namedRef ? false : canReturnToDefault(binding, facts.defaultRef);
     let fetchToken: string | null = token;
     if (
       !fetchToken &&
@@ -6022,6 +6034,7 @@ export class ResidentDO extends Sandbox<Env> {
           // goes on there: the default is always in the mirror, and the
           // worktree step below provisions the tree at its tip.
           const back = await this.returnBindingToDefault(binding, facts.defaultRef);
+          if (back.binding.ref !== binding.ref) refChanged = true;
           binding = back.binding;
           returned = back.returned;
           want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });
@@ -6058,6 +6071,7 @@ export class ResidentDO extends Sandbox<Env> {
         const recreated = await this.ensureThreadWorktree(binding, sha, mode.originUrl, mode.modeSwitch, {
           detached: target.kind === "sha",
           reuse,
+          refChanged,
         });
         return { sha, threadLockKey, recreated };
       }, ATTACH_MUTEX_WAIT_MS);
@@ -6219,7 +6233,11 @@ export class ResidentDO extends Sandbox<Env> {
      *  expected commit it still holds (item 51) — the tree is checked out at
      *  that commit, detached, instead of at a branch. `reuse`: a resumed
      *  run's attach (item 66): keep the tree as it stands, or refuse. */
-    opts: { detached: boolean; reuse: boolean } = { detached: false, reuse: false },
+    opts: { detached: boolean; reuse: boolean; refChanged: boolean } = {
+      detached: false,
+      reuse: false,
+      refChanged: false,
+    },
   ): Promise<boolean> {
     const wt = binding.worktreePath;
     const threadDir = parentDir(wt);
@@ -6256,7 +6274,14 @@ export class ResidentDO extends Sandbox<Env> {
         }
       }
     }
-    const decision = decideWorktree({ reuse: opts.reuse, modeSwitch, sha, worktreePath: wt, facts });
+    const decision = decideWorktree({
+      reuse: opts.reuse,
+      modeSwitch,
+      refChanged: opts.refChanged,
+      sha,
+      worktreePath: wt,
+      facts,
+    });
     if (decision.kind === "refuse") throw new ReuseRefusedError(decision.why);
     if (decision.kind === "reuse") return false;
 
