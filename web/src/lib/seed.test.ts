@@ -5,7 +5,7 @@ import type { WebSeed } from "@core/channels/webSeed.js";
 import { fetchSeed, readSeed, SEED_ACCEPT } from "./seed";
 import { ALL_ON } from "../testing/mount";
 
-const SEED: WebSeed = { page: "runNotFound", title: "Run not found", retentionDays: 30, capabilities: ALL_ON };
+const SEED: WebSeed = { page: "runNotFound", title: "No run found", retentionDays: 30, capabilities: ALL_ON };
 
 const answer = (body: string, type: string | null, status = 200) =>
   new Response(body, { status, headers: type ? { "content-type": type } : {} });
@@ -25,7 +25,7 @@ describe("fetchSeed", () => {
     const cases: Array<() => Promise<Response>> = [
       async () => answer("<!doctype html><html></html>", "text/html; charset=utf-8"),
       async () => answer(JSON.stringify({ repo: "acme/api", totals: {} }), "application/json"),
-      async () => answer("run not found", "text/plain", 404),
+      async () => answer("no run found", "text/plain", 404),
       async () => answer("{}", null),
       async () => answer("not json", "application/json"),
       async () => {

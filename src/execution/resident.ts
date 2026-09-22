@@ -704,10 +704,7 @@ export class ResidentNeedsRefError extends Error {
     readonly resource: string,
     readonly defaultRef?: string,
   ) {
-    super(
-      `the ${resource} resident needs a branch for this thread: no ref is bound yet. ` +
-        `Name the branch to work on (e.g. "on main") and try again.`,
-    );
+    super(`Which branch should the ${resource} resident use for this thread (for example, "main")?`);
     this.name = "ResidentNeedsRefError";
   }
 }
@@ -1468,8 +1465,7 @@ export class ResidentExecutor implements Executor {
     const stillGone = (data: Record<string, unknown>): ExecInfraError =>
       classifyError(
         new ExecInfraError(
-          `resident ${route}: worktree still unavailable after a re-attach (${String(data.error ?? "")}) — ` +
-            "the resident may be mid-restore; try again shortly.",
+          `this is a bug: resident ${route} still had no worktree after its automatic re-attach (${String(data.error ?? "")}); no further restore wait was scheduled`,
           "refused",
         ),
         { kind: "infra", code: "attach" },

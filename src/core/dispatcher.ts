@@ -956,7 +956,7 @@ export async function dispatch(
         const original = await shipRequestOf(runsService, owner.run.id);
         if (original === undefined) {
           await io.reply(
-            "This ship pipeline ended, but its original task could not be read; what task should this thread re-issue?",
+            "This ship pipeline ended, but its original task could not be read. What was the pipeline's original task?",
           );
           await recordPendingOperator();
           return ended;

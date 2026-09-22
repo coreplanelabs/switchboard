@@ -1288,8 +1288,10 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       const [end] = b.of("unit-end") as Array<{ ending: { report: string } }>;
       return end!.ending.report;
     };
-    expect(await report(true)).toContain("re-issue `agent:ship` in this thread with the same text");
-    expect(await report(undefined)).toContain("the unit runs again when the plan is re-issued");
+    expect(await report(true)).toContain("the next reply in this thread continues it from the open pull request");
+    expect(await report(undefined)).toContain(
+      "the next run of this plan recognizes the unit's branch and pull request",
+    );
   });
 
   it("the plan answer's runPageBase reaches the machine: an aborted unit's report links the coding child's run page instead of repeating its write-up (issue 1806)", async () => {
@@ -1726,10 +1728,10 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     ]);
     expect(ends[1]!.ending.report).toContain("Could not create the pipeline branch `plan/fixture/u20`");
     expect(ends[3]!.ending.report).toBe(
-      "⛔ Blocked: U22 waits on U21, which is blocked itself. Re-issue the plan naming the remaining units once it is resolved.",
+      "⛔ Blocked: U22 waits on U21, which is blocked itself. A later pipeline recognizes both units once the dependency is resolved.",
     );
     expect(ends[4]!.ending.report).toBe(
-      "⛔ Blocked: U12 waits on U11, which ended merge_refused. Re-issue the plan naming the remaining units once it is resolved.",
+      "⛔ Blocked: U12 waits on U11, which ended merge_refused. A later pipeline recognizes the dependency once it is resolved.",
     );
     expect(ends[5]!.ending.report).toContain("waits on U20, which ended aborted");
     for (const e of ends) expect(e.ending.report).not.toContain("undefined");
@@ -2286,7 +2288,7 @@ describe("the plan runner's driver — a step that throws inside the walk become
     });
     expect(ends[0]!.ending.report).toContain("The runner failed after round 2's review verdict");
     expect(ends[0]!.ending.report).toContain("not_found");
-    expect(ends[0]!.ending.report).toContain("Re-issue `agent:ship` in this thread to continue");
+    expect(ends[0]!.ending.report).toContain("The unit remains bound to this thread; the next reply continues it");
     // One line: the message never carries a stack or a second line.
     expect(ends[0]!.ending.report.split("\n")[0]).toContain("HTTP 404");
     expect(s.names()).toContain("U10/end/threw");

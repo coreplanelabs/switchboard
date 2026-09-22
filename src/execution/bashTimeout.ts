@@ -59,7 +59,7 @@ export function bashBudgetWithinRun(wantedMs: number, remainingMs: number): RunB
     return {
       kind: "exhausted",
       note:
-        `run budget exhausted — ${secs(remainingMs)}s of wall clock left, inside the ` +
+        `the run budget is exhausted — ${secs(remainingMs)}s of wall clock left, inside the ` +
         `${secs(RUN_DEADLINE_RESERVE_MS)}s write-up reserve, so the command was not run; write up what you have now`,
     };
   }

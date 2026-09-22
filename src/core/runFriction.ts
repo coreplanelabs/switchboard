@@ -621,7 +621,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       findings.push({
         category: "infra_failure",
         severity: "high",
-        summary: `no result for tool call (run ended mid-tool): ${event.summary}`,
+        summary: `no result for tool call (the run ended mid-tool): ${event.summary}`,
         tool: event.tool,
         eventIndex: index,
         ...(durationMs !== undefined ? { durationMs } : {}),

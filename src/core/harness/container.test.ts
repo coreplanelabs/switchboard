@@ -945,7 +945,7 @@ describe("ExecHarnessContainer — each operation is one command over the execut
       answer(503, { error: "not-serviceable: registry record or repo facts missing", reason: "unregistered" }),
       new ExecInfraError("resident /exec HTTP 400", residentAnswerReason(400, {})),
       new ExecInfraError(
-        "resident /exec: worktree still unavailable after a re-attach (evicted: …) — the resident may be mid-restore; try again shortly.",
+        "this is a bug: resident /exec still had no worktree after its automatic re-attach (evicted: …); no further restore wait was scheduled",
         "refused",
       ),
       new ExecInfraError(

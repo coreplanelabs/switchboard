@@ -328,7 +328,7 @@ export function patternSignature(f: FrictionFinding): string {
       return "slow_model_turn:model_turn";
     case "infra_failure": {
       if (summary.startsWith("sandbox dead")) return "infra_failure:sandbox_dead";
-      const mid = /^no result for tool call \(run ended mid-tool\):\s*/.exec(summary);
+      const mid = /^no result for tool call \(the run ended mid-tool\):\s*/.exec(summary);
       if (mid) return `infra_failure:mid-tool ${commandSignature(summary.slice(mid[0].length))}`;
       const during = /^exec infrastructure failed during\s*/.exec(summary);
       return `infra_failure:${commandSignature(during ? summary.slice(during[0].length) : summary)}`;

@@ -294,7 +294,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     const rec = recordingSink();
     serveEvents(() => null, rec.sink);
     expect(rec.status).toBe(404);
-    expect(rec.body()).toContain("run not found");
+    expect(rec.body()).toContain("no run found");
     expect(rec.ended).toBe(true);
     expect(rec.headers["content-type"]).not.toContain("event-stream");
   });
@@ -827,7 +827,7 @@ describe("createLiveViewHandler (node:http)", () => {
     await missing.finished;
     expect(missing.status).toBe(404);
     expect(missing.headers["content-type"]).toBe("application/json; charset=utf-8");
-    expect(JSON.parse(missing.body())).toMatchObject({ page: "runNotFound", title: "Run not found" });
+    expect(JSON.parse(missing.body())).toMatchObject({ page: "runNotFound", title: "No run found" });
   });
 
   // Feature: docs/decisions/0053 — the picker is offered to a session holding `all`, to nobody else.
@@ -1719,7 +1719,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
       h.handler(live.req, live.res);
       await done(live);
       expect(live.status).toBe(404);
-      expect(live.body()).toBe("run not found");
+      expect(live.body()).toBe("no run found");
       expect(run.control.requested).toBeUndefined();
     });
 
@@ -1772,12 +1772,12 @@ describe("live view on RunsService: history pages + index toggle", () => {
         h.handler(t.req, t.res);
         await done(t);
         expect([url, t.status]).toEqual([url, 404]);
-        if (/\/(events|friction)$/.test(url)) expect(t.body()).toBe("run not found");
+        if (/\/(events|friction)$/.test(url)) expect(t.body()).toBe("no run found");
         else {
           const seed = seedOf(t.body()) as RunNotFoundSeed;
           expect(seed).toEqual({
             page: "runNotFound",
-            title: "Run not found",
+            title: "No run found",
             retentionDays: 30,
             capabilities: ALL_CAPABILITIES,
           }); // nothing echoed from the request — a static seed
@@ -1802,7 +1802,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
       const seed = seedOf(t.body()) as RunNotFoundSeed;
       expect(seed).toEqual({
         page: "runNotFound",
-        title: "Run not found",
+        title: "No run found",
         retentionDays: 30,
         capabilities: ALL_CAPABILITIES,
       });
@@ -1943,7 +1943,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(indexSeedOf(t.body()).retentionDays).toBeNull();
       expect(retentionSentence(7)).toBe("Finished runs are kept for 7 days, then deleted");
       expect(retentionSentence(1)).toBe("Finished runs are kept for 1 day, then deleted");
-      expect(retentionSentence(null)).toBe("Run history is off; finished runs are kept about a minute.");
+      expect(retentionSentence(null)).toBe("History is off; finished runs are kept about a minute.");
     });
 
     it("AE9: a hostile persisted label is inert in the page and survives the seed round trip as data", async () => {
@@ -2180,16 +2180,16 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(denied.body()).toBe(unknown.body()); // byte-identical: existence never revealed
       expect(seedOf(denied.body())).toEqual({
         page: "runNotFound",
-        title: "Run not found",
+        title: "No run found",
         retentionDays: 30,
         capabilities: ALL_CAPABILITIES,
       });
       for (const url of ["/runs/priv/events", "/runs/priv/friction"]) {
         const t = await request(h, url, alice);
-        expect([url, t.status, t.body()]).toEqual([url, 404, "run not found"]);
+        expect([url, t.status, t.body()]).toEqual([url, 404, "no run found"]);
       }
       const stop = await request(h, "/runs/priv/stop?mode=soft", alice, "POST");
-      expect([stop.status, stop.body()]).toEqual([404, "run not found"]);
+      expect([stop.status, stop.body()]).toEqual([404, "no run found"]);
       // Who, which route, why — never the run id, never in the reply.
       // The read routes deny on the run's attributes (alice is not a member); the
       // stop denies one question earlier — an unlisted session holds no `runs:write`.
@@ -2468,7 +2468,7 @@ describe("artifact route (item 26)", () => {
       expect((await get(h, `/runs/r1/artifacts/${SVG.key}`)).status).toBe(404); // r2's file, through r1
       expect((await get(h, `/runs/r1/artifacts/runs/r1/out/9-made-up.png`)).status).toBe(404);
       const unknown = await get(h, `/runs/nope/artifacts/${PNG.key}`);
-      expect([unknown.status, unknown.body()]).toEqual([404, "run not found"]);
+      expect([unknown.status, unknown.body()]).toEqual([404, "no run found"]);
       expect(audit).not.toHaveBeenCalled(); // a key the run never named is not a read of anything
       expect((await get(h, `/runs/r1/artifacts/${PNG.key}`)).status).toBe(200);
       expect(audit.mock.calls.map(([e]) => e)).toEqual([{ route: "artifact", runId: "r1", identity: "access:admin" }]);
@@ -2567,7 +2567,7 @@ describe("artifact route (item 26)", () => {
       const SOURCE: GrantsSource = { grants: new Map(), commandGroups: ["runs"] };
       const alice: LiveViewContext = { actor: accessActor({ sub: "alice" }, (id) => grantsFor(id, SOURCE)) };
       const denied = await get(h, `/runs/priv/artifacts/${PNG.key}`, alice);
-      expect([denied.status, denied.body()]).toEqual([404, "run not found"]);
+      expect([denied.status, denied.body()]).toEqual([404, "no run found"]);
       expect(audit.mock.calls.map(([e]) => e)).toEqual([
         { route: "artifact", identity: "access:alice", denied: "not-member" },
       ]);

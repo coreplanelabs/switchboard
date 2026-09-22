@@ -82,7 +82,7 @@ const defineCommand = commandDefiner<RunsCommandDeps>();
 
 const runId = z.string().regex(RUN_ID_PATTERN);
 const positiveInt = z.coerce.number().int().positive();
-const idArg = { name: "id", schema: runId, describe: "run id" } as const;
+const idArg = { name: "id", schema: runId, describe: "id of the run" } as const;
 
 /** A hosted parent's soft-stop refusal (record 0060; live-view items 10 and
  *  16), a 409 pointing at the units and the escape — the same sentence the
@@ -93,7 +93,7 @@ export const HOSTED_STOP_REFUSAL =
 function unwrap<T>(res: Result<T>, what: "run" | "unit" = "run"): T {
   if (res.ok) return res.value;
   if (res.error === "hosted") throw new CommandError("conflict", HOSTED_STOP_REFUSAL);
-  throw new CommandError(res.error, res.error === "not_found" ? `${what} not found` : "run already finished");
+  throw new CommandError(res.error, res.error === "not_found" ? `no ${what} found` : "the run already finished");
 }
 
 /** What `runs findings` says when no run the caller may see names the pull
@@ -124,7 +124,7 @@ async function getVisibleRun(
   const decision = authorize(actor, action, runResource(view));
   if (!decision.allow) {
     (deps.denied ?? logDenied)({ commandId, actorId: actor.id, action, reason: decision.reason });
-    throw new CommandError("not_found", "run not found");
+    throw new CommandError("not_found", "no run found");
   }
   return view;
 }

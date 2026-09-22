@@ -54,7 +54,7 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 | `config overrides` | Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; `config show --channel <id>` reads one. | anyone |
 | `config channels` | The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; `listed: false` says the bot could not list its channels and only the scoped ones are here. | anyone |
 | `config set <channel\|me\|thread\|user\|org\|repo> [--agent <string>] [--model <string>] [--models <object>] [--effort <low\|medium\|high\|xhigh\|max>] [--efforts <object>] [--verbosity <quiet\|verbose\|debug>] [--harness <object>] [--boundary <object>] [--review <object>] [--intake <object>] [--pulls <object>] [--repo <string>] [--user <string>] [--github <string>] [--channel <string>] [--thread <string>]` | Set the agent, model, effort, verbosity, harness, boundary or default repository (`--repo owner/name`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.&lt;agent&gt;, --efforts.&lt;agent&gt; and --harness.&lt;agent&gt;. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (`config set user --user <id> --github <login>`, identity admins — never your own: it is not yours to type), or the pull-request watch (`config set org\|repo --pulls.watch on\|off` with its caps, repo taking `--repo <owner/name>`). | anyone |
-| `config clear <channel\|me\|thread\|user\|org\|repo> [--channel <string>] [--thread <string>] [--repo <string>] [--user <string>]` | Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); `config clear user --user <id>` removes one person's GitHub binding (identity admins). Static config.yaml values show through again. | anyone |
+| `config clear <channel\|me\|thread\|user\|org\|repo> [--channel <string>] [--thread <string>] [--repo <string>] [--user <string>]` | Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); `config clear user --user <id>` removes one person's GitHub binding (identity admins). Static config.yaml values show through again. | anyone |
 | `config instructions <channel\|me> [text…] [--channel <string>]` | Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions. | anyone |
 
 ### `runs`
@@ -84,7 +84,7 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 | Command | What it does | Who can run it |
 |---|---|---|
 | `friction report [--since-ms <integer>] [--limit <integer>] [--min-runs <integer>]` | Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted. | anyone |
-| `friction propose [--dry-run] [--top <integer>] [--min-runs <integer>] [--repo <string>]` | Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues. | repo managers (`repo:write`) |
+| `friction propose [--dry-run] [--top <integer>] [--min-runs <integer>] [--repo <string>]` | Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues. | repo managers (`repo:write`) |
 
 ### `repo`
 
@@ -95,8 +95,8 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 | `repo offboard <slug> [--dry-run]` | Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only). | repo managers (`repo:write`) |
 | `repo reconfigure <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>]` | Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach). | repo managers (`repo:write`) |
 | `repo rebuild <slug> [--dry-run]` | Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only). | repo managers (`repo:write`) |
-| `repo test <slug> [ref]` | Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch). | anyone granted `agent:run:coding` |
-| `repo build <slug> [ref]` | Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch). | anyone granted `agent:run:coding` |
+| `repo test <slug> [ref]` | Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch). | anyone granted `agent:run:coding` |
+| `repo build <slug> [ref]` | Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch). | anyone granted `agent:run:coding` |
 
 ### `memory`
 
@@ -115,7 +115,7 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 | `mcp connect <name> [--scope <me\|channel\|org>] [--channel <string>]` | A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes. | anyone |
 | `mcp show <name> [--scope <me\|channel\|org>] [--channel <string>]` | One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential. | anyone |
 | `mcp remove <name> [--scope <me\|channel\|org>] [--channel <string>]` | Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights). | anyone |
-| `mcp promote <name> --from <string> [--agents <string>]` | Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied. | repo managers (`repo:write`) |
+| `mcp promote <name> --from <string> [--agents <string>]` | Promote a person's MCP server into the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied. | repo managers (`repo:write`) |
 
 ### `schedule`
 

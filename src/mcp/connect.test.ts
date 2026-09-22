@@ -81,10 +81,13 @@ describe("connect tickets (docs/reference/specs/mcp-tools.md item 15)", () => {
     expect(ok.ok && ok.token === "tok-123").toBe(true);
   });
 
-  it("every refusal has a human sentence that names the next step", () => {
+  it("every refusal has a human sentence that narrates the outcome or names the missing automatic recovery", () => {
     for (const kind of ["not_found", "expired", "used", "cancelled", "wrong_identity", "not_authorizing"] as const) {
       expect(refusalMessage({ kind })).toMatch(/link|user/);
     }
+    expect(refusalMessage({ kind: "not_authorizing" })).toContain("This is a bug");
+    expect(refusalMessage({ kind: "not_found" })).toContain("no fresh connect link was opened automatically");
+    expect(refusalMessage({ kind: "expired" })).toContain("no fresh connect link was opened automatically");
     expect(refusalMessage({ kind: "bad_token", reason: "the token is empty" })).toBe(
       "The token was not accepted: the token is empty.",
     );

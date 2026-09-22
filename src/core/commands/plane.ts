@@ -63,7 +63,7 @@ function runLine(row: PlaneRunRow, now: number, surface: "chat" | "text"): strin
 
 function prLine(row: PlanePullRequestRow, surface: "chat" | "text"): string {
   const name = `${row.pr.repo}#${row.pr.number}`;
-  const owner = row.owner.unitKey ?? (row.owner.runId ? `run ${shortId(row.owner.runId)}` : "a person");
+  const owner = row.owner.unitKey ?? (row.owner.runId ? `the run ${shortId(row.owner.runId)}` : "a person");
   const health = healthWords(row.health) || "-";
   if (surface === "chat") return `• ${name} — ${health} · ${owner}`;
   return `${name.padEnd(32)}  ${health.padEnd(24)}  ${owner}`.trimEnd();

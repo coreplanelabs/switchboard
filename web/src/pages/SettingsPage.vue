@@ -39,7 +39,8 @@ const tab = computed(() => seed?.tab ?? "channels");
     <div class="error mx-auto my-8 max-w-lg rounded-lg border border-err/30 bg-err/10 px-5 py-4 text-sm" role="alert">
       <p class="font-medium text-highlighted">Settings could not be loaded.</p>
       <p class="mt-1 text-muted">
-        The page arrived without its data. Reload to try again; if it keeps happening, the bot's log has the reason.
+        This is a bug: the page arrived without its data and no automatic reload was scheduled. The bot's log has the
+        reason.
       </p>
       <UButton class="mt-3" size="xs" color="neutral" variant="outline" @click="browser.reload()">Reload</UButton>
     </div>

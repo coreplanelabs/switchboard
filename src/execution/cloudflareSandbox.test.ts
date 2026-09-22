@@ -369,7 +369,7 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
     expect(err).toBeInstanceOf(ExecCapacityError);
     expect(err).not.toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toBe(
-      "sandbox fleet busy — no free per-thread sandbox after waiting 60s (the fleet's max_instances is reached); try again in a few minutes",
+      "this is a bug: the sandbox fleet had no free per-thread sandbox after waiting 60s (the fleet's max_instances is reached), and no automatic queue remained",
     );
     expect(calls).toHaveLength(4);
     await vi.advanceTimersByTimeAsync(60_000);
@@ -883,7 +883,7 @@ describe("CloudflareSandboxExecutor sandbox-starting wait", () => {
     expect(err).toBeInstanceOf(ExecCapacityError);
     expect(err).not.toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toBe(
-      "sandbox not ready — the thread's container did not finish starting within 600s; try again in a few minutes",
+      "this is a bug: the thread's sandbox did not finish starting within 600s, and no automatic start wait remained",
     );
     // Only the fleet's ending carries the log facts (execution.md item 14):
     // a start-wait ending logs nothing at the bot's ending site.
@@ -918,7 +918,7 @@ describe("CloudflareSandboxExecutor sandbox-starting wait", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     const err = await outcome;
     expect(err).toBeInstanceOf(ExecCapacityError);
-    expect((err as Error).message).toContain("sandbox fleet busy");
+    expect((err as Error).message).toContain("this is a bug: the sandbox fleet had no free per-thread sandbox");
     expect((err as Error).message).toContain("after waiting 20s");
     // sends at 0 (starting), 5 (busy: the fleet's ladder restarts at its first step, 10 s), 15 (busy: its
     // second step, 20 s, capped at the 5 s left), 20 (busy, the budget spent), then the throw

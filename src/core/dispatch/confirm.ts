@@ -8,9 +8,8 @@
 // parsed input, through the typed line's own path (`runChatCommand` with the
 // stored message): authorization, the inline run record and the audit line are
 // the typed grammar's, with `source: confirm` on the audit line and `outcome:
-// confirmed` on the record's `route` event. Every refusal is a named line, and
-// a store that cannot be read at the click is one too — the person types the
-// line, as they would have before the button existed.
+// confirmed` on the record's `route` event. Every refusal is a named statement;
+// a later request may mint a new offer, but this click never delegates recovery.
 import type { Actor } from "../authz/types.js";
 import type { ChatCommandResult } from "../commandChat.js";
 import type { Confirmation, ConfirmationRefusal, RedispatchConfirmation } from "../confirmations.js";
@@ -23,13 +22,16 @@ import { runChatCommand } from "./commandRun.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { redactedInput, ROUTED_RECEIPT_PREFIX } from "./route.js";
 
-export const OFFER_EXPIRED_LINE = "this offer expired; its ten minutes passed — type the line to run it";
+export const OFFER_EXPIRED_LINE =
+  "this offer expired after ten minutes; nothing ran, and a later request may receive a fresh confirmation";
 /** A question's Yes lives `QUESTION_TTL_MS` (a day), not the write's ten
  *  minutes, so its expired click names the window it missed. */
-export const QUESTION_EXPIRED_LINE = "this question expired; its day passed — type the line to run it";
+export const QUESTION_EXPIRED_LINE =
+  "this question expired after one day; nothing ran, and a later request may receive a fresh question";
 export const OFFER_FOREIGN_LINE = "only the requester can confirm this";
 export const OFFER_USED_LINE = "this offer was already used";
-export const OFFER_UNREADABLE_LINE = "the confirmation could not be read; type the line to run it";
+export const OFFER_UNREADABLE_LINE =
+  "this is a bug: the confirmation could not be read, so nothing ran and no replacement offer was minted";
 export const OFFER_CANCELLED_LINE = "Cancelled; nothing ran";
 
 /** The reason a confirmed run's `route` event gives on the record. */

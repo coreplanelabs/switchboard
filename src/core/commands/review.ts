@@ -59,7 +59,7 @@ const runId = z.string().regex(RUN_ID_PATTERN);
  *  `readingDiffAbridge` capability normally HIDES the command instead
  *  (capabilities.md item 2); this names the three facts the capability reads. */
 export const ABRIDGE_OFF_MESSAGE =
-  "The abridged reading diff is off in this deployment: it needs the `meat` binary on the bot host, the Anthropic provider's credential, `review.readingDiff.provider` not `off`, and run history to store it.";
+  "The abridged reading diff is off in this deployment: it needs the `meat` binary on the bot host, the Anthropic provider's credential, `review.readingDiff.provider` not `off`, plus history to store it.";
 
 /** The artifact summary as JSON: each declared field, present only when set
  *  (an `undefined` key would vanish on the wire and differ between surfaces);
@@ -133,12 +133,12 @@ async function abridgerOf(deps: ReviewCommandDeps): Promise<ReviewAbridger> {
 async function assertVisible(deps: ReviewCommandDeps, id: string, caller: Caller): Promise<void> {
   const runs = await deps.review.runs();
   const res = await runs.getRun(id);
-  if (!res.ok) throw new CommandError("not_found", "run not found");
+  if (!res.ok) throw new CommandError("not_found", "no run found");
   const actor: Actor = caller.actor;
   if (!authorize(actor, "runs:read", runResource(res.value)).allow)
     // The mask holds (record 0054): the sentence answers "not found" so the
     // run's existence is not revealed, while the cause tells the span the truth.
-    throw new CommandError("not_found", "run not found", "policy");
+    throw new CommandError("not_found", "no run found", "policy");
 }
 
 function refused(err: unknown): never {
@@ -151,7 +151,7 @@ export const reviewAbridge = defineCommand({
   // Hidden unless the abridging can happen here (the binary, the credential,
   // the switch) AND there is a record to append to.
   enabledWhen: (caps) => caps.runHistory && caps.readingDiffAbridge,
-  args: [{ name: "id", schema: runId, describe: "run id of a finished PR review" }],
+  args: [{ name: "id", schema: runId, describe: "id of a finished PR review run" }],
   options: z.object({
     model: z
       .string()

@@ -292,11 +292,11 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   if (tierProblem !== undefined) return refused("spawn_tier", tierProblem);
   // A child is a reader (agent-conductor item 3): the registry's identity
   // column is the line, never a list kept here, so a preset that writes is
-  // refused by name and the requester is pointed at starting it by hand.
+  // refused by name before a child is started.
   if (AGENTS[request.preset]?.identity === "write") {
     return refused(
       "spawn_identity",
-      `\`${request.preset}\` runs as a \`write\` identity — it pushes branches and opens pull requests — and a spawned child never writes: it reads this conversation and reports; the person who asked starts that work by hand with \`agent:${request.preset}\``,
+      `\`${request.preset}\` runs as a \`write\` identity — it pushes branches and opens pull requests — so this run was not started: spawned children read this conversation and report, but never write`,
     );
   }
   // The child's minutes are the parent's remainder, refused under the child

@@ -436,7 +436,7 @@ export function askExitCode(finished: RunReceipt | undefined): 0 | 1 {
 export function missingBotConfig(configPath: string): CommandError {
   return new CommandError(
     "unavailable",
-    `bot config not found at ${configPath} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`,
+    `bot config not found at ${configPath} — the command stopped before work began; the config path comes from SWITCHBOARD_CONFIG or defaults to config/config.yaml (deploy, env, friction analyze need no bot config)`,
   );
 }
 

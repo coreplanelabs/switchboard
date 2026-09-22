@@ -105,7 +105,7 @@ commands:
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
   config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
   config set           — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
-  config clear         — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
+  config clear         — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
   runs get             — One run's record, its cost in dollars per model (or unpriced) included; \`--include messages\` adds its events with free text wrapped as untrusted content.
@@ -118,15 +118,15 @@ commands:
   runs search          — Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content.
   review abridge       — Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed.
   friction report      — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
-  friction propose     — Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.
+  friction propose     — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
   friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
   repo list            — Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge.
   repo onboard         — Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated).
   repo offboard        — Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only).
   repo reconfigure     — Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach).
   repo rebuild         — Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only).
-  repo test            — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
-  repo build           — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  repo test            — Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  repo build           — Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
   memory list          — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
   memory forget        — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
   memory sweep         — Retire the stored status records the write gate rejects today (soft delete, per scope; yours freely, shared org/repo/channel scopes need repo-management rights); \`--dry-run\` lists the marked ids and changes nothing.
@@ -135,7 +135,7 @@ commands:
   mcp connect          — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
   mcp show             — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
   mcp remove           — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
-  mcp promote          — Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
+  mcp promote          — Promote a person's MCP server into the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
   schedule list        — Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did.
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. In \`registry\` mode it first copies the release's images its Workers lack into the account registry (what \`deploy images\` does). --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
@@ -285,7 +285,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
 • \`config channels\` — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
 • \`config set\` — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
-• \`config clear\` — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
+• \`config clear\` — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -299,15 +299,15 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`review abridge\` — Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed.
 *friction*
 • \`friction report\` — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
-• \`friction propose\` — Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.
+• \`friction propose\` — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
 *repo*
 • \`repo list\` — Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge.
 • \`repo onboard\` — Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated).
 • \`repo offboard\` — Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only).
 • \`repo reconfigure\` — Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach).
 • \`repo rebuild\` — Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only).
-• \`repo test\` — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
-• \`repo build\` — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+• \`repo test\` — Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+• \`repo build\` — Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
 *memory*
 • \`memory list\` — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
 • \`memory forget\` — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
@@ -318,7 +318,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`mcp connect\` — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
 • \`mcp show\` — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
 • \`mcp remove\` — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
-• \`mcp promote\` — Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
+• \`mcp promote\` — Promote a person's MCP server into the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
 *schedule*
 • \`schedule list\` — Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did.
 *deploy*
@@ -397,7 +397,7 @@ commands:
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
   config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
   config set           — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
-  config clear         — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
+  config clear         — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
   runs get             — One run's record, its cost in dollars per model (or unpriced) included; \`--include messages\` adds its events with free text wrapped as untrusted content.
@@ -409,10 +409,10 @@ commands:
   runs findings        — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
   runs search          — Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content.
   friction report      — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
-  friction propose     — Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.
+  friction propose     — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
   friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
-  repo test            — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
-  repo build           — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  repo test            — Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  repo build           — Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
   memory list          — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
   memory forget        — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
   memory sweep         — Retire the stored status records the write gate rejects today (soft delete, per scope; yours freely, shared org/repo/channel scopes need repo-management rights); \`--dry-run\` lists the marked ids and changes nothing.
@@ -421,7 +421,7 @@ commands:
   mcp connect          — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
   mcp show             — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
   mcp remove           — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
-  mcp promote          — Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
+  mcp promote          — Promote a person's MCP server into the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. In \`registry\` mode it first copies the release's images its Workers lack into the account registry (what \`deploy images\` does). --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
   deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
@@ -547,7 +547,7 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
 • \`config channels\` — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
 • \`config set\` — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
-• \`config clear\` — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
+• \`config clear\` — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -559,10 +559,10 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 • \`steer run\` — Fold words into a live run at its next step boundary, by run id.
 *friction*
 • \`friction report\` — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
-• \`friction propose\` — Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.
+• \`friction propose\` — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
 *repo*
-• \`repo test\` — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
-• \`repo build\` — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+• \`repo test\` — Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+• \`repo build\` — Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
 *memory*
 • \`memory list\` — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
 • \`memory forget\` — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
@@ -573,7 +573,7 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 • \`mcp connect\` — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
 • \`mcp show\` — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
 • \`mcp remove\` — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
-• \`mcp promote\` — Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
+• \`mcp promote\` — Promote a person's MCP server into the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
 *deploy*
 • \`deploy plan\` — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
 *delivery*
@@ -645,7 +645,7 @@ commands:
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
   config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
   config set           — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
-  config clear         — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
+  config clear         — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
   runs get             — One run's record, its cost in dollars per model (or unpriced) included; \`--include messages\` adds its events with free text wrapped as untrusted content.
@@ -656,8 +656,8 @@ commands:
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
   runs search          — Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content.
   friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
-  repo test            — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
-  repo build           — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  repo test            — Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  repo build           — Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
   mcp list             — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. \`--all\` (admins): every tier.
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. In \`registry\` mode it first copies the release's images its Workers lack into the account registry (what \`deploy images\` does). --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
@@ -750,7 +750,7 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
 • \`config channels\` — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
 • \`config set\` — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
-• \`config clear\` — Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
+• \`config clear\` — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -760,8 +760,8 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 *steer*
 • \`steer run\` — Fold words into a live run at its next step boundary, by run id.
 *repo*
-• \`repo test\` — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
-• \`repo build\` — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+• \`repo test\` — Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+• \`repo build\` — Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
 *mcp*
 • \`mcp list\` — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. \`--all\` (admins): every tier.
 *deploy*
@@ -799,7 +799,7 @@ exports[`capability surfaces — minimal > web seeds: /runs (capabilities, reten
     "schedules": false,
   },
   "runs": {
-    "retention": "Run history is off; finished runs are kept about a minute.",
+    "retention": "History is off; finished runs are kept about a minute.",
     "retentionDays": null,
     "rows": 0,
   },

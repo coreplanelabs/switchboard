@@ -62,7 +62,7 @@ export function lostWorkspaceNote(why: string, restarts: boolean): string {
   const lost = `resumed after a restart: the run's workspace could not be re-attached (${why})`;
   return restarts
     ? `${lost}; the run restarts from its request under the same run id`
-    : `${lost}, and the row's request cannot be read, so the run ends here; re-send it to run it again`;
+    : `${lost}; this is a bug: the row's request cannot be read, so the run ends here and no replacement run starts`;
 }
 
 /**
@@ -211,7 +211,7 @@ export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<A
         icon: "🔁",
         reason: restored
           ? "workspace lost across the restart; restarting from the request"
-          : "workspace lost across the restart; re-send to run again",
+          : "this is a bug: the workspace was lost across the restart, the request could not be read, and no replacement run starts",
         ...closeLines(clock(), false),
       }),
     );

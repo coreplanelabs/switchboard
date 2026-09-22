@@ -1,0 +1,20 @@
+{
+  "src/channels/mcpConnectView.ts": {
+    "run": 2
+  },
+  "src/core/dispatch/admission.ts": {
+    "run": 1
+  },
+  "src/core/dispatch/threadArtifacts.ts": {
+    "run": 1
+  },
+  "web/src/components/runs/RunRow.vue": {
+    "run": 1
+  },
+  "web/src/pages/MetricsPage.vue": {
+    "run": 2
+  },
+  "web/src/pages/NotFoundPage.vue": {
+    "run": 1
+  }
+}

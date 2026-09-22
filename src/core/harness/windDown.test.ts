@@ -23,9 +23,9 @@ const time: WindDownEnding = { kind: "time", text: "" };
 const timeWritten: WindDownEnding = { kind: "time", text: "findings so far: hi" };
 
 describe("windDownAnswer — the finale answer reads what the ending established (harness-pi item 6)", () => {
-  it("with no facts the words are the harness's own: the guess that work may exist, and the advice", () => {
+  it("with no facts the words are the harness's own: the guess that work may exist, then the gap", () => {
     expect(windDownAnswer(time, 45)).toBe(
-      "Stopped at the 45-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.",
+      "Stopped at the 45-minute budget without finishing. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.",
     );
     expect(windDownAnswer(timeWritten, 45)).toBe(
       "⚠️ _Hit the 45-minute budget before finishing — findings so far:_\n\nfindings so far: hi",
@@ -63,25 +63,25 @@ describe("windDownAnswer — the finale answer reads what the ending established
     );
   });
 
-  it("work left in a tree that is discarded or torn down is never said to exist there: the counts, the fate, the advice", () => {
+  it("work left in a discarded or torn-down tree closes on the counts and fate after naming the gap", () => {
     expect(
       windDownAnswer(time, 45, { workspace: { kind: "left", uncommitted: 2, unpushed: 0, fate: "discarded" } }),
     ).toBe(
-      "Stopped at the 45-minute budget without finishing. 2 uncommitted change(s) and 0 unpushed commit(s) were left in the tree and discarded at the run's end — narrow the task and try again.",
+      "Stopped at the 45-minute budget without finishing. This is a bug: the task outlived its run budget and no automatic continuation was scheduled. 2 uncommitted change(s) and 0 unpushed commit(s) were left in the tree and discarded at the run's end.",
     );
     expect(
       windDownAnswer(time, 45, { workspace: { kind: "left", uncommitted: 0, unpushed: 3, fate: "torn_down" } }),
     ).toBe(
-      "Stopped at the 45-minute budget without finishing. 0 uncommitted change(s) and 3 unpushed commit(s) were left in the tree, which is torn down since a command may still be running in it — narrow the task and try again.",
+      "Stopped at the 45-minute budget without finishing. This is a bug: the task outlived its run budget and no automatic continuation was scheduled. 0 uncommitted change(s) and 3 unpushed commit(s) were left in the tree, which is torn down since a command may still be running in it.",
     );
   });
 
   it("a workspace that could not be measured is said so, and a run with no workspace names none", () => {
     expect(windDownAnswer(time, 45, { workspace: { kind: "unmeasured" } })).toBe(
-      "Stopped at the 45-minute budget without finishing. The workspace could not be measured, so work may sit unpushed there — narrow the task and try again.",
+      "Stopped at the 45-minute budget without finishing. This is a bug: the task outlived its run budget and no automatic continuation was scheduled. The workspace could not be measured, so work may sit unpushed there.",
     );
     expect(windDownAnswer(time, 45, { workspace: { kind: "none" } })).toBe(
-      "Stopped at the 45-minute budget without finishing. Narrow the task and try again.",
+      "Stopped at the 45-minute budget without finishing. This is a bug: the task outlived its run budget and no automatic continuation was scheduled.",
     );
     expect(windDownAnswer(timeWritten, 45, { workspace: { kind: "none" } })).toBe(windDownAnswer(timeWritten, 45));
   });
@@ -96,11 +96,11 @@ describe("windDownAnswer — the finale answer reads what the ending established
     const reason = "aborted at the finale bound (3 minutes)";
     // time budget — model call (no writeUpFailedOnTool)
     expect(windDownAnswer({ kind: "time", text: "", writeUpFailed: reason }, 45)).toBe(
-      `Stopped at the 45-minute budget without finishing; the model call failed during the wind-down (${reason}), so no write-up came. Partial work may exist in the workspace — narrow the task and try again.`,
+      `Stopped at the 45-minute budget without finishing; the model call failed during the wind-down (${reason}), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
     );
     // time budget — tool wait (writeUpFailedOnTool: true)
     expect(windDownAnswer({ kind: "time", text: "", writeUpFailed: reason, writeUpFailedOnTool: true }, 45)).toBe(
-      `Stopped at the 45-minute budget without finishing; the finale bound ended the wait on a tool call (${reason}), so no write-up came. Partial work may exist in the workspace — narrow the task and try again.`,
+      `Stopped at the 45-minute budget without finishing; the finale bound ended the wait on a tool call (${reason}), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
     );
     // turn guard — tool wait
     expect(
@@ -109,7 +109,7 @@ describe("windDownAnswer — the finale answer reads what the ending established
         45,
       ),
     ).toBe(
-      `Stopped after 5 turns in 1 minute — that pace looks like a loop — without finishing; the finale bound ended the wait on a tool call (${reason}), so no write-up came. Partial work may exist in the workspace — look for a retry loop in the run's events before trying again.`,
+      `Stopped after 5 turns in 1 minute — that pace looks like a loop — without finishing; the finale bound ended the wait on a tool call (${reason}), so no write-up came. Partial work may exist in the workspace — this is a bug: a retry loop spent the turn guard and no automatic recovery was scheduled.`,
     );
     // soft stop — tool wait
     expect(windDownAnswer({ kind: "soft", text: "", writeUpFailed: reason, writeUpFailedOnTool: true }, 45)).toBe(
@@ -138,7 +138,7 @@ describe("windDownAnswer — the finale answer reads what the ending established
     );
     expect(windDownAnswer({ kind: "turns", pace, text: "" }, 45)).toBe(turnGuardAnswer("", pace));
     expect(windDownAnswer({ kind: "turns", pace, text: "" }, 45, { workspace: { kind: "none" } })).toBe(
-      `Stopped after ${pace} — that pace looks like a loop — without finishing. Look for a retry loop in the run's events before trying again.`,
+      `Stopped after ${pace} — that pace looks like a loop — without finishing. This is a bug: a retry loop spent the turn guard and no automatic recovery was scheduled.`,
     );
     expect(windDownAnswer({ kind: "soft", text: "" }, 45, clean)).toBe(
       `⏹ Stopped early by an operator (soft stop) before any findings were written. ${clause}`,

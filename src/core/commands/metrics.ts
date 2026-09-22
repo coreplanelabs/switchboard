@@ -106,7 +106,7 @@ export const metricsTrend = defineCommand({
       // A source that failed names its class (run-metrics.md item 9): the
       // status rides the message, the token never does.
       const kind = err instanceof Error ? err.name : "Error";
-      throw new CommandError("unavailable", `run metrics unavailable: ${kind}: ${message}`);
+      throw new CommandError("unavailable", `metrics by run unavailable: ${kind}: ${message}`);
     }
   },
 });

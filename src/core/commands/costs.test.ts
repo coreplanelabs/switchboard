@@ -103,6 +103,7 @@ describe("costs.snapshot", () => {
     expect(err).toBeInstanceOf(CommandError);
     expect(err).toMatchObject({ code: "busy" });
     expect(String((err as Error).message)).toContain("costs snapshot not taken: cloudflare graphql 502");
+    expect(String((err as Error).message)).toContain("the scheduled loop will take the next snapshot");
   });
 });
 

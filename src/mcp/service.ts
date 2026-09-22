@@ -1045,7 +1045,7 @@ export class McpService {
     } catch (err) {
       return { name: r.name, unavailable: `secret store: ${err instanceof Error ? err.message : String(err)}` };
     }
-    if (!sealed) return { name: r.name, unavailable: "no credential stored — run `mcp connect`" };
+    if (!sealed) return { name: r.name, unavailable: "no credential is stored, so this server is unavailable" };
     try {
       const stored = parseStoredCredential(await openCredential(this.opts.key, sealed));
       if (stored.kind === "bearer") return { spec: { ...base, auth: { type: "bearer", token: stored.token } } };

@@ -137,7 +137,7 @@ async function complete(
       res,
       400,
       "Token rejected by the server",
-      `<p class="err">${esc(warning ?? "the server rejected the token")}</p><p>Nothing was stored. Check the token and try again.</p>${server ? entryForm(server, nonce) : ""}`,
+      `<p class="err">${esc(warning ?? "the server rejected the token")}</p><p>Nothing was stored. This is a bug: the token was refused and no fresh sign-in was opened automatically.</p>${server ? entryForm(server, nonce) : ""}`,
     );
   }
   return connected(res, server, toolCount, warning);
@@ -345,7 +345,12 @@ function page(res: ServerResponse, status: number, title: string, body: string, 
 
 function failure(res: ServerResponse, err: unknown): void {
   console.error(`[mcp-connect] ${err instanceof Error ? err.message : String(err)}`);
-  page(res, 503, "Registry unavailable", "<p>The MCP registry could not be reached. Try again in a moment.</p>");
+  page(
+    res,
+    503,
+    "Registry unavailable",
+    "<p>This is a bug: the MCP registry could not be reached and no automatic retry was scheduled.</p>",
+  );
 }
 
 function esc(s: string): string {

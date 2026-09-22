@@ -76,10 +76,10 @@ describe("installSeedRouting", () => {
     await r.push("/runs");
     const nav = r.push("/metrics?days=7");
     await vi.waitFor(() => expect(load).toHaveBeenCalledWith("/metrics?days=7"));
-    release("/metrics?days=7", seedFor("Run metrics"));
+    release("/metrics?days=7", seedFor("Metrics by run"));
     await nav;
     expect(r.currentRoute.value.fullPath).toBe("/metrics?days=7");
-    expect(routing.seedAt("/metrics?days=7")?.title).toBe("Run metrics");
+    expect(routing.seedAt("/metrics?days=7")?.title).toBe("Metrics by run");
     expect(leave).not.toHaveBeenCalled();
   });
 

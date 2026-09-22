@@ -590,6 +590,6 @@ export function serializeSeed(seed: WebSeed): string {
  *  there is. (Moved from runsIndex.ts; the client renders it from
  *  `retentionDays`.) */
 export function retentionSentence(retentionDays: number | null): string {
-  if (retentionDays === null) return "Run history is off; finished runs are kept about a minute.";
+  if (retentionDays === null) return "History is off; finished runs are kept about a minute.";
   return `Finished runs are kept for ${retentionDays} day${retentionDays === 1 ? "" : "s"}, then deleted`;
 }

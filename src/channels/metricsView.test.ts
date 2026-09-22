@@ -127,7 +127,7 @@ describe("createMetricsViewHandler", () => {
     const seed = seedOf(page.body());
     expect(seed.page).toBe("metrics");
     expect(seed.report).toEqual(JSON.parse(JSON.stringify(r)));
-    expect(page.body()).toContain("<title>Run metrics</title>");
+    expect(page.body()).toContain("<title>Metrics by run</title>");
     const twin = fakeReqRes("GET", "/metrics.json");
     expect(handler(twin.req, twin.res)).toBe(true);
     await tick();
@@ -186,7 +186,7 @@ describe("createMetricsViewHandler", () => {
     expect(handler(t.req, t.res)).toBe(true);
     await tick();
     expect(t.status).toBe(503);
-    expect(t.body()).toBe("run metrics unavailable: MetricsSourceError");
+    expect(t.body()).toBe("metrics by run unavailable: MetricsSourceError");
     expect(t.body()).not.toContain("secret-words");
   });
 });

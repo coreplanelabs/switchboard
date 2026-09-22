@@ -318,7 +318,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     );
     expect(s.replies[0]).toContain("Ship cannot start under a 40-minute budget");
     expect(s.replies[0]).toContain("needs 163 minutes");
-    expect(s.replies[0]).toContain("`agent:coding`");
+    expect(s.replies[0]).toContain("the coding child's 90");
   });
 
   it("a boundary at the fit's sum starts the runner: 163 minutes hold three review rounds", async () => {
@@ -370,7 +370,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     s.deps.createCoordinatorInstance = async (id) => ({ kind: "failed", id, reason: "engine down" });
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect(s.replies).toEqual([
-      "⚠️ The plan runner could not be started: engine down. Nothing ran; re-issue the request to try again.",
+      "⚠️ This is a bug: the plan runner could not be started (engine down), nothing ran, and no automatic start retry was scheduled.",
     ]);
     expect(JSON.stringify(s.closes[0])).toContain("⚠️");
     expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed" });
@@ -394,7 +394,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     delete s.deps.fetchCoordinatorInstanceStatus;
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect(s.replies).toEqual([
-      "⚠️ The plan runner could not be started: PUBLIC_BASE_URL is not set — the bot cannot address its own shim. Nothing ran; re-issue the request to try again.",
+      "⚠️ This is a bug: the plan runner could not be started (PUBLIC_BASE_URL is not set — the bot cannot address its own shim), nothing ran, and no automatic start retry was scheduled.",
     ]);
     expect(JSON.stringify(s.closes[0])).toContain("⚠️");
 
@@ -404,7 +404,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     delete t.deps.fetchCoordinatorInstanceStatus;
     await runShipBranch(t.deps, t.msg, t.io, t.ctx);
     expect(t.replies[0]).toBe(
-      "⚠️ The plan runner could not be started: SWITCHBOARD_INGRESS_TOKENS has no single `coordinator` entry — the bot cannot present the coordinator bearer. Nothing ran; re-issue the request to try again.",
+      "⚠️ This is a bug: the plan runner could not be started (SWITCHBOARD_INGRESS_TOKENS has no single `coordinator` entry — the bot cannot present the coordinator bearer), nothing ran, and no automatic start retry was scheduled.",
     );
   });
 

@@ -454,7 +454,7 @@ export async function refreshCredential(
 ): Promise<OAuthCredential> {
   if (!cred.refreshToken)
     throw new OAuthError(
-      "the access token expired and the server issued no refresh token — run `mcp connect` to sign in again",
+      "this is a bug: the access token expired, the server issued no refresh token, and no fresh sign-in was opened automatically",
     );
   const tokens = await tokenRequest(fetchImpl, cred.tokenEndpoint, {
     grant_type: "refresh_token",

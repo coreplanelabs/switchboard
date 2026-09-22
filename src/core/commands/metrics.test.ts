@@ -104,7 +104,7 @@ describe("metrics.trend", () => {
     expect(err).toBeInstanceOf(CommandError);
     expect(err).toMatchObject({ code: "unavailable" });
     expect(String((err as Error).message)).toBe(
-      "run metrics unavailable: MetricsSourceError: analytics engine sql 403: authentication error",
+      "metrics by run unavailable: MetricsSourceError: analytics engine sql 403: authentication error",
     );
   });
 
