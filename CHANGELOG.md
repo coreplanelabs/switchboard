@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.260.3](https://github.com/coreplanelabs/switchboard/compare/v1.260.2...v1.260.3) (2026-09-22)
+
+
+### Bug fixes
+
+* **dispatcher:** ignore narrative branch phrases ([#2171](https://github.com/coreplanelabs/switchboard/issues/2171)) ([737ec9b](https://github.com/coreplanelabs/switchboard/commit/737ec9bdebc910676caa9e026efcf3c4da62accb))
+* **ship:** preserve every coding child ending ([#2158](https://github.com/coreplanelabs/switchboard/issues/2158)) ([2d6dd17](https://github.com/coreplanelabs/switchboard/commit/2d6dd17569db5943ecaf6d3716c3c124dd95e392))
+* **ship:** resume human-gated findings from human answers ([#2167](https://github.com/coreplanelabs/switchboard/issues/2167)) ([378e270](https://github.com/coreplanelabs/switchboard/commit/378e270f00c2970235afbc622c398e23d3b31b70))
+
+
+### Documentation
+
+* **ship:** accept orchestrator-composed ship units ([#2162](https://github.com/coreplanelabs/switchboard/issues/2162)) ([6f30c41](https://github.com/coreplanelabs/switchboard/commit/6f30c41f835264be8c4ac8c1f0dcfffe56d791ed))
+
 ## [1.260.2](https://github.com/coreplanelabs/switchboard/compare/v1.260.1...v1.260.2) (2026-09-21)
 
 
