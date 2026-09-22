@@ -7,15 +7,15 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
 execution: code
-extends: ../decisions/0074-one-typed-provider-failure-cause-decides-every-model-call-and-every-surface-renders-it-once.md
+extends: ../decisions/0075-one-typed-provider-failure-cause-decides-every-model-call-and-every-surface-renders-it-once.md
 ---
 
 # Provider failures are typed, parked and rendered once - Plan
 
 ## Goal Capsule
 
-- **Objective**: Implement accepted [record 0074](../decisions/0074-one-typed-provider-failure-cause-decides-every-model-call-and-every-surface-renders-it-once.md): every model call classifies one closed provider-failure cause, provider-down causes park and resume work, people see one safe sentence, operators see account credit before zero, and configured keys fail closed at deploy configuration time.
-- **Authority**: record 0074 owns causes, rendering and rollout. [Record 0064](../decisions/0064-the-plane-owns-every-runs-state-a-refusal-becomes-a-queue-position-an-ending-is-judged-by-the-ledger-that-saw-it-and-a-release-is-a-quiet-window-a-person-closes.md) owns leases, provider parks and durable release effects. [Record 0072](../decisions/0072-a-run-has-one-live-state-owned-by-the-server-a-closed-set-one-event-one-wording-function-and-every-surface-reads-the-one-field.md) owns closed cause/rendering shape.
+- **Objective**: Implement accepted [record 0075](../decisions/0075-one-typed-provider-failure-cause-decides-every-model-call-and-every-surface-renders-it-once.md): every model call classifies one closed provider-failure cause, provider-down causes park and resume work, people see one safe sentence, operators see account credit before zero, and configured keys fail closed at deploy configuration time.
+- **Authority**: record 0075 owns causes, rendering and rollout. [Record 0064](../decisions/0064-the-plane-owns-every-runs-state-a-refusal-becomes-a-queue-position-an-ending-is-judged-by-the-ledger-that-saw-it-and-a-release-is-a-quiet-window-a-person-closes.md) owns leases, provider parks and durable release effects. [Record 0072](../decisions/0072-a-run-has-one-live-state-owned-by-the-server-a-closed-set-one-event-one-wording-function-and-every-surface-reads-the-one-field.md) owns closed cause/rendering shape.
 - **Execution profile**: four dependency-ordered code units, one pull request and review each. U1 lands with this record. U2 makes provider recovery proactive and visible. U3 exposes credit facts. U4 refuses missing configured keys before deploy.
 - **Stop conditions**: stop before changing behavior if a model call cannot cross `ProviderFailure`; if a user renderer needs the raw provider body or URL; if a provider-down turn cannot remain under the existing run lease; if a probe can start a duplicate turn; if account telemetry requires an inference key to leave the bot; if required-secret derivation would reject an intentionally keyless provider; or if any unit weakens authorization, credential isolation, admission, leases or the harness gate.
 - **Tail ownership**: no unit merges autonomously. The operational receipt waits for the bot Worker generation containing U2 or later.
