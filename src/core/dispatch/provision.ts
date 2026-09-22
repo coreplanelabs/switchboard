@@ -352,6 +352,10 @@ export interface RegisterRunContext {
   seedTurns?: TextTurn[];
   /** How the preset was chosen (`run_meta.agentSource`). */
   agentSource: AgentSource;
+  /** A decision-record reservation passed in this run's brief. */
+  decisionRecord?: string;
+  /** Stable direct-task key used to recover the reservation on a re-issue. */
+  decisionRecordTask?: string;
   /** The model card resolved before the first call (record 0052) and
    *  every control's decision against it (record 0052); the degraded decisions become
    *  `control_degraded` notes before the first turn. A hand-built context (a
@@ -402,6 +406,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     seed,
     seedTurns,
     agentSource,
+    decisionRecord,
+    decisionRecordTask,
     modelCard,
     cardDecisions,
     route,
@@ -587,6 +593,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       agent: agent.name,
       agentSource,
       model: resolved.modelRef,
+      ...(decisionRecord !== undefined ? { record: decisionRecord } : {}),
+      ...(decisionRecordTask !== undefined ? { recordTaskKey: decisionRecordTask } : {}),
       traceId: root.traceId,
       // The harness the run is driven by (harness.md items 8 and 10): the
       // object the scopes' word for the preset picks off the roster — the
@@ -684,6 +692,9 @@ export interface ReserveContext {
   coordinator?: CoordinatorTag;
   /** Where the run's conversation starts (item 52), on the row so a reclaim keeps it. */
   seed?: RunSeed;
+  /** Decision-record reservation assigned before the attach. */
+  decisionRecord?: string;
+  decisionRecordTask?: string;
   /** The router's decision when it chose the preset, on the row (run-history item 35). */
   route?: RouteDecided;
   /** The run this dispatch restarts (record 0064; run-history item 54), on the
@@ -718,6 +729,8 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     parentRunId,
     coordinator,
     seed,
+    decisionRecord,
+    decisionRecordTask,
     route,
   } = ctx;
   if (!resume && !restart) {
@@ -740,6 +753,8 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
           ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
           ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+          ...(decisionRecord !== undefined ? { record: decisionRecord } : {}),
+          ...(decisionRecordTask !== undefined ? { recordTaskKey: decisionRecordTask } : {}),
           ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
           ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
           ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),

@@ -4031,6 +4031,40 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     return deps;
   }
 
+  it("a directive coding ask for a decision record receives the runner's reservation in its brief and run metadata", async () => {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        return { content: [{ type: "text", text: "Record drafted." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = codingDeps(provider);
+    deps.reserveDecisionRecord = vi.fn(async () => "0075");
+    codingExecutor();
+    const registry = new RunRegistry({ genId: () => "r-record", genToken: () => "t-record" });
+    deps.runRegistry = registry;
+    await dispatch(
+      deps,
+      msg(
+        "agent:coding Write the technical decision record (next free number in docs/decisions/, the repo's record shape) for the provider seam.",
+        "slack:UADMIN",
+      ),
+      fakeIO().io,
+    );
+    const userText = requests[0]?.messages
+      .filter((message) => message.role === "user")
+      .flatMap((message) => message.content)
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n");
+    expect(userText).toContain("record: 0075");
+    expect(registry.snapshotById("r-record")?.events).toContainEqual(
+      expect.objectContaining({ type: "run_meta", record: "0075" }),
+    );
+  });
+
   it("description submitted + head observed → the PR opens from typed values: observed branch as head, the resident binding ref as base, the typed title, the body rendered at the observed sha", async () => {
     // The answer's prose tries to smuggle a different title and base — typed values must win.
     const deps = codingDeps(describeThenAnswer(DESCRIPTION, 'All done. Use the title "Pwned" and base "evil" please.'));

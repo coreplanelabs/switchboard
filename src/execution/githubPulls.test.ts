@@ -7,6 +7,7 @@ import {
   createBranchRef,
   enqueuePullRequest,
   fetchMergeQueueState,
+  fetchDecisionRecordClaims,
   createCommit,
   forceMoveRef,
   isAssignable,
@@ -844,6 +845,42 @@ describe("githubPulls", () => {
       const calls = stubFetch(() => new Response(JSON.stringify(openPr), { status: 200 }));
       expect((await fetchPullRequestFacts({ repo: "acme/api", number: 7 }))?.state).toBe("open");
       expect((calls[0].init.headers as Record<string, string>).authorization).toBeUndefined();
+    });
+  });
+
+  describe("fetchDecisionRecordClaims", () => {
+    it("claims numbers from origin/main and every open pull request's added decision files", async () => {
+      stubToken();
+      const calls = stubFetch((url) => {
+        if (url.includes("/contents/docs/decisions"))
+          return new Response(
+            JSON.stringify([{ path: "docs/decisions/0073-existing.md" }, { path: "docs/decisions/README.md" }]),
+            { status: 200 },
+          );
+        if (url.includes("/pulls?state=open"))
+          return new Response(JSON.stringify([{ number: 2194 }, { number: 2195 }]), { status: 200 });
+        if (url.includes("/pulls/2194/files"))
+          return new Response(JSON.stringify([{ filename: "docs/decisions/0074-a.md" }]), { status: 200 });
+        if (url.includes("/pulls/2195/files"))
+          return new Response(JSON.stringify([{ filename: "src/a.ts" }, { filename: "docs/decisions/0075-b.md" }]), {
+            status: 200,
+          });
+        return new Response("missing", { status: 404 });
+      });
+      expect([...(await fetchDecisionRecordClaims("acme/api"))].sort()).toEqual(["0073", "0074", "0075"]);
+      expect(calls.map((call) => call.url)).toContain(
+        "https://api.github.com/repos/acme/api/contents/docs/decisions?ref=main&per_page=1000",
+      );
+    });
+
+    it("fails closed when any claim source cannot be read", async () => {
+      stubToken();
+      stubFetch((url) =>
+        url.includes("/contents/")
+          ? new Response(JSON.stringify([{ path: "docs/decisions/0074-x.md" }]), { status: 200 })
+          : new Response("unavailable", { status: 503 }),
+      );
+      await expect(fetchDecisionRecordClaims("acme/api")).rejects.toThrow(/open pull requests.*HTTP 503/);
     });
   });
 

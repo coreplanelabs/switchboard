@@ -153,6 +153,11 @@ export interface RunRecord {
   /** The thread that started the run (`IncomingMessage.sourceUrl`), for the
    *  index's hover link. Optional as above. */
   sourceUrl?: string;
+  /** The decision-record number the runner reserved and passed in this coding
+   * run's brief. Absent when the task writes no record. */
+  record?: string;
+  /** Stable text-free key for a direct task's re-issue. */
+  recordTaskKey?: string;
   /** The typed handoff a coding child submitted (docs/reference/specs/agent-ship.md
    *  item 14): its deviations from the plan unit, its follow-ups and the
    *  criteria it could not prove — redacted like every stored string. Present
@@ -325,6 +330,20 @@ export function instanceIdOfEvents(events: readonly RunEvent[]): string | undefi
   let id: string | undefined;
   for (const e of events) if (e.type === "ship_handoff") id = e.instanceId;
   return id;
+}
+
+/** The reservation carried by the last run_meta that names one. */
+export function decisionRecordOfEvents(
+  events: readonly RunEvent[],
+): { record: string; recordTaskKey?: string } | undefined {
+  let reservation: { record: string; recordTaskKey?: string } | undefined;
+  for (const event of events)
+    if (event.type === "run_meta" && event.record !== undefined)
+      reservation = {
+        record: event.record,
+        ...(event.recordTaskKey !== undefined ? { recordTaskKey: event.recordTaskKey } : {}),
+      };
+  return reservation;
 }
 
 /** The pull request a run's events say it opened or edited — the last
@@ -1011,6 +1030,9 @@ export function isRunRecord(v: unknown): v is RunRecord {
   )
     return false;
   if (!isOptionalString(r.activity) || !isOptionalString(r.sourceUrl) || !isOptionalString(r.userName)) return false;
+  if (r.record !== undefined && (typeof r.record !== "string" || !/^\d{4}$/.test(r.record))) return false;
+  if (r.recordTaskKey !== undefined && (typeof r.recordTaskKey !== "string" || !/^[0-9a-f]{16}$/.test(r.recordTaskKey)))
+    return false;
   // The handoff is checked for shape, not bounds (docs/reference/specs/agent-ship.md
   // item 14): redaction may lengthen a stored string past the tool's limit.
   if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;

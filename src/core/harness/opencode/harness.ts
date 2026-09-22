@@ -279,6 +279,7 @@ export async function openOpenCodeRun(
     ...(run.card ? { card: run.card } : {}),
     identity,
     system: run.system,
+    ...(run.environment !== undefined ? { environment: run.environment } : {}),
     relayTools: run.tools.map((t) => t.name),
     ...(settings.compaction ? { compaction: settings.compaction } : {}),
   };

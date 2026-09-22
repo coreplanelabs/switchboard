@@ -12,6 +12,7 @@ import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import { usageOfEvents } from "../runUsage.js";
 import {
   fitRecordToBudget,
+  decisionRecordOfEvents,
   instanceIdOfEvents,
   leaseOfEvents,
   prOfEvents,
@@ -380,6 +381,7 @@ export function assembleRunRecord(input: {
   // The plan runner instance a ship run's hand-off created (record 0051 R2):
   // its `ship_handoff` event, projected like the coordinator tag.
   const instanceId = instanceIdOfEvents(events);
+  const decisionRecord = decisionRecordOfEvents(events);
   // The pipeline's standing (record 0065): the registry's whole-list fold
   // when the caller has it, else the one fold over the snapshot's events —
   // the snapshot is the trimmed backlog, so the registry summary wins.
@@ -429,6 +431,7 @@ export function assembleRunRecord(input: {
     ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
     ...coordinatorFields(input.coordinator),
     ...(instanceId !== undefined ? { instanceId } : {}),
+    ...(decisionRecord !== undefined ? decisionRecord : {}),
     ...(pipeline !== undefined ? { pipeline } : {}),
     ...(input.hosted ? { hosted: true as const } : {}),
     ...(input.seed !== undefined ? { seed: input.seed } : {}),

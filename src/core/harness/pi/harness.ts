@@ -947,6 +947,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         ...(run.effort ? { effort: run.effort } : {}),
         identity: run.agent.identity,
         system: run.system,
+        ...(run.environment !== undefined ? { environment: run.environment } : {}),
         relayTools: run.tools.map((t) => t.name),
         ...(deps.compaction ? { compaction: deps.compaction } : {}),
       };

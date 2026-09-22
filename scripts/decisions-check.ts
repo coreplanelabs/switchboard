@@ -26,6 +26,7 @@ import {
   type BaseHistory,
   type RecordText,
 } from "../src/docs/records.js";
+import { DECISION_RECORD_ENV, decisionRecordNumberProblems } from "../src/core/decisionRecordReservation.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
@@ -70,6 +71,18 @@ function main(): number {
   const ref = process.env.DECISIONS_BASE ?? "origin/main";
   const base = baseRecords(ref, history);
   if (base.kind === "found") problems.push(...immutabilityProblems(records, base.texts));
+  const mainTip = history.commitOf("origin/main");
+  if (mainTip !== null)
+    problems.push(
+      ...decisionRecordNumberProblems(
+        records.map((record) => record.path),
+        history.recordPaths(mainTip),
+        {
+          child: process.env.SWITCHBOARD_RUN_ID !== undefined,
+          ...(process.env[DECISION_RECORD_ENV] !== undefined ? { reservation: process.env[DECISION_RECORD_ENV] } : {}),
+        },
+      ),
+    );
   for (const p of problems) console.error(`decisions:check ${p.path}: ${p.what}`);
   if (problems.length > 0) {
     console.error(`decisions:check FAILED — ${problems.length} problem(s) in ${records.length} record(s)`);
@@ -80,7 +93,7 @@ function main(): number {
       ? ` (immutability not checked: ${base.why})`
       : `, accepted bodies unchanged against ${base.commit.slice(0, 8)} (the merge-base with ${ref})`;
   console.log(
-    `decisions:check ok — ${records.length} record(s) carry a valid status, every superseded_by resolves${immutability}`,
+    `decisions:check ok — ${records.length} record(s) carry a valid status, every superseded_by resolves, decision numbers are unique against main${immutability}`,
   );
   return 0;
 }

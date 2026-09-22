@@ -244,6 +244,9 @@ describe("openCodeLaunchArgs and the environment", () => {
       expect(env[OPENCODE_PASSWORD_ENV]).toBe("pw-1");
       for (const key of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENCODE_SERVER_PASSWORD"])
         expect(env).not.toHaveProperty(key);
+      expect(
+        openCodeLaunchEnv({ ...spec, environment: { SWITCHBOARD_DECISION_RECORD: "0075" } }, BEARER, "pw-1"),
+      ).toMatchObject({ SWITCHBOARD_DECISION_RECORD: "0075", [RUN_BEARER_ENV]: BEARER });
       const values = Object.values(env).join("\n");
       expect(values).not.toContain("sk-ant-never");
       expect(values).not.toContain("sk-never");

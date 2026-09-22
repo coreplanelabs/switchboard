@@ -182,6 +182,9 @@ describe("piLaunchEnv", () => {
       PI_TELEMETRY: "0",
     });
     expect(Object.keys(piLaunchEnv(spec, "x")).some((k) => k.endsWith("_API_KEY"))).toBe(false);
+    expect(piLaunchEnv({ ...spec, environment: { SWITCHBOARD_DECISION_RECORD: "0075" } }, "real-bearer")).toMatchObject(
+      { SWITCHBOARD_DECISION_RECORD: "0075", [RUN_BEARER_ENV]: "real-bearer" },
+    );
   });
 });
 

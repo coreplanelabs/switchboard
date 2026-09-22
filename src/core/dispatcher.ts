@@ -150,7 +150,10 @@ import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
 import type { CardShell } from "./statusCardFrame.js";
 import { createRunEnding } from "./runEnding.js";
+import { shipUnitText } from "./ship/preflight.js";
 import { messageIdOf, type ChannelIO, type IncomingMessage, type StatusHandle } from "./types.js";
+import { asksForDecisionRecord, decisionRecordTaskKey } from "./decisionRecordReservation.js";
+import { defaultDecisionRecordAllocator } from "./decisionRecordReservationWiring.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
 // parsing, layered resolution, permission gates, history assembly, executor
@@ -198,6 +201,8 @@ export interface CoreDeps
    * because `CoreDeps` is the one place a process declares what it runs with.
    */
   issueTracker?: IssueTracker;
+  /** Reserve a decision-record number for a stable direct-run task key. */
+  reserveDecisionRecord?: (repo: string, taskKey: string, existing?: string) => Promise<string>;
 }
 
 /** A plain reply into a thread an unfinished unit owns (record 0051's reply-as-event and gone-instance rules):
@@ -546,6 +551,8 @@ export async function dispatch(
   // left open — a run failure is closed (with its checklist) by the run loop.
   let setupCard: StatusHandle | undefined;
   let setupShell: CardShell | undefined;
+  let decisionRecord: string | undefined;
+  let decisionRecordTask: string | undefined;
   // The card ticks from the ack (docs/reference/specs/tracing.md): a 5 s heartbeat repaints
   // it through setup — the elapsed time and the setup step in flight — until
   // the run loop's own heartbeat takes over (or the request ends without one).
@@ -1295,6 +1302,35 @@ export async function dispatch(
     const clip = budgetClipLabel(agent, profile, directives.budget, { coordinator: opts.coordinator !== undefined });
     if (clip) shell.note("debug", clip);
 
+    // A coordinator child already carries the reservation on its contract. A
+    // direct coding directive that asks to write a record reserves here, after
+    // the repository gate and before its brief, attach or model turn. Re-issues
+    // read the same task key from prior run records; the allocator closes the
+    // concurrent interval before either task has an open pull request.
+    decisionRecord = opts.contract?.record ?? carriedRow?.meta.record;
+    decisionRecordTask = carriedRow?.meta.recordTaskKey;
+    if (
+      decisionRecord === undefined &&
+      agent.name === "coding" &&
+      agentSource === "directive" &&
+      repoCtx.repo !== undefined &&
+      asksForDecisionRecord(directives.text)
+    ) {
+      decisionRecordTask = decisionRecordTaskKey(
+        repoCtx.repo,
+        msg.threadKey,
+        shipUnitText(directives.text, repoCtx.repo).trim(),
+      );
+      const prior = (await deps.runStore.list({ threadKey: msg.threadKey, agent: "coding", limit: 200 })).find(
+        (row) => row.repo === repoCtx.repo && row.recordTaskKey === decisionRecordTask && row.record !== undefined,
+      )?.record;
+      const reserve =
+        deps.reserveDecisionRecord ??
+        ((repo: string, taskKey: string, existing?: string) =>
+          defaultDecisionRecordAllocator.reserve(repo, taskKey, existing));
+      decisionRecord = await reserve(repoCtx.repo, decisionRecordTask, prior);
+    }
+
     // agent:ship fork (docs/reference/specs/agent-ship.md): after agent resolution and the
     // repo gates above, BEFORE the top-level attach — ship attaches nothing
     // here; the plan runner's children each attach their own workspace as
@@ -1394,11 +1430,15 @@ export async function dispatch(
       : buildConversation(opts.seed ?? history, requestText, msg.images, msg.documents, references.blocks, msg.userId);
     const built = session ? session.messages : channelBuilt!.messages;
     const seedActors = session ? session.actors : channelBuilt?.actors;
+    const withRecord =
+      !resume && decisionRecord !== undefined && agent.name === "coding"
+        ? withContractInFirstUserTurn(built, `record: ${decisionRecord}`)
+        : built;
     const messages = resume
       ? resume.plan.messages
       : contractBlock !== undefined && agent.name !== "review"
-        ? withContractInFirstUserTurn(built, contractBlock)
-        : built;
+        ? withContractInFirstUserTurn(withRecord, contractBlock)
+        : withRecord;
 
     // Executor selection is context-aware: the agent's resource declarations
     // decide whether anything is provisioned at all (general gets nothing),
@@ -1458,6 +1498,8 @@ export async function dispatch(
       ...(opts.restartCarried !== undefined ? { restartCarried: opts.restartCarried } : {}),
       ...(seedTurns ? { seedTurns } : {}),
       agentSource,
+      ...(decisionRecord !== undefined ? { decisionRecord } : {}),
+      ...(decisionRecordTask !== undefined ? { decisionRecordTask } : {}),
       modelCard,
       cardDecisions,
       ...(operatorEvent ? { operator: operatorEvent } : {}),
@@ -1559,6 +1601,8 @@ export async function dispatch(
       parentRunId,
       coordinator,
       seed,
+      ...(decisionRecord !== undefined ? { decisionRecord } : {}),
+      ...(decisionRecordTask !== undefined ? { decisionRecordTask } : {}),
       ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
     });
     if (reservation) {
@@ -2015,6 +2059,7 @@ export async function dispatch(
       isCodingPrRun,
       reviewHead,
       requestText: directives.text,
+      ...(decisionRecord !== undefined ? { decisionRecord } : {}),
       card,
       shell,
       doneLines,

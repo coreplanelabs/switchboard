@@ -752,6 +752,10 @@ export type RunEvent =
       agentSource?: AgentSource;
       /** Absent on a command run, which resolves no model. */
       model?: string;
+      /** Decision-record reservation carried in a coding child's brief. */
+      record?: string;
+      /** Stable direct-task key used to recover that reservation on a re-issue. */
+      recordTaskKey?: string;
       /** The request's trace id (docs/reference/specs/tracing.md), once the root exists. */
       traceId?: string;
       /** The harness the run is driven by (`Harness.name`; docs/reference/specs/harness.md

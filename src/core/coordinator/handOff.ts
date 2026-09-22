@@ -18,7 +18,9 @@
 import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { DEFAULT_GRANT, IDLE_DAYS_DEFAULT, type Grant, type GrantSource } from "../budgets.js";
 import { DEFAULT_VERBOSITY, type Verbosity } from "../verbosity.js";
-import { PLAN_MAX_CHARS, unitTitleOf } from "../ship/contract.js";
+import { parsePlanUnit, PLAN_MAX_CHARS, unitTitleOf } from "../ship/contract.js";
+import { asksForDecisionRecord, decisionRecordTaskKey } from "../decisionRecordReservation.js";
+import { defaultDecisionRecordAllocator } from "../decisionRecordReservationWiring.js";
 import type { ShipEntry } from "../ship/preflight.js";
 import { shipTaskText, shipUnitText } from "../ship/preflight.js";
 import {
@@ -107,6 +109,9 @@ export interface HandOffDeps {
   create: (id: string) => Promise<CreateInstanceAnswer>;
   /** The shim's `GET /admin/coordinator/instances/<id>`: whether an earlier attempt's instance still runs, ended, or never existed. */
   status: (id: string) => Promise<InstanceStatusAnswer>;
+  /** Reserve one decision-record number for a stable task key. Production uses
+   * origin/main plus every open pull request; injectable for admission tests. */
+  reserveDecisionRecord?: (repo: string, taskKey: string, existing?: string) => Promise<string>;
   log?: (line: string) => void;
 }
 
@@ -151,6 +156,8 @@ type Planned = {
   baseFallback?: { requested: string };
   /** The pull request's own auto-merge fact at entry (agent-ship item 9): named in the reply, never refused. */
   autoMergeEnabled?: boolean;
+  /** Stable task keys for units whose own brief asks to write a decision record. */
+  recordTasks?: Readonly<Record<string, string>>;
 };
 
 const refused = (code: RefusalCode, reply: string): HandOffOutcome => ({
@@ -236,6 +243,9 @@ async function plan(
         ...(entry.branch !== undefined ? { entryBranch: entry.branch } : {}),
         ...(entry.autoMergeEnabled !== undefined ? { autoMergeEnabled: entry.autoMergeEnabled } : {}),
         ...(entry.baseFallback !== undefined ? { baseFallback: entry.baseFallback } : {}),
+        ...(asksForDecisionRecord(text)
+          ? { recordTasks: { [graph.units[0]!.id]: decisionRecordTaskKey(entry.repo, msg.threadKey, text.trim()) } }
+          : {}),
       },
     };
   }
@@ -296,6 +306,14 @@ async function plan(
       identity,
       merge: "runner",
       ...(entry.baseFallback !== undefined ? { baseFallback: entry.baseFallback } : {}),
+      recordTasks: Object.fromEntries(
+        graph.units.flatMap((unit) => {
+          const section = parsePlanUnit(text, unit.id)?.section ?? "";
+          return asksForDecisionRecord(section)
+            ? [[unit.id, decisionRecordTaskKey(entry.repo, msg.threadKey, section.trim())]]
+            : [];
+        }),
+      ),
     },
   };
 }
@@ -303,25 +321,38 @@ async function plan(
 /** The rows of a plan's selected units under an instance, as the plan states
  *  them; a generated plan's one unit takes the entry's branch when the entry
  *  resumed, and the resume rides its row. */
-function rowsFor(
+async function rowsFor(
+  deps: HandOffDeps,
   p: Planned,
   selected: readonly string[],
   instanceId: string,
-  lastPushOf?: ReadonlyMap<string, string>,
-): CoordinatorUnit[] {
-  return p.graph.units
-    .filter((u) => selected.includes(u.id))
-    .map((u) => ({
-      instanceId,
-      unit: u.id,
-      slug: u.slug,
-      title: u.title,
-      branch: p.entryBranch ?? u.branch,
-      dependsOn: u.dependsOn,
-      rounds: [],
-      ...(p.resume !== undefined ? { resume: p.resume } : {}),
-      ...(lastPushOf?.has(u.id) ? { lastPush: lastPushOf.get(u.id)! } : {}),
-    }));
+  carried?: ReadonlyMap<string, { lastPush?: string; record?: string }>,
+): Promise<CoordinatorUnit[]> {
+  const reserve =
+    deps.reserveDecisionRecord ??
+    ((repo, taskKey, existing) => defaultDecisionRecordAllocator.reserve(repo, taskKey, existing));
+  return Promise.all(
+    p.graph.units
+      .filter((u) => selected.includes(u.id))
+      .map(async (u) => {
+        const previous = carried?.get(u.id);
+        const taskKey = p.recordTasks?.[u.id];
+        const record =
+          taskKey !== undefined ? await reserve(p.identity.repo, taskKey, previous?.record) : previous?.record;
+        return {
+          instanceId,
+          unit: u.id,
+          slug: u.slug,
+          title: u.title,
+          branch: p.entryBranch ?? u.branch,
+          dependsOn: u.dependsOn,
+          rounds: [],
+          ...(p.resume !== undefined ? { resume: p.resume } : {}),
+          ...(previous?.lastPush !== undefined ? { lastPush: previous.lastPush } : {}),
+          ...(record !== undefined ? { record } : {}),
+        };
+      }),
+  );
 }
 
 /** The reply's account of where a plan runs, one bullet per fact: the plan,
@@ -400,7 +431,7 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   const firstId = planInstanceId(p.planId);
   const first = await deps.instances.get(firstId);
   if (first === null) {
-    const units = rowsFor(p, p.selected, firstId);
+    const units = await rowsFor(deps, p, p.selected, firstId);
     const instance: CoordinatorInstance = {
       id: firstId,
       ...p.identity,
@@ -444,11 +475,16 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   // push): carried onto the next attempt's row, so its pre-check starts at the
   // review round when the open pull request still heads exactly there. The
   // latest attempt's word wins.
-  const lastPushOf = new Map<string, string>();
+  const carried = new Map<string, { lastPush?: string; record?: string }>();
   for (let n = 1; n <= attempt; n++)
     for (const row of await deps.instances.listUnits(planInstanceId(p.planId, n))) {
       if (row.ending?.kind === "merged") merged.add(row.unit);
-      if (row.lastPush !== undefined) lastPushOf.set(row.unit, row.lastPush);
+      const prior = carried.get(row.unit) ?? {};
+      carried.set(row.unit, {
+        ...prior,
+        ...(row.lastPush !== undefined ? { lastPush: row.lastPush } : {}),
+        ...(row.record !== undefined ? { record: row.record } : {}),
+      });
     }
   const remaining = p.selected.filter((u) => !merged.has(u));
   if (remaining.length === 0)
@@ -460,7 +496,7 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   if (status.kind === "absent") {
     // The latest attempt's create failed after its records were written: the
     // records are this request's to replace, under the same id and attempt.
-    const units = rowsFor(p, remaining, latest.id, lastPushOf);
+    const units = await rowsFor(deps, p, remaining, latest.id, carried);
     const instance: CoordinatorInstance = {
       id: latest.id,
       ...p.identity,
@@ -481,7 +517,7 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   }
   // Ended: the next attempt reruns what the earlier attempts did not merge.
   const nextId = planInstanceId(p.planId, attempt + 1);
-  const units = rowsFor(p, remaining, nextId, lastPushOf);
+  const units = await rowsFor(deps, p, remaining, nextId, carried);
   const instance: CoordinatorInstance = {
     id: nextId,
     ...p.identity,

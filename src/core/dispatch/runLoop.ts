@@ -15,6 +15,7 @@ import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import { predicateFor } from "../authz/predicate.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
+import { DECISION_RECORD_ENV } from "../decisionRecordReservation.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
 import type { ModelCard } from "../modelCard.js";
@@ -193,6 +194,8 @@ export interface RunLoopContext {
   /** The request's text with its directives stripped — what the review
    *  post-step reads the opt-out from (agent-review.md item 18). */
   requestText: string;
+  /** Decision-record reservation exposed to the child process and its brief. */
+  decisionRecord?: string;
   card: StatusHandle;
   shell: CardShell;
   /** The done card's shape and queued lines, from the finish-site diagnosis (the dispatch's `doneLines`). */
@@ -1206,6 +1209,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             messages,
             tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools),
             toolContext,
+            ...(ctx.decisionRecord !== undefined ? { environment: { [DECISION_RECORD_ENV]: ctx.decisionRecord } } : {}),
             ...(session
               ? { notepad: () => session.readNotepad(), conversation: () => session.readConversation() }
               : {}),

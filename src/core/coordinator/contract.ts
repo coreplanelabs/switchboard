@@ -489,6 +489,10 @@ export interface CoordinatorUnit {
    *  — no pre-check, no branch, no round 0. A task string's row only; written by
    *  the hand-off, read by the driver into the machine's input. */
   resume?: { pr: number; headSha?: string; url?: string };
+  /** The decision-record number reserved at admission for this unit. A unit
+   * that writes a record carries it through every attempt and briefs its child
+   * as `record: NNNN`; the child never scans the directory for a number. */
+  record?: string;
   /** The head the unit's own coding child last pushed, recorded when the unit
    *  ended `review_pending` (the wall clock capped after the pull request was
    *  opened or updated): the next attempt's pre-check starts at the review
@@ -659,6 +663,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (r.issue !== undefined && !isFinite(r.issue)) return false;
   if (r.pr !== undefined && !isPr(r.pr)) return false;
   if (r.resume !== undefined && !isResume(r.resume)) return false;
+  if (r.record !== undefined && (typeof r.record !== "string" || !/^\d{4}$/.test(r.record))) return false;
   if (r.lastPush !== undefined && !isText(r.lastPush)) return false;
   if (r.segments !== undefined && (!Array.isArray(r.segments) || !r.segments.every(isSegment))) return false;
   if (r.idle !== undefined && !isUnitIdle(r.idle)) return false;
