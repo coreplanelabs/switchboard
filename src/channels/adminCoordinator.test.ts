@@ -307,7 +307,7 @@ function harness(
       over.commenterAuthorized ??
       (async (requester, author) => requester === INSTANCE.userId && author.login === "alice" && author.id === 7),
     selfIdentity: async () => over.self ?? { login: "acme-switchboard[bot]", id: 4242 },
-    fetchPrFacts: async () => {
+    fetchPrFacts: async (pr) => {
       if (over.prFacts instanceof Error) throw over.prFacts;
       if (over.prFacts !== undefined)
         return over.prFacts.state === "open" && !("headBranchExists" in over.prFacts)
@@ -336,7 +336,7 @@ function harness(
         headRef: INSTANCE.branch,
         headSha: "a".repeat(40),
         headBranchExists: true,
-        htmlUrl: "https://github.com/acme/api/pull/7",
+        htmlUrl: `https://github.com/acme/api/pull/${pr.number}`,
       };
     },
     fetchCommitChecks: async () => {
@@ -1568,6 +1568,8 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       state: "open",
       prNumber: 77,
       url: "https://github.com/acme/api/pull/77",
+      headSha: "a".repeat(40),
+      headBranchExists: true,
       at: NOW,
     });
     expect(h.opens).toHaveLength(1);
@@ -1827,6 +1829,58 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     const res = await recoverCheck(h.deps);
     expect(res.body).toEqual({ ok: true, state: "none", unrecovered: "no_base", at: NOW });
     expect(h.opens).toHaveLength(0);
+  });
+
+  it("agent-ship item 10: a recovered pull request is refreshed before dispatch, so a deleted head is returned fail-closed and an unavailable branch state is retried", async () => {
+    const deleted = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headRef: INSTANCE.branch,
+        headSha: "b".repeat(40),
+        headBranchExists: false,
+      },
+    });
+    await deleted.instances.put(INSTANCE);
+    expect(await recoverCheck(deleted.deps)).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        state: "open",
+        prNumber: 77,
+        url: "https://github.com/acme/api/pull/77",
+        headSha: "b".repeat(40),
+        headBranchExists: false,
+        at: NOW,
+      },
+    });
+
+    const unknown = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headRef: INSTANCE.branch,
+        headSha: "b".repeat(40),
+        headBranchExists: undefined,
+      },
+    });
+    await unknown.instances.put(INSTANCE);
+    expect(await recoverCheck(unknown.deps)).toEqual({
+      status: 502,
+      body: {
+        ok: false,
+        error: "github_unavailable",
+        message: "could not verify whether acme/api#77's head branch exists",
+        at: NOW,
+      },
+    });
+
+    const unavailable = harness({ prFacts: new Error("GitHub 502") });
+    await unavailable.instances.put(INSTANCE);
+    expect(await recoverCheck(unavailable.deps)).toEqual({
+      status: 502,
+      body: { ok: false, error: "github_unavailable", message: "GitHub 502", at: NOW },
+    });
   });
 
   // Feature: docs/reference/specs/agent-ship.md items 10 and 15 (record 0062)

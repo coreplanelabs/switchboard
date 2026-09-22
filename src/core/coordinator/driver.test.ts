@@ -451,7 +451,9 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "pr-check": [
         prNone(),
         prOpen(T0 + 10 * MIN),
+        prOpen(T0 + 21 * MIN, { headBranchExists: true }),
         prOpen(T0 + 30 * MIN, { headSha: headB }),
+        prOpen(T0 + 41 * MIN, { headSha: headB, headBranchExists: true }),
         prOpen(T0 + 50 * MIN, { headSha: headC }),
       ],
       round: Array.from({ length: 16 }, () => acked()),

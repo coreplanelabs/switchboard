@@ -483,6 +483,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       guardTransition: true,
       post: h.post,
       fetchPrHead: async () => undefined,
+      fetchPrFacts: async () => ({ state: "closed", sameRepoHead: true }),
       reply: h.reply,
       logKey: "t",
     });
@@ -490,6 +491,35 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     expect(out).toEqual({ posted: false, reason: "the pull request is no longer open at a readable head" });
     expect(h.replies[0]).toContain("Review not posted");
     expect(h.replies[0]).toContain("Slack-only");
+  });
+
+  it("agent-ship item 9: a deleted or unreadable same-repository head branch blocks the ship review post even when the pull request still reports the pinned sha", async () => {
+    for (const facts of [
+      { state: "open" as const, headSha: HEAD, sameRepoHead: true, headBranchExists: false },
+      undefined,
+    ]) {
+      const h = harness();
+      const input = {
+        agent: AGENTS.review,
+        requestText: "review acme/api#42",
+        repoCtx: { repo: "acme/api", pr: 42 },
+        heads: { reviewHead: HEAD, observedHead: HEAD },
+        verdict,
+        digest: undefined,
+        answer,
+        carried: undefined,
+        hardStopped: false,
+        guardTransition: true as const,
+        post: h.post,
+        fetchPrHead: async () => HEAD,
+        fetchPrFacts: async () => facts,
+        reply: h.reply,
+        logKey: "t",
+      };
+      const out = await runReviewPostStep(input);
+      expect(h.posts).toEqual([]);
+      expect(out).toEqual({ posted: false, reason: "the pull request is no longer open at a readable head" });
+    }
   });
 
   it("a non-review AgentDef never posts, even with a resolved PR and a verdict", async () => {

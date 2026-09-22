@@ -49,10 +49,14 @@ import type { RepoContext } from "./repoContext.js";
 import type { RunEvent } from "./runEvents.js";
 import type { RunControl } from "./runRegistry/runControl.js";
 import { systemClock } from "./trace/clock.js";
+import type { PullRequestFacts } from "../execution/githubPulls.js";
 
 /** The PR's current head as GitHub reports it; undefined (or a throw) means
  *  unknown. The dispatcher passes `deps.fetchPrHead ?? currentPrHeadSha`. */
 export type FetchPrHead = (pr: { repo: string; number: number }) => Promise<string | undefined>;
+/** The PR's state, head and head-ref existence from one branch-aware read.
+ *  Ship transitions use this instead of the head-only reader. */
+export type FetchPrFacts = (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
 /** The commits a PR head carries over its base; undefined (or a throw) means
  *  the move is unclassifiable. `deps.fetchPrCommits ?? prCommitsSince`. */
 export type FetchPrCommits = (q: { repo: string; base: string; sha: string }) => Promise<PrCommitList | undefined>;
@@ -700,39 +704,49 @@ export type ReviewPostOutcome = ReviewPost;
  * and registry finish, while a ship round may invoke it inside its loop.
  * Never throws; the returned `ReviewPostOutcome` says whether a post landed.
  */
-export async function runReviewPostStep(input: {
-  agent: AgentDef;
-  requestText: string;
-  repoCtx: Pick<RepoContext, "repo" | "pr" | "prUnpostable" | "prSize">;
-  /** The pinned head and the workspace HEAD observed after the turn. */
-  heads: { reviewHead: string | undefined; observedHead: string | undefined };
-  verdict: ReviewVerdict | undefined;
-  /** The last diff digest the round's agent computed (`diff_digest` →
-   *  `onDigest`), or undefined when it never called the tool. */
-  digest: DigestReport | undefined;
-  answer: string;
-  carried: { reviewed: string; current: string; commits: number } | undefined;
-  hardStopped: boolean;
-  /** Ship children re-read immediately before posting because their parent can
-   *  revoke the transition; standalone reviews keep their established single
-   *  post-publication head read. */
-  guardTransition?: boolean;
-  /** The GitHub post; the dispatcher passes `deps.postReviewComment ?? postReviewComment`. */
-  post: (target: ReviewCommentTarget, body: string) => Promise<void>;
-  fetchPrHead: FetchPrHead;
-  reply: (text: string) => Promise<void>;
-  /** An acknowledgement's reply (routing-and-config item 28) — the carried-
-   *  review note goes out through it, so the request's verbosity decides;
-   *  absent, `reply`. The notes that need the person (a review not posted, a
-   *  head that moved after the pin) stay on `reply`. */
-  ack?: (text: string) => Promise<void>;
-  /** The run's stream (`registry.publish` bound to the run): the outcome is
-   *  published as a `review_posted` event or a `review_not_posted` note for a
-   *  review round that was asked to post (item 18). Absent → the outcome is
-   *  only returned (a caller outside a run). */
-  publish?: (event: RunEvent) => void;
-  logKey: string;
-}): Promise<ReviewPostOutcome> {
+export async function runReviewPostStep(
+  input: {
+    agent: AgentDef;
+    requestText: string;
+    repoCtx: Pick<RepoContext, "repo" | "pr" | "prUnpostable" | "prSize">;
+    /** The pinned head and the workspace HEAD observed after the turn. */
+    heads: { reviewHead: string | undefined; observedHead: string | undefined };
+    verdict: ReviewVerdict | undefined;
+    /** The last diff digest the round's agent computed (`diff_digest` →
+     *  `onDigest`), or undefined when it never called the tool. */
+    digest: DigestReport | undefined;
+    answer: string;
+    carried: { reviewed: string; current: string; commits: number } | undefined;
+    hardStopped: boolean;
+    /** The GitHub post; the dispatcher passes `deps.postReviewComment ?? postReviewComment`. */
+    post: (target: ReviewCommentTarget, body: string) => Promise<void>;
+    fetchPrHead: FetchPrHead;
+    reply: (text: string) => Promise<void>;
+    /** An acknowledgement's reply (routing-and-config item 28) — the carried-
+     *  review note goes out through it, so the request's verbosity decides;
+     *  absent, `reply`. The notes that need the person (a review not posted, a
+     *  head that moved after the pin) stay on `reply`. */
+    ack?: (text: string) => Promise<void>;
+    /** The run's stream (`registry.publish` bound to the run): the outcome is
+     *  published as a `review_posted` event or a `review_not_posted` note for a
+     *  review round that was asked to post (item 18). Absent → the outcome is
+     *  only returned (a caller outside a run). */
+    publish?: (event: RunEvent) => void;
+    logKey: string;
+  } & (
+    | {
+        /** Ship children re-read state, head and head-ref existence immediately
+         *  before posting because their parent can revoke the transition. */
+        guardTransition: true;
+        fetchPrFacts: FetchPrFacts;
+      }
+    | {
+        /** Standalone reviews keep their established post-publication head read. */
+        guardTransition?: false;
+        fetchPrFacts?: FetchPrFacts;
+      }
+  ),
+): Promise<ReviewPostOutcome> {
   const { agent, repoCtx, verdict, carried, logKey } = input;
   const { reviewHead, observedHead } = input.heads;
   // The record's fact (item 18): what a review round leaves behind about its
@@ -841,15 +855,15 @@ export async function runReviewPostStep(input: {
     }
   }
   if (input.guardTransition === true && postTarget && reviewHead) {
-    // Final transition guard immediately before the write: the pull request
-    // must still be open at the head this verdict covers. `fetchPrHead`
-    // returns no head for a merged/closed or unreadable pull request, so every
-    // such race is Slack-only and the coordinator records the skipped verdict.
+    // Final transition guard immediately before the write: one fresh facts
+    // read must prove the pull request is open, its head ref still exists and
+    // that ref is at the commit this verdict covers. A head-only read can keep
+    // reporting the last commit after a same-repository branch is deleted.
     const where = `${postTarget.repo}#${postTarget.number}`;
     const pinned = carried?.current ?? reviewHead;
-    const current = normalizeHead(
-      await input.fetchPrHead({ repo: postTarget.repo, number: postTarget.number }).catch(() => undefined),
-    );
+    const facts = await input.fetchPrFacts({ repo: postTarget.repo, number: postTarget.number }).catch(() => undefined);
+    const current =
+      facts?.state === "open" && facts.headBranchExists === true ? normalizeHead(facts.headSha) : undefined;
     if (current === undefined || !sameCommit(current, pinned)) {
       const reason =
         current === undefined

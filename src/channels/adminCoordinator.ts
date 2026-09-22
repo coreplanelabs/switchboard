@@ -1839,7 +1839,15 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       const recovered = await recoverPushedBranch(deps, instance, unit.row, branch, recover.runId);
       if (recovered.kind === "opened") {
         await remember({ number: recovered.pr.number, url: recovered.pr.htmlUrl });
-        return json(200, { ok: true, state: "open", prNumber: recovered.pr.number, url: recovered.pr.htmlUrl, at });
+        // Open-or-edit is not a transition fact: the request can merge, close
+        // or lose its head ref before this route returns. Re-read the pull
+        // request whole and let an unknown branch state throw into the step's
+        // retry instead of dispatching a child on the optimistic open result.
+        const recoveredFacts = await deps.fetchPrFacts({ repo: instance.repo, number: recovered.pr.number });
+        if (recoveredFacts === undefined) throw new Error(`could not read ${instance.repo}#${recovered.pr.number}`);
+        const recoveredState = pullRequestState(recovered.pr.number, recovered.pr.htmlUrl, recoveredFacts);
+        if (recoveredState === undefined) throw new Error(headBranchStateError(instance.repo, recovered.pr.number));
+        return json(200, { ok: true, ...recoveredState, at });
       }
       return json(200, { ok: true, state: "none", unrecovered: recovered.why, at });
     }

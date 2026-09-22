@@ -22,7 +22,13 @@ import { makeWebCapability } from "../../tools/web.js";
 import { RestGithubApi, type GithubApi } from "../../execution/githubApi.js";
 import type { GithubCapability } from "../../tools/github.js";
 import type { ArtifactStore } from "../../artifacts/store.js";
-import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } from "../../execution/githubPulls.js";
+import type {
+  OpenedPullRequest,
+  OpenPrRef,
+  PullRequestFacts,
+  PullRequestTarget,
+  RepoShipInfo,
+} from "../../execution/githubPulls.js";
 import type { DispatchIdentityRewrite } from "../../execution/identityRewrite.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import { workspaceBindingFor, type ExecutorSelection } from "../../execution/factory.js";
@@ -220,6 +226,12 @@ export interface RunDeps
    * tests assert the entry without a network call.
    */
   fetchRepoShipInfo?: (repo: string) => Promise<RepoShipInfo | undefined>;
+  /**
+   * Branch-aware pull request facts for a ship child's final review-post guard
+   * (agent-ship item 9): state, current head and whether the same-repository
+   * head ref still exists. Default: githubPulls' `fetchPullRequestFacts`.
+   */
+  fetchPrFacts?: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
   /**
    * Posts a review back to a PR (docs/reference/specs/agent-review.md item 8): the
    * review post-step, run inside the run loop for a `review` run against a
