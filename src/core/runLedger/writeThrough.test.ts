@@ -1295,6 +1295,25 @@ describe("events, state, heartbeat", () => {
     expect(inner.live.get("r1")!.state).toEqual({ verdict: "approve", checklist: "● done", pushedBranch: "feat/x" });
   });
 
+  it("setStateDurable answers only after the row acknowledges the merged state and fails closed after the write retries are spent", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let failures = 0;
+    const ledger = overriding(inner, {
+      setState: async (...args) => {
+        if (failures-- > 0) throw new TransientStoreError("HTTP 503");
+        return inner.setState(...args);
+      },
+    });
+    const { wt } = harness({ ledger });
+    const run = (await openRun(wt, openReq()))!;
+    expect(await run.setStateDurable({ effects: { envelopes: { one: true } } })).toBe(true);
+    expect(inner.live.get("r1")!.state).toEqual({ effects: { envelopes: { one: true } } });
+
+    failures = 2;
+    expect(await run.setStateDurable({ effects: { envelopes: { two: true } } })).toBe(false);
+    expect(inner.live.get("r1")!.state).toEqual({ effects: { envelopes: { one: true } } });
+  });
+
   it("state patches merge and coalesce: the row holds the newest merged state", async () => {
     const { ledger, wt } = harness();
     const run = (await openRun(wt, openReq({ state: { checklist: "○ a" } })))!;

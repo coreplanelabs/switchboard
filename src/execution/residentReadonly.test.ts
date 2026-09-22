@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseReadonly, planReadonlyAttach } from "./residentReadonly.js";
+import { parseEffectOnly, parseReadonly, planReadonlyAttach } from "./residentReadonly.js";
 
 // Feature: docs/reference/specs/resident-repos.md item 50 — a read-only attach gets no
 // credential file and an unfetchable origin; a mode switch on a thread
@@ -22,11 +22,20 @@ describe("parseReadonly (the /attach body field)", () => {
   });
 });
 
+describe("parseEffectOnly (the /attach body field)", () => {
+  it("is additive, boolean-only and defaults off", () => {
+    expect(parseEffectOnly(undefined)).toEqual({ effectOnly: false });
+    expect(parseEffectOnly(true)).toEqual({ effectOnly: true });
+    expect(parseEffectOnly("true")).toEqual({ error: "effectOnly must be a boolean when present" });
+  });
+});
+
 describe("planReadonlyAttach", () => {
   it("read-only: no token, scrub credentials, origin = the unreadable mirror", () => {
     expect(planReadonlyAttach({ readonly: true, slug: "acme/api", mirrorDir: MIRROR })).toEqual({
       readonly: true,
       modeSwitch: false,
+      credentialScope: "none",
       credentialFile: false,
       scrubCredentials: true,
       originUrl: MIRROR,
@@ -37,10 +46,40 @@ describe("planReadonlyAttach", () => {
     expect(planReadonlyAttach({ readonly: false, slug: "acme/api", mirrorDir: MIRROR })).toEqual({
       readonly: false,
       modeSwitch: false,
+      credentialScope: "write",
       credentialFile: true,
       scrubCredentials: false,
       originUrl: "https://github.com/acme/api.git",
     });
+  });
+
+  it("effects-on gives child git a read-scoped credential and switching to or from it recreates the tree", () => {
+    expect(planReadonlyAttach({ readonly: false, effectOnly: true, slug: "acme/api", mirrorDir: MIRROR })).toEqual({
+      readonly: false,
+      modeSwitch: false,
+      credentialScope: "read",
+      credentialFile: true,
+      scrubCredentials: false,
+      originUrl: "https://github.com/acme/api.git",
+    });
+    expect(
+      planReadonlyAttach({
+        readonly: false,
+        effectOnly: true,
+        prior: { readonly: false, effectOnly: false },
+        slug: "a/b",
+        mirrorDir: MIRROR,
+      }).modeSwitch,
+    ).toBe(true);
+    expect(
+      planReadonlyAttach({
+        readonly: false,
+        effectOnly: false,
+        prior: { readonly: false, effectOnly: true },
+        slug: "a/b",
+        mirrorDir: MIRROR,
+      }).modeSwitch,
+    ).toBe(true);
   });
 
   it("a live tree built for the OTHER mode is a mode switch → recreate (both directions)", () => {

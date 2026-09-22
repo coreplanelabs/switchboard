@@ -120,6 +120,7 @@ function input(over: Partial<UnitPipelineInput> = {}): UnitPipelineInput {
     base: "main",
     caps: { maxRounds: 3, maxMinutes: 240 },
     merge: "runner",
+    effects: "shadow",
     generated: false,
     ...over,
   };
@@ -156,6 +157,20 @@ class Driver {
 const finished = (facts: Omit<Extract<ChildFacts, { finished: true }>, "finished">): ChildFacts => ({
   finished: true,
   ...facts,
+  // Most fixtures describe the established successful publication path. Give
+  // those a runner receipt by default; tests of missing/legacy/salvage evidence
+  // pass `pushed` explicitly.
+  ...((facts.pr !== undefined || facts.headSha !== undefined) && facts.pushed === undefined
+    ? {
+        pushed: [
+          {
+            ref: input().unit.branch,
+            sha: facts.headSha ?? HEAD_A,
+            by: "runner" as const,
+          },
+        ],
+      }
+    : {}),
 });
 
 /** Run a child round to its confirmed end: the spawn, the wait (an event) and the read-record. */
@@ -1020,7 +1035,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       finished({
         status: "completed",
         finalReply: "Budget reached: pushed the parser, the tests are next.",
-        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 40 * MIN }],
+        pushed: [{ ref: branch, sha: HEAD_A, by: "runner", at: T0 + 40 * MIN }],
         leaseStartedAt: T0,
         costUsd: 12.5,
         handoffLists: { deviations: [], followUps: [{ what: "tests", where: "src" }], unproven: [] },
@@ -1084,7 +1099,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       "run-c1",
       finished({
         status: "completed",
-        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 10 * MIN }],
+        pushed: [{ ref: branch, sha: HEAD_A, by: "runner", at: T0 + 10 * MIN }],
         leaseStartedAt: T0,
         costUsd: 15,
         handoffLists: { deviations: [], followUps: [{ what: "docs", where: "spec" }], unproven: [] },
@@ -1155,7 +1170,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     runChild(
       capped,
       "run-c0",
-      finished({ status: "completed", pushed: [{ ref: branch, sha: HEAD_A }], costUsd: 20 }),
+      finished({ status: "completed", pushed: [{ ref: branch, sha: HEAD_A, by: "runner" }], costUsd: 20 }),
       T0 + 45 * MIN,
     );
     capped.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
@@ -1176,7 +1191,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     runChild(
       unknown,
       "run-c0",
-      finished({ status: "completed", pushed: [{ ref: branch, sha: HEAD_A }] }),
+      finished({ status: "completed", pushed: [{ ref: branch, sha: HEAD_A, by: "runner" }] }),
       T0 + 45 * MIN,
     );
     unknown.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
@@ -1189,7 +1204,12 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     // Progress under the default grant of zero: judged, refused as exhausted, said so.
     const zero = fresh(input({ merge: "person", generated: true }));
     zero.answer({ type: "branch", ok: true, at: T0 });
-    runChild(zero, "run-c0", finished({ status: "completed", pushed: [{ ref: branch, sha: HEAD_A }] }), T0 + 45 * MIN);
+    runChild(
+      zero,
+      "run-c0",
+      finished({ status: "completed", pushed: [{ ref: branch, sha: HEAD_A, by: "runner" }] }),
+      T0 + 45 * MIN,
+    );
     zero.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
     expect(zero.action).toMatchObject({
       type: "end",
@@ -1225,7 +1245,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       finished({
         status: "completed",
         finalReply: "The unit is blocked and I stopped without pushing, per the plan's own stop condition.",
-        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 3 * MIN }],
+        pushed: [{ ref: branch, sha: HEAD_A, by: "runner", at: T0 + 3 * MIN }],
         leaseStartedAt: T0,
         costUsd: 8,
         handoffLists: {
@@ -1271,7 +1291,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       "run-c0",
       finished({
         status: "completed",
-        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 40 * MIN }],
+        pushed: [{ ref: branch, sha: HEAD_A, by: "runner", at: T0 + 40 * MIN }],
         leaseStartedAt: T0,
       }),
       T0 + 45 * MIN,
@@ -1374,6 +1394,62 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     );
     closed.answer({ type: "pr-check", pr: { state: "none", prClosed: true }, at: T0 + 5 * MIN });
     expect(closed.action).toMatchObject({ type: "end", ending: { kind: "aborted", round: { index: 0 } } });
+  });
+
+  it("shadow keeps matching legacy publication authoritative, while on refuses it without a matching runner receipt and salvage remains preservation only", () => {
+    const shadow = fresh(input({ merge: "person", effects: "shadow" }));
+    shadow.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      shadow,
+      "run-c0",
+      finished({
+        status: "completed",
+        headSha: HEAD_A,
+        pr: { number: 7, url: PR_URL, created: true },
+        pushed: [{ ref: shadow.state.input.unit.branch, sha: HEAD_A, by: "push" }],
+      }),
+      T0 + 5 * MIN,
+    );
+    expect(shadow.action).toMatchObject({ type: "pr-check" });
+
+    for (const pushed of [
+      [],
+      [{ ref: input().unit.branch, sha: HEAD_A, by: "push" as const }],
+      [{ ref: input().unit.branch, sha: HEAD_A, by: "salvage" as const }],
+    ]) {
+      const d = fresh(input({ merge: "person", effects: "on" }));
+      d.answer({ type: "branch", ok: true, at: T0 });
+      runChild(
+        d,
+        "run-c0",
+        finished({
+          status: "completed",
+          headSha: HEAD_A,
+          pr: { number: 7, url: PR_URL, created: true },
+          pushed,
+        }),
+        T0 + 5 * MIN,
+      );
+      expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+      expect(renderUnitReport(d.state)).toMatch(
+        /no runner publication receipt|ended before its work was ready for review/,
+      );
+    }
+
+    const ready = fresh(input({ merge: "person", effects: "on" }));
+    ready.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      ready,
+      "run-c0",
+      finished({
+        status: "completed",
+        headSha: HEAD_A,
+        pr: { number: 7, url: PR_URL, created: true },
+        pushed: [{ ref: ready.state.input.unit.branch, sha: HEAD_A, by: "runner" }],
+      }),
+      T0 + 5 * MIN,
+    );
+    expect(ready.action).toMatchObject({ type: "pr-check" });
   });
 
   it("aborts: a round 0 that opened no pull request, a branch that could not be created, a coding child that failed, a findings step that repushed nothing (unless every finding was declined)", () => {
@@ -1493,7 +1569,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       finished({
         status: "completed",
         finalReply: "Already on main via pull request 3377 — verified at head, nothing to push.",
-        pushed: [{ ref: branch, sha: HEAD_A }],
+        pushed: [{ ref: branch, sha: HEAD_A, by: "runner" }],
         handoff: true,
         handoffLists: landedHandoff,
         ...over,
@@ -3949,7 +4025,7 @@ describe("the unit report — the child's write-up is pointed at, never repeated
       finished({
         status: "completed",
         finalReply: "Budget reached: pushed the parser, the tests are next.",
-        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 40 * MIN }],
+        pushed: [{ ref: branch, sha: HEAD_A, by: "runner", at: T0 + 40 * MIN }],
         leaseStartedAt: T0,
       }),
       T0 + 45 * MIN,
@@ -4019,7 +4095,7 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
       "run-c0",
       finished({
         status: "completed",
-        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 40 * MIN }],
+        pushed: [{ ref: branch, sha: HEAD_A, by: "runner", at: T0 + 40 * MIN }],
         leaseStartedAt: T0,
         costUsd: 12.5,
         handoffLists: HANDOFF,

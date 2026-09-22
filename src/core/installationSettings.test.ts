@@ -22,7 +22,9 @@ const MANIFEST_SECRETS: string[] = (
 const EVERYTHING_YAML = `${CLOUD_FULL.yaml.replace(
   "    general: anthropic/general-model\n",
   "    general: anthropic/general-model\n  efforts:\n    general: xhigh\n",
-)}routing:
+)}harness:
+  effects: on
+routing:
   operator: shadow
 intake:
   effort: medium
@@ -68,6 +70,7 @@ describe("installationSettings", () => {
     expect(rows.has("routing.effort")).toBe(false);
     expect(rows.has("routing.auto")).toBe(false);
     expect(rows.has("routing.answer")).toBe(false);
+    expect(rows.get("harness.effects")).toMatchObject({ value: "on", isDefault: false, how: "config" });
     expect(rows.get("intake.effort")).toMatchObject({ value: "medium", isDefault: false });
     expect(rows.get("memory.effort")).toMatchObject({ value: "the model's own default", isDefault: true });
     expect(rows.get("defaults.efforts.general")).toMatchObject({ value: "xhigh", isDefault: false, how: "runtime" });
@@ -90,6 +93,11 @@ describe("installationSettings", () => {
     const view = installationSettings(parseAppConfigText(MINIMAL.yaml), NO_CAPABILITIES);
     expect(view.settings.every((r) => r.key.startsWith("defaults.") || r.isDefault)).toBe(true);
     expect(rowsByKey(view.settings).has("routing.model")).toBe(false);
+    expect(rowsByKey(view.settings).get("harness.effects")).toMatchObject({
+      value: "shadow",
+      isDefault: true,
+      how: "config",
+    });
     expect(rowsByKey(view.settings).get("memory.enabled")).toMatchObject({ value: "false", isDefault: true });
     expect(rowsByKey(view.settings).get("defaults.efforts.general")).toMatchObject({
       value: "the model's own default",

@@ -8,6 +8,7 @@ import { secretsFrom, type Secrets } from "./secrets.js";
 import {
   ConfigStore,
   defaultIntakeMode,
+  effectsModeOf,
   FileOverridesBacking,
   InMemoryOverridesBacking,
   intakeModelRef,
@@ -1150,6 +1151,26 @@ describe("harness block (harness.<preset>: pi or opencode)", () => {
       review: "pi",
     });
     expect(store().config.harness).toBeUndefined();
+  });
+
+  it("accepts harness.effects exactly as shadow or on and defaults rollout to shadow", () => {
+    expect(effectsModeOf(store(YAML_FIXTURE + "harness:\n  effects: shadow\n").config)).toBe("shadow");
+    expect(effectsModeOf(store(YAML_FIXTURE + "runHistory:\n  store: file\nharness:\n  effects: on\n").config)).toBe(
+      "on",
+    );
+    expect(effectsModeOf(store().config)).toBe("shadow");
+  });
+
+  it("refuses harness.effects on without durable run history", () => {
+    expect(() => store(YAML_FIXTURE + "harness:\n  effects: on\n")).toThrow(
+      /harness\.effects: on requires runHistory so effect envelopes and receipts survive restart/,
+    );
+  });
+
+  it("refuses an unknown effects mode by name", () => {
+    expect(() => store(YAML_FIXTURE + "harness:\n  effects: off\n")).toThrow(
+      /harness\.effects: off is not an effects mode; the effects modes are shadow and on/,
+    );
   });
 
   it("refuses a preset the registry does not know, naming it", () => {

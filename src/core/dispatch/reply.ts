@@ -282,6 +282,10 @@ export function activityLine(e: RunEvent): string {
       return "PR description recorded"; // published straight to the registry — never arrives here
     case "pr_opened":
       return "PR opened"; // published straight to the registry — never arrives here
+    case "effect":
+      return e.result.outcome === "succeeded"
+        ? `${e.result.shadow ? "◌ would push" : "⬆ runner pushed"} ${e.result.destination} @ ${e.result.after.slice(0, 7)}`
+        : `effect refused: ${e.result.reason}`;
     case "pushed_head":
       return `⬆ pushed ${e.ref} @ ${e.sha.slice(0, 7)}`;
     case "coordinator_tag":

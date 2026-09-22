@@ -248,6 +248,9 @@ export interface LedgerRun {
   event(event: RunEvent, seq: number): void;
   /** Merge into the run's state and send it (coalesced: the newest wins). */
   setState(patch: RunState): void;
+  /** Merge and wait until this state is durably acknowledged. Effects use this
+   *  fail-closed path before crossing an external boundary. */
+  setStateDurable(patch: RunState): Promise<boolean>;
   /** `live → finishing`, before the reply — the double-answer gate (D9). */
   finishing(): Promise<FinishingGate>;
   /** A reserved run that never started (item 42): the row goes with no record,
@@ -495,6 +498,9 @@ export class NullLedgerRun implements LedgerRun {
   }
   setState(_patch: RunState): void {
     // no ledger to mirror onto
+  }
+  async setStateDurable(_patch: RunState): Promise<boolean> {
+    return false;
   }
   async finishing(): Promise<FinishingGate> {
     return "unavailable";
@@ -1095,26 +1101,43 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       if (this.detached) return;
       this.state = { ...this.state, ...patch };
       this.stateDirty = true;
-      this.stateSending = this.stateSending.then(() => this.sendState());
+      this.stateSending = this.stateSending.then(async () => void (await this.sendState()));
+    }
+
+    async setStateDurable(patch: RunState): Promise<boolean> {
+      if (this.detached || this.finished) return false;
+      this.state = { ...this.state, ...patch };
+      this.stateDirty = true;
+      let acknowledged = false;
+      const sending = this.stateSending.then(async () => {
+        acknowledged = await this.sendState();
+      });
+      this.stateSending = sending;
+      await sending;
+      return acknowledged;
     }
 
     /** The merged snapshot, sent once per burst of patches; a transient failure
      *  is retried once after a backoff and, failing that, leaves the state
      *  dirty so the next patch carries it — the LAST state of a run (a verdict
      *  set near the end) must not be lost to one blip. */
-    private async sendState(): Promise<void> {
-      if (!this.stateDirty || this.detached || this.finished) return;
+    private async sendState(): Promise<boolean> {
+      if (!this.stateDirty) return !this.detached && !this.finished;
+      if (this.detached || this.finished) return false;
       this.stateDirty = false;
       for (let attempt = 1; ; attempt++) {
         try {
           const result = await ledger.setState(this.runId, gen, this.state);
-          if (!result.ok) this.detach(`state refused (${result.reason})`);
-          return;
+          if (!result.ok) {
+            this.detach(`state refused (${result.reason})`);
+            return false;
+          }
+          return true;
         } catch (err) {
           if (err instanceof RouteMissingError || err instanceof PermanentStoreError || attempt >= 2) {
             this.stateDirty = true;
             warn(`[ledger] ${this.threadKey} state not written: ${describe(err)}`);
-            return;
+            return false;
           }
           await sleep(RETRY_MS[0]);
         }

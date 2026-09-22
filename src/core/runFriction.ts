@@ -537,6 +537,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       return;
     }
 
+    if (ev.type !== "run_note") return;
     switch (ev.kind) {
       case "wrap_up":
         // Its extent is the time from the warning to the end of the window (how

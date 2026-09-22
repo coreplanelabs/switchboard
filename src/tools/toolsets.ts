@@ -15,6 +15,7 @@
 
 import { attachFileTool } from "./attach.js";
 import { planeShowTool } from "./plane.js";
+import { pushTool } from "./push.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS } from "./github.js";
 import type { RunnableTool } from "./runnableTool.js";
@@ -54,6 +55,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     submitPrDescriptionTool,
     submitHandoffTool,
     submitDispositionsTool,
+    pushTool,
     webFetchTool,
     diffDigestTool,
     listSkillsTool,

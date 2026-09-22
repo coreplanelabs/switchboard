@@ -1,5 +1,5 @@
 import { ARTIFACT_DEFAULTS } from "../artifacts/config.js";
-import { referencesOn, type AppConfig } from "../config.js";
+import { effectsModeOf, referencesOn, type AppConfig } from "../config.js";
 import { DEFAULT_WINDOW_MS } from "../channels/slackCatchUp.js";
 import type { Capabilities } from "./capabilities.js";
 import { parseDeliveryConfig, SNAPSHOT_EVERY_MINUTES } from "./delivery.js";
@@ -143,6 +143,13 @@ export function installationSettings(config: AppConfig, caps: Capabilities): Ins
   );
 
   settings.push(
+    row(
+      "harness.effects",
+      config.harness?.effects,
+      effectsModeOf(config),
+      "config",
+      "whether typed runner effects only observe legacy publication (shadow) or own publication (on)",
+    ),
     row(
       "intake.effort",
       config.intake?.effort,

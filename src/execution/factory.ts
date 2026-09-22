@@ -124,6 +124,8 @@ export interface ExecutorContext {
    *  the class provisioned and the identity minted are read from here and
    *  never from `agent`, so nothing a boundary capped can leak back in. */
   profile: RunProfile;
+  /** Typed-effect rollout. `on` removes publication authority from child git. */
+  effects?: "shadow" | "on";
   /** inferred target repo, e.g. "org/name" */
   repo?: string;
   /** inferred git ref within `repo` */
@@ -501,6 +503,7 @@ export async function makeExecutor(
             threadKey: ctx.threadKey,
             refHint: ctx.ref,
             readonly,
+            effectOnly: ctx.profile.identity === "write" && ctx.effects === "on" ? true : undefined,
             sha: ctx.headSha,
             // The run's commit identity pairs, resolved per exec (record 0062):
             // the resident holds its own credential, so the pairs alone ride.
@@ -770,6 +773,7 @@ async function reattachWorkspace(
     threadKey: ctx.threadKey,
     refHint: ctx.ref,
     readonly: ctx.profile.identity === "read" ? true : undefined,
+    effectOnly: ctx.profile.identity === "write" && ctx.effects === "on" ? true : undefined,
     sha: ctx.headSha,
     reuse: true,
     // The run's commit identity pairs, resolved per exec (record 0062): the

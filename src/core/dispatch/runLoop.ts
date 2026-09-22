@@ -10,9 +10,10 @@
 // settle's re-review, the review's verdict turn and the description turn
 // (harness-pi item 14) and is ended here after them. The stage's claim and
 // the tools' capabilities are run.ts.
-import type { ResolvedRequest } from "../../config.js";
+import { effectsModeOf, type ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
+import { authorize } from "../authz/authorize.js";
 import { predicateFor } from "../authz/predicate.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { DECISION_RECORD_ENV } from "../decisionRecordReservation.js";
@@ -111,9 +112,40 @@ import { artifactLink, cardActivity, quietActivity, replyAck } from "./reply.js"
 import { shows } from "../verbosity.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
+import {
+  ProductionRunEffects,
+  RecordingRunEffects,
+  type EffectEnvelope,
+  type EffectResult,
+  type PushReceipt,
+} from "../runEffects.js";
+import { gitRunEffectsDeps } from "../runEffectsGit.js";
 
 /** Longest note summary the loop writes for an ending (`run_failed`, `workspace_torn_down`): a reason, not a stack dump. */
 const ENDING_NOTE_MAX = 500;
+
+/** The publication authority restored after a restart: newest first, but only
+ * for this admitted destination and the checkout's current head. */
+export function latestRunnerPublication(
+  results: Record<string, EffectResult>,
+  branch: string | undefined,
+  head: string | undefined,
+): PushReceipt | undefined {
+  if (!branch || !head) return undefined;
+  const destination = `refs/heads/${branch}`;
+  return Object.values(results)
+    .map((result, sequence) => ({ result, sequence }))
+    .filter(
+      (entry): entry is { result: PushReceipt; sequence: number } =>
+        entry.result?.kind === "push" &&
+        entry.result.outcome === "succeeded" &&
+        entry.result.shadow !== true &&
+        entry.result.by === "runner" &&
+        entry.result.destination === destination &&
+        entry.result.after.toLowerCase() === head.toLowerCase(),
+    )
+    .sort((a, b) => b.result.occurredAt - a.result.occurredAt || b.sequence - a.sequence)[0]?.result;
+}
 
 /** What the loop hands back once the run has answered: the answer as
  *  canonicalized for every projection, the head the review settled on, the
@@ -453,6 +485,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // when no push was observed — the checkout can move between the push and
   // the post. The latest push wins.
   const pushes = trackPushedBranch(typeof restored.pushedBranch === "string" ? restored.pushedBranch : undefined);
+  // A successful production push effect becomes the run's only requested-
+  // publication authority. It also tells the observation and PR post-step
+  // which branch to read without parsing a child bash result.
+  let runnerPublication: PushReceipt | undefined;
   // The loop ended at its time budget (the harness's wind-down note): a ship
   // coding child then salvages what its tree still holds (push-before-abort,
   // agent-ship.md item 8) after the workspace observation below.
@@ -761,8 +797,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let workspaceObserved = false;
   let workSalvageAttempted = false;
   let endingSalvageAttempted = false;
+  const requestedPublicationBranch = (): string | undefined =>
+    runnerPublication?.destination.replace(/^refs\/heads\//, "") ?? pushes.branch();
   const observeWorkspaceNow = async () => {
-    const pushedBranch = pushes.branch();
+    const pushedBranch = requestedPublicationBranch();
     const observed = await root.span("run.observe_workspace", (span) =>
       observeCodingWorkspace(
         executor,
@@ -790,7 +828,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (workSalvageAttempted || !isCodingPrRun || coordinator === undefined) return;
     if (!workspaceObserved) await observeWorkspaceNow();
     const target = salvageTargetOf({
-      pushedBranch: pushes.branch(),
+      pushedBranch: requestedPublicationBranch(),
       checkedOut: observedCheckedOut,
       base: repoCtx.baseRef ?? (await coordinatorBase),
     });
@@ -963,8 +1001,116 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         table: async () => (await deps.plane!()).table(predicateFor(chatActorOf(deps.config, msg), "runs:read", "run")),
       }
     : undefined;
+  type StoredEffects = { envelopes: Record<string, EffectEnvelope>; results: Record<string, EffectResult> };
+  const restoredEffects =
+    typeof restored.effects === "object" && restored.effects !== null
+      ? (restored.effects as Partial<StoredEffects>)
+      : {};
+  const effectState: StoredEffects = {
+    envelopes:
+      typeof restoredEffects.envelopes === "object" && restoredEffects.envelopes !== null
+        ? restoredEffects.envelopes
+        : {},
+    results:
+      typeof restoredEffects.results === "object" && restoredEffects.results !== null ? restoredEffects.results : {},
+  };
+  let effectStateWrite: Promise<void> = Promise.resolve();
+  const serializeEffectState = <T>(write: () => Promise<T>): Promise<T> => {
+    const next = effectStateWrite.then(write);
+    effectStateWrite = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  };
+  const effectMode = effectsModeOf(deps.config.config);
+  const admittedRepository = repoCtx.repo;
+  // A requester-named or PR-derived ref is strict. A run bound only because the
+  // resident supplied its default may create its own feature branch; that
+  // branch is validated against the checked-out facts and the admitted base.
+  const admittedBranch = repoCtx.ref;
+  const publicationBranch = binding?.ref ?? repoCtx.ref;
+  let admittedHead = binding?.sha ?? repoCtx.headSha;
+  if (Object.keys(effectState.results).length > 0) {
+    const headOut = await executor.exec("git rev-parse HEAD").catch(() => "");
+    admittedHead =
+      headOut
+        .split(/\r?\n/)
+        .map((line) => line.trim().toLowerCase())
+        .find((line) => /^[0-9a-f]{40}$/.test(line)) ?? admittedHead;
+  }
+  runnerPublication = latestRunnerPublication(effectState.results, publicationBranch, admittedHead);
+  const actor = chatActorOf(deps.config, msg);
+  const effects =
+    isCodingPrRun && admittedRepository !== undefined && ledgerRun !== undefined
+      ? (() => {
+          const effectDeps = gitRunEffectsDeps({
+            executor,
+            actor: msg.userId,
+            admittedRepository,
+            ...(admittedBranch !== undefined ? { admittedBranch } : {}),
+            admittedBase: async () => repoCtx.baseRef ?? (await coordinatorBase),
+            changedSetGates: binding?.verification,
+            authorize: (repository) => {
+              const [owner, name] = repository.split("/");
+              return (
+                Boolean(owner && name) &&
+                authorize(actor, "repo:use", { type: "repo", owner: owner!, name: name! }).allow
+              );
+            },
+            persistEnvelope: (envelope) =>
+              serializeEffectState(async () => {
+                const standing = effectState.envelopes[envelope.effectId];
+                if (standing !== undefined) return standing;
+                const next: StoredEffects = {
+                  envelopes: { ...effectState.envelopes, [envelope.effectId]: envelope },
+                  results: { ...effectState.results },
+                };
+                if (!(await ledgerRun.setStateDurable({ effects: next })))
+                  throw new Error("the effect envelope was not durably persisted");
+                effectState.envelopes = next.envelopes;
+                return envelope;
+              }),
+            priorResult: async (effectId) => effectState.results[effectId],
+            auditResult: async (result) => void onEvent({ type: "effect", result }),
+            recordResult: (result) =>
+              serializeEffectState(async () => {
+                const next: StoredEffects = {
+                  envelopes: { ...effectState.envelopes },
+                  results: { ...effectState.results, [result.effectId]: result },
+                };
+                if (!(await ledgerRun.setStateDurable({ effects: next })))
+                  throw new Error("the effect result was not durably persisted");
+                effectState.results = next.results;
+                onEvent({ type: "effect", result });
+                if (result.outcome === "succeeded" && result.shadow !== true) {
+                  runnerPublication = result;
+                  onEvent({
+                    type: "pushed_head",
+                    ref: result.destination.replace(/^refs\/heads\//, ""),
+                    sha: result.after,
+                    by: "runner",
+                    clean: true,
+                  });
+                }
+                if (effectMode === "shadow")
+                  onEvent({
+                    type: "run_note",
+                    kind: "effect_decision",
+                    summary:
+                      result.outcome === "succeeded"
+                        ? `shadow push would allow ${result.destination} at ${result.after.slice(0, 7)}; no write was made`
+                        : `shadow push would refuse ${result.reason}; no write was attempted`,
+                  });
+              }),
+            occurredAt: clock,
+          });
+          return effectMode === "on" ? new ProductionRunEffects(effectDeps) : new RecordingRunEffects(effectDeps);
+        })()
+      : undefined;
   const toolContext = {
     executor,
+    ...(effects ? { effects } : {}),
     reportProgress,
     ...(attachFile ? { attach: attachFile } : {}),
     ...(artifacts ? { artifacts } : {}),
@@ -1243,6 +1389,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               checkout: binding?.workspace ?? "/workspace",
               ...(ownBranch !== undefined ? { branch: ownBranch } : {}),
               protectedBranches,
+              effects: effectMode,
             },
             ...(round.selection.backend ? { backend: round.selection.backend } : {}),
             span: root,
@@ -1700,6 +1847,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             remoteRepo: observedRemoteRepo,
           },
           description: prDescription,
+          ...(runnerPublication
+            ? {
+                publication: {
+                  ref: runnerPublication.destination.replace(/^refs\/heads\//, ""),
+                  sha: runnerPublication.after,
+                  by: "runner" as const,
+                },
+              }
+            : {}),
           target: prTarget,
           openPullRequest: deps.openPullRequest ?? openPullRequest,
           findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,

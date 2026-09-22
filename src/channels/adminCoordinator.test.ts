@@ -177,6 +177,7 @@ function harness(
     queueState?: MergeQueueState | Error;
     /** The runs page base the plan route answers (agent-ship item 12). */
     runPageBase?: string;
+    appConfig?: object;
     runnerRebase?: AdminCoordinatorDeps["runnerRebase"];
     /** The grant scopes say at wake time. */
     grantFact?: { grant: { renewals: number; costCapUsd?: number }; source: "org" | "channel" | "user" };
@@ -243,6 +244,7 @@ function harness(
     childAdmission: createCoordinatorChildAdmission(() => over.draining === true),
     grantsFor: (id) => GRANTS[id] ?? NO_GRANTS,
     instances,
+    ...(over.appConfig !== undefined ? { appConfig: () => over.appConfig } : {}),
     ...(over.runPageBase !== undefined ? { runPageBase: over.runPageBase } : {}),
     ...(over.runnerRebase !== undefined ? { runnerRebase: over.runnerRebase } : {}),
     ...(over.grantFact !== undefined ? { shipGrantFor: () => over.grantFact! } : {}),
@@ -2437,6 +2439,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         ok: true,
         planId: "fixture",
         merge: "runner",
+        effects: "shadow",
         // Absent on the record: the machine reads the default, named as the org's.
         addressSeverity: "minor",
         addressSeveritySource: "org",
@@ -2471,6 +2474,8 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       units: [],
     });
     expect("planId" in body).toBe(false);
+    const on = await planHarness({ appConfig: { harness: { effects: "on" } } });
+    expect((await call(on, "plan", { parentInstanceId: PLAN_INSTANCE.id })).body).toMatchObject({ effects: "on" });
   });
 
   it("plan answers the runs page base when the deps carry one — the unit-end report links a child's write-up to its run page with it — and leaves it out otherwise (issue 1806)", async () => {

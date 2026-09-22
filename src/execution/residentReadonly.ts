@@ -22,6 +22,7 @@
  *  on one thread is rare (a thread is normally one agent for its whole life). */
 
 export type ParsedReadonly = { readonly: boolean } | { error: string };
+export type ParsedEffectOnly = { effectOnly: boolean } | { error: string };
 
 /** `/attach` body field `readonly`: absent → false (older bots never send it);
  *  a boolean → itself; anything else → a 400-shaped error. */
@@ -31,13 +32,22 @@ export function parseReadonly(value: unknown): ParsedReadonly {
   return { error: "readonly must be a boolean when present" };
 }
 
+export function parseEffectOnly(value: unknown): ParsedEffectOnly {
+  if (value === undefined) return { effectOnly: false };
+  if (typeof value === "boolean") return { effectOnly: value };
+  return { error: "effectOnly must be a boolean when present" };
+}
+
 export interface ReadonlyAttachPlan {
   /** The mode this attach builds/reuses the tree for (recorded on the binding). */
   readonly: boolean;
   /** True when the existing tree was built for the other mode and must be wiped
    *  before reuse — evaluated before the ordinary dirty/stale checks. */
   modeSwitch: boolean;
-  /** Mint a repo-scoped token for the tree and write the credential file (writable only). A read-only attach never puts a token in the tree; the mirror's own recovery fetch (root, outside the tree) may still mint one. */
+  /** Credential placed in the tree: none for review, read for an effects-on
+   *  child, write only for the legacy/shadow writable path. */
+  credentialScope: "none" | "read" | "write";
+  /** Backward-compatible projection used by the attach flow. */
   credentialFile: boolean;
   /** Remove any credential file / helper config from the tree (read-only, every
    *  attach — a reused tree may predate this rule). */
@@ -48,9 +58,11 @@ export interface ReadonlyAttachPlan {
 
 export function planReadonlyAttach(input: {
   readonly: boolean;
+  /** Effects-on coding attach: ordinary git reads work, publication does not. */
+  effectOnly?: boolean;
   /** The thread's existing binding, if any. `evicted` trees are gone from disk
    *  and are recreated anyway, so their recorded mode is irrelevant. */
-  prior?: { readonly?: boolean; evicted?: boolean };
+  prior?: { readonly?: boolean; effectOnly?: boolean; evicted?: boolean };
   /** `owner/name` of the repo — the writable origin. */
   slug: string;
   /** The resident's bare mirror path — the read-only origin. Thread users are
@@ -60,12 +72,16 @@ export function planReadonlyAttach(input: {
   mirrorDir: string;
 }): ReadonlyAttachPlan {
   const { readonly, prior, slug, mirrorDir } = input;
+  const effectOnly = !readonly && input.effectOnly === true;
   const priorLive = prior !== undefined && !prior.evicted;
-  const modeSwitch = priorLive && (prior.readonly ?? false) !== readonly;
+  const modeSwitch =
+    priorLive && ((prior.readonly ?? false) !== readonly || (!readonly && (prior.effectOnly ?? false) !== effectOnly));
+  const credentialScope = readonly ? "none" : effectOnly ? "read" : "write";
   return {
     readonly,
     modeSwitch,
-    credentialFile: !readonly,
+    credentialScope,
+    credentialFile: credentialScope !== "none",
     scrubCredentials: readonly,
     originUrl: readonly ? mirrorDir : `https://github.com/${slug}.git`,
   };

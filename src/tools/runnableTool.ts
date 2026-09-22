@@ -18,6 +18,7 @@ import type { DigestReport } from "../core/diffDigest.js";
 import type { WaitCapability } from "../core/dispatch/awaitChildren.js";
 import type { SpawnCapability } from "../core/dispatch/spawn.js";
 import type { PrDescription } from "../core/prDescription.js";
+import type { RunEffects } from "../core/runEffects.js";
 import type { ToolDef } from "../core/provider.js";
 import type { AddressSeverity, FindingDisposition, ReviewVerdict } from "../core/reviewVerdict.js";
 import type { RunEvent } from "../core/runEvents.js";
@@ -153,6 +154,10 @@ export interface ToolContext {
    *  (docs/reference/specs/pr-description.md item 1). Absent (a no-repo run,
    *  a unit context) → no repository carries the gate, the cap alone holds. */
   repo?: string;
+  /** Runner-owned external effects available to a coding run. The child can
+   *  state a typed intent through these commands; it never receives the
+   *  transport credential or arbitrary arguments. */
+  effects?: RunEffects;
   /** Receives the coding agent's typed PR description from
    *  `submit_pr_description` (docs/reference/specs/pr-description.md). Injected by the
    *  dispatcher for coding runs; the last valid call wins. The dispatcher

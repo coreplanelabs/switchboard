@@ -19,7 +19,7 @@ export interface PushedHeadFact {
   ref: string;
   sha: string;
   /** Mechanical WIP checkpoints are preserved work, not a completed agent push. */
-  by?: "push" | "salvage";
+  by?: "push" | "salvage" | "runner";
   at?: number;
 }
 
@@ -28,6 +28,9 @@ export interface ProgressInput {
   branch: string;
   /** The heads the segment's coding run pushed (`RunRecord.pushed`). */
   pushed: readonly PushedHeadFact[];
+  /** Cutover authority: shadow accepts the legacy/historical push evidence;
+   * on counts only a typed runner publication. */
+  runnerOnly?: boolean;
   /** The head the segment started from — the previous segment's recorded sha.
    *  Absent on a fresh branch, where the base head stands in for it. */
   startHead?: string;
@@ -60,7 +63,9 @@ const sameSha = (a: string, b: string): boolean => {
  *  deviations never reaches this decision: it is the round's own ending (issue
  *  2086) and the unit ends held before any renewal is judged. */
 export function progressOf(input: ProgressInput): Progress {
-  const last = [...input.pushed].reverse().find((h) => h.ref === input.branch);
+  const last = [...input.pushed]
+    .reverse()
+    .find((h) => h.ref === input.branch && h.by !== "salvage" && (!input.runnerOnly || h.by === "runner"));
   if (last !== undefined) {
     const newerThanLease =
       input.leaseStartedAt === undefined || last.at === undefined || last.at >= input.leaseStartedAt;

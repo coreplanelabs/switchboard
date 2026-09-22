@@ -44,12 +44,24 @@ export interface MoveOptions extends ExecTraceOptions {
   signal?: AbortSignal;
 }
 
+export interface GitPublicationRequest {
+  source: string;
+  destination: string;
+  lease?: string;
+}
+
 export interface Executor {
   /** Run a shell command; returns combined output (never throws on non-zero
    *  exit). `opts.signal` is a hard run stop: an implementation that can
    *  cancel the underlying command does so and returns/throws promptly; one that
    *  cannot simply ignores it — the runner stops waiting on it either way. */
   exec(command: string, opts?: ExecOptions): Promise<string>;
+  /** Runner-only git publication. The child tool context never exposes this
+   *  method; implementations keep write credentials behind this closed call. */
+  publishGit?(
+    request: GitPublicationRequest,
+    opts?: ExecTraceOptions,
+  ): Promise<{ previous?: string; published: string }>;
   /** Read a file, path relative to the execution workspace. */
   readFile(path: string, opts?: ExecTraceOptions): Promise<string>;
   /** Write a file (creating parent dirs), path relative to the workspace. */

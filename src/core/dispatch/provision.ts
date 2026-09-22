@@ -10,7 +10,7 @@
 // — the card, the registry row, the reservation — so `dispatch()` records it
 // before the next step that can throw and its outer finally releases exactly
 // what the inline code did.
-import type { ConfigStore, ResolvedRequest } from "../../config.js";
+import { effectsModeOf, type ConfigStore, type ResolvedRequest } from "../../config.js";
 import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
 import { AGENTS, type AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
@@ -887,6 +887,7 @@ async function attachRound(
           threadKey,
           agent,
           profile,
+          effects: effectsModeOf(deps.config.config),
           repo: repoCtx.repo,
           ref: repoCtx.ref,
           headSha: repoCtx.headSha,

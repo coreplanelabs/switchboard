@@ -1,3 +1,5 @@
+import { effectsModeOf, type AppConfig } from "../config.js";
+
 // The bot steps a ship coordinator calls (docs/reference/specs/http-ingress.md
 // item 9; docs/decisions/0029-durable-objects-store-workflows-schedule.md,
 // docs/decisions/0031-the-coordinator-runs-a-plan-not-a-pull-request.md): the
@@ -1925,6 +1927,9 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
     ...(instance.plan !== undefined ? { planId: instance.plan.id } : {}),
     // Who merges: the instance's field; a record written before it existed is a person's merge.
     merge: instance.merge ?? "person",
+    // The effect rollout mode is fixed into the plan answer, so the durable
+    // machine judges child publication under the same authority as the run.
+    effects: effectsModeOf((deps.appConfig?.() ?? {}) as Pick<AppConfig, "harness">),
     // The severity to address, beside `merge`: one value the machine reads.
     addressSeverity: instance.addressSeverity ?? "minor",
     addressSeveritySource: instance.addressSeveritySource ?? "org",

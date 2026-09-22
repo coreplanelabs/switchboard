@@ -210,6 +210,8 @@ interface PlanFacts {
   planId?: string;
   /** Who merges, as the instance's field has it: the plan route answers it, `person` when absent. */
   merge: "runner" | "person";
+  /** The typed-effect rollout mode fixed when the plan route is read. */
+  effects: "shadow" | "on";
   /** The severity to address, beside `merge`: the level an approve's findings are held to, and which layer set it. */
   addressSeverity: AddressSeverity;
   addressSeveritySource: AddressSeveritySource;
@@ -269,6 +271,7 @@ function readPlan(a: BotAnswer): PlanFacts {
   return {
     ...(typeof b.planId === "string" ? { planId: b.planId } : {}),
     merge: b.merge === "runner" ? "runner" : "person",
+    effects: b.effects === "on" ? "on" : "shadow",
     addressSeverity: isAddressSeverity(b.addressSeverity) ? b.addressSeverity : "minor",
     addressSeveritySource:
       b.addressSeveritySource === "run" || b.addressSeveritySource === "user" || b.addressSeveritySource === "channel"
@@ -961,6 +964,7 @@ async function runUnit(
       // seeded plan and `person` on a task, and the door re-checks it — the
       // branch's name never decides.
       merge: plan.merge,
+      effects: plan.effects,
       addressSeverity: plan.addressSeverity,
       addressSeveritySource: plan.addressSeveritySource,
       grant: plan.grant,

@@ -609,6 +609,25 @@ describe("makeExecutor resident selection", () => {
     expect(bodies[3]).not.toHaveProperty("readonly");
   });
 
+  it("effects on attaches a coding resident with a read-only child credential while leaving review mode distinct", async () => {
+    stubEnvs();
+    const { bodies } = stubFetch(
+      { body: { state: "warm", reason: "" } },
+      {
+        body: {
+          workspace: "/workspace/threads/x/master",
+          ref: "master",
+          sha: "abc",
+          user: "worker2",
+          deps: "hardlink",
+        },
+      },
+    );
+    await makeExecutor(residentOpts(), { ...repoCtx(), effects: "on" });
+    expect(bodies[1]).toMatchObject({ effectOnly: true });
+    expect(bodies[1]).not.toHaveProperty("readonly");
+  });
+
   // docs/reference/specs/resident-repos.md item 51: a resolved PR head is passed to /attach
   // as `sha` so the resident fetches a mirror whose ref tip lags it (otherwise
   // a re-review right after a push clones a stale tip); no resolved head → no

@@ -1119,6 +1119,9 @@ export interface UnitPipelineInput {
    *  `runner` (a seeded plan, under its grant) or `person` (a task, or a
    *  record without the field). */
   merge: "runner" | "person";
+  /** Typed-effect rollout mode fixed onto the runner's plan facts. Shadow keeps
+   * legacy publication authoritative; on requires the runner receipt. */
+  effects?: "shadow" | "on";
   /** The severity to address: resolved once by the hand-off —
    *  directive > user > channel > org — and written on the instance beside
    *  `merge`, so the machine reads one value. Absent reads as the default. */
@@ -1884,6 +1887,30 @@ function settleCoding(
       [roundNote(round, "aborted")],
     );
   }
+  // During shadow, the established legacy publisher remains authoritative;
+  // the recording effect deliberately emits no runner publication. At cutover
+  // only the typed receipt qualifies. Salvage was handled above and is never
+  // requested-publication evidence in either mode.
+  const runnerPublication = facts.pushed
+    ?.filter((p) => p.by === "runner" && (facts.headSha === undefined || sameCommit(p.sha, facts.headSha)))
+    .at(-1);
+  if (
+    s.input.effects === "on" &&
+    facts.status === "completed" &&
+    (facts.pr !== undefined || facts.headSha !== undefined) &&
+    !runnerPublication
+  )
+    return end(
+      next,
+      {
+        kind: "aborted",
+        reason: `⚠️ The coding child completed but its run record has no runner publication receipt for the claimed head. A moved remote ref, child shell result, legacy push observation or salvage checkpoint is not readiness evidence, so no review round started.`,
+        round,
+        reviewRounds: next.reviewRounds,
+      },
+      [roundNote(round, "aborted")],
+    );
+
   // A failed coding child no longer aborts outright: the pr-check looks at the
   // branch first — an ordinary push before the death is recovered as the
   // round's pull request, and only a branch with nothing on it ends the unit
@@ -2583,6 +2610,7 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
       const progress = progressOf({
         branch: s.input.unit.branch,
         pushed: phase.childPushed ?? [],
+        runnerOnly: s.input.effects === "on",
         ...(session?.continueFrom !== undefined ? { startHead: session.continueFrom } : {}),
         ...(phase.childLeaseStartedAt !== undefined ? { leaseStartedAt: phase.childLeaseStartedAt } : {}),
         ...(session?.previousHandoff !== undefined && phase.childHandoff !== undefined

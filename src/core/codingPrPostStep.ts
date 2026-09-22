@@ -595,6 +595,10 @@ export async function runCodingPrPostStep(input: {
   verbosity: Verbosity;
   observed: WorkspaceObservation;
   description: PrDescription | undefined;
+  /** The runner's typed push receipt, when requested publication crossed the
+   *  effect seam. It is the publication authority; remote equality then only
+   *  confirms the object still stands and never creates a legacy push fact. */
+  publication?: { ref: string; sha: string; by: "runner" };
   target: CodingPrTarget;
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
   /** The open PR whose head is the branch, or null (githubPulls.ts'
@@ -669,7 +673,17 @@ export async function runCodingPrPostStep(input: {
   const headSha = normalizeHead(observed.head);
   const branch = observed.branch;
   const remoteHead = normalizeHead(observed.remoteHead);
-  const pushed = headSha !== undefined && remoteHead !== undefined && sameCommit(remoteHead, headSha);
+  const runnerPublished =
+    input.publication !== undefined &&
+    branch === input.publication.ref &&
+    headSha !== undefined &&
+    sameCommit(input.publication.sha, headSha);
+  const pushed =
+    runnerPublished ||
+    (input.publication === undefined &&
+      headSha !== undefined &&
+      remoteHead !== undefined &&
+      sameCommit(remoteHead, headSha));
   const compareUrl =
     repo && branch && pushed ? `https://github.com/${repo}/compare/${encodeGithubPathSegments(branch)}` : undefined;
   // HEAD moved after the push: the head branch is the one the run's
@@ -737,7 +751,7 @@ export async function runCodingPrPostStep(input: {
   // (run-history item 2; decision 0046): the branch the run pushed and the sha
   // the remote holds — never a checkout sitting at the base's own tip —
   // published whether or not a description or a pull request follows.
-  if (pushedBranch && branch !== undefined && headSha !== undefined) {
+  if (pushedBranch && branch !== undefined && headSha !== undefined && input.publication === undefined) {
     // The `clean` fact (record 0064): no uncommitted or unpushed work at the
     // push, from the same observation — absent when either measure is missing.
     const clean =

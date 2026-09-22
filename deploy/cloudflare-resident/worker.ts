@@ -95,7 +95,7 @@ import {
   type LevelSide,
   type ResidentLevelsDoc,
 } from "./levels.js";
-import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
+import { parseEffectOnly, parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
 import {
   decideWorktree,
   parseReuse,
@@ -415,7 +415,7 @@ const BUILD_ID = buildId(BUILD);
 // route is a `resident.fetch` root at the edge. Each joins the bot's trace when
 // the request carried one. The tracer and its log sink are shared.ts's: the
 // refresh instance's root (refresh.ts) starts from the same pair.
-const STREAMED_ROUTES: ReadonlySet<string> = new Set(["/attach", "/exec", "/op", "/await-restore"]);
+const STREAMED_ROUTES: ReadonlySet<string> = new Set(["/attach", "/exec", "/effect/push", "/op", "/await-restore"]);
 
 /** One request as the resident's own root: started at its t0, joining the
  *  bot's trace when `traceparent` parses, the collector's steps grafted as
@@ -957,7 +957,7 @@ interface MintedToken {
   token: string;
   expiresAtMs: number;
 }
-const githubTokenCache = new Map<string, MintedToken>(); // key: repo slug ("owner/name")
+const githubTokenCache = new Map<string, MintedToken>(); // key: scope + repo slug
 
 /** Mint a 1-hour installation token scoped to exactly `slug`'s repository,
  *  returning it with its expiry so callers can persist `expiresAtMs` and refresh
@@ -965,7 +965,11 @@ const githubTokenCache = new Map<string, MintedToken>(); // key: repo slug ("own
  *  cache — for a token GitHub REJECTED, whose cached copy must not be re-served.
  *  Throws a command-level Error on any failure — callers MUST NOT
  *  translate that into a lifecycle transition. */
-export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh?: boolean }): Promise<MintedToken> {
+export async function mintRepoScopedToken(
+  env: Env,
+  slug: string,
+  opts?: { fresh?: boolean; scope?: "read" | "write" },
+): Promise<MintedToken> {
   if (!githubAppConfigured(env)) {
     throw new Error(
       "github-app-not-configured: GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID / GITHUB_APP_PRIVATE_KEY secrets are unset; cannot mint an installation token",
@@ -977,8 +981,10 @@ export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh
   // refreshes at, so a token the cache hands out is never one a fresh attach
   // would immediately have to re-mint. Was 5 min — too little for a 20-minute
   // exec to run under.
-  if (opts?.fresh) githubTokenCache.delete(slug);
-  const cached = opts?.fresh ? undefined : githubTokenCache.get(slug);
+  const scope = opts?.scope ?? "write";
+  const cacheKey = `${scope}:${slug}`;
+  if (opts?.fresh) githubTokenCache.delete(cacheKey);
+  const cached = opts?.fresh ? undefined : githubTokenCache.get(cacheKey);
   if (cached && systemClock() < cached.expiresAtMs - CREDENTIAL_EXPIRY_MARGIN_MS) return cached;
 
   const jwt = await githubAppJwt(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
@@ -995,7 +1001,10 @@ export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh
         "content-type": "application/json",
         "user-agent": "switchboard-resident",
       },
-      body: JSON.stringify({ repositories: [repoName] }),
+      body: JSON.stringify({
+        repositories: [repoName],
+        ...(scope === "read" ? { permissions: { contents: "read", metadata: "read" } } : {}),
+      }),
       // A slow GitHub must not hang attach/refresh. The 10s abort surfaces as a
       // command-level Error (below), never a lifecycle transition.
       signal: AbortSignal.timeout(10_000),
@@ -1015,7 +1024,7 @@ export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh
   }
   const data = (await res.json()) as { token: string; expires_at: string };
   const minted: MintedToken = { token: data.token, expiresAtMs: Date.parse(data.expires_at) };
-  githubTokenCache.set(slug, minted);
+  githubTokenCache.set(cacheKey, minted);
   return minted;
 }
 
@@ -1208,6 +1217,8 @@ interface ThreadBinding {
    *  file, origin = the unreadable mirror. An attach in the other mode
    *  recreates the tree. Absent (pre-field bindings) = writable. */
   readonly?: boolean;
+  /** Effects-on coding tree: its helper holds a read-scoped token only. */
+  effectOnly?: boolean;
   /** Epoch ms when `.git/github-credentials` was last written (attach or the
    *  per-exec refresh). Absent = unknown → the next writable exec re-mints
    *  (`shouldRefreshThreadCredentials`); cleared by a read-only attach. */
@@ -1238,6 +1249,9 @@ interface AttachOk {
   workspace: string;
   ref: string;
   sha: string;
+  /** Closed changed-set gate set from the same onboarded command table used by
+   * the resident's test operation. */
+  verification: Array<{ name: string; command: string }>;
   user: string;
   /** True only when a scoped install had to run (lockfile key differed). */
   reconciled: boolean;
@@ -2431,22 +2445,23 @@ export class ResidentDO extends Sandbox<Env> {
     gitArgs: readonly string[],
     step: ResidentStepName,
     timeoutMs: number,
+    credentialFile: string = CRED_FILE,
   ): Promise<string> {
     const injected = { GIT_TERMINAL_PROMPT: "0" }; // fail fast instead of prompting
     validateEnvNames(injected);
     if (!token) {
       return this.runOk(["git", "-c", "credential.helper=", ...gitArgs], step, { timeoutMs, env: injected });
     }
-    await this.writeFile(CRED_FILE, `https://x-access-token:${token}@github.com\n`);
+    await this.writeFile(credentialFile, `https://x-access-token:${token}@github.com\n`);
     try {
       return await this.runOk(
-        ["git", "-c", "credential.helper=", "-c", `credential.helper=store --file=${CRED_FILE}`, ...gitArgs],
+        ["git", "-c", "credential.helper=", "-c", `credential.helper=store --file=${credentialFile}`, ...gitArgs],
         step,
         { timeoutMs, env: injected },
       );
     } finally {
       try {
-        await this.deleteFile(CRED_FILE);
+        await this.deleteFile(credentialFile);
       } catch {
         // one-shot file inside the 700 root-only dir; deletion is best-effort
       }
@@ -5506,13 +5521,14 @@ export class ResidentDO extends Sandbox<Env> {
     record?: ResidentRecord,
     traceparent?: string,
     reason: RefHintReason = NO_REF_HINT_REASON,
+    effectOnly = false,
   ): Promise<AttachOk | ThreadErr> {
     // One step trace per attach (docs/reference/specs/tracing.md item 19): every command
     // the attach runs lands on it, and the answer carries it.
     const t0 = systemClock();
     const trace = createStepTrace(t0);
     const res = await this.stepTrace.run(trace, () =>
-      this.attachThreadTraced(threadKey, refHint, readonly, wantSha, reuse, record, t0, reason),
+      this.attachThreadTraced(threadKey, refHint, readonly, wantSha, reuse, record, t0, reason, effectOnly),
     );
     // The same steps as the resident's own `resident.attach` root (item 22).
     emitStepRoot("resident.attach", t0, trace.steps(), traceparent, "error" in res ? refusalOutcome(res) : "ok");
@@ -5529,6 +5545,7 @@ export class ResidentDO extends Sandbox<Env> {
     record: ResidentRecord | undefined,
     t0: number,
     reason: RefHintReason,
+    effectOnly: boolean,
   ): Promise<AttachOk | ThreadErr> {
     try {
       await this.ensureHydrated();
@@ -5586,6 +5603,7 @@ export class ResidentDO extends Sandbox<Env> {
           t0,
           record,
           reason,
+          effectOnly,
         );
         // The run this attach opens is now in flight until its release —
         // whatever its op counters read between the bot's calls (item 44).
@@ -5626,6 +5644,7 @@ export class ResidentDO extends Sandbox<Env> {
     t0: number,
     recordFromRoute: ResidentRecord | undefined,
     reason: RefHintReason,
+    effectOnly: boolean,
   ): Promise<AttachOk | ThreadErr> {
     try {
       await this.refreshIfStale(resourceId);
@@ -5692,7 +5711,7 @@ export class ResidentDO extends Sandbox<Env> {
       : (prior?.worktreePath ?? (await threadWorktreePath(threadKey, ref)));
     // Read-only vs writable (item 50): decided here, once, from the request
     // and the prior binding's mode — the tested pure helper is the shipped code.
-    const mode = planReadonlyAttach({ readonly, prior, slug, mirrorDir: MIRROR_DIR });
+    const mode = planReadonlyAttach({ readonly, effectOnly, prior, slug, mirrorDir: MIRROR_DIR });
 
     const alloc = await this.allocateThreadUser(
       threadKey,
@@ -5996,7 +6015,9 @@ export class ResidentDO extends Sandbox<Env> {
       // Read-only: no token for the TREE — nothing to leak, nothing to push with.
     } else if (githubAppConfigured(this.env)) {
       try {
-        const minted = await mintRepoScopedToken(this.env, slug);
+        const minted = await mintRepoScopedToken(this.env, slug, {
+          scope: mode.credentialScope === "read" ? "read" : "write",
+        });
         token = minted.token;
         tokenExpiresAtMs = minted.expiresAtMs;
       } catch (err) {
@@ -6226,6 +6247,7 @@ export class ResidentDO extends Sandbox<Env> {
       ...(deps.depsKey ? { depsKey: deps.depsKey } : {}),
       sha: locked.value.sha,
       readonly: mode.readonly,
+      effectOnly: mode.credentialScope === "read",
       // A writable attach that could not mint keeps nothing to date: the next
       // exec sees the file missing and re-mints (or logs and runs without).
       ...(credentialsWrittenAt !== undefined ? { credentialsWrittenAt } : {}),
@@ -6242,6 +6264,7 @@ export class ResidentDO extends Sandbox<Env> {
       workspace: binding.worktreePath,
       ref: binding.ref,
       sha: locked.value.sha,
+      verification: [{ name: "test", command: record.commands.test }],
       user: binding.user,
       reconciled: deps.reconciled,
       recreated: locked.value.recreated,
@@ -7078,6 +7101,7 @@ export class ResidentDO extends Sandbox<Env> {
       // expiry-driven refresh still reuses the cache.
       const minted = await mintRepoScopedToken(this.env, resource.slice("repo:".length), {
         fresh: decision.reason === "empty",
+        scope: binding.effectOnly ? "read" : "write",
       });
       const writtenAt = await this.writeThreadCredentials(binding, minted.token);
       console.log(`credentials: refreshed for ${binding.threadKey} (${decision.reason})`);
@@ -7151,6 +7175,54 @@ export class ResidentDO extends Sandbox<Env> {
       if (n <= 0) this.threadOpsInFlight.delete(threadKey);
       else this.threadOpsInFlight.set(threadKey, n);
     }
+  }
+
+  async publishThread(
+    threadKey: string,
+    source: string,
+    destination: string,
+    lease: string | null,
+  ): Promise<{ previous?: string; published: string } | ThreadErr> {
+    return this.withThreadBusy(threadKey, async () => {
+      const pre = await this.threadPreflight(threadKey);
+      if ("error" in pre) return pre;
+      const { binding } = pre;
+      if (binding.effectOnly !== true)
+        return { error: "effect-push-refused: this worktree is not bound to runner-only publication", status: 409 };
+      const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+      const slug = resource.slice("repo:".length);
+      let minted: MintedToken;
+      try {
+        minted = await mintRepoScopedToken(this.env, slug, { scope: "write" });
+      } catch (err) {
+        return { error: `effect-push-credential-unavailable: ${errMsg(err)}`, status: 503 };
+      }
+      const leaseArg = `--force-with-lease=${destination}:${lease ?? ""}`;
+      try {
+        await this.gitWithCred(
+          minted.token,
+          [
+            "-C",
+            binding.worktreePath,
+            "-c",
+            `safe.directory=${binding.worktreePath}`,
+            "-c",
+            "core.hooksPath=/dev/null",
+            "push",
+            "--no-verify",
+            leaseArg,
+            "origin",
+            `${source}:${destination}`,
+          ],
+          "git",
+          GIT_NETWORK_TIMEOUT_MS,
+          `${CRED_FILE}-${binding.user}`,
+        );
+      } catch (err) {
+        return { error: `effect-push-failed: ${errMsg(err)}`, status: 502 };
+      }
+      return { ...(lease !== null ? { previous: lease } : {}), published: source };
+    });
   }
 
   async execThread(
@@ -8890,6 +8962,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/attach": { scope: "operator", method: "POST" },
   "/detach": { scope: "operator", method: "POST" },
   "/exec": { scope: "operator", method: "POST" },
+  "/effect/push": { scope: "operator", method: "POST" },
   "/read": { scope: "operator", method: "POST" },
   "/write": { scope: "operator", method: "POST" },
   "/op": { scope: "operator", method: "POST" },
@@ -9009,6 +9082,8 @@ export default {
             return await handleDetach(env, body);
           case "/exec":
             return await handleExec(env, body, traceparent);
+          case "/effect/push":
+            return await handleEffectPush(env, body);
           case "/read":
             return await handleRead(env, body);
           case "/write":
@@ -9620,6 +9695,10 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
   }
   const readonly = parseReadonly(body.readonly);
   if ("error" in readonly) return json({ error: readonly.error }, 400);
+  const effectOnly = parseEffectOnly(body.effectOnly);
+  if ("error" in effectOnly) return json({ error: effectOnly.error }, 400);
+  if (readonly.readonly && effectOnly.effectOnly)
+    return json({ error: "readonly and effectOnly cannot both be true" }, 400);
   const want = parseWantSha(body.sha);
   if ("error" in want) return json({ error: want.error }, 400);
   const reuse = parseReuse(body.reuse);
@@ -9653,6 +9732,7 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
         ctx.record,
         traceparent,
         reason,
+        effectOnly.effectOnly,
       ),
     ),
     ({ result, levels }) => ({ ...(result as object), ...(levels ? { levels } : {}) }),
@@ -9692,6 +9772,24 @@ async function handleDetach(env: Env, body: Record<string, unknown>): Promise<Re
   const result = await ctx.stub.detachThread(ctx.threadKey, body.force === true, pushed.pushed);
   if ("error" in result) return threadErrResponse(result);
   return json(result);
+}
+
+async function handleEffectPush(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const ctx = await resolveThreadRoute(env, body);
+  if (ctx instanceof Response) return ctx;
+  const source = parseWantSha(body.source);
+  if ("error" in source || source.sha === null) return json({ error: "source must be a 40-character commit sha" }, 400);
+  if (typeof body.destination !== "string" || !body.destination.startsWith("refs/heads/"))
+    return json({ error: "destination must name one refs/heads branch" }, 400);
+  const branch = parseRef(body.destination.slice("refs/heads/".length), "destination");
+  if ("error" in branch) return json({ error: branch.error }, 400);
+  const lease = body.lease === undefined ? { sha: null } : parseWantSha(body.lease);
+  if ("error" in lease) return json({ error: "lease must be a 40-character commit sha when present" }, 400);
+  return streamHeartbeatJson(
+    ctx.stub.publishThread(ctx.threadKey, source.sha, `refs/heads/${branch.ref}`, lease.sha),
+    (result) => result,
+    (err) => catchAllErr(err, "effect-push-failed"),
+  );
 }
 
 async function handleExec(env: Env, body: Record<string, unknown>, traceparent?: string): Promise<Response> {

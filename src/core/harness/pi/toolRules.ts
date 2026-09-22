@@ -29,6 +29,7 @@ export const PI_TOOL_BUNDLES: Readonly<Record<string, string>> = {
   write: "write-files",
   edit: "write-files",
   submit_pr_description: "pr",
+  push: "effects",
   submit_verdict: "verdict",
 };
 
@@ -42,6 +43,7 @@ export const CODING_REACH: ReadonlySet<string> = new Set([
   "github-read",
   "github-write",
   "pr",
+  "effects",
 ]);
 
 /** A read-identity preset's reach — the `readonly` and `explore` toolsets'
@@ -88,6 +90,9 @@ export interface ToolRuleContext {
    *  explicit timeout reaches past it is refused before it runs. Absent (a
    *  preview, a gate whose ask carries no timeout), no call is judged by it. */
   loopEndsIn?: () => number;
+  /** The typed-effects rollout mode. In `on`, bash can never publish; in
+   *  `shadow`, the legacy text judge remains authoritative for one release. */
+  effects?: "shadow" | "on";
 }
 
 const allowed: ToolVerdict = { verdict: "allowed" };
@@ -208,6 +213,7 @@ function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
   if (MERGE_OR_APPROVE.test(command)) {
     return refused("merge/approve — a coding run never merges or approves a pull request");
   }
+  if (ctx.effects === "on" && potentialChildPush(command)) return judgePush();
   if (ctx.identity !== "write") {
     // The read-only rule (harness-pi item 10): the worktree the resident
     // attached for this run holds no write token and its origin is the
@@ -221,10 +227,19 @@ function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
     return allowed;
   }
   for (const match of command.matchAll(GIT_PUSH)) {
-    const verdict = judgePush(match[1], ctx);
+    const verdict = judgeLegacyPush(match[1], ctx);
     if (verdict.verdict !== "allowed") return verdict;
   }
   return allowed;
+}
+
+/** Defense in depth for the known shell push spellings. This is deliberately
+ * not an authorization parser: in effects-on mode the child executor has no
+ * publish credential, and every spelling recognized here receives the same
+ * one-rule refusal. Alias creation is included because its only purpose in a
+ * compound command can be to hide the push word from the next git command. */
+function potentialChildPush(command: string): boolean {
+  return ANY_PUSH.test(command) || /\bgit\s+config\s+alias\.[^\s=]+(?:\s+|=)[^;&|]*\bpush\b/.test(command);
 }
 
 /** pi's bash `timeout` is seconds, optional, and unbounded when absent (the
@@ -242,13 +257,20 @@ function judgeBashTimeout(timeout: unknown, ctx: ToolRuleContext): ToolVerdict {
   return refused(commandPastLoopEndRefusal(Math.round(timeout), Math.max(0, Math.floor(leftMs / 1000))));
 }
 
-/** `git push [flags] [remote [refspec]]`: the run's repository is `origin`
+/** The effects-on push judge has one rule and no shell or git semantics. */
+function judgePush(): ToolVerdict {
+  return refused("publish — the child does not push; use the typed push tool");
+}
+
+/** Shadow rollout only: `git push [flags] [remote [refspec]]` uses the legacy
+ * text judge while today's path remains the sole publisher. It is deleted at
+ * cutover; no production-effects decision depends on it. The run's repository is `origin`
  *  and, when the run was given a branch, that is its one target — anything
  *  else is a `repo:use` the grant set does not carry; a destination of `HEAD`
  *  is the branch the driver checked out, the run's, so `git push origin HEAD`
  *  is the same push as naming it. A run naming its own branch may push any but
  *  the protected ones: the base its pull request targets is never pushed to. */
-function judgePush(tail: string, ctx: ToolRuleContext): ToolVerdict {
+function judgeLegacyPush(tail: string, ctx: ToolRuleContext): ToolVerdict {
   const [remote, refspec] = pushArguments(tail);
   if (remote !== undefined && remote !== "origin") {
     return refused(`repo:use — push to remote \`${remote}\`, not the run's repository (origin)`);

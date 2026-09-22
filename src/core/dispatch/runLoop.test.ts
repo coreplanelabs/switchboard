@@ -44,7 +44,7 @@ import type { DispatchFollowUp } from "./admission.js";
 import { buildMessages } from "./messages.js";
 import { resolveRun } from "./resolve.js";
 import type { HarnessProcessDeps, RunDeps } from "./run.js";
-import { runLoop, type RunLoopOutcome, type RunOutcome } from "./runLoop.js";
+import { latestRunnerPublication, runLoop, type RunLoopOutcome, type RunOutcome } from "./runLoop.js";
 
 /** The loop's answered outcome; an interruption fails the test naming its note. */
 function answered(out: RunLoopOutcome): RunOutcome {
@@ -379,6 +379,103 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     idempotencyKey: "key",
     base: "main",
   };
+  it("restores the newest runner publication matching the admitted branch and current head", () => {
+    const receipt = (effectId: string, branch: string, after: string, occurredAt: number) => ({
+      effectId,
+      kind: "push" as const,
+      outcome: "succeeded" as const,
+      actor: "slack:UX",
+      repository: "acme/api",
+      resource: `acme/api#refs/heads/${branch}`,
+      destination: `refs/heads/${branch}`,
+      after,
+      tree: after,
+      endpoint: "https://github.com/acme/api.git",
+      gates: [],
+      by: "runner" as const,
+      occurredAt,
+    });
+    const old = receipt("old", "feat/x", "a".repeat(40), 10);
+    const wrongBranch = receipt("other", "feat/y", "b".repeat(40), 40);
+    const current = receipt("current", "feat/x", "b".repeat(40), 30);
+    const sameTimeNewer = receipt("same-time-newer", "feat/x", "b".repeat(40), 30);
+    const staleLater = receipt("stale", "feat/x", "a".repeat(40), 50);
+    expect(
+      latestRunnerPublication({ old, wrongBranch, current, sameTimeNewer, staleLater }, "feat/x", "b".repeat(40)),
+    ).toEqual(sameTimeNewer);
+  });
+
+  it("configuration refuses effects on when no durable run ledger can back the tool", () => {
+    expect(() => configStore(`${YAML}\nharness:\n  effects: on\n`)).toThrow(
+      /harness\.effects: on requires runHistory so effect envelopes and receipts survive restart/,
+    );
+  });
+
+  it("does not resolve a push until the effect envelope's durable state write is acknowledged", async () => {
+    const commands: string[] = [];
+    const executor: Partial<Executor> = { exec: async (command) => (commands.push(command), "") };
+    let durableWrites = 0;
+    const ledgerRun = new NullLedgerRun("run-l", { put: async () => {}, abandoned: () => {} });
+    ledgerRun.setStateDurable = async () => {
+      durableWrites++;
+      return false;
+    };
+    const effectHarness: Harness = {
+      name: piHarness.name,
+      history: piHarness.history,
+      dispositions: piHarness.dispositions,
+      effort: (tier) => piHarness.effort(tier),
+      builtinTools: (identity) => piHarness.builtinTools(identity),
+      open: async (_deps, harnessRun) => {
+        let answer = "effect unexpectedly ran";
+        try {
+          await harnessRun.toolContext.effects!.execute({
+            effectId: "push-1",
+            command: {
+              kind: "push",
+              repository: "acme/api",
+              branch: "feat/x",
+              expectedHead: "a".repeat(40),
+              base: "main",
+              gateSet: "changed-set",
+            },
+          });
+        } catch (err) {
+          answer = err instanceof Error ? err.message : String(err);
+        }
+        return { answer, followUp: async () => "", remainingMs: () => 60_000, end: async () => {} };
+      },
+      find: async () => "alive-here",
+      end: async () => {},
+    };
+    const s = setup("", {
+      agent: "coding",
+      coding: true,
+      executor,
+      harness: {
+        ...({} as HarnessProcessDeps),
+        harnesses: roster(effectHarness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      yaml: `${YAML}\nrunHistory:\n  store: file\nharness:\n  effects: on\n`,
+      repoCtx: { repo: "acme/api", ref: "feat/x", baseRef: "main" },
+      binding: {
+        ref: "feat/x",
+        sha: "a".repeat(40),
+        verification: [{ name: "test", command: "pytest -q" }],
+      },
+    });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun }));
+    expect(out.answer).toContain("not durably persisted");
+    expect(durableWrites).toBe(1);
+    expect(commands).not.toContain("git remote get-url --push origin");
+    expect(commands.some((command) => command.startsWith("git fetch ") || command.startsWith("git push "))).toBe(false);
+    expect(commands).not.toContain("pytest -q");
+  });
+
   // docs/reference/specs/agent-coding.md item 10: the thread's file upload
   // rides the tool context only when the channel has one — a coding run's
   // `attach_file` posts through the requesting thread's `attachFile`.
@@ -1978,6 +2075,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       checkout: "/srv/wt/the-pr",
       branch: "fix/the-pr-head",
       protectedBranches: ["main"],
+      effects: "shadow",
       loopEndsIn: expect.any(Function),
     });
     expect(push(fixRound, "fix/the-pr-head")).toBe("allowed");
@@ -1992,6 +2090,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       checkout: "/workspace",
       branch: "unit/u26",
       protectedBranches: ["feat/trunk"],
+      effects: "shadow",
       loopEndsIn: expect.any(Function),
     });
     expect(push(child, "unit/u26")).toBe("allowed");
@@ -2023,6 +2122,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       checkout: "/workspace",
       branch: "unit/u27",
       protectedBranches: ["feat/trunk"],
+      effects: "shadow",
       loopEndsIn: expect.any(Function),
     });
     expect(push(recovered, "unit/u27")).toBe("allowed");
@@ -2033,6 +2133,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       identity: "write",
       checkout: "/workspace",
       protectedBranches: ["main"],
+      effects: "shadow",
       loopEndsIn: expect.any(Function),
     });
     expect(push(plain, "feat/anything")).toBe("allowed");

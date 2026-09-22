@@ -466,6 +466,29 @@ describe("ResidentExecutor.exec", () => {
   });
 });
 
+describe("ResidentExecutor.publishGit", () => {
+  it("uses the closed runner-owned effect route rather than a child shell command", async () => {
+    const { calls } = stubFetch({
+      body: { previous: "b".repeat(40), published: "c".repeat(40) },
+    });
+    const ex = new ResidentExecutor(OPTS);
+    await expect(
+      ex.publishGit({
+        source: "c".repeat(40),
+        destination: "refs/heads/feat/x",
+        lease: "b".repeat(40),
+      }),
+    ).resolves.toEqual({ previous: "b".repeat(40), published: "c".repeat(40) });
+    expect(route(calls[0])).toBe("/effect/push");
+    expect(sentBody(calls[0])).toMatchObject({
+      source: "c".repeat(40),
+      destination: "refs/heads/feat/x",
+      lease: "b".repeat(40),
+    });
+    expect(String(sentBody(calls[0]).command ?? "")).toBe("");
+  });
+});
+
 // An infra failure (`ExecInfraError`) names a genuinely dead resident and
 // NEVER a healthy one that merely rejected agent-fixable input. A
 // client/validation rejection (command-too-long) is the exact false-positive
@@ -709,6 +732,14 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[1])).not.toHaveProperty("readonly");
   });
 
+  it("sends effectOnly only for a coding worktree whose publication credential stays behind the runner port", async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: ATTACH_OK });
+    await ResidentExecutor.open({ ...OPTS, refHint: "master", effectOnly: true });
+    expect(sentBody(calls[0])).toMatchObject({ effectOnly: true });
+    await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    expect(sentBody(calls[1])).not.toHaveProperty("effectOnly");
+  });
+
   // docs/reference/specs/resident-repos.md item 51: the expected head rides along so the
   // resident fetches a mirror whose ref tip lags it (a re-review after a push
   // would otherwise attach to a stale tip). Sent only when set — older body
@@ -855,6 +886,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
         ref: "master",
         sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05",
         user: "worker2",
+        verification: [{ name: "test", command: "pytest -q" }],
         deps: "hardlink",
       },
     });
@@ -864,6 +896,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
       sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05",
       workspace: "/workspace/threads/t/master",
       user: "worker2",
+      verification: [{ name: "test", command: "pytest -q" }],
     });
   });
 

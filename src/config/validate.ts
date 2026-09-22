@@ -323,6 +323,10 @@ export function validateConfig(cfg: AppConfig): void {
     if (problem) throw new Error(`config.yaml: ${problem}`);
   }
   validateHarnessWords(cfg, "config.yaml");
+  if (cfg.harness?.effects === "on" && cfg.runHistory === undefined)
+    throw new Error(
+      "config.yaml: harness.effects: on requires runHistory so effect envelopes and receipts survive restart",
+    );
   validateMcpServers(cfg, "config.yaml");
   if (typeof cfg.organization !== "string" || cfg.organization.trim() === "") {
     throw new Error(
@@ -455,6 +459,13 @@ export function validateHarnessWords(
     if (typeof harness !== "object" || harness === null || Array.isArray(harness))
       throw new Error(`${source}: ${path} must be a mapping of preset to a harness name (${harnessWords(" or ")})`);
     for (const [preset, value] of Object.entries(harness)) {
+      if (path === "harness" && preset === "effects") {
+        if (value !== "shadow" && value !== "on")
+          throw new Error(
+            `${source}: harness.effects: ${typeof value === "string" ? value : JSON.stringify(value)} is not an effects mode; the effects modes are shadow and on`,
+          );
+        continue;
+      }
       if (!Object.hasOwn(AGENTS, preset)) throw new Error(`${source}: ${path}.${preset} is not a known agent`);
       if (!isHarnessName(value))
         throw new Error(

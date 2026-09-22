@@ -296,19 +296,20 @@ export interface RunLease {
 }
 
 /** A head a run pushed, as the record names it (item 2): the branch, sha,
- *  and whether the agent pushed it or the run's mechanical WIP salvage did.
+ *  and whether the runner published it by typed request, the shadow rollout
+ *  observed a legacy child push, or the run's mechanical WIP salvage did.
  *  `by` is optional for records written before that distinction survived the
  *  event fold. */
 export interface PushedHead {
   ref: string;
   sha: string;
-  by?: "push" | "salvage";
+  by?: "push" | "salvage" | "runner";
 }
 
 /** The heads a run's events say it pushed — one per branch, the last event's
  *  sha winning, in first-seen order — or nothing when it pushed none. */
 export function pushedHeadsOf(events: readonly RunEvent[]): PushedHead[] | undefined {
-  const byRef = new Map<string, { sha: string; by: "push" | "salvage" }>();
+  const byRef = new Map<string, { sha: string; by: "push" | "salvage" | "runner" }>();
   for (const e of events) if (e.type === "pushed_head") byRef.set(e.ref, { sha: e.sha, by: e.by });
   if (byRef.size === 0) return undefined;
   return [...byRef].map(([ref, pushed]) => ({ ref, ...pushed }));
@@ -1064,7 +1065,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
           ref.length > 0 &&
           typeof sha === "string" &&
           /^[0-9a-f]{7,40}$/.test(sha) &&
-          (by === undefined || by === "push" || by === "salvage")
+          (by === undefined || by === "push" || by === "salvage" || by === "runner")
         );
       })
     )

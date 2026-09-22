@@ -299,6 +299,9 @@ export type RunNoteKind =
    *  work in its tree: before teardown the run loop made a WIP commit and
    *  pushed the unit branch, or recorded why no push was possible. */
   | "work_salvage"
+  /** A typed effect evaluated in shadow mode. The note says whether the seam
+   *  would allow or refuse it and that no write was made. */
+  | "effect_decision"
   /** A pi run's compaction failed for good — the provider refused the summary
    *  (harness-pi.md item 7) — and the run loop treated it as a checkpoint
    *  signal: the tracked changes were committed and pushed to the run's own
@@ -369,6 +372,7 @@ export const RUN_NOTE_KINDS = [
   "directory_reached",
   "budget_salvage",
   "work_salvage",
+  "effect_decision",
   "compaction_salvage",
   "stuck_loop",
   "decline_cascade",
@@ -923,16 +927,22 @@ export type RunEvent =
    *  start of the loop; a resumed run carries the original. Head material,
    *  like `run_meta`. Additive: unknown → ignored. */
   | { type: "lease"; startedAt: number; endsAt: number; loopEndsAt: number; seq?: number; at?: number }
+  /** A runner-owned external effect outcome (record 0074): the typed receipt
+   *  or refusal is durable before it is returned to the child. Its operation-
+   *  specific shape is validated where the effect is produced; old readers
+   *  retain the object as an additive event. */
+  | { type: "effect"; result: import("./runEffects.js").EffectResult; seq?: number; at?: number }
   /** A head the run pushed (docs/reference/specs/run-history.md item 2; decision
    *  0046): the branch and the sha the coding post-step observed on the remote
-   *  (`by: "push"`), or the budget-end salvage pushed (`by: "salvage"`),
+   *  (`by: "runner"` from the typed effect, legacy `by: "push"` during shadow),
+   *  or the budget-end salvage pushed (`by: "salvage"`),
    *  whether or not a pull request follows — the fact renewal reads. Published
    *  straight to the registry like `pr_opened`. Additive: unknown → ignored. */
   | {
       type: "pushed_head";
       ref: string;
       sha: string;
-      by: "push" | "salvage";
+      by: "push" | "salvage" | "runner";
       /** No uncommitted or unpushed work at the push (record 0064): the fact
        *  the plane's soft stop reads. Absent where the measure was missing. */
       clean?: boolean;

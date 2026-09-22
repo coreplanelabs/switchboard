@@ -1,3 +1,9 @@
+import { execFile } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
   CODING_REACH,
@@ -160,6 +166,79 @@ describe("judgeToolCall — a read-identity run", () => {
     expect(bash("gh pr comment 12 --body 'done'")).toEqual({ verdict: "allowed" });
     expect(bash("gh api repos/o/r/issues/12/comments -f body=hi")).toEqual({ verdict: "allowed" });
     expect(bash("git push -u origin load-pi/test-gap-1")).toEqual({ verdict: "allowed" });
+  });
+});
+
+// Record 0074's shell-shape regression: once runner effects are on,
+// child bash has one publication rule. The table is deliberately about the
+// historically troublesome spellings, but every row has the same verdict;
+// none is parsed for an endpoint, source or refspec.
+describe("judgeToolCall — bash cannot publish when harness.effects is on", () => {
+  const on = { ...ctx, effects: "on" as const };
+  const push = { verdict: "refused", reason: "publish — the child does not push; use the typed push tool" };
+
+  it.each([
+    ["plain", "git push -u origin load-pi/test-gap-1"],
+    ["omitted refspec", "git push"],
+    ["git config override", "git -c push.default=current push"],
+    ["environment config", "GIT_CONFIG=/tmp/other git push origin HEAD"],
+    ["alternate endpoint", "git push https://github.com/other/repo.git HEAD:main"],
+    ["force", "git push --force-with-lease origin HEAD:load-pi/test-gap-1"],
+    ["bulk", "git push --all origin"],
+    ["tags", "git push --tags origin"],
+    ["mirror", "git push --mirror origin"],
+    ["wrapper", "sh -c 'git push origin HEAD'"],
+    ["command substitution", "echo $(git push origin HEAD)"],
+    ["backtick substitution", "echo `git push origin HEAD`"],
+    ["compound before", "git switch main && git push"],
+    ["compound after", "git push origin HEAD; git status"],
+    ["alias definition and use", "git config alias.ship push && git ship origin HEAD"],
+  ])("refuses %s by the courtesy structural rule", (_name, command) => {
+    expect(judgeToolCall("bash", { command }, on)).toEqual(push);
+  });
+
+  it("an obfuscated push that misses the courtesy rule is rejected by the remote because the child has no publication credential", async () => {
+    const requests: Array<{ authorization?: string }> = [];
+    const remote = createServer((req, res) => {
+      requests.push({ ...(req.headers.authorization ? { authorization: req.headers.authorization } : {}) });
+      res.writeHead(401, { "www-authenticate": 'Basic realm="fake-git"' });
+      res.end("publication credential required");
+    });
+    await new Promise<void>((resolve) => remote.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = remote.address();
+      if (address === null || typeof address === "string") throw new Error("fake remote did not bind a TCP port");
+      const dir = mkdtempSync(join(tmpdir(), "switchboard-no-publish-credential-"));
+      writeFileSync(join(dir, "README.md"), "fixture\n");
+      const run = promisify(execFile);
+      await run("git", ["init", "-q"], { cwd: dir });
+      await run("git", ["add", "README.md"], { cwd: dir });
+      await run(
+        "git",
+        ["-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"],
+        {
+          cwd: dir,
+        },
+      );
+      await run("git", ["remote", "add", "origin", `http://127.0.0.1:${address.port}/acme/api.git`], { cwd: dir });
+      const command = 'G=git; "$G" push origin HEAD:refs/heads/feat/obfuscated';
+      expect(judgeToolCall("bash", { command }, on)).toEqual({ verdict: "allowed" });
+      let failed: { stderr?: string; code?: number } | undefined;
+      try {
+        await run("bash", ["-lc", command], {
+          cwd: dir,
+          env: { PATH: process.env.PATH ?? "", HOME: dir, GIT_TERMINAL_PROMPT: "0" },
+        });
+      } catch (err) {
+        failed = err as { stderr?: string; code?: number };
+      }
+      expect(failed?.code).not.toBe(0);
+      expect(failed?.stderr).toMatch(/could not read Username|terminal prompts disabled|Authentication failed/i);
+      expect(requests.length).toBeGreaterThan(0);
+      expect(requests.every((request) => request.authorization === undefined)).toBe(true);
+    } finally {
+      await new Promise<void>((resolve, reject) => remote.close((err) => (err ? reject(err) : resolve())));
+    }
   });
 });
 

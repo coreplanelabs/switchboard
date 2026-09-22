@@ -122,6 +122,7 @@ export async function attachRoundWorkspace(input: {
     agent: AgentDef;
     /** The round's effective profile — what is provisioned, and as whom. */
     profile: RunProfile;
+    effects?: "shadow" | "on";
     repo?: string;
     ref?: string;
     headSha?: string;
@@ -157,6 +158,7 @@ export async function attachRoundWorkspace(input: {
       threadKey: input.round.threadKey,
       agent,
       profile,
+      effects: input.round.effects,
       repo: input.round.repo,
       ref: input.round.ref,
       headSha: input.round.headSha,

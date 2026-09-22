@@ -50,6 +50,7 @@ import {
   truncate,
   type ExecOptions,
   type Executor,
+  type GitPublicationRequest,
   type ReleaseMode,
   type ReleaseResult,
 } from "./executor.js";
@@ -71,6 +72,7 @@ import type { LeftBehind } from "./residentCleanliness.js";
 //     heartbeats then ONE JSON document {stdout, stderr, exitCode, truncated};
 //     post-validation failures arrive IN-BODY as {error, needs?, exitCode:127}
 //     — parse the body, never trust the status.
+//   /effect/push {resource, threadKey, source, destination, lease?} → runner-owned publication
 //   /read {resource, threadKey, path} → {content, truncated} | 409 needs-attach
 //   /write {resource, threadKey, path, content} → {ok, bytes} | same errors
 //
@@ -546,6 +548,9 @@ export interface ResidentExecutorOptions {
    *  the worktree with no credential file and an unfetchable origin. Sent only
    *  when true, so an older resident sees the body it always did. */
   readonly?: boolean;
+  /** Typed effects own publication: the worktree receives only a read-scoped
+   *  credential, while `/effect/push` mints and spends write authority. */
+  effectOnly?: boolean;
   /** The commit the caller expects the ref to be at — a PR head (docs/reference/specs/
    *  resident-repos.md item 51). The resident fetches its mirror when the ref's
    *  tip is not this commit instead of cloning a stale tip. Sent only when set,
@@ -588,6 +593,9 @@ export interface ResidentExecutorOptions {
 export interface ResidentBinding {
   ref: string;
   sha: string;
+  /** Repository-declared changed-set verification commands from the resident's
+   * onboarded command table. Absent from older Workers and cold workspaces. */
+  verification?: Array<{ name: string; command: string }>;
   /** Absolute path of the thread's worktree inside the resident — the cwd of
    *  every /exec. Advisory (named to the model so it never goes looking for
    *  the repository); undefined if the attach answer lacked it. */
@@ -1291,6 +1299,7 @@ export class ResidentExecutor implements Executor {
     const body: Record<string, unknown> = {};
     if (this.opts.refHint) body.refHint = this.opts.refHint;
     if (this.opts.readonly) body.readonly = true;
+    if (this.opts.effectOnly) body.effectOnly = true;
     if (this.opts.sha && this.shaPending) body.sha = this.opts.sha;
     if (this.opts.reuse) body.reuse = true;
     if (this.opts.ownPr) body.ownPr = this.opts.ownPr;
@@ -1326,9 +1335,19 @@ export class ResidentExecutor implements Executor {
     const trace = sanitizeGraftedSteps(data.trace);
     const rebound = reboundOf(data.rebound);
     const rebindRefused = rebindRefusedOf(data.rebindRefused);
+    const verification = Array.isArray(data.verification)
+      ? data.verification.flatMap((entry) => {
+          if (typeof entry !== "object" || entry === null) return [];
+          const gate = entry as Record<string, unknown>;
+          return typeof gate.name === "string" && typeof gate.command === "string" && gate.name && gate.command
+            ? [{ name: gate.name, command: gate.command }]
+            : [];
+        })
+      : [];
     this.lastBinding = {
       ref: data.ref,
       sha: data.sha,
+      ...(verification.length > 0 ? { verification } : {}),
       ...(typeof data.workspace === "string" && data.workspace ? { workspace: data.workspace } : {}),
       ...(typeof data.user === "string" && data.user ? { user: data.user } : {}),
       ...(typeof data.container === "string" && data.container ? { container: data.container } : {}),
@@ -1917,6 +1936,35 @@ export class ResidentExecutor implements Executor {
     const exitCode = Number(data.exitCode ?? 0);
     if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);
     return truncate(parts || "(no output)");
+  }
+
+  async publishGit(
+    request: GitPublicationRequest,
+    opts?: ExecTraceOptions,
+  ): Promise<{ previous?: string; published: string }> {
+    const { status, data } = await this.opWithReattach(
+      "/effect/push",
+      {
+        source: request.source,
+        destination: request.destination,
+        ...(request.lease !== undefined ? { lease: request.lease } : {}),
+      },
+      { span: opts?.span, callTimeoutMs: BASH_TIMEOUT_MAX_MS + EXEC_CALL_MARGIN_MS },
+    );
+    if (status !== 200 || typeof data.published !== "string") {
+      const said = answeredStatus(status, data);
+      throw classifyError(
+        new ExecInfraError(
+          `resident /effect/push: ${String(data.error ?? `HTTP ${said}`)}`,
+          residentAnswerReason(said, data),
+        ),
+        { kind: "http", code: String(said) },
+      );
+    }
+    return {
+      ...(typeof data.previous === "string" ? { previous: data.previous } : {}),
+      published: data.published,
+    };
   }
 
   async readFile(path: string, opts?: ExecTraceOptions): Promise<string> {

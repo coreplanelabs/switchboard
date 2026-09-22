@@ -52,7 +52,7 @@ import {
 } from "./config/validate.js";
 export type { IntakeMode } from "./config/validate.js";
 import type { HarnessName } from "./core/harness/contract.js";
-import type { HarnessScope } from "./core/harness/roster.js";
+import { isHarnessName, type HarnessScope } from "./core/harness/roster.js";
 import type { OpenCodeCompactionConfig } from "./core/harness/opencode/process.js";
 import {
   effectiveConfirm,
@@ -321,6 +321,20 @@ export interface ReviewConfig {
   addressSeverity?: AddressSeverity;
 }
 
+export const EFFECTS_MODES = ["shadow", "on"] as const;
+export type EffectsMode = (typeof EFFECTS_MODES)[number];
+
+/** Deployment harness settings: preset → harness words plus the typed-effects
+ * rollout mode. `effects` is not a preset and never participates in the
+ * per-user/per-channel harness-resolution ladder. */
+export interface HarnessConfig {
+  effects?: EffectsMode;
+  [preset: string]: HarnessName | EffectsMode | undefined;
+}
+
+/** The typed-effect rollout enters at shadow when the key is absent. */
+export const effectsModeOf = (config: Pick<AppConfig, "harness">): EffectsMode => config.harness?.effects ?? "shadow";
+
 export interface AppConfig {
   /**
    * The GitHub organization (or user) this installation serves — the account
@@ -505,7 +519,7 @@ export interface AppConfig {
    * flight. Validated at load against the roster's names: any other word
    * fails by name, as does a preset the registry does not know.
    */
-  harness?: Record<string, HarnessName>;
+  harness?: HarnessConfig;
   /**
    * What the harness writes into pi's per-run settings for every run on pi
    * (docs/reference/specs/harness-pi.md item 4): today the compaction
@@ -1242,12 +1256,13 @@ export class ConfigStore {
     const layers: Array<[HarnessScope, Record<string, HarnessName> | undefined]> = [
       ["user", user.harness],
       ["channel", channel.harness],
-      ["defaults", this.config.harness],
     ];
     for (const [scope, words] of layers) {
       const name = words?.[preset];
       if (name !== undefined) return { name, scope };
     }
+    const configured = this.config.harness?.[preset];
+    if (isHarnessName(configured)) return { name: configured, scope: "defaults" };
     return undefined;
   }
 
@@ -1256,7 +1271,7 @@ export class ConfigStore {
    *  no scope names one. */
   private effectiveHarnesses(channel: Scope, user: Scope): Record<string, ResolvedHarness> {
     const presets = new Set([
-      ...Object.keys(this.config.harness ?? {}),
+      ...Object.keys(this.config.harness ?? {}).filter((key) => key !== "effects"),
       ...Object.keys(channel.harness ?? {}),
       ...Object.keys(user.harness ?? {}),
     ]);
@@ -1534,7 +1549,13 @@ export class ConfigStore {
         models: this.config.defaults.models,
         ...(this.config.defaults.efforts ? { efforts: this.config.defaults.efforts } : {}),
         ...(this.config.defaults.verbosity ? { verbosity: this.config.defaults.verbosity } : {}),
-        ...(this.config.harness ? { harness: this.config.harness } : {}),
+        ...(this.config.harness
+          ? {
+              harness: Object.fromEntries(
+                Object.entries(this.config.harness).filter(([key, value]) => key !== "effects" && isHarnessName(value)),
+              ) as Record<string, HarnessName>,
+            }
+          : {}),
       },
       installationEfforts: {
         ...(this.config.defaults.efforts?.general ? { operator: this.config.defaults.efforts.general } : {}),
