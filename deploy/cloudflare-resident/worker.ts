@@ -103,6 +103,7 @@ import {
   type WorktreeFacts,
 } from "../../src/execution/residentReuse.js";
 import {
+  admitThreadDiskWithRollback,
   boundByFor,
   canReturnToDefault,
   parseOwnPr,
@@ -5704,7 +5705,8 @@ export class ResidentDO extends Sandbox<Env> {
     const binding = alloc.binding;
     // "Nothing created" on failure: a FRESH allocation (new binding or a
     // re-allocation after eviction) is rolled back if the attach fails below,
-    // so a bogus refHint can neither bind sticky garbage nor leak a pool user.
+    // including a throw during disk admission, so a bogus refHint can neither
+    // bind sticky garbage nor leak a pool user.
     const rollback = async (): Promise<void> => {
       if (!alloc.wrote) return;
       if (prior) await this.ctx.storage.put(threadBindingKey(threadKey), prior);
@@ -5712,7 +5714,12 @@ export class ResidentDO extends Sandbox<Env> {
     };
 
     // Disk admission (item 55): before the lock, since making room takes it.
-    const admission = await this.admitThreadDisk({ threadKey, binding, facts, record });
+    // An evicted prior binding has already published its replacement to
+    // reserve the user; keep that row provisional if admission itself throws.
+    const admission = await admitThreadDiskWithRollback(
+      () => this.admitThreadDisk({ threadKey, binding, facts, record }),
+      rollback,
+    );
     if ("error" in admission) {
       await rollback();
       return admission;

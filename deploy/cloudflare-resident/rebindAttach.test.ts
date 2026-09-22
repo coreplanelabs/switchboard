@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rebindPlan } from "../../src/execution/residentRebind.js";
+import { admitThreadDiskWithRollback, rebindPlan } from "../../src/execution/residentRebind.js";
 import { decideWorktree } from "../../src/execution/residentReuse.js";
 import { methodOf, readSource } from "./testing/sourceScan";
 
@@ -66,6 +66,27 @@ describe("a named ref replaces the sticky fallback before the worktree is provis
     );
     expect(body).toMatch(/await this\.discardReplacedCheckout\(threadKey, discard\)/);
     expect(method("discardReplacedCheckout")).toMatch(/this\.run\(\["rm", "-rf", path\]\)/);
+  });
+
+  it("a disk-admission throw restores an evicted prior binding instead of publishing the failed replacement", async () => {
+    const prior = { ref: "main", evicted: true, user: "" };
+    const replacement = { ref: "fix/retry", evicted: false, user: "worker2" };
+    let stored = replacement;
+    const admitThreadDisk = async (): Promise<never> => {
+      throw new Error("disk admission failed");
+    };
+
+    await expect(
+      admitThreadDiskWithRollback(admitThreadDisk, async () => {
+        stored = prior;
+      }),
+    ).rejects.toThrow("disk admission failed");
+    expect(stored).toBe(prior);
+
+    const body = method("attachThreadBody");
+    expect(body).toMatch(
+      /admitThreadDiskWithRollback\(\s*\(\) => this\.admitThreadDisk\(\{ threadKey, binding, facts, record \}\),\s*rollback,?\s*\)/,
+    );
   });
 
   it("a changed named ref forces the old tree to be recreated even when both refs currently have the same commit", () => {
