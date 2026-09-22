@@ -2052,6 +2052,7 @@ const ROUND_OUTCOMES = [
   "request_changes",
   "no_verdict",
   "checks_failed",
+  "blocked_by_operator_check",
   "checks_restarted",
   "transient",
   "enqueued",
@@ -2152,6 +2153,11 @@ function parseGate(raw: unknown): { level: AddressSeverity; findings: string[] }
   return { level: g.level, findings: g.findings as string[] };
 }
 
+/** The visible, per-head identity at the start of an operator-check report.
+ *  Slack may split a long report, so reconciliation looks for this marker
+ *  rather than requiring one history turn to equal the whole report. */
+const operatorCheckReportIdentity = (headSha: string): string => `approved head \`${headSha}\``;
+
 /** A round boundary: appended to the unit's row and drawn on the card. */
 async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
@@ -2174,6 +2180,22 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       ok: false,
       error: "gate must be { level: blocking|major|minor|nit, findings: string[] }",
     });
+  const report =
+    typeof body.report === "string" && body.report.length > 0 && body.report.length <= 20_000 ? body.report : undefined;
+  const reportHead = normalizeHead(body.reportHead);
+  const operatorBoundary = body.outcome === "blocked_by_operator_check";
+  if (
+    (operatorBoundary &&
+      (report === undefined ||
+        reportHead === undefined ||
+        !report.includes(operatorCheckReportIdentity(reportHead)))) ||
+    (!operatorBoundary && (body.report !== undefined || body.reportHead !== undefined))
+  )
+    return json(400, {
+      ok: false,
+      error:
+        "blocked_by_operator_check must carry its report with the approved reportHead identity, and no other outcome may",
+    });
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
@@ -2183,15 +2205,39 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
-  const updated: CoordinatorUnit = {
+  const existingReport = reportHead !== undefined ? row.operatorCheckReports?.[reportHead] : undefined;
+  if (existingReport !== undefined && existingReport.report !== report)
+    return json(409, { ok: false, error: "operator_check_report_changed", reportHead });
+  const boundaryExists =
+    reportHead !== undefined &&
+    row.rounds.some((round) => round.outcome === "blocked_by_operator_check" && round.reportHead === reportHead);
+  let updated: CoordinatorUnit = {
     ...row,
-    rounds: [
-      ...row.rounds,
-      { index: body.index, agent: body.agent, outcome: body.outcome as string, at, ...(gate ? { gate } : {}) },
-    ],
+    rounds: boundaryExists
+      ? row.rounds
+      : [
+          ...row.rounds,
+          {
+            index: body.index,
+            agent: body.agent,
+            outcome: body.outcome as string,
+            at,
+            ...(gate ? { gate } : {}),
+            ...(reportHead !== undefined ? { reportHead } : {}),
+          },
+        ],
+    ...(report !== undefined && reportHead !== undefined
+      ? {
+          operatorCheckReports: {
+            ...(row.operatorCheckReports ?? {}),
+            [reportHead]: existingReport ?? { report },
+          },
+        }
+      : {}),
   };
-  await deps.instances.putUnits([updated]);
-  if (host.kind === "host") {
+  const stored = await deps.instances.putUnits([updated]);
+  if (!stored.ok) return json(503, { ok: false, error: "round_boundary_unrecorded", at });
+  if (host.kind === "host" && !boundaryExists) {
     const thread = unitThread(instance, updated, units.length);
     hostPublish(
       deps,
@@ -2212,6 +2258,7 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
           state: body.outcome as string,
           ...(thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
           ...(updated.pr !== undefined ? { pr: updated.pr.number } : {}),
+          ...(report !== undefined ? { report } : {}),
           at,
         },
       ],
@@ -2229,6 +2276,40 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   ).catch((err) =>
     (deps.log ?? console.warn)(`[coordinator] ${instance.id}: the card could not be redrawn: ${describe(err)}`),
   );
+  if (report !== undefined && reportHead !== undefined && existingReport?.deliveredAt === undefined) {
+    const thread = unitThread(instance, updated, units.length);
+    const io = deps.ioFor({ threadKey: thread.threadKey ?? instance.threadKey, userId: instance.userId });
+    if (!io) return json(503, { ok: false, error: "operator_check_report_undeliverable", at });
+    let alreadyPosted: boolean;
+    try {
+      const identity = operatorCheckReportIdentity(reportHead);
+      alreadyPosted = (await io.history()).some((item) => item.role === "assistant" && item.text.includes(identity));
+    } catch (err) {
+      (deps.log ?? console.warn)(
+        `[coordinator] ${instance.id} ${row.unit}: operator-check report history could not be reconciled: ${describe(err)}`,
+      );
+      return json(502, { ok: false, error: "operator_check_report_unreconciled", at });
+    }
+    if (!alreadyPosted) {
+      try {
+        await io.reply(report);
+      } catch (err) {
+        (deps.log ?? console.warn)(
+          `[coordinator] ${instance.id} ${row.unit}: operator-check report could not reach the unit thread: ${describe(err)}`,
+        );
+        return json(502, { ok: false, error: "operator_check_report_undelivered", at });
+      }
+    }
+    updated = {
+      ...updated,
+      operatorCheckReports: {
+        ...(updated.operatorCheckReports ?? {}),
+        [reportHead]: { report, deliveredAt: at },
+      },
+    };
+    const marked = await deps.instances.putUnits([updated]);
+    if (!marked.ok) return json(503, { ok: false, error: "operator_check_report_delivery_unrecorded", at });
+  }
   return json(200, { ok: true, at });
 }
 
@@ -3064,14 +3145,16 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
           };
   }
   // A head still pending — a run not completed, a required check whose run
-  // does not exist yet, no check reported, or a draft waiting on its ready
-  // event — is what the machine's checks wait rides: register it so the
+  // does not exist yet, no check reported, an operator precondition waiting
+  // for its re-run, or a draft waiting on its ready event — is what the
+  // machine's checks wait rides: register it so the
   // intake's settled event wakes it (http-ingress item 12), exactly as the
   // merge step's pending answer does.
   if (
     checks === undefined ||
     checks.pending.length > 0 ||
     (checks.expected?.length ?? 0) > 0 ||
+    checks.failed.some((failure) => failure.operatorPrecondition === true) ||
     checks.total === 0 ||
     facts?.draft === true
   )
@@ -3079,7 +3162,10 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   if (checks !== undefined && checks.failed.length > 0)
     log(
       `[coordinator] ${instance.id} ${body.unit}: CI red at ${headSha.slice(0, 7)} — ${checks.failed
-        .map((f) => `${f.name} (${f.conclusion}${f.flakeSuspect === true ? ", suspected flake" : ""})`)
+        .map(
+          (f) =>
+            `${f.name} (${f.conclusion}${f.flakeSuspect === true ? ", suspected flake" : ""}${f.operatorPrecondition === true ? ", operator precondition" : ""})`,
+        )
         .join(", ")}`,
     );
   return json(200, {

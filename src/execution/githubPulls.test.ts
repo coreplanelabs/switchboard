@@ -16,6 +16,7 @@ import {
   fetchPullRequestFacts,
   fetchPullRequestTitleBody,
   fetchCommitChecks,
+  fetchCheckRunDetails,
   listOpenPullRequests,
   fixupCommitSubjects,
   fetchPullRequestReviews,
@@ -1166,6 +1167,44 @@ describe("githubPulls", () => {
         ),
       ).toEqual({ ok: true, sha: "9".repeat(40) });
       expect(JSON.parse(String(calls[0].init.body))).toMatchObject({ commit_message: "Merged-by: ivy-dev" });
+    });
+
+    it("fetchCheckRunDetails carries the creating App and bounded output used to classify the issue's operator-owned check", async () => {
+      stubToken();
+      stubFetch(
+        () =>
+          new Response(
+            JSON.stringify({
+              check_runs: [
+                {
+                  name: "production impact",
+                  status: "completed",
+                  conclusion: "failure",
+                  html_url: "https://github.com/acme/api/runs/139",
+                  app: { slug: "external-impact" },
+                  output: {
+                    title: "Production precondition failed",
+                    summary: "The deployed bot holds no OPENAI_API_KEY.",
+                    text: "Run deploy secrets bot --only OPENAI_API_KEY.",
+                  },
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+      );
+
+      expect(await fetchCheckRunDetails("acme/api", "c".repeat(40))).toEqual([
+        {
+          name: "production impact",
+          status: "completed",
+          conclusion: "failure",
+          url: "https://github.com/acme/api/runs/139",
+          app: "external-impact",
+          output:
+            "Production precondition failed\nThe deployed bot holds no OPENAI_API_KEY.\nRun deploy secrets bot --only OPENAI_API_KEY.",
+        },
+      ]);
     });
 
     it("fetchCommitChecks names the runs still going and the runs that did not succeed — skipped and neutral count as green; a failed fetch or an answer that is not the route's is undefined, never a throw", async () => {

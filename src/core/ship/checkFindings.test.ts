@@ -81,6 +81,97 @@ describe("classifyRoundChecks — the merge door's reading joined with the class
     ]);
   });
 
+  it("classifies ownership before output: a required external operator check blocks, while required repository CI and its deployment-shaped output stay child-owned", () => {
+    const productionImpact =
+      "Every production default now resolves through the openai provider block, but the deployed Switchboard bot Worker holds 22 secrets and no OPENAI_API_KEY. Run deploy secrets bot --only OPENAI_API_KEY, then re-run this check.";
+    const out = classifyRoundChecks(
+      [
+        run({ name: "production impact", app: "external-impact", output: productionImpact }),
+        run({ name: "ci / bot", app: "depot", output: "Typecheck failed in src/core/ship/coordinator.ts" }),
+        run({
+          name: "ci / workers",
+          app: "depot",
+          output: "FAIL deploy/cloudflare-memory/sessionLog.test.ts > persists the report",
+        }),
+      ],
+      ["src/core/ship/coordinator.ts"],
+      ["production impact", "ci / bot", "ci / workers"],
+    );
+
+    expect(out.failed).toEqual([
+      {
+        name: "production impact",
+        conclusion: "failure",
+        url: "https://github.com/acme/api/actions/runs/9/job/1",
+        output: productionImpact,
+        operatorPrecondition: true,
+      },
+      {
+        name: "ci / bot",
+        conclusion: "failure",
+        url: "https://github.com/acme/api/actions/runs/9/job/1",
+      },
+      {
+        name: "ci / workers",
+        conclusion: "failure",
+        url: "https://github.com/acme/api/actions/runs/9/job/1",
+      },
+    ]);
+  });
+
+  it("requires both an external owner and an operator instruction, never a bare deployment keyword", () => {
+    const out = classifyRoundChecks(
+      [
+        run({ name: "policy", app: "external-policy", output: "Production policy failed" }),
+        run({
+          name: "impact path",
+          app: "external-impact",
+          output: "Failure in deploy/cloudflare-memory/sessionLog.test.ts",
+        }),
+        run({ name: "impact script", app: "external-impact", output: "deploy:check failed" }),
+        run({ name: "missing key", app: "external-impact", output: "No OPENAI_API_KEY is deployed" }),
+        run({ name: "secret instruction", app: "external-impact", output: "Set OPENAI_API_KEY on the bot." }),
+        run({ name: "config instruction", app: "external-impact", output: "Push the config, then re-run." }),
+        run({
+          name: "production impact",
+          app: "external-impact",
+          output: "No OPENAI_API_KEY is deployed. Run deploy secrets bot --only OPENAI_API_KEY, then re-run.",
+        }),
+      ],
+      [],
+    );
+
+    expect(out.failed.slice(0, 4).every((failure) => failure.operatorPrecondition !== true)).toBe(true);
+    expect(out.failed.slice(4)).toMatchObject([
+      { name: "secret instruction", operatorPrecondition: true },
+      { name: "config instruction", operatorPrecondition: true },
+      { name: "production impact", operatorPrecondition: true },
+    ]);
+  });
+
+  it("recognizes operator imperatives in Markdown lists and after prose prefaces", () => {
+    const out = classifyRoundChecks(
+      [
+        run({
+          name: "listed secret instruction",
+          app: "external-impact",
+          output: "- Run deploy secrets bot --only OPENAI_API_KEY",
+        }),
+        run({
+          name: "prefaced secret instruction",
+          app: "external-impact",
+          output: "To fix this, run deploy secrets bot --only OPENAI_API_KEY",
+        }),
+      ],
+      [],
+    );
+
+    expect(out.failed).toMatchObject([
+      { name: "listed secret instruction", operatorPrecondition: true },
+      { name: "prefaced secret instruction", operatorPrecondition: true },
+    ]);
+  });
+
   it("carries every required context beside the unreported subset, so an unrelated check cannot hide an empty required-check launch", () => {
     expect(
       classifyRoundChecks([run({ name: "pr title", conclusion: "success" })], [], ["ci / bot", "ci / workers"]),

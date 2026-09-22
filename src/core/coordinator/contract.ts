@@ -516,12 +516,17 @@ export interface CoordinatorUnit {
   idle?: UnitIdle;
   /** Answers to indexed idle waits, keyed by the wait step's durable identity. */
   wakes?: Record<string, UnitWakeAnswer>;
+  /** Operator-check reports keyed by the approved head. The round boundary is
+   *  append-only history; this sibling tracks whether its one thread sentence
+   *  landed, so a route retry can reconcile or retry delivery independently. */
+  operatorCheckReports?: Record<string, { report: string; deliveredAt?: number }>;
   /** The round boundaries the coordinator reported, oldest first (the `ship_round`
    *  vocabulary). `gate` rides an approve the machine's severity check caught
    *  carrying a finding at or above the level in force ([agent-ship](../../../docs/reference/specs/agent-ship.md)
    *  item 9) — a mismatch to be seen, since the child's parser holds an approve
-   *  to the same level. */
-  rounds: Array<{ index: number; agent: string; outcome: string; at: number; gate?: RoundGate }>;
+   *  to the same level. `reportHead` identifies an operator-check boundary; its
+   *  report and delivery state live separately above. */
+  rounds: Array<{ index: number; agent: string; outcome: string; at: number; gate?: RoundGate; reportHead?: string }>;
   /** How the unit ended: the ending's kind and the thread's report, when it
    *  has. `cause` names the machine's reason behind a driver-posted kind;
    *  `step` and `round` locate that reason without parsing the report. For a
@@ -536,6 +541,7 @@ const MAX_TEXT = 512;
 /** A unit's report — the loop's words for how it ended, with a cap report's findings — is longer than a name. */
 const MAX_REPORT = 20_000;
 const MAX_ROUNDS = 200;
+const COMMIT_HEAD = /^[0-9a-f]{7,40}$/i;
 
 const isText = (v: unknown, max = MAX_TEXT): v is string => typeof v === "string" && v.length > 0 && v.length <= max;
 const isOptionalText = (v: unknown): boolean => v === undefined || isText(v);
@@ -675,6 +681,19 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   )
     return false;
   if (
+    r.operatorCheckReports !== undefined &&
+    (!isObject(r.operatorCheckReports) ||
+      Array.isArray(r.operatorCheckReports) ||
+      !Object.entries(r.operatorCheckReports).every(
+        ([head, delivery]) =>
+          COMMIT_HEAD.test(head) &&
+          isObject(delivery) &&
+          isText(delivery.report, MAX_REPORT) &&
+          (delivery.deliveredAt === undefined || isFinite(delivery.deliveredAt)),
+      ))
+  )
+    return false;
+  if (
     !Array.isArray(r.rounds) ||
     r.rounds.length > MAX_ROUNDS ||
     !r.rounds.every(
@@ -684,7 +703,8 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
         isText(x.agent) &&
         isText(x.outcome) &&
         isFinite(x.at) &&
-        (x.gate === undefined || isRoundGate(x.gate)),
+        (x.gate === undefined || isRoundGate(x.gate)) &&
+        (x.reportHead === undefined || (typeof x.reportHead === "string" && COMMIT_HEAD.test(x.reportHead))),
     )
   )
     return false;

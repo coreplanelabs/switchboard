@@ -3419,6 +3419,134 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].rounds).toHaveLength(1); // nothing malformed was appended
   });
 
+  it("an operator-check boundary keeps the report, and a lost route response replays without another boundary or thread post", async () => {
+    const replies: string[] = [];
+    const h = await planHarness({
+      ioFor: () => ({
+        reply: async (text: string) => void replies.push(text),
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => [],
+      }),
+    });
+    await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    const reportHead = "a".repeat(40);
+    const boundary = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      index: 1,
+      agent: "review",
+      outcome: "blocked_by_operator_check",
+    };
+    const report = `⏸️ Blocked by an operator check at approved head \`${reportHead}\`; no coding child was started.\n\n> The deployed bot holds no OPENAI_API_KEY.`;
+
+    expect(await call(h, "round", { ...boundary, report, reportHead })).toEqual({
+      status: 200,
+      body: { ok: true, at: NOW },
+    });
+    const row = (await h.instances.listUnits(PLAN_INSTANCE.id))[0];
+    expect(row.rounds).toEqual([
+      { index: 1, agent: "review", outcome: "blocked_by_operator_check", reportHead, at: NOW },
+    ]);
+    expect(row.operatorCheckReports).toEqual({ [reportHead]: { report, deliveredAt: NOW } });
+    expect(replies).toEqual([report]);
+    // The runner may lose this route's successful HTTP response and replay its
+    // durable step. The same per-head identity is a read, not a second boundary
+    // or Slack post.
+    expect(await call(h, "round", { ...boundary, report, reportHead })).toEqual({
+      status: 200,
+      body: { ok: true, at: NOW },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].rounds).toHaveLength(1);
+    expect(replies).toEqual([report]);
+    expect((await call(h, "round", boundary)).status).toBe(400);
+    expect(
+      (
+        await call(h, "round", {
+          ...boundary,
+          outcome: "approve",
+          report,
+          reportHead,
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  it("retries an undelivered operator-check report without appending its per-head boundary twice", async () => {
+    const replies: string[] = [];
+    let attempts = 0;
+    const h = await planHarness({
+      ioFor: () => ({
+        reply: async (text: string) => {
+          attempts++;
+          if (attempts === 1) throw new Error("Slack temporarily unavailable");
+          replies.push(text);
+        },
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => [],
+      }),
+    });
+    await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    const reportHead = "b".repeat(40);
+    const report = `⏸️ Blocked by an operator check at approved head \`${reportHead}\`.\n\n> Run deploy secrets bot --only OPENAI_API_KEY.`;
+    const boundary = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      index: 1,
+      agent: "review",
+      outcome: "blocked_by_operator_check",
+      report,
+      reportHead,
+    };
+
+    expect((await call(h, "round", boundary)).status).toBe(502);
+    let row = (await h.instances.listUnits(PLAN_INSTANCE.id))[0];
+    expect(row.rounds).toHaveLength(1);
+    expect(row.operatorCheckReports).toEqual({ [reportHead]: { report } });
+
+    expect(await call(h, "round", boundary)).toEqual({ status: 200, body: { ok: true, at: NOW } });
+    row = (await h.instances.listUnits(PLAN_INSTANCE.id))[0];
+    expect(row.rounds).toHaveLength(1);
+    expect(row.operatorCheckReports).toEqual({ [reportHead]: { report, deliveredAt: NOW } });
+    expect(attempts).toBe(2);
+    expect(replies).toEqual([report]);
+  });
+
+  it("reconciles a lost successful reply from thread history, so catch-up posts no duplicate report or boundary", async () => {
+    const posted: string[] = [];
+    let attempts = 0;
+    const h = await planHarness({
+      ioFor: () => ({
+        reply: async (text: string) => {
+          attempts++;
+          posted.push(text);
+          throw new Error("Slack accepted the post but the response was lost");
+        },
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => posted.map((text) => ({ role: "assistant" as const, text })),
+      }),
+    });
+    await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    const reportHead = "c".repeat(40);
+    const report = `⏸️ Blocked by an operator check at approved head \`${reportHead}\`.\n\n> Run deploy secrets bot --only OPENAI_API_KEY.`;
+    const boundary = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      index: 1,
+      agent: "review",
+      outcome: "blocked_by_operator_check",
+      report,
+      reportHead,
+    };
+
+    expect((await call(h, "round", boundary)).status).toBe(502);
+    expect(await call(h, "round", boundary)).toEqual({ status: 200, body: { ok: true, at: NOW } });
+    const row = (await h.instances.listUnits(PLAN_INSTANCE.id))[0];
+    expect(row.rounds).toHaveLength(1);
+    expect(row.operatorCheckReports).toEqual({ [reportHead]: { report, deliveredAt: NOW } });
+    expect(attempts).toBe(1);
+    expect(posted).toEqual([report]);
+  });
+
   // Record 0065 / issue 1968: `ShipRoundOutcome` grew `continued` (decision 0046's
   // renewal) and `idle` (record 0051) while the route's accepted list did not,
   // so a renewed round 0 threw in the driver. The route now accepts the whole
@@ -4558,6 +4686,25 @@ describe("POST /admin/coordinator/checks — the round's checks read at the revi
     const none = await checksHarness({ roundChecks: { total: 0, pending: [], failed: [] } });
     await checks(none);
     expect(none.mergeWaitNotes).toEqual([{ headSha: HEAD, instanceId: INSTANCE.id, at: NOW }]);
+  });
+
+  it("an operator-owned red check registers the approved head so its re-run wakes the same checks step", async () => {
+    const operator = await checksHarness({
+      roundChecks: {
+        total: 1,
+        pending: [],
+        failed: [
+          {
+            name: "production impact",
+            conclusion: "failure",
+            operatorPrecondition: true,
+            output: "The deployed bot holds no OPENAI_API_KEY.",
+          },
+        ],
+      },
+    });
+    await checks(operator);
+    expect(operator.mergeWaitNotes).toEqual([{ headSha: HEAD, instanceId: INSTANCE.id, at: NOW }]);
   });
 
   it("an expected check not yet reported registers the head in the merge-wait book like a pending one, and the round reader is handed the pull request's own base for the required checks (issue 2063)", async () => {

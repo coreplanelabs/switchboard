@@ -301,6 +301,29 @@ describe("isCoordinatorUnit — one unit's row", () => {
     expect(isCoordinatorUnit({ ...unit, resume: "7" })).toBe(false);
   });
 
+  it("operator-check report delivery is keyed by a commit head and validated separately from its round boundary", () => {
+    const head = "a".repeat(40);
+    const report = "Operator action required";
+    expect(
+      isCoordinatorUnit({
+        ...unit,
+        operatorCheckReports: { [head]: { report, deliveredAt: 1_100 } },
+        rounds: [{ index: 1, agent: "review", outcome: "blocked_by_operator_check", reportHead: head, at: 1_000 }],
+      }),
+    ).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, operatorCheckReports: { short: { report } } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, operatorCheckReports: { [head]: { report: "" } } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, operatorCheckReports: { [head]: { report, deliveredAt: "now" } } })).toBe(
+      false,
+    );
+    expect(
+      isCoordinatorUnit({
+        ...unit,
+        rounds: [{ index: 1, agent: "review", outcome: "blocked_by_operator_check", reportHead: "short", at: 1_000 }],
+      }),
+    ).toBe(false);
+  });
+
   it("the review thread is a thread key with an optional link, beside the unit's own thread; a review thread without its key, with a malformed link, or as a bare string is refused", () => {
     expect(isCoordinatorUnit({ ...unit, reviewThread: { threadKey: "slack:C1:3.0" } })).toBe(true);
     expect(isCoordinatorUnit({ ...unit, reviewThread: undefined })).toBe(true);

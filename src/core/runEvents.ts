@@ -438,6 +438,9 @@ export type ShipRoundOutcome =
    *  0055): the failures become check findings and the findings step runs as
    *  for any changes-requested round. */
   | "checks_failed"
+  /** Every red check is an operator precondition: no child starts, the round
+   *  reports the check output once, and the approved head waits for it to change. */
+  | "blocked_by_operator_check"
   /** No required check appeared during the checks step's grace chunk, so the
    *  runner re-fired the pull_request event once by closing and reopening it. */
   | "checks_restarted"

@@ -577,7 +577,16 @@ const isRoundChecks = (v: unknown): v is RoundChecks =>
   Array.isArray(v.pending) &&
   v.pending.every((n: unknown) => typeof n === "string") &&
   Array.isArray(v.failed) &&
-  v.failed.every((f: unknown) => isRecord(f) && typeof f.name === "string" && typeof f.conclusion === "string") &&
+  v.failed.every(
+    (f: unknown) =>
+      isRecord(f) &&
+      typeof f.name === "string" &&
+      typeof f.conclusion === "string" &&
+      (f.url === undefined || typeof f.url === "string") &&
+      (f.flakeSuspect === undefined || typeof f.flakeSuspect === "boolean") &&
+      (f.operatorPrecondition === undefined || typeof f.operatorPrecondition === "boolean") &&
+      (f.output === undefined || typeof f.output === "string"),
+  ) &&
   (v.required === undefined ||
     (Array.isArray(v.required) && v.required.every((n: unknown) => typeof n === "string"))) &&
   (v.expected === undefined || (Array.isArray(v.expected) && v.expected.every((n: unknown) => typeof n === "string")));
@@ -1001,6 +1010,7 @@ async function runUnit(
             agent: note.agent,
             outcome: note.outcome,
             ...(note.gate !== undefined ? { gate: note.gate } : {}),
+            ...(note.report !== undefined ? { report: note.report, reportHead: note.reportHead } : {}),
           };
           const noteStep = `${prefix}/note/${++notes}`;
           last = { step: noteStep, round: { index: note.index, kind: note.agent } };

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { shipRoundHeader } from "../shipPipeline.js";
 import { ASKS } from "../budgets.js";
 import type { Finding, FindingDisposition } from "../reviewVerdict.js";
+import { classifyRoundChecks } from "./checkFindings.js";
 import {
   applyReturn,
   cursorFinished,
@@ -2828,18 +2829,23 @@ describe("the round verdict — the checks step at the reviewed head (record 005
     return d;
   };
 
-  it("a red check at the approved head yields a check finding and a findings round — never merge_ready and never the merge step — and the finding rides the briefs and the dispositions exactly as a reviewer's", () => {
+  it("a red Depot shard at the approved head yields a check finding and a findings round — never merge_ready and never the merge step — and the finding rides the briefs and the dispositions exactly as a reviewer's", () => {
     const d = approved(); // merge: runner — the door is never asked over a red head
     expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/1", prNumber: 7, headSha: HEAD_A });
-    d.answer({
-      type: "checks",
-      checks: {
-        total: 3,
-        pending: [],
-        failed: [{ name: "ci / bot", conclusion: "failure", url: "https://github.com/acme/api/runs/1" }],
-      },
-      at: T0 + 21 * MIN,
-    });
+    const checks = classifyRoundChecks(
+      [
+        {
+          name: "ci / bot",
+          app: "depot",
+          status: "completed",
+          conclusion: "failure",
+          url: "https://github.com/acme/api/runs/1",
+        },
+      ],
+      ["src/core/ship/coordinator.ts"],
+      ["ci / bot"],
+    );
+    d.answer({ type: "checks", checks, at: T0 + 21 * MIN });
     // The failed check is a finding of the round — id check:<name>, severity
     // blocking, the conclusion and URL in the row — under a round note of its own.
     expect(d.rounds()).toContain("1 review checks_failed");
@@ -2908,6 +2914,79 @@ describe("the round verdict — the checks step at the reviewed head (record 005
     expect(d.action).toMatchObject({ type: "checks", step: "U10/2/review/checks/1", headSha: HEAD_B });
     greenChecks(d, T0 + 51 * MIN);
     expect(d.action).toMatchObject({ type: "merge", headSha: HEAD_B });
+  });
+
+  it("repository CI failures containing deploy paths or a deploy:check script still open a fix round", () => {
+    for (const output of [
+      "FAIL deploy/cloudflare-memory/sessionLog.test.ts > persists the report",
+      "npm error Lifecycle script `deploy:check` failed with error",
+    ]) {
+      const d = approved();
+      const checks = classifyRoundChecks(
+        [{ name: "ci / bot", app: "depot", status: "completed", conclusion: "failure", output }],
+        [],
+        ["ci / bot"],
+      );
+
+      d.answer({ type: "checks", checks, at: T0 + 21 * MIN });
+
+      expect(d.rounds()).toContain("1 review checks_failed");
+      expect(d.action).toMatchObject({
+        type: "spawn",
+        round: { index: 1, kind: "findings" },
+        brief: { checks: [{ id: "check:ci / bot" }] },
+      });
+    }
+  });
+
+  it("a branch-required external operator check ends the review round blocked, reports its output once, dispatches no child, and turns green into the merge step under the existing approval", () => {
+    const d = approved();
+    const output =
+      "The deployed bot holds no OPENAI_API_KEY. Run deploy secrets bot --only OPENAI_API_KEY, then re-run this check.";
+    const checks = classifyRoundChecks(
+      [
+        {
+          name: "production impact",
+          app: "external-impact",
+          status: "completed",
+          conclusion: "failure",
+          url: "https://github.com/acme/api/runs/139",
+          output,
+        },
+      ],
+      [],
+      ["production impact"],
+    );
+    const failure = checks.failed[0]!;
+
+    d.answer({ type: "checks", checks, at: T0 + 21 * MIN });
+
+    expect(d.rounds()).toContain("1 review blocked_by_operator_check");
+    const blocked = d.notes.find(
+      (note): note is Extract<CoordinatorNote, { type: "round" }> =>
+        note.type === "round" && note.outcome === "blocked_by_operator_check",
+    );
+    expect(blocked).toMatchObject({
+      reportHead: HEAD_A,
+      report: expect.stringContaining("`production impact`"),
+    });
+    expect(blocked?.report).toContain("> The deployed bot holds no OPENAI_API_KEY.");
+    expect(d.state.findingsByRound[1]).toEqual([]);
+    expect(d.action).toMatchObject({
+      type: "wait-checks",
+      step: "U10/1/review/checks/wait/1",
+      headSha: HEAD_A,
+    });
+
+    d.answer({ type: "wait-checks", outcome: "event" });
+    d.answer({ type: "checks", checks: { total: 3, pending: [], failed: [failure] }, at: T0 + 22 * MIN });
+    expect(d.rounds().filter((round) => round.endsWith("blocked_by_operator_check"))).toHaveLength(1);
+    expect(d.action).toMatchObject({ type: "wait-checks", step: "U10/1/review/checks/wait/2", headSha: HEAD_A });
+
+    d.answer({ type: "wait-checks", outcome: "event" });
+    greenChecks(d, T0 + 23 * MIN, 3);
+    expect(d.action).toMatchObject({ type: "merge", headSha: HEAD_A });
+    expect(d.state.reviewRounds).toBe(1);
   });
 
   it("a pending check registers at the head and waits on checks-settled in the merge wait's chunks, then reads again — and an unreadable GitHub reads as pending", () => {

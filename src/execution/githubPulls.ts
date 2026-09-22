@@ -989,6 +989,7 @@ export async function fetchCheckRunDetails(repo: string, sha: string): Promise<C
     conclusion?: unknown;
     html_url?: unknown;
     details_url?: unknown;
+    app?: { slug?: unknown };
     output?: { title?: unknown; summary?: unknown; text?: unknown };
   }>) {
     const output = [run.output?.title, run.output?.summary, run.output?.text]
@@ -1002,6 +1003,7 @@ export async function fetchCheckRunDetails(repo: string, sha: string): Promise<C
       status: typeof run.status === "string" ? run.status : "completed",
       ...(typeof run.conclusion === "string" ? { conclusion: run.conclusion } : {}),
       ...(url !== undefined ? { url } : detailsUrl !== undefined ? { url: detailsUrl } : {}),
+      ...(typeof run.app?.slug === "string" ? { app: run.app.slug } : {}),
       ...(output.length > 0 ? { output } : {}),
     });
   }

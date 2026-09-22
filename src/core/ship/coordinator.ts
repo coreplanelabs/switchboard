@@ -791,13 +791,15 @@ export type StepReturn =
 
 /** One failed check run at the reviewed head, as the round's checks step reads
  *  it (record 0055): the name, GitHub's conclusion, the run's URL, and whether
- *  the bot's classifier suspects a flake — a test timeout or runner stall on a
- *  shard whose test files the pull request's changed paths never touch. */
+ *  the bot's classifier suspects a flake or an operator precondition. Operator
+ *  failures carry the bounded check output the report quotes. */
 export interface CheckFailure {
   name: string;
   conclusion: string;
   url?: string;
   flakeSuspect?: boolean;
+  operatorPrecondition?: boolean;
+  output?: string;
 }
 
 /** The check runs at the reviewed head as the round's checks step reads them.
@@ -1063,6 +1065,11 @@ export type CoordinatorNote =
        *  record, a harness around `submit_verdict`) and the row, the card and
        *  the log say so instead of routing silently into the findings step. */
       gate?: { level: AddressSeverity; findings: string[] };
+      /** A check only an operator can satisfy. The reviewed head is the
+       *  report's stable identity; the round route keeps its delivery state
+       *  separate from this boundary and posts it to the unit thread once. */
+      report?: string;
+      reportHead?: string;
     }
   | { type: "ended"; ending: UnitEnding };
 type RoundNote = Extract<CoordinatorNote, { type: "round" }>;
@@ -1246,6 +1253,8 @@ type Phase =
       graced: boolean;
       retried: boolean;
       refired: boolean;
+      /** The operator-blocked sentence was already published for this head. */
+      operatorReported: boolean;
       retry?: string[];
       refire?: true;
     }
@@ -1262,6 +1271,7 @@ type Phase =
       graced: boolean;
       retried: boolean;
       refired: boolean;
+      operatorReported: boolean;
     }
   | { at: "ended" };
 
@@ -2080,6 +2090,7 @@ function enterChecks(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNo
         graced: false,
         retried: false,
         refired: false,
+        operatorReported: false,
       },
     },
     notes,
@@ -2110,6 +2121,7 @@ function checksVerdict(
   | { kind: "retry"; names: string[] }
   | { kind: "refire" }
   | { kind: "failed"; failed: CheckFailure[] }
+  | { kind: "operator"; failed: CheckFailure[] }
   | { kind: "draft" }
   | { kind: "pending" }
   | { kind: "grace" }
@@ -2122,7 +2134,11 @@ function checksVerdict(
     // re-run is spent only when every failure is a suspect.
     if (!p.retried && checks.failed.every((f) => f.flakeSuspect === true))
       return { kind: "retry", names: checks.failed.map((f) => f.name) };
-    return { kind: "failed", failed: checks.failed };
+    // A child is dispatched only for failures the repository can change. If
+    // both classes are red, fix the code defects first; a later read parks on
+    // any operator precondition that remains.
+    const childOwned = checks.failed.filter((f) => f.operatorPrecondition !== true);
+    return childOwned.length > 0 ? { kind: "failed", failed: childOwned } : { kind: "operator", failed: checks.failed };
   }
   // A draft outranks the waits: its checks may sit green forever, and only a
   // person's "ready" changes anything — a red check above still gets its fix
@@ -2141,6 +2157,22 @@ function checksVerdict(
   // an expected check not yet reported (issue 2063) is pending the same way.
   if (checks === undefined || checks.pending.length > 0 || missing.length > 0) return { kind: "pending" };
   return { kind: "green" };
+}
+
+/** The one operator-blocked sentence published for a reviewed head. Check
+ *  output is already bounded at the GitHub boundary; quote each line so the
+ *  action the check requested remains visibly the check's own words. */
+function operatorCheckReport(failed: readonly CheckFailure[], headSha: string): string {
+  const rows = failed.map((failure) => {
+    const output = failure.output?.trim() || "No check output was reported.";
+    const quote = output
+      .split("\n")
+      .map((line) => `> ${line}`)
+      .join("\n");
+    return `Operator action required for check \`${failure.name}\`${failure.url ? ` (${failure.url})` : ""}:\n${quote}`;
+  });
+  const report = `⏸️ Blocked by an operator check at approved head \`${headSha}\`; no coding child was started.\n\n${rows.join("\n\n")}`;
+  return report.length <= 16_000 ? report : `${report.slice(0, 15_999)}…`;
 }
 
 /** What the checks step answered, folded into the round (record 0055). Pure
@@ -2193,6 +2225,7 @@ function settleChecks(
         graced: p.graced,
         retried: p.retried,
         refired: p.refired,
+        operatorReported: p.operatorReported,
         ...over,
       },
     },
@@ -2251,6 +2284,21 @@ function settleChecks(
           notes,
         );
       return enterRound(next, { index: round.index, kind: "findings" }, notes);
+    }
+    case "operator": {
+      const waiting = wait({ operatorReported: true });
+      return p.operatorReported
+        ? waiting
+        : {
+            ...waiting,
+            notes: [
+              {
+                ...roundNote(round, "blocked_by_operator_check"),
+                report: operatorCheckReport(verdict.failed, p.headSha),
+                reportHead: p.headSha,
+              },
+            ],
+          };
     }
     case "draft":
       // A draft pull request (issue 2063): the unit idles on the settled event
@@ -3126,6 +3174,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
             graced: p.graced,
             retried: p.retried,
             refired: p.refired,
+            operatorReported: p.operatorReported,
           },
         },
         notes: [],
