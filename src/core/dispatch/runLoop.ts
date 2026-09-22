@@ -48,6 +48,7 @@ import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/
 import type { RouteDecided } from "./route.js";
 import {
   commitsOverBase,
+  fetchPullRequestFacts,
   fetchRepoShipInfo,
   findOpenPrByHead,
   openPullRequest,
@@ -1794,7 +1795,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           answer,
           carried,
           hardStopped: false,
-          guardTransition: coordinator !== undefined,
+          ...(coordinator !== undefined
+            ? {
+                guardTransition: true as const,
+                fetchPrFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
+              }
+            : { guardTransition: false as const }),
           post: deps.postReviewComment ?? postReviewComment,
           fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
           reply: (text) => io.reply(text),

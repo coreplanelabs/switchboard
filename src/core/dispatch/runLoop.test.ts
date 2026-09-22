@@ -272,6 +272,12 @@ function setup(
       ? {
           postReviewComment: opts.review.post,
           fetchPrHead: async () => opts.review!.currentHead ?? opts.review!.head,
+          fetchPrFacts: async () => ({
+            state: "open" as const,
+            sameRepoHead: true,
+            headSha: opts.review!.currentHead ?? opts.review!.head,
+            headBranchExists: true,
+          }),
           fetchPrCommits: async ({ sha }: { sha: string }) => opts.review!.commits?.(sha),
         }
       : {}),

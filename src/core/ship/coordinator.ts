@@ -1232,6 +1232,9 @@ type Phase =
    *  queue's outcome instead of attempting the squash again. */
   | { at: "merge"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number; queued?: true }
   | { at: "rebase"; pr: PrRef; headSha: string; n: number }
+  /** A rebase can run long enough for the pull request to change again. Both
+   *  dispatching outcomes stop here for one fresh state/head/ref read. */
+  | { at: "rebase-pr-check"; pr: PrRef; n: number; outcome: "conflict" | "changed" }
   | { at: "merge-wait"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number; queued?: true }
   /** The round's checks step (record 0055): the check runs at the reviewed head
    *  are read after an approve settles, before merge_ready or the merge door.
@@ -1596,6 +1599,12 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         step: `${unit}/rebase/${p.n}`,
         prNumber: p.pr.number,
         headSha: p.headSha,
+      };
+    case "rebase-pr-check":
+      return {
+        type: "pr-check",
+        step: `${unit}/rebase/${p.n}/pr-check`,
+        pr: p.pr.number,
       };
     case "merge-wait":
       return {
@@ -3278,12 +3287,11 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           reason: r.reason,
           reviewRounds: s.reviewRounds,
         });
-      if (r.outcome === "conflict")
-        return enterRound(clocked, {
-          index: s.reviewRounds,
-          kind: "rebase",
-          attempt: p.n,
-        });
+      if (r.outcome === "conflict" || r.outcome === "changed")
+        return {
+          state: { ...clocked, phase: { at: "rebase-pr-check", pr: p.pr, n: p.n, outcome: r.outcome } },
+          notes: [],
+        };
       if (!("headSha" in r))
         return end(clocked, {
           kind: "merge_refused",
@@ -3292,8 +3300,36 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           reviewRounds: s.reviewRounds,
         });
       const rebased: UnitPipelineState = { ...clocked, lastReviewHead: r.headSha };
-      if (r.outcome === "changed") return mandatoryReview(rebased);
       return enterChecks(rebased, { index: s.reviewRounds, kind: "review" }, []);
+    }
+    case "rebase-pr-check": {
+      const pr = (ret as Extract<StepReturn, { type: "pr-check" }>).pr;
+      if (pr.state === "merged") return foundMerged(clocked, pr);
+      if (pr.state === "closed") return foundClosed(clocked, pr);
+      if (pr.state === "open" && pr.headBranchExists === false) return missingHeadBranch(clocked, pr);
+      if (pr.state !== "open")
+        return end(clocked, {
+          kind: "merge_refused",
+          pr: p.pr,
+          reason: "the pull request disappeared after the rebase resolver finished",
+          reviewRounds: s.reviewRounds,
+        });
+      const head = normalizeHead(pr.headSha);
+      if (pr.headBranchExists !== true || head === undefined)
+        return end(clocked, {
+          kind: "merge_refused",
+          pr: { number: pr.prNumber, url: pr.url },
+          reason: "the pull request's head branch could not be verified after the rebase resolver finished",
+          reviewRounds: s.reviewRounds,
+        });
+      const refreshed: UnitPipelineState = {
+        ...clocked,
+        pr: { number: pr.prNumber, url: pr.url },
+        lastReviewHead: head,
+      };
+      return p.outcome === "conflict"
+        ? enterRound(refreshed, { index: s.reviewRounds, kind: "rebase", attempt: p.n })
+        : mandatoryReview(refreshed);
     }
     case "merge-wait":
       return {

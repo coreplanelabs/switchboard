@@ -4303,6 +4303,56 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
   });
 });
 
+describe("the approved-head rebase transition (agent-ship item 9)", () => {
+  function atRebase(): Driver {
+    const d = fresh(input());
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    greenChecks(d, T0 + 20 * MIN);
+    expect(d.action).toMatchObject({ type: "merge", headSha: HEAD_A });
+    d.answer({ type: "merge", outcome: "conflict", reason: "the base moved", at: T0 + 21 * MIN });
+    expect(d.action).toMatchObject({ type: "rebase", headSha: HEAD_A });
+    return d;
+  }
+
+  it("agent-ship item 9: conflict and changed rebase outcomes re-read the pull request before dispatch, so a deleted branch gets no child and a moved head pins the replacement review", () => {
+    const conflict = atRebase();
+    conflict.answer({ type: "rebase", outcome: "conflict", reason: "src/cache.ts", at: T0 + 22 * MIN });
+    expect(conflict.action).toMatchObject({ type: "pr-check", pr: 7 });
+    conflict.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, headBranchExists: false },
+      at: T0 + 23 * MIN,
+    });
+    expect(conflict.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    expect(conflict.action).not.toMatchObject({ type: "spawn" });
+
+    const changed = atRebase();
+    changed.answer({ type: "rebase", outcome: "changed", headSha: HEAD_B, at: T0 + 22 * MIN });
+    expect(changed.action).toMatchObject({ type: "pr-check", pr: 7 });
+    changed.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_C, headBranchExists: true },
+      at: T0 + 23 * MIN,
+    });
+    expect(changed.action).toMatchObject({
+      type: "spawn",
+      preset: "review",
+      brief: { kind: "review", pr: 7, headSha: HEAD_C },
+    });
+  });
+});
+
 describe("the merge queue — the door enqueues instead of merging (issue 2011)", () => {
   /** The unit at its merge door: round 0, an approving review at HEAD_A, green checks. */
   function atMergeDoor(over: Partial<UnitPipelineInput> = {}): Driver {
