@@ -361,6 +361,9 @@ export class ConsoleIO implements ChannelIO {
    *  before that, and forever when no run was started (a config reply such as
    *  `help`, a refusal before a run existed). */
   finished: RunReceipt | undefined;
+  /** A typed request failure that ended before a run existed, such as the
+   * operator model refusing the one-shot ask. */
+  failed = false;
   /** How many child threads this one has opened; the next child's number. */
   private children = 0;
   constructor(
@@ -387,6 +390,9 @@ export class ConsoleIO implements ChannelIO {
   }
   runFinished(receipt: RunReceipt): void {
     this.finished = receipt;
+  }
+  requestFailed(): void {
+    this.failed = true;
   }
   async status(initial: StatusUpdate): Promise<StatusHandle> {
     console.error(this.prefix + initial.title);
@@ -421,11 +427,11 @@ export class ConsoleIO implements ChannelIO {
 }
 
 /** What the `ask` process exits with: 1 when the run it started ended in any
- *  state but `completed` — the code a command that ran and failed exits with
- *  (`exitCodeFor`), so a shell reads a refused key, a failed tool or a stop the
- *  same way; 0 for an answer, and for a request that started no run. */
-export function askExitCode(finished: RunReceipt | undefined): 0 | 1 {
-  return finished === undefined || finished.status === "completed" ? 0 : 1;
+ *  state but `completed`, or when a typed failure ended the request before a
+ *  run existed — the code a command that ran and failed exits with
+ *  (`exitCodeFor`); 0 for an answer and for a successful no-run reply. */
+export function askExitCode(finished: RunReceipt | undefined, requestFailed = false): 0 | 1 {
+  return requestFailed || (finished !== undefined && finished.status !== "completed") ? 1 : 0;
 }
 
 /** The bot config, loaded on first use — `deploy.*`, `env.*`, `friction
@@ -739,7 +745,7 @@ async function main(): Promise<void> {
   await runHistoryWriter.settled();
   loopback.close();
   // The exit code is set, not forced: the process ends when its last write has drained.
-  process.exitCode = askExitCode(io.finished);
+  process.exitCode = askExitCode(io.finished, io.failed);
 }
 
 /** The `ask` process's own HTTP server on a free loopback port: the model

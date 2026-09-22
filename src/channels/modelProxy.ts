@@ -761,12 +761,15 @@ export async function handleAdmitted(
   );
   if (!upstream.ok) {
     log(`[model-proxy] 503 ${upstream.code} run=${grant.runId}`);
+    const provider = deps.providers()[grant.providerName];
+    const keyVariable = provider?.apiKeyEnv ?? (shape === "anthropic-messages" ? ANTHROPIC_API_KEY_ENV : undefined);
     return providerFailureResponse(
       shape,
       503,
       new ProviderFailure(upstream.code === "provider_key_missing" ? "key-absent" : "permanent", {
         provider: grant.providerName,
         model: grant.model,
+        ...(upstream.code === "provider_key_missing" && keyVariable !== undefined ? { keyVariable } : {}),
       }),
     );
   }

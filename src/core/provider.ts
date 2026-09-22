@@ -123,6 +123,21 @@ export interface ProviderFailureAnswer {
   model?: string;
 }
 
+export interface ProviderFailureDetails extends Pick<ProviderFailureAnswer, "status" | "provider" | "model"> {
+  operatorUrl?: string;
+  /** The configured variable involved in a key failure. It is operator-safe
+   * diagnostic context, never part of the requester-facing renderer. */
+  keyVariable?: string;
+}
+
+function providerFailureDiagnostic(cause: ProviderFailureCause, details: ProviderFailureDetails): string {
+  if (details.provider !== undefined && details.keyVariable !== undefined) {
+    if (cause === "key-absent") return `Provider "${details.provider}": ${details.keyVariable} is not set`;
+    if (cause === "key-invalid") return `Provider "${details.provider}": ${details.keyVariable} was refused`;
+  }
+  return renderProviderFailure(cause);
+}
+
 export class ProviderFailure extends Error {
   override readonly name = "ProviderFailure";
   override readonly cause: ProviderFailureCause;
@@ -130,17 +145,16 @@ export class ProviderFailure extends Error {
   readonly provider: string | undefined;
   readonly model: string | undefined;
   readonly operatorUrl: string | undefined;
+  readonly keyVariable: string | undefined;
 
-  constructor(
-    cause: ProviderFailureCause,
-    details: Pick<ProviderFailureAnswer, "status" | "provider" | "model"> & { operatorUrl?: string } = {},
-  ) {
-    super(renderProviderFailure(cause));
+  constructor(cause: ProviderFailureCause, details: ProviderFailureDetails = {}) {
+    super(providerFailureDiagnostic(cause, details));
     this.cause = cause;
     this.status = details.status;
     this.provider = details.provider;
     this.model = details.model;
     this.operatorUrl = details.operatorUrl;
+    this.keyVariable = details.keyVariable;
   }
 }
 
@@ -312,6 +326,7 @@ export function providerFailureOf(error: unknown): ProviderFailure {
       ...(typeof row.provider === "string" ? { provider: row.provider } : {}),
       ...(typeof row.model === "string" ? { model: row.model } : {}),
       ...(typeof row.operatorUrl === "string" ? { operatorUrl: row.operatorUrl } : {}),
+      ...(typeof row.keyVariable === "string" ? { keyVariable: row.keyVariable } : {}),
     });
   }
   return classifyProviderFailure({ error });

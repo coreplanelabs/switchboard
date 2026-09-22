@@ -169,7 +169,12 @@ export class PiAiProvider implements Provider {
     let key: string | undefined;
     if (this.keyEnv !== undefined) {
       const secret = this.secrets.named(this.keyEnv);
-      if (!secret) throw new ProviderFailure("key-absent", { provider: this.name, model: req.model });
+      if (!secret)
+        throw new ProviderFailure("key-absent", {
+          provider: this.name,
+          model: req.model,
+          keyVariable: this.keyEnv,
+        });
       key = secret.reveal();
     }
     const model = this.model(req.model, req.maxTokens, req.effort !== undefined);
@@ -177,11 +182,11 @@ export class PiAiProvider implements Provider {
       ...piStreamOptions(this.api, req, key),
       ...(this.fetchImpl ? { fetch: this.fetchImpl } : {}),
     };
-    let message: PiAssistantMessage;
     try {
-      message = await this.api$()
+      const message = await this.api$()
         .stream(model, toPiContext(req, model, this.clock), options)
         .result();
+      return fromPiMessage(message, this.name);
     } catch (err) {
       const failure = providerFailureOf(err);
       throw new ProviderFailure(failure.cause, {
@@ -189,9 +194,13 @@ export class PiAiProvider implements Provider {
         provider: this.name,
         model: req.model,
         ...(failure.operatorUrl !== undefined ? { operatorUrl: failure.operatorUrl } : {}),
+        ...(failure.keyVariable !== undefined
+          ? { keyVariable: failure.keyVariable }
+          : failure.cause === "key-invalid" && this.keyEnv !== undefined
+            ? { keyVariable: this.keyEnv }
+            : {}),
       });
     }
-    return fromPiMessage(message, this.name);
   }
 
   /** pi's implementation of this provider's API, loaded on the first call and

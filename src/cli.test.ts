@@ -252,17 +252,21 @@ describe("parseCliArgv — the `start` built-in (the bot process, not a registry
 });
 
 describe("askExitCode — what the `ask` process exits with (the ConsoleIO channel's receipt)", () => {
-  it("no run (a config reply such as `help`) or a completed run is 0; a run that ended failed or stopped is 1 — the code every failed command exits with", () => {
+  it("a successful no-run reply or completed run is 0; a typed no-run failure, failed run or stopped run is 1 — the code every failed command exits with", () => {
     expect(askExitCode(undefined)).toBe(0);
+    expect(askExitCode(undefined, true)).toBe(1);
     expect(askExitCode({ id: "r1", status: "completed" })).toBe(0);
     expect(askExitCode({ id: "r1", status: "failed" })).toBe(1);
     expect(askExitCode({ id: "r1", status: "stopped_soft" })).toBe(1);
     expect(askExitCode({ id: "r1", status: "stopped_hard" })).toBe(1);
   });
 
-  it("ConsoleIO keeps the receipt the core hands it when the run finishes; none before", () => {
+  it("ConsoleIO keeps the run receipt and a typed failure that ends before a run exists", () => {
     const io = new ConsoleIO();
     expect(io.finished).toBeUndefined();
+    expect(io.failed).toBe(false);
+    io.requestFailed();
+    expect(io.failed).toBe(true);
     io.runFinished({ id: "r1", status: "failed" });
     expect(io.finished).toEqual({ id: "r1", status: "failed" });
   });
