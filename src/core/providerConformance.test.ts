@@ -135,11 +135,17 @@ describe("ProviderFailure — the closed failure matrix", () => {
   it("authenticates the proxy's exact typed envelope and rejects an absent or tampered marker", () => {
     const envelope = authenticateProxyProviderFailure({
       type: "provider_failure",
-      cause: "rate-limited",
-      message: "The model provider is rate-limited.",
+      cause: "request-rejected",
+      message: "The model provider rejected the request shape; no work was started.",
+      schemaRejection: { tool: "future_schema", keyword: "dependentSchemas" },
     });
     expect(proxyProviderFailureIsAuthenticated({ error: envelope })).toBe(true);
     expect(proxyProviderFailureIsAuthenticated({ error: { ...envelope, cause: "permanent" } })).toBe(false);
+    expect(
+      proxyProviderFailureIsAuthenticated({
+        error: { ...envelope, schemaRejection: { tool: "future_schema", keyword: "pattern" } },
+      }),
+    ).toBe(false);
     const { _switchboard_proxy_auth: _marker, ...unmarked } = envelope;
     expect(proxyProviderFailureIsAuthenticated({ error: unmarked })).toBe(false);
   });

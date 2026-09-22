@@ -5,7 +5,7 @@
 // may choose its own ProviderFailure cause.
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause } from "../provider.js";
+import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause, type ProviderSchemaRejection } from "../provider.js";
 
 export const PROXY_PROVIDER_FAILURE_AUTH_FIELD = "_switchboard_proxy_auth";
 
@@ -17,6 +17,7 @@ export interface ProxyProviderFailureEnvelope {
   type: "provider_failure";
   cause: ProviderFailureCause;
   message: string;
+  schemaRejection?: ProviderSchemaRejection;
 }
 
 export type AuthenticatedProxyProviderFailureEnvelope = ProxyProviderFailureEnvelope & {
@@ -30,7 +31,14 @@ const isCause = (value: unknown): value is ProviderFailureCause =>
   typeof value === "string" && (PROVIDER_FAILURE_CAUSES as readonly string[]).includes(value);
 
 function payload(envelope: ProxyProviderFailureEnvelope, nonce: string): string {
-  return JSON.stringify([AUTH_VERSION, nonce, envelope.type, envelope.cause, envelope.message]);
+  return JSON.stringify([
+    AUTH_VERSION,
+    nonce,
+    envelope.type,
+    envelope.cause,
+    envelope.message,
+    envelope.schemaRejection ?? null,
+  ]);
 }
 
 function signature(envelope: ProxyProviderFailureEnvelope, nonce: string): Buffer {
@@ -82,6 +90,17 @@ export function proxyProviderFailureIsAuthenticated(value: unknown): boolean {
   if (found.length !== 1) return false;
   const row = found[0];
   if (row.type !== "provider_failure" || !isCause(row.cause) || typeof row.message !== "string") return false;
+  const rejection = isRecord(row.schemaRejection) ? row.schemaRejection : undefined;
+  if (
+    row.schemaRejection !== undefined &&
+    (typeof rejection?.tool !== "string" ||
+      rejection.tool.length === 0 ||
+      typeof rejection.keyword !== "string" ||
+      rejection.keyword.length === 0)
+  )
+    return false;
+  const schemaRejection =
+    rejection !== undefined ? { tool: rejection.tool as string, keyword: rejection.keyword as string } : undefined;
   const marker = row[PROXY_PROVIDER_FAILURE_AUTH_FIELD];
   if (typeof marker !== "string") return false;
   const parts = marker.split(".");
@@ -94,6 +113,14 @@ export function proxyProviderFailureIsAuthenticated(value: unknown): boolean {
   } catch {
     return false;
   }
-  const expected = signature({ type: "provider_failure", cause: row.cause, message: row.message }, nonce);
+  const expected = signature(
+    {
+      type: "provider_failure",
+      cause: row.cause,
+      message: row.message,
+      ...(schemaRejection !== undefined ? { schemaRejection } : {}),
+    },
+    nonce,
+  );
   return offered.length === expected.length && timingSafeEqual(offered, expected);
 }

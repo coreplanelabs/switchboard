@@ -15,7 +15,11 @@ import type { RunEvent } from "../core/runEvents.js";
 import { proxyProviderFailureIsAuthenticated } from "../core/modelProxy/providerFailureAuth.js";
 import { RunBearerStore, type RunBearerGrant } from "../core/modelProxy/runBearers.js";
 import type { ModelCard } from "../core/modelCard.js";
-import type { ProviderConfig } from "../core/provider.js";
+import { classifyProviderFailure, type ProviderConfig, type ToolDef } from "../core/provider.js";
+import { CommandRegistry } from "../core/commandRegistry.js";
+import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
+import { operatorProjection, operatorTools } from "../core/dispatch/operator.js";
+import { routableCommands, routablePresets } from "../core/dispatch/route.js";
 import {
   ANTHROPIC_MESSAGES_PATH,
   bodyKindOf,
@@ -31,6 +35,7 @@ import {
   pinRequest,
   PROXY_PATHS,
   proxyShapeOf,
+  shapeToolSchemasForWire,
   SseMeter,
   type ModelProxyDeps,
   type ProxyRequest,
@@ -732,6 +737,199 @@ describe("pinning and pass-through — the Responses shape", () => {
       max_output_tokens: 4096,
     });
     expect(JSON.stringify(body)).toBe(before);
+  });
+});
+
+describe("tool-schema conformance on each wire", () => {
+  const rejectsLookaround = (pattern: string): boolean => /\(\?(?:[=!]|<[=!])/.test(pattern);
+  const lookaroundPatterns = (value: unknown, into: string[] = []): string[] => {
+    if (Array.isArray(value)) {
+      for (const item of value) lookaroundPatterns(item, into);
+      return into;
+    }
+    if (typeof value !== "object" || value === null) return into;
+    for (const [key, item] of Object.entries(value)) {
+      if (key === "pattern" && typeof item === "string" && rejectsLookaround(item)) into.push(item);
+      lookaroundPatterns(item, into);
+    }
+    return into;
+  };
+  const operatorCatalogue = (): ToolDef[] => {
+    const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+    registerCoreCommands(registry);
+    const presets = routablePresets();
+    return operatorTools({
+      text: "review the pull request",
+      tail: [],
+      projection: operatorProjection({
+        presets,
+        commands: routableCommands(registry),
+        allowedPresets: presets.map((preset) => preset.name),
+      }),
+    });
+  };
+
+  it("the operator catalogue is clean of every construct known to be refused on each wire", async () => {
+    const catalogue = operatorCatalogue();
+    expect(catalogue).toHaveLength(52);
+    expect(
+      catalogue
+        .filter((tool) => lookaroundPatterns(tool.inputSchema).length > 0)
+        .map((tool) => tool.name)
+        .sort(),
+    ).toEqual(["delivery_report", "pulls_enqueue", "pulls_merge", "pulls_rebase"]);
+    const wireTools = {
+      "anthropic-messages": catalogue.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.inputSchema,
+      })),
+      "openai-chat": catalogue.map((tool) => ({
+        type: "function",
+        function: { name: tool.name, description: tool.description, parameters: tool.inputSchema },
+      })),
+      "openai-responses": catalogue.map((tool) => ({
+        type: "function",
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+      })),
+    } as const;
+    const cases = [
+      {
+        shape: "anthropic-messages" as const,
+        path: ANTHROPIC_MESSAGES_PATH,
+        grant: (h: ReturnType<typeof harness>) => h.grant("run-anthropic"),
+        body: () => anthropicRequest({ tools: wireTools["anthropic-messages"] }),
+      },
+      {
+        shape: "openai-chat" as const,
+        path: OPENAI_CHAT_COMPLETIONS_PATH,
+        grant: (h: ReturnType<typeof harness>) => h.localGrant("run-chat"),
+        body: () => ({
+          model: "gpt-x",
+          max_tokens: 3,
+          messages: [{ role: "user", content: "hi" }],
+          tools: wireTools["openai-chat"],
+        }),
+      },
+      {
+        shape: "openai-responses" as const,
+        path: OPENAI_RESPONSES_PATH,
+        grant: (h: ReturnType<typeof harness>) => h.responsesGrant("run-responses"),
+        body: () => responsesRequest({ tools: wireTools["openai-responses"] }),
+      },
+    ];
+
+    for (const testCase of cases) {
+      const directlyShaped = shapeToolSchemasForWire(testCase.shape, { tools: wireTools[testCase.shape] });
+      expect(lookaroundPatterns(directlyShaped.body.tools), testCase.shape).toHaveLength(
+        testCase.shape === "openai-responses" ? 0 : 4,
+      );
+      const h = harness({
+        answer: (call) => {
+          const rejected = call.url.endsWith("/responses") && lookaroundPatterns(call.body.tools).length > 0;
+          return new Response(
+            JSON.stringify(
+              rejected ? { error: { type: "invalid_request_error", code: "invalid_json_schema" } } : responsesAnswer(),
+            ),
+            { status: rejected ? 400 : 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      const token = h.bearers.mint(testCase.grant(h));
+      const res = await handleModelProxyRequest(
+        request({ path: testCase.path, headers: bearer(token), json: testCase.body() }).req,
+        h.deps,
+      );
+
+      expect(res.status, testCase.shape).toBe(200);
+      expect(lookaroundPatterns(h.calls[0].body.tools), testCase.shape).toHaveLength(
+        testCase.shape === "openai-responses" ? 0 : 4,
+      );
+      expect(
+        h.published
+          .filter((event) => event.type === "run_note" && event.kind === "control_degraded")
+          .map((event) => (event.type === "run_note" && event.kind === "control_degraded" ? event.asked : ""))
+          .sort(),
+      ).toEqual(
+        testCase.shape === "openai-responses"
+          ? ["delivery_report.pattern", "pulls_enqueue.pattern", "pulls_merge.pattern", "pulls_rebase.pattern"]
+          : [],
+      );
+    }
+  });
+
+  it("carries a provider-named unmeasured schema rejection as authenticated tool and keyword evidence", async () => {
+    const h = harness({
+      answer: () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              type: "invalid_request_error",
+              code: "invalid_json_schema",
+              message:
+                "Invalid schema for function 'future_schema': schema keyword 'dependentSchemas' is not supported.",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+    });
+    const token = h.bearers.mint(h.responsesGrant("run-1"));
+    const res = await handleModelProxyRequest(
+      request({
+        path: OPENAI_RESPONSES_PATH,
+        headers: bearer(token),
+        json: responsesRequest({
+          tools: [
+            {
+              type: "function",
+              name: "future_schema",
+              parameters: { type: "object", dependentSchemas: { repo: { required: ["owner"] } } },
+            },
+          ],
+        }),
+      }).req,
+      h.deps,
+    );
+
+    expect(res.status).toBe(400);
+    expect(json(res).error).toMatchObject({
+      cause: "request-rejected",
+      schemaRejection: { tool: "future_schema", keyword: "dependentSchemas" },
+    });
+    expect(proxyProviderFailureIsAuthenticated(res.body)).toBe(true);
+    expect(
+      classifyProviderFailure({ status: res.status, body: res.body, trustedEnvelope: true }).schemaRejection,
+    ).toEqual({ tool: "future_schema", keyword: "dependentSchemas" });
+  });
+
+  it("keeps native Responses patterns and property names byte-for-byte", async () => {
+    const h = harness();
+    const token = h.bearers.mint(h.responsesGrant("run-1"));
+    const sent = responsesRequest({
+      tools: [
+        {
+          type: "function",
+          name: "native",
+          parameters: {
+            type: "object",
+            properties: {
+              pattern: { type: "string" },
+              repo: { type: "string", pattern: "^[\\w.-]+/[\\w.-]+$" },
+            },
+          },
+        },
+      ],
+    });
+    const res = await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: sent }).req,
+      h.deps,
+    );
+
+    expect(res.status).toBe(200);
+    expect(h.calls[0].body.tools).toEqual(sent.tools);
+    expect(h.published).toEqual([]);
   });
 });
 

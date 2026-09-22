@@ -6,7 +6,8 @@
 // authenticates the bearer (this run, unexpired, unrevoked), pins the request
 // to the preset's model and `max_tokens` whatever the body named, refuses a
 // call past the run's turn guard (the preset's `maxTurns`, derived from its
-// wall clock) as a typed run event, forwards everything
+// wall clock) as a typed run event, shapes tool schemas to the selected
+// wire's accepted vocabulary with every loss recorded, and forwards everything
 // else byte-for-byte to the real provider with the real key from this
 // process's secrets, streams the answer back, and closes one `model.turn` span
 // per call carrying the token attrs the native runner sets — so the run page,
@@ -39,6 +40,7 @@ import {
   wireOf,
   type ProviderConfig,
   type ProviderFailureCause,
+  type ProviderSchemaRejection,
   type TokenUsage,
   type Wire,
 } from "../core/provider.js";
@@ -172,6 +174,7 @@ function providerFailureResponse(shape: ProxyShape, status: number, failure: Pro
     type: "provider_failure",
     cause: failure.cause,
     message: renderProviderFailure(failure.cause, providerFailureParks(failure.cause) ? "parked" : "ended"),
+    ...(failure.schemaRejection !== undefined ? { schemaRejection: failure.schemaRejection } : {}),
   });
   const body = shape === "anthropic-messages" ? { type: "error", error } : { error };
   return { status, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
@@ -568,12 +571,190 @@ export function shapeTools(
   return { body: shaped, toolChoice: toolChoiceWord(shape, undefined, kept.length) };
 }
 
+/** The one measured mismatch between the operator's emitted catalogue and
+ * the Responses schema parser: ECMAScript lookahead/lookbehind syntax. This is
+ * not an exhaustive validator vocabulary; an unmeasured mismatch is covered by
+ * the operator's authenticated schema-rejection re-ask. Plain patterns stay
+ * native, and this unsupported constraint degrades to the tool's validation. */
+function responsesRejectsPattern(pattern: string): boolean {
+  return /\(\?(?:[=!]|<[=!])/.test(pattern);
+}
+
+export interface ToolSchemaDegradation {
+  tool: string;
+  keyword: string;
+  why: string;
+}
+
+function shapeResponsesSchema(
+  value: unknown,
+  tool: string,
+  degradations: ToolSchemaDegradation[],
+): { value: unknown; changed: boolean } {
+  const schema = record(value);
+  if (!schema) {
+    if (!Array.isArray(value)) return { value, changed: false };
+    let changed = false;
+    const items = value.map((item) => {
+      const shaped = shapeResponsesSchema(item, tool, degradations);
+      changed ||= shaped.changed;
+      return shaped.value;
+    });
+    return { value: changed ? items : value, changed };
+  }
+  let changed = false;
+  const out: Record<string, unknown> = {};
+  for (const [keyword, item] of Object.entries(schema)) {
+    if (keyword === "pattern" && typeof item === "string" && responsesRejectsPattern(item)) {
+      degradations.push({
+        tool,
+        keyword,
+        why: "the Responses wire does not accept regular-expression lookaround",
+      });
+      changed = true;
+      continue;
+    }
+    if ((keyword === "properties" || keyword === "$defs" || keyword === "definitions") && record(item)) {
+      let mapChanged = false;
+      const mapped: Record<string, unknown> = {};
+      for (const [name, child] of Object.entries(record(item)!)) {
+        const shaped = shapeResponsesSchema(child, tool, degradations);
+        mapChanged ||= shaped.changed;
+        mapped[name] = shaped.value;
+      }
+      out[keyword] = mapChanged ? mapped : item;
+      changed ||= mapChanged;
+      continue;
+    }
+    if (
+      ["additionalProperties", "allOf", "anyOf", "if", "items", "not", "oneOf", "then", "else"].includes(keyword) &&
+      typeof item === "object" &&
+      item !== null
+    ) {
+      const shaped = shapeResponsesSchema(item, tool, degradations);
+      out[keyword] = shaped.value;
+      changed ||= shaped.changed;
+      continue;
+    }
+    out[keyword] = item;
+  }
+  return { value: changed ? out : value, changed };
+}
+
+/** Per-wire schema shaping. Other dialects retain their schemas byte for byte;
+ * Responses loses only constructs its validator cannot parse, with one typed
+ * degradation per tool and keyword for the run record. */
+export function shapeToolSchemasForWire(
+  shape: ProxyShape,
+  body: Record<string, unknown>,
+): { body: Record<string, unknown>; degradations: ToolSchemaDegradation[] } {
+  if (shape !== "openai-responses" || !Array.isArray(body.tools)) return { body, degradations: [] };
+  const degradations: ToolSchemaDegradation[] = [];
+  let changed = false;
+  const tools = body.tools.map((item) => {
+    const tool = record(item);
+    if (!tool) return item;
+    const name = typeof tool.name === "string" ? tool.name : "unnamed";
+    const shaped = shapeResponsesSchema(tool.parameters, name, degradations);
+    if (!shaped.changed) return item;
+    changed = true;
+    return { ...tool, parameters: shaped.value };
+  });
+  const unique = degradations.filter(
+    (candidate, index, all) =>
+      all.findIndex((other) => other.tool === candidate.tool && other.keyword === candidate.keyword) === index,
+  );
+  return { body: changed ? { ...body, tools } : body, degradations: unique };
+}
+
 /** A tool definition's name in the route's dialect: Anthropic's and the flat
  *  Responses shape's ride at the top (`{ name }`), the chat shape's inside the
  *  function object (`{ function: { name } }`). */
 function toolNameOf(shape: ProxyShape, tool: Record<string, unknown> | undefined): unknown {
   if (tool === undefined) return undefined;
   return shape === "openai-chat" ? record(tool.function)?.name : tool.name;
+}
+
+function toolSchemaOf(shape: ProxyShape, tool: Record<string, unknown>): unknown {
+  if (shape === "anthropic-messages") return tool.input_schema;
+  if (shape === "openai-chat") return record(tool.function)?.parameters;
+  return tool.parameters;
+}
+
+function schemaKeywords(value: unknown, into = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) {
+    for (const item of value) schemaKeywords(item, into);
+    return into;
+  }
+  const schema = record(value);
+  if (!schema) return into;
+  for (const [keyword, item] of Object.entries(schema)) {
+    into.add(keyword);
+    if ((keyword === "properties" || keyword === "$defs" || keyword === "definitions") && record(item)) {
+      for (const child of Object.values(record(item)!)) schemaKeywords(child, into);
+    } else {
+      schemaKeywords(item, into);
+    }
+  }
+  return into;
+}
+
+function providerErrorProse(body: string): string {
+  const strings = (value: unknown, into: string[] = []): string[] => {
+    if (typeof value === "string") into.push(value);
+    else if (Array.isArray(value)) for (const item of value) strings(item, into);
+    else if (record(value)) for (const item of Object.values(record(value)!)) strings(item, into);
+    return into;
+  };
+  try {
+    return strings(JSON.parse(body) as unknown).join(" ");
+  } catch {
+    return body;
+  }
+}
+
+function quoted(text: string, word: string): boolean {
+  return [`'${word}'`, `"${word}"`, `\`${word}\``].some((candidate) => text.includes(candidate));
+}
+
+/** A generic request rejection is not schema evidence. The provider boundary
+ * vouches only when its answer names schema validation plus exactly one tool
+ * from the sent table and one keyword present in that tool's sent schema. */
+function providerSchemaRejectionOf(
+  shape: ProxyShape,
+  body: Record<string, unknown>,
+  errorBody: string,
+): ProviderSchemaRejection | undefined {
+  const prose = providerErrorProse(errorBody);
+  if (
+    !/(?:invalid|unsupported|refused|rejected)[^.!?]{0,80}(?:json )?schema|(?:json )?schema[^.!?]{0,80}(?:invalid|unsupported|not (?:permitted|supported))/i.test(
+      prose,
+    )
+  )
+    return undefined;
+  const candidates = (Array.isArray(body.tools) ? body.tools : [])
+    .map((item) => record(item))
+    .filter((item): item is Record<string, unknown> => item !== undefined)
+    .map((tool) => ({ name: toolNameOf(shape, tool), schema: toolSchemaOf(shape, tool) }))
+    .filter(
+      (tool): tool is { name: string; schema: unknown } => typeof tool.name === "string" && quoted(prose, tool.name),
+    );
+  if (candidates.length !== 1) return undefined;
+  const [candidate] = candidates;
+  const keywords = [...schemaKeywords(candidate.schema)].filter((keyword) => quoted(prose, keyword));
+  if (keywords.length !== 1) return undefined;
+  return { tool: candidate.name, keyword: keywords[0]! };
+}
+
+function withSchemaRejection(failure: ProviderFailure, schemaRejection: ProviderSchemaRejection): ProviderFailure {
+  return new ProviderFailure(failure.cause, {
+    ...(failure.status !== undefined ? { status: failure.status } : {}),
+    ...(failure.provider !== undefined ? { provider: failure.provider } : {}),
+    ...(failure.model !== undefined ? { model: failure.model } : {}),
+    ...(failure.operatorUrl !== undefined ? { operatorUrl: failure.operatorUrl } : {}),
+    ...(failure.keyVariable !== undefined ? { keyVariable: failure.keyVariable } : {}),
+    schemaRejection,
+  });
 }
 
 export function toolsOffered(shape: ProxyShape, body: Record<string, unknown>): ToolsOffered {
@@ -795,9 +976,25 @@ export async function handleAdmitted(
     );
   }
   // What the run offered rides the span; what went upstream is shaped by the
-  // harness's marks (the checkpoint turn's none, a post-step's trimmed list).
+  // harness's marks (the checkpoint turn's none, a post-step's trimmed list)
+  // and then by the selected wire's schema vocabulary. Every schema loss is a
+  // typed degradation on the run, never a silent request rewrite.
   const shaped = shapeTools(shape, body, deps.bearers.marksOf(grant.runId));
-  const payload = JSON.stringify(pinRequest(shape, shaped.body, grant));
+  const schemaShaped = shapeToolSchemasForWire(shape, shaped.body);
+  for (const degradation of schemaShaped.degradations) {
+    grant.publish({
+      type: "run_note",
+      kind: "control_degraded",
+      control: "tool_schema",
+      asked: `${degradation.tool}.${degradation.keyword}`,
+      applied: "removed",
+      vouched: true,
+      why: degradation.why,
+      summary: `tool "${degradation.tool}" schema keyword "${degradation.keyword}" removed for ${shape}: ${degradation.why}`,
+      at: deps.clock(),
+    });
+  }
+  const payload = JSON.stringify(pinRequest(shape, schemaShaped.body, grant));
   const offered = { ...toolsOffered(shape, body), toolChoice: shaped.toolChoice };
   const startedAt = deps.clock();
   const span = grant.span.start("model.turn", {
@@ -847,11 +1044,21 @@ export async function handleAdmitted(
       return classifyProviderFailure({ error: thrown ?? new Error("fetch failed"), provider: grant.providerName });
     const contentType = (answer.headers.get("content-type") ?? "").toLowerCase();
     if (answer.ok && !contentType.includes("text/html")) return undefined;
-    const body = await answer
+    const failureBody = await answer
       .clone()
       .text()
       .catch(() => "");
-    return classifyProviderFailure({ status: answer.status, body, provider: grant.providerName, model: grant.model });
+    const failure = classifyProviderFailure({
+      status: answer.status,
+      body: failureBody,
+      provider: grant.providerName,
+      model: grant.model,
+    });
+    const schemaRejection =
+      answer.status === 400 && failure.cause === "request-rejected"
+        ? providerSchemaRejectionOf(shape, schemaShaped.body, failureBody)
+        : undefined;
+    return schemaRejection !== undefined ? withSchemaRejection(failure, schemaRejection) : failure;
   };
   let res: Response | undefined;
   let thrown: unknown;

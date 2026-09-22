@@ -127,11 +127,20 @@ export interface ProviderFailureAnswer {
   trustedEnvelope?: boolean;
 }
 
+export interface ProviderSchemaRejection {
+  tool: string;
+  keyword: string;
+}
+
 export interface ProviderFailureDetails extends Pick<ProviderFailureAnswer, "status" | "provider" | "model"> {
   operatorUrl?: string;
   /** The configured variable involved in a key failure. It is operator-safe
    * diagnostic context, never part of the requester-facing renderer. */
   keyVariable?: string;
+  /** Vouched evidence minted at the provider boundary when its response names
+   * one offered tool and one schema keyword. Callers may repair only on
+   * this pair, never on a generic 400 or provider-controlled prose. */
+  schemaRejection?: ProviderSchemaRejection;
 }
 
 function providerFailureDiagnostic(cause: ProviderFailureCause, details: ProviderFailureDetails): string {
@@ -150,6 +159,7 @@ export class ProviderFailure extends Error {
   readonly model: string | undefined;
   readonly operatorUrl: string | undefined;
   readonly keyVariable: string | undefined;
+  readonly schemaRejection: ProviderSchemaRejection | undefined;
 
   constructor(cause: ProviderFailureCause, details: ProviderFailureDetails = {}) {
     super(providerFailureDiagnostic(cause, details));
@@ -159,6 +169,7 @@ export class ProviderFailure extends Error {
     this.model = details.model;
     this.operatorUrl = details.operatorUrl;
     this.keyVariable = details.keyVariable;
+    this.schemaRejection = details.schemaRejection;
   }
 }
 
@@ -197,6 +208,16 @@ export function renderProviderFailure(cause: ProviderFailureCause, surface: Prov
 
 const providerFailureRecord = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+
+function providerSchemaRejectionRecord(value: unknown): ProviderSchemaRejection | undefined {
+  const row = providerFailureRecord(value);
+  return typeof row?.tool === "string" &&
+    row.tool.length > 0 &&
+    typeof row.keyword === "string" &&
+    row.keyword.length > 0
+    ? { tool: row.tool, keyword: row.keyword }
+    : undefined;
+}
 
 function providerFailureBody(body: unknown): unknown {
   if (typeof body !== "string") return body;
@@ -249,6 +270,53 @@ function providerFailureText(input: ProviderFailureAnswer): string {
   }
 }
 
+function quotedWord(text: string, word: string): boolean {
+  return [`'${word}'`, `"${word}"`, `\`${word}\``].some((candidate) => text.includes(candidate));
+}
+
+function toolSchemaKeywords(value: unknown, into = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) {
+    for (const item of value) toolSchemaKeywords(item, into);
+    return into;
+  }
+  const schema = providerFailureRecord(value);
+  if (!schema) return into;
+  for (const [keyword, item] of Object.entries(schema)) {
+    into.add(keyword);
+    if ((keyword === "properties" || keyword === "$defs" || keyword === "definitions") && providerFailureRecord(item)) {
+      for (const child of Object.values(providerFailureRecord(item)!)) toolSchemaKeywords(child, into);
+    } else {
+      toolSchemaKeywords(item, into);
+    }
+  }
+  return into;
+}
+
+/** The provider adapter's evidence for one repairable schema rejection. The
+ * response must prove schema validation failed and name exactly one offered
+ * tool plus exactly one keyword present in that tool's sent schema. */
+export function providerSchemaRejectionOf(
+  error: unknown,
+  tools: readonly ToolDef[] | undefined,
+): ProviderSchemaRejection | undefined {
+  if (!tools || tools.length === 0) return undefined;
+  const text = providerFailureText({ error });
+  const parsed = providerFailureBody(providerFailureRecord(error) ?? text);
+  const prose = providerFailureProse(parsed ?? text);
+  if (
+    !/(?:invalid|unsupported|refused|rejected)[^.!?]{0,80}(?:json )?schema|(?:json )?schema[^.!?]{0,80}(?:invalid|unsupported|not (?:permitted|supported))/i.test(
+      prose,
+    )
+  )
+    return undefined;
+  const namedTools = tools.filter((tool) => quotedWord(prose, tool.name));
+  if (namedTools.length !== 1) return undefined;
+  const [tool] = namedTools;
+  const namedKeywords = [...toolSchemaKeywords(tool.inputSchema)].filter((keyword) => quotedWord(prose, keyword));
+  if (namedKeywords.length !== 1) return undefined;
+  return { tool: tool.name, keyword: namedKeywords[0]! };
+}
+
 function providerFailureProse(value: unknown, into: string[] = []): string {
   if (typeof value === "string") {
     into.push(value);
@@ -274,20 +342,25 @@ function isProviderFailureCause(value: unknown): value is ProviderFailureCause {
   return typeof value === "string" && (PROVIDER_FAILURE_CAUSES as readonly string[]).includes(value);
 }
 
-function trustedProviderFailureCause(value: unknown): ProviderFailureCause | undefined {
+function trustedProviderFailureEnvelope(
+  value: unknown,
+): { cause: ProviderFailureCause; schemaRejection?: ProviderSchemaRejection } | undefined {
   if (Array.isArray(value)) {
     for (const item of value) {
-      const cause = trustedProviderFailureCause(item);
-      if (cause !== undefined) return cause;
+      const envelope = trustedProviderFailureEnvelope(item);
+      if (envelope !== undefined) return envelope;
     }
     return undefined;
   }
   const row = providerFailureRecord(value);
   if (!row) return undefined;
-  if (row.type === "provider_failure" && isProviderFailureCause(row.cause)) return row.cause;
+  if (row.type === "provider_failure" && isProviderFailureCause(row.cause)) {
+    const schemaRejection = providerSchemaRejectionRecord(row.schemaRejection);
+    return { cause: row.cause, ...(schemaRejection !== undefined ? { schemaRejection } : {}) };
+  }
   for (const item of Object.values(row)) {
-    const cause = trustedProviderFailureCause(item);
-    if (cause !== undefined) return cause;
+    const envelope = trustedProviderFailureEnvelope(item);
+    if (envelope !== undefined) return envelope;
   }
   return undefined;
 }
@@ -302,7 +375,7 @@ export function classifyProviderFailure(input: ProviderFailureAnswer): ProviderF
   const text = providerFailureText(input);
   const parsed = providerFailureBody(input.body ?? providerFailureRecord(input.error) ?? text);
   const signals = providerFailureSignals(parsed);
-  const trusted = input.trustedEnvelope === true ? trustedProviderFailureCause(parsed) : undefined;
+  const trusted = input.trustedEnvelope === true ? trustedProviderFailureEnvelope(parsed) : undefined;
   const status = providerFailureStatus(input, text);
   // A parsed provider object contributes its structured signals and prose,
   // but never its untrusted `cause` value. That preserves message-only
@@ -327,7 +400,7 @@ export function classifyProviderFailure(input: ProviderFailureAnswer): ProviderF
     /\boverloaded\b/i.test(unstructuredText) ||
     /<html[\s>][\s\S]{0,4000}\b(?:bad gateway|service unavailable|gateway timeout)\b/i.test(unstructuredText);
   let cause: ProviderFailureCause;
-  if (trusted !== undefined) cause = trusted;
+  if (trusted !== undefined) cause = trusted.cause;
   else if (status === 402) cause = "credit-or-quota-exhausted";
   else if (status === 429) cause = "rate-limited";
   else if (transientTransport) cause = "transient";
@@ -369,6 +442,7 @@ export function classifyProviderFailure(input: ProviderFailureAnswer): ProviderF
     ...(input.provider !== undefined ? { provider: input.provider } : {}),
     ...(input.model !== undefined ? { model: input.model } : {}),
     ...(operatorUrl !== undefined ? { operatorUrl } : {}),
+    ...(trusted?.schemaRejection !== undefined ? { schemaRejection: trusted.schemaRejection } : {}),
   });
 }
 
@@ -384,6 +458,9 @@ function typedProviderFailureOf(error: unknown, seen = new Set<object>()): Provi
       ...(typeof row.model === "string" ? { model: row.model } : {}),
       ...(typeof row.operatorUrl === "string" ? { operatorUrl: row.operatorUrl } : {}),
       ...(typeof row.keyVariable === "string" ? { keyVariable: row.keyVariable } : {}),
+      ...(providerSchemaRejectionRecord(row.schemaRejection) !== undefined
+        ? { schemaRejection: providerSchemaRejectionRecord(row.schemaRejection)! }
+        : {}),
     });
   }
   // StructuredAskError and other boundary wrappers preserve the original

@@ -340,8 +340,7 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
     const { fetchImpl } = fakeFetch(
       JSON.stringify({
         error: {
-          message:
-            "Invalid JSON schema: regex lookaround is not supported; see https://provider.example/schema and retry",
+          message: "Invalid schema for function 'route': schema keyword 'pattern' is not supported.",
           type: "invalid_request_error",
           code: "invalid_json_schema",
         },
@@ -364,7 +363,76 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
         fetch: fetchImpl,
       },
     );
-    await expect(table.get("openai").complete({ ...routeRequest(), model: "gpt-5.6-sol" })).rejects.toMatchObject({
+    await expect(
+      table.get("openai").complete({
+        ...routeRequest(),
+        model: "gpt-5.6-sol",
+        tools: [
+          {
+            ...ROUTE_TOOL,
+            inputSchema: {
+              type: "object",
+              properties: { repo: { type: "string", pattern: "^(?!reserved/)[\\w.-]+/[\\w.-]+$" } },
+            },
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({
+      name: "ProviderFailure",
+      cause: "request-rejected",
+      status: 400,
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      schemaRejection: { tool: "route", keyword: "pattern" },
+      message: "The model provider rejected the request shape; no work was started.",
+    });
+  });
+
+  it("a keyword-only schema 400 shared by several offered tools stays generic and drops no tool", async () => {
+    const { fetchImpl, calls } = fakeFetch(
+      JSON.stringify({
+        error: {
+          message: "Invalid JSON schema: keyword 'dependentSchemas' is not supported.",
+          type: "invalid_request_error",
+          code: "invalid_json_schema",
+        },
+      }),
+      400,
+    );
+    const table = new PiAiProviders(
+      {
+        openai: {
+          type: "openai-compatible",
+          wire: "openai-responses",
+          baseUrl: "https://api.openai.com/v1",
+          apiKeyEnv: "OPENAI_API_KEY",
+        },
+      },
+      {
+        secrets: secretsFrom({ OPENAI_API_KEY: "sk-openai-test" }),
+        clock: CLOCK,
+        fetch: fetchImpl,
+      },
+    );
+    const sharedKeyword = {
+      type: "object",
+      dependentSchemas: { repo: { required: ["owner"] } },
+    };
+    const failure = await table
+      .get("openai")
+      .complete({
+        ...routeRequest(),
+        model: "gpt-5.6-sol",
+        tools: [
+          { ...ROUTE_TOOL, name: "route_one", inputSchema: sharedKeyword },
+          { ...ROUTE_TOOL, name: "route_two", inputSchema: sharedKeyword },
+        ],
+        toolChoice: { type: "any" },
+      })
+      .catch((error: unknown) => error);
+
+    expect((calls[0].body.tools as { name?: string }[]).map((tool) => tool.name)).toEqual(["route_one", "route_two"]);
+    expect(failure).toMatchObject({
       name: "ProviderFailure",
       cause: "request-rejected",
       status: 400,
@@ -372,6 +440,7 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
       model: "gpt-5.6-sol",
       message: "The model provider rejected the request shape; no work was started.",
     });
+    expect(failure).toMatchObject({ schemaRejection: undefined });
   });
 
   it("the request's signal reaches the wire: an aborted call is a thrown error, never a result", async () => {

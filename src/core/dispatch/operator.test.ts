@@ -40,6 +40,7 @@ import {
 import { ConfigStore } from "../../config.js";
 import {
   classifyProviderFailure,
+  ProviderFailure,
   renderProviderFailure,
   type CompletionRequest,
   type Provider,
@@ -361,8 +362,95 @@ describe("runOperator — the loop over a scripted model", () => {
     expect(answer.outputTokens).toBeGreaterThan(0);
   });
 
-  it("a provider-rejected request is a typed refusal with one safe sentence, never a non_decision that falls to general", async () => {
+  it("an explicit schema rejection is re-asked without its tool even when the keyword is unmeasured", async () => {
+    const incompatible = {
+      ...command("repo.test"),
+      tool: {
+        ...tool("repo_test"),
+        inputSchema: {
+          type: "object",
+          dependentSchemas: { repo: { required: ["owner"] } },
+        },
+      },
+    };
+    const prompts: { tool: ToolDef; tools?: ToolDef[] }[] = [];
+    const answer = await runOperator(
+      input({
+        projection: operatorProjection({
+          presets: routablePresets(),
+          commands: [command("runs.list"), incompatible],
+          allowedPresets: ["general"],
+        }),
+      }),
+      async (prompt) => {
+        prompts.push(prompt);
+        if (prompts.length === 1)
+          throw new Error("structured wrapper", {
+            cause: new ProviderFailure("request-rejected", {
+              status: 400,
+              schemaRejection: { tool: "repo_test", keyword: "dependentSchemas" },
+            }),
+          });
+        return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "read ask" } };
+      },
+    );
+
+    expect([prompts[0].tool, ...(prompts[0].tools ?? [])].map((candidate) => candidate.name)).toContain("repo_test");
+    expect([prompts[1].tool, ...(prompts[1].tools ?? [])].map((candidate) => candidate.name)).not.toContain(
+      "repo_test",
+    );
+    expect(answer.decision).toMatchObject({ kind: "binds" });
+    expect(answer.attempts).toEqual([
+      {
+        outcome: "violation",
+        violation: 'provider rejected tool "repo_test" schema keyword "dependentSchemas"; re-asked without that tool',
+      },
+      { outcome: "accepted" },
+    ]);
+    expect(operatorEventOf("on", answer).attempts?.[0]?.violation).toContain(
+      'tool "repo_test" schema keyword "dependentSchemas"',
+    );
+  });
+
+  it("schema re-asks have their own budget after an ordinary structured violation", async () => {
+    const prompts: { tool: ToolDef; tools?: ToolDef[] }[] = [];
+    const answer = await runOperator(
+      input({
+        projection: operatorProjection({
+          presets: routablePresets(),
+          commands: [command("runs.list"), command("schema.one"), command("schema.two")],
+          allowedPresets: ["general"],
+        }),
+      }),
+      async (prompt) => {
+        prompts.push(prompt);
+        if (prompts.length === 1) return { tool: "not_offered", input: {} };
+        if (prompts.length <= 3)
+          throw new ProviderFailure("request-rejected", {
+            status: 400,
+            schemaRejection: {
+              tool: prompts.length === 2 ? "schema_one" : "schema_two",
+              keyword: "futureKeyword",
+            },
+          });
+        return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "read ask" } };
+      },
+    );
+
+    expect(prompts).toHaveLength(4);
+    expect(answer.decision).toMatchObject({ kind: "binds" });
+    expect(answer.attempts?.map((attempt) => attempt.outcome)).toEqual([
+      "violation",
+      "violation",
+      "violation",
+      "accepted",
+    ]);
+  });
+
+  it("a provider-rejected request without explicit schema evidence is one typed refusal, never a re-ask or non_decision", async () => {
+    let calls = 0;
     const answer = await runOperator(input(), async () => {
+      calls++;
       throw classifyProviderFailure({
         status: 400,
         body: {
@@ -375,6 +463,7 @@ describe("runOperator — the loop over a scripted model", () => {
         },
       });
     });
+    expect(calls).toBe(1);
     expect(answer.decision).toEqual({
       kind: "refusal",
       cause: "provider",
