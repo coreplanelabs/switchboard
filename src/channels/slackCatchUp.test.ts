@@ -493,9 +493,8 @@ describe("interruptedCardFrame", () => {
       "◓ *review* on `anthropic/claude-fable-5` · resident refreshing · 153s — thinking (88s since last tool)",
     );
     expect(f.title).toBe("❌ interrupted · *review* on `anthropic/claude-fable-5` · resident refreshing · 153s");
-    expect(f.detail).toMatch(/restarted while this run was in flight/);
-    expect(f.detail).toMatch(/this is a bug/i);
-    expect(f.detail).toContain("no replacement run was started");
+    expect(f.detail).toMatch(/restarted .* while this run was in flight/);
+    expect(f.detail).toMatch(/re-send/i);
   });
 
   it("a routed card — its label carries `· route reason: <reason>` at debug — closes with the same one-sentence detail as any card: no override footer (routing-and-config item 21)", () => {

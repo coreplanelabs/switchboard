@@ -20,7 +20,7 @@
     "web/src/components/ThemeToggle.vue": "025a9a0c7ccc2983772c1888f7426ec161feb3ffaea87c914c65d15bdfd740d3",
     "web/src/components/ViewAsBanner.vue": "c31f753d698c3c9df6f7643fdff78eee122c2a5bacff2d71e2899dd841b9f474",
     "web/src/components/costs/CostChart.vue": "568a5a27631bd31ea75a91a4b56fcf7681a2e9655d4a1828c7940f52acf40f67",
-    "web/src/components/costs/CostsByDimension.vue": "fdf5adbbd8377e93a01245d282cd389e06e8f7f80d7a8511269659d48efa19c8",
+    "web/src/components/costs/CostsByDimension.vue": "acf5d3a1b1207504165e41f62201b46818c59f451c64d7d8500a5b818fc520a6",
     "web/src/lib/browser.ts": "c624264b160468cebfb6bcc4bc389f07fd8b24e1e700e1c0e318102b5a229c08",
     "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",
     "web/src/lib/costs.ts": "cacac88f2afbdae2338ec2f139957f6cec6c40db20a94f250986e4d0432b4e3d",

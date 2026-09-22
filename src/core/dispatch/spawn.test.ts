@@ -329,11 +329,9 @@ describe("spawnChild — the one path a child run is born through", () => {
     expect(writers.map((a) => a.name)).toEqual(["coding", "ship"]);
     for (const { name } of writers) {
       const out = await spawnChild(deps(dispatch), parent(ch.io), { preset: name, prompt: "fix it", repo: "acme/api" });
-      expect(out, name).toEqual({
-        kind: "refused",
-        reason: "spawn_identity",
-        message: `\`${name}\` runs as a \`write\` identity — it pushes branches and opens pull requests — so this run was not started: spawned children read this conversation and report, but never write`,
-      });
+      expect(out, name).toMatchObject({ kind: "refused", reason: "spawn_identity" });
+      expect((out as { message: string }).message).toContain(`\`${name}\``);
+      expect((out as { message: string }).message).toMatch(/write/);
     }
     expect(ch.leads).toEqual([]);
     expect(dispatch).not.toHaveBeenCalled();

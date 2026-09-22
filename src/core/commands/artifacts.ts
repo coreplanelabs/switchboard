@@ -91,7 +91,7 @@ export const artifactsLifecycle = defineCommand({
     if (!read.ok)
       throw new CommandError(
         "unavailable",
-        `this is a bug: the rules were applied to ${bucket}, but their read-back failed (${read.problem}) and no automatic confirmation was completed`,
+        `the rules were applied to ${bucket} but reading them back failed — ${read.problem}; run \`artifacts lifecycle\` again to confirm`,
       );
     const match = rulesMatch(read.value, rules);
     if (!match.ok)

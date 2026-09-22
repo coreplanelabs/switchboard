@@ -332,7 +332,8 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     });
     expect(refusals).toEqual(["repo_unverified"]);
     expect(closedReasons(closes).join("\n")).toContain("repo could not be verified");
-    expect(replies[0]).toContain("⚠️ This is a bug: I couldn't verify that `acme/api` is an onboarded repo");
+    expect(replies[0]).toContain("⚠️ I couldn't verify that `acme/api` is an onboarded repo");
+    expect(replies[0]).toContain("https://github.com/acme/api");
   });
 
   it("a restricted repository refuses a user without a grant for it by name; a granted one, and an unrestricted repository, pass", async () => {
@@ -451,7 +452,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
       expect(refusals).toEqual(["repo_unverified"]);
       expect(closedReasons(closes).join("\n")).toContain("repo could not be verified");
       expect(replies[0]).toBe(
-        "⚠️ This is a bug: I couldn't verify `acme/api` against GitHub because it did not answer, so I did not start an *explore* run and no automatic retry was scheduled.",
+        "⚠️ I couldn't verify `acme/api` against GitHub — it didn't answer — so I did not start an *explore* run rather than guess which repository you meant. Try again in a minute.",
       );
       expect(replies[0]).not.toContain("resident registry");
     });
@@ -724,10 +725,10 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
   });
 });
 
-// docs/reference/specs/routing-and-config.md items 4 and 33: the profile gate,
-// beside the agent gate and before the thread is claimed — an identity or a
-// machine class above a boundary's cap is refused by name (the axis, the cap,
-// its scope and the resulting state); a clipped budget is allowed and carried.
+// docs/reference/specs/routing-and-config.md item 4: the profile gate, beside
+// the agent gate and before the thread is claimed — an identity or a machine
+// class above a boundary's cap is refused by name (the axis, the cap, its
+// scope, how to get it raised); a clipped budget is allowed and carried.
 describe("authorizeProfile — the profile gate, before the thread is claimed", () => {
   const coding = getAgent("coding");
 
@@ -747,22 +748,22 @@ describe("authorizeProfile — the profile gate, before the thread is claimed", 
     expect(refusals).toEqual([]);
   });
 
-  it("an identity above the cap is refused under the dispatch's refusal wrap, naming the axis, cap, scope and unchanged state — per scope", async () => {
+  it("an identity above the cap is refused under the dispatch's refusal wrap, naming the axis, the cap, its scope and how to get it raised — per scope", async () => {
     const cases = [
       {
         scope: "channel" as const,
         reply:
-          "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Switchboard left this channel's boundary unchanged and did not start the run.",
+          "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Run it in a channel that allows `write`, or ask slack:UADMIN to raise this channel's boundary.",
       },
       {
         scope: "user" as const,
         reply:
-          "🚫 `coding` needs a `write` credential; your own boundary caps runs at `read`. Switchboard left your boundary and overrides unchanged and did not start the run.",
+          "🚫 `coding` needs a `write` credential; your own boundary caps runs at `read`. Raise your own boundary with `config set me --boundary.maxIdentity write`, or drop your overrides with `config clear me`.",
       },
       {
         scope: "defaults" as const,
         reply:
-          "🚫 `coding` needs a `write` credential; the installation's default boundary caps runs at `read`. Switchboard left the installation's default boundary unchanged and did not start the run.",
+          "🚫 `coding` needs a `write` credential; the installation's default boundary caps runs at `read`. Ask slack:UADMIN to raise `defaults.boundary` in the configuration.",
       },
     ];
     for (const { scope, reply } of cases) {
@@ -779,26 +780,26 @@ describe("authorizeProfile — the profile gate, before the thread is claimed", 
     }
   });
 
-  it("the minutes axis names the minimum, the lease and whose clip it was, then closes on the unchanged state", () => {
+  it("the minutes axis names the minimum, the lease and whose clip it was, then the way forward per scope: the directive to resend with, the user's boundary to raise, the channel or the defaults to ask about, the parent's remaining time", () => {
     const hint = "slack:UADMIN";
     expect(profileRefusalReply("explore", { axis: "minutes", needs: 4, have: 3, scope: "directive" }, hint)).toBe(
-      "🚫 `explore` needs at least 4 minutes — a turn, then its write-up and post-step — and this message's own budget gives it 3. Switchboard applied this message's budget directive and did not start the run.",
+      "🚫 `explore` needs at least 4 minutes — a turn, then its write-up and post-step — and this message's own budget gives it 3. Send the message again with `budget:4` or more.",
     );
     expect(profileRefusalReply("coding", { axis: "minutes", needs: 9, have: 5, scope: "user" }, hint)).toBe(
-      "🚫 `coding` needs at least 9 minutes — a turn, then its write-up and post-step — and your own boundary gives it 5. Switchboard left your boundary and overrides unchanged and did not start the run.",
+      "🚫 `coding` needs at least 9 minutes — a turn, then its write-up and post-step — and your own boundary gives it 5. Raise your own boundary with `config set me --boundary.maxMinutes 9`, or drop your overrides with `config clear me`.",
     );
     expect(profileRefusalReply("review", { axis: "minutes", needs: 7, have: 5, scope: "channel" }, hint)).toBe(
-      "🚫 `review` needs at least 7 minutes — a turn, then its write-up and post-step — and this channel's boundary gives it 5. Switchboard left this channel's boundary unchanged and did not start the run.",
+      "🚫 `review` needs at least 7 minutes — a turn, then its write-up and post-step — and this channel's boundary gives it 5. Run it in a channel whose boundary allows 7 minutes, or ask slack:UADMIN to raise this channel's boundary.",
     );
     expect(profileRefusalReply("general", { axis: "minutes", needs: 4, have: 2, scope: "defaults" }, hint)).toBe(
-      "🚫 `general` needs at least 4 minutes — a turn, then its write-up and post-step — and the installation's default boundary gives it 2. Switchboard left the installation's default boundary unchanged and did not start the run.",
+      "🚫 `general` needs at least 4 minutes — a turn, then its write-up and post-step — and the installation's default boundary gives it 2. Ask slack:UADMIN to raise `defaults.boundary` in the configuration.",
     );
     expect(profileRefusalReply("research", { axis: "minutes", needs: 4, have: 2, scope: "parent" }, hint)).toBe(
-      "🚫 `research` needs at least 4 minutes — a turn, then its write-up and post-step — and the parent run's remaining budget gives it 2. Switchboard left the parent run's remaining budget unchanged and did not start the run.",
+      "🚫 `research` needs at least 4 minutes — a turn, then its write-up and post-step — and the parent run's remaining budget gives it 2. Spawn it from a run with at least 4 minutes left.",
     );
   });
 
-  it("a class outside the set is refused naming the class, the allowed set and every unchanged scope", async () => {
+  it("a class outside the set is refused naming the class, the allowed set and every scope that excludes it, with one way forward per scope", async () => {
     const one = setup();
     await authorizeProfile(one.deps, {
       ...one.gate,
@@ -809,7 +810,7 @@ describe("authorizeProfile — the profile gate, before the thread is claimed", 
       },
     });
     expect(one.replies).toEqual([
-      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary allows only `none`. Switchboard left this channel's boundary unchanged; it did not start the run.",
+      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary allows only `none`. Run it in a channel that allows `repo-resident`, or ask slack:UADMIN to raise this channel's boundary.",
     ]);
     const two = setup();
     await authorizeProfile(two.deps, {
@@ -821,7 +822,7 @@ describe("authorizeProfile — the profile gate, before the thread is claimed", 
       },
     });
     expect(two.replies).toEqual([
-      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary and your own boundary allow only `none`, `blank`. Switchboard left this channel's boundary unchanged; Switchboard left your boundary and overrides unchanged; it did not start the run.",
+      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary and your own boundary allow only `none`, `blank`. Run it in a channel that allows `repo-resident`, or ask slack:UADMIN to raise this channel's boundary; raise your own boundary with `config set me --boundary.machines <classes including repo-resident>`, or drop your overrides with `config clear me`.",
     ]);
     expect(two.refusals).toEqual(["profile_bounded"]);
   });

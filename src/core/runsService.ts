@@ -624,7 +624,7 @@ function hostedSealAnswer(units: readonly CoordinatorUnit[], runnerStopped: bool
     const how = u.ending
       ? u.ending.kind
       : u.threadKey !== undefined
-        ? "no ending was recorded — the next reply in its thread continues the unit"
+        ? "no ending was recorded — re-issue `agent:ship` in its thread to continue"
         : "not started";
     return `${u.unit} — ${how}${u.pr ? ` — ${u.pr.url}` : ""}`;
   });

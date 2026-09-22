@@ -88,7 +88,7 @@ export function createMetricsViewHandler(
           json(res, report);
           return;
         }
-        page(req, res, 200, ctx.actor, "Metrics by run", { page: "metrics", report });
+        page(req, res, 200, ctx.actor, "Run metrics", { page: "metrics", report });
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
@@ -98,7 +98,7 @@ export function createMetricsViewHandler(
         }
         // A failing source: the class says what kind of failure, the body
         // carries no query text and no token (run-metrics.md item 8).
-        plain(res, 503, `metrics by run unavailable: ${err instanceof Error ? err.name : "Error"}`);
+        plain(res, 503, `run metrics unavailable: ${err instanceof Error ? err.name : "Error"}`);
       });
     return true;
   };

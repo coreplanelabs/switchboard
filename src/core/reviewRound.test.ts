@@ -183,7 +183,6 @@ describe("checkPrHeadPreflight (explicit AgentDef, before any model call)", () =
       expect(r.where).toBe("acme/api#42");
       expect(r.reply).toContain("not started");
       expect(r.reply).toContain("acme/api#42");
-      expect(r.reply).toContain("This is a bug: no automatic head lookup retry was scheduled");
     }
   });
 
@@ -262,8 +261,8 @@ describe("guardAttachedHead (before any model call)", () => {
       expect(r.reply).toContain("acme/api#42");
       expect(r.reply).toContain(`workspace-observed HEAD for patch-1 is at ${OTHER}`);
       expect(r.reply).toContain(`PR head is ${HEAD}`);
-      expect(r.reply).toContain("This is a bug: the workspace was not reprovisioned automatically at the new head");
-      expect(r.reply).toContain("It is not a finding, and nothing was posted to GitHub");
+      expect(r.reply).toContain("This infrastructure mismatch is not a finding and nothing was posted to GitHub");
+      expect(r.reply).toMatch(/re-send/i);
     }
   });
 
@@ -296,8 +295,7 @@ describe("guardAttachedHead (before any model call)", () => {
     expect(unreadable.outcome).toBe("refused");
     if (unreadable.outcome === "refused") {
       expect(unreadable.reply).toContain("workspace-observed HEAD for b could not be read");
-      expect(unreadable.reply).toContain("This is a bug: the infrastructure failure was not retried automatically");
-      expect(unreadable.reply).toContain("not a finding, and nothing was posted to GitHub");
+      expect(unreadable.reply).toContain("not a finding and nothing was posted to GitHub");
     }
     expect(fetchPrHead).not.toHaveBeenCalled();
   });

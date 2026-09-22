@@ -137,11 +137,11 @@ export function shipInterruptedNote(prUrl?: string, cause?: InterruptionCause, i
   const stands = prUrl
     ? `Its work stands on GitHub: ${prUrl}.`
     : "Whatever it pushed stands on its pipeline branch; no PR was opened yet.";
-  const continuation = idle
-    ? "The next reply in this thread continues the unit."
+  const reissue = idle
+    ? "To continue, reply in this thread to continue."
     : prUrl
-      ? `The pipeline kept its task, branch and pull request; the next reply in this thread continues the review loop at ${prUrl}.`
-      : "The pipeline kept its task and branch; the next reply in this thread starts round 0 again on that branch.";
+      ? `To continue the review loop, re-issue \`agent:ship\` in this thread with only the PR URL (${prUrl}).`
+      : "To continue, re-issue `agent:ship` in this thread with the task — round 0 runs again on the same branch.";
   const opening =
     cause === "container_replaced"
       ? "⚠️ The resident container running this pipeline's child was replaced (a deploy's image swap) and the child could not resume, so the pipeline stopped."
@@ -150,7 +150,7 @@ export function shipInterruptedNote(prUrl?: string, cause?: InterruptionCause, i
         : cause === "bot_restart"
           ? "⚠️ The bot restarted while this ship pipeline was running, so the pipeline stopped."
           : "⚠️ This ship pipeline's child was interrupted and could not resume, so the pipeline stopped.";
-  return `${opening} ${stands} ${continuation}`;
+  return `${opening} ${stands} ${reissue}`;
 }
 
 // ---- the plan graph --------------------------------------------------------------------------------
@@ -1755,7 +1755,7 @@ function settleCoding(
       next,
       {
         kind: "aborted",
-        reason: `⚠️ The coding child ended because ${cause}; the branch carries the interrupted work at \`${checkpoint.sha.slice(0, 7)}\` on \`${checkpoint.branch}\`. The next reply in this thread resumes from that checkpoint instead of starting over.`,
+        reason: `⚠️ The coding child ended because ${cause}; the branch carries the interrupted work at \`${checkpoint.sha.slice(0, 7)}\` on \`${checkpoint.branch}\`. Re-issue the request to resume from it instead of starting over.`,
         round,
         reviewRounds: next.reviewRounds,
       },
@@ -2922,7 +2922,7 @@ function dispositionFor(s: UnitPipelineState, finding: Finding, round: number): 
 function writeUpPointer(s: UnitPipelineState, kind: RoundKind, runId: string | undefined): string | undefined {
   if (runId === undefined) return undefined;
   const base = s.input.runPageBase;
-  const at = base !== undefined ? `${base.replace(/\/+$/, "")}/${encodeURIComponent(runId)}` : `the run ${runId}`;
+  const at = base !== undefined ? `${base.replace(/\/+$/, "")}/${encodeURIComponent(runId)}` : `run ${runId}`;
   return `The ${presetOf(kind)} child's write-up is its own message above in this thread — the single copy of the detail (${at}).`;
 }
 
@@ -3036,9 +3036,9 @@ export function renderUnitReport(
   // The re-issue line keys on the instance's mark, never on who merges: a
   // generated plan is re-issued with the request's own text, a seeded one by
   // its plan path — and a seeded plan can be a person's merge too.
-  const continuation = s.input.generated
-    ? `The pipeline kept this unit's task and branch; the next reply in this thread continues it${prUrl ? ` from the open pull request (${prUrl})` : " from the branch head"}.`
-    : `The unit's dependents in this plan stay blocked; the next run of this plan recognizes the unit's branch and pull request.`;
+  const reissue = s.input.generated
+    ? `To continue, re-issue \`agent:ship\` in this thread with the same text${prUrl ? ` and include the PR URL (${prUrl})` : " — include the PR URL if a PR exists"}.`
+    : `The unit's dependents in this plan stay blocked; the unit runs again when the plan is re-issued.`;
   const declined = [...(s.dispositionsByRound[e.reviewRounds - 1] ?? [])].filter((d) => d.disposition === "declined");
   const declinedLine = `Declined findings: ${declined.length > 0 ? declined.map((d) => `${d.findingId}${d.note ? ` — ${d.note}` : ""}`).join("; ") : "none"}`;
   const verdictLine = `Verdict: LGTM${s.lastVerdictSummary ? ` — ${s.lastVerdictSummary}` : ""}`;
@@ -3063,7 +3063,7 @@ export function renderUnitReport(
   const checkpointLine = (checkpoint: { branch: string; sha: string } | undefined) =>
     checkpoint === undefined
       ? undefined
-      : `The branch carries the interrupted work at \`${checkpoint.sha.slice(0, 7)}\` on \`${checkpoint.branch}\`; the next reply in this thread resumes from it instead of starting over.`;
+      : `The branch carries the interrupted work at \`${checkpoint.sha.slice(0, 7)}\` on \`${checkpoint.branch}\`; re-issue to resume from it instead of starting over.`;
   switch (e.kind) {
     case "merged":
       if (e.by === "other")
@@ -3119,13 +3119,13 @@ export function renderUnitReport(
       // the cause and the person's exact next step.
       if (e.cause === "draft") {
         const link = e.pr !== undefined ? ` — ${e.pr.url}` : "";
-        if (!shows(verbosity, "verbose")) return `⏸️ Held: draft — GitHub still marks the pull request as draft${link}`;
-        const draftContinuation = s.input.generated
-          ? `The pipeline kept the task, branch and pull request${e.pr !== undefined ? ` (${e.pr.url})` : ""}; after GitHub marks it ready, the next reply in this thread resumes at the review round.`
-          : `The unit stays held while GitHub marks the pull request as a draft; ${continuation.charAt(0).toLowerCase()}${continuation.slice(1)}`;
+        if (!shows(verbosity, "verbose")) return `⏸️ Held: draft — mark it ready to continue${link}`;
+        const draftReissue = s.input.generated
+          ? `To continue, mark it ready and re-issue \`agent:ship\` in this thread with only the PR URL${e.pr !== undefined ? ` (${e.pr.url})` : ""} — no new task text; the re-issued pipeline resumes at the review round.`
+          : `To continue, mark it ready; ${reissue.charAt(0).toLowerCase()}${reissue.slice(1)}`;
         return join([
           `⏸️ Held after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — the pull request is a draft, so nothing can merge and no fix round would change anything.`,
-          draftContinuation,
+          draftReissue,
         ]);
       }
       // The blocked hold (issue 2086): the coding child concluded its round
@@ -3138,7 +3138,7 @@ export function renderUnitReport(
         return join([
           `⏸️ Held after ${rounds}: the coding child of round ${e.round.index} concluded its round blocked instead of opening a pull request — ${e.reason}.${prLine}`,
           writeUpPointer(s, e.round.kind, e.runId),
-          `No renewal was spent and no second coding child ran — a concluded round is not renewed (a renewal continues a budget that ran out mid-work). The child's answer remains the thread's open question; the next reply is treated as its answer. ${continuation}`,
+          `No renewal was spent and no second coding child ran — a concluded round is not renewed (a renewal continues a budget that ran out mid-work). Next step: your word in this thread — answer what the child raised, and the unit continues from there. ${reissue}`,
         ]);
       }
       // A human-gated row is a question to a person. The enclosing idle keeps
@@ -3150,7 +3150,7 @@ export function renderUnitReport(
       return join([
         `⏸️ Waiting for a person after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — every finding of review round ${e.round.index} is human-gated, a receipt only a person can produce: ${rows}. The unit stays live; no unanswered fix round was opened.`,
         levelLine,
-        `The next reply in this unit thread or authorized pull request comment becomes the fix round's answer; review then runs again.`,
+        `Reply in this unit thread or comment on the pull request with the receipt. The answer and finding become the fix round's brief, then review runs again.`,
       ]);
     }
     case "merge_refused":
@@ -3166,8 +3166,8 @@ export function renderUnitReport(
       return join([
         `⚠️ The review approved ${e.pr.url} but the pipeline did not merge it: ${e.reason}. A person decides what becomes of the pull request.`,
         s.input.generated
-          ? continuation
-          : "The approved work remains on the branch. This is a bug: the pipeline has no automatic recovery for this refused merge, so the unit's dependents remain blocked.",
+          ? reissue
+          : `The approved work is on the branch: rebase or fix it, push, and merge it by hand. Then re-issue the plan naming the remaining units — a unit whose pull request has merged is recognized and not run again, and its dependents start from there.`,
       ]);
     case "round_cap": {
       // The quiet copy counts the last review's open findings, only the
@@ -3186,7 +3186,7 @@ export function renderUnitReport(
         failedChecks.length > 0
           ? `🧢 Ship stopped at a cap: the ${e.maxRounds}-round cap — the review of round ${e.reviewRounds} approved, but ${failedChecks.map((f) => `\`${f.id}\``).join(", ")} failed at the approved head and no fix round remains.${prLine}`
           : `🧢 Ship stopped at a cap: the ${e.maxRounds}-round cap — no approval after ${rounds}.${prLine}`;
-      return join([headline, splitReport(s), continuation]);
+      return join([headline, splitReport(s), reissue]);
     }
     case "wall_clock_cap":
       if (!shows(verbosity, "verbose")) return `🧢 Out of budget — no approval after ${rounds}.${prLine}`;
@@ -3194,13 +3194,13 @@ export function renderUnitReport(
         `🧢 Ship stopped at a cap: the remaining pipeline time (~${Math.max(0, Math.round(e.remainingMs / MIN))} min of the ${s.input.caps.maxMinutes}-minute budget) cannot hold another round${e.refused ? ` (the ${e.refused.round} round would get ${e.refused.minutes} min, under its floor of ${e.refused.floor})` : ""} — no approval after ${rounds}.${prLine}`,
         budgetSplitLine(e.spent, s.input.caps.maxMinutes),
         splitReport(s),
-        continuation,
+        reissue,
       ]);
     case "review_pending":
       return join([
         `⏳ Review pending: the coding child shipped ${e.pr.url}${e.headSha !== undefined ? ` (head \`${e.headSha.slice(0, 7)}\`)` : ""} but the remaining pipeline time cannot hold the review round — the work stands, only the review is missing. The next pipeline starts at the review round while the pull request still heads at the child's own last push.`,
         aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
-        aside(continuation),
+        aside(reissue),
       ]);
     case "stopped":
       if (!shows(verbosity, "verbose"))
@@ -3216,7 +3216,7 @@ export function renderUnitReport(
         e.postedReview
           ? "ℹ️ A changes-requested review was posted this round before the stop — its findings stand on the PR."
           : undefined,
-        continuation,
+        s.input.idleDays && s.input.idleDays > 0 ? "Next step: reply in this thread to continue." : reissue,
       ]);
     case "aborted":
       if (!shows(verbosity, "verbose")) return `⚠️ Aborted after ${rounds}: ${e.reason}${prLine}`;
@@ -3229,7 +3229,7 @@ export function renderUnitReport(
         ),
         e.renewal !== undefined ? `🔁 Not renewed: ${e.renewal.line}.` : undefined,
         `⚠️ Ship aborted after ${rounds}.`,
-        continuation,
+        reissue,
       ]);
     case "continued":
       // A segment boundary is the runner continuing — an acknowledgement, verbose
@@ -3239,18 +3239,18 @@ export function renderUnitReport(
       return join([
         writeUpPointer(s, e.round.kind, e.runId),
         s.input.idleDays && s.input.idleDays > 0
-          ? `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. The next reply in this thread continues it; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`
+          ? `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. Next step: reply in this thread to continue; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`
           : `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. A fresh ${s.input.caps.maxMinutes}-minute budget opens in this thread${e.from !== undefined ? ` from \`${e.from.slice(0, 7)}\`` : ""}, with the last run's write-up as its request; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`,
         aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
       ]);
     case "transient":
       if (!shows(verbosity, "verbose"))
-        return `⚠️ Aborted after ${rounds}: this is a bug — the model provider failed twice and no automatic retry remains.${prLine}`;
+        return `⚠️ Aborted after ${rounds}: the model provider failed twice; re-issue once it settles.${prLine}`;
       return join([
         `⚠️ The coding child of round ${e.round.index} (run ${e.runId}) died on a provider transient — a model-gateway 5xx, a cut stream or a gateway timeout past the harness's retry ladder — with nothing pushed, after the round was already re-run once for the same reason. The task itself was never the problem.`,
         writeUpPointer(s, e.round.kind, s.lastCodingRunId),
-        `⚠️ This is a bug: ship ended after ${rounds} because its automatic provider retry was spent.`,
-        continuation,
+        `⚠️ Ship ended after ${rounds}; re-issue once the provider settles.`,
+        reissue,
       ]);
     case "no_verdict":
       if (!shows(verbosity, "verbose"))
@@ -3259,7 +3259,7 @@ export function renderUnitReport(
         `⚠️ Review round ${e.round.index} ended without a submitted verdict (budget, refusal, or stop) — ship never converts that into a request for changes, so no findings step ran.`,
         writeUpPointer(s, e.round.kind, s.reviewRunByRound[e.round.index]),
         `⚠️ Ship aborted after ${rounds}.`,
-        continuation,
+        reissue,
       ]);
     case "interrupted":
       return join([shipInterruptedNote(prUrl, e.cause, (s.input.idleDays ?? 0) > 0), checkpointLine(e.checkpoint)]);
@@ -3268,7 +3268,7 @@ export function renderUnitReport(
     case "refused":
       return join([
         `🚫 The ${presetOf(e.round.kind)} child of round ${e.round.index} was refused by the authorize stage (${e.refusal})${e.message ? `: ${e.message}` : ""} — every child is authorized as the requesting user, so the pipeline ends here.`,
-        aside(continuation),
+        aside(reissue),
       ]);
     case "idle":
       // The old kind's sentence at this copy's level — the report is unchanged

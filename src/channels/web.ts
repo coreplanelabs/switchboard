@@ -902,7 +902,7 @@ export function createWebChatHandler(
         // same 404 an unknown run gives (live-view item 19): existence is never
         // revealed. The viewer's own lane is theirs to open empty.
         if (open.runs.length === 0 && !ownLane(sub, threadKey)) {
-          deps.page(req, res, 404, ctx.actor, "No run found", { page: "runNotFound", retentionDays });
+          deps.page(req, res, 404, ctx.actor, "Run not found", { page: "runNotFound", retentionDays });
           return;
         }
         const seed = await seedFor(ctx, route.id, threadKey, open);

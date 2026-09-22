@@ -315,7 +315,7 @@ function stopDecision(actor: Actor, view: RunView): Decision {
   return admitted.allow ? authorize(actor, "runs:write", runResource(view)) : admitted;
 }
 
-const NOT_FOUND = "no run found";
+const NOT_FOUND = "run not found";
 /** A stop refused on a hosted ship parent (record 0060; items 10 and 16): the
  *  409 body both stop routes write — the token route for both modes (the
  *  capability stops nothing on it), the tokenless route for soft (the escape
@@ -489,7 +489,7 @@ export function createLiveViewHandler(
    *  id, an expired one, a wrong token, a deny — and a unit the viewer may not
    *  see (item 28) — with the way back. */
   const notFoundPage = (req: HttpRequest, res: ServerResponse, viewer: Actor): void => {
-    deps.page(req, res, 404, viewer, "No run found", {
+    deps.page(req, res, 404, viewer, "Run not found", {
       page: "runNotFound",
       retentionDays: deps.retention ? deps.retention.retentionDays : null,
     });
@@ -789,7 +789,7 @@ export function createLiveViewHandler(
         }
         const result = access.requestStop(mode);
         if (!result.ok) {
-          if (result.reason === "finished") text(res, 409, "the run already finished");
+          if (result.reason === "finished") text(res, 409, "run already finished");
           else if (result.reason === "hosted") text(res, 409, HOSTED_STOP);
           else text(res, 404, NOT_FOUND);
           return true;
@@ -848,13 +848,13 @@ export function createLiveViewHandler(
           return;
         }
         if (found.value.finished) {
-          text(res, 409, "the run already finished");
+          text(res, 409, "run already finished");
           return;
         }
         const stopped = await service.stopRun(route.id, mode, { kind: "access", id: actor.id });
         if (!stopped.ok) {
           if (stopped.error === "hosted") text(res, 409, HOSTED_STOP);
-          else if (stopped.error === "conflict") text(res, 409, "the run already finished");
+          else if (stopped.error === "conflict") text(res, 409, "run already finished");
           else text(res, 404, NOT_FOUND);
           return;
         }

@@ -322,7 +322,7 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
     throw new RefusalError(
       refusalOf(
         "model_card_refused",
-        `Model "${resolved.modelRef}" speaks the openai-responses wire, which the "opencode" harness cannot speak yet; this request needs the pi harness or an openai-chat block.`,
+        `Model "${resolved.modelRef}" speaks the openai-responses wire, which the "opencode" harness cannot speak yet: run it on pi, or use an openai-chat block.`,
       ),
     );
   }

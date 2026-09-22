@@ -67,8 +67,8 @@ export function closureNote(agent: string | undefined, prUrl: string | undefined
     // claim it (issue 1876).
     return shipInterruptedNote(prUrl, cause === "resident_replaced" ? "container_replaced" : "bot_restart");
   if (cause !== undefined)
-    return `This is a bug: this run ended — ${endingCauseWords(cause)} — but it could not be resumed from the ledger. This card stopped updating and no replacement run was started.`;
-  return "This is a bug: the bot restarted while this run was in flight, but the run could not be resumed from the ledger. This card stopped updating and no replacement run was started.";
+    return `This run ended — ${endingCauseWords(cause)} — and it could not be resumed, so this card stopped updating. Re-send your request to run it again.`;
+  return "The bot restarted while this run was in flight and it could not be resumed, so this card stopped updating. Re-send your request to run it again.";
 }
 
 /** The PR url a run's events recorded (`pr_opened`), the last one wins. */

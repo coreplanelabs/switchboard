@@ -158,9 +158,6 @@ describe("the merge refuses unapproved heads and hands the release to a person",
     const res = await registry.invoke("pulls.merge", { args: ["acme/api#42"], options: {} }, person(), deps);
     expect(res).toMatchObject({ ok: false, error: "conflict" });
     expect((res as { message?: string }).message).toContain("no check reported at the head of acme/api#42");
-    expect((res as { message?: string }).message).toContain(
-      "this is a bug when the repository has CI because no automatic wait or event re-fire was scheduled",
-    );
     expect(calls).not.toContain("merge acme/api#42");
   });
 

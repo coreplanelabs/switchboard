@@ -73,12 +73,12 @@ export const costsSnapshot = defineCommand({
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // Off is `unavailable`; a take that failed is `busy` — the same 503 over
-      // HTTP, but the previous snapshot keeps serving and the loop's next
-      // tick retries by itself, so the reply narrates that recovery.
+      // HTTP, but the code tells a caller "retry" from "not here": the previous
+      // snapshot keeps serving and the loop's next tick retries by itself.
       if (message === COSTS_OFF_MESSAGE) throw new CommandError("unavailable", message);
       throw new CommandError(
         "busy",
-        `costs snapshot not taken: ${message} — the previous snapshot still serves, and the scheduled loop will take the next snapshot`,
+        `costs snapshot not taken: ${message} — the previous snapshot still serves; try again`,
       );
     }
   },
@@ -136,7 +136,7 @@ function renderCostsBy(output: JsonValue, surface: "chat" | "text" = "text"): st
         ];
   const where =
     coverage.historyOn === false
-      ? "history is off — no runs to attribute"
+      ? "run history is off — no runs to attribute"
       : `runs from ${String(coverage.from)}${coverage.clamped === true ? ` (earlier days are past the history's ${String(coverage.retentionDays)}-day window)` : ""}${typeof o.pending === "number" && o.pending > 0 ? ` · ${o.pending} run(s) still being priced` : ""}`;
   const tieOut =
     typeof rec.comparedDays === "number" && rec.comparedDays > 0

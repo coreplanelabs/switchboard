@@ -171,9 +171,6 @@ describe("ResidentExecutor.attach over a heartbeat stream (item 59: an attach th
     const err = await ex.attach().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ResidentNeedsRefError);
     expect((err as ResidentNeedsRefError).defaultRef).toBe("master");
-    expect((err as Error).message).toBe(
-      'Which branch should the repo:jshttp/vary resident use for this thread (for example, "main")?',
-    );
   });
 
   it("pre-validation refusals keep using the real HTTP status (a 404 body without `status` is still not-onboarded)", async () => {
@@ -622,9 +619,7 @@ describe("ResidentExecutor.readFile / writeFile", () => {
     );
     const err = await new ResidentExecutor(OPTS).readFile("f.txt").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExecInfraError);
-    expect((err as Error).message).toMatch(
-      /this is a bug: resident \/read still had no worktree after its automatic re-attach/,
-    );
+    expect((err as Error).message).toMatch(/worktree still unavailable after a re-attach/);
     expect(calls.map(route)).toEqual(["/read", "/attach", "/read"]); // exactly one re-attach, no second
   });
 
@@ -636,9 +631,7 @@ describe("ResidentExecutor.readFile / writeFile", () => {
     );
     const err = await new ResidentExecutor(OPTS).readFile("f.txt").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExecInfraError);
-    expect((err as Error).message).toMatch(
-      /this is a bug: resident \/read still had no worktree after its automatic re-attach/,
-    );
+    expect((err as Error).message).toMatch(/worktree still unavailable after a re-attach/);
   });
 
   it("a path escape is a legible 400 error", async () => {

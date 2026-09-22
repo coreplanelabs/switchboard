@@ -1,8 +1,8 @@
 # Switchboard — the operating contract
 
-Switchboard is an agent gateway: Slack, the CLI, HTTP or MCP sends a message; a dispatcher routes it to an agent, whose provider-backed run uses tools through an executor it never touches directly. Slack is one channel, not the architecture.
+Switchboard is an agent gateway: a message arrives over a channel (Slack, the CLI, HTTP, MCP), a dispatcher routes it to an agent, the agent runs on a model provider and executes tools through an executor it never touches directly. Slack is one channel, not the architecture.
 
-Read this first. Details: [README.md](README.md), [docs](docs/README.md) at <https://openswitchboard.dev> and the [behavioral specs](docs/reference/specs/README.md).
+Every agent here reads this first. Detail is a link away: [README.md](README.md) (the front door), [docs/](docs/README.md) (the human-facing tree, at <https://openswitchboard.dev>), [docs/reference/specs/](docs/reference/specs/README.md) (the behavioral contract).
 
 ## How a change is made
 
@@ -79,7 +79,6 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run hygiene:gen` | Records the tree's remaining imprint after a scrub; refuses growth unless `-- --force`. | Part of `fix`; new imprint fails it like `hygiene:check`. |
 | `npm run vocabulary:check` | No internal word prints on a user surface; the baseline only shrinks. | Part of `check:consistency`; a hit is rewritten in the user's nouns. |
 | `npm run vocabulary:gen` | Records the remaining internal words; refuses growth unless `-- --force`. | Part of `fix`. |
-| `npm run user-message:check` | No user-facing statement delegates recovery. | Part of `check:consistency`; the baseline only shrinks. |
 | `npm run docs:changed` | Says whether the last push touched the docs or their build (a CI job output). | CI only — gates the docs deploy. |
 | `npm run deploy:targets` | Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment. | CI only — the `deploy targets` job. |
 | `npm run docs:dev` | Serves the docs site locally with live reload. | Writing docs; `-- --port <n>` picks the port. |

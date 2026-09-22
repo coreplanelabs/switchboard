@@ -938,12 +938,12 @@ describe("runs unit / runs children / runs search — the unit is the reading un
     expect(unitArg?.describe).not.toMatch(/attempt|instance/i);
   });
 
-  it("an unknown unit is not_found (`no unit found`), a malformed key is invalid_input naming `unit`, a reader outside the predicate is told not_found exactly as for an unknown unit, and chat is a surface for the listing", async () => {
+  it("an unknown unit is not_found (`unit not found`), a malformed key is invalid_input naming `unit`, a reader outside the predicate is told not_found exactly as for an unknown unit, and chat is a surface for the listing", async () => {
     const { registry, deps } = await world();
     expect(await registry.invoke("runs.unit", { args: ["plan-p-1:U77"], options: {} }, cli, deps)).toMatchObject({
       ok: false,
       error: "not_found",
-      message: "no unit found",
+      message: "unit not found",
       decidedBy: "handler",
     });
     const malformed = await registry.invoke("runs.unit", { args: ["nonsense"], options: {} }, cli, deps);
@@ -953,7 +953,7 @@ describe("runs unit / runs children / runs search — the unit is the reading un
     expect(await registry.invoke("runs.unit", { args: ["plan-p-1:U16"], options: {} }, pinnedX, deps)).toMatchObject({
       ok: false,
       error: "not_found",
-      message: "no unit found",
+      message: "unit not found",
     });
     expect(
       await registry.invoke("runs.unit", { args: ["plan-p-1:U16"], options: {} }, chatOperator, deps),
@@ -976,7 +976,7 @@ describe("runs unit / runs children / runs search — the unit is the reading un
     expect(await registry.invoke("runs.children", { args: ["nope"], options: {} }, cli, deps)).toMatchObject({
       ok: false,
       error: "not_found",
-      message: "no run found",
+      message: "run not found",
     });
     expect(await registry.invoke("runs.children", { args: ["cond"], options: {} }, pinnedX, deps)).toMatchObject({
       ok: false,

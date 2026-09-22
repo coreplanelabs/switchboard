@@ -284,7 +284,7 @@ export async function composeChild(
         ref: unit.branch,
         prompt:
           `The approved pull request ${prUrl(instance.repo, brief.pr)} conflicts with \`${brief.base}\` at reviewed head \`${brief.headSha}\`. ` +
-          `Rebase \`${unit.branch}\` onto the latest \`${brief.base}\`, resolve only the conflicts git left using the thread and repository rules, and make the lease-protected push only after the changed-set fast gates pass. ` +
+          `Rebase \`${unit.branch}\` onto the latest \`${brief.base}\`, resolve only the conflicts git left using the thread and repository rules, run the changed-set fast gates, and push with lease. ` +
           "Resubmit the pull request description at the pushed head. Never merge and never approve; the pipeline re-reviews the changed patch.",
       };
     default: {
@@ -296,6 +296,6 @@ export async function composeChild(
 
 async function facts(readers: BriefReaders, runId: string): Promise<ChildRunFacts> {
   const read = await readers.readRunFacts(runId);
-  if (!read) throw new Error(`the run ${runId} is not in history`);
+  if (!read) throw new Error(`run ${runId} is not in the run history`);
   return read;
 }

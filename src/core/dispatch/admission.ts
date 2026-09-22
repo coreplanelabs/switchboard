@@ -784,13 +784,13 @@ export async function steerRun(
   if (live && live.runId === target.runId) {
     live.inbox.push(followUpOf(msg, text, at, { ledgerSeq, ...(sender.from ? { from: sender.from } : {}) }));
     console.log(
-      `[steer] ${sender.from ? `the run ${sender.from.runId}` : sender.userId} → the ${target.agent} run ${target.runId} in ${target.threadKey} (${live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
+      `[steer] ${sender.from ? `run ${sender.from.runId}` : sender.userId} → ${target.agent} run ${target.runId} in ${target.threadKey} (${live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
     );
     return { kind: "steered", where: "here", at, ...(ledgerSeq !== undefined ? { ledgerSeq } : {}) };
   }
   if (ledgerSeq !== undefined) {
     console.log(
-      `[steer] ${sender.from ? `the run ${sender.from.runId}` : sender.userId} → the ${target.agent} run ${target.runId} live on another generation (durable seq ${ledgerSeq})`,
+      `[steer] ${sender.from ? `run ${sender.from.runId}` : sender.userId} → ${target.agent} run ${target.runId} live on another generation (durable seq ${ledgerSeq})`,
     );
     return { kind: "steered", where: "elsewhere", at, ledgerSeq };
   }
@@ -848,7 +848,7 @@ export function createSteerSender(deps: {
   return {
     async send(runId, words, caller) {
       const run = deps.runs.getById(runId);
-      if (!run) throw new CommandError("not_found", `the run ${runId} is not known here.`);
+      if (!run) throw new CommandError("not_found", `run ${runId} is not known here.`);
       const owner = authorizeSteerOwner({
         caller: { ids: caller.actor.self ?? [caller.actor.id], grants: effectiveGrants(caller.actor) },
         target: {
@@ -864,7 +864,7 @@ export function createSteerSender(deps: {
       if (ended) {
         const when =
           run.finishedAt !== undefined ? `at ${new Date(run.finishedAt).toISOString()}` : "before this steer arrived";
-        throw new CommandError("conflict", `the run ${runId} ended ${when}; nothing to steer.`);
+        throw new CommandError("conflict", `run ${runId} ended ${when}; nothing to steer.`);
       }
       const out = await steerRun(
         deps,
@@ -897,7 +897,7 @@ export function createSteerSender(deps: {
         case "not_live":
           throw new CommandError(
             "conflict",
-            `the run ${runId} ended while the steer was being delivered; nothing to steer.`,
+            `run ${runId} ended while the steer was being delivered; nothing to steer.`,
           );
       }
     },

@@ -62,12 +62,13 @@ export const toolCutNote = (doing: string): string =>
  *  would spend before the cut told the model. `askedSecs` is the timeout the
  *  call named, `leftSecs` what remains before the loop ends. */
 export const commandPastLoopEndRefusal = (askedSecs: number, leftSecs: number): string =>
-  `budget — this command asked for a ${askedSecs} s timeout and the loop ends in ${leftSecs} s, so it could never finish. ` +
-  `A timeout inside the ${leftSecs} s left can still finish; otherwise the current work and write-up stand, and CI owns full verification.`;
+  `budget — this command asked for a ${askedSecs} s timeout and the loop ends in ${leftSecs} s, so it could never finish: ` +
+  `re-issue it with a timeout inside the ${leftSecs} s left if it finishes sooner, or push what you have and write up — ` +
+  `the full verification is CI's.`;
 export const turnGuardNote = (pace: string): string =>
   `turn guard fired: ${pace}, a pace that looks like a loop — writing up findings so far`;
 export const softStopNote = (): string => "soft stop — no further steps, writing up findings so far";
-export const hardStopNote = (): string => "hard stop — the run was aborted, no summary written";
+export const hardStopNote = (): string => "hard stop — run aborted, no summary written";
 /** A model call that failed once the run was winding down — the finale bound's
  *  own abort of a call in flight included — is a note on the record, never the
  *  ending: the write-up's answer stands, and this says what failed under it. */
@@ -299,19 +300,21 @@ export function windDownAnswer(ending: WindDownEnding, maxMinutes: number, facts
   }
 }
 
-const TIME_ADVICE = "this is a bug: the task outlived its run budget and no automatic continuation was scheduled";
-const TURN_ADVICE = "this is a bug: a retry loop spent the turn guard and no automatic recovery was scheduled";
+const TIME_ADVICE = "narrow the task and try again";
+const TURN_ADVICE = "look for a retry loop in the run's events before trying again";
 const shortSha = (sha: string): string => sha.slice(0, 7);
 const counted = (w: { uncommitted: number; unpushed: number }): string =>
   `${w.uncommitted} uncommitted change(s) and ${w.unpushed} unpushed commit(s)`;
 
 /** The sentences of what was established, in the answer's precedence — the
  *  tree, then the description — or nothing when nothing was measured (no
- *  facts, `unread`, `none`). */
-function established(facts: EndingFacts | undefined): string {
+ *  facts, `unread`, `none`). `advice` is the wind-down's own next step, said
+ *  only where the work did not land anywhere a follow-up can start from. */
+function established(facts: EndingFacts | undefined, advice: string | undefined): string {
+  const then = advice ? ` — ${advice}` : "";
   const w = facts?.workspace;
   let tree = "";
-  if (w?.kind === "unmeasured") tree = "The workspace could not be measured, so work may sit unpushed there.";
+  if (w?.kind === "unmeasured") tree = `The workspace could not be measured, so work may sit unpushed there${then}.`;
   else if (w?.kind === "clean")
     tree = `The tree was clean${w.branch ? ` and \`${w.branch}\` held no unpushed commits` : " with no unpushed commits"}${w.head ? ` — its head \`${shortSha(w.head)}\` is on the remote` : ""}.`;
   else if (w?.kind === "salvaged")
@@ -321,8 +324,8 @@ function established(facts: EndingFacts | undefined): string {
       w.fate === "kept"
         ? `${counted(w)} sit in the workspace, kept for this thread until it idles out — a follow-up here reuses them.`
         : w.fate === "discarded"
-          ? `${counted(w)} were left in the tree and discarded at the run's end.`
-          : `${counted(w)} were left in the tree, which is torn down since a command may still be running in it.`;
+          ? `${counted(w)} were left in the tree and discarded at the run's end${then}.`
+          : `${counted(w)} were left in the tree, which is torn down since a command may still be running in it${then}.`;
   const description =
     facts?.description === "submitted"
       ? "The PR description was submitted."
@@ -332,34 +335,20 @@ function established(facts: EndingFacts | undefined): string {
   return [tree, description].filter((s) => s !== "").join(" ");
 }
 
-/** A gap is named only when work did not land anywhere a continuation can
- *  start from. It precedes the measured tree state so the answer closes on
- *  what the run loop established. */
-function gapApplies(facts: EndingFacts | undefined): boolean {
-  const w = facts?.workspace;
-  return (
-    w === undefined ||
-    w.kind === "unread" ||
-    w.kind === "unmeasured" ||
-    w.kind === "none" ||
-    (w.kind === "left" && w.fate !== "kept")
-  );
-}
-
-/** The empty write-up's remaining sentences: the gap where recovery did not
- *  land, followed by what was established or the unmeasured-work guess. */
-function nothingWritten(facts: EndingFacts | undefined, gap: string | undefined): string {
-  const gapSentence = gap && gapApplies(facts) ? `${gap.charAt(0).toUpperCase()}${gap.slice(1)}.` : "";
-  const known = established(facts);
-  if (known) return ` ${[gapSentence, known].filter((s) => s !== "").join(" ")}`;
-  if (facts?.workspace?.kind === "none") return gapSentence ? ` ${gapSentence}` : "";
-  return ` Partial work may exist in the workspace${gap ? ` — ${gap}` : ""}.`;
+/** The empty write-up's second sentence: what was established; else, with
+ *  nothing measured, that work may exist where there is a workspace to hold
+ *  it, and the advice. */
+function nothingWritten(facts: EndingFacts | undefined, advice: string | undefined): string {
+  const known = established(facts, advice);
+  if (known) return ` ${known}`;
+  if (facts?.workspace?.kind === "none") return advice ? ` ${advice.charAt(0).toUpperCase()}${advice.slice(1)}.` : "";
+  return ` Partial work may exist in the workspace${advice ? ` — ${advice}` : ""}.`;
 }
 
 /** The label's join before the write-up: the facts as sentences when there
  *  are any, else the dash the label always had. */
 function beforeFindings(facts: EndingFacts | undefined): string {
-  const known = established(facts);
+  const known = established(facts, undefined);
   return known ? `. ${known} Findings so far:` : " — findings so far:";
 }
 
@@ -386,7 +375,7 @@ export const turnGuardAnswer = (
   writeUpFailedOnTool?: true,
 ): string =>
   text
-    ? `⚠️ _Stopped after ${pace} — that pace looks like a loop${established(facts) ? beforeFindings(facts) : "; findings so far:"}_\n\n${text}`
+    ? `⚠️ _Stopped after ${pace} — that pace looks like a loop${established(facts, undefined) ? beforeFindings(facts) : "; findings so far:"}_\n\n${text}`
     : `Stopped after ${pace} — that pace looks like a loop — without finishing${noWriteUp(writeUpFailed, writeUpFailedOnTool)}.${nothingWritten(facts, TURN_ADVICE)}`;
 
 /** The thread's answer when no wind-down label applies — the wrap-up never

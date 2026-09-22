@@ -192,7 +192,7 @@ async function fencedTarget(args: {
   if (args.refusePending && checks.total === 0)
     throw new CommandError(
       "conflict",
-      `no check reported at the head of ${name} — nothing was done; this is a bug when the repository has CI because no automatic wait or event re-fire was scheduled (a repository with no CI stays a person's click on GitHub)`,
+      `no check reported at the head of ${name} — nothing was done; retry once CI registers (a repository with no CI stays a person's click on GitHub)`,
     );
   if (checks.failed.length > 0)
     throw new CommandError(

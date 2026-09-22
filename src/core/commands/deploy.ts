@@ -489,7 +489,7 @@ export const deployInit = defineCommand({
     if (drift.length > 0)
       throw new CommandError(
         "conflict",
-        `this is a bug: Worker configs are not the render of their templates — ${drift.map((f) => `${f.path} (${f.status})`).join(", ")} — and deploy did not repair or commit the generated files automatically`,
+        `Worker configs are not the render of their templates — ${drift.map((f) => `${f.path} (${f.status})`).join(", ")}; run \`npm run deploy:gen\` and commit the result`,
       );
     const output: InitOutput = { profile: { origin: loaded.origin, path: loaded.path }, files };
     return output as unknown as JsonValue;

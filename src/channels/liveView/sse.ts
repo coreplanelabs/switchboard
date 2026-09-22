@@ -179,7 +179,7 @@ export function serveEvents(
   );
   if (!subscribed) {
     sink.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-    sink.write("no run found");
+    sink.write("run not found");
     sink.end();
     return;
   }

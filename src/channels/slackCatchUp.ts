@@ -292,7 +292,7 @@ export function interruptedCardFrame(cardText: string): StatusUpdate {
     .replaceAll("&amp;", "&")
     .trim();
   const detail =
-    "This is a bug: the bot restarted while this run was in flight, but the run could not be resumed from the ledger. The card stopped updating and no replacement run was started.";
+    "The bot restarted (a deploy) while this run was in flight, so the run was lost and this card stopped updating. Re-send your request to run it again.";
   return { title: `❌ interrupted · ${label}`, detail };
 }
 

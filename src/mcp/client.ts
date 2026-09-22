@@ -268,7 +268,7 @@ async function readCapped(res: Response, max: number, signal?: AbortSignal): Pro
   let total = 0;
   try {
     for (;;) {
-      if (signal?.aborted) throw new McpError("timeout", "the run was aborted");
+      if (signal?.aborted) throw new McpError("timeout", "run aborted");
       const { value, done } = await reader.read();
       if (done) break;
       if (value) {

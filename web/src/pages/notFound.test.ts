@@ -15,7 +15,7 @@ describe("NotFoundPage (run 404, item 19)", () => {
 
   it("states the registry TTL when run history is off", () => {
     const w = mountApp(NotFoundPage, { seed: { page: "runNotFound", retentionDays: null } });
-    expect(w.text()).toContain("History is off; finished runs are kept about a minute.");
+    expect(w.text()).toContain("Run history is off; finished runs are kept about a minute.");
   });
 });
 

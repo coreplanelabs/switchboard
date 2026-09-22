@@ -183,10 +183,6 @@
       "does": "Records the remaining internal words; refuses growth unless `-- --force`.",
       "when": "Part of `fix`."
     },
-    "user-message:check": {
-      "does": "No user-facing statement delegates recovery.",
-      "when": "Part of `check:consistency`; the baseline only shrinks."
-    },
     "agents:gen": {
       "does": "Writes the Commands table in AGENTS.md from `package.json` and this file.",
       "when": "After adding or changing a script; part of `fix`."

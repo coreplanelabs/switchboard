@@ -447,7 +447,7 @@ describe("mcp list --all and mcp promote (record 0042)", () => {
     expect(await text(inv, "mcp.list", {}, chat(NOBODY, { configWrite: false }))).not.toContain("vanta");
   });
 
-  it("`mcp promote <name> --from <user>` promotes the server into the org tier for an admin and hands back the org connect link; a non-admin is refused; the person's entry stays", async () => {
+  it("`mcp promote <name> --from <user>` re-issues the server in the org tier for an admin and hands back the org connect link; a non-admin is refused; the person's entry stays", async () => {
     const { svc, backing } = service();
     const inv = bind(svc);
     await inv.invoke("mcp.add", { args: ["vanta"], options: { url: "https://mcp.vanta.com/mcp" } }, chat(ALICE)); // bearer

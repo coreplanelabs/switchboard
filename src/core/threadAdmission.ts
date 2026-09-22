@@ -220,7 +220,7 @@ export function steerAck(live: LiveThread, now: number): string {
 export function refusalReply(live: LiveThread, decision: { requestedAgent: string }, now: number): string {
   return (
     `⏳ A *${live.agent}* run is already in flight in this thread (${elapsed(live, now)} in).${linkSuffix(live)}\n` +
-    `An \`agent:${decision.requestedAgent}\` request cannot start beside it — one run per thread — so this request was not started.`
+    `An \`agent:${decision.requestedAgent}\` request cannot start beside it — one run per thread. Wait for it to finish and re-send, or start a new thread.`
   );
 }
 

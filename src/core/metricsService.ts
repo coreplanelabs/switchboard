@@ -16,7 +16,7 @@ import { systemClock } from "./trace/clock.js";
 // queries per read. A process without the reader hands the Null Object.
 
 export const METRICS_OFF_MESSAGE =
-  "Metrics by run aren't configured — metrics.dataset in config (beside the costs block's Cloudflare account and analytics token) enables this view.";
+  "Run metrics aren't configured — set metrics.dataset in config (beside the costs block's Cloudflare account and analytics token) to enable this view.";
 
 export interface MetricsService {
   /** The trend report for the range: `days` (1..90; default from config) ending today, optionally one agent's runs. */

@@ -738,7 +738,7 @@ describe("CostsPage · By user", () => {
         }),
       ),
     });
-    expect(off.find(".coverage").text()).toContain("history is off");
+    expect(off.find(".coverage").text()).toContain("run history is off");
     expect(off.find("table.by td.empty").text()).toBe("no runs in this range");
   });
 
@@ -778,7 +778,7 @@ describe("CostsPage · By user", () => {
     const line = partly.find(".reconciliation").text().replace(/\s+/g, " ");
     expect(line).toContain("LLM attributed $3.50 of $3.60 on the workspace over 1 day");
     expect(line).toContain(
-      "2 days with $12.25 of tokens from runs but no workspace figure (billed outside this workspace) not compared",
+      "2 days with $12.25 of run tokens but no workspace figure (billed outside this workspace) not compared",
     );
     expect(line).not.toContain("-$");
     const none = mountApp(CostsPage, {
@@ -800,7 +800,7 @@ describe("CostsPage · By user", () => {
     const text = none.find(".reconciliation").text().replace(/\s+/g, " ");
     expect(text).toContain("no day in range has a workspace LLM figure to compare against");
     expect(text).not.toContain("LLM attributed");
-    expect(text).toContain("3 days with $15.75 of tokens from runs");
+    expect(text).toContain("3 days with $15.75 of run tokens");
   });
 
   it("a compared range where more was attributed than the workspace shows says so in words, never as a negative dollar", () => {

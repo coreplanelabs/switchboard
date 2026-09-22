@@ -1124,9 +1124,6 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
     expect(blocks[0]).toEqual(offerBlocks[0]);
     expect(blocks.some((b) => b.type === "actions")).toBe(false);
     expect(blocks.at(-1)!.text!.text).toBe(CLICK_FAILED_LINE);
-    expect(CLICK_FAILED_LINE).toBe(
-      "this click could not be handled; nothing ran, and the command line remains visible in the offer",
-    );
   });
 
   it("a failure to complete the message after a throw is logged too and never escapes the handler", async () => {

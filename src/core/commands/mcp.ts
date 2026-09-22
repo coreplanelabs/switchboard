@@ -279,7 +279,7 @@ export const mcpPromote = defineCommand({
   // so it is destructive at its every input (record 0057's audit rule).
   annotations: { destructive: true, risk: () => "adds or moves a server every run in the scope can use" },
   describe:
-    "Promote a person's MCP server into the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.",
+    "Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.",
   render: renderAdd,
   settle: (output, { deps }) => settleConnect(deps, output),
   handler: async ({ args, options, caller, deps }) => {

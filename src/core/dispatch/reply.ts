@@ -269,7 +269,7 @@ export function activityLine(e: RunEvent): string {
     case "answer":
       return "answer ready";
     case "run_meta":
-      return "context for the run recorded"; // published straight to the registry too — never arrives here
+      return "run context recorded"; // published straight to the registry too — never arrives here
     case "lease":
       return "lease started"; // the harness's clocks: head material the run loop keeps off the card — never arrives here
     case "skill_use":
@@ -538,8 +538,9 @@ export const REFUSAL_SENTENCES = {
     `The repository is outside the Switchboard GitHub App installation (\`github_repos\` lists the reachable ones), or the name is wrong.`,
   repo_unverified: (p: { slug: string; agent: string; via: "github" | "registry" }) =>
     p.via === "github"
-      ? `⚠️ This is a bug: I couldn't verify \`${p.slug}\` against GitHub because it did not answer, so I did not start ${aRun(p.agent)} and no automatic retry was scheduled.`
-      : `⚠️ This is a bug: I couldn't verify that \`${p.slug}\` is an onboarded repo because the resident registry did not answer, so I did not start a *${p.agent}* run and no automatic fallback was started.`,
+      ? `⚠️ I couldn't verify \`${p.slug}\` against GitHub — it didn't answer — so I did not start ${aRun(p.agent)} rather than guess which repository you meant. Try again in a minute.`
+      : `⚠️ I couldn't verify that \`${p.slug}\` is an onboarded repo — the resident registry didn't answer — so I did not start a *${p.agent}* run rather than guess which repo you meant. ` +
+        `Try again in a minute, or name the repository by URL (https://github.com/${p.slug}) to run in a cold per-thread sandbox.`,
   repo_not_onboarded: (p: { slug: string; agent: string; onboardHint: string }) =>
     `📦 \`${p.slug}\` is not onboarded as a resident, so I did not start a *${p.agent}* run for it. ` +
     `${p.onboardHint} for a warm, deps-ready environment, or name the repository by URL ` +
@@ -562,7 +563,7 @@ export const REFUSAL_SENTENCES = {
   ship_budget: (p: { maxMinutes: number; maxRounds: number; need: number; provision: number; coding: number }) =>
     `🚫 Ship cannot start under a ${p.maxMinutes}-minute budget: the loop it allows (${p.maxRounds} review rounds) needs ${p.need} minutes — ` +
     `${p.provision} to provision, the coding child's ${p.coding}, and the reserve for the rounds after it at their floors. ` +
-    `Switchboard left the budget and boundary unchanged and did not start either the review loop or a single coding pass.`,
+    `Widen the budget or the boundary that clipped it, or run \`agent:coding\` for a single pass without the review loop.`,
 } as const;
 
 /** `a *coding* run`, `an *explore* run`: the agent's name with its article. */

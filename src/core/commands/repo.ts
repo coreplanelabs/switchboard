@@ -534,7 +534,7 @@ export const repoOffboard = defineCommand({
         `• ${n(w.backupObjects)} snapshot backup object(s) in R2${ids}`,
         `• ${n(w.r2Objects)} object(s) under the resident's R2 prefix`,
         `• ${n(w.threadBindings)} thread binding(s) and the container (currently \`${String(w.container ?? "?")}\`)`,
-        `Nothing was changed. Without \`--dry-run\`, \`repo offboard ${slug}\` performs this removal.`,
+        `Nothing was changed. Run \`repo offboard ${slug}\` to execute.`,
       ].join("\n");
     }
     const errors = Array.isArray(o.errors) ? (o.errors as string[]) : [];
@@ -582,7 +582,7 @@ export const repoRebuild = defineCommand({
           : "• discard no snapshot (none recorded)",
         `• reprovision from scratch on \`${String(reprov.defaultRef ?? "?")}\` (budget ${n(reprov.provisioningTimeoutMs)}ms)`,
         `• keep the registry record and ${n(keeps.threadBindings)} thread binding(s)`,
-        `Nothing was changed. Without \`--dry-run\`, \`repo rebuild ${slug}\` performs this rebuild.`,
+        `Nothing was changed. Run \`repo rebuild ${slug}\` to execute.`,
       ].join("\n");
     }
     return (
@@ -711,7 +711,7 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
     // agent, or the exec grant a token was minted with (policy.ts).
     resource: () => ({ type: "agent", name: "coding" }),
     effect: "write",
-    describe: `Executes the repo's onboarded ${op} command with zero model turns (needs coding-agent access; the ref must be a plausible branch).`,
+    describe: `Run the repo's onboarded ${op} command with zero model turns (needs coding-agent access; the ref must be a plausible branch).`,
     render: renderOp,
     handler: async ({ args, caller, deps, span }) => {
       // The same per-repo allowlist a coding run against this repo passes.
@@ -770,7 +770,7 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
           throw new CommandError(
             "unavailable",
             result.transient === true
-              ? `${result.message} — the resident was unavailable for a moment; Switchboard ended the command as unavailable`
+              ? `${result.message} — the resident was unavailable for a moment; re-run the command`
               : result.message,
           );
       }

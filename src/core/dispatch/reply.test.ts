@@ -296,7 +296,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
           adminsHint,
         ),
         quoted:
-          "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Switchboard left this channel's boundary unchanged and did not start the run.",
+          "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Run it in a channel that allows `write`, or ask an admin to raise this channel's boundary.",
       },
       {
         code: "repo_not_visible",
@@ -309,13 +309,14 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
         code: "repo_unverified",
         built: REFUSAL_SENTENCES.repo_unverified({ slug: "o/r", agent: "coding", via: "github" }),
         quoted:
-          "⚠️ This is a bug: I couldn't verify `o/r` against GitHub because it did not answer, so I did not start a *coding* run and no automatic retry was scheduled.",
+          "⚠️ I couldn't verify `o/r` against GitHub — it didn't answer — so I did not start a *coding* run rather than guess which repository you meant. Try again in a minute.",
       },
       {
         code: "repo_unverified",
         built: REFUSAL_SENTENCES.repo_unverified({ slug: "o/r", agent: "coding", via: "registry" }),
         quoted:
-          "⚠️ This is a bug: I couldn't verify that `o/r` is an onboarded repo because the resident registry did not answer, so I did not start a *coding* run and no automatic fallback was started.",
+          "⚠️ I couldn't verify that `o/r` is an onboarded repo — the resident registry didn't answer — so I did not start a *coding* run rather than guess which repo you meant. " +
+          "Try again in a minute, or name the repository by URL (https://github.com/o/r) to run in a cold per-thread sandbox.",
       },
       {
         code: "repo_not_onboarded",
@@ -339,14 +340,14 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
         built: refusalReply(liveThread, { requestedAgent: "review" }, 120_000),
         quoted:
           "⏳ A *coding* run is already in flight in this thread (120s in).\n" +
-          "An `agent:review` request cannot start beside it — one run per thread — so this request was not started.",
+          "An `agent:review` request cannot start beside it — one run per thread. Wait for it to finish and re-send, or start a new thread.",
       },
       {
         code: "elsewhere_follow_up_refused",
         built: refusalReply(liveThread, { requestedAgent: "review" }, 120_000),
         quoted:
           "⏳ A *coding* run is already in flight in this thread (120s in).\n" +
-          "An `agent:review` request cannot start beside it — one run per thread — so this request was not started.",
+          "An `agent:review` request cannot start beside it — one run per thread. Wait for it to finish and re-send, or start a new thread.",
       },
       {
         code: "ship_thread_live",
@@ -375,20 +376,19 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
         quoted:
           "🚫 Ship cannot start under a 10-minute budget: the loop it allows (1 review rounds) needs 25 minutes — " +
           "5 to provision, the coding child's 15, and the reserve for the rounds after it at their floors. " +
-          "Switchboard left the budget and boundary unchanged and did not start either the review loop or a single coding pass.",
+          "Widen the budget or the boundary that clipped it, or run `agent:coding` for a single pass without the review loop.",
       },
       {
         code: "confirmation_expired",
         built: OFFER_EXPIRED_LINE,
-        quoted:
-          "this offer expired after ten minutes; nothing ran, and a later request may receive a fresh confirmation",
+        quoted: "this offer expired; its ten minutes passed — type the line to run it",
       },
       { code: "confirmation_foreign", built: OFFER_FOREIGN_LINE, quoted: "only the requester can confirm this" },
       { code: "confirmation_used", built: OFFER_USED_LINE, quoted: "this offer was already used" },
       {
         code: "confirmation_unreadable",
         built: OFFER_UNREADABLE_LINE,
-        quoted: "this is a bug: the confirmation could not be read, so nothing ran and no replacement offer was minted",
+        quoted: "the confirmation could not be read; type the line to run it",
       },
       // Record 0037: ONE sentence for all eight reference codes.
       ...(
@@ -407,7 +407,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
         code: "follow_up_dropped",
         built: FOLLOW_UP_DROPPED_BY_STOP,
         quoted:
-          "⛔ This is a bug: the run was stopped before it read this folded follow-up, and the follow-up was not replayed as a fresh request.",
+          "⛔ The run this was folded into was stopped before it read this follow-up, so it was not run. Re-send it to run it fresh.",
       },
     ];
     // Every code in the closed table is accounted for: rendered here, built by

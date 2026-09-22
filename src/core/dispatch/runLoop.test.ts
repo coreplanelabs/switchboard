@@ -4455,7 +4455,7 @@ describe("the run control's lease clock — started by the run loop on the harne
     // empty text — and nothing appended by a PR post-step that ran on an
     // observation that never happened.
     expect(out.answer).toBe(
-      `Stopped at the ${s.ctx.agent.maxMinutes}-minute budget without finishing. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
+      `Stopped at the ${s.ctx.agent.maxMinutes}-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`,
     );
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
     // Nothing drove the replaced container's executor after the end: no workspace observation, no salvage, no post-step.
@@ -4546,7 +4546,7 @@ describe("the run control's lease clock — started by the run loop on the harne
     expect(opens).toBe(1);
     expect(seen).toEqual([undefined, 30_000]);
     expect(out.answer).toBe(
-      `Stopped at the ${s.ctx.agent.maxMinutes}-minute budget without finishing. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
+      `Stopped at the ${s.ctx.agent.maxMinutes}-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`,
     );
     // Nothing drove the replaced container's executor after the end: the
     // settle's HEAD read would have been a `needs: attach` the recovery refuses.

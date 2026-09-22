@@ -137,7 +137,7 @@ function answer(routes: Record<string, () => Promise<Response> | Response>) {
   fetchMock.mockImplementation((url: string) => {
     const path = String(url);
     for (const [prefix, respond] of Object.entries(routes)) if (path.startsWith(prefix)) return respond();
-    return Promise.resolve(new Response("no run found", { status: 404 }));
+    return Promise.resolve(new Response("run not found", { status: 404 }));
   });
 }
 const sse = (text: string) => new Response(text, { status: 200, headers: { "content-type": "text/event-stream" } });

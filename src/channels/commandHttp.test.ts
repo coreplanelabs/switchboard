@@ -483,7 +483,7 @@ describe("createCommandHttpHandler — the Access API is bound by channel visibi
     const priv = fakeReqRes({ method: "GET", url: "/api/runs.get?id=fin-priv" });
     await handler(priv.req, priv.res, nativeOperator);
     expect(priv.status).toBe(404);
-    expect(priv.json()).toEqual({ error: "no run found", code: "not_found" });
+    expect(priv.json()).toEqual({ error: "run not found", code: "not_found" });
     const missing = fakeReqRes({ method: "GET", url: "/api/runs.get?id=nope" });
     await handler(missing.req, missing.res, nativeOperator);
     expect(missing.status).toBe(404);

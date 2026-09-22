@@ -258,7 +258,7 @@ export function checkPrHeadPreflight(input: {
     where,
     reply:
       `🔀 Review of ${where} not started: GitHub did not give me a usable head commit for the PR (the lookup failed, or answered without a well-formed SHA), ` +
-      `so I cannot pin a review to it. This is a bug: no automatic head lookup retry was scheduled, and nothing was posted to GitHub.`,
+      `so I cannot pin a review to it. Re-send the request in a moment; if it keeps failing, look at the PR on GitHub and at the bot's GitHub App credentials.`,
   };
 }
 
@@ -315,7 +315,7 @@ export async function guardAttachedHead(input: {
       outcome: "refused",
       reply:
         `🔀 Review of ${where} not started: ${namedSource} could not be read, so the workspace cannot be verified against PR head ${expected}. ` +
-        `This is a bug: the infrastructure failure was not retried automatically. It is not a finding, and nothing was posted to GitHub.`,
+        `This infrastructure failure is not a finding and nothing was posted to GitHub; re-send the request after the workspace backend recovers.`,
     };
   }
   if (sameCommit(expected, attached)) return { outcome: "verified" };
@@ -331,7 +331,7 @@ export async function guardAttachedHead(input: {
     outcome: "refused",
     reply:
       `🔀 Review of ${where} not started: the ${namedSource} is at ${attached}, but the PR head is ${expected} — the branch moved while the workspace was being prepared (a push or force-push). ` +
-      `This is a bug: the workspace was not reprovisioned automatically at the new head. It is not a finding, and nothing was posted to GitHub.`,
+      `This infrastructure mismatch is not a finding and nothing was posted to GitHub; re-send the request to review the new head.`,
   };
 }
 

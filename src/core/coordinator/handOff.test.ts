@@ -489,7 +489,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     );
     expect(first.status).toBe("aborted");
     expect(first.reply).toBe(
-      "⚠️ This is a bug: the plan runner could not be started (engine down), nothing ran, and no automatic start retry was scheduled.",
+      "⚠️ The plan runner could not be started: engine down. Nothing ran; re-issue the request to try again.",
     );
     const second = harness({ store: leftover, status: { "plan-fixture": { kind: "absent" } } });
     const retried = await handOffToCoordinator(
@@ -542,7 +542,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       );
       expect(refused.status, status).toBe("aborted");
       expect(refused.reply, status).toBe(
-        `🚫 A runner for plan \`fixture\` is still running (\`plan-fixture\`, status: ${status}), so this request started no second runner.`,
+        `🚫 A runner for plan \`fixture\` is still running (\`plan-fixture\`, status: ${status}): wait for it to end — or terminate it in the Workflows dashboard — before re-issuing.`,
       );
       expect(again.created).toEqual([]);
     }
@@ -558,7 +558,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       status: { "plan-fixture": { kind: "unanswered", reason: "the shim could not be reached: ECONNREFUSED" } },
     });
     expect((await handOffToCoordinator(mute.deps, input({ runId: "run-s4" }))).reply).toBe(
-      "⚠️ This is a bug: the plan runner could not tell whether `plan-fixture` still runs (the shim could not be reached: ECONNREFUSED), so nothing ran and no automatic state retry was scheduled.",
+      "⚠️ The plan runner could not tell whether `plan-fixture` still runs: the shim could not be reached: ECONNREFUSED. Nothing ran; re-issue the request to try again.",
     );
     expect(odd.created).toEqual([]);
     expect(mute.created).toEqual([]);
@@ -699,10 +699,10 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       create: { kind: "unanswered", reason: "PUBLIC_BASE_URL is not set — the bot cannot address its own shim" },
     });
     expect((await handOffToCoordinator(silent.deps, input())).reply).toBe(
-      "⚠️ This is a bug: the plan runner could not be started (PUBLIC_BASE_URL is not set — the bot cannot address its own shim), nothing ran, and no automatic start retry was scheduled.",
+      "⚠️ The plan runner could not be started: PUBLIC_BASE_URL is not set — the bot cannot address its own shim. Nothing ran; re-issue the request to try again.",
     );
     const threw = harness({ create: new Error("boom") });
-    expect((await handOffToCoordinator(threw.deps, input())).reply).toContain("could not be started (boom)");
+    expect((await handOffToCoordinator(threw.deps, input())).reply).toContain("could not be started: boom");
   });
 });
 

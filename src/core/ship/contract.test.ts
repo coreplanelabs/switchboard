@@ -383,7 +383,7 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     // preset's rebase-before-every-push rule (record 0071 mechanism one), never a conditional re-fetch
     expect(text).toContain(
       "Push the branch as soon as the change exists and the fast gates pass — the project's full verification " +
-        "is CI's gate and runs there after the push, with any fix as a further commit; an unpushed tree does not " +
+        "is CI's gate, run there after the push with any fix as a further commit; an unpushed tree does not " +
         `survive the run's end. ${FAST_GATES_POINTER} ${GATE_RECEIPTS} ${REBASE_POINTER}`,
     );
     expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(text.indexOf(REBASE_POINTER));

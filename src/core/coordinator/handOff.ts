@@ -424,12 +424,12 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   if (status.kind === "unanswered")
     return refused(
       "plan_runner_state_unknown",
-      `⚠️ This is a bug: the plan runner could not tell whether \`${latest.id}\` still runs (${status.reason}), so nothing ran and no automatic state retry was scheduled.`,
+      `⚠️ The plan runner could not tell whether \`${latest.id}\` still runs: ${status.reason}. Nothing ran; re-issue the request to try again.`,
     );
   if (status.kind === "status" && RUNNING.has(status.status))
     return refused(
       "plan_runner_live",
-      `🚫 A runner for ${where} is still running (\`${latest.id}\`, status: ${status.status}), so this request started no second runner.`,
+      `🚫 A runner for ${where} is still running (\`${latest.id}\`, status: ${status.status}): wait for it to end — or terminate it in the Workflows dashboard — before re-issuing.`,
     );
   if (status.kind === "status" && !ENDED.has(status.status))
     return refused(
@@ -514,7 +514,7 @@ async function start(
     // requesters lose together — neither touches what is there.
     return refused(
       "plan_runner_conflict",
-      `🚫 A runner for \`${instance.id}\` was just recorded by another request, so this request started nothing; the recorded runner owns the pipeline.`,
+      `🚫 A runner for \`${instance.id}\` was just recorded by another request — re-issue in a minute if it did not start.`,
     );
   }
   const rows = await deps.instances.putUnits(units);
@@ -581,7 +581,7 @@ async function start(
       log(`[ship] ${input.msg.threadKey}: the plan runner ${instance.id} could not be started — ${answer.reason}`);
       return refused(
         "plan_start_failed",
-        `⚠️ This is a bug: the plan runner could not be started (${answer.reason}), nothing ran, and no automatic start retry was scheduled.`,
+        `⚠️ The plan runner could not be started: ${answer.reason}. Nothing ran; re-issue the request to try again.`,
       );
   }
 }

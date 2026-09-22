@@ -747,7 +747,7 @@ describe("executor provisioning by agent resources", () => {
     const ended = await run;
     expect(ended.status).toBe("stopped");
     expect(second.replies).toHaveLength(2);
-    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this folded follow-up/);
+    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this follow-up/);
     expect(first.replies).toEqual([]);
     expect(registry.listActive()).toEqual([]);
   });
@@ -1262,7 +1262,7 @@ describe("resident repo dispatch", () => {
     expect(replies[0]).toContain("not onboarded");
     expect(replies[0]).toContain("repo onboard acme/try-catch");
     expect(replies[0]).not.toContain("Ask "); // an admin can run `repo onboard` themselves
-    expect(replies[0]).toContain("name the repository by URL");
+    expect(replies[0]).toContain("name the repository by URL"); // the URL form still binds a real repo
     expect(provider.requests).toHaveLength(0); // no model turn
     expect(makeExecutor).not.toHaveBeenCalled(); // no workspace of any kind
     expect(statuses[statuses.length - 1].title).toContain("not started");
@@ -1512,8 +1512,7 @@ describe("resident repo dispatch", () => {
     expect(replies[0]).toContain("couldn't verify");
     expect(replies[0]).toContain("acme/web");
     expect(replies[0]).not.toContain("not onboarded"); // silence is not a refusal
-    expect(replies[0]).toContain("This is a bug");
-    expect(replies[0]).toContain("no automatic fallback was started");
+    expect(replies[0]).toContain("name the repository by URL"); // the URL form still binds a real repo
     expect(provider.requests).toHaveLength(0);
     expect(makeExecutor).not.toHaveBeenCalled();
     expect(statuses[statuses.length - 1].title).toContain("could not be verified");
@@ -2239,7 +2238,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(reply).toContain("acme/api#42");
     expect(reply).toContain(attached); // what the resident attached
     expect(reply).toContain(head); // what the PR head is
-    expect(reply).toContain("This is a bug: the workspace was not reprovisioned automatically at the new head");
+    expect(reply).toMatch(/re-send/i);
     const last = statuses[statuses.length - 1];
     expect(last.title).toMatch(/not started/);
     // Before refusing, the PR's current head is asked once (item 12) — here the
@@ -2252,7 +2251,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
   // ref's tip, so "attached ≠ resolved" is usually "a push raced the request
   // and the worktree is at the PR's head NOW". One GET decides: attached = the
   // current head → the run reviews it (the block names it as verified) instead
-  // of refusing the mismatched workspace.
+  // of refusing and asking the user to re-send.
   it("a resident review attached at a commit that IS the PR's current head (moved since resolution) runs, reviewing the attached head", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
@@ -2340,7 +2339,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const reply = replies.find((r) => /not started/i.test(r)) ?? "";
     expect(reply).toContain("acme/api#42");
     expect(reply).toMatch(/head/i);
-    expect(reply).toContain("This is a bug: no automatic head lookup retry was scheduled");
+    expect(reply).toMatch(/re-send/i);
     expect(statuses[statuses.length - 1].title).toMatch(/not started/);
   });
 
@@ -9457,7 +9456,7 @@ workspaceDir: __WORKDIR__
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     expect(replies).toEqual([
-      "⚠️ This is a bug: the plan runner could not be started (PUBLIC_BASE_URL is not set — the bot cannot address its own shim), nothing ran, and no automatic start retry was scheduled.",
+      "⚠️ The plan runner could not be started: PUBLIC_BASE_URL is not set — the bot cannot address its own shim. Nothing ran; re-issue the request to try again.",
     ]);
     expect(statuses[statuses.length - 1]!.title).toContain("⚠️");
     expect(provider.requests).toHaveLength(0);
@@ -9568,7 +9567,7 @@ workspaceDir: __WORKDIR__
     const refusedIO = fakeIO();
     await dispatch(refusedRun.deps, msg(TASK_MSG, "slack:UADMIN"), refusedIO.io);
     expect(refusedIO.statuses[refusedIO.statuses.length - 1]!.title).toContain("⚠️");
-    expect(refusedIO.replies[0]).toContain("This is a bug: the plan runner could not be started (engine down)");
+    expect(refusedIO.replies[0]).toContain("The plan runner could not be started: engine down");
     expect(registry.getById("run-shipref")).toMatchObject({ finished: true, status: "completed" });
   });
 
@@ -10097,7 +10096,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await run;
     expect(first.replies.some((r) => r.includes("aborted"))).toBe(true);
     expect(second.replies).toHaveLength(2);
-    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this folded follow-up/);
+    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this follow-up/);
     expect(requests).toHaveLength(1);
     expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
   });
@@ -10182,7 +10181,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await run;
     expect(first.replies.some((r) => r.includes("finale exploded"))).toBe(true);
     expect(second.replies).toHaveLength(2);
-    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this folded follow-up/);
+    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this follow-up/);
     expect(requests).toHaveLength(1); // no fresh turn
     expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
   });
@@ -13724,7 +13723,7 @@ workspaceDir: __WORKDIR__
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, inChannel("COPEN", "agent:explore budget:3 time the suite"), io);
     expect(replies).toEqual([
-      "🚫 `explore` needs at least 4 minutes — a turn, then its write-up and post-step — and this message's own budget gives it 3. Switchboard applied this message's budget directive and did not start the run.",
+      "🚫 `explore` needs at least 4 minutes — a turn, then its write-up and post-step — and this message's own budget gives it 3. Send the message again with `budget:4` or more.",
     ]);
     expect(statuses).toEqual([]);
     expect(claim).not.toHaveBeenCalled();
@@ -13749,7 +13748,7 @@ workspaceDir: __WORKDIR__
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, inChannel("CREAD", "agent:coding fix it"), io);
     expect(replies).toEqual([
-      "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Switchboard left this channel's boundary unchanged and did not start the run.",
+      "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Run it in a channel that allows `write`, or ask slack:UADMIN to raise this channel's boundary.",
     ]);
     expect(statuses).toEqual([]); // refused before the ack card: nothing to close
     expect(claim).not.toHaveBeenCalled(); // no thread claimed
@@ -13775,7 +13774,7 @@ workspaceDir: __WORKDIR__
     const { io, replies } = fakeIO();
     await dispatch(deps, inChannel("CNOMACHINE", "agent:coding fix it"), io);
     expect(replies).toEqual([
-      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary allows only `none`. Switchboard left this channel's boundary unchanged; it did not start the run.",
+      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary allows only `none`. Run it in a channel that allows `repo-resident`, or ask slack:UADMIN to raise this channel's boundary.",
     ]);
     expect(makeExecutor).not.toHaveBeenCalled();
     expect(provider.requests).toHaveLength(0);

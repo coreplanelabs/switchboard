@@ -667,7 +667,7 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
     expect(err).toBeInstanceOf(CommandError);
     expect((err as CommandError).code).toBe("unavailable");
     expect((err as CommandError).message).toBe(
-      `bot config not found at ${missing} — the command stopped before work began; the config path comes from SWITCHBOARD_CONFIG or defaults to config/config.yaml (deploy, env, friction analyze need no bot config)`,
+      `bot config not found at ${missing} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`,
     );
     const dir = mkdtempSync(join(tmpdir(), "swb-cli-config-"));
     writeFileSync(
@@ -734,7 +734,7 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
       expect(out, argv.join(" ")).toEqual({
         exitCode: 1,
         stdout: "",
-        stderr: `error (unavailable): bot config not found at ${missing} — the command stopped before work began; the config path comes from SWITCHBOARD_CONFIG or defaults to config/config.yaml (deploy, env, friction analyze need no bot config)`,
+        stderr: `error (unavailable): bot config not found at ${missing} — set SWITCHBOARD_CONFIG to a config file or run from a checkout with config/config.yaml (deploy, env, friction analyze need none)`,
       });
     }
   });

@@ -3814,9 +3814,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(
       (await call(capped, "unit-wake", { ...key, parentInstanceId: key.instanceId, waitId: "U10/idle/1" })).body,
     ).toMatchObject({ answer: { kind: "answered", reply: expect.stringContaining("cost cap") } });
-    expect(capped.replies.at(-1)).toContain("the next reply in this thread continues the unit");
-    expect(capped.replies.at(-1)).toContain("the idle unit remains open");
-    expect(capped.replies.at(-1)).toContain("is its stop command");
+    expect(capped.replies.at(-1)).toContain("reply in this thread to continue");
 
     const unfit = await idleHarness({ grantFact: { grant: { renewals: 2 }, source: "org" } });
     const unfitRows = await unfit.instances.listUnits(PLAN_INSTANCE.id);
@@ -4915,7 +4913,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     expect((await merge(bare)).body).toMatchObject({
       outcome: "refused",
       reason:
-        "`main` takes changes only through a merge queue and the door cannot enqueue — this is a bug: automatic merge-queue enqueue is unavailable; the approved work stands",
+        "`main` takes changes only through a merge queue and the door cannot enqueue — enqueue acme/api#7 by hand (`gh pr merge --auto`); the approved work stands",
     });
     // GitHub refusing the enqueue itself is a refusal in GitHub's words.
     const refused = await mergeHarness({ queueRule: true, enqueue: { ok: false, reason: "queue is locked" } });
