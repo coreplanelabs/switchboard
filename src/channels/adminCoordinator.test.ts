@@ -6,6 +6,7 @@ import { AGENTS } from "../agents/registry.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { CoordinatorInstance, CoordinatorTag, CoordinatorUnit } from "../core/coordinator/contract.js";
+import { runPlan, type BotReply, type CoordinatorBot, type StepRunner } from "../core/coordinator/driver.js";
 import type { ChildContract } from "../core/ship/contract.js";
 import {
   applyReturn,
@@ -21,7 +22,12 @@ import { InMemoryRunStore } from "../core/runStore.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import { createLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
 import { hostKeyOf } from "../core/runLedger/hostKey.js";
-import { HOSTED_DEADLINE_MARGIN_MINUTES, RESTART_CLAIM_GRACE_MS, minutesToMs } from "../core/budgets.js";
+import {
+  HOSTED_DEADLINE_MARGIN_MINUTES,
+  RESTART_CLAIM_GRACE_MS,
+  SHIP_RECORD_VISIBILITY,
+  minutesToMs,
+} from "../core/budgets.js";
 import { createRunsService } from "../core/runsService.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
@@ -3365,6 +3371,156 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect("reviewPostReason" in (res.body as { run: Record<string, unknown> }).run).toBe(false);
     expect(h.reviewFetches()).toBe(0);
     expect(h.sleeps).toEqual([]);
+  });
+
+  it("a run from an earlier attempt of the same plan resolves to the current attempt after the re-issue moved requester and thread, while a genuinely foreign run stays the same opaque not_found as an absent run", async () => {
+    const h = await planHarness();
+    const current: CoordinatorInstance = {
+      ...PLAN_INSTANCE,
+      id: "plan-fixture-2",
+      attempt: 2,
+      runId: "run-parent-2",
+      userId: "slack:UBOB",
+      channelId: "slack:C2",
+      threadKey: "slack:C2:9.0",
+      createdAt: NOW,
+    };
+    await h.instances.put(current);
+    await h.instances.putUnits([{ ...unitRow("U10", { threadKey: "slack:C2:10.0" }), instanceId: current.id }]);
+    await h.store.put(
+      record("run-prior", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        idempotencyKey: `${PLAN_INSTANCE.id}:U10/1/review`,
+        agent: "review",
+        threadKey: "slack:C1:2.0",
+      }),
+    );
+    await h.store.put(
+      record("run-foreign", {
+        parentInstanceId: "plan-other",
+        idempotencyKey: "plan-other:U10/1/review",
+        agent: "review",
+        threadKey: "slack:C1:2.0",
+      }),
+    );
+
+    expect(
+      (await call(h, "read-record", { parentInstanceId: current.id, runId: "run-prior", unit: "U10" })).body,
+    ).toMatchObject({ ok: true, run: { id: "run-prior", finished: true } });
+    const hidden = { status: 404, body: { ok: false, error: "not_found" } };
+    expect(await call(h, "read-record", { parentInstanceId: current.id, runId: "run-foreign", unit: "U10" })).toEqual(
+      hidden,
+    );
+    expect(await call(h, "read-record", { parentInstanceId: current.id, runId: "run-absent", unit: "U10" })).toEqual(
+      hidden,
+    );
+  });
+
+  describe("read-record recovery — the real runner step over the real store (item 9)", () => {
+    it("a finish event racing the review record's write retries under the runner's short bound and resumes from the verdict", async () => {
+      const HEAD = "a".repeat(40);
+      const h = await planHarness();
+      await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" }), unitRow("U11")]);
+      await h.store.put(
+        record("run-c0", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          idempotencyKey: `${PLAN_INSTANCE.id}:U10/0/coding`,
+          threadKey: "slack:C1:2.0",
+          handoff: { deviations: [], followUps: [], unproven: [] },
+          events: [
+            { type: "pr_opened", number: 7, url: "https://github.com/acme/api/pull/7", created: true, seq: 1 },
+            { type: "answer", text: "Done — branch pushed.", seq: 2 },
+          ],
+        }),
+      );
+      const reviewRecord = record("run-r1", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        idempotencyKey: `${PLAN_INSTANCE.id}:U10/1/review`,
+        agent: "review",
+        threadKey: "slack:C1:2.0",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewHead: HEAD,
+        reviewPost: { posted: true, target: { repo: "acme/api", number: 7 }, head: HEAD, verdict: "approve" },
+        events: [{ type: "answer", text: "LGTM: clean", seq: 1 }],
+      });
+      const wire = (body: Record<string, unknown>, status = 200): BotReply => ({
+        status,
+        text: JSON.stringify({ ...body, at: NOW }),
+      });
+      const routeCalls = new Map<string, number>();
+      let reviewReads = 0;
+      const scripted = (route: string): BotReply => {
+        const n = (routeCalls.get(route) ?? 0) + 1;
+        routeCalls.set(route, n);
+        switch (route) {
+          case "plan":
+            return wire({
+              ok: true,
+              planId: "fixture",
+              merge: "person",
+              repo: "acme/api",
+              base: "main",
+              caps: { maxRounds: 2, maxMinutes: 240 },
+              units: [unitRow("U10")],
+            });
+          case "unit-start":
+            return wire({ ok: true, threadKey: "slack:C1:2.0", branch: "plan/fixture/u10", base: "main" });
+          case "branch":
+            return wire({ ok: true, branch: "plan/fixture/u10", base: "main" });
+          case "spawn":
+            return wire({ ok: true, runId: n === 1 ? "run-c0" : "run-r1", threadKey: "slack:C1:2.0" });
+          case "pr-check":
+            if (n === 1) return wire({ ok: true, state: "none" });
+            return wire({
+              ok: true,
+              state: "open",
+              prNumber: 7,
+              url: "https://github.com/acme/api/pull/7",
+              headSha: HEAD,
+            });
+          case "checks":
+            return wire({ ok: true, checks: { total: 1, pending: [], failed: [] } });
+          case "round":
+          case "unit-end":
+          case "finish":
+            return wire({ ok: true, told: true });
+          default:
+            throw new Error(`no scripted ${route} answer`);
+        }
+      };
+      const bot: CoordinatorBot = {
+        async step(route, body) {
+          if (route !== "read-record") return scripted(route);
+          const response = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}read-record`, body), h.deps);
+          if (body.runId === "run-r1") {
+            reviewReads += 1;
+            if (response.status === 404)
+              queueMicrotask(() => {
+                void h.store.put(reviewRecord);
+              });
+          }
+          return { status: response.status, text: JSON.stringify(response.body) };
+        },
+      };
+      const sleeps: Array<{ name: string; ms: number }> = [];
+      const steps: StepRunner = {
+        // No platform retry here: the regression proves the runner's own
+        // event-qualified visibility bound, not the Workflow engine's coarse retry ladder.
+        do: async (_name, _config, callback) => callback(),
+        sleep: async (name, ms) => {
+          sleeps.push({ name, ms });
+          await Promise.resolve();
+        },
+        waitForEvent: async () => ({ ok: true }),
+      };
+
+      await expect(runPlan(steps, bot, PLAN_INSTANCE.id)).resolves.toMatchObject({
+        units: { U10: "merge_ready" },
+        outcome: "completed",
+      });
+      expect(reviewReads).toBe(2);
+      expect(sleeps).toEqual([{ name: "U10/1/review/read/1/record-visible/1", ms: SHIP_RECORD_VISIBILITY.retryMs }]);
+    });
   });
 
   it("read-record answers a recorded skip as reviewPosted: false with the child's reason, GitHub never asked — a skip the child chose is not a post GitHub has yet to surface", async () => {

@@ -70,6 +70,7 @@ import {
   isHumanGatePending,
   INSTANCE_ID_PATTERN,
   STEP_NAME_PATTERN,
+  unitOfIdempotencyKey,
   type CoordinatorInstance,
   type CoordinatorTag,
   type CoordinatorUnit,
@@ -108,6 +109,7 @@ import type { SweepReport } from "../core/pullSweep.js";
 import {
   interruptionCauseOfWords,
   parsePlanBranch,
+  planInstanceId,
   type Brief,
   type InterruptionCause,
   type RoundChecks,
@@ -1285,6 +1287,40 @@ async function childPullRequestState(
   return state;
 }
 
+/** A re-issued plan's later runner may finish reading a child the earlier
+ * attempt spawned. The lineage is admitted only where both durable instance
+ * rows prove the same plan, repository and unit, with the caller on the latest
+ * attempt; every other mismatch keeps the opaque read mask. */
+async function isEarlierAttemptRun(
+  deps: AdminCoordinatorDeps,
+  current: CoordinatorInstance | null,
+  view: RunView,
+  unit: string | undefined,
+): Promise<boolean> {
+  if (current?.plan === undefined || view.parentInstanceId === undefined || unit === undefined) return false;
+  if (unitOfIdempotencyKey(view.idempotencyKey ?? "") !== unit) return false;
+  const prior = await deps.instances.get(view.parentInstanceId);
+  if (prior?.plan === undefined) return false;
+  const currentAttempt = current.attempt ?? 1;
+  const priorAttempt = prior.attempt ?? 1;
+  if (
+    currentAttempt <= priorAttempt ||
+    current.plan.id !== prior.plan.id ||
+    current.plan.path !== prior.plan.path ||
+    current.repo !== prior.repo
+  )
+    return false;
+  const [nextAttempt, currentUnits, priorUnits] = await Promise.all([
+    deps.instances.get(planInstanceId(current.plan.id, currentAttempt + 1)),
+    deps.instances.listUnits(current.id),
+    deps.instances.listUnits(prior.id),
+  ]);
+  if (nextAttempt !== null) return false;
+  const currentUnit = currentUnits.find((row) => row.unit === unit);
+  const priorUnit = priorUnits.find((row) => row.unit === unit);
+  return currentUnit !== undefined && priorUnit !== undefined && currentUnit.branch === priorUnit.branch;
+}
+
 async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -1294,11 +1330,17 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
     return json(400, { ok: false, error: "unit must be a unit id" });
   const at = (deps.clock ?? systemClock)();
   // A run outside the instance is `not_found`, byte-identical to a missing one
-  // (authorization.md: a denied read reveals nothing).
-  const res = await deps.runs.getRun(body.runId);
-  if (!res.ok || res.value.parentInstanceId !== id.value) return json(404, { ok: false, error: "not_found" });
+  // (authorization.md: a denied read reveals nothing). The only moved identity
+  // admitted is an earlier attempt of this same plan and unit, proven from both
+  // durable instance rows rather than from caller-supplied ids alone.
+  const [res, instanceRow] = await Promise.all([deps.runs.getRun(body.runId), deps.instances.get(id.value)]);
+  if (!res.ok) return json(404, { ok: false, error: "not_found" });
   const view = res.value;
-  const instanceRow = await deps.instances.get(id.value);
+  if (
+    view.parentInstanceId !== id.value &&
+    !(await isEarlierAttemptRun(deps, instanceRow, view, typeof body.unit === "string" ? body.unit : undefined))
+  )
+    return json(404, { ok: false, error: "not_found" });
   let pullRequest: Record<string, unknown> | undefined;
   try {
     pullRequest = await childPullRequestState(deps, instanceRow, typeof body.unit === "string" ? body.unit : undefined);

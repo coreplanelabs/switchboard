@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { SHIP_RECORD_VISIBILITY } from "../budgets.js";
 import { MERGE_WAIT_CHUNK_MS, PR_TRANSITION_GUARD_MS, WAIT_CHUNK_MS } from "../ship/coordinator.js";
 import { checksSettledEventType, RUN_FINISHED_EVENT_PREFIX, type CoordinatorUnit } from "./contract.js";
 import {
@@ -2244,7 +2245,7 @@ describe("the plan runner's driver — a step that throws inside the walk become
   const HEAD_2 = "b".repeat(40);
   const red = { total: 2, pending: [], failed: [{ name: "ci", conclusion: "failure" }] };
 
-  it("the incident's shape pinned: a round-2 approve whose read-record stores a stamped non-transient refusal (HTTP 404 not_found — the walk's instant death, no retry ladder) posts the unit's ending before the instance fails — kind failed, cause step_threw, the read step and round 2, the one-line message in the user's words — and the finish still says failed; never the bare 'no ending was recorded' seal", async () => {
+  it("the incident's shape pinned: after a round-2 finish event, opaque read-record 404s exhaust the short visibility bound before the unit records the failed read and the instance ends — never the bare 'no ending was recorded' seal", async () => {
     const s = steps({
       "U10/0/coding/wait/1": "event",
       "U10/1/review/wait/1": "event",
@@ -2265,11 +2266,12 @@ describe("the plan runner's driver — a step that throws inside the walk become
         codingDone("run-c0", T0 + 10 * MIN),
         reviewApproved("run-r1", T0 + 20 * MIN),
         record({ id: "run-f1", finished: true, status: "completed", headSha: HEAD_2 }, T0 + 30 * MIN),
-        // Round 2's LGTM landed on GitHub, but the record read answers a
-        // stamped refusal outside the transient set: the mapper throws
-        // OUTSIDE the step — the platform retries nothing — and before this
-        // fix the instance died two seconds after the approve with no ending.
-        ok({ ok: false, error: "not_found" }, T0 + 40 * MIN, 404),
+        // Round 2's LGTM landed on GitHub, but the record never becomes
+        // visible. The event-qualified short ladder is spent before the final
+        // opaque answer leaves the read and records the failed ending.
+        ...Array.from({ length: SHIP_RECORD_VISIBILITY.retries + 1 }, () =>
+          ok({ ok: false, error: "not_found" }, T0 + 40 * MIN, 404),
+        ),
       ],
       // Round 1's checks step reads a red head (the incident's seq 39–42:
       // approve, then checks_failed, then the fix round and the re-review).
@@ -2303,6 +2305,12 @@ describe("the plan runner's driver — a step that throws inside the walk become
     expect(ends[0]!.ending.report).toContain("The unit remains bound to this thread; the next reply continues it");
     // One line: the message never carries a stack or a second line.
     expect(ends[0]!.ending.report.split("\n")[0]).toContain("HTTP 404");
+    expect(b.of("read-record").filter((body) => body.runId === "run-r2")).toHaveLength(
+      SHIP_RECORD_VISIBILITY.retries + 1,
+    );
+    expect(s.taken.filter((taken) => taken.kind === "sleep" && taken.name.includes("record-visible"))).toHaveLength(
+      SHIP_RECORD_VISIBILITY.retries,
+    );
     expect(s.names()).toContain("U10/end/threw");
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
   });
@@ -2448,8 +2456,11 @@ describe("the plan runner's driver — a step that throws inside the walk become
       "unit-start": [started("U10")],
       branch: [branched("U10")],
       spawn: [spawned("run-c0")],
-      // The read's stored answer is a stamped refusal → the mapper throws.
-      "read-record": [ok({ ok: false, error: "not_found" }, T0 + 10 * MIN, 404)],
+      // The event-qualified reads spend their short visibility bound; the
+      // final stored refusal is still the original throw the ending preserves.
+      "read-record": Array.from({ length: SHIP_RECORD_VISIBILITY.retries + 1 }, () =>
+        ok({ ok: false, error: "not_found" }, T0 + 10 * MIN, 404),
+      ),
       "pr-check": [prNone()],
       round: [acked()],
       "unit-end": Array.from({ length: STEP_RETRIES.limit + 1 }, () => new Error("the bot is down")),
