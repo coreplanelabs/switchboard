@@ -130,13 +130,14 @@ export async function contractFor(
       break;
     }
   }
-  return contractFromPlan({
+  const contract = contractFromPlan({
     ...source,
     readSpec: (spec) => specs.get(spec),
     ...(agentRules ? { agentRules } : {}),
     rebase,
     ...(issue ? { issue } : {}),
   });
+  return unit.record !== undefined ? { ...contract, record: unit.record } : contract;
 }
 
 const prUrl = (repo: string, pr: number) => `https://github.com/${repo}/pull/${pr}`;
@@ -213,8 +214,9 @@ export async function composeChild(
       // resume — it starts from the recorded sha in a clean tree, and its
       // request is the previous segment's write-up and handoff, never the
       // person's message again.
+      const work = unit.record !== undefined ? `record: ${unit.record}\n\n${task}` : task;
       const prompt =
-        brief.continue !== undefined ? `${await continuationPreface(brief.continue, unit, readers)}\n\n${task}` : task;
+        brief.continue !== undefined ? `${await continuationPreface(brief.continue, unit, readers)}\n\n${work}` : work;
       return { preset: "coding", prompt, ref: unit.branch, contract };
     }
     case "review": {

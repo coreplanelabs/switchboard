@@ -447,6 +447,8 @@ export interface HarnessRun {
   /** The tools the harness relays to the bot — the preset's toolset (src/tools/toolsets.ts), every one run here (the relay clause). */
   tools: RunnableTool[];
   toolContext: ToolContext;
+  /** Public, runner-owned values the harness process and its shell inherit. */
+  environment?: Record<string, string>;
   /** The thread's facts the gate judges the harness's own tools by: the
    *  checkout, the run's branch, the protected ones. The identity is the
    *  preset's (`agent.identity`) and is folded in by the harness, so the

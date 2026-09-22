@@ -16,4 +16,6 @@ superseded_by: 00NN-slug.md # only when status is superseded
 ---
 ```
 
-Files are numbered `NNNN-slug.md`; the number is the record's stable id. The index at [`docs/explanation/design-decisions.md`](../explanation/design-decisions.md) is generated from this directory by `npm run docs:gen`.
+Files are numbered `NNNN-slug.md`; the number is the record's stable id. A coding child never scans this directory for the next number: when its task asks it to write a record, admission reserves the next number unused on `origin/main` and unclaimed by any open pull request, stores that reservation on the unit and run, and puts `record: NNNN` in the child's brief. The child writes exactly that number; `npm run decisions:check` refuses an unreserved child write, a different number, two added files with one number, or a number already present on main. A re-issue of the same task keeps its reservation.
+
+The index at [`docs/explanation/design-decisions.md`](../explanation/design-decisions.md) is generated from this directory by `npm run docs:gen`.

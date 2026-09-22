@@ -103,6 +103,7 @@ const CAUSE_OF = {
   plan_runner_state_unread: "system",
   plan_units_merged: "request",
   plan_history_unavailable: "system",
+  decision_record_store_unavailable: "system",
   plan_runner_conflict: "system",
   plan_instance_orphaned: "system",
   plan_start_failed: "system",

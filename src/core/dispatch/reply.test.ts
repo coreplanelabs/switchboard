@@ -442,6 +442,9 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       "plan_runner_state_unread",
       "plan_units_merged",
       "plan_history_unavailable",
+      // decisionRecordReservation.test.ts and both admission tests prove the
+      // shared durable-store refusal's sentence and typed code.
+      "decision_record_store_unavailable",
       "plan_runner_conflict",
       "plan_instance_orphaned",
       "plan_start_failed",

@@ -65,6 +65,8 @@ export interface Guard {
 
 export interface ChildContract {
   unit: ContractUnit;
+  /** The decision-record number reserved for this unit at admission. */
+  record?: string;
   specRows: ContractSpecRow[];
   /** Absent when the repository has neither rules file. */
   agentRules: AgentRules | undefined;

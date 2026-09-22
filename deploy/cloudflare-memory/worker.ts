@@ -1718,6 +1718,14 @@ export class RunHistoryDO extends DurableObject<Env> {
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (instance_id, unit)
       );
+      CREATE TABLE IF NOT EXISTS decision_record_reservations (
+        repo TEXT NOT NULL,
+        task_key TEXT NOT NULL,
+        number TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (repo, task_key),
+        UNIQUE (repo, number)
+      );
     `);
     // The thread events of a unit-owned thread (record 0051's reply-as-event rule): a
     // sibling table of the unit rows, never a field on them — `putUnits`
@@ -2599,6 +2607,71 @@ export class RunHistoryDO extends DurableObject<Env> {
       );
     });
     return out;
+  }
+
+  // ---- decision-record reservations (agent-ship item 16) ---------------------
+
+  /** One atomic durable allocation across bot processes. Existing unit and run
+   * rows seed the claim set for reservations written before this ledger existed. */
+  async reserveDecisionRecord(
+    repo: string,
+    taskKey: string,
+    claimed: string[],
+    existing: string | undefined,
+    now: number,
+  ): Promise<{ number: string }> {
+    let number = "";
+    this.ctx.storage.transactionSync(() => {
+      const prior = this.sql
+        .exec<{ number: string }>(
+          `SELECT number FROM decision_record_reservations WHERE repo = ? AND task_key = ?`,
+          repo,
+          taskKey,
+        )
+        .toArray()[0];
+      if (prior !== undefined) {
+        number = prior.number;
+        return;
+      }
+
+      const used = new Set(claimed);
+      for (const row of this.sql
+        .exec<{ number: string }>(`SELECT number FROM decision_record_reservations WHERE repo = ?`, repo)
+        .toArray())
+        used.add(row.number);
+      for (const row of this.sql
+        .exec<{ instance_json: string; unit_json: string }>(
+          `SELECT i.json AS instance_json, u.json AS unit_json
+             FROM coordinator_units u JOIN coordinator_instances i ON i.instance_id = u.instance_id`,
+        )
+        .toArray()) {
+        const instance = JSON.parse(row.instance_json) as CoordinatorInstance;
+        const unit = JSON.parse(row.unit_json) as CoordinatorUnit;
+        if (instance.repo === repo && unit.record !== undefined) used.add(unit.record);
+      }
+      for (const row of this.sql
+        .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE repo = ?`, repo)
+        .toArray()) {
+        const record = JSON.parse(row.summary_json) as { record?: unknown };
+        if (typeof record.record === "string" && /^\d{4}$/.test(record.record)) used.add(record.record);
+      }
+      for (const row of this.sql.exec<{ meta_json: string }>(`SELECT meta_json FROM live_runs`).toArray()) {
+        const meta = JSON.parse(row.meta_json) as { repo?: unknown; record?: unknown };
+        if (meta.repo === repo && typeof meta.record === "string" && /^\d{4}$/.test(meta.record)) used.add(meta.record);
+      }
+
+      const highest = [...used].reduce((max, value) => (/^\d{4}$/.test(value) ? Math.max(max, Number(value)) : max), 0);
+      number = existing ?? String(highest + 1).padStart(4, "0");
+      if (!/^\d{4}$/.test(number)) throw new Error(`decision-record numbers exhausted for ${repo}`);
+      this.sql.exec(
+        `INSERT INTO decision_record_reservations (repo, task_key, number, created_at) VALUES (?, ?, ?, ?)`,
+        repo,
+        taskKey,
+        number,
+        now,
+      );
+    });
+    return { number };
   }
 
   // ---- the units of the plan an instance runs (run-history item 50) -----------
@@ -4955,6 +5028,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/events/list",
   "/runs/coordinator/events/mark-consumed",
   "/runs/coordinator/wake",
+  "/runs/decision-record/reserve",
   "/runs/claim",
   "/runs/heartbeat",
   "/runs/append",
@@ -5565,6 +5639,21 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     const r = await stub.handoff(g.value, runIds);
     console.log(`[runs/handoff] ${key.value} ${g.value} marked ${r.marked.length}/${runIds.length}`);
     return json(r);
+  }
+
+  // Decision-record allocation is one atomic write on the same durable object
+  // that holds unit and run rows, so a bot restart cannot forget a claim.
+  if (pathname === "/runs/decision-record/reserve") {
+    if (typeof b.repo !== "string" || !REPO_SLUG.test(b.repo)) return json({ error: "repo must be owner/name" }, 400);
+    if (typeof b.taskKey !== "string" || !/^[0-9a-f]{16}$/.test(b.taskKey))
+      return json({ error: "taskKey must be a decision-record task key" }, 400);
+    if (!Array.isArray(b.claimed) || !b.claimed.every((number) => typeof number === "string" && /^\d{4}$/.test(number)))
+      return json({ error: "claimed must be an array of decision-record numbers" }, 400);
+    if (b.existing !== undefined && (typeof b.existing !== "string" || !/^\d{4}$/.test(b.existing)))
+      return json({ error: "existing must be a decision-record number" }, 400);
+    return json(
+      await stub.reserveDecisionRecord(b.repo, b.taskKey, b.claimed as string[], b.existing as string | undefined, now),
+    );
   }
 
   // The coordinator's parent records (run-history item 49): the record whole,

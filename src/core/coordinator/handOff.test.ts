@@ -5,6 +5,8 @@ import { handOffToCoordinator, type HandOffDeps, type HandOffInput } from "./han
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
 import { MAX_FILE_CHARS } from "../../execution/githubApi.js";
 import { PLAN_MAX_CHARS } from "../ship/contract.js";
+import { generatedPlanId } from "../ship/coordinator.js";
+import { DecisionRecordAllocator } from "../decisionRecordReservation.js";
 
 // Feature: docs/reference/specs/agent-ship.md item 16 — every `agent:ship`
 // request the preflight admitted is handed to the plan runner: the bot writes
@@ -247,6 +249,66 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     );
     expect(await wordy.instances.get("plan-make-the-runner-warm-the-eaaa45")).toMatchObject({ merge: "person" });
     expect(await h.instances.listEvents({ instanceId: id, unit: ["U", "1"].join("") })).toEqual([]);
+  });
+
+  it("two record-writing tasks admitted together carry consecutive reservations on their unit rows, and re-issuing the same task keeps its number", async () => {
+    const allocator = new DecisionRecordAllocator(async () => new Set(["0074"]));
+    const reserve = allocator.reserve.bind(allocator);
+    const effect = harness();
+    const provider = harness();
+    effect.deps.reserveDecisionRecord = reserve;
+    provider.deps.reserveDecisionRecord = reserve;
+    const effectText =
+      "in acme/api: Write the technical decision record (next free number in docs/decisions/, the repo's record shape) for one typed side-effect seam.";
+    const providerText =
+      "in acme/api: Write the technical decision record (next free number in docs/decisions/, the repo's record shape) for one provider-failure cause.";
+
+    const [a, b] = await Promise.all([
+      handOffToCoordinator(effect.deps, input({ entry: { repo: "acme/api", base: "main" }, requestText: effectText })),
+      handOffToCoordinator(
+        provider.deps,
+        input({ entry: { repo: "acme/api", base: "main" }, requestText: providerText }),
+      ),
+    ]);
+    expect((await effect.instances.listUnits(a.instanceId!))[0]?.record).toBe("0075");
+    expect((await provider.instances.listUnits(b.instanceId!))[0]?.record).toBe("0076");
+
+    const again = harness({
+      store: effect.instances,
+      status: { [a.instanceId!]: { kind: "status", status: "complete" } },
+    });
+    again.deps.reserveDecisionRecord = reserve;
+    const reissued = await handOffToCoordinator(
+      again.deps,
+      input({ entry: { repo: "acme/api", base: "main" }, requestText: effectText }),
+    );
+    expect((await effect.instances.listUnits(reissued.instanceId!))[0]?.record).toBe("0075");
+  });
+
+  it("an unavailable durable decision-record store refuses admission without issuing a number or writing a unit", async () => {
+    const h = harness();
+    const allocator = new DecisionRecordAllocator(
+      async () => new Set(["0074"]),
+      async () => undefined,
+    );
+    h.deps.reserveDecisionRecord = allocator.reserve.bind(allocator);
+
+    const task = "Document this choice in a decision record.";
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: `in acme/api: ${task}`,
+      }),
+    );
+
+    expect(out).toMatchObject({
+      status: "aborted",
+      refusal: { cause: "system", code: "decision_record_store_unavailable" },
+    });
+    expect(out.reply).toContain("durable coordinator store");
+    expect(h.created).toEqual([]);
+    expect(await h.instances.listUnits(`plan-${generatedPlanId(task, "slack:C1:1.0")}`)).toEqual([]);
   });
 
   it("a generated task persists its accepted inline media as one retry-stable seed event after the unit row and before the Workflow starts; an over-cap seed says what was dropped", async () => {

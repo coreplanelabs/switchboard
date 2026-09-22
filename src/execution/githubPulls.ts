@@ -1080,6 +1080,63 @@ export interface OpenPullRequestRow {
   sameRepoHead: boolean;
 }
 
+/** Every decision-record number already unavailable to a new admission:
+ * records on origin/main plus records added by every open pull request. The
+ * caller serializes the still-local interval before a newly admitted task has
+ * an open pull request. Throws rather than allocating from an incomplete view. */
+export async function fetchDecisionRecordClaims(repo: string): Promise<ReadonlySet<string>> {
+  const token = await requireToken();
+  const get = async (url: string, what: string): Promise<unknown> => {
+    const res = await fetch(url, { headers: apiHeaders(token), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`${what} could not be read: HTTP ${res.status} ${redactAndCap(text, 300)}`);
+    }
+    return res.json().catch(() => null);
+  };
+  const numbers = new Set<string>();
+  const claim = (path: unknown) => {
+    if (typeof path !== "string") return;
+    const number = /^docs\/decisions\/(\d{4})-[^/]+\.md$/.exec(path)?.[1];
+    if (number !== undefined) numbers.add(number);
+  };
+
+  const main = await get(
+    `https://api.github.com/repos/${repo}/contents/docs/decisions?ref=main&per_page=1000`,
+    `origin/main's decision records in ${repo}`,
+  );
+  if (!Array.isArray(main))
+    throw new Error(`origin/main's decision records in ${repo} could not be read: malformed answer`);
+  for (const row of main as Array<{ path?: unknown }>) claim(row.path);
+
+  const pulls: number[] = [];
+  for (let page = 1; ; page += 1) {
+    const rows = await get(
+      `https://api.github.com/repos/${repo}/pulls?state=open&per_page=100&page=${page}`,
+      `the open pull requests of ${repo}`,
+    );
+    if (!Array.isArray(rows)) throw new Error(`the open pull requests of ${repo} could not be read: malformed answer`);
+    for (const row of rows as Array<{ number?: unknown }>)
+      if (typeof row.number === "number" && Number.isInteger(row.number) && row.number > 0) pulls.push(row.number);
+    if (rows.length < 100) break;
+  }
+  await Promise.all(
+    pulls.map(async (number) => {
+      for (let page = 1; ; page += 1) {
+        const rows = await get(
+          `https://api.github.com/repos/${repo}/pulls/${number}/files?per_page=100&page=${page}`,
+          `the changed files of ${repo}#${number}`,
+        );
+        if (!Array.isArray(rows))
+          throw new Error(`the changed files of ${repo}#${number} could not be read: malformed answer`);
+        for (const row of rows as Array<{ filename?: unknown }>) claim(row.filename);
+        if (rows.length < 100) break;
+      }
+    }),
+  );
+  return numbers;
+}
+
 /** Every open pull request of `repo`, oldest first as GitHub lists them (one
  *  page of 100 — the pipeline's open set is far smaller). Throws on missing
  *  credential or a non-2xx response, so the sweep's answer names the failure

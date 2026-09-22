@@ -761,6 +761,67 @@ describe("run ledger — the coordinator instance record (item 49)", () => {
   });
 });
 
+// Feature: docs/reference/specs/agent-ship.md item 16 and run-history.md item 50 —
+// decision-record reservations survive bot-process restarts in the state Worker,
+// with already-persisted unit and run rows included in the claim set.
+describe("run ledger — durable decision-record reservations (agent-ship item 16)", () => {
+  it("advances past reservations persisted on unit and run rows, and reuses a task key after a process restart", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: "ship_record_reservations",
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+      repo: "acme/api",
+      branch: "plan/records/u1",
+      base: "main",
+      createdAt: 1_000,
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: ["U", "1"].join(""),
+      slug: "u1",
+      branch: "plan/records/u1",
+      dependsOn: [],
+      record: "0075",
+      rounds: [],
+    };
+    await post("/runs/coordinator/put", { storeKey: key, instance });
+    await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] });
+
+    expect(
+      await post("/runs/decision-record/reserve", {
+        storeKey: key,
+        repo: "acme/api",
+        taskKey: "1111111111111111",
+        claimed: ["0074"],
+      }),
+    ).toEqual({ status: 200, data: { number: "0076" } });
+    expect(
+      await post("/runs/decision-record/reserve", {
+        storeKey: key,
+        repo: "acme/api",
+        taskKey: "1111111111111111",
+        claimed: ["0074"],
+      }),
+    ).toEqual({ status: 200, data: { number: "0076" } });
+
+    await post("/runs/put", {
+      storeKey: key,
+      record: { ...record("record-run", "slack:C1:2.0"), repo: "acme/api", record: "0077" },
+    });
+    expect(
+      await post("/runs/decision-record/reserve", {
+        storeKey: key,
+        repo: "acme/api",
+        taskKey: "2222222222222222",
+        claimed: ["0074"],
+      }),
+    ).toEqual({ status: 200, data: { number: "0078" } });
+  });
+});
+
 describe("run ledger — the coordinator's unit rows (item 50)", () => {
   const INSTANCE_ID = "ship_acme_api_1";
   const unit = (name: string, over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({

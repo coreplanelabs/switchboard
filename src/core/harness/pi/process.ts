@@ -134,6 +134,8 @@ export interface PiLaunchSpec {
   identity: Identity;
   /** The composed system prompt the dispatcher would hand the native loop. */
   system: string;
+  /** Public runner-owned values inherited by pi and its shell. */
+  environment?: Record<string, string>;
   /** The harness's own tools the extension registers, so the prompt can name them. */
   relayTools: readonly string[];
   /** The run's resolved model card (record 0052): what `models.json` says of
@@ -191,6 +193,7 @@ export function piLaunchArgs(spec: PiLaunchSpec): string[] {
  *  into the env record and nowhere else. */
 export function piLaunchEnv(spec: PiLaunchSpec, bearer: string): Record<string, string> {
   return {
+    ...spec.environment,
     [RUN_BEARER_ENV]: bearer,
     [HARNESS_URL_ENV]: spec.harnessUrl,
     SWITCHBOARD_RUN_ID: spec.runId,

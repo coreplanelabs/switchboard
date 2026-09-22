@@ -226,6 +226,27 @@ describe("assembleRunRecord — the handoff on the record", () => {
     for (const key of ["verdict", "reviewHead", "dispositions"]) expect(key in record).toBe(false);
   });
 
+  it("carries the decision-record reservation and direct-task key from run_meta", () => {
+    const record = assembleRunRecord({
+      ...base(),
+      snap: {
+        events: [
+          {
+            type: "run_meta",
+            agent: "coding",
+            record: "0075",
+            recordTaskKey: "0123456789abcdef",
+          },
+        ],
+        startedAt: 1,
+        eventCount: 1,
+        stepCount: 0,
+      } as never,
+    });
+    expect(record).toMatchObject({ record: "0075", recordTaskKey: "0123456789abcdef" });
+    expect(isRunRecord(record)).toBe(true);
+  });
+
   // docs/reference/specs/costs.md (cost by user): the run's token usage is summed
   // at the one assembly from its model.turn spans, per model, and rides the
   // record — every record carries it, zero turns included.

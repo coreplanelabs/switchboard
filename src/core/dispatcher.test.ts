@@ -65,6 +65,7 @@ import type { ContentPart } from "./chatMessage.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
 import { shipUnitText } from "./ship/preflight.js";
+import { DecisionRecordReservationUnavailableError, decisionRecordTaskKey } from "./decisionRecordReservation.js";
 import { generatedPlanId, unitBranch } from "./ship/coordinator.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
@@ -4030,6 +4031,109 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     deps.findOpenPrByHead = vi.fn(async () => null);
     return deps;
   }
+
+  it("a directive coding ask for a decision record receives the runner's reservation in its brief and run metadata", async () => {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        return { content: [{ type: "text", text: "Record drafted." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = codingDeps(provider);
+    deps.reserveDecisionRecord = vi.fn(async () => "0075");
+    codingExecutor();
+    const registry = new RunRegistry({ genId: () => "r-record", genToken: () => "t-record" });
+    deps.runRegistry = registry;
+    await dispatch(
+      deps,
+      msg(
+        "agent:coding Write the technical decision record (next free number in docs/decisions/, the repo's record shape) for the provider seam.",
+        "slack:UADMIN",
+      ),
+      fakeIO().io,
+    );
+    const userText = requests[0]?.messages
+      .filter((message) => message.role === "user")
+      .flatMap((message) => message.content)
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n");
+    expect(userText).toContain("record: 0075");
+    expect(registry.snapshotById("r-record")?.events).toContainEqual(
+      expect.objectContaining({ type: "run_meta", record: "0075" }),
+    );
+  });
+
+  it("an unavailable durable decision-record store refuses a direct coding admission with the typed store refusal", async () => {
+    const complete = vi.fn(async (): Promise<CompletionResult> => ({
+      content: [{ type: "text", text: "should not run" }],
+      stopReason: "end_turn",
+    }));
+    const deps = codingDeps({ name: "fake", complete });
+    deps.reserveDecisionRecord = vi.fn(async () => {
+      throw new DecisionRecordReservationUnavailableError();
+    });
+    const { io, replies } = fakeIO();
+
+    const outcome = await dispatch(
+      deps,
+      msg("agent:coding Document this choice in a decision record.", "slack:UADMIN"),
+      io,
+    );
+
+    expect(outcome).toMatchObject({ status: "refused", refusal: "decision_record_store_unavailable" });
+    expect(replies).toContainEqual(expect.stringContaining("durable coordinator store"));
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it("a re-issued decision-record task finds its reservation beyond the newest 200 coding records", async () => {
+    const ask =
+      "Write the technical decision record (next free number in docs/decisions/, the repo's record shape) for the provider seam.";
+    const incoming = msg(`agent:coding ${ask}`, "slack:UADMIN");
+    const taskKey = decisionRecordTaskKey("acme/api", incoming.threadKey, shipUnitText(ask, "acme/api").trim());
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        return { content: [{ type: "text", text: "Record drafted." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = codingDeps(provider);
+    const firstPage = Array.from({ length: 200 }, (_, index) => ({
+      id: `newer-${String(200 - index).padStart(3, "0")}`,
+      agent: "coding",
+      repo: "acme/api",
+      record: "0099",
+      recordTaskKey: `other-${index}`,
+      finishedAt: 10_000 - index,
+    }));
+    const matching = {
+      id: "older-match",
+      agent: "coding",
+      repo: "acme/api",
+      record: "0075",
+      recordTaskKey: taskKey,
+      finishedAt: 1,
+    };
+    deps.runStore.list = vi.fn(async (opts) =>
+      opts.before === undefined ? firstPage : [matching],
+    ) as unknown as typeof deps.runStore.list;
+    deps.reserveDecisionRecord = vi.fn(async () => "0075");
+    codingExecutor();
+
+    await dispatch(deps, incoming, fakeIO().io);
+
+    expect(deps.runStore.list).toHaveBeenCalledTimes(2);
+    expect(deps.runStore.list).toHaveBeenNthCalledWith(2, {
+      threadKey: incoming.threadKey,
+      agent: "coding",
+      limit: 200,
+      before: firstPage.at(-1)!.finishedAt,
+      beforeId: firstPage.at(-1)!.id,
+    });
+    expect(deps.reserveDecisionRecord).toHaveBeenCalledWith("acme/api", taskKey, "0075");
+  });
 
   it("description submitted + head observed → the PR opens from typed values: observed branch as head, the resident binding ref as base, the typed title, the body rendered at the observed sha", async () => {
     // The answer's prose tries to smuggle a different title and base — typed values must win.

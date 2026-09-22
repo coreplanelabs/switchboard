@@ -221,6 +221,8 @@ describe("isCoordinatorUnit — one unit's row", () => {
   it("accepts a full row, its JSON round-trip and a bare one (the branch, the dependencies and no rounds)", () => {
     expect(isCoordinatorUnit(unit)).toBe(true);
     expect(isCoordinatorUnit(JSON.parse(JSON.stringify(unit)))).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, record: "0075" })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, record: "75" })).toBe(false);
     expect(
       isCoordinatorUnit({
         instanceId: instance.id,

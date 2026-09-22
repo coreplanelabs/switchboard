@@ -405,6 +405,8 @@ describe("registerRun — the run's row on every surface before the attach", () 
     const { io, started } = fakeIO(history);
     const out = await registerRun(d, {
       agentSource: "directive",
+      decisionRecord: "0075",
+      decisionRecordTask: "0123456789abcdef",
       msg: { ...r.message, userName: "alice", images: [{ mediaType: "image/png", data: "QUJD" }] },
       io,
       agent: r.agent,
@@ -454,6 +456,8 @@ describe("registerRun — the run's row on every surface before the attach", () 
         ref: "main",
         pr: 41,
         headSha: "a".repeat(40),
+        record: "0075",
+        recordTaskKey: "0123456789abcdef",
       }),
     );
     expect(events).toContainEqual(
@@ -698,6 +702,8 @@ describe("reserveRun — the ledger reservation before the attach", () => {
       hooks,
       admitted: r.admitted,
       root: r.root,
+      decisionRecord: "0075",
+      decisionRecordTask: "0123456789abcdef",
     });
     expect(out?.reserved?.runId).toBe("run-p");
     expect(out?.requestRow).toEqual(durableInboxMessage(r.message, r.message.text, NOW));
@@ -712,6 +718,8 @@ describe("reserveRun — the ledger reservation before the attach", () => {
           channelId: "slack:CX",
           repo: "acme/api",
           ref: "main",
+          record: "0075",
+          recordTaskKey: "0123456789abcdef",
           readonly: false,
         },
         card: null,

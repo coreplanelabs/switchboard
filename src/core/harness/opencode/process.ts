@@ -235,6 +235,8 @@ export interface OpenCodeLaunchSpec {
   identity: Identity;
   /** The composed system prompt the dispatcher would hand the native loop. */
   system: string;
+  /** Public runner-owned values inherited by OpenCode and its shell. */
+  environment?: Record<string, string>;
   /** The harness's own tools the plugin will register, so the prompt can name them. */
   relayTools: readonly string[];
   /** The run's resolved model card (record 0052): what the configuration says
@@ -541,6 +543,7 @@ export function openCodePassword(bearer: string): string {
 export function openCodeLaunchEnv(spec: OpenCodeLaunchSpec, bearer: string, password: string): Record<string, string> {
   const { paths } = spec;
   return {
+    ...spec.environment,
     [RUN_BEARER_ENV]: bearer,
     [HARNESS_URL_ENV]: spec.harnessUrl,
     SWITCHBOARD_RUN_ID: spec.runId,

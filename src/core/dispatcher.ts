@@ -90,7 +90,7 @@ import {
   WorkspaceFiles,
   type StagedOutcome,
 } from "./dispatch/staging.js";
-import type { RunRecord, RunSeed } from "./runRecord.js";
+import { RUN_LIST_MAX_LIMIT, type RunRecord, type RunSeed } from "./runRecord.js";
 import {
   attachWorkspace,
   budgetClipLabel,
@@ -150,11 +150,43 @@ import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
 import type { CardShell } from "./statusCardFrame.js";
 import { createRunEnding } from "./runEnding.js";
+import { shipUnitText } from "./ship/preflight.js";
 import { messageIdOf, type ChannelIO, type IncomingMessage, type StatusHandle } from "./types.js";
+import {
+  DECISION_RECORD_STORE_REFUSAL,
+  DecisionRecordReservationUnavailableError,
+  asksForDecisionRecord,
+  decisionRecordTaskKey,
+} from "./decisionRecordReservation.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
 // parsing, layered resolution, permission gates, history assembly, executor
 // selection, and the agent run. Channels are pure transports (src/channels/).
+
+async function priorDecisionRecord(
+  store: CoreDeps["runStore"],
+  threadKey: string,
+  repo: string,
+  taskKey: string,
+): Promise<string | undefined> {
+  let before: number | undefined;
+  let beforeId: string | undefined;
+  for (;;) {
+    const rows = await store.list({
+      threadKey,
+      agent: "coding",
+      limit: RUN_LIST_MAX_LIMIT,
+      ...(before !== undefined ? { before, beforeId } : {}),
+    });
+    const match = rows.find((row) => row.repo === repo && row.recordTaskKey === taskKey && row.record !== undefined);
+    if (match?.record !== undefined) return match.record;
+    if (rows.length < RUN_LIST_MAX_LIMIT) return undefined;
+    const last = rows.at(-1)!;
+    if (last.finishedAt === before && last.id === beforeId) return undefined;
+    before = last.finishedAt;
+    beforeId = last.id;
+  }
+}
 
 export interface CoreDeps
   extends
@@ -546,6 +578,8 @@ export async function dispatch(
   // left open — a run failure is closed (with its checklist) by the run loop.
   let setupCard: StatusHandle | undefined;
   let setupShell: CardShell | undefined;
+  let decisionRecord: string | undefined;
+  let decisionRecordTask: string | undefined;
   // The card ticks from the ack (docs/reference/specs/tracing.md): a 5 s heartbeat repaints
   // it through setup — the elapsed time and the setup step in flight — until
   // the run loop's own heartbeat takes over (or the request ends without one).
@@ -1295,6 +1329,49 @@ export async function dispatch(
     const clip = budgetClipLabel(agent, profile, directives.budget, { coordinator: opts.coordinator !== undefined });
     if (clip) shell.note("debug", clip);
 
+    // A coordinator child already carries the reservation on its contract. A
+    // direct coding directive that asks to write a record reserves here, after
+    // the repository gate and before its brief, attach or model turn. Re-issues
+    // read the same task key from prior run records; the allocator closes the
+    // concurrent interval before either task has an open pull request.
+    decisionRecord = opts.contract?.record ?? carriedRow?.meta.record;
+    decisionRecordTask = carriedRow?.meta.recordTaskKey;
+    if (
+      decisionRecord === undefined &&
+      agent.name === "coding" &&
+      agentSource === "directive" &&
+      repoCtx.repo !== undefined &&
+      asksForDecisionRecord(directives.text)
+    ) {
+      decisionRecordTask = decisionRecordTaskKey(
+        repoCtx.repo,
+        msg.threadKey,
+        shipUnitText(directives.text, repoCtx.repo).trim(),
+      );
+      const prior = await priorDecisionRecord(deps.runStore, msg.threadKey, repoCtx.repo, decisionRecordTask);
+      const reserve =
+        deps.reserveDecisionRecord ??
+        (async () => {
+          throw new DecisionRecordReservationUnavailableError();
+        });
+      try {
+        decisionRecord = await reserve(repoCtx.repo, decisionRecordTask, prior);
+      } catch (error) {
+        if (!(error instanceof DecisionRecordReservationUnavailableError)) throw error;
+        await refuse(refusalOf("decision_record_store_unavailable", DECISION_RECORD_STORE_REFUSAL), () =>
+          card.done(
+            shell.close({
+              kind: "not_started",
+              icon: "⚠️",
+              reason: "durable coordinator store unavailable",
+              ...closeLines(clock(), false),
+            }),
+          ),
+        );
+        return ended;
+      }
+    }
+
     // agent:ship fork (docs/reference/specs/agent-ship.md): after agent resolution and the
     // repo gates above, BEFORE the top-level attach — ship attaches nothing
     // here; the plan runner's children each attach their own workspace as
@@ -1394,11 +1471,15 @@ export async function dispatch(
       : buildConversation(opts.seed ?? history, requestText, msg.images, msg.documents, references.blocks, msg.userId);
     const built = session ? session.messages : channelBuilt!.messages;
     const seedActors = session ? session.actors : channelBuilt?.actors;
+    const withRecord =
+      !resume && decisionRecord !== undefined && agent.name === "coding"
+        ? withContractInFirstUserTurn(built, `record: ${decisionRecord}`)
+        : built;
     const messages = resume
       ? resume.plan.messages
       : contractBlock !== undefined && agent.name !== "review"
-        ? withContractInFirstUserTurn(built, contractBlock)
-        : built;
+        ? withContractInFirstUserTurn(withRecord, contractBlock)
+        : withRecord;
 
     // Executor selection is context-aware: the agent's resource declarations
     // decide whether anything is provisioned at all (general gets nothing),
@@ -1458,6 +1539,8 @@ export async function dispatch(
       ...(opts.restartCarried !== undefined ? { restartCarried: opts.restartCarried } : {}),
       ...(seedTurns ? { seedTurns } : {}),
       agentSource,
+      ...(decisionRecord !== undefined ? { decisionRecord } : {}),
+      ...(decisionRecordTask !== undefined ? { decisionRecordTask } : {}),
       modelCard,
       cardDecisions,
       ...(operatorEvent ? { operator: operatorEvent } : {}),
@@ -1559,6 +1642,8 @@ export async function dispatch(
       parentRunId,
       coordinator,
       seed,
+      ...(decisionRecord !== undefined ? { decisionRecord } : {}),
+      ...(decisionRecordTask !== undefined ? { decisionRecordTask } : {}),
       ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
     });
     if (reservation) {
@@ -2015,6 +2100,7 @@ export async function dispatch(
       isCodingPrRun,
       reviewHead,
       requestText: directives.text,
+      ...(decisionRecord !== undefined ? { decisionRecord } : {}),
       card,
       shell,
       doneLines,

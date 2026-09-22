@@ -254,6 +254,15 @@ describe("composeChild — the child a brief names", () => {
       },
     );
     expect(linked.prompt).toBe("point the redirect at https://calendar.acme.test/TrrMBAg7");
+
+    const reserved = await composeChild(
+      { kind: "contract", unit: "U10", rebase: { branch: unit.branch, onto: "main" } },
+      instance,
+      { ...unit, record: "0075" },
+      r,
+    );
+    expect(reserved.prompt).toMatch(/^record: 0075\n\nImplement unit U10/);
+    expect(reserved.contract?.record).toBe("0075");
   });
 
   it("a contract brief with a continuation prefaces the unit's request with the segment, the branch and sha to continue from, and the previous run's write-up and handoff — the contract itself unchanged (decision 0046)", async () => {
