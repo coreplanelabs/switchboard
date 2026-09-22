@@ -416,7 +416,7 @@ describe("resolveTarget — the provider checked, and the target repo/ref/PR sta
     expect(() =>
       resolveTarget({ config: configStore(withResponses) }, ctxFor({ name: "opencode", scope: "user" })),
     ).toThrow(
-      /Model "openai\/gpt-5\.4" speaks the openai-responses wire, which the "opencode" harness cannot speak yet/,
+      'The "opencode" harness cannot start model "openai/gpt-5.4" from provider "openai": it cannot speak the "openai-responses" wire',
     );
     const onPi = resolveTarget({ config: configStore(withResponses) }, ctxFor(undefined));
     expect(onPi.modelCard.wire).toBe("openai-responses");

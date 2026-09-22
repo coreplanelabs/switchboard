@@ -241,6 +241,7 @@ describe("harnessFactsOf — a row's facts, read by the harness that wrote them"
       sessionFile: "s.jsonl",
       root: "/tmp/switchboard-pi-run-7",
       bearerHash: "h",
+      wire: "openai-responses",
       container: "vm-1",
       relaunches: 2,
     };
@@ -260,6 +261,7 @@ describe("harnessFactsOf — a row's facts, read by the harness that wrote them"
       relaunches: 0,
     });
     expect(harnessFactsOf({ pid: 7, logOffset: 120, relaunches: 1.5 })).toMatchObject({ relaunches: 0 });
+    expect(harnessFactsOf({ pid: 7, logOffset: 120, wire: "not-a-wire" })).not.toHaveProperty("wire");
     // A key a later build writes rides through this build's rewrite of the row.
     expect(harnessFactsOf({ pid: 7, logOffset: 120, futureField: { kept: true } })).toEqual({
       harness: "pi",
@@ -451,6 +453,7 @@ describe("PiHarness — pi as the contract's object", () => {
       logOffset: 0,
       root: paths.dir,
       bearerHash: bearerHashOf(BEARER),
+      wire: "anthropic-messages",
       container: "vm-fake",
       relaunches: 2,
       futureField: "kept",

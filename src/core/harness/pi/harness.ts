@@ -443,6 +443,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   // started or registered, and said on the record first, since no bridge
   // exists yet to say it. From here `recorded` is pi's shape.
   const recorded = run.resume?.facts;
+  const runWire = piRunWire({ model: { providerType: run.model.providerType }, card: run.card });
   if (recorded !== undefined && !isPiFacts(recorded)) {
     const mismatch = new HarnessMismatchError("pi", recorded.harness);
     run.onProgress?.(mismatch.message);
@@ -817,7 +818,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // start is filed under, goes with it (below).
     let reattached = false;
     /** Why a live pi was ended here for the fresh start: the row named no
-     *  root for it, or carried no bearer this generation could honour. */
+     *  root, its immutable model configuration speaks another wire, or it
+     *  carried no bearer this generation could honour. */
     let ended: string | undefined;
     /** The row's pi runs in another container than this run was handed: it
      *  is named by pid and container, and neither probed nor ended here: a
@@ -849,22 +851,31 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       if (located === "another-container") {
         elsewhere = `pi is elsewhere: the row's pi (pid ${recorded.pid}) ran in container ${recorded.container}, not the one this run was handed (${here}), so it was neither probed nor ended here`;
       } else if (located === "alive-here") {
-        if (recorded.root !== undefined && honoured(recorded.bearerHash)) {
+        const wireMismatch =
+          recorded.wire !== undefined && recorded.wire !== runWire
+            ? `was configured for ${recorded.wire} while provider ${run.model.provider} now declares ${runWire}`
+            : undefined;
+        if (recorded.root !== undefined && wireMismatch === undefined && honoured(recorded.bearerHash)) {
           reattached = true;
           paths = piRunPathsAt(recorded.root);
         } else {
           ended =
             recorded.root === undefined
               ? "named no directory for its pi"
-              : "carried no bearer this generation could honour for its pi";
+              : (wireMismatch ?? "carried no bearer this generation could honour for its pi");
           await container.kill(recorded.pid).catch(() => {});
         }
       }
     }
     if (reattached && recorded && paths !== undefined) {
       pid = recorded.pid;
-      // The row learns the container it was found in, when it did not say.
-      facts = { ...recorded, ...(recorded.container === undefined && here !== undefined ? { container: here } : {}) };
+      // The row learns this run's wire and the container it was found in when
+      // either field predates its facts, so the next save is unambiguous.
+      facts = {
+        ...recorded,
+        wire: runWire,
+        ...(recorded.container === undefined && here !== undefined ? { container: here } : {}),
+      };
       mirrored = recorded.logOffset;
       transport = new PiRpcTransport({
         container,
@@ -982,7 +993,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               model: {
                 provider: run.model.provider,
                 id: run.model.id,
-                api: piApiFor(piRunWire({ model: { providerType: run.model.providerType }, card: run.card })),
+                api: piApiFor(runWire),
               },
               at: now(),
             },
@@ -1046,6 +1057,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         logOffset: 0,
         root: paths.dir,
         ...(bearerHash !== undefined ? { bearerHash } : {}),
+        wire: runWire,
         ...(here !== undefined ? { container: here } : {}),
         relaunches: recorded?.relaunches ?? 0,
       };

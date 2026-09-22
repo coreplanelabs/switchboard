@@ -108,6 +108,7 @@ const paths = piRunPaths("run-7");
 /** A row's pi facts as a previous generation wrote them: the discriminator and a relaunch count of 0 unless the test says otherwise. */
 const piFacts = (facts: Omit<PiHarnessFacts, "harness" | "relaunches"> & { relaunches?: number }): PiHarnessFacts => ({
   harness: "pi",
+  wire: "anthropic-messages",
   relaunches: 0,
   ...facts,
 });
@@ -406,6 +407,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       logOffset: 0,
       root: paths.dir,
       bearerHash: bearerHashOf(w.bearer),
+      wire: "anthropic-messages",
       container: "vm-fake",
       relaunches: 0,
     });
@@ -483,6 +485,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       logOffset: 0,
       root: paths.dir,
       bearerHash: bearerHashOf(w.bearer),
+      wire: "anthropic-messages",
       container: "vm-fake",
       relaunches: 0,
     });
@@ -2367,6 +2370,74 @@ describe("runPiHarness — after a bot restart", () => {
     expect(w.bearers.verify(theirToken).ok).toBe(true);
     expect(w.bearers.verify(w.bearer).ok).toBe(true);
     expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: theirs.dir, bearerHash: bearerHashOf(theirToken) });
+  });
+
+  it("restarts a live pi whose immutable model config speaks another wire, then writes the run provider's Responses wire before continuing", async () => {
+    const w = world();
+    const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
+    await w.container.start({ paths: theirs, command: "pi", args: [], env: {} });
+    w.run.model = { id: "gpt-5.4", provider: "openai", providerType: "openai-compatible" };
+    w.run.card = {
+      ref: "openai/gpt-5.4",
+      block: "openai",
+      model: "gpt-5.4",
+      vendor: "openai",
+      wire: "openai-responses",
+      levels: "unknown",
+      capField: "max_output_tokens",
+      window: 1_050_000,
+      inputs: { image: true, document: true },
+      cache: "none",
+      provenance: {
+        levels: "wire",
+        capField: "wire",
+        window: "wire",
+        inputs: "wire",
+        cache: "wire",
+        price: "wire",
+      },
+    };
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: theirs.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      wire: "openai-chat",
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "continued on Responses"));
+
+    expect(await w.start()).toBe("continued on Responses");
+    expect(w.container.starts).toHaveLength(2);
+    const models = JSON.parse(w.container.files.get(`${paths.agentDir}/models.json`)!) as {
+      providers: Record<string, { api: string }>;
+    };
+    expect(models.providers.switchboard.api).toBe("openai-responses");
+    expect(w.facts.at(-1)).toMatchObject({ wire: "openai-responses" });
+    expect(w.notes[0]).toContain("was configured for openai-chat while provider openai now declares openai-responses");
+  });
+
+  it.each([
+    { recordedWire: undefined, expectedStarts: 1, case: "an absent wire re-attaches" },
+    { recordedWire: "openai-chat" as const, expectedStarts: 2, case: "a differing wire restarts" },
+    { recordedWire: "anthropic-messages" as const, expectedStarts: 1, case: "a matching wire re-attaches" },
+  ])("uses the recorded model wire compatibly: $case", async ({ recordedWire, expectedStarts }) => {
+    const w = world();
+    const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
+    await w.container.start({ paths: theirs, command: "pi", args: [], env: {} });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: theirs.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      wire: recordedWire,
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "continued on a compatible wire"));
+
+    expect(await w.start()).toBe("continued on a compatible wire");
+    expect(w.container.starts).toHaveLength(expectedStarts);
+    expect(w.facts.at(-1)).toMatchObject({ wire: "anthropic-messages" });
   });
 
   it("a row whose facts carry no bearer hash cannot be re-attached: its pi is ended by pid and a fresh pi starts with this generation's bearer, the note saying why", async () => {
@@ -6128,6 +6199,7 @@ describe("runPiHarness — the relaunch in the replacement container", () => {
       logOffset: 0,
       root: paths.dir,
       bearerHash: bearerHashOf(w.bearer),
+      wire: "anthropic-messages",
       container: "vm-fake",
       relaunches: 1,
     });

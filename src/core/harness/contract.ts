@@ -15,7 +15,7 @@ import type { RunnableTool, ToolContext } from "../../tools/runnableTool.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { ModelCard } from "../modelCard.js";
 import type { RunBearerStore } from "../modelProxy/runBearers.js";
-import type { ProviderConfig } from "../provider.js";
+import { WIRES, type ProviderConfig, type Wire } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import type { Settlement } from "../runLedger/resume.js";
 import type { StepReport } from "../runLedger/stepReport.js";
@@ -73,6 +73,11 @@ export interface PiHarnessFacts {
    *  written before it was recorded: that pi's calls no proxy here can honour,
    *  so it is ended and a fresh one started with this generation's bearer. */
   bearerHash?: string;
+  /** The wire pi's immutable model configuration speaks. A later generation
+   *  restarts on a present mismatch. Absent on a row written before the field
+   *  existed: the live process survives when every other fact matches, and the
+   *  run's wire is recorded on the next save. */
+  wire?: Wire;
   /** The identity of the container pi runs in (`HarnessContainer.identity`), so a
    *  generation handed another container reads "pi is elsewhere", never "pi
    *  is dead", and probes or ends nothing at that pid there. Absent on a row
@@ -153,7 +158,7 @@ export function harnessFactsOf(value: unknown): HarnessFacts | undefined {
 }
 
 function piFactsOf(v: Record<string, unknown>): PiHarnessFacts | undefined {
-  const { harness: _harness, pid, logOffset, sessionFile, root, bearerHash, container, relaunches, ...rest } = v;
+  const { harness: _harness, pid, logOffset, sessionFile, root, bearerHash, wire, container, relaunches, ...rest } = v;
   if (typeof pid !== "number" || typeof logOffset !== "number") return undefined;
   return {
     ...rest,
@@ -164,6 +169,7 @@ function piFactsOf(v: Record<string, unknown>): PiHarnessFacts | undefined {
     ...(typeof sessionFile === "string" ? { sessionFile } : {}),
     ...(typeof bearerHash === "string" ? { bearerHash } : {}),
     ...(typeof root === "string" ? { root } : {}),
+    ...((WIRES as readonly unknown[]).includes(wire) ? { wire: wire as Wire } : {}),
     ...(typeof container === "string" ? { container } : {}),
   };
 }
