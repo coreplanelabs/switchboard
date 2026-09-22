@@ -7,6 +7,7 @@ import {
   truncate,
   type ExecOptions,
   type Executor,
+  type ExecutorDeclaration,
   type ReleaseMode,
   type ReleaseResult,
 } from "./executor.js";
@@ -102,6 +103,12 @@ export interface E2BOptions {
 }
 
 export class E2BExecutor implements Executor {
+  static readonly declaration = {
+    name: "E2BExecutor",
+    capabilities: {},
+  } as const satisfies ExecutorDeclaration;
+  readonly capabilities = E2BExecutor.declaration.capabilities;
+
   /** The one refresher for this executor's thread (null without a source). */
   private refresher: SandboxCredentialRefresher | null = null;
 

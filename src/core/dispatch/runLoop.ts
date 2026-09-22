@@ -125,7 +125,7 @@ import { gitRunEffectsDeps } from "../runEffectsGit.js";
 const ENDING_NOTE_MAX = 500;
 
 /** The publication authority restored after a restart: newest first, but only
- * for this admitted destination and the checkout's current head. */
+ * for the run's published destination and the checkout's current head. */
 export function latestRunnerPublication(
   results: Record<string, EffectResult>,
   branch: string | undefined,
@@ -1029,7 +1029,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // resident supplied its default may create its own feature branch; that
   // branch is validated against the checked-out facts and the admitted base.
   const admittedBranch = repoCtx.ref;
-  const publicationBranch = binding?.ref ?? repoCtx.ref;
+  // A resumed default-bound run may have created and published a feature branch.
+  // Its durable pushed ref outranks the resident's original sticky binding;
+  // the receipt still has to match that ref and the workspace's current head.
+  const publishedBranch = pushes.branch() ?? binding?.ref ?? repoCtx.ref;
   let admittedHead = binding?.sha ?? repoCtx.headSha;
   if (Object.keys(effectState.results).length > 0) {
     const headOut = await executor.exec("git rev-parse HEAD").catch(() => "");
@@ -1039,7 +1042,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         .map((line) => line.trim().toLowerCase())
         .find((line) => /^[0-9a-f]{40}$/.test(line)) ?? admittedHead;
   }
-  runnerPublication = latestRunnerPublication(effectState.results, publicationBranch, admittedHead);
+  runnerPublication = latestRunnerPublication(effectState.results, publishedBranch, admittedHead);
   const actor = chatActorOf(deps.config, msg);
   const effects =
     isCodingPrRun && admittedRepository !== undefined && ledgerRun !== undefined

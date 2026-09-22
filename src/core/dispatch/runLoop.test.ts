@@ -379,7 +379,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     idempotencyKey: "key",
     base: "main",
   };
-  it("restores the newest runner publication matching the admitted branch and current head", () => {
+  it("restores the newest runner publication matching the published branch and current head", () => {
     const receipt = (effectId: string, branch: string, after: string, occurredAt: number) => ({
       effectId,
       kind: "push" as const,
@@ -407,7 +407,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   it("configuration refuses effects on when no durable run ledger can back the tool", () => {
     expect(() => configStore(`${YAML}\nharness:\n  effects: on\n`)).toThrow(
-      /harness\.effects: on requires runHistory so effect envelopes and receipts survive restart/,
+      /harness\.effects: on requires a Worker-backed run ledger; runHistory is missing/,
     );
   });
 
@@ -460,7 +460,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         loopbackUrl: "http://127.0.0.1:8080",
         containerFor: () => new FakeHarnessContainer(),
       },
-      yaml: `${YAML}\nrunHistory:\n  store: file\nharness:\n  effects: on\n`,
+      yaml: `${YAML}\nrunHistory:\n  store: worker\n  worker:\n    baseUrl: https://state.example\nharness:\n  effects: on\n`,
       repoCtx: { repo: "acme/api", ref: "feat/x", baseRef: "main" },
       binding: {
         ref: "feat/x",
@@ -3896,6 +3896,80 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(rec.events.some((e) => e.type === "run_note" && (e as { kind: string }).kind === "review_not_posted")).toBe(
       false,
     );
+  });
+
+  // agent-ship item 7: a default-bound coding run may cut and publish its own
+  // feature branch. On resume the persisted runner receipt, not the resident's
+  // original default binding, is the publication authority for the PR post-step.
+  it("a resumed default-bound coding run restores its feature-branch publication receipt at the current head", async () => {
+    const BRANCH = "feat/typed-effect";
+    const AFTER = "b".repeat(40);
+    const description: PrDescription = {
+      title: "fix(core): restore typed publication receipts",
+      tldr: "Restores a published feature branch after restart. The PR post-step keeps its publication authority.",
+      why: "A default resident binding names main rather than the branch created by the run.",
+      pointers: [
+        { label: "Receipt restore", text: "Matches the run-owned ref.", anchor: { path: "src/a", from: 1, to: 2 } },
+      ],
+      feedbackWanted: "Check the resume boundary.",
+      verified: "Focused regression.",
+      decisions: [],
+      risk: "Low.",
+      validation: { criteria: [{ criterion: "resume", proof: "covered" }] },
+    };
+    const receipt = {
+      effectId: "push-1",
+      kind: "push" as const,
+      outcome: "succeeded" as const,
+      actor: "slack:UX",
+      repository: "o/r",
+      resource: `o/r#refs/heads/${BRANCH}`,
+      destination: `refs/heads/${BRANCH}`,
+      after: AFTER,
+      tree: AFTER,
+      endpoint: "https://github.com/o/r.git",
+      gates: [],
+      by: "runner" as const,
+      occurredAt: NOW - 1_000,
+    };
+    const executor = {
+      exec: async (cmd: string) => {
+        if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+        if (cmd.includes(`refs/heads/${BRANCH}`)) return `${AFTER}\n`;
+        if (/rev-parse HEAD/.test(cmd)) return `${AFTER}\n`;
+        if (/rev-list --count/.test(cmd)) return "0\n";
+        return ""; // the effect-only child cannot prove publication through ls-remote
+      },
+    };
+    const s = setup("", {
+      agent: "coding",
+      provider: neverCalled(),
+      yaml: `${YAML}\nrunHistory:\n  store: worker\n  worker:\n    baseUrl: https://state.example\nharness:\n  effects: on\n`,
+      repoCtx: { repo: "o/r", baseRef: "main" },
+      binding: { ref: "main", sha: "a".repeat(40), workspace: "/srv/wt/default" },
+      executor,
+      coding: true,
+    });
+    const opened: Array<Record<string, unknown>> = [];
+    s.deps.commitsOverBase = async () => 1;
+    s.deps.openPullRequest = async (target) => {
+      opened.push({ ...target });
+      return { number: 74, htmlUrl: "https://github.com/o/r/pull/74", created: true };
+    };
+    const resume = finishing("Done: published the feature branch.", {
+      agent: "coding",
+      state: {
+        prDescription: description,
+        pushedBranch: BRANCH,
+        effects: { envelopes: {}, results: { "push-1": receipt } },
+      },
+    });
+
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ repo: "o/r", headBranch: BRANCH, base: "main" });
+    expect(out.prNote).toContain("PR opened");
   });
 
   // run-history item 48a: a coding child resumed after a bot roll whose tag

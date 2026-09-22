@@ -446,7 +446,7 @@ workspaceDir: ./workspaces
 # `defaults.harness` key is refused pointing here. How-to:
 # docs/how-to/put-a-preset-on-opencode.md.
 # harness:
-#   effects: shadow    # shadow logs typed push decisions; on makes typed push authoritative
+#   effects: shadow    # shadow logs decisions; on requires a Worker run ledger + typed-effects executor
 #   coding: opencode   # coding runs on OpenCode
 #   review: pi         # the default, written out
 

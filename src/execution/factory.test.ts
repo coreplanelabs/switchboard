@@ -91,6 +91,25 @@ describe("makeExecutor per-agent provisioning", () => {
     expect(existsSync(d.workspaceDir)).toBe(false);
   });
 
+  it.each([
+    ["LocalExecutor", undefined],
+    ["E2BExecutor", { type: "e2b" as const }],
+    ["CloudflareSandboxExecutor", { type: "cloudflare" as const, url: "https://sandbox.example" }],
+  ])(
+    "%s refuses a write run under effects on before provisioning because it does not declare typed effects",
+    async (name, execution) => {
+      const d = dirs();
+      vi.mocked(resolveGithubToken).mockClear();
+      await expect(
+        makeExecutor({ ...d, ...(execution ? { execution } : {}) }, { ...ctx("coding"), effects: "on" }),
+      ).rejects.toThrow(
+        new RegExp(`${name} cannot serve a write run while harness\\.effects is on: it does not declare typed effects`),
+      );
+      expect(existsSync(d.workspaceDir)).toBe(false);
+      expect(resolveGithubToken).not.toHaveBeenCalled();
+    },
+  );
+
   it("a local backend honors the effective profile's identity on every exec instead of inheriting an arbitrary host credential", async () => {
     const d = dirs();
     vi.mocked(resolveGithubToken).mockClear();
@@ -623,7 +642,8 @@ describe("makeExecutor resident selection", () => {
         },
       },
     );
-    await makeExecutor(residentOpts(), { ...repoCtx(), effects: "on" });
+    const selection = await makeExecutor(residentOpts(), { ...repoCtx(), effects: "on" });
+    expect(selection.executor.capabilities).toEqual({ typedEffects: true });
     expect(bodies[1]).toMatchObject({ effectOnly: true });
     expect(bodies[1]).not.toHaveProperty("readonly");
   });

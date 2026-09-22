@@ -9,7 +9,14 @@ import { residentTraceOf, type ResidentTrace } from "./residentTrace.js";
 import { mkdirSync } from "node:fs";
 import type { AgentDef, Identity, MachineClass } from "../agents/registry.js";
 import type { RunProfile } from "../config/profile.js";
-import { LocalExecutor, execDeadline, isDeadlineMiss, isRunStopError, type Executor } from "./executor.js";
+import {
+  LocalExecutor,
+  execDeadline,
+  isDeadlineMiss,
+  isRunStopError,
+  type Executor,
+  type ExecutorDeclaration,
+} from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import {
@@ -397,7 +404,7 @@ export async function makeExecutor(
   if (machine === "blank") {
     assertProfileIdentity(ctx.profile.identity, machine);
     return {
-      executor: await makePerThreadExecutor(opts, { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }),
+      executor: await makePerThreadExecutor(opts, { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }, ctx),
       backend: perThreadBackend(opts),
     };
   }
@@ -408,7 +415,7 @@ export async function makeExecutor(
   // there is no note.
   if (machine === "repo-cold") {
     return {
-      executor: await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx)),
+      executor: await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx), ctx),
       backend: perThreadBackend(opts),
     };
   }
@@ -495,6 +502,7 @@ export async function makeExecutor(
         // The resolved PR head rides along so the resident fetches a mirror
         // whose ref tip lags it (item 51) instead of cloning a stale tip; the
         // thread's own PR rides along as the reason for the hint (item 16).
+        requireTypedEffectsCapability(ResidentExecutor.declaration, ctx);
         const selection = await openResident(
           {
             baseUrl: resident.baseUrl,
@@ -579,7 +587,7 @@ export async function makeExecutor(
       // resident answers no body; a Worker that is not the cloudflare one has
       // no /seed) → the cold path as before, and so does a refused seed, with
       // the refusal on the note.
-      const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx));
+      const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx), ctx);
       const handle = probe.kind === "status" ? probe.seed : undefined;
       const outcome =
         handle && executor instanceof CloudflareSandboxExecutor
@@ -606,7 +614,7 @@ export async function makeExecutor(
   }
 
   return {
-    executor: await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx)),
+    executor: await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx), ctx),
     note,
     backend: perThreadBackend(opts),
     ...(failedAttach ? { trace: failedAttach.steps } : {}),
@@ -699,7 +707,7 @@ async function reattachWorkspace(
       ctx.profile.machine === "blank"
         ? { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }
         : perThreadCheckout(opts, ctx);
-    return { executor: await makePerThreadExecutor(opts, input), backend: perThreadBackend(opts) };
+    return { executor: await makePerThreadExecutor(opts, input, ctx), backend: perThreadBackend(opts) };
   }
   const resident = opts.execution?.resident;
   if (!resident) throw refuse("no resident backend is configured in this process");
@@ -766,6 +774,7 @@ async function reattachWorkspace(
     );
   const nonWarm =
     landed.state === "warm" ? undefined : oneLine(`${landed.state}${landed.reason ? ` (${landed.reason})` : ""}`);
+  requireTypedEffectsCapability(ResidentExecutor.declaration, ctx);
   const executor = new ResidentExecutor({
     baseUrl: resident.baseUrl,
     token: token.reveal(),
@@ -1215,10 +1224,36 @@ function assertProfileIdentity(identity: Identity, machine: MachineClass): void 
   }
 }
 
+/** Refuse an authoritative write before provisioning unless the selected
+ * adapter declares the WHOLE typed-effects contract: no child write credential
+ * and a closed publication route over this workspace. The decision reads one
+ * capability bit, never an executor-name allowlist. */
+function requireTypedEffectsCapability(declaration: ExecutorDeclaration, ctx: ExecutorContext): void {
+  if (ctx.effects !== "on" || ctx.profile.identity !== "write") return;
+  if (declaration.capabilities.typedEffects === true) return;
+  throw new Error(
+    `${declaration.name} cannot serve a write run while harness.effects is on: it does not declare typed effects ` +
+      `(the child must receive no repository write credential and the runner must be able to publish its workspace)`,
+  );
+}
+
 /** The per-thread backends (the pre-resident selection, unchanged). */
-async function makePerThreadExecutor(opts: ExecutorFactoryOptions, input: PerThreadInputs): Promise<Executor> {
+async function makePerThreadExecutor(
+  opts: ExecutorFactoryOptions,
+  input: PerThreadInputs,
+  ctx: ExecutorContext,
+): Promise<Executor> {
   const { threadKey } = input;
   const type = opts.execution?.type ?? "local";
+  const declaration =
+    type === "local"
+      ? LocalExecutor.declaration
+      : type === "e2b"
+        ? E2BExecutor.declaration
+        : type === "cloudflare"
+          ? CloudflareSandboxExecutor.declaration
+          : undefined;
+  if (declaration !== undefined) requireTypedEffectsCapability(declaration, ctx);
 
   if (type === "local") {
     const dir = localWorkspaceDir(opts.workspaceDir, threadKey);

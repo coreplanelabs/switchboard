@@ -3,6 +3,8 @@ import type { AppConfig, Scope } from "../config.js";
 import {
   boundaryProblem,
   validateBoundaries,
+  validateEffectsLedger,
+  validateEffectsLedgerAtStartup,
   validateProviders,
   validateReview,
   validateScopeBlocks,
@@ -11,6 +13,35 @@ import {
 import { wireOf, type ProviderConfig } from "../core/provider.js";
 
 const providers = (blocks: Record<string, unknown>): AppConfig => ({ providers: blocks }) as unknown as AppConfig;
+
+// Feature: docs/reference/specs/harness.md item 12a — authoritative effects
+// need the Worker-backed run ledger. A file store has no live-run state, and a
+// configured Worker without its bearer is not an effective ledger at startup.
+describe("validateEffectsLedger — authoritative effects have a durable ledger", () => {
+  const effectsOn = (runHistory?: AppConfig["runHistory"]): AppConfig =>
+    ({ harness: { effects: "on" }, ...(runHistory ? { runHistory } : {}) }) as AppConfig;
+
+  it("refuses effects on at config validation when run history is absent or file-backed", () => {
+    expect(() => validateEffectsLedger(effectsOn(), "config.yaml")).toThrow(
+      /harness\.effects: on requires a Worker-backed run ledger; runHistory is missing/,
+    );
+    expect(() => validateEffectsLedger(effectsOn({ store: "file" }), "config.yaml")).toThrow(
+      /harness\.effects: on requires a Worker-backed run ledger; runHistory\.store is file/,
+    );
+  });
+
+  it("accepts a declared Worker ledger, then refuses startup when its effective bearer is absent", () => {
+    const cfg = effectsOn({
+      store: "worker",
+      worker: { baseUrl: "https://state.example", tokenEnv: "RUN_STATE_TOKEN" },
+    });
+    expect(() => validateEffectsLedger(cfg, "config.yaml")).not.toThrow();
+    expect(() => validateEffectsLedgerAtStartup(cfg, false)).toThrow(
+      /harness\.effects: on requires a durable effect ledger; runHistory\.worker bearer RUN_STATE_TOKEN is absent/,
+    );
+    expect(() => validateEffectsLedgerAtStartup(cfg, true)).not.toThrow();
+  });
+});
 
 // Feature: docs/reference/specs/model-proxy.md item 11 and
 // docs/reference/specs/routing-and-config.md item 2 — the block's declaration

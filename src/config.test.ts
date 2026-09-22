@@ -1155,15 +1155,20 @@ describe("harness block (harness.<preset>: pi or opencode)", () => {
 
   it("accepts harness.effects exactly as shadow or on and defaults rollout to shadow", () => {
     expect(effectsModeOf(store(YAML_FIXTURE + "harness:\n  effects: shadow\n").config)).toBe("shadow");
-    expect(effectsModeOf(store(YAML_FIXTURE + "runHistory:\n  store: file\nharness:\n  effects: on\n").config)).toBe(
-      "on",
-    );
+    expect(
+      effectsModeOf(
+        store(
+          YAML_FIXTURE +
+            "runHistory:\n  store: worker\n  worker:\n    baseUrl: https://state.example\nharness:\n  effects: on\n",
+        ).config,
+      ),
+    ).toBe("on");
     expect(effectsModeOf(store().config)).toBe("shadow");
   });
 
   it("refuses harness.effects on without durable run history", () => {
     expect(() => store(YAML_FIXTURE + "harness:\n  effects: on\n")).toThrow(
-      /harness\.effects: on requires runHistory so effect envelopes and receipts survive restart/,
+      /harness\.effects: on requires a Worker-backed run ledger; runHistory is missing/,
     );
   });
 

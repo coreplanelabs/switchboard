@@ -50,6 +50,7 @@ import {
   truncate,
   type ExecOptions,
   type Executor,
+  type ExecutorDeclaration,
   type GitPublicationRequest,
   type ReleaseMode,
   type ReleaseResult,
@@ -930,6 +931,12 @@ export type ResidentRestoreWait =
 const CONTROL_RESET_REISSUE_ROUTES = new Set(["/read", "/write"]);
 
 export class ResidentExecutor implements Executor {
+  static readonly declaration = {
+    name: "ResidentExecutor",
+    capabilities: { typedEffects: true },
+  } as const satisfies ExecutorDeclaration;
+  readonly capabilities = ResidentExecutor.declaration.capabilities;
+
   /** Consecutive `runtime-replaced` answers on the idempotent routes (/read,
    *  /write) with no successful op between them. One is a deploy that swapped
    *  the resident isolate under a call (routine: re-attach and re-issue); two

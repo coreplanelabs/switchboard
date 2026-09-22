@@ -10,6 +10,7 @@ import {
   truncate,
   type ExecOptions,
   type Executor,
+  type ExecutorDeclaration,
 } from "./executor.js";
 import type { ExecTraceOptions } from "./executor.js";
 import {
@@ -170,6 +171,12 @@ function waitForSlot(ms: number, waitedMs: number, signal?: AbortSignal): Promis
 }
 
 export class CloudflareSandboxExecutor implements Executor {
+  static readonly declaration = {
+    name: "CloudflareSandboxExecutor",
+    capabilities: {},
+  } as const satisfies ExecutorDeclaration;
+  readonly capabilities = CloudflareSandboxExecutor.declaration.capabilities;
+
   /** The one refresher for this executor's thread (null until first needed). */
   private refresher: SandboxCredentialRefresher | null = null;
 

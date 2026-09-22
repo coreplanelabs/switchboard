@@ -5,6 +5,7 @@ import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
 import { openConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
+import { validateEffectsLedgerAtStartup } from "./config/validate.js";
 import { configRefusalReason, createConfigRefusalServer } from "./configBoot.js";
 import { intakeCompletion } from "./intakeModel.js";
 import { providerModelsReader } from "./core/dispatch/providerModels.js";
@@ -294,6 +295,7 @@ export async function runBot(): Promise<void> {
   const capabilities = capabilitiesFrom(config.config, publicEnv(), processSecrets, {
     meatBinary: meatOnPath(publicEnv()),
   });
+  validateEffectsLedgerAtStartup(config.config, capabilities.runLedger);
   console.log(`[capabilities] ${JSON.stringify(capabilities)}`);
   // The config's provider table on pi's model library, for the model calls made
   // outside a run — the router's and reflection's (docs/reference/specs/harness-pi.md

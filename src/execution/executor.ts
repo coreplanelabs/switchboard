@@ -50,7 +50,23 @@ export interface GitPublicationRequest {
   lease?: string;
 }
 
+/** Capabilities an executor promises as one closed contract. `typedEffects`
+ * means the child receives no repository write credential and the runner can
+ * publish that same workspace through `publishGit`. Absence means neither
+ * half may be assumed. */
+export interface ExecutorCapabilities {
+  typedEffects?: true;
+}
+
+/** The adapter's declaration is readable before provisioning, so the factory
+ * can refuse an unsupported run before it creates a workspace or credential. */
+export interface ExecutorDeclaration {
+  name: string;
+  capabilities: Readonly<ExecutorCapabilities>;
+}
+
 export interface Executor {
+  readonly capabilities?: Readonly<ExecutorCapabilities>;
   /** Run a shell command; returns combined output (never throws on non-zero
    *  exit). `opts.signal` is a hard run stop: an implementation that can
    *  cancel the underlying command does so and returns/throws promptly; one that
@@ -339,6 +355,12 @@ export function truncate(s: string): string {
  *  every command, just like the remote backends. Direct construction keeps
  *  the historical process-env behavior for local utilities and tests. */
 export class LocalExecutor implements Executor {
+  static readonly declaration = {
+    name: "LocalExecutor",
+    capabilities: {},
+  } as const satisfies ExecutorDeclaration;
+  readonly capabilities = LocalExecutor.declaration.capabilities;
+
   constructor(
     private workspaceDir: string,
     private readonly resolveEnvs?: () => Promise<Record<string, string>>,

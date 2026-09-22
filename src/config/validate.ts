@@ -9,6 +9,7 @@ import { INVOICE_APIS, WIRES, WIRE_ALIASES, parseModelRef, type ProviderConfig }
 import { catalogExists } from "../core/installedModelRegistry.js";
 import type { SelfImprovementConfig } from "../core/selfImprovement.js";
 import type { RunHistoryConfig } from "../core/runStore.js";
+import { DEFAULT_RUN_STORE_TOKEN_ENV } from "../core/runStoreWorker.js";
 import {
   ADDRESS_SEVERITIES,
   isAddressSeverity,
@@ -307,6 +308,30 @@ export function validateMcpServers(
   }
 }
 
+/** The static half of authoritative effects: only a Worker-backed run
+ * history can persist live effect envelopes and receipts. A file store keeps
+ * finished records but has no run ledger. */
+export function validateEffectsLedger(cfg: AppConfig, source: string): void {
+  if (cfg.harness?.effects !== "on") return;
+  if (cfg.runHistory === undefined)
+    throw new Error(`${source}: harness.effects: on requires a Worker-backed run ledger; runHistory is missing`);
+  if (cfg.runHistory.store === "file")
+    throw new Error(`${source}: harness.effects: on requires a Worker-backed run ledger; runHistory.store is file`);
+  if (cfg.runHistory.worker === undefined)
+    throw new Error(`${source}: harness.effects: on requires a Worker-backed run ledger; runHistory.worker is missing`);
+}
+
+/** The effective half, after startup resolved the Worker's bearer. A declared
+ * ledger whose credential is absent is no ledger, so authoritative effects
+ * cannot degrade to the null write-through. */
+export function validateEffectsLedgerAtStartup(cfg: AppConfig, runLedgerAvailable: boolean): void {
+  if (cfg.harness?.effects !== "on" || runLedgerAvailable) return;
+  const tokenEnv = cfg.runHistory?.worker?.tokenEnv ?? DEFAULT_RUN_STORE_TOKEN_ENV;
+  throw new Error(
+    `startup: harness.effects: on requires a durable effect ledger; runHistory.worker bearer ${tokenEnv} is absent`,
+  );
+}
+
 /** Validates in place: throws on the first fatal finding. The one non-fatal
  *  findings live elsewhere (`loadAppConfigFrom` reports the document source). */
 export function validateConfig(cfg: AppConfig): void {
@@ -323,10 +348,6 @@ export function validateConfig(cfg: AppConfig): void {
     if (problem) throw new Error(`config.yaml: ${problem}`);
   }
   validateHarnessWords(cfg, "config.yaml");
-  if (cfg.harness?.effects === "on" && cfg.runHistory === undefined)
-    throw new Error(
-      "config.yaml: harness.effects: on requires runHistory so effect envelopes and receipts survive restart",
-    );
   validateMcpServers(cfg, "config.yaml");
   if (typeof cfg.organization !== "string" || cfg.organization.trim() === "") {
     throw new Error(
@@ -354,6 +375,7 @@ export function validateConfig(cfg: AppConfig): void {
   // field at load, like the costs block its credential rides with.
   parseMetricsConfig(cfg.metrics);
   if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory);
+  validateEffectsLedger(cfg, "config.yaml");
   if (cfg.tracing !== undefined) validateTracing(cfg.tracing);
   validateRuntimeOverrides(cfg.runtimeOverrides);
   if (cfg.review !== undefined) validateReview(cfg.review);
