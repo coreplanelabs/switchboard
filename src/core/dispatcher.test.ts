@@ -12,7 +12,13 @@ import { processSecrets } from "../secrets.js";
 import { ConfigStore } from "../config.js";
 import { MAX_INSTRUCTIONS_LENGTH } from "../config/validate.js";
 import type { ChatMessage } from "./chatMessage.js";
-import type { CompletionRequest, CompletionResult, Provider } from "./provider.js";
+import {
+  classifyProviderFailure,
+  renderProviderFailure,
+  type CompletionRequest,
+  type CompletionResult,
+  type Provider,
+} from "./provider.js";
 import { AGENTS, getAgent } from "../agents/registry.js";
 import { CONFIG_AWARENESS_HEADER } from "./configAwareness.js";
 import { planResume } from "./runLedger/resume.js";
@@ -1141,7 +1147,7 @@ describe("executor provisioning by agent resources", () => {
     expect(last.title).toContain("*coding*");
     expect(last.title).not.toContain("setup failed");
     expect(statuses.some((f) => f.title.includes("setup failed"))).toBe(false); // never relabeled
-    expect(replies.some((r) => r.includes("model exploded"))).toBe(true);
+    expect(replies.some((r) => r.includes(renderProviderFailure("permanent")))).toBe(true);
   });
 
   it("a coding ask still selects the configured remote backend", async () => {
@@ -5950,17 +5956,16 @@ describe("closed-card checklist and review verdict run link", () => {
     const deps = makeDeps(YAML_FIXTURE, provider);
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
-    const fail = replies.find((r) => r.includes("model exploded"));
-    // The harness names the failed call before the provider's words (harness-pi item 6).
+    const fail = replies.find((r) => r.includes(renderProviderFailure("permanent")));
     expect(fail).toMatch(
-      /⚠️ the model call failed: model exploded\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)/,
+      /⚠️ The model provider refused the call; the request ended without exposing the provider's response\.\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)/,
     );
   });
 
   // harness-pi item 6: a call the provider refused under its usage policy is
-  // the failure by name, and the thread reads how to go on — never the
-  // provider's words, which the run page keeps.
-  it("a run the provider refused under its usage policy replies the one sentence that says how to go on, with the run link and none of the provider's words; any other provider error keeps the harness's text", async () => {
+  // the failure by name, and every renderer gets only the permanent cause's
+  // one sentence — never the provider's words.
+  it("a run the provider refused under its usage policy replies the permanent cause's one sentence with the run link and none of the provider's words; any other provider error keeps the harness's text", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
     const provider: Provider = {
       name: "fake",
@@ -5973,7 +5978,7 @@ describe("closed-card checklist and review verdict run link", () => {
     await dispatch(deps, msg("hello there"), io);
     const fail = replies.find((r) => r.startsWith("⚠️"));
     expect(fail).toMatch(
-      /^⚠️ the model refused this request under its usage policy — rephrase it and the thread continues\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)$/,
+      /^⚠️ The model provider refused the call; the request ended without exposing the provider's response\.\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)$/,
     );
     expect(replies.join("\n")).not.toContain("classifier");
   });
@@ -8313,7 +8318,7 @@ describe("run history write path", () => {
     const rec = await store.get("run-h");
     expect(rec?.status).toBe("failed");
     expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input"]);
-    expect(replies.some((r) => r.includes("provider exploded"))).toBe(true);
+    expect(replies.some((r) => r.includes(renderProviderFailure("permanent")))).toBe(true);
     expect(activeRunCount()).toBe(0);
   });
 
@@ -10069,7 +10074,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await run;
     // The first run failed and said so; the follow-up was NOT lost with it: it
     // ran as its own turn, on its own sender's channel handle.
-    expect(first.replies.some((r) => r.includes("provider exploded"))).toBe(true);
+    expect(first.replies.some((r) => r.includes(renderProviderFailure("permanent")))).toBe(true);
     expect(second.replies.at(-1)).toBe("answer 2");
     expect(second.statuses.length).toBeGreaterThan(0); // its own card
     expect(requests).toHaveLength(2);
@@ -10180,7 +10185,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     expect(registry.requestStop("r1", "t", "soft")).toEqual({ ok: true, mode: "soft" });
     settle().fail(new Error("finale exploded")); // the in-flight call fails AFTER the stop
     await run;
-    expect(first.replies.some((r) => r.includes("finale exploded"))).toBe(true);
+    expect(first.replies.some((r) => r.includes(renderProviderFailure("permanent")))).toBe(true);
     expect(second.replies).toHaveLength(2);
     expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this folded follow-up/);
     expect(requests).toHaveLength(1); // no fresh turn
@@ -12233,7 +12238,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     fail(new Error("provider exploded"));
     await run;
     await writer.settled();
-    expect(a.replies.some((r) => r.includes("provider exploded"))).toBe(true);
+    expect(a.replies.some((r) => r.includes(renderProviderFailure("permanent")))).toBe(true);
     expect(b.replies.at(-1)).toBe("answer 2");
     // The fresh turn's reservation met run-1's row, waited for its finish, claimed again, and its own finish went through the ledger.
     expect(order).toEqual([
@@ -17761,6 +17766,35 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(deps.invoked).toEqual(["config.show"]);
     // The decision is what runs: no route model, no agent run, no model turn.
     expect(provider.requests).toHaveLength(0);
+  });
+
+  it("on: an operator schema 400 renders one typed sentence and never falls through to general", async () => {
+    const { deps, provider, registry } = operatorDeps(ON_YAML);
+    deps.operatorModel = vi.fn<RouteModel>(async () => {
+      throw classifyProviderFailure({
+        status: 400,
+        body: {
+          error: {
+            message:
+              "Invalid JSON schema: regex lookaround is not supported; see https://provider.example/schema and retry",
+            type: "invalid_request_error",
+            code: "invalid_json_schema",
+          },
+        },
+      });
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("please review the pull request", "slack:UADMIN"), io);
+    expect(provider.requests).toHaveLength(0);
+    expect(replies).toEqual([renderProviderFailure("request-rejected")]);
+    expect(registry.snapshotById("r1")!.events.find((event) => event.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "refusal",
+      reason: "request-rejected",
+      refusalCause: "provider",
+      refusalText: renderProviderFailure("request-rejected"),
+      providerFailure: "request-rejected",
+    });
   });
 
   it("on: a turn ending with no tool call is re-asked once, then binds general with no_decision on the run's operator field", async () => {

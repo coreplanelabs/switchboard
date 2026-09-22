@@ -4,6 +4,7 @@
 import type { DescriptionIssue, PrDescription, RecordedJson, RenderedPointer } from "./prDescriptionTypes.js";
 import type { HarnessScope } from "./harness/scope.js";
 import type { ModelCard } from "./modelCard.js";
+import type { ProviderFailureCause } from "./provider.js";
 
 /** The `pr_description` review artifact minus the event envelope
  *  (docs/reference/specs/reading-diff.md item 7). */
@@ -1118,6 +1119,9 @@ export type RunEvent =
       request?: string;
       refusalCause?: string;
       refusalText?: string;
+      /** The typed cause when the operator model call failed at the provider
+       * boundary. Its refusal text is always the cause-owned renderer. */
+      providerFailure?: ProviderFailureCause;
       attempts?: ReadonlyArray<{ outcome: "accepted" | "violation"; violation?: string }>;
       intake?: { verdict: string; reason: string };
       latencyMs?: number;

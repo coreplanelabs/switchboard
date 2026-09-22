@@ -78,6 +78,7 @@ import {
   selectReclaim,
 } from "../../src/core/runLedger/decisions.ts";
 import { intakeReceiptRetentionMs, minutesToMs, PLANE } from "../../src/core/budgets.ts";
+import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause } from "../../src/core/provider.ts";
 import { holdBackgroundTask } from "./backgroundTasks.ts";
 import {
   causeOfClose,
@@ -1786,6 +1787,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         side TEXT NOT NULL,
         reported_at INTEGER NOT NULL,
         generation TEXT NOT NULL,
+        cause TEXT,
         PRIMARY KEY (resident, name)
       );
       CREATE TABLE IF NOT EXISTS plane_endings (
@@ -1795,6 +1797,13 @@ export class RunHistoryDO extends DurableObject<Env> {
         at INTEGER NOT NULL
       );
     `);
+    const planeLevelColumns = new Set(
+      this.sql
+        .exec<{ name: string }>(`PRAGMA table_info(plane_levels)`)
+        .toArray()
+        .map((column) => column.name),
+    );
+    if (!planeLevelColumns.has("cause")) this.sql.exec(`ALTER TABLE plane_levels ADD COLUMN cause TEXT`);
   }
 
   // ---- the orchestration plane (record 0064; orchestration-plane.md) ----------
@@ -1874,9 +1883,14 @@ export class RunHistoryDO extends DurableObject<Env> {
         .map((r) => [r.run_id, r.seq]),
     );
     const levels = this.sql
-      .exec<{ resident: string; name: string; side: string; reported_at: number; generation: string }>(
-        `SELECT * FROM plane_levels`,
-      )
+      .exec<{
+        resident: string;
+        name: string;
+        side: string;
+        reported_at: number;
+        generation: string;
+        cause: string | null;
+      }>(`SELECT * FROM plane_levels`)
       .toArray()
       .map((r): PlaneLevelRow => ({
         resident: r.resident,
@@ -1884,6 +1898,9 @@ export class RunHistoryDO extends DurableObject<Env> {
         side: r.side as PlaneLevelRow["side"],
         reportedAt: r.reported_at,
         generation: r.generation,
+        ...(r.cause !== null && (PROVIDER_FAILURE_CAUSES as readonly string[]).includes(r.cause)
+          ? { cause: r.cause as ProviderFailureCause }
+          : {}),
       }));
     return { queue, liveThreads, liveRuns, inboxSeqs, reservations, openWindows, levels };
   }
@@ -1945,12 +1962,13 @@ export class RunHistoryDO extends DurableObject<Env> {
         this.sql.exec(`DELETE FROM plane_windows WHERE kind = ?`, w.window);
       } else if (w.table === "plane_levels") {
         this.sql.exec(
-          `INSERT OR REPLACE INTO plane_levels (resident, name, side, reported_at, generation) VALUES (?, ?, ?, ?, ?)`,
+          `INSERT OR REPLACE INTO plane_levels (resident, name, side, reported_at, generation, cause) VALUES (?, ?, ?, ?, ?, ?)`,
           w.row.resident,
           w.row.name,
           w.row.side,
           w.row.reportedAt,
           w.row.generation,
+          w.row.cause ?? null,
         );
       } else if (w.table === "plane_findings") {
         // A finding (record 0064, "Endings and the watches"): keyed by watch
@@ -2104,14 +2122,20 @@ export class RunHistoryDO extends DurableObject<Env> {
   planeLevel(
     post:
       | { resident: string; name: "seat" | "memory" | "drain"; side: "below" | "above"; generation: string }
-      | { provider: string; name: "provider"; side: "up" | "down" },
+      | { provider: string; name: "provider"; side: "up" | "down"; cause?: ProviderFailureCause },
     now: number,
   ): { admitted: number } {
     // The model proxy's provider level (record 0064): `up` re-issues every
     // held turn parked on the provider — the steers land as inbox writes in the
     // decider's transaction — and walks anything queued on `provider_up`.
     if (post.name === "provider") {
-      const r = this.planeApply({ kind: "provider_level", at: now, provider: post.provider, level: post.side });
+      const r = this.planeApply({
+        kind: "provider_level",
+        at: now,
+        provider: post.provider,
+        level: post.side,
+        ...(post.side === "down" && post.cause !== undefined ? { cause: post.cause } : {}),
+      });
       const admitted = r.effects.filter((e) => e.kind === "admit").length;
       console.log(`[plane/level] provider ${post.provider} ${post.side} — ${admitted} admission(s)`);
       return { admitted };
@@ -5125,7 +5149,22 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
       if (typeof b.provider !== "string" || b.provider.length === 0)
         return json({ error: "provider must be a non-empty string" }, 400);
       if (b.side !== "up" && b.side !== "down") return json({ error: "side must be up or down" }, 400);
-      return json(await stub.planeLevel({ provider: b.provider, name: "provider", side: b.side }, now));
+      if (
+        b.cause !== undefined &&
+        (typeof b.cause !== "string" || !(PROVIDER_FAILURE_CAUSES as readonly string[]).includes(b.cause))
+      )
+        return json({ error: `cause must be one of ${PROVIDER_FAILURE_CAUSES.join(", ")}` }, 400);
+      return json(
+        await stub.planeLevel(
+          {
+            provider: b.provider,
+            name: "provider",
+            side: b.side,
+            ...(b.side === "down" && typeof b.cause === "string" ? { cause: b.cause as ProviderFailureCause } : {}),
+          },
+          now,
+        ),
+      );
     }
     // A resident's level report (record 0064): forwarded by the bot from the levels a
     // resident answer carried, or from the registry's drain outbox.

@@ -600,7 +600,7 @@ describe("pinning and pass-through — the OpenAI shape", () => {
     expect(h.calls[0].headers.authorization).toBeUndefined();
   });
 
-  it("a provider whose key variable is unset is 503 provider_key_missing before any turn is spent; one the config does not name is 503 provider_unconfigured", async () => {
+  it("an unset provider key is typed key-absent before any turn is spent; an unnamed provider is typed permanent", async () => {
     const h = harness({ env: { ANTHROPIC_API_KEY: REAL_ANTHROPIC_KEY } }); // LOCAL_KEY unset
     const token = h.bearers.mint(h.localGrant("run-1"));
     const res = await handleModelProxyRequest(
@@ -608,15 +608,17 @@ describe("pinning and pass-through — the OpenAI shape", () => {
       h.deps,
     );
     expect(res.status).toBe(503);
-    expect(errorType(res)).toBe("provider_key_missing");
-    expect((json(res).error as { message: string }).message).toContain("LOCAL_KEY");
+    expect(errorType(res)).toBe("provider_failure");
+    expect(json(res).error).toMatchObject({ cause: "key-absent" });
+    expect((json(res).error as { message: string }).message).not.toContain("LOCAL_KEY");
     const gone = h.bearers.mint(h.localGrant("run-2", { providerName: "vanished" }));
     const res2 = await handleModelProxyRequest(
       request({ path: OPENAI_CHAT_COMPLETIONS_PATH, headers: bearer(gone), json: openAiRequest() }).req,
       h.deps,
     );
     expect(res2.status).toBe(503);
-    expect(errorType(res2)).toBe("provider_unconfigured");
+    expect(errorType(res2)).toBe("provider_failure");
+    expect(json(res2).error).toMatchObject({ cause: "permanent" });
     expect(h.fetchFake).not.toHaveBeenCalled();
     expect(h.bearers.grantOf("run-1")?.turns).toBe(0);
   });
@@ -1312,7 +1314,7 @@ describe("the turn guard — a run that ended between the door and the turn", ()
 });
 
 describe("upstream failures", () => {
-  it("an upstream 4xx/5xx is forwarded with its status and body verbatim and the span ends error with the status; the turn is spent", async () => {
+  it("an upstream 4xx/5xx keeps its status but crosses as a typed safe sentence; the span ends error and the turn is spent", async () => {
     const h = harness({
       answer: () =>
         new Response(JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "Overloaded" } }), {
@@ -1324,14 +1326,22 @@ describe("upstream failures", () => {
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, h.deps);
     expect(res.status).toBe(529);
     expect(res.headers["request-id"]).toBe("req_err");
-    expect(json(res)).toEqual({ type: "error", error: { type: "overloaded_error", message: "Overloaded" } });
+    expect(json(res)).toEqual({
+      type: "error",
+      error: {
+        type: "provider_failure",
+        cause: "transient",
+        message:
+          "The model provider is temporarily unavailable; your work is kept and will continue when service recovers.",
+      },
+    });
     const [turn] = h.ends.filter((s) => s.name === "model.turn");
     expect(turn.status).toBe("error");
     expect(turn.attrs.httpStatus).toBe(529);
     expect(h.bearers.grantOf("run-1")?.turns).toBe(1);
   });
 
-  it("an upstream that cannot be reached is 502 upstream_unreachable and the span ends error", async () => {
+  it("an upstream that cannot be reached is a typed 502 transient failure and the span ends error", async () => {
     const h = harness({
       answer: () => {
         throw new TypeError("fetch failed");
@@ -1340,7 +1350,8 @@ describe("upstream failures", () => {
     const token = h.bearers.mint(h.grant("run-1"));
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, h.deps);
     expect(res.status).toBe(502);
-    expect(errorType(res)).toBe("upstream_unreachable");
+    expect(errorType(res)).toBe("provider_failure");
+    expect(String(res.body)).toContain('"cause":"transient"');
     expect(h.ends.filter((s) => s.name === "model.turn")[0].status).toBe("error");
   });
 
@@ -1490,7 +1501,7 @@ describe("createModelProxyHandler — the node adapter", () => {
     expect(page.status()).toBe(502);
     expect(page.headers()["content-type"]).toBe("application/json; charset=utf-8");
     expect(page.headers()["x-content-type-options"]).toBe("nosniff");
-    expect(page.text()).toContain("the model provider did not answer");
+    expect(page.text()).toContain("The model provider is temporarily unavailable");
     expect(page.text()).not.toContain("<script>");
     expect(bodyKindOf("application/json")).toBe("json");
     expect(bodyKindOf("text/event-stream; charset=utf-8")).toBe("sse");
@@ -1522,17 +1533,41 @@ describe("createModelProxyHandler — the node adapter", () => {
 
 describe("the provider level and the park (record 0064)", () => {
   const planeFake = () => {
-    const levels: Array<{ provider: string; side: string }> = [];
+    const levels: Array<{ provider: string; side: string; cause?: string }> = [];
     const parks: Array<{ runId: string; provider: string }> = [];
     return {
       levels,
       parks,
       plane: {
-        level: (provider: string, side: "up" | "down") => void levels.push({ provider, side }),
+        level: (provider: string, side: "up" | "down", cause?: string) =>
+          void levels.push({ provider, side, ...(cause !== undefined ? { cause } : {}) }),
         park: (runId: string, provider: string) => void parks.push({ runId, provider }),
       },
     };
   };
+
+  it("a 402 credit limit is provider-down by typed cause: it gets one retry, parks the held turn, and relays one safe sentence without the payload or key URL", async () => {
+    const payload = {
+      message:
+        "This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 12789. To increase, visit https://openrouter.ai/workspaces/default/keys/key-test and adjust the key's total limit",
+      code: 402,
+      metadata: { limit_source: "openrouter_key_limit" },
+    };
+    const h = harness({
+      answer: () =>
+        new Response(JSON.stringify(payload), { status: 402, headers: { "content-type": "application/json" } }),
+    });
+    const p = planeFake();
+    const token = h.bearers.mint(h.grant("run-1"));
+    const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, { ...h.deps, plane: p.plane });
+    expect(res.status).toBe(402);
+    expect(h.calls).toHaveLength(2);
+    expect(p.levels).toEqual([{ provider: "anthropic", side: "down", cause: "credit-or-quota-exhausted" }]);
+    expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
+    expect(String(res.body)).toContain("The model provider's credit or quota is exhausted");
+    expect(String(res.body)).not.toContain("limit_source");
+    expect(String(res.body)).not.toContain("https://");
+  });
 
   it("a transport failure gets one retry; past it the provider is reported down and the run parked, and the error is still relayed", async () => {
     const h = harness({
@@ -1546,7 +1581,7 @@ describe("the provider level and the park (record 0064)", () => {
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, deps);
     expect(res.status).toBe(502);
     expect(h.calls).toHaveLength(2); // the one retry
-    expect(p.levels).toEqual([{ provider: "anthropic", side: "down" }]);
+    expect(p.levels).toEqual([{ provider: "anthropic", side: "down", cause: "transient" }]);
     expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
   });
 
@@ -1567,7 +1602,7 @@ describe("the provider level and the park (record 0064)", () => {
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, deps);
     expect(res.status).toBe(529);
     expect(h.calls).toHaveLength(2); // never a third call (record 0064's one retry)
-    expect(p.levels).toEqual([{ provider: "anthropic", side: "down" }]);
+    expect(p.levels).toEqual([{ provider: "anthropic", side: "down", cause: "transient" }]);
     expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
   });
 
@@ -1583,10 +1618,10 @@ describe("the provider level and the park (record 0064)", () => {
     const token = h.bearers.mint(h.grant("run-1"));
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, { ...h.deps, plane: p.plane });
     expect(res.status).toBe(502);
-    expect(String(res.body)).toContain("the model provider did not answer");
+    expect(String(res.body)).toContain("The model provider is temporarily unavailable");
     expect(String(res.body)).not.toContain("cloudflare");
     expect(h.calls).toHaveLength(2);
-    expect(p.levels).toEqual([{ provider: "anthropic", side: "down" }]);
+    expect(p.levels).toEqual([{ provider: "anthropic", side: "down", cause: "transient" }]);
     expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
   });
 
@@ -1621,12 +1656,12 @@ describe("the provider level and the park (record 0064)", () => {
     const deps = { ...h.deps, plane: p.plane };
     const token = h.bearers.mint(h.grant("run-1"));
     await handleModelProxyRequest(request({ headers: bearer(token) }).req, deps);
-    expect(p.levels).toEqual([{ provider: "anthropic", side: "down" }]);
+    expect(p.levels).toEqual([{ provider: "anthropic", side: "down", cause: "transient" }]);
     expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
     status = 200;
     await handleModelProxyRequest(request({ headers: bearer(token) }).req, deps);
     expect(p.levels).toEqual([
-      { provider: "anthropic", side: "down" },
+      { provider: "anthropic", side: "down", cause: "transient" },
       { provider: "anthropic", side: "up" },
     ]);
     // Without the seam the same failures relay as before, reporting nothing.

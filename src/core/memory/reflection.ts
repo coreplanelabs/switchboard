@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Provider } from "../provider.js";
+import { providerFailureOf, renderProviderFailure, type CompletionResult, type Provider } from "../provider.js";
 import type { Effort } from "../../effort.js";
 import { authorize } from "../authz/index.js";
 import type { Actor, ChannelVisibility, Resource } from "../authz/types.js";
@@ -442,14 +442,21 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
     const seen = new Set<string>();
     const existing = [...(await windowP), ...hits].filter((r) => !seen.has(r.id) && (seen.add(r.id), true));
     const text = buildReflectionInput({ history: deps.history, request: deps.request, answer: deps.answer, existing });
-    const result = await deps.provider.complete({
-      model: deps.model,
-      system: REFLECTION_SYSTEM,
-      messages: [{ role: "user", content: [{ type: "text", text }] }],
-      maxTokens: REFLECTION_MAX_TOKENS,
-      ...(deps.effort !== undefined ? { effort: deps.effort } : {}),
-      ...(deps.effortWord !== undefined ? { effortWord: deps.effortWord } : {}),
-    });
+    let result: CompletionResult;
+    try {
+      result = await deps.provider.complete({
+        model: deps.model,
+        system: REFLECTION_SYSTEM,
+        messages: [{ role: "user", content: [{ type: "text", text }] }],
+        maxTokens: REFLECTION_MAX_TOKENS,
+        ...(deps.effort !== undefined ? { effort: deps.effort } : {}),
+        ...(deps.effortWord !== undefined ? { effortWord: deps.effortWord } : {}),
+      });
+    } catch (err) {
+      const failure = providerFailureOf(err);
+      warn(`reflection skipped: ${renderProviderFailure(failure.cause)}`);
+      return;
+    }
     const reply = result.content
       .filter((p): p is { type: "text"; text: string } => p.type === "text")
       .map((p) => p.text)
