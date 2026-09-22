@@ -59,6 +59,19 @@ export type WorktreeDecision =
   /** A reusing attach cannot keep this tree, and must not replace it. */
   | { kind: "refuse"; why: string };
 
+/** A named-ref replacement is built beside the checkout its sticky binding
+ * still names. Once the attach settles, discard the superseded checkout on
+ * success or the provisional checkout on failure; either outcome leaves the
+ * persisted binding and the one surviving checkout saying the same ref. */
+export function replacementWorktreeCleanup(input: {
+  priorPath: string;
+  replacementPath: string;
+  succeeded: boolean;
+}): string | null {
+  if (input.priorPath === input.replacementPath) return null;
+  return input.succeeded ? input.priorPath : input.replacementPath;
+}
+
 export function decideWorktree(input: {
   /** True for a resumed run's attach: keep the tree, never wipe it. */
   reuse: boolean;

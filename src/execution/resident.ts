@@ -1306,9 +1306,13 @@ export class ResidentExecutor implements Executor {
     if (typeof data.ref !== "string" || typeof data.sha !== "string") {
       throw new Error(`resident attach: malformed answer for ${this.opts.resource} (missing ref/sha)`);
     }
+    const returned = returnedOf(data.returned);
     // A named ref is the spawn's branch, not a hint an older sticky binding may
     // override. Fail closed against a Worker predating that invariant rather
-    // than let the child work and push from another attempt's branch.
+    // than let the child work and push from another attempt's branch. The two
+    // typed fallback cases are not named-ref authority: ownPr may leave a
+    // default-bound thread where it stood, and refByDefault names the resident's
+    // fallback rather than a branch the requester chose.
     if (
       this.opts.refHint !== undefined &&
       !this.opts.refByDefault &&
@@ -1322,7 +1326,6 @@ export class ResidentExecutor implements Executor {
     const trace = sanitizeGraftedSteps(data.trace);
     const rebound = reboundOf(data.rebound);
     const rebindRefused = rebindRefusedOf(data.rebindRefused);
-    const returned = returnedOf(data.returned);
     this.lastBinding = {
       ref: data.ref,
       sha: data.sha,

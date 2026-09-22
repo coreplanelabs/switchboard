@@ -2073,6 +2073,12 @@ describe("repo/ref resolution + resident prompt selection", () => {
             ref: "plan/two/u1",
             sha: secondSha,
             user: "worker2",
+            rebindRefused: {
+              to: "plan/one/u1",
+              pr: 7,
+              reason: "named-ref",
+              why: "the existing binding was named directly",
+            },
           }),
           { status: 200 },
         ),
@@ -2081,9 +2087,17 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
     const registry = new RunRegistry({ genId: () => "run-binding", genToken: () => "tok" });
     deps.runRegistry = registry;
-    // The resolver's answer is the FIRST plan's branch and head — what the
-    // thread's records say, not where this run's attach will bind.
-    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "plan/one/u1", headSha: firstHead });
+    // The resolver's answer is the FIRST plan's own-PR-derived branch and
+    // head — what the thread's records say, not where this run's existing
+    // named binding stands after the resident refuses that legacy move.
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "plan/one/u1",
+      headSha: firstHead,
+      refFromPr: true,
+      pr: 7,
+      prFromRecord: true,
+    });
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     const events = registry.snapshotById("run-binding")!.events;

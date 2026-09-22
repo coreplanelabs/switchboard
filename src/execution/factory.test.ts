@@ -546,7 +546,7 @@ describe("makeExecutor resident selection", () => {
         { body: { state: "warm", reason: "" } },
         attached({ ref: "master", returned: { from: "fix/x", to: "master", pr: 7, at: "t" } }),
       );
-      const { note, binding } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: "fix/x", headSha: SHA });
+      const { note, binding } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: "fix/x", headSha: SHA, ownPr });
       expect(note).toBe(
         "resident · jshttp/vary · master@47c4230 · returned to master (the branch of this thread's PR #7 is gone)",
       );
@@ -560,7 +560,12 @@ describe("makeExecutor resident selection", () => {
         { body: { state: "warm", reason: "" } },
         attached({ ref: "master", returned: { from: "plan/slug/u1", to: "master", at: "t" } }),
       );
-      const { note, binding } = await makeExecutor(residentOpts(), { ...repoCtx(), ref: "plan/slug/u1", headSha: SHA });
+      const { note, binding } = await makeExecutor(residentOpts(), {
+        ...repoCtx(),
+        ref: "plan/slug/u1",
+        headSha: SHA,
+        ownPr: { number: 7, ref: "plan/slug/u1" },
+      });
       expect(note).toBe(
         "resident · jshttp/vary · master@47c4230 · returned to master (this thread's branch plan/slug/u1 is gone)",
       );

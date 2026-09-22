@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { rebindPlan } from "../../src/execution/residentRebind.js";
+import { decideWorktree } from "../../src/execution/residentReuse.js";
 import { methodOf, readSource } from "./testing/sourceScan";
 
 // The one exception to the sticky ref binding (docs/reference/specs/resident-repos.md
@@ -43,9 +45,27 @@ describe("a named ref replaces the sticky fallback before the worktree is provis
     const allocate = method("allocateThreadUser");
     expect(allocate).toMatch(/replaceRef = false,/);
     expect(allocate).toMatch(/const replacingRef = existing !== undefined && replaceRef && existing\.ref !== ref;/);
-    expect(allocate).toMatch(/if \(existing && !existing\.evicted && existing\.user && !replacingRef\)/);
+    expect(allocate).toMatch(
+      /if \(existing && !existing\.evicted && existing\.user && !replacingRef && !recordingNamedAuthority\)/,
+    );
     expect(allocate).toMatch(/ref: replacingRef \? ref : \(existing\?\.ref \?\? ref\),/);
-    expect(allocate).toMatch(/replacingRef\s*\? \{ boundBy \}/);
+    expect(allocate).toMatch(
+      /worktreePath: replacingRef \? worktreePath : \(existing\?\.worktreePath \?\? worktreePath\),/,
+    );
+    expect(allocate).toMatch(/replacingRef \|\| recordingNamedAuthority\s*\? \{ boundBy \}/);
+    // Replacing an existing named binding reserves no new user, so the old row
+    // remains authoritative until the final attach write. A failed attach
+    // discards the provisional checkout; a success discards the old one.
+    expect(allocate).toMatch(/const deferRefWrite = replacingRef && !existing\.evicted && existing\.user !== "";/);
+    expect(allocate).toMatch(/if \(!deferRefWrite\) await this\.ctx\.storage\.put\(key, binding\);/);
+    expect(allocate).toMatch(/return \{ binding, wrote: !deferRefWrite \};/);
+    expect(body).toMatch(/const replacingNamedRef = namedRef && prior !== undefined && prior\.ref !== ref;/);
+    expect(body).toMatch(/await replacementWorktreePath\(threadKey, ref, prior\.worktreePath\)/);
+    expect(body).toMatch(
+      /replacementWorktreeCleanup\(\{[\s\S]*?priorPath: prior\.worktreePath,[\s\S]*?replacementPath: binding\.worktreePath,[\s\S]*?succeeded: attached !== undefined && !\("error" in attached\),[\s\S]*?\}\)/,
+    );
+    expect(body).toMatch(/await this\.discardReplacedCheckout\(threadKey, discard\)/);
+    expect(method("discardReplacedCheckout")).toMatch(/this\.run\(\["rm", "-rf", path\]\)/);
   });
 
   it("a changed named ref forces the old tree to be recreated even when both refs currently have the same commit", () => {
@@ -61,6 +81,43 @@ describe("a named ref replaces the sticky fallback before the worktree is provis
     expect(method("ensureThreadWorktree")).toMatch(
       /decideWorktree\(\{[\s\S]*?reuse: opts\.reuse,[\s\S]*?modeSwitch,[\s\S]*?refChanged: opts\.refChanged,[\s\S]*?sha,[\s\S]*?worktreePath: wt,[\s\S]*?facts,[\s\S]*?\}\)/,
     );
+  });
+
+  it("an explicit attach naming the already default-bound ref records named authority without replacing the checkout, so an own-PR hint cannot move it", () => {
+    const allocate = method("allocateThreadUser");
+    expect(allocate).toMatch(
+      /const recordingNamedAuthority = existing !== undefined && replaceRef && existing\.boundBy !== boundBy;/,
+    );
+    expect(allocate).toMatch(
+      /if \(existing && !existing\.evicted && existing\.user && !replacingRef && !recordingNamedAuthority\)/,
+    );
+    expect(allocate).toMatch(/replacingRef \|\| recordingNamedAuthority\s*\? \{ boundBy \}/);
+    expect(allocate).toMatch(/ref: replacingRef \? ref : \(existing\?\.ref \?\? ref\),/);
+    expect(allocate).toMatch(
+      /worktreePath: replacingRef \? worktreePath : \(existing\?\.worktreePath \?\? worktreePath\),/,
+    );
+
+    const body = method("attachThreadBody");
+    expect(body).toMatch(/const replacingNamedRef = namedRef && prior !== undefined && prior\.ref !== ref;/);
+    expect(body).toMatch(/refChanged: storedPrior !== undefined && storedPrior\.ref !== binding\.ref,/);
+    expect(
+      decideWorktree({
+        reuse: false,
+        modeSwitch: false,
+        refChanged: false,
+        sha: "tip",
+        worktreePath: "/workspace/threads/thread",
+        facts: { exists: true, readable: true, dirty: false, head: "tip" },
+      }),
+    ).toEqual({ kind: "reuse" });
+    expect(
+      rebindPlan({
+        ownPr: { number: 2192, ref: "fix/own-pr" },
+        reuse: false,
+        binding: { ref: "main", user: "worker2", boundBy: "name" },
+        defaultRef: "main",
+      }),
+    ).toMatchObject({ kind: "refuse", refused: { reason: "named-ref" } });
   });
 });
 
@@ -207,9 +264,10 @@ describe("moveOntoOwnBranch: the mirror must hold the branch, then the row moves
     expect(move).not.toMatch(/git", "clone"/);
     expect(move).not.toMatch(/git checkout/);
     expect(move).not.toMatch(/worktreePath/);
-    // The path is the binding's throughout: nothing is derived from the moved ref.
+    // The legacy own-PR move is not a named replacement, so it keeps the
+    // binding's path; only the transactional named-ref path gets a sibling.
     expect(method("attachThreadBody")).toMatch(
-      /const worktreePath = prior\?\.worktreePath \?\? \(await threadWorktreePath\(threadKey, ref\)\);/,
+      /const worktreePath = replacingNamedRef[\s\S]*?: \(prior\?\.worktreePath \?\? \(await threadWorktreePath\(threadKey, ref\)\)\);/,
     );
   });
 });

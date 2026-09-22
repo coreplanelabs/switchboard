@@ -96,7 +96,12 @@ import {
   type ResidentLevelsDoc,
 } from "./levels.js";
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
-import { decideWorktree, parseReuse, type WorktreeFacts } from "../../src/execution/residentReuse.js";
+import {
+  decideWorktree,
+  parseReuse,
+  replacementWorktreeCleanup,
+  type WorktreeFacts,
+} from "../../src/execution/residentReuse.js";
 import {
   boundByFor,
   canReturnToDefault,
@@ -1751,6 +1756,17 @@ async function threadWorktreePath(threadKey: string, ref: string): Promise<strin
   const hash8 = [...new Uint8Array(digest).slice(0, 4)].map((b) => b.toString(16).padStart(2, "0")).join("");
   const slug = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 60);
   return `${THREADS_DIR}/${slug(threadKey)}-${hash8}/${slug(ref)}`;
+}
+
+/** Build a named-ref replacement beside the checkout the sticky row still
+ * names. A slash-to-dash slug collision gets a ref hash so the provisional
+ * clone can never overwrite the old checkout before the attach commits. */
+async function replacementWorktreePath(threadKey: string, ref: string, priorPath: string): Promise<string> {
+  const desired = await threadWorktreePath(threadKey, ref);
+  if (desired !== priorPath) return desired;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ref));
+  const hash8 = [...new Uint8Array(digest).slice(0, 4)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${desired}-ref-${hash8}`;
 }
 
 /** Path confinement for /read and /write: conservative charset, no `..`
@@ -5398,8 +5414,8 @@ export class ResidentDO extends Sandbox<Env> {
   /** Storage-only allocation (atomic under the DO input gate: get → list →
    *  put touches nothing but this object's storage, so two concurrent
    *  attaches cannot both claim the same user). A hint that names no branch
-   *  keeps the sticky ref. An explicit named ref replaces it in the same row;
-   *  the attach then provisions the existing path at that ref. */
+   *  keeps the sticky ref. An explicit named ref records named authority even
+   *  when it matches the sticky ref; only a changed ref replaces the path. */
   private async allocateThreadUser(
     threadKey: string,
     ref: string,
@@ -5412,7 +5428,10 @@ export class ResidentDO extends Sandbox<Env> {
     const key = threadBindingKey(threadKey);
     const existing = await this.ctx.storage.get<ThreadBinding>(key);
     const replacingRef = existing !== undefined && replaceRef && existing.ref !== ref;
-    if (existing && !existing.evicted && existing.user && !replacingRef) return { binding: existing, wrote: false };
+    const recordingNamedAuthority = existing !== undefined && replaceRef && existing.boundBy !== boundBy;
+    const deferRefWrite = replacingRef && !existing.evicted && existing.user !== "";
+    if (existing && !existing.evicted && existing.user && !replacingRef && !recordingNamedAuthority)
+      return { binding: existing, wrote: false };
     const user =
       existing && !existing.evicted && existing.user ? existing.user : await this.findFreePoolUser(threadKey);
     if (!user) {
@@ -5426,7 +5445,7 @@ export class ResidentDO extends Sandbox<Env> {
       threadKey,
       ref: replacingRef ? ref : (existing?.ref ?? ref),
       user,
-      worktreePath: existing?.worktreePath ?? worktreePath,
+      worktreePath: replacingRef ? worktreePath : (existing?.worktreePath ?? worktreePath),
       boundAt: existing?.boundAt ?? now,
       lastAttachAt: now,
       evicted: false,
@@ -5435,7 +5454,7 @@ export class ResidentDO extends Sandbox<Env> {
       // remains its history across every ref choice.
       ...(existing
         ? {
-            ...(replacingRef
+            ...(replacingRef || recordingNamedAuthority
               ? { boundBy }
               : {
                   ...(existing.boundBy !== undefined ? { boundBy: existing.boundBy } : {}),
@@ -5446,8 +5465,28 @@ export class ResidentDO extends Sandbox<Env> {
           }
         : { boundBy }),
     };
-    await this.ctx.storage.put(key, binding);
-    return { binding, wrote: true };
+    // A live existing binding already reserves this user. Its named-ref
+    // replacement stays provisional until deps and credentials succeed;
+    // keeping the old row here lets a failed attach discard the new checkout
+    // without ever publishing a binding that did not complete. An evicted row
+    // has no user reservation, so its fresh allocation is written and rolled
+    // back through the ordinary path.
+    if (!deferRefWrite) await this.ctx.storage.put(key, binding);
+    return { binding, wrote: !deferRefWrite };
+  }
+
+  /** Best-effort cleanup after a provisional named-ref replacement settles.
+   * The binding and its surviving checkout already agree; a cleanup failure
+   * leaves only an unreachable sibling for the thread's eventual eviction. */
+  private async discardReplacedCheckout(threadKey: string, path: string): Promise<void> {
+    try {
+      const removed = await this.run(["rm", "-rf", path]);
+      if (removed.exitCode !== 0) {
+        console.log(`attach ${threadKey}: failed to discard replaced checkout ${path}: ${removed.stderr}`);
+      }
+    } catch (err) {
+      console.log(`attach ${threadKey}: failed to discard replaced checkout ${path}: ${errMsg(err)}`);
+    }
   }
 
   /** POST /attach: idempotent per-thread workspace materialization.
@@ -5646,7 +5685,10 @@ export class ResidentDO extends Sandbox<Env> {
         cause: "request",
       };
     }
-    const worktreePath = prior?.worktreePath ?? (await threadWorktreePath(threadKey, ref));
+    const replacingNamedRef = namedRef && prior !== undefined && prior.ref !== ref;
+    const worktreePath = replacingNamedRef
+      ? await replacementWorktreePath(threadKey, ref, prior.worktreePath)
+      : (prior?.worktreePath ?? (await threadWorktreePath(threadKey, ref)));
     // Read-only vs writable (item 50): decided here, once, from the request
     // and the prior binding's mode — the tested pure helper is the shipped code.
     const mode = planReadonlyAttach({ readonly, prior, slug, mirrorDir: MIRROR_DIR });
@@ -5675,8 +5717,9 @@ export class ResidentDO extends Sandbox<Env> {
       await rollback();
       return admission;
     }
+    let attached: AttachOk | ThreadErr | undefined;
     try {
-      return await this.attachThreadCreate({
+      attached = await this.attachThreadCreate({
         threadKey,
         refHint,
         wantSha,
@@ -5693,8 +5736,17 @@ export class ResidentDO extends Sandbox<Env> {
         ...(rebind.rebound !== undefined ? { rebound: rebind.rebound } : {}),
         ...(rebind.rebindRefused !== undefined ? { rebindRefused: rebind.rebindRefused } : {}),
       });
+      return attached;
     } finally {
       this.diskCommittedKiB -= admission.committedKiB;
+      if (replacingNamedRef && prior !== undefined) {
+        const discard = replacementWorktreeCleanup({
+          priorPath: prior.worktreePath,
+          replacementPath: binding.worktreePath,
+          succeeded: attached !== undefined && !("error" in attached),
+        });
+        if (discard !== null) await this.discardReplacedCheckout(threadKey, discard);
+      }
     }
   }
 
