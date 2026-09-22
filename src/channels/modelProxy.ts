@@ -29,7 +29,18 @@ import {
   type ReportedCost,
 } from "../core/modelProxy/usage.js";
 import { NO_PRICES, priceTurn, type ModelPriceTable, type TurnPrice } from "../core/modelPricing.js";
-import { ANTHROPIC_API_KEY_ENV, wireOf, type ProviderConfig, type TokenUsage, type Wire } from "../core/provider.js";
+import {
+  ANTHROPIC_API_KEY_ENV,
+  classifyProviderFailure,
+  providerFailureParks,
+  ProviderFailure,
+  renderProviderFailure,
+  wireOf,
+  type ProviderConfig,
+  type ProviderFailureCause,
+  type TokenUsage,
+  type Wire,
+} from "../core/provider.js";
 import type { Secrets } from "../secrets.js";
 import { readBody } from "./http.js";
 
@@ -112,7 +123,8 @@ export interface ModelProxyDeps {
    *  not re-reported every turn); `park` parks the failing turn's run on
    *  `provider_up`. Both fire and forget — the proxy never waits on the plane. */
   plane?: {
-    level(provider: string, side: "up" | "down"): void;
+    level(provider: string, side: "up", cause?: undefined): void;
+    level(provider: string, side: "down", cause: ProviderFailureCause): void;
     park(runId: string, provider: string): void;
   };
 }
@@ -147,6 +159,19 @@ export function refusalResponse(
   message: string,
 ): ProxyResponse {
   const error = { type: code, message };
+  const body = shape === "anthropic-messages" ? { type: "error", error } : { error };
+  return { status, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+}
+
+/** A provider's untrusted error answer becomes the typed cause and the one
+ * renderer sentence before it crosses into a harness. The status remains the
+ * provider's; its payload and URL do not. */
+function providerFailureResponse(shape: ProxyShape, status: number, failure: ProviderFailure): ProxyResponse {
+  const error = {
+    type: "provider_failure",
+    cause: failure.cause,
+    message: renderProviderFailure(failure.cause),
+  };
   const body = shape === "anthropic-messages" ? { type: "error", error } : { error };
   return { status, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
 }
@@ -736,7 +761,14 @@ export async function handleAdmitted(
   );
   if (!upstream.ok) {
     log(`[model-proxy] 503 ${upstream.code} run=${grant.runId}`);
-    return refusalResponse(shape, 503, upstream.code, upstream.message);
+    return providerFailureResponse(
+      shape,
+      503,
+      new ProviderFailure(upstream.code === "provider_key_missing" ? "key-absent" : "permanent", {
+        provider: grant.providerName,
+        model: grant.model,
+      }),
+    );
   }
   const turn = deps.bearers.consumeTurn(grant.runId);
   if (!turn.ok && turn.reason === "ended") {
@@ -792,14 +824,11 @@ export async function handleAdmitted(
     );
   const outcome = (status: number, outBytes: number) =>
     `[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → ${status} in=${Buffer.byteLength(payload)} out=${outBytes} ${Math.max(0, deps.clock() - startedAt)}ms`;
-  // One immediate retry TOTAL on a transport-class failure (record 0064): a
-  // throw/reset, a retryable status, or a gateway HTML page. The run-level
-  // harness then holds and backs off inside its lease; this fast retry only
-  // absorbs a single edge blip, so a turn makes at most two upstream calls. A
-  // failure past the retry is the provider's level going `down` — reported to
-  // the plane with the run parked on `provider_up` — and the error is still
-  // relayed (the harness's held turn reads the steer). A client abort says
-  // nothing about the provider: nothing is retried and nothing is reported.
+  // One immediate retry TOTAL when the typed cause says the provider is down:
+  // transport/transient, rate-limited, or credit/quota exhausted. The run-level
+  // harness then holds and backs off inside its lease. Every provider answer is
+  // classified before a consumer acts, and every failed response crossing the
+  // proxy is rendered from the cause rather than relaying the wire payload.
   const call = (): Promise<Response> =>
     (deps.fetch ?? fetch)(upstream.url, {
       method: "POST",
@@ -807,44 +836,65 @@ export async function handleAdmitted(
       body: payload,
       ...(req.signal ? { signal: req.signal } : {}),
     });
-  const providerDown = () => {
-    deps.plane?.level(grant.providerName, "down");
+  const providerDown = (failure: ProviderFailure) => {
+    deps.plane?.level(grant.providerName, "down", failure.cause);
     deps.plane?.park(grant.runId, grant.providerName);
   };
   const aborted = () => req.signal?.aborted === true;
-  const retryable = (answer: Response | undefined): boolean => {
-    if (answer === undefined) return true;
-    if (answer.status === 408 || answer.status === 425 || answer.status === 429 || answer.status >= 500) return true;
-    // A gateway can answer its own document with 200. It is transport output,
-    // never a model answer and never safe to relay into the harness as HTML.
-    return (answer.headers.get("content-type") ?? "").toLowerCase().includes("text/html");
+  const failureOf = async (answer: Response | undefined, thrown?: unknown): Promise<ProviderFailure | undefined> => {
+    if (answer === undefined)
+      return classifyProviderFailure({ error: thrown ?? new Error("fetch failed"), provider: grant.providerName });
+    const contentType = (answer.headers.get("content-type") ?? "").toLowerCase();
+    if (answer.ok && !contentType.includes("text/html")) return undefined;
+    const body = await answer
+      .clone()
+      .text()
+      .catch(() => "");
+    return classifyProviderFailure({ status: answer.status, body, provider: grant.providerName, model: grant.model });
   };
   let res: Response | undefined;
-  let failure: unknown;
+  let thrown: unknown;
   try {
     res = await call();
   } catch (err) {
-    failure = err;
+    thrown = err;
   }
-  if (retryable(res) && !aborted()) {
-    const retried = await call().catch(() => undefined);
-    // A retry that also failed transport keeps the first answer: a 5xx body
-    // relays as it came; nothing at all is the 502 below.
+  let providerFailure = await failureOf(res, thrown);
+  if (providerFailure !== undefined && providerFailureParks(providerFailure.cause) && !aborted()) {
+    let retried: Response | undefined;
+    let retryThrown: unknown;
+    try {
+      retried = await call();
+    } catch (err) {
+      retryThrown = err;
+    }
+    // A retry that also failed transport keeps the first response when there
+    // was one, but its typed cause still decides the provider's level.
     if (retried !== undefined) res = retried;
+    providerFailure = await failureOf(retried ?? res, retryThrown ?? thrown);
   }
-  if (retryable(res) && !aborted()) providerDown();
-  if (res === undefined || (res.headers.get("content-type") ?? "").toLowerCase().includes("text/html")) {
-    span.fail(failure ?? new Error("upstream unreachable"));
+  if (providerFailure !== undefined && providerFailureParks(providerFailure.cause) && !aborted())
+    providerDown(providerFailure);
+  const html = (res?.headers.get("content-type") ?? "").toLowerCase().includes("text/html");
+  if (res === undefined || html) {
+    const failure = providerFailure ?? classifyProviderFailure({ error: thrown, provider: grant.providerName });
+    span.fail(failure);
     span.end("error");
     log(`[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → upstream unreachable`);
-    return refusalResponse(shape, 502, "upstream_unreachable", "the model provider did not answer");
+    return providerFailureResponse(shape, 502, failure);
   }
   const headers = pickResponseHeaders(res.headers);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
+    const failure =
+      providerFailure ??
+      classifyProviderFailure({ status: res.status, body: text, provider: grant.providerName, model: grant.model });
     span.end("error", { httpStatus: res.status });
     log(outcome(res.status, text.length));
-    return { status: res.status, headers, body: text };
+    return {
+      ...providerFailureResponse(shape, res.status, failure),
+      headers: { ...headers, "content-type": "application/json" },
+    };
   }
   // A relayed success is the provider's level `up` (record 0064): the plane
   // re-issues every turn held parked on the provider, whichever run relayed it.
@@ -869,7 +919,9 @@ export async function handleAdmitted(
         log(outcome(res.status, outBytes));
       },
       onError: (err) => {
-        providerDown();
+        providerDown(
+          classifyProviderFailure({ status: 503, error: err, provider: grant.providerName, model: grant.model }),
+        );
         const result = meter.result();
         span.setAttrs(
           turnAttrs(grant, result, firstAt !== undefined ? firstAt - startedAt : undefined, offered, priceOf(result)),
@@ -938,16 +990,18 @@ export function createModelProxyHandler(deps: ModelProxyDeps): (req: HttpRequest
   // plane on change, so a healthy provider is not re-reported every turn — the
   // first success after a `down` is what flips `provider_up` and re-issues the
   // held turns.
-  const lastSide = new Map<string, "up" | "down">();
+  const lastSide = new Map<string, string>();
   const planeDeps: ModelProxyDeps = deps.plane
     ? {
         ...deps,
         plane: {
           ...deps.plane,
-          level: (provider, side) => {
-            if (lastSide.get(provider) === side) return;
-            lastSide.set(provider, side);
-            deps.plane?.level(provider, side);
+          level: (provider: string, side: "up" | "down", cause?: ProviderFailureCause) => {
+            const report = side === "down" ? `${side}:${cause ?? "permanent"}` : side;
+            if (lastSide.get(provider) === report) return;
+            lastSide.set(provider, report);
+            if (side === "down") deps.plane?.level(provider, side, cause ?? "permanent");
+            else deps.plane?.level(provider, side);
           },
         },
       }

@@ -10,7 +10,7 @@ import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import { TEST_GITHUB_CREDENTIALS } from "../../execution/testing/githubCredentials.js";
-import type { Provider } from "../provider.js";
+import { renderProviderFailure, type Provider } from "../provider.js";
 import { ExecSandboxRestartedError, type Executor } from "../../execution/executor.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
@@ -554,7 +554,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   it("a failed run: the error propagates, the registry is finished `failed`, the workspace is released first and the card closes with ❌; the drain writes the failed record", async () => {
     const s = setup(new Error("provider down"));
-    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("provider down");
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(renderProviderFailure("permanent"));
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
     expect(s.releases).toEqual(["paired"]);
     expect(s.closes).toHaveLength(1);
@@ -893,20 +893,20 @@ describe("runLoop — the model turn and everything that rides on it", () => {
   // on the record itself, even when the reply is never delivered.
   it("a failed run leaves its reason on the record: the loop's throw is published as a `run_failed` run_note before the finish, so the run page says why", async () => {
     const s = setup(new Error("harness container: read failed — runtime-replaced"));
-    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("runtime-replaced");
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(renderProviderFailure("permanent"));
     s.ending.drain(undefined);
     await s.writer.settled();
     const rec = (await s.store.get("run-l"))!;
     expect(rec.status).toBe("failed");
     expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "run_failed")).toEqual([
-      expect.objectContaining({ summary: expect.stringContaining("runtime-replaced") }),
+      expect.objectContaining({ summary: expect.stringContaining(renderProviderFailure("permanent")) }),
     ]);
   });
 
   // docs/reference/specs/run-history.md item 57: the failure by name. The
   // provider's refusal reaches the loop as the harness's typed error, and the
   // record says so, so the session's next seed can leave the request out.
-  it("a run whose model call the provider refused under its usage policy fails by name: the error is the refusal, the record says failure: policy_refusal beside status failed and the note keeps the provider's words; a run failed for any other reason carries no failure key", async () => {
+  it("a run whose model call the provider refused under its usage policy fails by name: the error is the refusal, the record says failure: policy_refusal beside status failed and the note keeps only the rendered cause; a run failed for any other reason carries no failure key", async () => {
     const refusing: Provider = {
       name: "fake",
       async complete() {
@@ -925,11 +925,13 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const rec = (await s.store.get("run-l"))!;
     expect(rec).toMatchObject({ status: "failed", failure: { kind: "policy_refusal" } });
     expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "policy_refusal")).toEqual([
-      expect.objectContaining({ summary: expect.stringContaining("blocked by the provider's classifier") }),
+      expect.objectContaining({
+        summary: "The model provider refused the call; the request ended without exposing the provider's response.",
+      }),
     ]);
 
     const down = setup(new Error("provider down"));
-    await expect(runLoop(down.deps, down.ctx)).rejects.toThrow("provider down");
+    await expect(runLoop(down.deps, down.ctx)).rejects.toThrow(renderProviderFailure("permanent"));
     down.ending.drain(undefined);
     await down.writer.settled();
     expect("failure" in (await down.store.get("run-l"))!).toBe(false);
@@ -1573,7 +1575,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(clean.pushed).toEqual([]);
     // The context no longer fits: the round ends with the push already made.
     const overflowed = await compacted({ dirty: true, thenOverflow: true });
-    expect(overflowed.out.failed).toContain("the model call failed");
+    expect(overflowed.out.failed).toContain(renderProviderFailure("permanent"));
     expect(overflowed.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
     // The compaction checkpoint preserves the dirty tree; the abnormal ending
     // then adds its own WIP marker so the durable last push cannot look final.
@@ -2583,7 +2585,7 @@ describe("the pi harness — the container replaced under a living bot: the rela
 
     // Generation B, gone: its pending model call fails and its pi is ended where it ran.
     botDies();
-    await expect(bOpen).rejects.toThrow(/the bot died with this generation/);
+    await expect(bOpen).rejects.toThrow(renderProviderFailure("permanent"));
     expect(b.killed).toEqual([5151]);
     await ledgerRun.close();
   });

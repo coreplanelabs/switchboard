@@ -12,7 +12,13 @@ import {
   renderProviderMatrix,
   type ProviderScenarioRow,
 } from "./testing/providerConformance.js";
-import { WIRES } from "./provider.js";
+import {
+  classifyProviderFailure,
+  PROVIDER_FAILURE_CAUSES,
+  renderProviderFailure,
+  WIRES,
+  type ProviderFailureCause,
+} from "./provider.js";
 
 // Feature: docs/reference/specs/model-proxy.md item 11 — the card and the
 // block's declaration, and its matrix (record 0052): controls × outcomes
@@ -21,6 +27,70 @@ import { WIRES } from "./provider.js";
 // row, the printer the pull request carries.
 
 const EXAMPLE_BLOCKS = ["anthropic", "openai", "openrouter"];
+
+// Feature: docs/reference/specs/model-proxy.md item 12b — every model call
+// classifies a provider answer through one closed ProviderFailure seam.
+const FAILURE_MATRIX: ReadonlyArray<{
+  cause: ProviderFailureCause;
+  status?: number;
+  body?: unknown;
+  error?: unknown;
+  operatorUrl?: string;
+}> = [
+  { cause: "transient", status: 503, body: { error: { type: "overloaded_error", message: "overloaded" } } },
+  { cause: "rate-limited", status: 429, body: { error: { code: "rate_limit_exceeded" } } },
+  {
+    cause: "credit-or-quota-exhausted",
+    status: 402,
+    body: {
+      message:
+        "This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 12789. To increase, visit https://openrouter.ai/workspaces/default/keys/key-test and adjust the key's total limit",
+      code: 402,
+      metadata: { limit_source: "openrouter_key_limit" },
+    },
+    operatorUrl: "https://openrouter.ai/workspaces/default/keys/key-test",
+  },
+  { cause: "key-absent", status: 503, body: { error: { type: "provider_key_missing" } } },
+  { cause: "key-invalid", status: 401, body: { error: { type: "authentication_error" } } },
+  { cause: "model-unknown", status: 404, body: { error: { code: "model_not_found" } } },
+  {
+    cause: "request-rejected",
+    status: 400,
+    body: {
+      error: {
+        message: "Invalid JSON schema: regex lookaround is not supported",
+        type: "invalid_request_error",
+        code: "invalid_json_schema",
+      },
+    },
+  },
+  { cause: "permanent", status: 403, body: { error: { type: "content_filter" } } },
+];
+
+describe("ProviderFailure — the closed failure matrix", () => {
+  it.each(FAILURE_MATRIX)(
+    "classifies $cause from status and structured answer",
+    ({ cause, operatorUrl, ...answer }) => {
+      expect(classifyProviderFailure(answer)).toMatchObject({
+        cause,
+        ...(operatorUrl !== undefined ? { operatorUrl } : {}),
+      });
+    },
+  );
+
+  it("has one matrix row per closed cause", () => {
+    expect(FAILURE_MATRIX.map((row) => row.cause)).toEqual(PROVIDER_FAILURE_CAUSES);
+  });
+
+  it("renders every typed cause as one calm sentence with no payload, provider URL or instruction", () => {
+    for (const cause of PROVIDER_FAILURE_CAUSES) {
+      const sentence = renderProviderFailure(cause);
+      expect(sentence.match(/[.!?](?:\s|$)/g)).toHaveLength(1);
+      expect(sentence).not.toMatch(/[{}]|https?:\/\/|code\"\s*:|message\"\s*:|metadata/i);
+      expect(sentence).not.toMatch(/\b(?:retry|re-send|visit|increase|contact|run)\b/i);
+    }
+  });
+});
 
 describe.each(PROVIDER_DRIVERS.map((d) => [d.harness, d] as const))("provider conformance — %s", (_name, driver) => {
   for (const row of PROVIDER_ROWS) {

@@ -1227,7 +1227,12 @@ describe("run ledger — intake receipts (item 59)", () => {
   it("the insert is if-absent inside the transaction: the first write answers inserted with the row, a second on the key answers the first stored row; read answers the row or null", async () => {
     const key = storeKey();
     expect((await post("/runs/intake/read", { storeKey: key, key: "slack:C1:2.0" })).data).toEqual({ receipt: null });
-    const first = intakeReceipt("slack:C1:1.0");
+    const first = intakeReceipt("slack:C1:1.0", {
+      source: "error",
+      providerFailure: "credit-or-quota-exhausted",
+      reason:
+        "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers.",
+    });
     expect(await post("/runs/intake", { storeKey: key, key: "slack:C1:2.0", receipt: first })).toMatchObject({
       status: 200,
       data: { inserted: true, stored: first },
@@ -1813,15 +1818,28 @@ describe("the plane's checkpoint steers and the provider condition — the heart
       };
     });
     expect(
-      (await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "down" })).data,
+      (
+        await post("/plane/level", {
+          storeKey: key,
+          name: "provider",
+          provider: "anthropic",
+          side: "down",
+          cause: "credit-or-quota-exhausted",
+        })
+      ).data,
     ).toEqual({ admitted: 0 });
     expect((await post("/plane/park", { storeKey: key, runId: "r3", provider: "anthropic" })).data).toEqual({
       parked: true,
     });
     await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
       const sql = (inst as unknown as { sql: SqlStorage }).sql;
-      expect(sql.exec(`SELECT resident, name, side FROM plane_levels`).toArray()).toEqual([
-        { resident: "anthropic", name: "provider", side: "above" },
+      expect(sql.exec(`SELECT resident, name, side, cause FROM plane_levels`).toArray()).toEqual([
+        {
+          resident: "anthropic",
+          name: "provider",
+          side: "above",
+          cause: "credit-or-quota-exhausted",
+        },
       ]);
       expect(sql.exec(`SELECT kind, key FROM plane_reservations`).toArray()).toEqual([
         { kind: "park", key: "anthropic#r3" },

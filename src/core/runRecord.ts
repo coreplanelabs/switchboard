@@ -1,6 +1,7 @@
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../config/profile.js";
 import type { RunEvent } from "./runEvents.js";
+import type { ProviderFailureCause } from "./provider.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isRunUsage, type RunUsage } from "./runUsage.js";
 import type { PushedBranch } from "../execution/residentRebind.js";
@@ -453,6 +454,7 @@ export interface RunOperatorDecision {
   request?: string;
   refusalCause?: string;
   refusalText?: string;
+  providerFailure?: ProviderFailureCause;
   /** The structured seam's attempts (record 0067): what each answer violated,
    *  or that it was accepted. */
   attempts?: { outcome: "accepted" | "violation"; violation?: string }[];
@@ -488,6 +490,7 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
     ...(e.request !== undefined ? { request: e.request } : {}),
     ...(e.refusalCause !== undefined ? { refusalCause: e.refusalCause } : {}),
     ...(e.refusalText !== undefined ? { refusalText: e.refusalText } : {}),
+    ...(e.providerFailure !== undefined ? { providerFailure: e.providerFailure } : {}),
     ...(e.attempts
       ? {
           attempts: e.attempts.map((a) => ({

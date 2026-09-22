@@ -20,7 +20,7 @@
 // The model seam is the router's (`RouteModel`, `providerStructuredModel`) under
 // the router's timeout; nothing calls this module yet — the Slack adapter's
 // gate arrives in a later unit.
-import type { ToolDef } from "./provider.js";
+import { providerFailureOf, renderProviderFailure, type ProviderFailureCause, type ToolDef } from "./provider.js";
 import { oneLine, redactAndCap } from "./redact.js";
 import { askStructured, attemptsOfThrow, type StructuredAttempt } from "./dispatch/structured.js";
 import { wrapUntrusted } from "./untrusted.js";
@@ -130,6 +130,9 @@ export interface IntakeDecision {
   reason: string;
   source: IntakeSource;
   receipt: IntakeReceiptOutcome;
+  /** A failed model call's typed cause. The channel renders this decision once
+   * instead of treating it as an ordinary `silent` verdict. */
+  providerFailure?: ProviderFailureCause;
   /** The structured seam's attempts (record 0067), when the model was asked:
    *  what each answer violated, or that it was accepted, kept on the receipt
    *  row so a flaky model is legible as re-asks, not as silent floors. */
@@ -152,7 +155,14 @@ export async function decideIntake(input: IntakeInput, deps: IntakeDeps): Promis
     } catch (err) {
       console.warn(`[intake] ${input.key}: receipt read failed — ${messageOf(err)}; deciding as if none`);
     }
-    if (row) return { verdict: row.verdict, reason: row.reason, source: row.source, receipt: "existing" };
+    if (row)
+      return {
+        verdict: row.verdict,
+        reason: row.reason,
+        source: row.source,
+        receipt: "existing",
+        ...(row.providerFailure !== undefined ? { providerFailure: row.providerFailure } : {}),
+      };
   }
   // The bot's own pending question decides deterministically, in every mode
   // (issue 2046): the bot asked, so the person's next words in that thread are
@@ -184,7 +194,13 @@ export async function decideIntake(input: IntakeInput, deps: IntakeDeps): Promis
   try {
     const { inserted, stored } = await deps.ledger.recordIntake(input.key, row);
     if (inserted) return { ...decided, receipt: "inserted" };
-    return { verdict: stored.verdict, reason: stored.reason, source: stored.source, receipt: "existing" };
+    return {
+      verdict: stored.verdict,
+      reason: stored.reason,
+      source: stored.source,
+      receipt: "existing",
+      ...(stored.providerFailure !== undefined ? { providerFailure: stored.providerFailure } : {}),
+    };
   } catch (err) {
     console.warn(`[intake] ${input.key}: receipt write failed — ${messageOf(err)}; acting on the verdict anyway`);
     return { ...decided, receipt: "failed" };
@@ -200,7 +216,13 @@ export async function decideIntake(input: IntakeInput, deps: IntakeDeps): Promis
 async function askModel(
   input: IntakeInput,
   deps: IntakeDeps,
-): Promise<{ verdict: IntakeVerdict; reason: string; source: IntakeSource; attempts?: StructuredAttempt[] }> {
+): Promise<{
+  verdict: IntakeVerdict;
+  reason: string;
+  source: IntakeSource;
+  providerFailure?: ProviderFailureCause;
+  attempts?: StructuredAttempt[];
+}> {
   type Parsed = { verdict: IntakeVerdict; reason: string; source: IntakeSource };
   try {
     const seam = await askStructured(
@@ -225,10 +247,20 @@ async function askModel(
   } catch (err) {
     const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
     const attempts = attemptsOfThrow(err);
+    if (timedOut) {
+      return {
+        verdict: "silent",
+        reason: tidyReason("the intake call timed out"),
+        source: "timeout",
+        ...(attempts ? { attempts } : {}),
+      };
+    }
+    const failure = providerFailureOf(err);
     return {
       verdict: "silent",
-      reason: tidyReason(timedOut ? "the intake call timed out" : `intake model failed: ${messageOf(err)}`),
-      source: timedOut ? "timeout" : "error",
+      reason: renderProviderFailure(failure.cause),
+      source: "error",
+      providerFailure: failure.cause,
       ...(attempts ? { attempts } : {}),
     };
   }

@@ -32,9 +32,16 @@
 // that fails to validate). A call whose input the schema refuses is re-asked
 // with the violation named, at most the bounded retries, every attempt on
 // the event; after them `non_decision` falls to the configured default with
-// no second model and never a sentence shown to the person.
+// no second model. A failed model call is different: its typed provider cause
+// renders once and stops at the door, never falling through to `general`.
 import { AGENTS, COMPOUND_PRESET, machineNeedsRepo } from "../../agents/registry.js";
-import { parseModelRef, type ToolDef } from "../provider.js";
+import {
+  parseModelRef,
+  providerFailureOf,
+  renderProviderFailure,
+  type ProviderFailureCause,
+  type ToolDef,
+} from "../provider.js";
 import { parseDirectives } from "../../directives.js";
 import { shows } from "../verbosity.js";
 import { oneLine, redactAndCap, redactSecrets } from "../redact.js";
@@ -154,6 +161,13 @@ export type OperatorDecision =
   | { kind: "binds"; binds: OperatorBind[]; reason: string }
   | { kind: "question"; text: string; proposal?: string; reason: string }
   | { kind: "refusal"; cause: "policy" | "request"; text: string; reason: string }
+  | {
+      kind: "refusal";
+      cause: "provider";
+      providerFailure: ProviderFailureCause;
+      text: string;
+      reason: string;
+    }
   | { kind: "non_decision"; reason: string };
 
 /** One bind: the typed line the loop's tool call renders (a registry
@@ -1017,10 +1031,9 @@ export function operatorMaxOutputTokens(): number {
  * carrying several tool calls is re-asked within the same shared retry budget;
  * after exhaustion, its sole action call passes the ordinary post-parse and
  * catalogue guards before it may be accepted, while zero or several actions
- * still return `non_decision`. A model that throws or times out is a
- * `non_decision` naming the failure — never a thrown error and never a
- * sentence a person reads — with the attempts collected before the throw kept
- * on the answer.
+ * still return `non_decision`. A model that throws or times out crosses the
+ * ProviderFailure seam and becomes a typed refusal with the cause's one safe
+ * sentence. It never falls through to the configured default.
  */
 export async function runOperator(
   input: OperatorInput,
@@ -1083,7 +1096,18 @@ export async function runOperator(
         // never a failure the outer catch floors. Past the bounded retries,
         // the one action call present still passes the ordinary post-parse
         // catalogue hold before it can be taken.
-        if (!(err instanceof MultiToolCallError)) throw err;
+        if (!(err instanceof MultiToolCallError)) {
+          const carried = attemptsOfThrow(err);
+          if (carried) attempts.push(...carried);
+          const failure = providerFailureOf(err);
+          return answered({
+            kind: "refusal",
+            cause: "provider",
+            providerFailure: failure.cause,
+            reason: failure.cause,
+            text: renderProviderFailure(failure.cause),
+          });
+        }
         const calls = JSON.stringify(err.calls);
         chars += calls.length;
         const violation = `the answer carried ${err.calls.length} tool calls; one tool call per turn`;
@@ -1162,6 +1186,9 @@ export async function runOperator(
       return answered(turn.decision);
     }
   } catch (err) {
+    // Failures after the provider turn (parse/catalogue/loop internals) retain
+    // the non-decision floor. The model call itself returns above as a typed
+    // provider refusal and cannot reach this catch.
     const why = tidy(err instanceof Error ? err.message : String(err));
     const carried = attemptsOfThrow(err);
     if (carried) attempts.push(...carried);
@@ -1188,6 +1215,7 @@ export function operatorEventOf(
   proposal?: string;
   refusalCause?: string;
   refusalText?: string;
+  providerFailure?: ProviderFailureCause;
   attempts?: StructuredAttempt[];
   intake?: { verdict: string; reason: string };
   latencyMs: number;
@@ -1212,6 +1240,7 @@ export function operatorEventOf(
     ...(d.kind === "question" ? { question: renderOperatorQuestion(d) } : {}),
     ...(d.kind === "question" && d.proposal !== undefined ? { proposal: d.proposal } : {}),
     ...(d.kind === "refusal" ? { refusalCause: d.cause, refusalText: d.text } : {}),
+    ...(d.kind === "refusal" && d.cause === "provider" ? { providerFailure: d.providerFailure } : {}),
     ...(answer.attempts ? { attempts: answer.attempts } : {}),
     ...(intake ? { intake: { verdict: intake.verdict, reason: intake.reason } } : {}),
     latencyMs: answer.latencyMs,
@@ -1297,7 +1326,7 @@ export async function operatorThreadTail(
  * request — onto the live run a reply is folded into, the inline run a typed
  * line becomes, or the agent run the request starts — or undefined when the
  * operator cannot run here (no model), which is a log line and nothing else.
- * Never throws: a model failure is a refusal-shaped decision on the log.
+ * Never throws: a model failure is a typed provider refusal rendered once.
  */
 export async function operatorStage(
   deps: OperatorStageDeps,
@@ -1541,6 +1570,14 @@ export async function executeOperatorDecision(
     // The `question` cell: rendered, then parked as the thread's pending
     // question on a door record — the person's next words are its answer.
     await io.reply(event.question ?? "");
+    await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
+    return answered;
+  }
+  if (event.providerFailure !== undefined) {
+    // A failed door call is an availability fact, not a routing decision. It
+    // renders once and ends at the door even in an owned thread; falling
+    // through would silently reinterpret the request as general or a steer.
+    await io.reply(event.refusalText ?? renderProviderFailure(event.providerFailure));
     await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
     return answered;
   }
