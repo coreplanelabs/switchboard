@@ -302,7 +302,35 @@ function harness(
     selfIdentity: async () => over.self ?? { login: "acme-switchboard[bot]", id: 4242 },
     fetchPrFacts: async () => {
       if (over.prFacts instanceof Error) throw over.prFacts;
-      return over.prFacts;
+      if (over.prFacts !== undefined)
+        return over.prFacts.state === "open" && !("headBranchExists" in over.prFacts)
+          ? { ...over.prFacts, headBranchExists: true }
+          : over.prFacts;
+      if (over.pr && !(over.pr instanceof Error))
+        return {
+          state: "open" as const,
+          sameRepoHead: true,
+          headRef: INSTANCE.branch,
+          ...(over.pr.headSha !== undefined ? { headSha: over.pr.headSha } : {}),
+          headBranchExists: true,
+          htmlUrl: over.pr.htmlUrl,
+        };
+      if (over.mergedPr && !(over.mergedPr instanceof Error))
+        return {
+          state: "closed" as const,
+          sameRepoHead: true,
+          mergedAt: over.mergedPr.mergedAt,
+          mergeCommitSha: over.mergedPr.sha,
+          htmlUrl: over.mergedPr.htmlUrl,
+        };
+      return {
+        state: "open" as const,
+        sameRepoHead: true,
+        headRef: INSTANCE.branch,
+        headSha: "a".repeat(40),
+        headBranchExists: true,
+        htmlUrl: "https://github.com/acme/api/pull/7",
+      };
     },
     fetchCommitChecks: async () => {
       if (over.checks instanceof Error) throw over.checks;
@@ -1323,6 +1351,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
         prNumber: 12,
         url: "https://github.com/acme/api/pull/12",
         headSha: "abc123",
+        headBranchExists: true,
         at: NOW,
       },
     });
@@ -1755,7 +1784,7 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
   });
 });
 
-describe("pr-check follows the machine's adopted pull request when nothing heads the branch (agent-ship item 10, issue 1799)", () => {
+describe("pr-check keeps the machine's adopted pull request authoritative before branch discovery (agent-ship items 9, 10 and 12)", () => {
   const followCheck = (deps: Parameters<typeof handleCoordinatorRequest>[1], body: Record<string, unknown> = {}) =>
     handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id, pr: 7, ...body }),
@@ -1770,13 +1799,21 @@ describe("pr-check follows the machine's adopted pull request when nothing heads
     await h.instances.put(INSTANCE);
     expect(await followCheck(h.deps)).toEqual({
       status: 200,
-      body: { ok: true, state: "open", prNumber: 7, url: "https://github.com/acme/api/pull/7", headSha: SHA, at: NOW },
+      body: {
+        ok: true,
+        state: "open",
+        prNumber: 7,
+        url: "https://github.com/acme/api/pull/7",
+        headSha: SHA,
+        headBranchExists: true,
+        at: NOW,
+      },
     });
-    // The by-head lookups ran first: an open pull request on the branch always wins.
-    expect(h.prLookups).toEqual([["acme/api", "plan/orchestration/u12"]]);
+    // An adopted pull request is read directly by number; no stale branch listing can mask its state.
+    expect(h.prLookups).toEqual([]);
   });
 
-  it("a followed pull request that merged answers merged with the merge commit and time; one verified CLOSED unmerged answers none with `prClosed` so the machine never briefs a review on it", async () => {
+  it("a followed pull request that merged answers merged with the merge receipt; one closed unmerged answers the terminal closed state with its closer", async () => {
     const merged = harness({
       prFacts: { state: "closed", sameRepoHead: true, mergedAt: "2026-09-13T23:55:59Z", mergeCommitSha: SHA },
     });
@@ -1791,15 +1828,126 @@ describe("pr-check follows the machine's adopted pull request when nothing heads
       at: NOW,
     });
 
-    const closed = harness({ prFacts: { state: "closed", sameRepoHead: true } });
+    const closed = harness({ prFacts: { state: "closed", sameRepoHead: true, closedBy: "maintainer" } });
     await closed.instances.put(INSTANCE);
-    expect((await followCheck(closed.deps)).body).toEqual({ ok: true, state: "none", prClosed: true, at: NOW });
+    expect((await followCheck(closed.deps)).body).toEqual({
+      ok: true,
+      state: "closed",
+      prNumber: 7,
+      url: "https://github.com/acme/api/pull/7",
+      closedBy: "maintainer",
+      at: NOW,
+    });
   });
 
-  it("an unreadable follow claims nothing — the plain none answer stands — and a malformed `pr` is refused 400", async () => {
-    const h = harness();
+  it("the ending-time read enriches the adopted pull request with checks and ready facts without discovering the unit branch", async () => {
+    const h = harness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "b".repeat(40) },
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headSha: SHA,
+        autoMergeEnabled: true,
+        mergeableState: "dirty",
+        baseRef: "release",
+      },
+      checks: { total: 2, pending: [], failed: [] },
+      fixups: ["fixup! use the adopted pull request"],
+      queueRule: true,
+    });
     await h.instances.put(INSTANCE);
-    expect((await followCheck(h.deps)).body).toEqual({ ok: true, state: "none", at: NOW });
+    expect((await followCheck(h.deps, { checks: true })).body).toMatchObject({
+      state: "open",
+      prNumber: 7,
+      url: "https://github.com/acme/api/pull/7",
+      headSha: SHA,
+      autoMergeEnabled: true,
+      checks: { total: 2, pending: [], failed: [] },
+      mergeableState: "dirty",
+      fixupCommits: ["fixup! use the adopted pull request"],
+      baseHasMergeQueue: true,
+    });
+    expect(h.prLookups).toEqual([]);
+  });
+
+  it("the ending-time read keeps an adopted pull request that merged on branch A even when pull request X heads the unit branch", async () => {
+    const h = harness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "b".repeat(40) },
+      prFacts: {
+        state: "closed",
+        sameRepoHead: true,
+        mergedAt: "2026-09-13T23:55:59Z",
+        mergeCommitSha: SHA,
+        mergedBy: "merge-bot[bot]",
+      },
+    });
+    await h.instances.put(INSTANCE);
+    expect(await followCheck(h.deps, { checks: true })).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        state: "merged",
+        prNumber: 7,
+        url: "https://github.com/acme/api/pull/7",
+        sha: SHA,
+        mergedAt: "2026-09-13T23:55:59Z",
+        mergedBy: "merge-bot[bot]",
+        at: NOW,
+      },
+    });
+    expect(h.prLookups).toEqual([]);
+  });
+
+  it("the ending-time read keeps an adopted pull request that closed on branch A even when pull request X heads the unit branch", async () => {
+    const h = harness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "b".repeat(40) },
+      prFacts: { state: "closed", sameRepoHead: true, closedBy: "maintainer" },
+    });
+    await h.instances.put(INSTANCE);
+    expect(await followCheck(h.deps, { checks: true })).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        state: "closed",
+        prNumber: 7,
+        url: "https://github.com/acme/api/pull/7",
+        closedBy: "maintainer",
+        at: NOW,
+      },
+    });
+    expect(h.prLookups).toEqual([]);
+  });
+
+  it("an unknown head-branch state fails closed so review and fix transitions retry instead of dispatching", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headRef: INSTANCE.branch,
+        headSha: SHA,
+        headBranchExists: undefined,
+      },
+    });
+    await h.instances.put(INSTANCE);
+    expect(await followCheck(h.deps)).toEqual({
+      status: 502,
+      body: {
+        ok: false,
+        error: "github_unavailable",
+        message: "could not verify whether acme/api#7's head branch exists",
+        at: NOW,
+      },
+    });
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it("an unreadable adopted pull request fails closed, and a malformed `pr` is refused 400", async () => {
+    const h = harness({ prFacts: new Error("GitHub 502") });
+    await h.instances.put(INSTANCE);
+    expect(await followCheck(h.deps)).toEqual({
+      status: 502,
+      body: { ok: false, error: "github_unavailable", message: "GitHub 502", at: NOW },
+    });
     expect((await followCheck(h.deps, { pr: "7" })).status).toBe(400);
     expect((await followCheck(h.deps, { pr: 0 })).status).toBe(400);
   });
@@ -1829,6 +1977,7 @@ describe("pr-check entry — the unit-start's resume facts beside the listing (a
       prNumber: 12,
       url: "https://github.com/acme/api/pull/12",
       headSha: SHA,
+      headBranchExists: true,
       branchHead: SHA,
       approved: true,
       checks: { total: 2, pending: [], failed: [] },
@@ -1857,6 +2006,7 @@ describe("pr-check entry — the unit-start's resume facts beside the listing (a
       prNumber: 12,
       url: "https://github.com/acme/api/pull/12",
       headSha: SHA,
+      headBranchExists: true,
       at: NOW,
     });
   });
@@ -2019,7 +2169,7 @@ describe("pr-check entry — the unit-start's resume facts beside the listing (a
     expect((await entryCheck(h.deps)).body).not.toHaveProperty("humanGate");
   });
 
-  it("an approval by another author, or at another head, answers approved false; each entry fact GitHub would not answer is left out — the check still answers open, never 502", async () => {
+  it("an approval by another author, or at another head, answers approved false; an unreadable transition fact fails closed", async () => {
     const other = harness({
       pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: SHA },
       prFacts: { state: "open", sameRepoHead: true, headSha: SHA },
@@ -2035,13 +2185,9 @@ describe("pr-check entry — the unit-start's resume facts beside the listing (a
       checks: new Error("GitHub 502"),
     });
     await unreadable.instances.put(INSTANCE);
-    expect((await entryCheck(unreadable.deps)).body).toEqual({
-      ok: true,
-      state: "open",
-      prNumber: 12,
-      url: "https://github.com/acme/api/pull/12",
-      headSha: SHA,
-      at: NOW,
+    expect(await entryCheck(unreadable.deps)).toEqual({
+      status: 502,
+      body: { ok: false, error: "github_unavailable", message: "GitHub 502", at: NOW },
     });
   });
 });
@@ -2754,6 +2900,30 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(h.dispatched).toEqual([]);
   });
 
+  it("steer tells a superseded child to end without publishing, through its inbox rather than a stop", async () => {
+    const h = await planHarness();
+    await h.store.put(record("run-r1", { parentInstanceId: PLAN_INSTANCE.id }));
+    const sent: Array<{ runId: string; text: string }> = [];
+    h.deps.steerChild = async (runId, text) => {
+      sent.push({ runId, text });
+      return true;
+    };
+    expect(
+      await call(h, "steer", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        runId: "run-r1",
+        reason: "merged",
+      }),
+    ).toEqual({ status: 200, body: { ok: true, outcome: "steered", at: NOW } });
+    expect(sent).toEqual([
+      {
+        runId: "run-r1",
+        text: "The pull request merged while this run was live. End now without a push or a review post. Record what already happened in the run's final reply.",
+      },
+    ]);
+  });
+
   it("read-record answers a finished child's typed artifacts — the pull request it opened, the verdict and reviewed head, whether the bot's verdict stands on the pull request at that head, the dispositions, whether a handoff was submitted", async () => {
     const HEAD = "a".repeat(40);
     const h = await planHarness({
@@ -3128,6 +3298,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         prNumber: 12,
         url: "https://github.com/acme/api/pull/12",
         headSha: "abc123",
+        headBranchExists: true,
         at: NOW,
       },
     });
@@ -3139,14 +3310,13 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect((await call(h, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U99" })).status).toBe(404);
 
     // `checks: true` (the ending's facts read, record 0055) adds the check runs
-    // at the head as the merge door reads them; an unreadable GitHub leaves the
-    // field out rather than failing the read; without the flag nothing is asked.
+    // at the head as the merge door reads them; without the flag nothing is asked.
     const withChecks = await planHarness({
       pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },
       checks: { total: 3, pending: ["ci / web"], failed: ["ci / package"] },
       // The ready state rides beside the checks (agent-ship item 9): the pull
       // request's own mergeable state and the head's self-declared fix-ups.
-      prFacts: { state: "open", sameRepoHead: true, mergeableState: "dirty" },
+      prFacts: { state: "open", sameRepoHead: true, headSha: "abc123", mergeableState: "dirty" },
       fixups: ["fixup! fix the login"],
       // The base's merge-queue rule rides the same read (issue 2011): the
       // merge:person report says the person's merge is queued.
@@ -3181,11 +3351,10 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       unit: "U10",
       checks: true,
     });
-    expect(noChecks.status).toBe(200);
-    expect(noChecks.body).not.toHaveProperty("checks");
-    expect(noChecks.body).not.toHaveProperty("mergeableState");
-    expect(noChecks.body).not.toHaveProperty("fixupCommits");
-    expect(noChecks.body).not.toHaveProperty("baseHasMergeQueue");
+    expect(noChecks).toEqual({
+      status: 502,
+      body: { ok: false, error: "github_unavailable", message: "GitHub 502", at: NOW },
+    });
   });
 
   it("pr-check for a unit whose branch only a merged pull request heads answers merged and remembers that pull request on the row, so the row reads like a unit the runner merged", async () => {
@@ -4324,10 +4493,47 @@ describe("POST /admin/coordinator/checks — the round's checks read at the revi
       failed: [{ name: "test 2 of 4", conclusion: "timed_out", url: "https://x/1", flakeSuspect: true }],
     };
     const h = await checksHarness({ roundChecks: red });
-    expect(await checks(h)).toEqual({ status: 200, body: { ok: true, checks: red, at: NOW } });
+    expect(await checks(h)).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        checks: red,
+        pullRequest: {
+          state: "open",
+          prNumber: 7,
+          url: "https://github.com/acme/api/pull/7",
+          headSha: HEAD,
+          headBranchExists: true,
+        },
+        at: NOW,
+      },
+    });
     expect(h.roundChecksAsked).toEqual([7]);
     // Nothing pending and checks reported: no merge-wait registration.
     expect(h.mergeWaitNotes).toEqual([]);
+  });
+
+  it("agent-ship item 10: an unknown head-branch state dispatches no check read or recovery and returns a retryable GitHub error", async () => {
+    const h = await checksHarness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headRef: "ship/warm-abc123",
+        headSha: HEAD,
+        headBranchExists: undefined,
+      },
+      roundChecks: { total: 1, pending: [], failed: [] },
+    });
+    expect(await checks(h)).toEqual({
+      status: 502,
+      body: {
+        ok: false,
+        error: "github_unavailable",
+        message: "could not verify whether acme/api#7's head branch exists",
+        at: NOW,
+      },
+    });
+    expect(h.roundChecksAsked).toEqual([]);
   });
 
   it("falls back to the merge door's plain reading when no round reader is wired — every failure a real one — and an unreadable GitHub leaves checks out", async () => {
@@ -4450,6 +4656,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     author: { login: "acme-switchboard[bot]", id: 4242 },
     headRef: "plan/fixture/u10-warm",
     headSha: HEAD,
+    headBranchExists: true,
     sameRepoHead: true,
     baseRef: "main",
     title: "feat(cache): warm on wake",
@@ -4512,6 +4719,20 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     // A seven-hex approved head still pins the squash to what GitHub has.
     const short = await mergeHarness();
     expect((await merge(short, { ...body, headSha: HEAD.slice(0, 7) })).body).toMatchObject({ outcome: "merged" });
+  });
+
+  it("agent-ship item 10: an unknown head-branch state dispatches no merge and returns a retryable GitHub error", async () => {
+    const h = await mergeHarness({ prFacts: facts({ headBranchExists: undefined }) });
+    expect(await merge(h)).toEqual({
+      status: 502,
+      body: {
+        ok: false,
+        error: "github_unavailable",
+        message: "could not verify whether acme/api#7's head branch exists",
+        at: NOW,
+      },
+    });
+    expect(h.merges).toEqual([]);
   });
 
   it("the grant decides first: a coordinator bearer without plan:merge is refused naming the grant, and nothing is asked of GitHub", async () => {
@@ -4599,10 +4820,12 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     expect(h.merges).toEqual([]);
   });
 
-  it("the pull request must be open, head the unit's branch and stand at the approved head; the bot's approving review must be pinned there — each refusal names what is off, and GitHub silent on the reviews is a passing 502", async () => {
-    expect((await merge(await mergeHarness({ prFacts: facts({ state: "closed" }) }))).body).toMatchObject({
-      outcome: "refused",
-      reason: "acme/api#7 is closed",
+  it("a closed or moved pull request is returned as a fresh recheck before the merge; the approval must still be pinned at an unchanged head", async () => {
+    expect(
+      (await merge(await mergeHarness({ prFacts: facts({ state: "closed", closedBy: "maintainer" }) }))).body,
+    ).toMatchObject({
+      outcome: "recheck",
+      pullRequest: { state: "closed", closedBy: "maintainer" },
     });
     expect(
       (await merge(await mergeHarness({ prFacts: facts({ headRef: "plan/fixture/u11-other" }) }))).body,
@@ -4611,8 +4834,8 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       reason: "acme/api#7 heads `plan/fixture/u11-other`, not the unit's branch `plan/fixture/u10-warm`",
     });
     expect((await merge(await mergeHarness({ prFacts: facts({ headSha: "b".repeat(40) }) }))).body).toMatchObject({
-      outcome: "refused",
-      reason: `the head of acme/api#7 moved: \`${"b".repeat(7)}\` is not the approved \`${HEAD.slice(0, 7)}\``,
+      outcome: "recheck",
+      pullRequest: { state: "open", headSha: "b".repeat(40) },
     });
     const otherAuthor = await mergeHarness({
       reviews: [{ author: { login: "alice" }, state: "APPROVED", commitId: HEAD, body: "LGTM: clean" }],
@@ -4712,10 +4935,10 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       outcome: "refused",
       reason: "GitHub refused the merge of acme/api#7 (HTTP 405): Pull Request is not mergeable",
     });
-    const unreadable = await mergeHarness({ prFacts: undefined });
+    const unreadable = await mergeHarness({ prFacts: new Error("GitHub 502") });
     expect(await merge(unreadable)).toEqual({
       status: 502,
-      body: { ok: false, error: "github_unavailable", message: "acme/api#7 could not be read", at: NOW },
+      body: { ok: false, error: "github_unavailable", message: "GitHub 502", at: NOW },
     });
     const threw = await mergeHarness({ merge: new Error("HTTP 502 bad gateway") });
     expect((await merge(threw)).status).toBe(502);

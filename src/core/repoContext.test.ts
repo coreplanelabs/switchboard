@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PR_BODY_CAP, ownPrOf, prCommitsSince, recordPrOf, repoFromThread, resolveRepoContext } from "./repoContext.js";
+import {
+  currentPrHeadSha,
+  PR_BODY_CAP,
+  ownPrOf,
+  prCommitsSince,
+  recordPrOf,
+  repoFromThread,
+  resolveRepoContext,
+} from "./repoContext.js";
 
 // Feature: docs/reference/specs/resident-repos.md item 29 — repo/ref resolution BEFORE the
 // model turn: explicit signals in the current message (owner/name slug,
@@ -33,6 +41,17 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+});
+
+describe("currentPrHeadSha — the review post transition guard", () => {
+  it("returns a head only while the pull request is open; merged or closed is terminal", async () => {
+    const sha = "a".repeat(40);
+    stubFetch({ body: { state: "open", merged: false, head: { sha } } });
+    await expect(currentPrHeadSha({ repo: "acme/api", number: 7 })).resolves.toBe(sha);
+
+    stubFetch({ body: { state: "closed", merged: true, merged_at: "2026-09-22T05:50:58Z", head: { sha } } });
+    await expect(currentPrHeadSha({ repo: "acme/api", number: 7 })).resolves.toBeUndefined();
+  });
 });
 
 describe("resolveRepoContext: explicit signals in the current message", () => {
