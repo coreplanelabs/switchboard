@@ -1614,16 +1614,18 @@ describe("resident repo dispatch", () => {
 // clarifying question, no model turn burned), and the resident prompt variant
 // selected AFTER executor resolution via RunOptions.system.
 
-/** Router-style fetch stub for the resident service: /status and /attach. */
+/** Router-style fetch stub for the resident service: /status, /attach and /exec. */
 function residentFetchStub(
   handlers: {
     status?: () => Response;
     attach?: (body: Record<string, unknown>) => Response;
+    exec?: (body: Record<string, unknown>) => Response;
     /** GitHub's REST API, for a resolution that fetches a pull request. */
     github?: (path: string) => Response;
   } = {},
 ) {
   const calls: Array<{ path: string; host: string; body?: Record<string, unknown> }> = [];
+  let attachedSha = "abc";
   const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
     const { pathname: path, host } = new URL(String(url));
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
@@ -1633,12 +1635,28 @@ function residentFetchStub(
       return handlers.status?.() ?? new Response(JSON.stringify({ state: "warm", reason: "" }), { status: 200 });
     }
     if (path === "/attach") {
-      return (
+      const response =
         handlers.attach?.(body ?? {}) ??
         new Response(
           JSON.stringify({ workspace: "/workspace/threads/t/main", ref: "main", sha: "abc", user: "worker2" }),
           { status: 200 },
-        )
+        );
+      const answer = (await response
+        .clone()
+        .json()
+        .catch(() => undefined)) as { sha?: unknown } | undefined;
+      if (typeof answer?.sha === "string") attachedSha = answer.sha;
+      return response;
+    }
+    if (path === "/exec") {
+      if (handlers.exec === undefined && body?.command !== "git rev-parse HEAD") {
+        throw new Error(`unexpected fetch: ${String(url)}`);
+      }
+      return (
+        handlers.exec?.(body ?? {}) ??
+        new Response(JSON.stringify({ stdout: `${attachedSha}\n`, stderr: "", exitCode: 0, truncated: false }), {
+          status: 200,
+        })
       );
     }
     throw new Error(`unexpected fetch: ${String(url)}`);
@@ -2214,13 +2232,110 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(replies.some((r) => /not started/i.test(r))).toBe(false);
   });
 
-  it("a resident review attached at ANOTHER commit than the PR head is not started: named reply, no model turn, worktree released", async () => {
+  it("a genuine push during workspace preparation is reprovisioned at the reviewed head and the review runs", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
     const head = "e".repeat(40);
-    const attached = "4dd3832099140ee5c76022a525bbc5e7629d5ada";
-    // Own stub: the shared one has no /detach route, and the release is the point here.
+    const previousHead = "4dd3832099140ee5c76022a525bbc5e7629d5ada";
+    let attaches = 0;
+    const { calls } = residentFetchStub({
+      attach: () => {
+        attaches++;
+        return new Response(
+          JSON.stringify({
+            workspace: "/workspace/threads/t-9f/patch-1",
+            ref: "patch-1",
+            sha: attaches === 1 ? previousHead : head,
+            user: "worker3",
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: head, baseRef: "main" });
+    deps.fetchPrHead = async () => head;
+    deps.postReviewComment = vi.fn(async () => {});
+    const { io, replies } = fakeIO();
+
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+
+    expect(provider.requests).toHaveLength(2); // the review and its no-verdict follow-up both ran
+    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+    expect(calls.filter((c) => c.path === "/attach").map((c) => c.body?.sha)).toEqual([head, head]);
+  });
+
+  it("a unit reviewing an adopted pull request binds its attach to the pull request branch instead of its own", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const head = "e".repeat(40);
+    const unitHead = "4dd3832099140ee5c76022a525bbc5e7629d5ada";
+    const { calls } = residentFetchStub({
+      attach: (body) =>
+        new Response(
+          JSON.stringify(
+            body.ownPr === undefined
+              ? {
+                  workspace: "/workspace/threads/t-9f/patch-1",
+                  ref: "patch-1",
+                  sha: head,
+                  user: "worker3",
+                }
+              : {
+                  workspace: "/workspace/threads/t-9f/unit-review-u1",
+                  ref: "feature/unit-review-u1",
+                  sha: unitHead,
+                  user: "worker3",
+                },
+          ),
+          { status: 200 },
+        ),
+    });
+    const provider = capturingProvider();
+    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "patch-1",
+      refFromPr: true,
+      pr: 42,
+      prFromRecord: true,
+      headSha: head,
+      baseRef: "main",
+    });
+    deps.fetchPrHead = async () => head;
+    deps.postReviewComment = vi.fn(async () => {});
+    const contract = contractFromPlan({
+      planMarkdown: "### U10. review the adopted pull request\n\nreview the adopted pull request\n",
+      unitId: "U10",
+      readSpec: () => undefined,
+      rebase: { branch: "feature/unit-review-u1", onto: "main" },
+    });
+    const { io, replies } = fakeIO();
+
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io, { contract });
+
+    expect(provider.requests).toHaveLength(2);
+    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+    expect(calls.find((c) => c.path === "/attach")?.body).toMatchObject({
+      refHint: "patch-1",
+      sha: head,
+      readonly: true,
+    });
+    expect(calls.find((c) => c.path === "/attach")?.body).not.toHaveProperty("ownPr");
+  });
+
+  it("a failed reprovision refuses with the two heads and no cause the guard did not establish", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const expectedHead = "e".repeat(40);
+    const firstHead = "4dd3832099140ee5c76022a525bbc5e7629d5ada";
+    const reprovisionedHead = "5dd3832099140ee5c76022a525bbc5e7629d5adb";
+    let attaches = 0;
+    let checkedOutHead = firstHead;
     const calls: Array<{ path: string; body?: Record<string, unknown> }> = [];
     vi.stubGlobal(
       "fetch",
@@ -2230,16 +2345,22 @@ describe("repo/ref resolution + resident prompt selection", () => {
         calls.push({ path, body });
         if (path === "/status") return new Response(JSON.stringify({ state: "warm", reason: "" }), { status: 200 });
         if (path === "/attach") {
+          attaches++;
+          checkedOutHead = attaches === 1 ? firstHead : reprovisionedHead;
           return new Response(
             JSON.stringify({
               workspace: "/workspace/threads/t-9f/patch-1",
               ref: "patch-1",
-              sha: attached,
+              sha: checkedOutHead,
               user: "worker3",
             }),
-            {
-              status: 200,
-            },
+            { status: 200 },
+          );
+        }
+        if (path === "/exec") {
+          return new Response(
+            JSON.stringify({ stdout: `${checkedOutHead}\n`, stderr: "", exitCode: 0, truncated: false }),
+            { status: 200 },
           );
         }
         if (path === "/detach") return new Response(JSON.stringify({ released: true }), { status: 200 });
@@ -2248,25 +2369,27 @@ describe("repo/ref resolution + resident prompt selection", () => {
     );
     const provider = capturingProvider();
     const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
-    const ctx = { repo: "acme/api", ref: "patch-1", pr: 42, headSha: head, baseRef: "main" };
-    deps.resolveRepoContext = () => ctx;
-    const post = vi.fn(async () => {});
-    deps.postReviewComment = post;
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "patch-1",
+      pr: 42,
+      headSha: expectedHead,
+      baseRef: "main",
+    });
+    deps.fetchPrHead = async () => "6dd3832099140ee5c76022a525bbc5e7629d5adc";
+    deps.postReviewComment = vi.fn(async () => {});
     const { io, replies, statuses } = fakeIO();
+
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
-    expect(provider.requests).toHaveLength(0); // no model turn burned on a guaranteed-refused review
-    expect(post).not.toHaveBeenCalled();
+
+    expect(provider.requests).toHaveLength(0);
     const reply = replies.find((r) => /not started/i.test(r)) ?? "";
-    expect(reply).toContain("acme/api#42");
-    expect(reply).toContain(attached); // what the resident attached
-    expect(reply).toContain(head); // what the PR head is
-    expect(reply).toContain("This is a bug: the workspace was not reprovisioned automatically at the new head");
-    const last = statuses[statuses.length - 1];
-    expect(last.title).toMatch(/not started/);
-    // Before refusing, the PR's current head is asked once (item 12) — here the
-    // GET fails (unknown) — then the pool user goes back.
-    expect(calls.map((c) => c.path)).toEqual(["/status", "/attach", "/repos/acme/api/pulls/42", "/detach"]);
-    expect(calls[3]?.body).toMatchObject({ force: true });
+    expect(reply).toContain(reprovisionedHead);
+    expect(reply).toContain(expectedHead);
+    expect(reply).not.toMatch(/branch moved|push|force-push|bug/i);
+    expect(statuses.at(-1)?.title).toMatch(/not started.*workspace head mismatch/i);
+    expect(calls.filter((c) => c.path === "/attach").map((c) => c.body?.sha)).toEqual([expectedHead, expectedHead]);
+    expect(calls.at(-1)).toMatchObject({ path: "/detach", body: { force: true } });
   });
 
   // agent-review.md item 12: the resident's attach fetches the mirror to the
@@ -2331,10 +2454,8 @@ describe("repo/ref resolution + resident prompt selection", () => {
     );
     expect(system).not.toContain(`Head commit: ${resolvedHead}`);
     expect(replies.some((r) => /not started/i.test(r))).toBe(false);
-    // The shared stub has no /exec route, so the workspace HEAD is unobservable
-    // and no head was reported: the guard fails closed as always.
-    expect(replies.some((r) => r.includes("reviewed head unknown"))).toBe(true);
-    expect(post).not.toHaveBeenCalled();
+    expect(replies.some((r) => r.includes("reviewed head unknown"))).toBe(false);
+    expect(post).toHaveBeenCalledTimes(1);
   });
 
   // When the PR head goes unresolved at resolution time and the run starts
@@ -3222,7 +3343,7 @@ describe("review post-step", () => {
       expect(reviewTurns(provider)).toHaveLength(1); // no re-review
       expect(ex.moves).toEqual([]);
       expect(ex.probeSpans.length).toBeGreaterThan(0);
-      expect(new Set(ex.probeSpans)).toEqual(new Set(["none", "run.settle_reviewed_head"]));
+      expect(new Set(ex.probeSpans)).toEqual(new Set(["dispatch.gate.attached_head", "run.settle_reviewed_head"]));
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
       expect(spy.calls[0].body).toMatch(

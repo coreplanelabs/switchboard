@@ -858,7 +858,11 @@ async function attachRound(
 ): Promise<RoundWorkspace> {
   const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal, remainingMs, requester } = ctx;
   const { onSetupNote } = ctx;
-  const ownPr = ownPrOf(repoCtx);
+  // A review target's PR-derived ref is authoritative. Passing `ownPr` asks
+  // the resident to preserve or conditionally move a sticky thread binding;
+  // that is right for a coding follow-up, but can keep a plan unit's branch
+  // when this round is reviewing an adopted pull request on another branch.
+  const ownPr = agent.name === "review" ? undefined : ownPrOf(repoCtx);
   return root.span("dispatch.workspace.attach", async (span) => {
     // The resident's own steps (clone, install, the mutex wait…) graft under
     // this span, rebased to its start (docs/reference/specs/tracing.md item 19) — on a

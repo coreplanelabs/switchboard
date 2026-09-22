@@ -547,17 +547,22 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
   const review = getAgent("review");
   const repoCtx: RepoContext = { repo: "acme/api", pr: 41, ref: "feature/x", headSha: SHA_A };
 
-  function selection(over: { sha?: string; resident?: boolean; observed?: string; seeded?: boolean } = {}): {
+  function selection(over: { sha?: string; resident?: boolean; observed?: string | string[]; seeded?: boolean } = {}): {
     selection: ExecutorSelection;
     releases: string[];
     commands: string[];
   } {
     const releases: string[] = [];
     const commands: string[] = [];
+    const observed = Array.isArray(over.observed) ? [...over.observed] : [over.observed ?? ""];
     const executor = {
       exec: async (command: string) => {
         commands.push(command);
-        return command.includes("rev-parse HEAD") ? (over.observed ?? "") : "provisioned";
+        return command.includes("rev-parse HEAD")
+          ? observed.length > 1
+            ? observed.shift()!
+            : (observed[0] ?? "")
+          : "provisioned";
       },
       release: async (mode: string) => {
         releases.push(mode);
@@ -602,7 +607,7 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
 
   it("the worktree attached at the PR head: verified, the repo context unchanged", async () => {
     const s = setup();
-    const { selection: sel } = selection({ sha: SHA_A });
+    const { selection: sel } = selection({ sha: SHA_A, observed: `${SHA_A}\n` });
     expect(await authorizeAttachedHead({ ...s.deps, fetchPrHead: async () => SHA_C }, ctx(s, sel))).toEqual({
       kind: "allowed",
       repoCtx,
@@ -612,10 +617,23 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
     expect(s.replies).toEqual([]);
   });
 
+  it("a resident binding SHA cannot verify a checkout whose observed HEAD differs", async () => {
+    const s = setup();
+    const { selection: sel, commands, releases } = selection({ sha: SHA_A, observed: `${SHA_B}\n` });
+
+    expect(await authorizeAttachedHead({ ...s.deps, fetchPrHead: async () => SHA_C }, ctx(s, sel))).toEqual({
+      kind: "refused",
+      reason: "workspace_head_mismatch",
+    });
+    expect(commands.filter((command) => command === "git rev-parse HEAD")).toHaveLength(2);
+    expect(releases).toEqual(["always"]);
+    expect(s.replies[0]).toContain(`workspace-observed HEAD for feature/x is at ${SHA_B}`);
+  });
+
   it("a push raced the request and the worktree sits at the PR's current head: adopted — the repo context takes that head and the caller re-publishes the run meta", async () => {
     const s = setup();
     const asked: unknown[] = [];
-    const { selection: sel } = selection({ sha: SHA_B });
+    const { selection: sel } = selection({ sha: SHA_B, observed: `${SHA_B}\n` });
     const out = await authorizeAttachedHead(
       {
         ...s.deps,
@@ -635,17 +653,73 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
     expect(asked).toEqual([{ repo: "acme/api", number: 41 }]);
   });
 
-  it("the branch moved while the worktree was being attached: refused — the pool user released, the card closed, one named reply, no model turn", async () => {
+  it("the workspace stays mismatched after one reprovision: refused — the pool user released, the card closed, one evidence-only reply, no model turn", async () => {
     const s = setup();
-    const { selection: sel, releases } = selection({ sha: SHA_B });
+    const { selection: sel, releases } = selection({ sha: SHA_B, observed: `${SHA_B}\n` });
     const out = await authorizeAttachedHead({ ...s.deps, fetchPrHead: async () => SHA_C }, ctx(s, sel));
-    expect(out).toEqual({ kind: "refused", reason: "branch_moved" });
-    expect(s.refusals).toEqual(["branch_moved"]);
+    expect(out).toEqual({ kind: "refused", reason: "workspace_head_mismatch" });
+    expect(s.refusals).toEqual(["workspace_head_mismatch"]);
     expect(releases).toEqual(["always"]);
-    expect(closedReasons(s.closes).join("\n")).toContain("branch moved");
-    expect(s.replies[0]).toContain(
-      `🔀 Review of acme/api#41 not started: the resident binding for feature/x is at ${SHA_B}, but the PR head is ${SHA_A}`,
+    expect(closedReasons(s.closes).join("\n")).toContain("workspace head mismatch");
+    expect(s.replies[0]).toContain(SHA_B);
+    expect(s.replies[0]).toContain(`expected reviewed head is ${SHA_A}`);
+    expect(s.replies[0]).not.toMatch(/branch moved|push|force-push|bug/i);
+  });
+
+  it("a resident moveTo failure refuses without describing the initial binding as the retry observation", async () => {
+    const s = setup();
+    const { selection: sel, releases } = selection({ sha: SHA_B, observed: `${SHA_B}\n` });
+    sel.executor.moveTo = async () => {
+      throw new Error("resident move failed");
+    };
+
+    expect(await authorizeAttachedHead({ ...s.deps, fetchPrHead: async () => SHA_C }, ctx(s, sel))).toEqual({
+      kind: "refused",
+      reason: "workspace_head_mismatch",
+    });
+    expect(releases).toEqual(["always"]);
+    expect(s.replies[0]).toContain(`initial workspace-observed HEAD for feature/x was at ${SHA_B}`);
+    expect(s.replies[0]).toContain("automatic reprovision failed before a retry HEAD could be observed");
+    expect(s.replies[0]).not.toContain(
+      `after one automatic reprovision, the resident binding for feature/x is at ${SHA_B}`,
     );
+  });
+
+  it("resident moveTo metadata cannot verify a retry whose observed HEAD is still mismatched", async () => {
+    const s = setup();
+    const { selection: sel, commands, releases } = selection({ sha: SHA_B, observed: `${SHA_B}\n` });
+    sel.executor.moveTo = async () => ({ sha: SHA_A });
+
+    expect(await authorizeAttachedHead({ ...s.deps, fetchPrHead: async () => SHA_C }, ctx(s, sel))).toEqual({
+      kind: "refused",
+      reason: "workspace_head_mismatch",
+    });
+    expect(commands.filter((command) => command === "git rev-parse HEAD")).toHaveLength(2);
+    expect(releases).toEqual(["always"]);
+    expect(s.replies[0]).toContain(`workspace-observed HEAD for feature/x is at ${SHA_B}`);
+  });
+
+  it("a successful retry publishes the observed checkout HEAD instead of moveTo metadata", async () => {
+    const s = setup();
+    const {
+      selection: sel,
+      commands,
+      releases,
+    } = selection({
+      sha: SHA_B,
+      observed: [`${SHA_B}\n`, `${SHA_A}\n`],
+    });
+    sel.executor.moveTo = async () => ({ sha: SHA_C });
+
+    expect(await authorizeAttachedHead({ ...s.deps, fetchPrHead: async () => SHA_C }, ctx(s, sel))).toEqual({
+      kind: "allowed",
+      repoCtx,
+      verifiedAtAttach: true,
+      headAdopted: false,
+    });
+    expect(commands.filter((command) => command === "git rev-parse HEAD")).toHaveLength(2);
+    expect(sel.binding?.sha).toBe(SHA_A);
+    expect(releases).toEqual([]);
   });
 
   it("an unseeded non-resident backend provisions the PR checkout at the resolved head before verifying it; a mismatch is refused and released before the model", async () => {
@@ -687,10 +761,10 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
         { ...mismatched.deps, fetchPrHead: async () => SHA_C },
         ctx(mismatched, elsewhere.selection),
       ),
-    ).toEqual({ kind: "refused", reason: "branch_moved" });
+    ).toEqual({ kind: "refused", reason: "workspace_head_mismatch" });
     expect(elsewhere.releases).toEqual(["always"]);
     expect(mismatched.replies[0]).toContain(`workspace-observed HEAD for feature/x is at ${SHA_B}`);
-    expect(mismatched.replies[0]).toContain(`PR head is ${SHA_A}`);
+    expect(mismatched.replies[0]).toContain(`expected reviewed head is ${SHA_A}`);
   });
 
   it("an unreadable workspace head is refused fail-closed; only non-review and resumed runs skip the first-turn guard", async () => {
@@ -698,10 +772,12 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
     const noSha = selection({ resident: false, observed: "exit 128: not a git repository" });
     expect(await authorizeAttachedHead(unknown.deps, ctx(unknown, noSha.selection))).toEqual({
       kind: "refused",
-      reason: "branch_moved",
+      reason: "workspace_head_mismatch",
     });
     expect(noSha.releases).toEqual(["always"]);
-    expect(unknown.replies[0]).toContain("workspace-observed HEAD for feature/x could not be read");
+    expect(unknown.replies[0]).toContain(
+      "workspace-observed HEAD for feature/x could not be read after one automatic reprovision",
+    );
 
     const asked: unknown[] = [];
     const deps: AuthorizeDeps = {

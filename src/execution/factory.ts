@@ -314,9 +314,10 @@ export interface ExecutorSelection {
   trace?: ResidentStep[];
   /** The resident's own total for the attach, for the clock-skew attr. */
   attachMs?: number;
-  /** The resident's attach answer (ref, sha, worktree path) on the resident
-   *  path — the dispatcher names the path to the model and checks the sha
-   *  against the PR head before a review runs. Unset on every other path. */
+  /** The resident's attach answer (ref, advisory sha, worktree path) on the
+   *  resident path — the dispatcher names the path to the model and observes
+   *  the checkout HEAD through the executor before a review runs. Unset on
+   *  every other path. */
   binding?: ResidentBinding;
   /** The drain's share of a failed attach's wait (issue 2101): on the sandbox
    *  fallback after a drained fleet refused the run, so the dispatcher still

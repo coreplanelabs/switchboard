@@ -47,7 +47,7 @@ const CAUSE_OF = {
   repo_not_onboarded: "request",
   repo_access: "policy",
   pr_head_unknown: "system",
-  branch_moved: "system",
+  workspace_head_mismatch: "system",
   coordinator_thread_live: "system",
   live_agent_allowlist: "policy",
   follow_up_refused: "request",

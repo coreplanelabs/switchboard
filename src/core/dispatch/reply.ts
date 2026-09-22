@@ -520,7 +520,7 @@ export async function renderConfirmationOffer(io: ChannelIO, offer: Confirmation
  * Codes missing here carry producer-built text on the `Refusal` instead:
  * `profile_bounded` (`profileRefusalReply`), `follow_up_refused` and its
  * `elsewhere_` twin (`refusalReply` in admission.ts), `pr_head_unknown`
- * (`checkPrHeadPreflight`), `branch_moved` (`guardAttachedHead`),
+ * (`checkPrHeadPreflight`), `workspace_head_mismatch` (`guardAttachedHead`),
  * `ship_preflight` (the preflight's own reply), the reference codes (the one
  * `REFERENCE_REFUSAL` line), the click codes (confirm.ts's lines), and the
  * silent codes (`coordinator_thread_live`, `workspace_lost`, `setup_failed`,
