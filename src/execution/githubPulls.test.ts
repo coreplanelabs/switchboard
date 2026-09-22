@@ -11,6 +11,7 @@ import {
   forceMoveRef,
   isAssignable,
   pullRequestHead,
+  fetchPullRequestComments,
   fetchPullRequestFacts,
   fetchPullRequestTitleBody,
   fetchCommitChecks,
@@ -635,6 +636,7 @@ describe("githubPulls", () => {
                 user: { login: "acme-switchboard[bot]", id: 318072483 },
                 state: "COMMENTED",
                 commit_id: "c".repeat(40),
+                submitted_at: "2026-09-21T19:20:00Z",
                 body: "LGTM: clean",
               },
               { user: { login: "alice" }, state: "APPROVED", commit_id: "c".repeat(40), body: null },
@@ -648,6 +650,7 @@ describe("githubPulls", () => {
           author: { login: "acme-switchboard[bot]", id: 318072483 },
           state: "COMMENTED",
           commitId: "c".repeat(40),
+          submittedAt: "2026-09-21T19:20:00Z",
           body: "LGTM: clean",
         },
         { author: { login: "alice" }, state: "APPROVED", commitId: "c".repeat(40), body: "" },
@@ -661,6 +664,98 @@ describe("githubPulls", () => {
         throw new Error("offline");
       });
       expect(await fetchPullRequestReviews({ repo: "acme/api", number: 7 })).toBeUndefined();
+    });
+
+    it("fetchPullRequestComments reads attributed conversation comments and ignores malformed rows", async () => {
+      stubToken();
+      const calls = stubFetch(
+        () =>
+          new Response(
+            JSON.stringify([
+              {
+                id: 99,
+                user: { login: "alice", id: 42, type: "User" },
+                created_at: "2026-09-21T19:21:00Z",
+                body: "The independent reader supplied the receipt.",
+              },
+              { id: "bad" },
+            ]),
+            { status: 200 },
+          ),
+      );
+      expect(await fetchPullRequestComments({ repo: "acme/api", number: 7 })).toEqual([
+        {
+          id: 99,
+          author: { login: "alice", id: 42, type: "User" },
+          createdAt: "2026-09-21T19:21:00Z",
+          body: "The independent reader supplied the receipt.",
+        },
+      ]);
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/issues/7/comments?per_page=100");
+    });
+
+    it("follows every review and comment page so an adopted human gate on page 2 finds its answer on page 3", async () => {
+      stubToken();
+      const reviews = "https://api.github.com/repos/acme/api/pulls/7/reviews";
+      const comments = "https://api.github.com/repos/acme/api/issues/7/comments";
+      const canonicalReviews = "https://api.github.com/repositories/123/pulls/7/reviews";
+      const canonicalComments = "https://api.github.com/repositories/123/issues/7/comments";
+      const calls = stubFetch((rawUrl) => {
+        const url = new URL(rawUrl);
+        const page = Number(url.searchParams.get("page") ?? "1");
+        const isReview = url.pathname.includes("/pulls/");
+        const canonicalBase = isReview ? canonicalReviews : canonicalComments;
+        const next = page < 3 ? `<${canonicalBase}?per_page=100&page=${page + 1}>; rel="next"` : "";
+        const last = page < 3 ? `<${canonicalBase}?per_page=100&page=3>; rel="last"` : "";
+        const link = [next, last].filter(Boolean).join(", ");
+        const rows = isReview
+          ? page === 2
+            ? [
+                {
+                  user: { login: "acme-switchboard[bot]", id: 318072483 },
+                  state: "COMMENTED",
+                  commit_id: "c".repeat(40),
+                  submitted_at: "2026-09-21T19:20:00Z",
+                  body: "REVIEW-VERDICT: request_changes\nF1 is human-gated.",
+                },
+              ]
+            : [{ user: { login: "alice", id: 42 }, state: "COMMENTED", body: `review page ${page}` }]
+          : page === 3
+            ? [
+                {
+                  id: 303,
+                  user: { login: "alice", id: 42, type: "User" },
+                  created_at: "2026-09-21T19:21:00Z",
+                  body: "The independent reader supplied the receipt.",
+                },
+              ]
+            : [
+                {
+                  id: page * 100,
+                  user: { login: "acme-switchboard[bot]", id: 318072483, type: "Bot" },
+                  created_at: `2026-09-21T19:${18 + page}:00Z`,
+                  body: `comment page ${page}`,
+                },
+              ];
+        return new Response(JSON.stringify(rows), { status: 200, headers: link ? { link } : undefined });
+      });
+
+      const reviewRows = await fetchPullRequestReviews({ repo: "acme/api", number: 7 });
+      const commentRows = await fetchPullRequestComments({ repo: "acme/api", number: 7 });
+
+      expect(reviewRows?.find((row) => row.body.includes("F1 is human-gated"))).toMatchObject({
+        author: { login: "acme-switchboard[bot]", id: 318072483 },
+        submittedAt: "2026-09-21T19:20:00Z",
+      });
+      expect(commentRows?.find((row) => row.id === 303)?.body).toBe("The independent reader supplied the receipt.");
+      expect(calls.map((call) => call.url)).toEqual([
+        `${reviews}?per_page=100`,
+        `${canonicalReviews}?per_page=100&page=2`,
+        `${canonicalReviews}?per_page=100&page=3`,
+        `${comments}?per_page=100`,
+        `${canonicalComments}?per_page=100&page=2`,
+        `${canonicalComments}?per_page=100&page=3`,
+      ]);
     });
 
     // The PR object lags the branch ref after a force-push; the ref is the head.

@@ -175,14 +175,18 @@ async function continuationPreface(
  *  words and the ask: every finding gets a disposition, the description is
  *  resubmitted, the branch is pushed. The `address-review-findings` skill
  *  carries the craft. */
-function findingsRequest(input: { where: string; findings: Finding[]; review: string }): string {
+function findingsRequest(input: { where: string; findings: Finding[]; review: string; answers?: string[] }): string {
   const findings =
     input.findings.map(formatFinding).join("\n") || "(the review listed no structured findings, address its prose)";
+  const answers =
+    input.answers !== undefined && input.answers.length > 0
+      ? `\n\nA person answered the human-gated finding. Treat the finding and this answer together as the fix brief:\n${input.answers.join("\n\n")}`
+      : "";
   return (
     `The review of ${input.where} requested changes. Load the \`address-review-findings\` skill and address every finding below, nits included: ` +
     `record one disposition per finding with submit_dispositions (fixed or declined, with a note), squash to coherent commits, ` +
     `resubmit the pull request description with submit_pr_description, and push the branch. Never merge and never approve.\n\n` +
-    `Findings:\n${findings}\n\nReview:\n${input.review}`
+    `Findings:\n${findings}${answers}\n\nReview:\n${input.review}`
   );
 }
 
@@ -223,8 +227,14 @@ export async function composeChild(
         // The prior round's check findings ride the brief by value (record
         // 0055): they sit on no run's record, so they join the review run's
         // own findings here — the coding run's dispositions match them by id
-        // exactly as a reviewer's.
-        const findings = [...((await facts(readers, brief.prior.reviewRunId)).findings ?? []), ...(brief.checks ?? [])];
+        // exactly as a reviewer's. An adopted posted verdict has no run row,
+        // so its marker-derived findings ride the brief directly.
+        const reviewFindings =
+          brief.prior.findings ??
+          (brief.prior.reviewRunId !== undefined
+            ? ((await facts(readers, brief.prior.reviewRunId)).findings ?? [])
+            : []);
+        const findings = [...reviewFindings, ...(brief.checks ?? [])];
         const recorded =
           brief.prior.codingRunId !== undefined
             ? ((await facts(readers, brief.prior.codingRunId)).dispositions ?? [])
@@ -248,7 +258,12 @@ export async function composeChild(
       return { preset: "review", prompt: `${prUrl(instance.repo, brief.pr)} ${severity}\n\n${turn}`, contract };
     }
     case "findings": {
-      const review = await facts(readers, brief.reviewRunId);
+      const review =
+        brief.reviewRunId !== undefined
+          ? brief.findings !== undefined
+            ? ((await readers.readRunFacts(brief.reviewRunId)) ?? {})
+            : await facts(readers, brief.reviewRunId)
+          : ({} as ChildRunFacts);
       // The round's check findings (record 0055) join the reviewer's: they sit
       // on no run's record, so the brief carries them by value and the coding
       // session answers them with dispositions exactly as a reviewer's.
@@ -256,8 +271,9 @@ export async function composeChild(
         preset: "coding",
         prompt: findingsRequest({
           where,
-          findings: [...(review.findings ?? []), ...(brief.checks ?? [])],
+          findings: [...(brief.findings ?? review.findings ?? []), ...(brief.checks ?? [])],
           review: review.finalReply ?? "",
+          ...(brief.answers !== undefined ? { answers: brief.answers } : {}),
         }),
         ref: unit.branch,
       };

@@ -157,6 +157,7 @@ import {
   fetchCheckRunDetails,
   fetchMergeQueueState,
   fetchCommitChecks,
+  fetchPullRequestComments,
   fetchPullRequestFacts,
   fetchPullRequestTitleBody,
   fixupCommitSubjects,
@@ -178,6 +179,7 @@ import { createPullSweepService } from "./core/pullSweep.js";
 import { buildPullSweepDeps } from "./core/pullSweepWiring.js";
 import { RestGithubApi } from "./execution/githubApi.js";
 import { resolveGithubIdentity } from "./execution/githubApp.js";
+import { bindingOf } from "./execution/authorBinding.js";
 import { dispatchIdentityRewrite } from "./execution/identityRewrite.js";
 import { DEPLOY_RESTART_NOTICE, setShutdownNotice } from "./core/dispatch/run.js";
 import { channelVisibilityOf, writeAbandonedRunRecords } from "./core/dispatch/record.js";
@@ -1110,9 +1112,18 @@ export async function runBot(): Promise<void> {
         );
       },
     });
+    const commenterAuthorized = async (requester: string, author: { login: string; id?: number }) => {
+      const binding = await bindingOf(requester, config);
+      return (
+        binding !== undefined && author.id === binding.id && author.login.toLowerCase() === binding.login.toLowerCase()
+      );
+    };
     const githubWebhook = createGithubWebhookHandler({
       secret: processSecrets.get("GITHUB_WEBHOOK_SECRET")?.reveal(),
       watch: mergeWatch,
+      ownerOf: (repo, prNumber) => runnerOwnership.owner(repo, prNumber),
+      instances: coordinatorInstances,
+      commenterAuthorized,
       checksSettled: async (repo, headSha) => {
         const checks = await fetchCommitChecks(repo, headSha);
         return checks !== undefined && checks.total > 0 && checks.pending.length === 0;
@@ -1176,6 +1187,8 @@ export async function runBot(): Promise<void> {
       github: deps.githubApi ?? new RestGithubApi(),
       createBranchRef,
       fetchPrReviews: fetchPullRequestReviews,
+      fetchPrComments: fetchPullRequestComments,
+      commenterAuthorized,
       // The merge step (record 0031's merge grant): the pull request as GitHub has it, the checks at its head, the squash.
       fetchPrFacts: fetchPullRequestFacts,
       fetchCommitChecks,

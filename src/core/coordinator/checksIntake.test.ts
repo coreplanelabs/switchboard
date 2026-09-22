@@ -3,12 +3,14 @@ import {
   GITHUB_EVENT_HEADER,
   GITHUB_SIGNATURE_HEADER,
   handleCheckRunIntake,
+  handleIssueCommentIntake,
   handlePushIntake,
   verifyWebhookSignature,
   type CheckRunIntakeDeps,
   createMergeWaitRegistry,
 } from "./checksIntake.js";
-import { checksSettledEventType, type WorkflowSender } from "./contract.js";
+import { checksSettledEventType, unitNudgeEventType, type WorkflowSender } from "./contract.js";
+import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
 
 const SECRET = "hush";
 const HEAD = "a".repeat(40);
@@ -137,6 +139,121 @@ describe("the GitHub check-run intake — the checks-settled event's publisher (
     expect(failed).toEqual({ status: 200, body: { ok: true, settled: true, sent: 0, of: 1 } });
     expect(GITHUB_SIGNATURE_HEADER).toBe("x-hub-signature-256");
     expect(GITHUB_EVENT_HEADER).toBe("x-github-event");
+  });
+});
+
+describe("the pull-request comment intake — a person's answer wakes the owning unit", () => {
+  const commentBody = (type = "User") =>
+    JSON.stringify({
+      action: "created",
+      issue: { number: 7, pull_request: { url: "https://api.github.com/repos/octo/repo/pulls/7" } },
+      comment: {
+        id: 99,
+        body: "The independent reader supplied the receipt.",
+        created_at: ["2026", "09", "21"].join("-") + "T19:21:00Z",
+        user: { login: "alice", id: 42, type },
+      },
+      repository: { full_name: "octo/repo" },
+    });
+
+  async function liveInstances() {
+    const instances = new InMemoryCoordinatorInstanceStore();
+    const owner = { instanceId: "runner-fixture", unit: "U10" };
+    await instances.put({
+      id: owner.instanceId,
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1",
+      repo: "octo/repo",
+      branch: "plan/fixture/u1",
+      createdAt: 1,
+    });
+    await instances.putUnits([
+      {
+        instanceId: owner.instanceId,
+        unit: owner.unit,
+        slug: "u1",
+        branch: "fixture/x/u1",
+        dependsOn: [],
+        rounds: [],
+        idle: { why: "held", at: 1, renewalsLeft: 0, spendUsd: 1, wakes: 0 },
+      },
+    ]);
+    return { instances, owner };
+  }
+
+  it("a verified comment from the requester's bound GitHub account appends one attributed wake event and nudges the live idle unit", async () => {
+    const { instances, owner } = await liveInstances();
+    const w = workflow();
+    const raw = commentBody();
+    const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      ownerOf: () => owner,
+      instances,
+      commenterAuthorized: async (requester, author) =>
+        requester === "slack:UALICE" && author.login === "alice" && author.id === 42,
+      workflow: w.sender,
+      now: () => 1,
+    });
+    expect(result).toEqual({ status: 200, body: { ok: true, appended: true, seq: 1, nudge: "sent" } });
+    expect(await instances.listEvents(owner)).toEqual([
+      expect.objectContaining({
+        id: "github:issue-comment:99",
+        sender: "github:42",
+        senderName: "alice",
+        text: "The independent reader supplied the receipt.",
+        mode: "wake",
+      }),
+    ]);
+    expect(w.sent).toEqual([{ instance: owner.instanceId, type: unitNudgeEventType(owner), payload: {} }]);
+  });
+
+  it("a comment from an account not bound to the requester cannot wake or steer the unit", async () => {
+    const { instances, owner } = await liveInstances();
+    const w = workflow();
+    const raw = commentBody();
+    const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      ownerOf: () => owner,
+      instances,
+      commenterAuthorized: async () => false,
+      workflow: w.sender,
+      now: () => 1,
+    });
+    expect(result).toEqual({ status: 200, body: { ok: true, ignored: "sender" } });
+    expect(await instances.listEvents(owner)).toEqual([]);
+    expect(w.sent).toEqual([]);
+  });
+
+  it("a bot comment and an unowned pull request are acknowledged without appending", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore();
+    const bot = commentBody("Bot");
+    expect(
+      (
+        await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, bot) }, bot, {
+          secret: SECRET,
+          ownerOf: () => undefined,
+          instances,
+          commenterAuthorized: async () => false,
+          workflow: undefined,
+          now: () => 1,
+        })
+      ).body,
+    ).toEqual({ ok: true, ignored: "sender" });
+    const human = commentBody();
+    expect(
+      (
+        await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, human) }, human, {
+          secret: SECRET,
+          ownerOf: () => undefined,
+          instances,
+          commenterAuthorized: async () => false,
+          workflow: undefined,
+          now: () => 1,
+        })
+      ).body,
+    ).toEqual({ ok: true, ignored: "unowned" });
   });
 });
 

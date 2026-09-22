@@ -10,7 +10,13 @@
 //
 import { IDLE_DAYS_MAX, type Grant, type GrantSource } from "../budgets.js";
 import { isVerbosity, type Verbosity } from "../verbosity.js";
-import { isAddressSeverity, type AddressSeverity, type AddressSeveritySource } from "../ship/coordinator.js";
+import { isFindingShape } from "../reviewVerdict.js";
+import {
+  isAddressSeverity,
+  type AddressSeverity,
+  type AddressSeveritySource,
+  type HumanGatePending,
+} from "../ship/coordinator.js";
 import { isHandoffShape, type Handoff } from "../ship/handoff.js";
 
 // A coordinator is a Workflow instance in the shim Worker whose children are
@@ -421,6 +427,8 @@ export interface UnitIdle {
   runId?: string;
   spendUsd: number | null;
   handoff?: Handoff;
+  /** The human-gated question this idle is waiting on. */
+  humanGate?: HumanGatePending;
   wakes: number;
 }
 
@@ -439,6 +447,7 @@ export type UnitWakeAnswer =
       texts: string[];
       senders: string[];
       leaseMs?: number;
+      humanGate?: HumanGatePending;
     }
   | { kind: "answered"; reply: string }
   | { kind: "stopped" }
@@ -579,6 +588,23 @@ const isRoundGate = (v: unknown): boolean =>
   Array.isArray(v.findings) &&
   v.findings.every((f) => typeof f === "string");
 
+export const isHumanGatePending = (v: unknown): v is HumanGatePending =>
+  isObject(v) &&
+  isObject(v.pr) &&
+  typeof v.pr.number === "number" &&
+  Number.isInteger(v.pr.number) &&
+  v.pr.number > 0 &&
+  isText(v.pr.url) &&
+  typeof v.round === "number" &&
+  Number.isInteger(v.round) &&
+  v.round >= 1 &&
+  Array.isArray(v.findings) &&
+  v.findings.every((finding: unknown) => isFindingShape(finding)) &&
+  (v.verdict === "approve" || v.verdict === "request_changes") &&
+  (v.reviewRunId === undefined || isText(v.reviewRunId)) &&
+  (v.headSha === undefined || isText(v.headSha)) &&
+  (v.askedAt === undefined || isFinite(v.askedAt));
+
 const isUnitIdle = (v: unknown): boolean =>
   isObject(v) &&
   isText(v.why, IDLE_WHY_MAX) &&
@@ -588,6 +614,7 @@ const isUnitIdle = (v: unknown): boolean =>
   (v.runId === undefined || isText(v.runId)) &&
   (v.spendUsd === null || isFinite(v.spendUsd)) &&
   (v.handoff === undefined || isHandoffShape(v.handoff)) &&
+  (v.humanGate === undefined || isHumanGatePending(v.humanGate)) &&
   isCount(v.wakes);
 
 const isSegment = (v: unknown): boolean =>
@@ -616,7 +643,8 @@ export const isUnitWakeAnswer = (v: unknown): v is UnitWakeAnswer => {
     v.texts.every((text) => typeof text === "string") &&
     Array.isArray(v.senders) &&
     v.senders.every((sender) => isText(sender)) &&
-    (v.leaseMs === undefined || (isFinite(v.leaseMs) && v.leaseMs > 0))
+    (v.leaseMs === undefined || (isFinite(v.leaseMs) && v.leaseMs > 0)) &&
+    (v.humanGate === undefined || isHumanGatePending(v.humanGate))
   );
 };
 
@@ -692,6 +720,24 @@ export type RunFinishedSend =
   | { kind: "none" }
   | { kind: "no-binding"; instance: string }
   | { kind: "failed"; instance: string; type: string; reason: string };
+
+/** Wake one unit after durable outside input was appended. The payload is
+ * deliberately empty: the unit re-reads its own event list before acting. */
+export async function sendUnitNudge(
+  workflow: WorkflowSender | undefined,
+  key: { instanceId: string; unit: string },
+): Promise<RunFinishedSend> {
+  const instance = key.instanceId;
+  if (!workflow) return { kind: "no-binding", instance };
+  const type = unitNudgeEventType(key);
+  try {
+    const handle = await workflow.get(instance);
+    await handle.sendEvent({ type, payload: {} });
+    return { kind: "sent", instance, type };
+  } catch (err) {
+    return { kind: "failed", instance, type, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
 
 /** The one send per settled head (http-ingress.md item 12): best effort like
  *  `sendRunFinished` — a refusal is answered, never thrown, and the parent's

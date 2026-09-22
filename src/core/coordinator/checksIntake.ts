@@ -6,10 +6,12 @@
 // waits at that head, and the driver's `waitForEvent` wakes at once instead of
 // timing out its bounded fallback. Node-free — the signature check is Web
 // Crypto — so the bot and a Worker verify the same way.
-// One event kind is read here on purpose. The general door, every outside
-// fact filed into the thread that owns the work, is docs/decisions/0047-an-outside-fact-finds-the-thread-that-owns-the-work.md;
-// no second event-specific intake is added before it lands.
-import { sendChecksSettled, type RunFinishedSend, type WorkflowSender } from "./contract.js";
+// Check completions address the head wait directly. Pull-request conversation
+// comments take the general outside-fact path: resolve the live owner, append
+// one durable unit event, then nudge that owner to re-read its pending state.
+import { sendChecksSettled, sendUnitNudge, type RunFinishedSend, type WorkflowSender } from "./contract.js";
+import type { CoordinatorInstanceStore } from "./instanceStore.js";
+import type { RunnerPullOwner } from "../runnerOwnership.js";
 import type { MergeWatch, WatchResult } from "../mergeWatch.js";
 
 /** The webhook header GitHub signs the raw body into: `sha256=<hex hmac>`. */
@@ -123,6 +125,99 @@ export async function handleCheckRunIntake(
     status: 200,
     body: { ok: true, settled: true, sent: sends.filter((s) => s.kind === "sent").length, of: instances.length },
   };
+}
+
+export interface IssueCommentIntakeDeps {
+  /** The webhook secret; absent, the intake is disabled — never open. */
+  secret: string | undefined;
+  /** The live runner that owns this pull request, if one does. */
+  ownerOf(repo: string, prNumber: number): RunnerPullOwner | undefined;
+  instances: Pick<CoordinatorInstanceStore, "appendEvent" | "get" | "listUnits">;
+  /** Resolve the commenter's GitHub identity against the requester and admit
+   * only the account trusted to speak for that write-capable pipeline. */
+  commenterAuthorized(requester: string, author: { login: string; id?: number }): Promise<boolean>;
+  workflow: WorkflowSender | undefined;
+  now(): number;
+}
+
+/** The requester's trusted pull-request conversation comment is an outside
+ * answer to the live unit that owns the pull request. Other accounts and bots
+ * are ignored, and an unowned pull request stays ordinary GitHub conversation. */
+export async function handleIssueCommentIntake(
+  headers: { event?: string; signature?: string },
+  rawBody: string,
+  deps: IssueCommentIntakeDeps,
+): Promise<CheckRunIntakeResult> {
+  if (deps.secret === undefined || deps.secret === "") return { status: 503, body: { error: "disabled" } };
+  if (headers.signature === undefined || !(await verifyWebhookSignature(deps.secret, rawBody, headers.signature)))
+    return { status: 401, body: { error: "unauthorized" } };
+  if (headers.event !== "issue_comment") return { status: 200, body: { ok: true, ignored: "event" } };
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    return { status: 400, body: { error: "invalid_json" } };
+  }
+  if (typeof payload !== "object" || payload === null) return { status: 400, body: { error: "invalid_body" } };
+  const p = payload as {
+    action?: unknown;
+    issue?: { number?: unknown; pull_request?: unknown };
+    comment?: {
+      id?: unknown;
+      body?: unknown;
+      created_at?: unknown;
+      user?: { login?: unknown; id?: unknown; type?: unknown };
+    };
+    repository?: { full_name?: unknown };
+  };
+  if (p.action !== "created") return { status: 200, body: { ok: true, ignored: "action" } };
+  if (p.issue?.pull_request === undefined) return { status: 200, body: { ok: true, ignored: "issue" } };
+  const repo = p.repository?.full_name;
+  const prNumber = p.issue.number;
+  const comment = p.comment;
+  if (
+    typeof repo !== "string" ||
+    repo === "" ||
+    typeof prNumber !== "number" ||
+    !Number.isInteger(prNumber) ||
+    typeof comment?.id !== "number" ||
+    typeof comment.body !== "string" ||
+    typeof comment.created_at !== "string" ||
+    typeof comment.user?.login !== "string" ||
+    typeof comment.user.type !== "string"
+  )
+    return { status: 400, body: { error: "invalid_body" } };
+  if (comment.user.type !== "User") return { status: 200, body: { ok: true, ignored: "sender" } };
+  let owner: RunnerPullOwner | undefined;
+  try {
+    owner = deps.ownerOf(repo, prNumber);
+  } catch {
+    return { status: 503, body: { error: "ownership_unavailable" } };
+  }
+  if (owner === undefined) return { status: 200, body: { ok: true, ignored: "unowned" } };
+  const instance = await deps.instances.get(owner.instanceId);
+  if (instance === null) return { status: 200, body: { ok: true, ignored: "ended" } };
+  const authorized = await deps
+    .commenterAuthorized(instance.userId, {
+      login: comment.user.login,
+      ...(typeof comment.user.id === "number" ? { id: comment.user.id } : {}),
+    })
+    .catch(() => false);
+  if (!authorized) return { status: 200, body: { ok: true, ignored: "sender" } };
+  const row = (await deps.instances.listUnits(owner.instanceId)).find((unit) => unit.unit === owner.unit);
+  if (row === undefined || row.ending !== undefined) return { status: 200, body: { ok: true, ignored: "ended" } };
+  const created = Date.parse(comment.created_at);
+  const appended = await deps.instances.appendEvent(owner, {
+    id: `github:issue-comment:${comment.id}`,
+    sender: `github:${typeof comment.user.id === "number" ? comment.user.id : comment.user.login}`,
+    senderName: comment.user.login,
+    text: comment.body,
+    mode: row.idle !== undefined ? "wake" : "steer",
+    at: Number.isFinite(created) ? created : deps.now(),
+  });
+  if (!appended.ok) return { status: 503, body: { error: "store_unavailable" } };
+  const sent = await sendUnitNudge(deps.workflow, owner);
+  return { status: 200, body: { ok: true, appended: true, seq: appended.seq, nudge: sent.kind } };
 }
 
 export interface PushIntakeDeps {

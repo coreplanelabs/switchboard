@@ -328,8 +328,14 @@ function findingCounts(findings: readonly Finding[] | undefined): string {
   return `${findings.length} finding${findings.length === 1 ? "" : "s"}: ${by}`;
 }
 
-/** A table cell: pipes escaped so the row holds, already one line. */
-const cell = (text: string): string => oneLine(text).replace(/\|/g, "\\|");
+/** A one-line Markdown table cell. Backslashes are escaped before pipes so
+ * input cannot consume the pipe escape and split the row. */
+export const escapeMarkdownTableCell = (text: string): string =>
+  oneLine(text).replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+
+/** Decode the two escapes emitted by `escapeMarkdownTableCell`. This also
+ * accepts the legacy form that escaped pipes without first escaping slashes. */
+export const unescapeMarkdownTableCell = (text: string): string => text.replace(/\\([\\|])/g, "$1");
 
 /** Whether a finding's `file` is a path a blob URL can point at: no
  *  whitespace, no backtick, not a URL. */
@@ -339,7 +345,7 @@ const isRepoPath = (file: string): boolean => /^[^\s`]+$/.test(file) && !/^[a-z]
  *  file is a path and a target is known. */
 function whereCell(f: Finding, target: ReviewBodyTarget | undefined): string {
   const location = f.line !== undefined ? `${f.file}:${f.line}` : f.file;
-  const label = `\`${cell(location)}\``;
+  const label = `\`${escapeMarkdownTableCell(location)}\``;
   if (!target || !isRepoPath(f.file)) return label;
   const path = encodeURI(f.file).replace(/#/g, "%23").replace(/\?/g, "%3F");
   const url = `https://github.com/${target.repo}/blob/${target.head}/${path}${f.line !== undefined ? `#L${f.line}` : ""}`;
@@ -360,6 +366,7 @@ function verdictMarker(verdict: ReviewVerdict | undefined, target: ReviewBodyTar
             id: f.id,
             severity: f.severity,
             file: f.file,
+            title: f.title,
             ...(f.line !== undefined ? { line: f.line } : {}),
             ...(f.humanGated ? { humanGated: true } : {}),
           })),
@@ -395,7 +402,10 @@ export function buildReviewPostBody(
       [
         "| Severity | Finding | Where |",
         "| --- | --- | --- |",
-        ...findings.map((f) => `| ${f.severity} | **${cell(f.id)}** ${cell(f.title)} | ${whereCell(f, target)} |`),
+        ...findings.map(
+          (f) =>
+            `| ${f.severity} | **${escapeMarkdownTableCell(f.id)}** ${escapeMarkdownTableCell(f.title)} | ${whereCell(f, target)} |`,
+        ),
       ].join("\n"),
     );
   }
@@ -517,7 +527,7 @@ const DISPOSITION_KINDS: readonly string[] = ["fixed", "declined"];
 
 const isRecordLike = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
-function isFindingShape(v: unknown): v is Finding {
+export function isFindingShape(v: unknown): v is Finding {
   if (!isRecordLike(v)) return false;
   return (
     typeof v.id === "string" &&

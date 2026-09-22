@@ -231,10 +231,9 @@ async function answerUnitOwnedThread(
   const at = ctx.clock();
   // No run exists here, so the event's id is the platform's own message id when the channel gave one.
   const messageId = msg.messageId;
-  // The mode is a receipt of the owner's state at append (record 0051), never the
-  // text's: no live run and no idle mark on the row — the pipeline is between
-  // rounds — so the event is a `steer`. The store's append enforces the
-  // per-event cap: attachments over it are dropped whole and the row says how many.
+  // The mode is a receipt of the owner's state at append (record 0051), never
+  // the text's: an idle owner receives a wake; between rounds it is a steer.
+  // The store's append enforces the per-event cap.
   const attachments = [...(msg.images ?? []), ...(msg.documents ?? [])].map((a) => ({
     mediaType: a.mediaType,
     data: a.data,
@@ -251,7 +250,7 @@ async function answerUnitOwnedThread(
       ...(msg.userName !== undefined ? { senderName: msg.userName } : {}),
       text: ctx.text,
       ...(attachments.length > 0 ? { attachments } : {}),
-      mode: "steer",
+      mode: owner.unit.idle !== undefined ? "wake" : "steer",
       at,
     })
     .catch((err: unknown) => {
@@ -914,8 +913,9 @@ export async function dispatch(
     // thread owned by an unfinished unit with no live run is one thread event
     // on that unit — appended with the mode read off the row, the instance
     // nudged and the sender acked before any fresh run resolves.
-    // In a UNIT's thread a directive naming an agent falls through to today's
-    // path: `agent:review <url>` there still means what it says. A live thread
+    // In a UNIT's thread a directive naming an agent normally falls through
+    // to today's path. A parked human-gated question is the exception: the
+    // next human input is its answer, not a rival run. A live thread
     // is the live run's (admission steers below); a session or no owner follows
     // the ordinary sticky or door-bound path.
     if (thread && !threadLive && deps.coordinatorInstances !== undefined) {
@@ -970,7 +970,7 @@ export async function dispatch(
         ({ sticky, resolved, agentSource } = settled);
         agentSource = "sticky";
       }
-      if (owner.kind === "unit" && directives.agent === undefined) {
+      if (owner.kind === "unit" && (directives.agent === undefined || owner.unit.idle?.humanGate !== undefined)) {
         // The same gate a live steer passes (admission's allowlist check): the
         // event is read by the unit's next coding child — a write-identity run
         // — so its sender must be allowed to run `coding`, refused the same

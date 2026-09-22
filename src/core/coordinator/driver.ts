@@ -40,6 +40,7 @@
 // the shim Worker imports this by relative path.
 
 import { DAY_MS, DEFAULT_GRANT, GRANT_RENEWALS_MAX, IDLE_DAYS_MAX, type Grant, type GrantSource } from "../budgets.js";
+import { isFindingShape, type Finding } from "../reviewVerdict.js";
 import { DEFAULT_VERBOSITY, isVerbosity, type Verbosity } from "../verbosity.js";
 import {
   applyReturn,
@@ -343,6 +344,8 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
   // they were written (the run record's validator), read here as they are.
   const facts = run as unknown as Omit<Extract<ChildFacts, { finished: true }>, "finished" | "status">;
   const {
+    finishedAt,
+    reviewAskedAt,
     finalReply,
     pr,
     headSha,
@@ -367,6 +370,8 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
     run: {
       finished: true,
       status: run.status as Extract<ChildFacts, { finished: true }>["status"],
+      ...(typeof finishedAt === "number" ? { finishedAt } : {}),
+      ...(typeof reviewAskedAt === "number" ? { reviewAskedAt } : {}),
       ...(finalReply !== undefined ? { finalReply } : {}),
       ...(pr !== undefined ? { pr } : {}),
       ...(headSha !== undefined ? { headSha } : {}),
@@ -401,6 +406,33 @@ function isCommitChecks(v: unknown): v is { total: number; pending: string[]; fa
   const c = v as Record<string, unknown>;
   const names = (x: unknown) => Array.isArray(x) && x.every((n) => typeof n === "string");
   return typeof c.total === "number" && names(c.pending) && names(c.failed);
+}
+
+function entryHumanGate(v: unknown):
+  | {
+      round: number;
+      findings: Finding[];
+      verdict: "approve" | "request_changes";
+      answer: string;
+      author: string;
+      commentId: string;
+    }
+  | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const row = v as Record<string, unknown>;
+  if (typeof row.round !== "number" || !Number.isInteger(row.round) || row.round < 1) return undefined;
+  if (!Array.isArray(row.findings) || !row.findings.every(isFindingShape)) return undefined;
+  if (row.verdict !== "approve" && row.verdict !== "request_changes") return undefined;
+  if (typeof row.answer !== "string" || typeof row.author !== "string" || typeof row.commentId !== "string")
+    return undefined;
+  return {
+    round: row.round,
+    findings: row.findings,
+    verdict: row.verdict,
+    answer: row.answer,
+    author: row.author,
+    commentId: row.commentId,
+  };
 }
 
 function prCheckReturn(step: string, a: BotAnswer): StepReturn {
@@ -448,6 +480,7 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
         // The base's merge-queue rule beside the checks (issue 2011): the
         // merge:person report says the person's merge is queued.
         ...(typeof a.body.baseHasMergeQueue === "boolean" ? { baseHasMergeQueue: a.body.baseHasMergeQueue } : {}),
+        ...(entryHumanGate(a.body.humanGate) !== undefined ? { humanGate: entryHumanGate(a.body.humanGate)! } : {}),
       },
       at,
     };
@@ -961,6 +994,7 @@ async function runUnit(
                     ...(note.ending.from !== undefined ? { from: note.ending.from } : {}),
                     spendUsd: note.ending.spendUsd,
                     ...(note.ending.handoff !== undefined ? { handoff: note.ending.handoff } : {}),
+                    ...(note.ending.humanGate !== undefined ? { humanGate: note.ending.humanGate } : {}),
                   }
                 : {}),
             },
@@ -1171,6 +1205,7 @@ async function waitOnIdle(
         ...(answer.runId !== undefined ? { previousRunId: answer.runId } : {}),
         ...(answer.handoff !== undefined ? { previousHandoff: answer.handoff } : {}),
         ...(answer.texts.length > 0 ? { texts: answer.texts } : {}),
+        ...(answer.humanGate !== undefined ? { humanGate: answer.humanGate } : {}),
         ...(answer.leaseMs !== undefined
           ? { resume: { leaseMs: answer.leaseMs, attempt: (currentSession?.resume?.attempt ?? 0) + 1 } }
           : {}),
@@ -1240,7 +1275,7 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
           next,
           stepPrefixOf(next, session),
           ending,
-          plan.idleDays,
+          ending.parkDays ?? plan.idleDays,
           session,
         );
         if (parked.kind === "ending") {

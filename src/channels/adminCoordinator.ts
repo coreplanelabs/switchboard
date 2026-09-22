@@ -50,6 +50,7 @@ import {
   IDLE_WAKES_MAX,
   leaseMinimum,
   minutesToMs,
+  SECOND_MS,
   type Grant,
   type GrantSource,
 } from "../core/budgets.js";
@@ -66,6 +67,7 @@ import {
   PLAN_MERGE_ACTION,
   idempotencyKeyFor,
   IDLE_WHY_MAX,
+  isHumanGatePending,
   INSTANCE_ID_PATTERN,
   STEP_NAME_PATTERN,
   type CoordinatorInstance,
@@ -85,10 +87,14 @@ import { childRequestText, spawnTierRefusal } from "../core/dispatch/spawn.js";
 import { EFFORT_LEVELS_HINT, isEffort, type Effort } from "../effort.js";
 import {
   CHANGES_TOKEN,
+  escapeMarkdownTableCell,
+  findingsAtOrAbove,
   isAddressSeverity,
+  isFindingShape,
   LGTM_TOKEN,
   type Finding,
   type ReviewVerdictKind,
+  unescapeMarkdownTableCell,
 } from "../core/reviewVerdict.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent, ShipRoundOutcome } from "../core/runEvents.js";
@@ -135,6 +141,7 @@ import {
   type MergeResult,
   type OpenedPullRequest,
   type OpenPrRef,
+  type PullRequestComment,
   type PullRequestFacts,
   type PullRequestReview,
   type PullRequestTarget,
@@ -208,7 +215,7 @@ export interface AdminCoordinatorDeps {
   /** Process-local ownership fence shared with the sweep. The durable runner
    *  remains authoritative; this fence only makes a simultaneous command defer. */
   runnerOwnership?: {
-    claim(repo: string, prNumber: number): void;
+    claim(repo: string, prNumber: number, owner?: { instanceId: string; unit: string }): void;
     release(repo: string, prNumber: number): void;
   };
   /** The ship grant as the requester's channel and user scopes say now. Idle
@@ -281,6 +288,12 @@ export interface AdminCoordinatorDeps {
   /** The reviews on a pull request (githubPulls.fetchPullRequestReviews) and the
    *  identity this bot posts as: whether the bot's verdict stands at a head. */
   fetchPrReviews: (pr: { repo: string; number: number }) => Promise<PullRequestReview[] | undefined>;
+  /** Conversation comments let an adopted attempt consume a trusted person's
+   * answer posted after the last human-gated verdict before it reviews again. */
+  fetchPrComments?: (pr: { repo: string; number: number }) => Promise<PullRequestComment[] | undefined>;
+  /** A pull-request comment may brief the requester's write-capable child only
+   * when its GitHub author is trusted to speak for that requester. */
+  commenterAuthorized(requester: string, author: { login: string; id?: number }): Promise<boolean>;
   selfIdentity: () => Promise<GithubIdentity | undefined>;
   /** The pause between `read-record`'s looks at GitHub's review list when the
    *  child's record carries no post of its own (`REVIEW_POSTED_RECHECK_MS`
@@ -980,6 +993,11 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   });
 }
 
+function reviewAskedAtOf(events: readonly RunEvent[] | undefined): number | undefined {
+  const posted = [...(events ?? [])].reverse().find((event) => event.type === "review_posted");
+  return posted?.type === "review_posted" && typeof posted.at === "number" ? posted.at : undefined;
+}
+
 function finalReplyOf(events: readonly RunEvent[] | undefined): string | undefined {
   const last = [...(events ?? [])].reverse().find((e) => e.type === "answer");
   return last && last.type === "answer" ? last.text : undefined;
@@ -1049,6 +1067,117 @@ async function reviewPostedAt(
   );
 }
 
+interface PostedHumanGate {
+  round: number;
+  findings: Finding[];
+  verdict: "approve" | "request_changes";
+  answer: string;
+  author: string;
+  commentId: string;
+}
+
+/** GitHub timestamps lose sub-second order. Treat their whole reported second
+ * as the verdict boundary so a later comment in that second is not discarded. */
+const githubSecondStart = (at: number): number => Math.floor(at / SECOND_MS) * SECOND_MS;
+
+/** Recover the title omitted by legacy verdict markers from the typed table
+ * in the same immutable review body. Ambiguous or malformed rows fail closed. */
+function legacyPostedFinding(value: unknown, body: string): Finding | undefined {
+  if (isFindingShape(value)) return value;
+  if (typeof value !== "object" || value === null) return undefined;
+  const row = value as Record<string, unknown>;
+  if (row.title !== undefined || typeof row.id !== "string" || typeof row.severity !== "string") return undefined;
+  const prefix = `| ${row.severity} | **${escapeMarkdownTableCell(row.id)}** `;
+  const header = "| Severity | Finding | Where |\n| --- | --- | --- |\n";
+  const tableStart = body.indexOf(header);
+  if (tableStart < 0) return undefined;
+  const table = body.slice(tableStart + header.length).split("\n\n", 1)[0]!;
+  const titles = table
+    .split("\n")
+    .filter((line) => line.startsWith(prefix))
+    .flatMap((line) => {
+      const tail = line.slice(prefix.length);
+      const boundary = tail.lastIndexOf(" | ");
+      return boundary > 0 ? [unescapeMarkdownTableCell(tail.slice(0, boundary)).trim()] : [];
+    })
+    .filter(Boolean);
+  if (titles.length !== 1) return undefined;
+  const recovered = { ...row, title: titles[0] };
+  return isFindingShape(recovered) ? recovered : undefined;
+}
+
+/** The typed human-gated verdict marker and the newest later comment from the
+ * requester's trusted GitHub account. A legacy marker recovers its omitted
+ * title from the review's typed table; a comment is never guessed to answer a
+ * finding we could not recover. */
+async function postedHumanGateAnswer(
+  deps: AdminCoordinatorDeps,
+  pr: { repo: string; number: number },
+  requester: string,
+  addressSeverity: AddressSeverity,
+): Promise<PostedHumanGate | undefined> {
+  if (deps.fetchPrComments === undefined) return undefined;
+  const [reviews, comments, self] = await Promise.all([
+    deps.fetchPrReviews(pr).catch(() => undefined),
+    deps.fetchPrComments(pr).catch(() => undefined),
+    deps.selfIdentity().catch(() => undefined),
+  ]);
+  if (reviews === undefined || comments === undefined || self === undefined) return undefined;
+  const own = reviews
+    .filter(
+      (review) =>
+        review.author?.login === self.login &&
+        (review.author.id === undefined || review.author.id === self.id) &&
+        review.submittedAt !== undefined &&
+        Number.isFinite(Date.parse(review.submittedAt)),
+    )
+    .sort((a, b) => Date.parse(a.submittedAt!) - Date.parse(b.submittedAt!))
+    .at(-1);
+  if (own === undefined) return undefined;
+  const marker = /<!-- switchboard:verdict (\{[^\n]*\}) -->/.exec(own.body);
+  if (marker === null) return undefined;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(marker[1]!);
+  } catch {
+    return undefined;
+  }
+  if (typeof payload !== "object" || payload === null) return undefined;
+  const row = payload as Record<string, unknown>;
+  if (row.verdict !== "approve" && row.verdict !== "request_changes") return undefined;
+  if (!Array.isArray(row.findings)) return undefined;
+  const postedFindings = row.findings.map((finding) => legacyPostedFinding(finding, own.body));
+  if (!postedFindings.every((finding): finding is Finding => finding !== undefined)) return undefined;
+  const findings = row.verdict === "approve" ? findingsAtOrAbove(postedFindings, addressSeverity) : postedFindings;
+  if (findings.length === 0 || !findings.every((finding) => finding.humanGated === true)) return undefined;
+  const candidates = comments
+    .filter(
+      (comment) =>
+        comment.author.type === "User" &&
+        comment.body.trim() !== "" &&
+        Number.isFinite(Date.parse(comment.createdAt)) &&
+        Date.parse(comment.createdAt) >= githubSecondStart(Date.parse(own.submittedAt!)),
+    )
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  let answer: PullRequestComment | undefined;
+  for (const candidate of candidates) {
+    const authorized = await deps.commenterAuthorized(requester, candidate.author).catch(() => false);
+    if (authorized) {
+      answer = candidate;
+      break;
+    }
+  }
+  if (answer === undefined) return undefined;
+  return {
+    round: 1,
+    findings,
+    verdict: row.verdict,
+    answer: answer.body.trim(),
+    author: answer.author.login,
+    commentId: String(answer.id),
+  };
+}
+
 /** `reviewPostedAt`, asked up to `REVIEW_POSTED_CHECKS` times a pause apart
  *  until it answers true: a review posted a second ago may not be in GitHub's
  *  list yet, and a silent GitHub may answer on the next look. The last look's
@@ -1111,6 +1240,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   const full = await deps.runs.getRun(body.runId, { include: "messages" });
   const record = full.ok ? full.value : view;
   const finalReply = finalReplyOf(record.events);
+  const reviewAskedAt = reviewAskedAtOf(record.events);
   const pr = prOpenedOf(record.events);
   // The hard stop's mark (record 0060; issue 1924): a finished child's unit
   // ends stopped on it, whatever the child's own status.
@@ -1171,6 +1301,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
       ...(pr !== undefined ? { pr } : {}),
       ...(record.verdict !== undefined ? { verdict: record.verdict } : {}),
       ...(record.reviewHead !== undefined ? { reviewHead: record.reviewHead } : {}),
+      ...(reviewAskedAt !== undefined ? { reviewAskedAt } : {}),
       ...(posted !== undefined ? { reviewPosted: posted.reviewPosted } : {}),
       ...(posted?.reviewPostReason !== undefined ? { reviewPostReason: posted.reviewPostReason } : {}),
       ...(record.dispositions !== undefined ? { dispositions: record.dispositions } : {}),
@@ -1424,7 +1555,10 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     const open = await deps.findOpenPrByHead(instance.repo, branch);
     if (open) {
       await remember({ number: open.number, url: open.htmlUrl });
-      deps.runnerOwnership?.claim(instance.repo, open.number);
+      deps.runnerOwnership?.claim(instance.repo, open.number, {
+        instanceId: instance.id,
+        unit: unit.row?.unit ?? (body.unit as string),
+      });
       // The entry facts (issue 1689). The branch's tip comes from the pull
       // request's own facts read, which prefers the head ref's tip over the
       // possibly-stale listing sha; the approval and the checks are read at
@@ -1438,6 +1572,14 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         entry && entryHead !== undefined
           ? await reviewPostedAt(deps, { repo: instance.repo, number: open.number }, "approve", entryHead)
           : undefined;
+      const humanGate = entry
+        ? await postedHumanGateAnswer(
+            deps,
+            { repo: instance.repo, number: open.number },
+            instance.userId,
+            instance.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY,
+          )
+        : undefined;
       const entryChecks =
         entry && entryHead !== undefined
           ? await deps.fetchCommitChecks(instance.repo, entryHead).catch(() => undefined)
@@ -1474,6 +1616,7 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         ...(open.headSha !== undefined ? { headSha: open.headSha } : {}),
         ...(branchHead !== undefined ? { branchHead } : {}),
         ...(approved !== undefined ? { approved } : {}),
+        ...(humanGate !== undefined ? { humanGate } : {}),
         // The pull request's own auto-merge fact (agent-ship item 9), so a
         // merge_ready ending can name it at the approved head.
         ...(open.autoMergeEnabled !== undefined ? { autoMergeEnabled: open.autoMergeEnabled } : {}),
@@ -1996,6 +2139,7 @@ function parseIdle(ending: Record<string, unknown>, runId: unknown, at: number):
     ...(typeof runId === "string" && RUN_ID_PATTERN.test(runId) ? { runId } : {}),
     spendUsd: typeof ending.spendUsd === "number" && Number.isFinite(ending.spendUsd) ? ending.spendUsd : null,
     ...(isHandoffShape(ending.handoff) ? { handoff: ending.handoff } : {}),
+    ...(isHumanGatePending(ending.humanGate) ? { humanGate: ending.humanGate } : {}),
     wakes: 0,
   };
 }
@@ -2042,10 +2186,20 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
 
   const events = await deps.instances.listEvents({ instanceId: instance.id, unit: row.unit }, true);
   const idle = row.idle;
+  // A human-gated question is answered only by input after the verdict that
+  // asked it. GitHub rounds comments to seconds, so its boundary includes the
+  // reported verdict second; precise channel timestamps keep strict ordering.
+  const askedAt = idle.humanGate?.askedAt;
+  const wakeEvents =
+    askedAt !== undefined
+      ? events.filter((event) =>
+          event.id?.startsWith("github:issue-comment:") ? event.at >= githubSecondStart(askedAt) : event.at > askedAt,
+        )
+      : events;
   const senderOf = (e: ThreadEvent): string => e.senderName ?? e.sender;
-  const senders = [...new Set(events.map(senderOf))];
-  const requesterWoke = events.some((event) => event.sender === instance.userId);
-  const stopperWoke = events.some((event) => event.mode === "interrupt");
+  const senders = [...new Set(wakeEvents.map(senderOf))];
+  const requesterWoke = wakeEvents.some((event) => event.sender === instance.userId);
+  const stopperWoke = wakeEvents.some((event) => event.mode === "interrupt");
   const grantFact = deps.shipGrantFor?.(instance) ?? {
     grant: instance.grant ?? DEFAULT_GRANT,
     source: instance.grantSource ?? ("org" as const),
@@ -2053,10 +2207,26 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
   const renewalsSpent = row.segments?.length ?? 0;
   let answer: UnitWakeAnswer;
 
-  if (events.length === 0) {
+  if (wakeEvents.length === 0) {
     answer = { kind: "answered", reply: "Nothing new was waiting for this unit." };
   } else if (idle.wakes + 1 >= IDLE_WAKES_MAX) {
     answer = { kind: "expired" };
+  } else if (idle.humanGate !== undefined) {
+    // A person's answer to a human-gated question resumes the same segment;
+    // it is not a request for another renewal. The fresh lease is the bounded
+    // room needed for the answer's fix round and re-review.
+    answer = {
+      kind: "segment",
+      index: row.segments?.at(-1)?.index ?? 1,
+      ...(idle.from !== undefined ? { from: idle.from } : {}),
+      ...(idle.runId !== undefined ? { runId: idle.runId } : {}),
+      spendUsd: idle.spendUsd,
+      ...(idle.handoff !== undefined ? { handoff: idle.handoff } : {}),
+      texts: wakeEvents.map(attributedText),
+      senders,
+      leaseMs: minutesToMs(instance.caps?.maxMinutes ?? resolveShipCaps(undefined).maxMinutes),
+      humanGate: idle.humanGate,
+    };
   } else {
     const segmentStart = row.segments?.at(-1)?.at ?? row.startedAt ?? idle.at;
     const leaseMs = Math.max(
@@ -2071,7 +2241,7 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
         ...(idle.runId !== undefined ? { runId: idle.runId } : {}),
         spendUsd: idle.spendUsd,
         ...(idle.handoff !== undefined ? { handoff: idle.handoff } : {}),
-        texts: events.map(attributedText),
+        texts: wakeEvents.map(attributedText),
         senders,
         leaseMs,
       };
@@ -2100,7 +2270,7 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
           ...(idle.runId !== undefined ? { runId: idle.runId } : {}),
           spendUsd: idle.spendUsd,
           ...(idle.handoff !== undefined ? { handoff: idle.handoff } : {}),
-          texts: events.map(attributedText),
+          texts: wakeEvents.map(attributedText),
           senders,
         };
       } else {
@@ -2112,7 +2282,7 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
     }
   }
 
-  const countedIdle = events.length > 0 ? { ...idle, wakes: idle.wakes + 1 } : idle;
+  const countedIdle = wakeEvents.length > 0 ? { ...idle, wakes: idle.wakes + 1 } : idle;
   const segments = row.segments ?? [];
   const updated: CoordinatorUnit = {
     ...row,
@@ -2355,16 +2525,17 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         ),
       );
   }
-  // A held ending's next step is a person's, at the pull request (issue 1990;
-  // agent-ship item 9): the report — the human-gated rows and the exact next
-  // step — lands there too, where the receipt's producer reads it beside the
-  // review that named them. Best effort, like the board's and the thread's.
-  if (ending.kind === "held" && updated.pr !== undefined) {
+  // A human-gated question's next step is a person's, at either answer
+  // surface. The report lands on the pull request beside the review that named
+  // it; the bot's own comment is ignored by the human-answer intake.
+  const parkedHumanGate = ending.kind === "idle" && idle?.humanGate !== undefined;
+  if ((ending.kind === "held" || parkedHumanGate) && updated.pr !== undefined) {
+    const state = parkedHumanGate ? "waiting for a person" : "held";
     await deps.github
-      .commentIssue(instance.repo, updated.pr.number, `**Plan runner — ${row.unit} held**\n\n${ending.report}`)
+      .commentIssue(instance.repo, updated.pr.number, `**Plan runner — ${row.unit} ${state}**\n\n${ending.report}`)
       .catch((err) =>
         (deps.log ?? console.warn)(
-          `[coordinator] ${instance.id} ${row.unit}: the held report could not be posted on the pull request: ${describe(err)}`,
+          `[coordinator] ${instance.id} ${row.unit}: the human-gated report could not be posted on the pull request: ${describe(err)}`,
         ),
       );
   }
@@ -2432,7 +2603,10 @@ async function rebaseStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   if (!row) return json(404, { ok: false, error: "unknown_unit", at });
   if (row.pr?.number !== undefined && row.pr.number !== body.prNumber)
     return json(409, { ok: false, error: "pull_request_moved", at });
-  deps.runnerOwnership?.claim(instance.repo, body.prNumber);
+  deps.runnerOwnership?.claim(instance.repo, body.prNumber, {
+    instanceId: instance.id,
+    unit: row.unit,
+  });
   if (deps.runnerRebase === undefined)
     return json(200, { ok: true, outcome: "refused", reason: "the runner's rebase resolver is unavailable", at });
   try {
