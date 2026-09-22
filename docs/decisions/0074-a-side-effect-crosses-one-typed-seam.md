@@ -1,6 +1,6 @@
 ---
 title: A side effect crosses one typed seam
-status: proposed
+status: accepted
 date: 2026-09-21
 pattern: Command–query separation at the runner boundary — a child asks for an effect with a typed command; the runner validates current facts, performs the effect, and returns a typed receipt or refusal
 ---
@@ -214,3 +214,14 @@ This pull request deliberately leaves `status: proposed`. Its cold-reader gate r
 ## Public hygiene
 
 This record keeps only public issue and pull-request numbers, repository-relative paths, one public-tree sha and the date required to audit the hard-case trace. It carries no Slack channel, user or message ids, no private URL, no customer or company name, no credential and no unpublished account detail.
+
+## Amended 2026-09-22 — accepted after the cold-reader gate and one review round
+
+*Acceptance re-evaluation.* The independent cold-reader gate recorded on pull request #2194 passed, and one review round found no remaining contradiction in the architectural bet. The bet is still two-sided and neither half is optional: the child has only narrow typed commands and no write route through its shell; the runner reads fresh facts, owns each operation's specific gates, performs the effect and records its typed receipt. The earlier sentences that deliberately kept this record proposed are historical gate statements and are superseded by this amendment. Acceptance says the boundary is decided, not that its four-unit rollout has shipped.
+
+Two fixtures arrived after the proposal and strengthen the same boundary:
+
+1. **Issue #2197 — a push the runner did not perform could not make the unit ready.** A ship child pushed its clean completed head, submitted its pull-request description and handed off, but its own push never entered the runner's `pushed[]`; only a later salvage entry did. The runner therefore judged completed work “not ready” and opened no pull request. Reading the remote ref would only replace one inference with another: under this record the runner performs the requested push, records `by: runner` against the exact gated tree, and ship-round readiness consumes that receipt.
+2. **Issue #2196 — a number the runner did not reserve could not be coordinated.** Two record-writing children independently scanned for the next free decision number and both chose 0074. Each checkout was locally reasonable, but no runner-owned effect serialized the shared allocation, so neither child could know about the other's concurrent choice. Record-number reservation is another instance of the rule, not a fifth rollout unit hidden here: when that write is designed, allocation must cross a narrow typed command whose runner reads fresh facts, performs the reservation and returns the receipt; a shell or directory scan cannot be its authority.
+
+Both failures have the same shape as the accepted hard case: an external effect the runner did not perform is an effect it cannot authoritatively know. The implementation plan therefore treats runner receipts, never shell success text or a later remote guess, as transition evidence.
