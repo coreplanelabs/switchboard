@@ -5627,7 +5627,7 @@ export class ResidentDO extends Sandbox<Env> {
     // branch. The own-PR move remains for callers that name no branch of their
     // own but carry the typed follow-up fact.
     const storedPrior = stored.get(threadBindingKey(threadKey)) as ThreadBinding | undefined;
-    const namedRef = refHint !== null && !reason.refByDefault;
+    const namedRef = refHint !== null && !reason.refByDefault && reason.ownPr === null;
     const rebind = namedRef
       ? { binding: storedPrior }
       : await this.rebindToOwnPr(storedPrior, reason.ownPr, reuse, facts.defaultRef, slug);

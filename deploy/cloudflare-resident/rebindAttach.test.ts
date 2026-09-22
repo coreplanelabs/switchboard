@@ -34,7 +34,7 @@ function functionOf(name: string): string {
 describe("a named ref replaces the sticky fallback before the worktree is provisioned", () => {
   it("a refHint not marked as the default fallback wins over a prior binding and is written back as the sticky named ref", () => {
     const body = method("attachThreadBody");
-    expect(body).toMatch(/const namedRef = refHint !== null && !reason\.refByDefault;/);
+    expect(body).toMatch(/const namedRef = refHint !== null && !reason\.refByDefault && reason\.ownPr === null;/);
     expect(body).toMatch(/const ref = namedRef \? refHint : \(prior\?\.ref \?\? refHint\);/);
     expect(body).toMatch(
       /allocateThreadUser\([\s\S]*?threadKey,[\s\S]*?ref,[\s\S]*?worktreePath,[\s\S]*?boundByFor\([\s\S]*?\),[\s\S]*?namedRef,[\s\S]*?\);/,
@@ -87,7 +87,7 @@ describe("the `ownPr` and `refByDefault` body fields reach the binding decision"
       /attachThreadBody\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*resourceId,\s*t0,\s*record,\s*reason,?\s*\)/,
     );
     const body = method("attachThreadBody");
-    const named = body.indexOf("const namedRef = refHint !== null && !reason.refByDefault;");
+    const named = body.indexOf("const namedRef = refHint !== null && !reason.refByDefault && reason.ownPr === null;");
     const rebind = body.indexOf("await this.rebindToOwnPr(storedPrior, reason.ownPr, reuse, facts.defaultRef, slug)");
     const ref = body.indexOf("const ref = namedRef ? refHint : (prior?.ref ?? refHint);");
     expect(named).toBeGreaterThan(-1);

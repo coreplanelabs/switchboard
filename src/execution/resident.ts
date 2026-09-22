@@ -525,8 +525,9 @@ export interface ResidentExecutorOptions {
   threadKey: string;
   /** Ref for an attach. A ref the request names is authoritative and replaces
    *  an older sticky binding; the sticky binding is only a fallback when the
-   *  request names none (`refByDefault` is true or this field is absent).
-   *  The resident persists the named ref on the binding (item 16). */
+   *  request names none (`refByDefault` is true, `ownPr` derived the hint, or
+   *  this field is absent). The resident persists the named ref on the binding
+   *  (item 16). */
   refHint?: string;
   /** The pull request the thread's OWN run opened, and its head branch — the
    *  reason `refHint` is that branch (`ownPrOf`, resident-repos item 29). The
@@ -1127,7 +1128,7 @@ export class ResidentExecutor implements Executor {
    *  refusal the service can answer with. Answers the binding the resident
    *  reported: the bound ref — a named `refHint` must be that ref, while the
    *  sticky binding may answer a different ref only when the caller named none
-   *  (`refByDefault`). The Worker also persists a named ref as the new sticky
+   *  (`refByDefault` or an `ownPr`-derived hint). The Worker also persists a named ref as the new sticky
    *  binding (item 16). `rebound` / `rebindRefused` report the legacy own-PR
    *  movement, and the sha says which commit the worktree is at. A
    *  200 without both fields is a malformed resident (the attach contract
@@ -1308,7 +1309,12 @@ export class ResidentExecutor implements Executor {
     // A named ref is the spawn's branch, not a hint an older sticky binding may
     // override. Fail closed against a Worker predating that invariant rather
     // than let the child work and push from another attempt's branch.
-    if (this.opts.refHint !== undefined && !this.opts.refByDefault && data.ref !== this.opts.refHint) {
+    if (
+      this.opts.refHint !== undefined &&
+      !this.opts.refByDefault &&
+      this.opts.ownPr === undefined &&
+      data.ref !== this.opts.refHint
+    ) {
       throw new Error(
         `resident attach: named ref mismatch for ${this.opts.resource} (asked for ${JSON.stringify(this.opts.refHint)}, got ${JSON.stringify(data.ref)})`,
       );

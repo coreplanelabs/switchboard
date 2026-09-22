@@ -772,12 +772,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     const moved = await ResidentExecutor.open({ ...OPTS, refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } });
     expect(moved.binding).toMatchObject({ ref: "fix/x", rebound: { from: "master", to: "fix/x", pr: 7 } });
     expect(moved.binding).not.toHaveProperty("rebindRefused");
-    const kept = await ResidentExecutor.open({
-      ...OPTS,
-      refHint: "master",
-      refByDefault: true,
-      ownPr: { number: 7, ref: "fix/x" },
-    });
+    const kept = await ResidentExecutor.open({ ...OPTS, refHint: "fix/x", ownPr: { number: 7, ref: "fix/x" } });
     expect(kept.binding).toMatchObject({
       ref: "master",
       rebindRefused: { to: "fix/x", pr: 7, reason: "branch-absent", why: "the mirror does not hold it" },
