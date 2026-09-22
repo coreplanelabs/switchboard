@@ -19,8 +19,12 @@ import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { DEFAULT_GRANT, IDLE_DAYS_DEFAULT, type Grant, type GrantSource } from "../budgets.js";
 import { DEFAULT_VERBOSITY, type Verbosity } from "../verbosity.js";
 import { parsePlanUnit, PLAN_MAX_CHARS, unitTitleOf } from "../ship/contract.js";
-import { asksForDecisionRecord, decisionRecordTaskKey } from "../decisionRecordReservation.js";
-import { defaultDecisionRecordAllocator } from "../decisionRecordReservationWiring.js";
+import {
+  DECISION_RECORD_STORE_REFUSAL,
+  DecisionRecordReservationUnavailableError,
+  asksForDecisionRecord,
+  decisionRecordTaskKey,
+} from "../decisionRecordReservation.js";
 import type { ShipEntry } from "../ship/preflight.js";
 import { shipTaskText, shipUnitText } from "../ship/preflight.js";
 import {
@@ -328,9 +332,7 @@ async function rowsFor(
   instanceId: string,
   carried?: ReadonlyMap<string, { lastPush?: string; record?: string }>,
 ): Promise<CoordinatorUnit[]> {
-  const reserve =
-    deps.reserveDecisionRecord ??
-    ((repo, taskKey, existing) => defaultDecisionRecordAllocator.reserve(repo, taskKey, existing));
+  const reserve = deps.reserveDecisionRecord ?? (() => Promise.reject(new DecisionRecordReservationUnavailableError()));
   return Promise.all(
     p.graph.units
       .filter((u) => selected.includes(u.id))
@@ -417,6 +419,16 @@ function planWhere(
  * attempts did not merge.
  */
 export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInput): Promise<HandOffOutcome> {
+  try {
+    return await handOffToCoordinatorUnchecked(deps, input);
+  } catch (error) {
+    if (error instanceof DecisionRecordReservationUnavailableError)
+      return refused("decision_record_store_unavailable", DECISION_RECORD_STORE_REFUSAL);
+    throw error;
+  }
+}
+
+async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffInput): Promise<HandOffOutcome> {
   const log = deps.log ?? console.log;
   const planned = await plan(deps, input);
   if (!planned.ok) return refused(planned.code, planned.reply);

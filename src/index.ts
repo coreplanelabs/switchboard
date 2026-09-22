@@ -183,7 +183,10 @@ import { resolveGithubIdentity } from "./execution/githubApp.js";
 import { bindingOf } from "./execution/authorBinding.js";
 import { dispatchIdentityRewrite } from "./execution/identityRewrite.js";
 import { DEPLOY_RESTART_NOTICE, setShutdownNotice } from "./core/dispatch/run.js";
-import { DecisionRecordAllocator } from "./core/decisionRecordReservation.js";
+import {
+  DecisionRecordAllocator,
+  DecisionRecordReservationUnavailableError,
+} from "./core/decisionRecordReservation.js";
 import { channelVisibilityOf, writeAbandonedRunRecords } from "./core/dispatch/record.js";
 import { createSteerSender, defaultAdmission } from "./core/dispatch/admission.js";
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
@@ -451,7 +454,8 @@ export async function runBot(): Promise<void> {
     fetchDecisionRecordClaims,
     async (repo, taskKey, claimed, existing) => {
       const reserved = await coordinatorInstances.reserveDecisionRecord(repo, taskKey, claimed, existing);
-      return reserved.ok ? reserved.number : undefined;
+      if (!reserved.ok) throw new DecisionRecordReservationUnavailableError();
+      return reserved.number;
     },
   );
   // The plane's `admit` execution (record 0064, "The queue"): the object wrote

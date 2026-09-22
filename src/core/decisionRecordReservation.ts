@@ -3,14 +3,32 @@ import type { RecordProblem } from "../docs/records.js";
 export const DECISION_RECORD_ENV = "SWITCHBOARD_DECISION_RECORD";
 export const DECISION_RECORD_PATTERN = /^docs\/decisions\/(\d{4})-[^/]+\.md$/;
 
-/** A unit asks for a record only when it asks to write one. Merely discussing
- * records or the reservation mechanism is not a request to create one. The
- * parenthesized procedure phrase is the historical form kept for re-issues. */
+const RECORD_MARKER =
+  /(?:^|\n)\s*(?:-\s*)?(?:\*\*)?(?:decision[- ]record|record)(?:\*\*)?\s*:\s*(write|yes|true|none|no|false)\b/im;
+const POSITIVE_RECORD_INSTRUCTION =
+  /\b(?:write|draft|create|add|author|produce|document)\b[^\n.!?;]{0,160}\b(?:technical\s+|architectural\s+|architecture\s+)?decision[- ]record\b/gi;
+const NEGATED_INSTRUCTION =
+  /(?:\b(?:do|does|did|must|should|will|can)\s+not(?:\s+\w+){0,3}|\b(?:don't|doesn't|didn't|mustn't|shouldn't|won't|can't)(?:\s+\w+){0,3}|\b(?:never|not|without)(?:\s+\w+){0,3})\s*$/i;
+
+/** A unit asks for a record when its structured marker says so, or when one
+ * sentence positively instructs the child to produce a decision record. A
+ * marker wins over prose, including a negative marker beside an example; a
+ * negated instruction and mere discussion of records never reserve a number. */
 export function asksForDecisionRecord(text: string): boolean {
-  return (
-    /\b(?:write|draft|create|add)\b[^\n]{0,120}\b(?:technical\s+)?decision record\b/i.test(text) ||
-    /\brecord\s*\(\s*(?:the\s+)?next free number in docs\/decisions\//i.test(text)
-  );
+  const marker = RECORD_MARKER.exec(text)?.[1]?.toLowerCase();
+  if (marker !== undefined) return marker === "write" || marker === "yes" || marker === "true";
+  for (const instruction of text.matchAll(POSITIVE_RECORD_INSTRUCTION)) {
+    const sentenceStart = Math.max(
+      text.lastIndexOf("\n", instruction.index),
+      text.lastIndexOf(".", instruction.index),
+      text.lastIndexOf("!", instruction.index),
+      text.lastIndexOf("?", instruction.index),
+      text.lastIndexOf(";", instruction.index),
+    );
+    const beforeVerb = text.slice(sentenceStart + 1, instruction.index);
+    if (!NEGATED_INSTRUCTION.test(beforeVerb)) return true;
+  }
+  return false;
 }
 
 const numberOf = (path: string): string | undefined => DECISION_RECORD_PATTERN.exec(path)?.[1];
@@ -95,10 +113,23 @@ export type DurableDecisionRecordReservation = (
   existing?: string,
 ) => Promise<string | undefined>;
 
+export const DECISION_RECORD_STORE_REFUSAL =
+  "⚠️ A record-writing task needs the durable coordinator store on the state Worker (`runHistory.worker`), but that store is unavailable, so no number was issued and nothing ran.";
+
+/** The durable store's typed unavailable answer. Admission catches this one
+ * failure and renders the same refusal for ship units and direct directives. */
+export class DecisionRecordReservationUnavailableError extends Error {
+  constructor() {
+    super("the durable coordinator store is unavailable");
+    this.name = "DecisionRecordReservationUnavailableError";
+  }
+}
+
 /** Serializes allocations per repository inside one runner. Every allocation
- * begins from main plus open pull requests. Production also commits it through
- * the state Worker's atomic durable ledger, while these maps provide the same
- * ordering for a process without that store. */
+ * begins from main plus open pull requests. Production commits through the
+ * state Worker's atomic durable ledger; an unavailable durable callback fails
+ * closed, while the maps only serialize callers that deliberately omit one
+ * (the in-memory implementation used by focused tests). */
 export class DecisionRecordAllocator {
   private readonly byTask = new Map<string, string>();
   private readonly claimed = new Map<string, Set<string>>();
@@ -129,6 +160,7 @@ export class DecisionRecordAllocator {
       for (const number of this.claimedFor(repo)) used.add(number);
       const prior = existing;
       const durable = await this.durable?.(repo, taskKey, used, prior);
+      if (this.durable !== undefined && durable === undefined) throw new DecisionRecordReservationUnavailableError();
       if (durable !== undefined && !/^\d{4}$/.test(durable))
         throw new Error(`decision-record reservation store returned invalid number ${JSON.stringify(durable)}`);
       if (prior !== undefined && durable !== undefined && durable !== prior)

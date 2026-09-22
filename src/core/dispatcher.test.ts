@@ -65,7 +65,7 @@ import type { ContentPart } from "./chatMessage.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
 import { shipUnitText } from "./ship/preflight.js";
-import { decisionRecordTaskKey } from "./decisionRecordReservation.js";
+import { DecisionRecordReservationUnavailableError, decisionRecordTaskKey } from "./decisionRecordReservation.js";
 import { generatedPlanId, unitBranch } from "./ship/coordinator.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
@@ -4064,6 +4064,28 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(registry.snapshotById("r-record")?.events).toContainEqual(
       expect.objectContaining({ type: "run_meta", record: "0075" }),
     );
+  });
+
+  it("an unavailable durable decision-record store refuses a direct coding admission with the typed store refusal", async () => {
+    const complete = vi.fn(async (): Promise<CompletionResult> => ({
+      content: [{ type: "text", text: "should not run" }],
+      stopReason: "end_turn",
+    }));
+    const deps = codingDeps({ name: "fake", complete });
+    deps.reserveDecisionRecord = vi.fn(async () => {
+      throw new DecisionRecordReservationUnavailableError();
+    });
+    const { io, replies } = fakeIO();
+
+    const outcome = await dispatch(
+      deps,
+      msg("agent:coding Document this choice in a decision record.", "slack:UADMIN"),
+      io,
+    );
+
+    expect(outcome).toMatchObject({ status: "refused", refusal: "decision_record_store_unavailable" });
+    expect(replies).toContainEqual(expect.stringContaining("durable coordinator store"));
+    expect(complete).not.toHaveBeenCalled();
   });
 
   it("a re-issued decision-record task finds its reservation beyond the newest 200 coding records", async () => {

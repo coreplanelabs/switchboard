@@ -5,6 +5,7 @@ import { handOffToCoordinator, type HandOffDeps, type HandOffInput } from "./han
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
 import { MAX_FILE_CHARS } from "../../execution/githubApi.js";
 import { PLAN_MAX_CHARS } from "../ship/contract.js";
+import { generatedPlanId } from "../ship/coordinator.js";
 import { DecisionRecordAllocator } from "../decisionRecordReservation.js";
 
 // Feature: docs/reference/specs/agent-ship.md item 16 — every `agent:ship`
@@ -282,6 +283,32 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       input({ entry: { repo: "acme/api", base: "main" }, requestText: effectText }),
     );
     expect((await effect.instances.listUnits(reissued.instanceId!))[0]?.record).toBe("0075");
+  });
+
+  it("an unavailable durable decision-record store refuses admission without issuing a number or writing a unit", async () => {
+    const h = harness();
+    const allocator = new DecisionRecordAllocator(
+      async () => new Set(["0074"]),
+      async () => undefined,
+    );
+    h.deps.reserveDecisionRecord = allocator.reserve.bind(allocator);
+
+    const task = "Document this choice in a decision record.";
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: `in acme/api: ${task}`,
+      }),
+    );
+
+    expect(out).toMatchObject({
+      status: "aborted",
+      refusal: { cause: "system", code: "decision_record_store_unavailable" },
+    });
+    expect(out.reply).toContain("durable coordinator store");
+    expect(h.created).toEqual([]);
+    expect(await h.instances.listUnits(`plan-${generatedPlanId(task, "slack:C1:1.0")}`)).toEqual([]);
   });
 
   it("a generated task persists its accepted inline media as one retry-stable seed event after the unit row and before the Workflow starts; an over-cap seed says what was dropped", async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DecisionRecordAllocator,
+  DecisionRecordReservationUnavailableError,
   asksForDecisionRecord,
   decisionRecordNumberProblems,
 } from "./decisionRecordReservation.js";
@@ -58,9 +59,29 @@ describe("DecisionRecordAllocator", () => {
     expect(await allocator.reserve("acme/api", "other-task")).toBe("0076");
   });
 
-  it("recognizes the two issue fixtures as record asks without treating the reservation bug report itself as one", () => {
+  it("an unavailable durable reservation store refuses without issuing a process-local number", async () => {
+    let storeAvailable = false;
+    const allocator = new DecisionRecordAllocator(
+      async () => new Set(["0074"]),
+      async () => (storeAvailable ? "0075" : undefined),
+    );
+
+    await expect(allocator.reserve("acme/api", "record-task")).rejects.toBeInstanceOf(
+      DecisionRecordReservationUnavailableError,
+    );
+    storeAvailable = true;
+    expect(await allocator.reserve("acme/api", "record-task")).toBe("0075");
+  });
+
+  it("recognizes positive record-writing instructions, excludes negations, and gives an explicit marker priority", () => {
     expect(asksForDecisionRecord(EFFECT_RECORD_ASK)).toBe(true);
     expect(asksForDecisionRecord(PROVIDER_RECORD_ASK)).toBe(true);
+    expect(asksForDecisionRecord("Document this choice in a decision record.")).toBe(true);
+    expect(asksForDecisionRecord("Do not write a decision record; just fix the provider seam.")).toBe(false);
+    expect(asksForDecisionRecord("decision-record: write\nDo not infer the record from this sentence.")).toBe(true);
+    expect(asksForDecisionRecord("decision-record: none\nWrite a decision record about the provider seam.")).toBe(
+      false,
+    );
     expect(
       asksForDecisionRecord(
         "Fix the reservation race: two children picked the same decision-record number; reserve it before either child runs.",

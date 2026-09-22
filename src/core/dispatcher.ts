@@ -152,8 +152,12 @@ import type { CardShell } from "./statusCardFrame.js";
 import { createRunEnding } from "./runEnding.js";
 import { shipUnitText } from "./ship/preflight.js";
 import { messageIdOf, type ChannelIO, type IncomingMessage, type StatusHandle } from "./types.js";
-import { asksForDecisionRecord, decisionRecordTaskKey } from "./decisionRecordReservation.js";
-import { defaultDecisionRecordAllocator } from "./decisionRecordReservationWiring.js";
+import {
+  DECISION_RECORD_STORE_REFUSAL,
+  DecisionRecordReservationUnavailableError,
+  asksForDecisionRecord,
+  decisionRecordTaskKey,
+} from "./decisionRecordReservation.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
 // parsing, layered resolution, permission gates, history assembly, executor
@@ -1347,9 +1351,25 @@ export async function dispatch(
       const prior = await priorDecisionRecord(deps.runStore, msg.threadKey, repoCtx.repo, decisionRecordTask);
       const reserve =
         deps.reserveDecisionRecord ??
-        ((repo: string, taskKey: string, existing?: string) =>
-          defaultDecisionRecordAllocator.reserve(repo, taskKey, existing));
-      decisionRecord = await reserve(repoCtx.repo, decisionRecordTask, prior);
+        (async () => {
+          throw new DecisionRecordReservationUnavailableError();
+        });
+      try {
+        decisionRecord = await reserve(repoCtx.repo, decisionRecordTask, prior);
+      } catch (error) {
+        if (!(error instanceof DecisionRecordReservationUnavailableError)) throw error;
+        await refuse(refusalOf("decision_record_store_unavailable", DECISION_RECORD_STORE_REFUSAL), () =>
+          card.done(
+            shell.close({
+              kind: "not_started",
+              icon: "⚠️",
+              reason: "durable coordinator store unavailable",
+              ...closeLines(clock(), false),
+            }),
+          ),
+        );
+        return ended;
+      }
     }
 
     // agent:ship fork (docs/reference/specs/agent-ship.md): after agent resolution and the
