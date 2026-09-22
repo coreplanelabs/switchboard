@@ -2171,6 +2171,67 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const id = `${ids.prompt}:follow-up:${++followUps}`;
       let turnSettled = false;
       let turnFailure: ProviderFailure | undefined;
+      /** A provider-down call in this post-loop turn stays inside the turn's
+       * lease, just as one in the initial loop does (model-proxy item 12a). */
+      let turnHeld: ProviderFailure | undefined;
+      let turnParkSettled = false;
+      let turnRetryReady = false;
+      let turnRetryWait: Promise<void> | undefined;
+      let turnRetryGeneration = 0;
+      let turnRetries = 0;
+      let turnRetryInFlight: string | undefined;
+      let turnReissueInFlight: string | undefined;
+      let turnReissues = 0;
+      let turnReissueRows: FollowUpInput[] = [];
+      let turnReissueInFlightRows: FollowUpInput[] = [];
+      const clearTurnProviderHold = () => {
+        turnHeld = undefined;
+        turnParkSettled = false;
+        turnRetryReady = false;
+        turnRetryWait = undefined;
+        turnRetryGeneration += 1;
+        turnReissueRows = [];
+        turnReissueInFlightRows = [];
+      };
+      const maybeReissueTurn = () => {
+        if (
+          turnHeld === undefined ||
+          !turnParkSettled ||
+          turnReissueInFlight !== undefined ||
+          turnRetryInFlight !== undefined ||
+          turnReissueRows.length === 0 ||
+          hardStopped ||
+          writeUp !== undefined ||
+          finaleAborted
+        )
+          return;
+        turnReissues += 1;
+        turnReissueInFlight = turnReissues === 1 ? `${id}:reissue` : `${id}:reissue:${turnReissues}`;
+        turnReissueInFlightRows = turnReissueRows.splice(0);
+        turnParkSettled = false;
+        turnSettled = false;
+        sends.send({ id: turnReissueInFlight, type: "prompt", message: REISSUE_PROMPT });
+      };
+      const drainTurnReissues = () => {
+        const inputs: FollowUpInput[] = run.inbox?.drain() ?? [];
+        if (inputs.length === 0) {
+          maybeReissueTurn();
+          return;
+        }
+        const reissued = inputs.filter((item) => item.userId === PLANE_ACTOR_ID && isReissueSteerText(item.text));
+        const waiting = reissued.length === 0 ? inputs : inputs.filter((item) => !reissued.includes(item));
+        if (waiting.length > 0) run.inbox?.requeue(waiting);
+        for (const item of reissued) {
+          emit({
+            type: "input",
+            text: redactSecrets(item.text),
+            messageId: followUpMessageId(item),
+            ...(item.userName ? { source: { user: item.userName } } : {}),
+          });
+        }
+        turnReissueRows.push(...reissued);
+        maybeReissueTurn();
+      };
       /** The turn's failed call was refused under the provider's usage policy (item 6). */
       let turnRefusal = false;
       /** The turn threw — a refused prompt, a dead pi, a failed model call, a bypass — so its span ends `error`. */
@@ -2190,6 +2251,27 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             abortPi();
           }
           return;
+        }
+        // Only the plane's provider-up control rows are drained during a
+        // post-loop turn. Ordinary thread follow-ups still wait for the run's
+        // end; an up row may race ahead of the failure and is buffered here.
+        drainTurnReissues();
+        if (turnHeld !== undefined) {
+          if (now() >= turnDeadline) throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+          if (
+            turnParkSettled &&
+            turnRetryReady &&
+            turnRetryInFlight === undefined &&
+            turnReissueInFlight === undefined
+          ) {
+            turnRetryReady = false;
+            turnRetryWait = undefined;
+            turnRetries += 1;
+            turnRetryInFlight = turnRetries === 1 ? `${id}:retry` : `${id}:retry:${turnRetries}`;
+            turnParkSettled = false;
+            turnSettled = false;
+            sends.send({ id: turnRetryInFlight, type: "prompt", message: PROVIDER_RETRY_PROMPT });
+          }
         }
         if (run.control?.requested === "soft") {
           note("stopped", softStopNote(), "soft");
@@ -2270,7 +2352,34 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             abortPi();
             break;
           }
-          if (obs.response) noteEcho(obs.response);
+          if (obs.response) {
+            noteEcho(obs.response);
+            if (turnReissueInFlight !== undefined && obs.response.id === turnReissueInFlight) {
+              turnReissueInFlight = undefined;
+              if (obs.response.success === false) {
+                turnReissueRows.unshift(...turnReissueInFlightRows);
+                turnReissueInFlightRows = [];
+                turnParkSettled = false;
+                note(
+                  "harness_error",
+                  `the follow-up turn's reissue prompt was refused (${String(obs.response.error ?? "no reason")}); the turn stays held for the next settle`,
+                );
+              } else {
+                mirror.inboxConsumedSeq = Math.max(
+                  mirror.inboxConsumedSeq,
+                  ...turnReissueInFlightRows.map((item) => item.ledgerSeq ?? 0),
+                );
+                clearTurnProviderHold();
+              }
+            }
+            if (turnRetryInFlight !== undefined && obs.response.id === turnRetryInFlight) {
+              turnRetryInFlight = undefined;
+              if (obs.response.success === false) {
+                turnParkSettled = false;
+                note("harness_error", "the follow-up turn's model retry prompt was refused; the failure remains held");
+              } else clearTurnProviderHold();
+            }
+          }
           if (obs.response?.id === id && obs.response.success === false)
             throw new PromptRefused(String(obs.response.error ?? "no reason"));
           if (obs.providerError !== undefined) {
@@ -2280,12 +2389,35 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               // the turn's ending — the write-up's label is (the loop's rule).
               writeUpFailed = renderProviderFailure(failure.cause);
               note("harness_error", windDownFailureNote(writeUpFailed, "turn"));
+            } else if (obs.policyRefusal !== true && providerFailureParks(failure.cause)) {
+              turnHeld = failure;
+              turnFailure = undefined;
+              turnRefusal = false;
+              turnParkSettled = false;
+              const backoff = PROVIDER_RETRY_BACKOFFS_MS[Math.min(turnRetries, PROVIDER_RETRY_BACKOFFS_MS.length - 1)]!;
+              run.onProgress?.(
+                `the model provider did not complete the follow-up call; the turn is held and retry ${turnRetries + 1} waits ${backoff / 1000}s inside this run's lease`,
+              );
             } else {
               turnFailure = failure;
               turnRefusal = obs.policyRefusal === true;
             }
           }
           if (obs.settled) {
+            if (turnHeld !== undefined && turnFailure === undefined && !hardStopped && !writeUp && !finaleAborted) {
+              turnParkSettled = true;
+              if (turnRetryWait === undefined) {
+                const backoff =
+                  PROVIDER_RETRY_BACKOFFS_MS[Math.min(turnRetries, PROVIDER_RETRY_BACKOFFS_MS.length - 1)]!;
+                const generation = ++turnRetryGeneration;
+                turnRetryWait = deps.sleep(backoff).then(() => {
+                  if (turnRetryGeneration === generation) turnRetryReady = true;
+                });
+              }
+              turnCheck();
+              if (hardStopped) break;
+              continue;
+            }
             turnSettled = true;
             break;
           }
@@ -2383,6 +2515,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         if (err instanceof HarnessControlFileLostError) note("harness_error", err.message);
         throw err;
       } finally {
+        turnRetryGeneration += 1;
         deps.bearers?.clearTurn(run.runId);
         live.toolContext = runContext;
         live.rules = rules;

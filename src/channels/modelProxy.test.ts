@@ -600,6 +600,25 @@ describe("pinning and pass-through — the OpenAI shape", () => {
     expect(h.calls[0].headers.authorization).toBeUndefined();
   });
 
+  // Feature: docs/reference/specs/model-proxy.md item 12b — requester text is
+  // sanitized, while the operator log carries the ProviderFailure diagnostic
+  // that names both the configured provider and its missing variable.
+  it("a missing configured key logs its provider and variable while the requester gets only the safe sentence", async () => {
+    const h = harness({ env: { ANTHROPIC_API_KEY: REAL_ANTHROPIC_KEY } });
+    const token = h.bearers.mint(h.localGrant("run-1"));
+    const res = await handleModelProxyRequest(
+      request({ path: OPENAI_CHAT_COMPLETIONS_PATH, headers: bearer(token), json: openAiRequest() }).req,
+      h.deps,
+    );
+    expect(h.logs).toContain(
+      '[model-proxy] 503 provider_key_missing run=run-1 — Provider "local": LOCAL_KEY is not set',
+    );
+    expect((json(res).error as { message: string }).message).toBe(
+      "The model provider key is not configured; this request cannot start until the service is restored.",
+    );
+    expect((json(res).error as { message: string }).message).not.toContain("LOCAL_KEY");
+  });
+
   it("an unset provider key is typed key-absent before any turn is spent; an unnamed provider is typed permanent", async () => {
     const h = harness({ env: { ANTHROPIC_API_KEY: REAL_ANTHROPIC_KEY } }); // LOCAL_KEY unset
     const token = h.bearers.mint(h.localGrant("run-1"));

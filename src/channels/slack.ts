@@ -459,6 +459,32 @@ export function catchUpDelayNote(messageTs: string, nowMs: number): string {
 /** What the catch-up's act did with one missed message (docs/reference/specs/slack-channel.md item 7). */
 export type CaughtUpAct = "dispatched" | "silenced" | "skipped";
 
+/** Slack itself is the delivery receipt for an intake-failure sentence. The
+ * decision row says what intake decided; an exact bot-authored reply says the
+ * separate side effect landed, including after an ambiguous post response. */
+function intakeFailureDelivered(
+  thread: ReadonlyArray<{ user?: string; text?: string }>,
+  botUserId: string | undefined,
+  reason: string,
+): boolean {
+  return botUserId !== undefined && thread.some((message) => message.user === botUserId && message.text === reason);
+}
+
+async function deliverIntakeFailure(opts: {
+  reason: string;
+  thread: ReadonlyArray<{ user?: string; text?: string }>;
+  botUserId: string | undefined;
+  reply?: (text: string) => Promise<void>;
+  failed: (err: unknown) => void;
+}): Promise<void> {
+  if (opts.reply === undefined || intakeFailureDelivered(opts.thread, opts.botUserId, opts.reason)) return;
+  try {
+    await opts.reply(opts.reason);
+  } catch (err) {
+    opts.failed(err);
+  }
+}
+
 /**
  * The catch-up's act for one missed message, before `handle()` (item 7, the
  * catch-up half of item 15). A candidate with a mention — including an edit
@@ -513,6 +539,14 @@ export async function actOnMissedMessage(
       if (row) {
         decided = true;
         silent = row.verdict === "silent";
+        if (row.providerFailure !== undefined)
+          await deliverIntakeFailure({
+            reason: row.reason,
+            thread: m.thread,
+            botUserId: opts.botUserId,
+            ...(opts.reply ? { reply: opts.reply } : {}),
+            failed: (err) => log(`[catch-up] ${key}: provider failure could not be rendered — ${describeError(err)}`),
+          });
         if (silent) log(`[catch-up] ${key}: silenced by its stored receipt (${row.source}): ${row.reason}`);
       } else {
         const page = m.thread;
@@ -538,13 +572,14 @@ export async function actOnMissedMessage(
         log(
           `[intake] ${key} ${decision.verdict} (${decision.source}, receipt ${decision.receipt}): ${decision.reason} — decided at catch-up`,
         );
-        if (decision.providerFailure !== undefined && decision.receipt !== "existing") {
-          try {
-            await opts.reply?.(decision.reason);
-          } catch (err) {
-            log(`[catch-up] ${key}: provider failure could not be rendered — ${describeError(err)}`);
-          }
-        }
+        if (decision.providerFailure !== undefined)
+          await deliverIntakeFailure({
+            reason: decision.reason,
+            thread: m.thread,
+            botUserId: opts.botUserId,
+            ...(opts.reply ? { reply: opts.reply } : {}),
+            failed: (err) => log(`[catch-up] ${key}: provider failure could not be rendered — ${describeError(err)}`),
+          });
         decided = true;
         silent = decision.verdict !== "addressed";
       }
@@ -942,14 +977,17 @@ async function gateThreadReply(
     intake.deps,
   );
   span.setAttrs({ intake: decision.verdict, intakeSource: decision.source, intakeReceipt: decision.receipt });
-  if (decision.providerFailure !== undefined && decision.receipt !== "existing") {
-    try {
-      await new SlackIO(client, ev).reply(decision.reason);
-    } catch (err) {
-      console.error(
-        `[intake] ${ev.channel}:${ev.ts} provider failure could not be rendered — ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+  if (decision.providerFailure !== undefined) {
+    await deliverIntakeFailure({
+      reason: decision.reason,
+      thread: page,
+      botUserId: ev.botUserId,
+      reply: (text) => new SlackIO(client, ev).reply(text),
+      failed: (err) =>
+        console.error(
+          `[intake] ${ev.channel}:${ev.ts} provider failure could not be rendered — ${err instanceof Error ? err.message : String(err)}`,
+        ),
+    });
     console.log(
       `[intake] ${ev.channel}:${ev.ts} ${decision.verdict} (${decision.source}, receipt ${decision.receipt}): ${decision.reason}`,
     );

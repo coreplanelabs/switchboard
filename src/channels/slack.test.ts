@@ -2051,6 +2051,81 @@ describe("the catch-up reads the receipt — onMissed's act (docs/reference/spec
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  // Feature: docs/reference/specs/routing-and-config.md item 27 — the
+  // decision receipt and Slack delivery are separate facts. A rejected first
+  // post leaves no bot sentence to reconcile, so the next catch-up retries;
+  // once Slack carries it, later catch-ups do not post it again.
+  it("a rejected intake-failure post is delivered once on the next catch-up, never twice", async () => {
+    const reason =
+      "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers.";
+    const stored: IntakeReceipt = {
+      verdict: "silent",
+      source: "error",
+      providerFailure: "credit-or-quota-exhausted",
+      reason,
+      mode: "classify",
+      model: "anthropic/fast-model",
+      gen: 1,
+      threadKey: "slack:CCU:100.000000",
+      decidedAt: 1,
+    };
+    const ledger = {
+      readIntake: vi.fn(async () => stored),
+      recordIntake: vi.fn(async () => ({ inserted: false, stored })),
+    };
+    const { gate, decide } = catchGate({ ledger });
+    const rejected = vi.fn(async () => {
+      throw new Error("ratelimited");
+    });
+    expect(
+      await actOnMissedMessage(missedOf(), {
+        botUserId: BOT,
+        intake: gate,
+        seen: seenSet(),
+        log: () => {},
+        reply: rejected,
+        dispatch: () => {},
+      }),
+    ).toBe("silenced");
+    expect(rejected).toHaveBeenCalledOnce();
+
+    const delivered = vi.fn(async () => {});
+    expect(
+      await actOnMissedMessage(missedOf(), {
+        botUserId: BOT,
+        intake: gate,
+        seen: seenSet(),
+        log: () => {},
+        reply: delivered,
+        dispatch: () => {},
+      }),
+    ).toBe("silenced");
+    expect(delivered).toHaveBeenCalledOnce();
+
+    const duplicate = vi.fn(async () => {});
+    expect(
+      await actOnMissedMessage(
+        missedOf({
+          thread: [
+            { user: BOT, bot_id: "B1", text: "report ready", ts: "100.000000" },
+            { user: "UASKER", text: "and the tests?", ts: "120.000100", thread_ts: "100.000000" },
+            { user: BOT, bot_id: "B1", text: reason, ts: "121.000100", thread_ts: "100.000000" },
+          ],
+        }),
+        {
+          botUserId: BOT,
+          intake: gate,
+          seen: seenSet(),
+          log: () => {},
+          reply: duplicate,
+          dispatch: () => {},
+        },
+      ),
+    ).toBe("silenced");
+    expect(duplicate).not.toHaveBeenCalled();
+    expect(decide).not.toHaveBeenCalled();
+  });
+
   it("an always thread is dispatched exactly as today: no receipt read, no verdict, no intakeDecided — and so is a replay when no gate is wired", async () => {
     const ledger = receiptLedger({ "CCU:120.000100": "silent" });
     const { gate, decide } = catchGate({ mode: "always", ledger });

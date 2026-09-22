@@ -317,10 +317,12 @@ export function classifyProviderFailure(input: ProviderFailureAnswer): ProviderF
   });
 }
 
-export function providerFailureOf(error: unknown): ProviderFailure {
+function typedProviderFailureOf(error: unknown, seen = new Set<object>()): ProviderFailure | undefined {
   if (error instanceof ProviderFailure) return error;
   const row = providerFailureRecord(error);
-  if (row?.name === "ProviderFailure" && isProviderFailureCause(row.cause)) {
+  if (!row || seen.has(row)) return undefined;
+  seen.add(row);
+  if (row.name === "ProviderFailure" && isProviderFailureCause(row.cause)) {
     return new ProviderFailure(row.cause, {
       ...(typeof row.status === "number" ? { status: row.status } : {}),
       ...(typeof row.provider === "string" ? { provider: row.provider } : {}),
@@ -329,7 +331,14 @@ export function providerFailureOf(error: unknown): ProviderFailure {
       ...(typeof row.keyVariable === "string" ? { keyVariable: row.keyVariable } : {}),
     });
   }
-  return classifyProviderFailure({ error });
+  // StructuredAskError and other boundary wrappers preserve the original
+  // throw as `cause`. Follow typed causes through those wrappers before the
+  // outer error's copied message can be classified without its status/body.
+  return typedProviderFailureOf(row.cause, seen);
+}
+
+export function providerFailureOf(error: unknown): ProviderFailure {
+  return typedProviderFailureOf(error) ?? classifyProviderFailure({ error });
 }
 
 /** Causes that make the provider unavailable rather than ending one call. */

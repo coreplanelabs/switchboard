@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RouteModel, RoutePrompt, RouteToolCall } from "./dispatch/route.js";
-import { classifyProviderFailure } from "./provider.js";
+import { classifyProviderFailure, providerFailureParks } from "./provider.js";
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from "./untrusted.js";
 import {
   buildIntakePrompt,
@@ -148,6 +148,25 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
     });
     expect(decision.reason).not.toMatch(/[{}]|https?:\/\/|limit_source/);
     expect(decision.reason.match(/[.!?](?:\s|$)/g)).toHaveLength(1);
+  });
+
+  // Feature: docs/reference/specs/model-proxy.md item 12b — askStructured
+  // retains earlier malformed attempts by wrapping a later throw; the typed
+  // ProviderFailure inside that wrapper still owns the disposition.
+  it("a malformed answer followed by a 402 keeps the nested credit failure park-capable", async () => {
+    let calls = 0;
+    const model: RouteModel = async () => {
+      if (calls++ === 0) return "not a verdict";
+      throw classifyProviderFailure({ status: 402, body: { error: { type: "payment_required" } } });
+    };
+    const decision = await decideIntake(input(), deps({ model }));
+    expect(decision).toMatchObject({
+      verdict: "silent",
+      source: "error",
+      providerFailure: "credit-or-quota-exhausted",
+      attempts: [{ outcome: "violation" }],
+    });
+    expect(providerFailureParks(decision.providerFailure!)).toBe(true);
   });
 
   it("a malformed answer — another tool, prose, an answer outside the enum — is silent with source: error, never a guessed verdict", async () => {

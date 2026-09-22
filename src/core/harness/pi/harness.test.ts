@@ -1107,6 +1107,59 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
   });
 
+  // Feature: docs/reference/specs/model-proxy.md item 12a — post-loop turns
+  // share the run's provider hold: a description/verdict/re-review/follow-up
+  // turn stays live through a parked 402 and the provider-up release reissues
+  // that same turn instead of ending the run.
+  it("a 402 during a follow-up turn parks and resumes on provider-up without ending the run", async () => {
+    const w = world({ providerPark: true });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) finalTurn(c, "loop done");
+      else if (n === 1)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage:
+                '402 {"error":{"type":"provider_failure","cause":"credit-or-quota-exhausted","message":"credit exhausted"}}',
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else if (n === 2) {
+        echoPrompt(c);
+        finalTurn(c, "follow-up recovered");
+      } else finalTurn(c, "the session is still live");
+    });
+    const session = await w.open();
+    const turn = session.followUp({
+      text: "write the PR description",
+      maxTurns: 4,
+      maxMinutes: 5,
+      toolContext: { executor },
+    });
+    await vi.waitFor(() => expect(w.notes.some((note) => note.includes("the turn is held"))).toBe(true));
+    w.inbox.push({
+      text: reissueSteerSentence("anthropic"),
+      userId: "plane",
+      userName: "plane",
+      at: NOW,
+      ledgerSeq: 3,
+    });
+    await expect(turn).resolves.toBe("follow-up recovered");
+    await expect(
+      session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+    ).resolves.toBe("the session is still live");
+    const prompts = w.container.commands().filter((command) => command.type === "prompt");
+    expect(prompts).toHaveLength(4);
+    expect(String(prompts[2].id)).toContain(":reissue");
+    expect(w.inbox.size).toBe(0);
+    await session.end();
+  });
+
   it("a 5xx then success: the transient failure is retried after the ladder's first backoff — pi is re-prompted and the retry's answer is the run's", async () => {
     const slept: number[] = [];
     const w = world({ sleep: async (ms) => void slept.push(ms) });
