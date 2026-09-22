@@ -94,6 +94,13 @@ export type { IntakeReceipt } from "./runLedger/types.js";
 export interface IntakeLedger {
   readIntake(key: string): Promise<IntakeReceipt | undefined>;
   recordIntake(key: string, receipt: IntakeReceipt): Promise<{ inserted: boolean; stored: IntakeReceipt }>;
+  /** Atomically owns delivery of one stored failure sentence. Optional only
+   * for a degraded/older ledger; an existing receipt is never posted without
+   * this cross-process fence. */
+  claimIntakeDelivery?(key: string, poster: string, claimedAt: number): Promise<boolean>;
+  /** Close a successful delivery forever, or release a rejected attempt so a
+   * later catch-up may claim it. */
+  finishIntakeDelivery?(key: string, poster: string, delivered: boolean): Promise<void>;
 }
 
 /** One reply to decide: the message, the thread's newest turns, the facts,
@@ -258,7 +265,7 @@ async function askModel(
     const failure = providerFailureOf(err);
     return {
       verdict: "silent",
-      reason: renderProviderFailure(failure.cause),
+      reason: renderProviderFailure(failure.cause, "ended"),
       source: "error",
       providerFailure: failure.cause,
       ...(attempts ? { attempts } : {}),

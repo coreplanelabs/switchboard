@@ -1230,8 +1230,7 @@ describe("run ledger — intake receipts (item 59)", () => {
     const first = intakeReceipt("slack:C1:1.0", {
       source: "error",
       providerFailure: "credit-or-quota-exhausted",
-      reason:
-        "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers.",
+      reason: "The model provider's credit or quota is exhausted; this request did not start.",
     });
     expect(await post("/runs/intake", { storeKey: key, key: "slack:C1:2.0", receipt: first })).toMatchObject({
       status: 200,
@@ -1245,6 +1244,44 @@ describe("run ledger — intake receipts (item 59)", () => {
     expect((await post("/runs/intake/read", { storeKey: key, key: "slack:C1:2.0" })).data).toEqual({
       receipt: first,
     });
+  });
+
+  it("claims one failure delivery atomically, releases a rejected post, and closes a successful post", async () => {
+    const key = storeKey();
+    const receiptKey = "slack:C1:2.0";
+    await post("/runs/intake", {
+      storeKey: key,
+      key: receiptKey,
+      receipt: intakeReceipt("slack:C1:1.0", { source: "error", providerFailure: "transient" }),
+    });
+    const claim = (poster: string, claimedAt = 5_000) =>
+      post("/runs/intake/delivery/claim", { storeKey: key, key: receiptKey, poster, claimedAt });
+    const [a, b] = await Promise.all([claim("poster-a"), claim("poster-b")]);
+    expect([a.data.claimed, b.data.claimed].sort()).toEqual([false, true]);
+    const owner = a.data.claimed === true ? "poster-a" : "poster-b";
+    const loser = owner === "poster-a" ? "poster-b" : "poster-a";
+
+    await post("/runs/intake/delivery/finish", {
+      storeKey: key,
+      key: receiptKey,
+      poster: loser,
+      delivered: false,
+    });
+    expect((await claim("poster-c")).data).toEqual({ claimed: false });
+    await post("/runs/intake/delivery/finish", {
+      storeKey: key,
+      key: receiptKey,
+      poster: owner,
+      delivered: false,
+    });
+    expect((await claim("poster-c")).data).toEqual({ claimed: true });
+    await post("/runs/intake/delivery/finish", {
+      storeKey: key,
+      key: receiptKey,
+      poster: "poster-c",
+      delivered: true,
+    });
+    expect((await claim("poster-d", Number.MAX_SAFE_INTEGER)).data).toEqual({ claimed: false });
   });
 
   it("list answers a thread's rows and rows since an instant, oldest first", async () => {

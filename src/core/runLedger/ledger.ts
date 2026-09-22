@@ -187,6 +187,13 @@ export interface RunLedger {
   /** The stored receipt, or none — the read the gate and the catch-up make
    *  before deciding (item 59). */
   readIntake(key: string): Promise<IntakeReceipt | undefined>;
+  /** Atomically claim the right to post one stored provider-failure sentence.
+   * The key names the receipt, the poster names the claiming process/attempt,
+   * and an expired unfinished claim may be recovered. */
+  claimIntakeDelivery(key: string, poster: string, claimedAt: number): Promise<boolean>;
+  /** Mark the claimant's post delivered forever, or release a rejected post
+   * for the next catch-up. A stale/non-owner finish changes nothing. */
+  finishIntakeDelivery(key: string, poster: string, delivered: boolean): Promise<void>;
   /** The receipts of a thread, or since an instant, oldest first (item 59) —
    *  what the live false-silence ratio reads. */
   listIntake(query: IntakeQuery): Promise<IntakeReceipt[]>;

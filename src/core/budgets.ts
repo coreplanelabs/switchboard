@@ -150,6 +150,11 @@ export function intakeReceiptRetentionMs(catchUpWindowMs: number): number {
  *  prompt one bounds the ratio the gate is judged by. */
 export const INTAKE_RECOVERY_WINDOW_MS = 10 * MINUTE_MS;
 
+/** How long one process owns the right to post a stored intake-failure
+ * sentence. A rejected post releases immediately; this bound only recovers a
+ * process that died after the atomic claim and before it could finish it. */
+export const INTAKE_DELIVERY_CLAIM_MS = 5 * MINUTE_MS;
+
 /** The presets that run the tool loop, and the one pipeline preset. */
 export const LOOP_PRESETS = [
   "general",

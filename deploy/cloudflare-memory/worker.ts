@@ -77,7 +77,7 @@ import {
   reclaimPhase,
   selectReclaim,
 } from "../../src/core/runLedger/decisions.ts";
-import { intakeReceiptRetentionMs, minutesToMs, PLANE } from "../../src/core/budgets.ts";
+import { INTAKE_DELIVERY_CLAIM_MS, intakeReceiptRetentionMs, minutesToMs, PLANE } from "../../src/core/budgets.ts";
 import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause } from "../../src/core/provider.ts";
 import { holdBackgroundTask } from "./backgroundTasks.ts";
 import {
@@ -1697,6 +1697,12 @@ export class RunHistoryDO extends DurableObject<Env> {
       );
       CREATE INDEX IF NOT EXISTS intake_thread ON intake_receipts(thread_key, decided_at);
       CREATE INDEX IF NOT EXISTS intake_prune ON intake_receipts(prune_after);
+      CREATE TABLE IF NOT EXISTS intake_deliveries (
+        receipt_key TEXT PRIMARY KEY,
+        poster TEXT NOT NULL,
+        claim_until INTEGER NOT NULL,
+        delivered INTEGER NOT NULL
+      );
     `);
     // The coordinator's parent records (run-history item 49): one row per
     // instance, written by the bot at the instance's creation and read by the
@@ -3247,6 +3253,48 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.intakeRow(key) ?? null;
   }
 
+  /** The receipt key and poster become one durable, atomic right to publish.
+   * A dead claimant can be replaced only after its bounded claim expires. */
+  async claimIntakeDelivery(key: string, poster: string, claimedAt: number): Promise<boolean> {
+    let claimed = false;
+    this.ctx.storage.transactionSync(() => {
+      if (this.intakeRow(key)?.providerFailure === undefined) return;
+      const existing = this.sql
+        .exec<{ claim_until: number; delivered: number }>(
+          `SELECT claim_until, delivered FROM intake_deliveries WHERE receipt_key = ?`,
+          key,
+        )
+        .toArray()[0];
+      if (existing?.delivered === 1 || (existing !== undefined && existing.claim_until > claimedAt)) return;
+      this.sql.exec(
+        `INSERT INTO intake_deliveries (receipt_key, poster, claim_until, delivered) VALUES (?, ?, ?, 0)
+         ON CONFLICT(receipt_key) DO UPDATE SET poster = excluded.poster, claim_until = excluded.claim_until, delivered = 0`,
+        key,
+        poster,
+        claimedAt + INTAKE_DELIVERY_CLAIM_MS,
+      );
+      claimed = true;
+    });
+    return claimed;
+  }
+
+  async finishIntakeDelivery(key: string, poster: string, delivered: boolean): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      if (delivered)
+        this.sql.exec(
+          `UPDATE intake_deliveries SET delivered = 1 WHERE receipt_key = ? AND poster = ? AND delivered = 0`,
+          key,
+          poster,
+        );
+      else
+        this.sql.exec(
+          `DELETE FROM intake_deliveries WHERE receipt_key = ? AND poster = ? AND delivered = 0`,
+          key,
+          poster,
+        );
+    });
+  }
+
   /** A thread's receipts, or the receipts since an instant, oldest first. */
   async listIntake(query: IntakeQuery): Promise<IntakeReceipt[]> {
     const clauses: string[] = [];
@@ -3598,6 +3646,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         receipts = this.sql
           .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM intake_receipts WHERE prune_after <= ?`, now)
           .one().n;
+        this.sql.exec(
+          `DELETE FROM intake_deliveries WHERE receipt_key IN (SELECT key FROM intake_receipts WHERE prune_after <= ?)`,
+          now,
+        );
         this.sql.exec(`DELETE FROM intake_receipts WHERE prune_after <= ?`, now);
         // The sessions no kept run names any more (session-log item 7): decided
         // here, on the rows this transaction leaves; dropped after it.
@@ -4996,6 +5048,8 @@ const LEDGER_ROUTES = new Set([
   "/runs/live-events",
   "/runs/intake",
   "/runs/intake/read",
+  "/runs/intake/delivery/claim",
+  "/runs/intake/delivery/finish",
   "/runs/intake/list",
   "/runs/transcript/owner",
   "/runs/transcript/write",
@@ -5701,6 +5755,21 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   }
 
   // The intake receipts (run-history item 59): keyed by the message, not a run.
+  if (pathname === "/runs/intake/delivery/claim" || pathname === "/runs/intake/delivery/finish") {
+    const receiptKey = b.key;
+    if (typeof receiptKey !== "string" || receiptKey.length === 0 || receiptKey.length > 256)
+      return json({ error: "key must be a non-empty string of at most 256 characters" }, 400);
+    if (typeof b.poster !== "string" || b.poster.length === 0 || b.poster.length > 256)
+      return json({ error: "poster must be a non-empty string of at most 256 characters" }, 400);
+    if (pathname === "/runs/intake/delivery/claim") {
+      if (typeof b.claimedAt !== "number" || !Number.isFinite(b.claimedAt))
+        return json({ error: "claimedAt must be a number" }, 400);
+      return json({ claimed: await stub.claimIntakeDelivery(receiptKey, b.poster, b.claimedAt) });
+    }
+    if (typeof b.delivered !== "boolean") return json({ error: "delivered must be a boolean" }, 400);
+    await stub.finishIntakeDelivery(receiptKey, b.poster, b.delivered);
+    return json({ ok: true });
+  }
   if (pathname === "/runs/intake" || pathname === "/runs/intake/read") {
     const receiptKey = b.key;
     if (typeof receiptKey !== "string" || receiptKey.length === 0 || receiptKey.length > 256)

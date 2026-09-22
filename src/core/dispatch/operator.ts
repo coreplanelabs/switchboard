@@ -1110,7 +1110,7 @@ export async function runOperator(
               cause: "provider",
               providerFailure: failure.cause,
               reason: failure.cause,
-              text: renderProviderFailure(failure.cause),
+              text: renderProviderFailure(failure.cause, "ended"),
             },
             failure.message,
           );
@@ -1587,7 +1587,7 @@ export async function executeOperatorDecision(
     // renders once and ends at the door even in an owned thread; falling
     // through would silently reinterpret the request as general or a steer.
     io.requestFailed?.();
-    await io.reply(event.refusalText ?? renderProviderFailure(event.providerFailure));
+    await io.reply(event.refusalText ?? renderProviderFailure(event.providerFailure, "ended"));
     await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
     return answered;
   }

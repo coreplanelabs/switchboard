@@ -856,6 +856,10 @@ export async function runBot(): Promise<void> {
               if (out === undefined) throw new Error("the receipt write degraded (the ledger warning names why)");
               return out;
             },
+            claimIntakeDelivery: (key: string, poster: string, claimedAt: number) =>
+              ledgerClient.claimIntakeDelivery(key, poster, claimedAt),
+            finishIntakeDelivery: (key: string, poster: string, delivered: boolean) =>
+              ledgerClient.finishIntakeDelivery(key, poster, delivered),
           }
         : null;
       slackIntake = wireIntakeGate({

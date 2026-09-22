@@ -143,8 +143,7 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
       verdict: "silent",
       source: "error",
       providerFailure: "credit-or-quota-exhausted",
-      reason:
-        "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers.",
+      reason: "The model provider's credit or quota is exhausted; this request did not start.",
     });
     expect(decision.reason).not.toMatch(/[{}]|https?:\/\/|limit_source/);
     expect(decision.reason.match(/[.!?](?:\s|$)/g)).toHaveLength(1);

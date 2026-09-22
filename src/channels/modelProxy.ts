@@ -18,6 +18,7 @@
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { once } from "node:events";
 import { MODEL_STREAM_HEARTBEAT_MS } from "../core/budgets.js";
+import { authenticateProxyProviderFailure } from "../core/modelProxy/providerFailureAuth.js";
 import type { RunBearerGrant, RunBearerStore, RunMarks } from "../core/modelProxy/runBearers.js";
 import type { SpanAttrs } from "../core/trace/attrs.js";
 import type { Clock } from "../core/trace/types.js";
@@ -167,11 +168,11 @@ export function refusalResponse(
  * renderer sentence before it crosses into a harness. The status remains the
  * provider's; its payload and URL do not. */
 function providerFailureResponse(shape: ProxyShape, status: number, failure: ProviderFailure): ProxyResponse {
-  const error = {
+  const error = authenticateProxyProviderFailure({
     type: "provider_failure",
     cause: failure.cause,
-    message: renderProviderFailure(failure.cause),
-  };
+    message: renderProviderFailure(failure.cause, providerFailureParks(failure.cause) ? "parked" : "ended"),
+  });
   const body = shape === "anthropic-messages" ? { type: "error", error } : { error };
   return { status, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
 }

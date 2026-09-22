@@ -380,11 +380,24 @@ describe("runOperator — the loop over a scripted model", () => {
       cause: "provider",
       providerFailure: "request-rejected",
       reason: "request-rejected",
-      text: renderProviderFailure("request-rejected"),
+      text: renderProviderFailure("request-rejected", "ended"),
     });
     expect(answer.decision.kind === "refusal" ? answer.decision.text : "").not.toMatch(
       /[{}]|https?:\/\/|lookaround|send another/i,
     );
+  });
+
+  it("a park-capable failure at the no-lease operator door says the request did not start", async () => {
+    const answer = await runOperator(input(), async () => {
+      throw classifyProviderFailure({ status: 503, body: { error: { type: "overloaded_error" } } });
+    });
+    expect(answer.decision).toMatchObject({
+      kind: "refusal",
+      cause: "provider",
+      providerFailure: "transient",
+      text: "The model provider is temporarily unavailable; this request did not start.",
+    });
+    expect(answer.decision.kind === "refusal" ? answer.decision.text : "").not.toMatch(/will continue|work is kept/);
   });
 
   it("the prompt is open: the tool set carries no forced choice, so the model may end the turn", () => {

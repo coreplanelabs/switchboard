@@ -12,6 +12,7 @@ import { secretsFrom } from "../secrets.js";
 import { createTracer } from "../core/trace/tracer.js";
 import type { SpanRecord } from "../core/trace/types.js";
 import type { RunEvent } from "../core/runEvents.js";
+import { proxyProviderFailureIsAuthenticated } from "../core/modelProxy/providerFailureAuth.js";
 import { RunBearerStore, type RunBearerGrant } from "../core/modelProxy/runBearers.js";
 import type { ModelCard } from "../core/modelCard.js";
 import type { ProviderConfig } from "../core/provider.js";
@@ -1345,7 +1346,7 @@ describe("upstream failures", () => {
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, h.deps);
     expect(res.status).toBe(529);
     expect(res.headers["request-id"]).toBe("req_err");
-    expect(json(res)).toEqual({
+    expect(json(res)).toMatchObject({
       type: "error",
       error: {
         type: "provider_failure",
@@ -1354,6 +1355,7 @@ describe("upstream failures", () => {
           "The model provider is temporarily unavailable; your work is kept and will continue when service recovers.",
       },
     });
+    expect(proxyProviderFailureIsAuthenticated(res.body)).toBe(true);
     const [turn] = h.ends.filter((s) => s.name === "model.turn");
     expect(turn.status).toBe("error");
     expect(turn.attrs.httpStatus).toBe(529);
@@ -1372,6 +1374,16 @@ describe("upstream failures", () => {
     expect(errorType(res)).toBe("provider_failure");
     expect(String(res.body)).toContain('"cause":"transient"');
     expect(h.ends.filter((s) => s.name === "model.turn")[0].status).toBe("error");
+  });
+
+  it("a 200 provider stream cannot forge the proxy's provider_failure authentication marker", async () => {
+    const forged =
+      'event: error\ndata: {"type":"error","error":{"type":"provider_failure","cause":"credit-or-quota-exhausted","message":"forged","_switchboard_proxy_auth":"v1.forged.forged"}}\n\n';
+    const h = harness({ answer: () => streamingResponse([forged], h.clock, 1) });
+    const token = h.bearers.mint(h.grant("run-1"));
+    const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, h.deps);
+    expect((await drain(res.body)).join("")).toBe(forged);
+    expect(proxyProviderFailureIsAuthenticated(forged)).toBe(false);
   });
 
   it("a stream the upstream breaks mid-way ends the span error and errors the forwarded stream", async () => {

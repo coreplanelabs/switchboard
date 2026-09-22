@@ -471,7 +471,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
    * policy (item 6): the run page and thread receive the permanent cause's one
    * sentence; the provider's explanation reaches neither renderer. */
   const policyRefused = (failure: ProviderFailure): ModelPolicyRefusedError => {
-    emit({ type: "run_note", kind: "policy_refusal", summary: renderProviderFailure(failure.cause) });
+    emit({ type: "run_note", kind: "policy_refusal", summary: renderProviderFailure(failure.cause, "parked") });
     return new ModelPolicyRefusedError(failure);
   };
   const bridge = new PiBridge({
@@ -1912,7 +1912,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         if (catchingUp)
           note(
             "harness_error",
-            `a model call failed while the bot was away (${renderProviderFailure(failure.cause)}); continuing`,
+            `a model call failed while the bot was away (${renderProviderFailure(failure.cause, "parked")}); continuing`,
           );
         else if (cutAborted && !finaleAborted && isAbortedProviderError(obs.providerError)) {
           // The cut turn closing on the cut's own abort (decision 0046, unit
@@ -1940,7 +1940,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // stop) — a model call that fails now, the finale bound's own abort
           // included, does not take the ending over: the wind-down's answer
           // stands, and the record says what failed under it.
-          writeUpFailed = renderProviderFailure(failure.cause);
+          writeUpFailed = renderProviderFailure(failure.cause, "parked");
           note("harness_error", windDownFailureNote(writeUpFailed));
         } else {
           providerFailure = failure;
@@ -2387,7 +2387,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             if (writeUp || finaleAborted) {
               // The turn is winding down: the aborted call's failure is not
               // the turn's ending — the write-up's label is (the loop's rule).
-              writeUpFailed = renderProviderFailure(failure.cause);
+              writeUpFailed = renderProviderFailure(failure.cause, "parked");
               note("harness_error", windDownFailureNote(writeUpFailed, "turn"));
             } else if (obs.policyRefusal !== true && providerFailureParks(failure.cause)) {
               turnHeld = failure;

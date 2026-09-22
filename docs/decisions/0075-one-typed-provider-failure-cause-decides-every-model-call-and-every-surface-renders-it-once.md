@@ -123,3 +123,11 @@ Operational receipt after the recovery cut: on `worker:bot` at or beyond the mer
 ## Public hygiene
 
 This record retains the public issue numbers, the incident minute and a shortened public-tree SHA because they make the decision auditable. It includes no credential, account identifier, full key URL, private conversation identifier, customer name or raw provider payload.
+
+## Amended
+
+A provider response body cannot declare its own typed cause. Mandatory transport facts classify first (402 as credit/quota exhaustion, 429 as rate limit, and 5xx or network failure as transient); an explicit `cause` is accepted only from Switchboard's bearer-authenticated internal `provider_failure` envelope.
+
+Bearer authentication alone does not make successful provider stream content internal. The proxy signs each failure envelope with a response-specific HMAC, and the pi bridge accepts its explicit cause only after that marker verifies; an unmarked or altered envelope remains provider-controlled input.
+
+The cause still owns requester wording, but the disposition surface is part of that rendering. A live leased turn uses the parked sentence that promises kept work will continue. Intake, operator and other no-lease doors use the ending-safe sentence that names the cause and says the request did not start.

@@ -13,6 +13,10 @@ import {
   type ProviderScenarioRow,
 } from "./testing/providerConformance.js";
 import {
+  authenticateProxyProviderFailure,
+  proxyProviderFailureIsAuthenticated,
+} from "./modelProxy/providerFailureAuth.js";
+import {
   classifyProviderFailure,
   PROVIDER_FAILURE_CAUSES,
   providerFailureParks,
@@ -65,7 +69,6 @@ const FAILURE_MATRIX: ReadonlyArray<{
   },
   {
     cause: "key-absent",
-    status: 503,
     body: { error: { type: "provider_key_missing" } },
     disposition: "end",
   },
@@ -117,12 +120,45 @@ describe("ProviderFailure — the closed failure matrix", () => {
     expect(FAILURE_MATRIX.map((row) => row.cause)).toEqual(PROVIDER_FAILURE_CAUSES);
   });
 
-  it("renders every typed cause as one calm sentence with no payload, provider URL or instruction", () => {
+  it("mandatory 402 and 429 statuses override a contradicting untrusted body cause", () => {
+    expect(classifyProviderFailure({ status: 402, body: { cause: "permanent" } }).cause).toBe(
+      "credit-or-quota-exhausted",
+    );
+    expect(classifyProviderFailure({ status: 429, body: { cause: "permanent" } }).cause).toBe("rate-limited");
+    expect(classifyProviderFailure({ status: 503, body: { cause: "key-absent" } }).cause).toBe("transient");
+  });
+
+  it("does not trust an explicit cause from a provider body", () => {
+    expect(classifyProviderFailure({ status: 403, body: { cause: "rate-limited" } }).cause).toBe("permanent");
+  });
+
+  it("authenticates the proxy's exact typed envelope and rejects an absent or tampered marker", () => {
+    const envelope = authenticateProxyProviderFailure({
+      type: "provider_failure",
+      cause: "rate-limited",
+      message: "The model provider is rate-limited.",
+    });
+    expect(proxyProviderFailureIsAuthenticated({ error: envelope })).toBe(true);
+    expect(proxyProviderFailureIsAuthenticated({ error: { ...envelope, cause: "permanent" } })).toBe(false);
+    const { _switchboard_proxy_auth: _marker, ...unmarked } = envelope;
+    expect(proxyProviderFailureIsAuthenticated({ error: unmarked })).toBe(false);
+  });
+
+  it("renders park and no-lease surfaces as separate calm sentences with no payload, URL or instruction", () => {
     for (const cause of PROVIDER_FAILURE_CAUSES) {
-      const sentence = renderProviderFailure(cause);
-      expect(sentence.match(/[.!?](?:\s|$)/g)).toHaveLength(1);
-      expect(sentence).not.toMatch(/[{}]|https?:\/\/|code"\s*:|message"\s*:|metadata/i);
-      expect(sentence).not.toMatch(/\b(?:retry|re-send|visit|increase|contact|run)\b/i);
+      const sentences = [renderProviderFailure(cause, "parked"), renderProviderFailure(cause, "ended")];
+      for (const sentence of sentences) {
+        expect(sentence.match(/[.!?](?:\s|$)/g)).toHaveLength(1);
+        expect(sentence).not.toMatch(/[{}]|https?:\/\/|code"\s*:|message"\s*:|metadata/i);
+        expect(sentence).not.toMatch(/\b(?:retry|re-send|visit|increase|contact|run)\b/i);
+      }
+      if (providerFailureParks(cause)) {
+        expect(sentences[0]).toMatch(/will continue/);
+        expect(sentences[1]).toMatch(/request did not start/);
+        expect(sentences[1]).not.toMatch(/will continue|work is kept/);
+      } else {
+        expect(sentences[0]).toBe(sentences[1]);
+      }
     }
   });
 });

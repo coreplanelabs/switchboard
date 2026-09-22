@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   App,
   SocketModeReceiver,
@@ -12,6 +13,7 @@ import { chatActorOf } from "../core/authz/actor.js";
 import {
   decideIntake as coreDecideIntake,
   degradedIntakeLine,
+  type IntakeDecision,
   type IntakeDeps,
   type IntakeFacts,
   type IntakeReceipt,
@@ -459,28 +461,81 @@ export function catchUpDelayNote(messageTs: string, nowMs: number): string {
 /** What the catch-up's act did with one missed message (docs/reference/specs/slack-channel.md item 7). */
 export type CaughtUpAct = "dispatched" | "silenced" | "skipped";
 
-/** Slack itself is the delivery receipt for an intake-failure sentence. The
- * decision row says what intake decided; an exact bot-authored reply says the
- * separate side effect landed, including after an ambiguous post response. */
-function intakeFailureDelivered(
-  thread: ReadonlyArray<{ user?: string; text?: string }>,
-  botUserId: string | undefined,
-  reason: string,
-): boolean {
-  return botUserId !== undefined && thread.some((message) => message.user === botUserId && message.text === reason);
-}
-
+/** Deliver one stored intake-failure sentence under the receipt's durable
+ * cross-process claim. A live reader never acts on `existing`; catch-up may,
+ * after the claim serializes its Slack reconciliation and post. */
 async function deliverIntakeFailure(opts: {
+  key: string;
+  receipt: IntakeDecision["receipt"];
+  allowExisting: boolean;
+  ledger: IntakeDeps["ledger"];
+  claimedAt: number;
+  poster: string;
   reason: string;
   thread: ReadonlyArray<{ user?: string; text?: string }>;
   botUserId: string | undefined;
   reply?: (text: string) => Promise<void>;
   failed: (err: unknown) => void;
 }): Promise<void> {
-  if (opts.reply === undefined || intakeFailureDelivered(opts.thread, opts.botUserId, opts.reason)) return;
+  if (opts.reply === undefined || (opts.receipt === "existing" && !opts.allowExisting)) return;
+  const postWithoutReceipt = async () => {
+    try {
+      await opts.reply!(opts.reason);
+    } catch (err) {
+      opts.failed(err);
+    }
+  };
+  // A failed/absent receipt has no durable row to claim, but the door must
+  // still render rather than silently swallowing the provider outage.
+  if (opts.receipt === "failed" || opts.receipt === "absent") {
+    await postWithoutReceipt();
+    return;
+  }
+  const ledger = opts.ledger;
+  // An inserted receipt degrades to a direct post against an older ledger. An
+  // existing row never does, because that would restore the cross-process race.
+  if (ledger?.claimIntakeDelivery === undefined || ledger.finishIntakeDelivery === undefined) {
+    if (opts.receipt === "existing") return;
+    await postWithoutReceipt();
+    return;
+  }
+  let claimed: boolean;
+  try {
+    claimed = await ledger.claimIntakeDelivery(opts.key, opts.poster, opts.claimedAt);
+  } catch (err) {
+    opts.failed(err);
+    return;
+  }
+  if (!claimed) return;
+  // Slack reconciliation happens only after the atomic claim, so concurrent
+  // readers cannot both observe an old snapshot and post.
+  const alreadyPosted =
+    opts.botUserId !== undefined &&
+    opts.thread.some((message) => message.user === opts.botUserId && message.text === opts.reason);
+  if (alreadyPosted) {
+    try {
+      await ledger.finishIntakeDelivery(opts.key, opts.poster, true);
+    } catch (err) {
+      opts.failed(err);
+    }
+    return;
+  }
   try {
     await opts.reply(opts.reason);
   } catch (err) {
+    try {
+      await ledger.finishIntakeDelivery(opts.key, opts.poster, false);
+    } catch (finishErr) {
+      opts.failed(finishErr);
+    }
+    opts.failed(err);
+    return;
+  }
+  try {
+    await ledger.finishIntakeDelivery(opts.key, opts.poster, true);
+  } catch (err) {
+    // Keep the durable claim closed until its bound; catch-up then reconciles
+    // the Slack post under the next claim instead of posting optimistically.
     opts.failed(err);
   }
 }
@@ -541,6 +596,12 @@ export async function actOnMissedMessage(
         silent = row.verdict === "silent";
         if (row.providerFailure !== undefined)
           await deliverIntakeFailure({
+            key,
+            receipt: "existing",
+            allowExisting: true,
+            ledger: intake.deps.ledger,
+            claimedAt: intake.deps.now(),
+            poster: `${PLATFORM}:${opts.botUserId}:${intake.gen}:${randomUUID()}`,
             reason: row.reason,
             thread: m.thread,
             botUserId: opts.botUserId,
@@ -574,6 +635,12 @@ export async function actOnMissedMessage(
         );
         if (decision.providerFailure !== undefined)
           await deliverIntakeFailure({
+            key,
+            receipt: decision.receipt,
+            allowExisting: true,
+            ledger: intake.deps.ledger,
+            claimedAt: intake.deps.now(),
+            poster: `${PLATFORM}:${opts.botUserId}:${intake.gen}:${randomUUID()}`,
             reason: decision.reason,
             thread: m.thread,
             botUserId: opts.botUserId,
@@ -978,14 +1045,21 @@ async function gateThreadReply(
   );
   span.setAttrs({ intake: decision.verdict, intakeSource: decision.source, intakeReceipt: decision.receipt });
   if (decision.providerFailure !== undefined) {
+    const key = `${ev.channel}:${ev.ts}`;
     await deliverIntakeFailure({
+      key,
+      receipt: decision.receipt,
+      allowExisting: false,
+      ledger: intake.deps.ledger,
+      claimedAt: intake.deps.now(),
+      poster: `${PLATFORM}:${ev.botUserId ?? "unknown"}:${intake.gen}:${randomUUID()}`,
       reason: decision.reason,
       thread: page,
       botUserId: ev.botUserId,
       reply: (text) => new SlackIO(client, ev).reply(text),
       failed: (err) =>
         console.error(
-          `[intake] ${ev.channel}:${ev.ts} provider failure could not be rendered — ${err instanceof Error ? err.message : String(err)}`,
+          `[intake] ${key} provider failure could not be rendered — ${err instanceof Error ? err.message : String(err)}`,
         ),
     });
     console.log(

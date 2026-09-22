@@ -717,12 +717,10 @@ describe("fromPiMessage — pi's assistant message as the completion result", ()
   it("an error or an abort is thrown by typed cause, never returned with pi's payload", () => {
     expect(() =>
       fromPiMessage(message({ stopReason: "error", errorMessage: "429 rate limited" }), "anthropic"),
-    ).toThrow("The model provider is rate-limited; your work is kept and will continue when capacity returns.");
+    ).toThrow("The model provider is rate-limited; this request did not start.");
     expect(() =>
       fromPiMessage(message({ stopReason: "aborted", errorMessage: "This operation was aborted" }), "anthropic"),
-    ).toThrow(
-      "The model provider is temporarily unavailable; your work is kept and will continue when service recovers.",
-    );
+    ).toThrow("The model provider is temporarily unavailable; this request did not start.");
     expect(() => fromPiMessage(message({ stopReason: "error" }), "anthropic")).toThrow(
       "The model provider refused the call; the request ended without exposing the provider's response.",
     );

@@ -463,6 +463,28 @@ describe("intake receipts — the routes and the retry (run-history item 59)", (
     });
   });
 
+  it("claims and finishes intake delivery through the receipt-keyed routes", async () => {
+    const w = stubWorker((path) =>
+      path === "/runs/intake/delivery/claim"
+        ? { status: 200, data: { claimed: true } }
+        : { status: 200, data: { ok: true } },
+    );
+    expect(await w.ledger.claimIntakeDelivery("slack:C1:2.0", "poster-a", 5_000)).toBe(true);
+    await w.ledger.finishIntakeDelivery("slack:C1:2.0", "poster-a", true);
+    expect(w.calls).toEqual([
+      {
+        path: "/runs/intake/delivery/claim",
+        auth: "Bearer tok",
+        body: { storeKey: "runs:default", key: "slack:C1:2.0", poster: "poster-a", claimedAt: 5_000 },
+      },
+      {
+        path: "/runs/intake/delivery/finish",
+        auth: "Bearer tok",
+        body: { storeKey: "runs:default", key: "slack:C1:2.0", poster: "poster-a", delivered: true },
+      },
+    ]);
+  });
+
   it("readIntake answers the row or none; listIntake passes only the filters given and answers the rows", async () => {
     const stored = receipt();
     const w = stubWorker((path) =>

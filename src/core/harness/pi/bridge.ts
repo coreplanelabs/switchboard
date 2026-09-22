@@ -22,6 +22,7 @@ import {
   type RunEvent,
   type RunNoteKind,
 } from "../../runEvents.js";
+import { proxyProviderFailureIsAuthenticated } from "../../modelProxy/providerFailureAuth.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
 import { classifyProviderFailure, type ProviderFailure } from "../../provider.js";
 import type { Clock, Span } from "../../trace/types.js";
@@ -337,7 +338,13 @@ export class PiBridge {
     }
     if (message.stopReason === "error") {
       const raw = message.errorMessage ?? "the model call failed";
-      out.providerFailure = classifyProviderFailure({ error: raw });
+      // Passing through the bearer-authenticated proxy does not authenticate a
+      // provider's successful stream content. Only the proxy's HMAC marker can
+      // vouch for the typed envelope and let its cause decide disposition.
+      out.providerFailure = classifyProviderFailure({
+        error: raw,
+        trustedEnvelope: proxyProviderFailureIsAuthenticated(raw),
+      });
       out.providerError = redactAndCap(raw, 400);
       if (typeof message.rawStopReason === "string" && POLICY_REFUSAL_STOP_REASONS.has(message.rawStopReason))
         out.policyRefusal = true;

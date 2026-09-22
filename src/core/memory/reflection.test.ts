@@ -486,9 +486,7 @@ describe("reflect (one extractor call → store.write)", () => {
     await expect(
       reflect({ ...base, provider, store: new InMemoryMemoryStore(), onWarn: (m) => warnings.push(m) }),
     ).resolves.toBeUndefined();
-    expect(warnings).toEqual([
-      "reflection skipped: The model provider is rate-limited; your work is kept and will continue when capacity returns.",
-    ]);
+    expect(warnings).toEqual(["reflection skipped: The model provider is rate-limited; this request did not start."]);
   });
 
   it("a reply with nothing durable (no facts, empty summary) writes nothing", async () => {

@@ -1534,26 +1534,55 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     expect(attrs).toMatchObject({ intake: "silent", intakeSource: "model", intakeReceipt: "inserted" });
   });
 
-  it("an intake provider failure is not silent: the door posts its one safe sentence and dispatches nothing", async () => {
+  it("an intake provider failure is not silent: the no-lease door posts its ending-safe sentence and dispatches nothing", async () => {
     const s = gateClient();
     stubDownloads(s.calls);
+    const reason = "The model provider's credit or quota is exhausted; this request did not start.";
     const decide = vi.fn(async (): Promise<IntakeDecision> => ({
       verdict: "silent",
       source: "error",
       receipt: "inserted",
       providerFailure: "credit-or-quota-exhausted",
-      reason:
-        "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers.",
+      reason,
     }));
     const { gate } = gateOf({ decideIntake: decide as unknown as typeof decideIntake });
     const out = await receiveSlackMessage(s.client, followUp(), spanStub().span, POLICY, [], gate);
     expect(out).toBeUndefined();
     expect(s.calls).toEqual(["chat.postMessage"]);
-    expect(s.postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers.",
-      }),
-    );
+    expect(s.postMessage).toHaveBeenCalledWith(expect.objectContaining({ text: reason }));
+    expect(reason).not.toMatch(/will continue|work is kept/);
+  });
+
+  it("a failed or absent provider-failure receipt still renders at the live no-lease door", async () => {
+    for (const receipt of ["failed", "absent"] as const) {
+      const s = gateClient();
+      const reason = "The model provider is temporarily unavailable; this request did not start.";
+      const decide = vi.fn(async (): Promise<IntakeDecision> => ({
+        verdict: "silent",
+        source: "error",
+        receipt,
+        providerFailure: "transient",
+        reason,
+      }));
+      const { gate } = gateOf({ decideIntake: decide as unknown as typeof decideIntake });
+      expect(await receiveSlackMessage(s.client, followUp(), spanStub().span, POLICY, [], gate)).toBeUndefined();
+      expect(s.postMessage).toHaveBeenCalledOnce();
+      expect(s.postMessage).toHaveBeenCalledWith(expect.objectContaining({ text: reason }));
+    }
+  });
+
+  it("the live path never posts a provider failure from another writer's existing receipt", async () => {
+    const s = gateClient();
+    const decide = vi.fn(async (): Promise<IntakeDecision> => ({
+      verdict: "silent",
+      source: "error",
+      receipt: "existing",
+      providerFailure: "transient",
+      reason: "The model provider is temporarily unavailable; this request did not start.",
+    }));
+    const { gate } = gateOf({ decideIntake: decide as unknown as typeof decideIntake });
+    expect(await receiveSlackMessage(s.client, followUp(), spanStub().span, POLICY, [], gate)).toBeUndefined();
+    expect(s.postMessage).not.toHaveBeenCalled();
   });
 
   it("addressed: the verdict and its receipt come first, the 👀 and the downloads after, and the runs page rides out as thread for dispatch", async () => {
@@ -1859,6 +1888,7 @@ describe("the catch-up reads the receipt — onMissed's act (docs/reference/spec
         },
       ]),
     );
+    const deliveries = new Map<string, { poster: string; delivered: boolean }>();
     const readIntake = vi.fn(async (key: string) => map.get(key));
     const recordIntake = vi.fn(async (key: string, receipt: IntakeReceipt) => {
       const existing = map.get(key);
@@ -1866,7 +1896,18 @@ describe("the catch-up reads the receipt — onMissed's act (docs/reference/spec
       map.set(key, receipt);
       return { inserted: true, stored: receipt };
     });
-    return { readIntake, recordIntake };
+    const claimIntakeDelivery = vi.fn(async (key: string, poster: string, _claimedAt: number) => {
+      if (deliveries.has(key)) return false;
+      deliveries.set(key, { poster, delivered: false });
+      return true;
+    });
+    const finishIntakeDelivery = vi.fn(async (key: string, poster: string, delivered: boolean) => {
+      const claim = deliveries.get(key);
+      if (claim?.poster !== poster) return;
+      if (delivered) deliveries.set(key, { poster, delivered: true });
+      else deliveries.delete(key);
+    });
+    return { readIntake, recordIntake, claimIntakeDelivery, finishIntakeDelivery };
   }
 
   const verdictOf = (verdict: "addressed" | "silent") =>
@@ -2021,9 +2062,8 @@ describe("the catch-up reads the receipt — onMissed's act (docs/reference/spec
     expect(seen.was("CCU", "120.000100")).toBe(true);
   });
 
-  it("a caught-up intake provider failure renders the same sentence once and remains undispatched", async () => {
-    const reason =
-      "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers.";
+  it("a caught-up intake provider failure renders the same ending-safe sentence once and remains undispatched", async () => {
+    const reason = "The model provider's credit or quota is exhausted; this request did not start.";
     const decide = vi.fn(async (): Promise<IntakeDecision> => ({
       verdict: "silent",
       source: "error",
@@ -2051,28 +2091,52 @@ describe("the catch-up reads the receipt — onMissed's act (docs/reference/spec
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  // Feature: docs/reference/specs/routing-and-config.md item 27 — the
-  // decision receipt and Slack delivery are separate facts. A rejected first
-  // post leaves no bot sentence to reconcile, so the next catch-up retries;
-  // once Slack carries it, later catch-ups do not post it again.
+  const storedFailure = (reason: string): IntakeReceipt => ({
+    verdict: "silent",
+    source: "error",
+    providerFailure: "credit-or-quota-exhausted",
+    reason,
+    mode: "classify",
+    model: "anthropic/fast-model",
+    gen: 1,
+    threadKey: "slack:CCU:100.000000",
+    decidedAt: 1,
+  });
+
+  it("two concurrent readers of one existing provider-failure receipt post once through its durable claim", async () => {
+    const reason = "The model provider's credit or quota is exhausted; this request did not start.";
+    const stored = storedFailure(reason);
+    const ledger = receiptLedger();
+    ledger.readIntake.mockResolvedValue(stored);
+    const { gate } = catchGate({ ledger });
+    const reply = vi.fn(async () => {});
+    const act = () =>
+      actOnMissedMessage(missedOf(), {
+        botUserId: BOT,
+        intake: gate,
+        seen: seenSet(),
+        log: () => {},
+        reply,
+        dispatch: () => {},
+      });
+
+    expect(await Promise.all([act(), act()])).toEqual(["silenced", "silenced"]);
+    expect(reply).toHaveBeenCalledOnce();
+    expect(reply).toHaveBeenCalledWith(reason);
+    expect(ledger.claimIntakeDelivery).toHaveBeenCalledTimes(2);
+    expect(ledger.finishIntakeDelivery).toHaveBeenCalledOnce();
+    expect(ledger.finishIntakeDelivery).toHaveBeenCalledWith("CCU:120.000100", expect.stringContaining(BOT), true);
+  });
+
+  // Feature: docs/reference/specs/slack-channel.md item 15 — the decision
+  // receipt and delivery receipt are separate durable facts. A rejected post
+  // releases its claim for catch-up; a successful post closes delivery, so a
+  // later reader cannot post the sentence twice.
   it("a rejected intake-failure post is delivered once on the next catch-up, never twice", async () => {
-    const reason =
-      "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers.";
-    const stored: IntakeReceipt = {
-      verdict: "silent",
-      source: "error",
-      providerFailure: "credit-or-quota-exhausted",
-      reason,
-      mode: "classify",
-      model: "anthropic/fast-model",
-      gen: 1,
-      threadKey: "slack:CCU:100.000000",
-      decidedAt: 1,
-    };
-    const ledger = {
-      readIntake: vi.fn(async () => stored),
-      recordIntake: vi.fn(async () => ({ inserted: false, stored })),
-    };
+    const reason = "The model provider's credit or quota is exhausted; this request did not start.";
+    const stored = storedFailure(reason);
+    const ledger = receiptLedger();
+    ledger.readIntake.mockResolvedValue(stored);
     const { gate, decide } = catchGate({ ledger });
     const rejected = vi.fn(async () => {
       throw new Error("ratelimited");
@@ -2088,6 +2152,7 @@ describe("the catch-up reads the receipt — onMissed's act (docs/reference/spec
       }),
     ).toBe("silenced");
     expect(rejected).toHaveBeenCalledOnce();
+    expect(ledger.finishIntakeDelivery).toHaveBeenLastCalledWith("CCU:120.000100", expect.stringContaining(BOT), false);
 
     const delivered = vi.fn(async () => {});
     expect(
@@ -2104,23 +2169,14 @@ describe("the catch-up reads the receipt — onMissed's act (docs/reference/spec
 
     const duplicate = vi.fn(async () => {});
     expect(
-      await actOnMissedMessage(
-        missedOf({
-          thread: [
-            { user: BOT, bot_id: "B1", text: "report ready", ts: "100.000000" },
-            { user: "UASKER", text: "and the tests?", ts: "120.000100", thread_ts: "100.000000" },
-            { user: BOT, bot_id: "B1", text: reason, ts: "121.000100", thread_ts: "100.000000" },
-          ],
-        }),
-        {
-          botUserId: BOT,
-          intake: gate,
-          seen: seenSet(),
-          log: () => {},
-          reply: duplicate,
-          dispatch: () => {},
-        },
-      ),
+      await actOnMissedMessage(missedOf(), {
+        botUserId: BOT,
+        intake: gate,
+        seen: seenSet(),
+        log: () => {},
+        reply: duplicate,
+        dispatch: () => {},
+      }),
     ).toBe("silenced");
     expect(duplicate).not.toHaveBeenCalled();
     expect(decide).not.toHaveBeenCalled();
