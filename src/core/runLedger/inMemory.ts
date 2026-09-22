@@ -2,6 +2,7 @@
 // against, applying the same pure decisions the Durable Object applies. It
 // also documents the storage shape in the plainest form.
 
+import { INTAKE_DELIVERY_CLAIM_MS } from "../budgets.js";
 import { utf8ByteLength, type RunRecord } from "../runRecord.js";
 import {
   checkFence,
@@ -96,6 +97,7 @@ export class InMemoryRunLedger implements RunLedger {
   readonly sessions = new Map<string, SessionLog>();
   readonly finished = new Map<string, RunRecord>();
   readonly intake = new Map<string, IntakeReceipt>();
+  readonly intakeDeliveries = new Map<string, { poster: string; claimUntil: number; delivered: boolean }>();
   /** The failure toggle (run-history item 59): tests flip a flag to make the
    *  next intake write or read throw, the way a lost Worker does. */
   readonly intakeFailure: { write?: boolean; read?: boolean } = {};
@@ -619,6 +621,27 @@ export class InMemoryRunLedger implements RunLedger {
   async readIntake(key: string): Promise<IntakeReceipt | undefined> {
     if (this.intakeFailure.read) throw new Error("intake read failed (toggled)");
     return this.intake.get(key);
+  }
+
+  async claimIntakeDelivery(key: string, poster: string, claimedAt: number): Promise<boolean> {
+    if (this.intakeFailure.write) throw new Error("intake write failed (toggled)");
+    if (this.intake.get(key)?.providerFailure === undefined) return false;
+    const existing = this.intakeDeliveries.get(key);
+    if (existing?.delivered === true || (existing !== undefined && existing.claimUntil > claimedAt)) return false;
+    this.intakeDeliveries.set(key, {
+      poster,
+      claimUntil: claimedAt + INTAKE_DELIVERY_CLAIM_MS,
+      delivered: false,
+    });
+    return true;
+  }
+
+  async finishIntakeDelivery(key: string, poster: string, delivered: boolean): Promise<void> {
+    if (this.intakeFailure.write) throw new Error("intake write failed (toggled)");
+    const existing = this.intakeDeliveries.get(key);
+    if (existing?.poster !== poster || existing.delivered) return;
+    if (delivered) this.intakeDeliveries.set(key, { ...existing, delivered: true });
+    else this.intakeDeliveries.delete(key);
   }
 
   async listIntake(query: IntakeQuery): Promise<IntakeReceipt[]> {

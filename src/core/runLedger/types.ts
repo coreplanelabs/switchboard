@@ -4,7 +4,7 @@
 // bot and by `deploy/cloudflare-memory/worker.ts` alike, the way runRecord.ts is.
 
 import type { ChatMessage } from "../chatMessage.js";
-import type { ToolDef } from "../provider.js";
+import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause, type ToolDef } from "../provider.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RunEvent } from "../runEvents.js";
@@ -300,6 +300,8 @@ export interface IntakeReceipt {
   verdict: "addressed" | "silent";
   reason: string;
   source: "model" | "mode" | "question" | "error" | "timeout";
+  /** Present only when `source: error` is a failed provider call. */
+  providerFailure?: ProviderFailureCause;
   /** The structured seam's attempts (docs/decisions/0067): what each answer
    *  violated, or that it was accepted; absent when no model was asked. */
   attempts?: ReadonlyArray<{ outcome: "accepted" | "violation"; violation?: string }>;
@@ -340,6 +342,9 @@ export function isIntakeReceipt(v: unknown): v is IntakeReceipt {
       r.source === "question" ||
       r.source === "error" ||
       r.source === "timeout") &&
+    (r.providerFailure === undefined ||
+      (typeof r.providerFailure === "string" &&
+        (PROVIDER_FAILURE_CAUSES as readonly string[]).includes(r.providerFailure))) &&
     (r.mode === "mention" || r.mode === "classify") &&
     typeof r.model === "string" &&
     typeof r.gen === "number" &&

@@ -870,6 +870,10 @@ export async function runBot(): Promise<void> {
               if (out === undefined) throw new Error("the receipt write degraded (the ledger warning names why)");
               return out;
             },
+            claimIntakeDelivery: (key: string, poster: string, claimedAt: number) =>
+              ledgerClient.claimIntakeDelivery(key, poster, claimedAt),
+            finishIntakeDelivery: (key: string, poster: string, delivered: boolean) =>
+              ledgerClient.finishIntakeDelivery(key, poster, delivered),
           }
         : null;
       slackIntake = wireIntakeGate({
@@ -1053,7 +1057,13 @@ export async function runBot(): Promise<void> {
       // and a park land on the write-through's plane routes, fire and forget —
       // the null write-through swallows both where no ledger is configured.
       plane: {
-        level: (provider, side) => void runLedger.planeLevel({ provider, name: "provider", side }),
+        level: (provider, side, cause) =>
+          void runLedger.planeLevel({
+            provider,
+            name: "provider",
+            side,
+            ...(side === "down" && cause !== undefined ? { cause } : {}),
+          }),
         park: (runId, provider) => void runLedger.planePark(runId, provider),
       },
     });

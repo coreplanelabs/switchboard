@@ -322,6 +322,12 @@ export interface ChannelIO {
    */
   runFinished?(receipt: RunReceipt): void;
   /**
+   * Called when a typed request fails before it can create a run. One-shot
+   * channels use this to return a failing process/transport status while the
+   * requester-facing reply remains the channel's safe sentence.
+   */
+  requestFailed?(): void;
+  /**
    * Called once by the core the moment a run has been CREATED in the registry
    * (before it executes), with the run id. The async HTTP ingress path uses it
    * to answer `202 Accepted` with the run id while the run continues in the

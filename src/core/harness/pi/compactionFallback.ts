@@ -10,7 +10,7 @@
 // loss: every dropped turn stays in the session log behind `recall`, and the
 // notepad carries what the agent chose to keep. So the fallback is not a
 // second model: after a compaction failed for good (the harness judges the
-// failure, `isTransientProviderError` ruling out the blips pi's next try
+// failure, the typed provider-down cause ruling out the blips pi's next try
 // would ride out), the next compaction's summary is this pointer, written
 // deterministically from what the extension's `session_before_compact` hook
 // hands over — the trigger, the size, the summary the compaction before it

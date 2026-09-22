@@ -788,9 +788,10 @@ export async function dispatch(
       // the live run. Thread occupancy itself is untouched: one live run per
       // thread, and nothing here starts a rival in an occupied one.
       const live = operatorEvent ? admission.get(msg.threadKey) : undefined;
-      // A `non_decision` after the bounded malformed-call retries, or a
-      // transport failure, is never a model decision: the request resolves on
-      // the configured default with the attempts recorded and no second model.
+      // A `non_decision` after the bounded malformed-call retries is never a
+      // model decision: the request resolves on the configured default with
+      // the attempts recorded and no second model. A provider failure is a
+      // typed refusal instead, rendered once without entering this floor.
       // The no-call case does not reach this branch: runOperator repairs it
       // once and turns a second no-call into the typed general bind.
       const operatorFellBack = operatorEvent?.outcome === "non_decision";

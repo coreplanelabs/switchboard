@@ -98,6 +98,309 @@ export interface Provider {
   complete(req: CompletionRequest): Promise<CompletionResult>;
 }
 
+/** Every model-call failure crosses this one seam. The cause is deliberately
+ * small and wire-neutral: adapters classify status plus structured body once;
+ * callers decide from `cause` and render only `renderProviderFailure(cause)`.
+ * `operatorUrl` is retained for an admin surface and never appears in the
+ * error's message or the user-facing renderer. */
+export const PROVIDER_FAILURE_CAUSES = [
+  "transient",
+  "rate-limited",
+  "credit-or-quota-exhausted",
+  "key-absent",
+  "key-invalid",
+  "model-unknown",
+  "request-rejected",
+  "permanent",
+] as const;
+export type ProviderFailureCause = (typeof PROVIDER_FAILURE_CAUSES)[number];
+
+export interface ProviderFailureAnswer {
+  status?: number;
+  body?: unknown;
+  error?: unknown;
+  provider?: string;
+  model?: string;
+  /** Only adapters that verified the model proxy's response-specific HMAC
+   * marker may set this. Provider response bodies are never trusted to name
+   * their own disposition. */
+  trustedEnvelope?: boolean;
+}
+
+export interface ProviderFailureDetails extends Pick<ProviderFailureAnswer, "status" | "provider" | "model"> {
+  operatorUrl?: string;
+  /** The configured variable involved in a key failure. It is operator-safe
+   * diagnostic context, never part of the requester-facing renderer. */
+  keyVariable?: string;
+}
+
+function providerFailureDiagnostic(cause: ProviderFailureCause, details: ProviderFailureDetails): string {
+  if (details.provider !== undefined && details.keyVariable !== undefined) {
+    if (cause === "key-absent") return `Provider "${details.provider}": ${details.keyVariable} is not set`;
+    if (cause === "key-invalid") return `Provider "${details.provider}": ${details.keyVariable} was refused`;
+  }
+  return renderProviderFailure(cause);
+}
+
+export class ProviderFailure extends Error {
+  override readonly name = "ProviderFailure";
+  override readonly cause: ProviderFailureCause;
+  readonly status: number | undefined;
+  readonly provider: string | undefined;
+  readonly model: string | undefined;
+  readonly operatorUrl: string | undefined;
+  readonly keyVariable: string | undefined;
+
+  constructor(cause: ProviderFailureCause, details: ProviderFailureDetails = {}) {
+    super(providerFailureDiagnostic(cause, details));
+    this.cause = cause;
+    this.status = details.status;
+    this.provider = details.provider;
+    this.model = details.model;
+    this.operatorUrl = details.operatorUrl;
+    this.keyVariable = details.keyVariable;
+  }
+}
+
+export type ProviderFailureSurface = "parked" | "ended";
+
+/** One cause, one sentence for the surface that owns the disposition. Only a
+ * live leased turn may promise continuation; every pre-run door defaults to
+ * an ending-safe sentence. No wire payload, provider URL or recovery
+ * instruction is accepted as an input. */
+export function renderProviderFailure(cause: ProviderFailureCause, surface: ProviderFailureSurface = "ended"): string {
+  switch (cause) {
+    case "transient":
+      return surface === "parked"
+        ? "The model provider is temporarily unavailable; your work is kept and will continue when service recovers."
+        : "The model provider is temporarily unavailable; this request did not start.";
+    case "rate-limited":
+      return surface === "parked"
+        ? "The model provider is rate-limited; your work is kept and will continue when capacity returns."
+        : "The model provider is rate-limited; this request did not start.";
+    case "credit-or-quota-exhausted":
+      return surface === "parked"
+        ? "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers."
+        : "The model provider's credit or quota is exhausted; this request did not start.";
+    case "key-absent":
+      return "The model provider key is not configured; this request cannot start until the service is restored.";
+    case "key-invalid":
+      return "The model provider key was refused; this request cannot start until the service is restored.";
+    case "model-unknown":
+      return "The configured model is unavailable from its provider; this request cannot start until the service is restored.";
+    case "request-rejected":
+      return "The model provider rejected the request shape; no work was started.";
+    case "permanent":
+      return "The model provider refused the call; the request ended without exposing the provider's response.";
+  }
+}
+
+const providerFailureRecord = (value: unknown): Record<string, unknown> | undefined =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+
+function providerFailureBody(body: unknown): unknown {
+  if (typeof body !== "string") return body;
+  const text = body.trim();
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    const at = text.indexOf("{");
+    if (at < 0) return undefined;
+    try {
+      return JSON.parse(text.slice(at)) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function providerFailureSignals(value: unknown, into: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    for (const item of value) providerFailureSignals(item, into);
+    return into;
+  }
+  const row = providerFailureRecord(value);
+  if (!row) return into;
+  for (const [key, item] of Object.entries(row)) {
+    const normalizedKey = key.toLowerCase();
+    if (typeof item === "string" && ["code", "type", "error_type", "reason", "limit_source"].includes(normalizedKey))
+      into.push(item.toLowerCase());
+    else if (typeof item === "number" && normalizedKey === "code") into.push(String(item));
+    providerFailureSignals(item, into);
+  }
+  return into;
+}
+
+function providerFailureStatus(input: ProviderFailureAnswer, text: string): number | undefined {
+  if (input.status !== undefined) return input.status;
+  const match = /(?:^|\b(?:http|status(?: code)?|error|api error)[^0-9]{0,8})([1-5]\d\d)\b/i.exec(text);
+  return match ? Number(match[1]) : undefined;
+}
+
+function providerFailureText(input: ProviderFailureAnswer): string {
+  const error = input.error;
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (typeof input.body === "string") return input.body;
+  try {
+    return input.body === undefined ? "" : JSON.stringify(input.body);
+  } catch {
+    return "";
+  }
+}
+
+function providerFailureProse(value: unknown, into: string[] = []): string {
+  if (typeof value === "string") {
+    into.push(value);
+    return into.join(" ");
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) providerFailureProse(item, into);
+    return into.join(" ");
+  }
+  const row = providerFailureRecord(value);
+  if (!row) return into.join(" ");
+  for (const [key, item] of Object.entries(row)) {
+    if (key.toLowerCase() !== "cause") providerFailureProse(item, into);
+  }
+  return into.join(" ");
+}
+
+function signalIncludes(signals: readonly string[], words: readonly string[]): boolean {
+  return signals.some((signal) => words.some((word) => signal === word || signal.includes(word)));
+}
+
+function isProviderFailureCause(value: unknown): value is ProviderFailureCause {
+  return typeof value === "string" && (PROVIDER_FAILURE_CAUSES as readonly string[]).includes(value);
+}
+
+function trustedProviderFailureCause(value: unknown): ProviderFailureCause | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const cause = trustedProviderFailureCause(item);
+      if (cause !== undefined) return cause;
+    }
+    return undefined;
+  }
+  const row = providerFailureRecord(value);
+  if (!row) return undefined;
+  if (row.type === "provider_failure" && isProviderFailureCause(row.cause)) return row.cause;
+  for (const item of Object.values(row)) {
+    const cause = trustedProviderFailureCause(item);
+    if (cause !== undefined) return cause;
+  }
+  return undefined;
+}
+
+/** Status plus structured body → one typed failure. Text is consulted only at
+ * this adapter boundary for transports that expose no structured error; no
+ * consumer owns a word list. Mandatory provider statuses and transport facts
+ * precede every untrusted body signal. Unknown answers fail closed as
+ * `permanent`. */
+export function classifyProviderFailure(input: ProviderFailureAnswer): ProviderFailure {
+  if (input.error instanceof ProviderFailure) return input.error;
+  const text = providerFailureText(input);
+  const parsed = providerFailureBody(input.body ?? providerFailureRecord(input.error) ?? text);
+  const signals = providerFailureSignals(parsed);
+  const trusted = input.trustedEnvelope === true ? trustedProviderFailureCause(parsed) : undefined;
+  const status = providerFailureStatus(input, text);
+  // A parsed provider object contributes its structured signals and prose,
+  // but never its untrusted `cause` value. That preserves message-only
+  // adapters without re-reading `cause: rate-limited` through the regex.
+  const unstructuredText =
+    input.body !== undefined && (providerFailureRecord(parsed) !== undefined || Array.isArray(parsed))
+      ? providerFailureProse(parsed)
+      : text;
+  const transientTransport =
+    status === 408 ||
+    status === 425 ||
+    (input.error instanceof Error && (input.error.name === "AbortError" || input.error.name === "TimeoutError")) ||
+    (status !== undefined && status >= 500) ||
+    /stream ended before message_stop|stream ended without finish_reason|ended before completion/i.test(
+      unstructuredText,
+    ) ||
+    /^(?:(?:AbortError:\s*)?(?:This|The) operation was aborted|Request aborted)\.?$/i.test(unstructuredText.trim()) ||
+    /ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|fetch failed|other side closed|network (?:error|failure)|(?:connection|stream) (?:reset|closed|terminated)|timed? ?out/i.test(
+      unstructuredText,
+    ) ||
+    /^terminated$/i.test(unstructuredText.trim()) ||
+    /\boverloaded\b/i.test(unstructuredText) ||
+    /<html[\s>][\s\S]{0,4000}\b(?:bad gateway|service unavailable|gateway timeout)\b/i.test(unstructuredText);
+  let cause: ProviderFailureCause;
+  if (trusted !== undefined) cause = trusted;
+  else if (status === 402) cause = "credit-or-quota-exhausted";
+  else if (status === 429) cause = "rate-limited";
+  else if (transientTransport) cause = "transient";
+  else if (
+    signalIncludes(signals, [
+      "limit_source",
+      "insufficient_quota",
+      "quota_exceeded",
+      "credit_limit",
+      "billing_hard_limit",
+      "payment_required",
+    ]) ||
+    (providerFailureRecord(parsed)?.metadata !== undefined &&
+      providerFailureRecord(providerFailureRecord(parsed)?.metadata)?.limit_source !== undefined)
+  )
+    cause = "credit-or-quota-exhausted";
+  else if (
+    signalIncludes(signals, ["rate_limit", "too_many_requests"]) ||
+    /\brate[- ]limit(?:ed)?\b/i.test(unstructuredText)
+  )
+    cause = "rate-limited";
+  else if (signalIncludes(signals, ["provider_key_missing", "key_absent", "missing_api_key"])) cause = "key-absent";
+  else if (
+    status === 401 ||
+    signalIncludes(signals, ["authentication_error", "invalid_api_key", "invalid_key", "unauthorized"])
+  )
+    cause = "key-invalid";
+  else if (signalIncludes(signals, ["model_not_found", "unknown_model", "model_unknown"])) cause = "model-unknown";
+  else if (
+    status === 400 ||
+    status === 422 ||
+    signalIncludes(signals, ["invalid_request_error", "invalid_json_schema", "bad_request", "unprocessable_entity"])
+  )
+    cause = "request-rejected";
+  else cause = "permanent";
+  const operatorUrl = /https?:\/\/[^\s"'<>]+/.exec(text)?.[0];
+  return new ProviderFailure(cause, {
+    ...(status !== undefined ? { status } : {}),
+    ...(input.provider !== undefined ? { provider: input.provider } : {}),
+    ...(input.model !== undefined ? { model: input.model } : {}),
+    ...(operatorUrl !== undefined ? { operatorUrl } : {}),
+  });
+}
+
+function typedProviderFailureOf(error: unknown, seen = new Set<object>()): ProviderFailure | undefined {
+  if (error instanceof ProviderFailure) return error;
+  const row = providerFailureRecord(error);
+  if (!row || seen.has(row)) return undefined;
+  seen.add(row);
+  if (row.name === "ProviderFailure" && isProviderFailureCause(row.cause)) {
+    return new ProviderFailure(row.cause, {
+      ...(typeof row.status === "number" ? { status: row.status } : {}),
+      ...(typeof row.provider === "string" ? { provider: row.provider } : {}),
+      ...(typeof row.model === "string" ? { model: row.model } : {}),
+      ...(typeof row.operatorUrl === "string" ? { operatorUrl: row.operatorUrl } : {}),
+      ...(typeof row.keyVariable === "string" ? { keyVariable: row.keyVariable } : {}),
+    });
+  }
+  // StructuredAskError and other boundary wrappers preserve the original
+  // throw as `cause`. Follow typed causes through those wrappers before the
+  // outer error's copied message can be classified without its status/body.
+  return typedProviderFailureOf(row.cause, seen);
+}
+
+export function providerFailureOf(error: unknown): ProviderFailure {
+  return typedProviderFailureOf(error) ?? classifyProviderFailure({ error });
+}
+
+/** Causes that make the provider unavailable rather than ending one call. */
+export function providerFailureParks(cause: ProviderFailureCause): boolean {
+  return cause === "transient" || cause === "rate-limited" || cause === "credit-or-quota-exhausted";
+}
+
 /** The three wire shapes a provider block may declare (record 0052):
  *  Anthropic's Messages API, OpenAI's Chat Completions and OpenAI's Responses
  *  API. Each is a proxy route of its own (`PROXY_PATHS`): an `openai-responses`

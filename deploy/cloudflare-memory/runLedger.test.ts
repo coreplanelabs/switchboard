@@ -1288,7 +1288,11 @@ describe("run ledger — intake receipts (item 59)", () => {
   it("the insert is if-absent inside the transaction: the first write answers inserted with the row, a second on the key answers the first stored row; read answers the row or null", async () => {
     const key = storeKey();
     expect((await post("/runs/intake/read", { storeKey: key, key: "slack:C1:2.0" })).data).toEqual({ receipt: null });
-    const first = intakeReceipt("slack:C1:1.0");
+    const first = intakeReceipt("slack:C1:1.0", {
+      source: "error",
+      providerFailure: "credit-or-quota-exhausted",
+      reason: "The model provider's credit or quota is exhausted; this request did not start.",
+    });
     expect(await post("/runs/intake", { storeKey: key, key: "slack:C1:2.0", receipt: first })).toMatchObject({
       status: 200,
       data: { inserted: true, stored: first },
@@ -1301,6 +1305,44 @@ describe("run ledger — intake receipts (item 59)", () => {
     expect((await post("/runs/intake/read", { storeKey: key, key: "slack:C1:2.0" })).data).toEqual({
       receipt: first,
     });
+  });
+
+  it("claims one failure delivery atomically, releases a rejected post, and closes a successful post", async () => {
+    const key = storeKey();
+    const receiptKey = "slack:C1:2.0";
+    await post("/runs/intake", {
+      storeKey: key,
+      key: receiptKey,
+      receipt: intakeReceipt("slack:C1:1.0", { source: "error", providerFailure: "transient" }),
+    });
+    const claim = (poster: string, claimedAt = 5_000) =>
+      post("/runs/intake/delivery/claim", { storeKey: key, key: receiptKey, poster, claimedAt });
+    const [a, b] = await Promise.all([claim("poster-a"), claim("poster-b")]);
+    expect([a.data.claimed, b.data.claimed].sort()).toEqual([false, true]);
+    const owner = a.data.claimed === true ? "poster-a" : "poster-b";
+    const loser = owner === "poster-a" ? "poster-b" : "poster-a";
+
+    await post("/runs/intake/delivery/finish", {
+      storeKey: key,
+      key: receiptKey,
+      poster: loser,
+      delivered: false,
+    });
+    expect((await claim("poster-c")).data).toEqual({ claimed: false });
+    await post("/runs/intake/delivery/finish", {
+      storeKey: key,
+      key: receiptKey,
+      poster: owner,
+      delivered: false,
+    });
+    expect((await claim("poster-c")).data).toEqual({ claimed: true });
+    await post("/runs/intake/delivery/finish", {
+      storeKey: key,
+      key: receiptKey,
+      poster: "poster-c",
+      delivered: true,
+    });
+    expect((await claim("poster-d", Number.MAX_SAFE_INTEGER)).data).toEqual({ claimed: false });
   });
 
   it("list answers a thread's rows and rows since an instant, oldest first", async () => {
@@ -1874,15 +1916,28 @@ describe("the plane's checkpoint steers and the provider condition — the heart
       };
     });
     expect(
-      (await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "down" })).data,
+      (
+        await post("/plane/level", {
+          storeKey: key,
+          name: "provider",
+          provider: "anthropic",
+          side: "down",
+          cause: "credit-or-quota-exhausted",
+        })
+      ).data,
     ).toEqual({ admitted: 0 });
     expect((await post("/plane/park", { storeKey: key, runId: "r3", provider: "anthropic" })).data).toEqual({
       parked: true,
     });
     await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
       const sql = (inst as unknown as { sql: SqlStorage }).sql;
-      expect(sql.exec(`SELECT resident, name, side FROM plane_levels`).toArray()).toEqual([
-        { resident: "anthropic", name: "provider", side: "above" },
+      expect(sql.exec(`SELECT resident, name, side, cause FROM plane_levels`).toArray()).toEqual([
+        {
+          resident: "anthropic",
+          name: "provider",
+          side: "above",
+          cause: "credit-or-quota-exhausted",
+        },
       ]);
       expect(sql.exec(`SELECT kind, key FROM plane_reservations`).toArray()).toEqual([
         { kind: "park", key: "anthropic#r3" },

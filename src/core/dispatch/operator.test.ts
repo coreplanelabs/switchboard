@@ -38,7 +38,13 @@ import {
   type RouteToolCall,
 } from "./route.js";
 import { ConfigStore } from "../../config.js";
-import type { CompletionRequest, Provider, ToolDef } from "../provider.js";
+import {
+  classifyProviderFailure,
+  renderProviderFailure,
+  type CompletionRequest,
+  type Provider,
+  type ToolDef,
+} from "../provider.js";
 import type { IncomingMessage } from "../types.js";
 import type { CommandDef } from "../commandRegistry.js";
 import { mcpToolName } from "../commandSurface.js";
@@ -355,14 +361,43 @@ describe("runOperator — the loop over a scripted model", () => {
     expect(answer.outputTokens).toBeGreaterThan(0);
   });
 
-  it("a model that throws is a non_decision naming the failure — never a thrown error", async () => {
+  it("a provider-rejected request is a typed refusal with one safe sentence, never a non_decision that falls to general", async () => {
     const answer = await runOperator(input(), async () => {
-      throw new Error("provider down");
+      throw classifyProviderFailure({
+        status: 400,
+        body: {
+          error: {
+            message:
+              "Invalid JSON schema: regex lookaround is not supported; see https://provider.example/schema and send another shape",
+            type: "invalid_request_error",
+            code: "invalid_json_schema",
+          },
+        },
+      });
+    });
+    expect(answer.decision).toEqual({
+      kind: "refusal",
+      cause: "provider",
+      providerFailure: "request-rejected",
+      reason: "request-rejected",
+      text: renderProviderFailure("request-rejected", "ended"),
+    });
+    expect(answer.decision.kind === "refusal" ? answer.decision.text : "").not.toMatch(
+      /[{}]|https?:\/\/|lookaround|send another/i,
+    );
+  });
+
+  it("a park-capable failure at the no-lease operator door says the request did not start", async () => {
+    const answer = await runOperator(input(), async () => {
+      throw classifyProviderFailure({ status: 503, body: { error: { type: "overloaded_error" } } });
     });
     expect(answer.decision).toMatchObject({
-      kind: "non_decision",
-      reason: expect.stringContaining("provider down") as unknown as string,
+      kind: "refusal",
+      cause: "provider",
+      providerFailure: "transient",
+      text: "The model provider is temporarily unavailable; this request did not start.",
     });
+    expect(answer.decision.kind === "refusal" ? answer.decision.text : "").not.toMatch(/will continue|work is kept/);
   });
 
   it("the prompt is open: the tool set carries no forced choice, so the model may end the turn", () => {

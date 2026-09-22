@@ -22,7 +22,9 @@ import {
   type RunEvent,
   type RunNoteKind,
 } from "../../runEvents.js";
+import { proxyProviderFailureIsAuthenticated } from "../../modelProxy/providerFailureAuth.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
+import { classifyProviderFailure, type ProviderFailure } from "../../provider.js";
 import type { Clock, Span } from "../../trace/types.js";
 import { type Disposition, SAID_ONCE_SUFFIX } from "../contract.js";
 import { MODEL_CALL_IN_FLIGHT } from "../windDown.js";
@@ -96,7 +98,10 @@ export interface BridgeObservation {
   response?: PiEvent;
   /** A finished message, in order, for the transcript mirror. */
   message?: Record<string, unknown>;
-  /** An assistant turn that ended in a provider error, with pi's message. */
+  /** An assistant turn that ended in a provider error, classified once at the
+   * provider seam. `providerError` is retained only as bounded operator detail;
+   * the harness decides from this typed value. */
+  providerFailure?: ProviderFailure;
   providerError?: string;
   /** Beside `providerError`: the provider's stop reason says it refused the
    *  call under its usage policy, so the harness fails the run by that name. */
@@ -332,7 +337,15 @@ export class PiBridge {
       this.assistantStartedAt = undefined;
     }
     if (message.stopReason === "error") {
-      out.providerError = redactAndCap(message.errorMessage ?? "the model call failed", 400);
+      const raw = message.errorMessage ?? "the model call failed";
+      // Passing through the bearer-authenticated proxy does not authenticate a
+      // provider's successful stream content. Only the proxy's HMAC marker can
+      // vouch for the typed envelope and let its cause decide disposition.
+      out.providerFailure = classifyProviderFailure({
+        error: raw,
+        trustedEnvelope: proxyProviderFailureIsAuthenticated(raw),
+      });
+      out.providerError = redactAndCap(raw, 400);
       if (typeof message.rawStopReason === "string" && POLICY_REFUSAL_STOP_REASONS.has(message.rawStopReason))
         out.policyRefusal = true;
       return;

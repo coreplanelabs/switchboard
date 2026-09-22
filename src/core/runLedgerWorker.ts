@@ -35,6 +35,8 @@
 //   POST /runs/session/notepad/write {key, gen, text}                    → {ok} | 409 fenced | 400 over the size
 //   POST /runs/intake           {storeKey, key, receipt, windowMs?}      → {inserted, stored}   (insert-if-absent, item 59)
 //   POST /runs/intake/read      {storeKey, key}                          → {receipt: IntakeReceipt | null}
+//   POST /runs/intake/delivery/claim {storeKey, key, poster, claimedAt}   → {claimed}
+//   POST /runs/intake/delivery/finish {storeKey, key, poster, delivered}  → {ok:true}
 //   POST /runs/intake/list      {storeKey, threadKey?, since?}           → {receipts: IntakeReceipt[]}
 
 import { RUN_ID_PATTERN, SESSION_KEY_PATTERN, type RunRecord } from "./runRecord.js";
@@ -540,6 +542,25 @@ export class WorkerRunLedger implements RunLedger {
   async readIntake(key: string): Promise<IntakeReceipt | undefined> {
     const r = await this.post("/runs/intake/read", { storeKey: this.opts.storeKey, key });
     return isIntakeReceipt(r.data.receipt) ? r.data.receipt : undefined;
+  }
+
+  async claimIntakeDelivery(key: string, poster: string, claimedAt: number): Promise<boolean> {
+    const r = await this.post("/runs/intake/delivery/claim", {
+      storeKey: this.opts.storeKey,
+      key,
+      poster,
+      claimedAt,
+    });
+    return r.data.claimed === true;
+  }
+
+  async finishIntakeDelivery(key: string, poster: string, delivered: boolean): Promise<void> {
+    await this.post("/runs/intake/delivery/finish", {
+      storeKey: this.opts.storeKey,
+      key,
+      poster,
+      delivered,
+    });
   }
 
   async listIntake(query: IntakeQuery): Promise<IntakeReceipt[]> {

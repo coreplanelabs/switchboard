@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RouteModel, RoutePrompt, RouteToolCall } from "./dispatch/route.js";
+import { classifyProviderFailure, providerFailureParks } from "./provider.js";
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from "./untrusted.js";
 import {
   buildIntakePrompt,
@@ -121,8 +122,50 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
       throw new Error("provider down");
     };
     const errored = await decideIntake(input(), deps({ model: failing }));
-    expect(errored).toMatchObject({ verdict: "silent", source: "error" });
-    expect(errored.reason).toContain("provider down");
+    expect(errored).toMatchObject({ verdict: "silent", source: "error", providerFailure: "permanent" });
+    expect(errored.reason).toBe(
+      "The model provider refused the call; the request ended without exposing the provider's response.",
+    );
+  });
+
+  it("a provider failure carries its typed cause and one safe sentence, never the provider payload or URL", async () => {
+    const failing: RouteModel = async () => {
+      throw classifyProviderFailure({
+        status: 402,
+        body: {
+          message: "More credits are required; visit https://provider.example/keys/secret-key",
+          metadata: { limit_source: "provider_key_limit" },
+        },
+      });
+    };
+    const decision = await decideIntake(input(), deps({ model: failing }));
+    expect(decision).toMatchObject({
+      verdict: "silent",
+      source: "error",
+      providerFailure: "credit-or-quota-exhausted",
+      reason: "The model provider's credit or quota is exhausted; this request did not start.",
+    });
+    expect(decision.reason).not.toMatch(/[{}]|https?:\/\/|limit_source/);
+    expect(decision.reason.match(/[.!?](?:\s|$)/g)).toHaveLength(1);
+  });
+
+  // Feature: docs/reference/specs/model-proxy.md item 12b — askStructured
+  // retains earlier malformed attempts by wrapping a later throw; the typed
+  // ProviderFailure inside that wrapper still owns the disposition.
+  it("a malformed answer followed by a 402 keeps the nested credit failure park-capable", async () => {
+    let calls = 0;
+    const model: RouteModel = async () => {
+      if (calls++ === 0) return "not a verdict";
+      throw classifyProviderFailure({ status: 402, body: { error: { type: "payment_required" } } });
+    };
+    const decision = await decideIntake(input(), deps({ model }));
+    expect(decision).toMatchObject({
+      verdict: "silent",
+      source: "error",
+      providerFailure: "credit-or-quota-exhausted",
+      attempts: [{ outcome: "violation" }],
+    });
+    expect(providerFailureParks(decision.providerFailure!)).toBe(true);
   });
 
   it("a malformed answer — another tool, prose, an answer outside the enum — is silent with source: error, never a guessed verdict", async () => {

@@ -136,10 +136,14 @@ describe("the CLI process running `ask` against a provider", () => {
     script = { kind: "refuse", status: 401, body: '{"error":{"message":"invalid api key"}}' };
     const r = await ask("what is 2+2");
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
-    // The run's pi called the model through the process's loopback proxy, which forwarded the provider's refusal.
-    expect(r.stdout).toContain("⚠️ the model call failed: 401");
-    expect(r.stdout).toContain("invalid api key");
+    // The one-shot operator call has no run lease to park under: the typed
+    // key-invalid cause ends the request, while only its safe rendering reaches stdout.
+    expect(r.stdout.trim()).toBe(
+      "The model provider key was refused; this request cannot start until the service is restored.",
+    );
+    expect(r.stdout).not.toContain("invalid api key");
     expect(r.stdout).not.toMatch(PROCESS_LOG_LINE);
-    expect(r.stderr).toMatch(/❌ \*general\* ·/);
+    expect(r.stderr).toContain("[operator] cli:");
+    expect(r.stderr).toContain('Provider "fake": FAKE_API_KEY was refused');
   }, 60_000);
 });

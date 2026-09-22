@@ -299,12 +299,15 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
     expect(result.stopReason).toBe("max_tokens");
   });
 
-  it("a key the block names but the environment lacks fails before any request, naming the variable", async () => {
+  it("a key the block names but the environment lacks fails before any request with typed key-absent cause", async () => {
     const { fetchImpl, calls } = fakeFetch(anthropicToolCallStream());
     const table = new PiAiProviders(CONFIGS, { secrets: secretsFrom({}), clock: CLOCK, fetch: fetchImpl });
-    await expect(table.get("anthropic").complete(routeRequest())).rejects.toThrow(
-      'Provider "anthropic": ANTHROPIC_API_KEY is not set',
-    );
+    await expect(table.get("anthropic").complete(routeRequest())).rejects.toMatchObject({
+      name: "ProviderFailure",
+      cause: "key-absent",
+      provider: "anthropic",
+      model: "claude-haiku-4-5",
+    });
     expect(calls).toHaveLength(0);
   });
 
@@ -318,15 +321,57 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
     expect(calls[0].headers["x-api-key"]).toBe("sk-ant-test");
   });
 
-  it("a provider error is a thrown error naming the provider and the model with pi's message — so route() says `router failed: …` and reflect() says `reflection failed: …`, as they do for a native failure", async () => {
+  it("a provider error is a typed failure with provider and model metadata, never the wire payload", async () => {
     const { fetchImpl } = fakeFetch(
       '{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
       401,
     );
     const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
-    await expect(table.get("anthropic").complete(routeRequest())).rejects.toThrow(
-      /^Provider "anthropic" \(claude-haiku-4-5\): 401 .*invalid x-api-key/,
+    await expect(table.get("anthropic").complete(routeRequest())).rejects.toMatchObject({
+      name: "ProviderFailure",
+      cause: "key-invalid",
+      status: 401,
+      provider: "anthropic",
+      model: "claude-haiku-4-5",
+    });
+  });
+
+  it("an OpenAI schema 400 crosses the adapter as request-rejected without its payload", async () => {
+    const { fetchImpl } = fakeFetch(
+      JSON.stringify({
+        error: {
+          message:
+            "Invalid JSON schema: regex lookaround is not supported; see https://provider.example/schema and retry",
+          type: "invalid_request_error",
+          code: "invalid_json_schema",
+        },
+      }),
+      400,
     );
+    const table = new PiAiProviders(
+      {
+        ...CONFIGS,
+        openai: {
+          type: "openai-compatible",
+          wire: "openai-responses",
+          baseUrl: "https://api.openai.com/v1",
+          apiKeyEnv: "OPENAI_API_KEY",
+        },
+      },
+      {
+        secrets: secretsFrom({ ANTHROPIC_API_KEY: "sk-ant-test", OPENAI_API_KEY: "sk-openai-test" }),
+        clock: CLOCK,
+        fetch: fetchImpl,
+      },
+    );
+    await expect(table.get("openai").complete({ ...routeRequest(), model: "gpt-5.6-sol" })).rejects.toMatchObject({
+      name: "ProviderFailure",
+      cause: "request-rejected",
+      status: 400,
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      message: "The model provider rejected the request shape; no work was started.",
+    });
   });
 
   it("the request's signal reaches the wire: an aborted call is a thrown error, never a result", async () => {
@@ -338,7 +383,7 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
     const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
     const pending = table.get("anthropic").complete({ ...routeRequest(), signal: controller.signal });
     controller.abort();
-    await expect(pending).rejects.toThrow(/^Provider "anthropic" \(claude-haiku-4-5\): .*abort/i);
+    await expect(pending).rejects.toMatchObject({ name: "ProviderFailure", cause: "transient" });
   });
 });
 
@@ -669,15 +714,15 @@ describe("fromPiMessage — pi's assistant message as the completion result", ()
     expect(fromPiMessage(message({ stopReason: "pending" }), "anthropic").stopReason).toBe("other");
   });
 
-  it("an error or an abort is thrown with pi's message, never returned as a result", () => {
+  it("an error or an abort is thrown by typed cause, never returned with pi's payload", () => {
     expect(() =>
       fromPiMessage(message({ stopReason: "error", errorMessage: "429 rate limited" }), "anthropic"),
-    ).toThrow('Provider "anthropic" (m): 429 rate limited');
+    ).toThrow("The model provider is rate-limited; this request did not start.");
     expect(() =>
-      fromPiMessage(message({ stopReason: "aborted", errorMessage: "Request aborted" }), "anthropic"),
-    ).toThrow('Provider "anthropic" (m): Request aborted');
+      fromPiMessage(message({ stopReason: "aborted", errorMessage: "This operation was aborted" }), "anthropic"),
+    ).toThrow("The model provider is temporarily unavailable; this request did not start.");
     expect(() => fromPiMessage(message({ stopReason: "error" }), "anthropic")).toThrow(
-      'Provider "anthropic" (m): the model call failed',
+      "The model provider refused the call; the request ended without exposing the provider's response.",
     );
   });
 });

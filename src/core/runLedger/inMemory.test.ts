@@ -503,6 +503,33 @@ describe("intake receipts (run-history item 59)", () => {
     expect(await ledger.readIntake("slack:C1:2.0")).toBeUndefined();
   });
 
+  it("claims one provider-failure delivery atomically, releases a rejection, and closes a success", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const key = "slack:C1:2.0";
+    await ledger.recordIntake(key, receipt({ source: "error", providerFailure: "transient" }));
+    expect(
+      await Promise.all([
+        ledger.claimIntakeDelivery(key, "poster-a", 1),
+        ledger.claimIntakeDelivery(key, "poster-b", 1),
+      ]),
+    ).toEqual([true, false]);
+    await ledger.finishIntakeDelivery(key, "poster-b", false);
+    expect(await ledger.claimIntakeDelivery(key, "poster-c", 2)).toBe(false);
+    await ledger.finishIntakeDelivery(key, "poster-a", false);
+    expect(await ledger.claimIntakeDelivery(key, "poster-c", 2)).toBe(true);
+    await ledger.finishIntakeDelivery(key, "poster-c", true);
+    expect(await ledger.claimIntakeDelivery(key, "poster-d", Number.MAX_SAFE_INTEGER)).toBe(false);
+  });
+
+  it("recovers an unfinished delivery claim after its bound, but never claims a non-failure receipt", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.recordIntake("failure", receipt({ source: "error", providerFailure: "transient" }));
+    await ledger.recordIntake("ordinary", receipt());
+    expect(await ledger.claimIntakeDelivery("failure", "dead-poster", 0)).toBe(true);
+    expect(await ledger.claimIntakeDelivery("failure", "recovery", Number.MAX_SAFE_INTEGER)).toBe(true);
+    expect(await ledger.claimIntakeDelivery("ordinary", "poster", 0)).toBe(false);
+  });
+
   it("listIntake answers a thread's rows and rows since an instant, oldest first", async () => {
     const ledger = new InMemoryRunLedger(() => 0);
     const a = receipt({ decidedAt: 1_000 });
