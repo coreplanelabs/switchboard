@@ -314,15 +314,17 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
   }
 
   // The Responses wire is pi's alone for now (record 0052, U42): a preset on
-  // OpenCode with a Responses block is refused here, by name, before any card
-  // or span — never a call that fails mid-run — until OpenCode's bundled
-  // `@ai-sdk/openai` is measured against the logging fake (the matrix's
-  // declared `cannot` carries the same reason).
-  if (modelCard.wire === "openai-responses" && (resolved.harness?.name ?? DEFAULT_HARNESS) === "opencode") {
+  // OpenCode with a Responses block is refused here, by harness, provider and
+  // wire before a run record, workspace work or model call — never a call that
+  // fails mid-run — until OpenCode's bundled `@ai-sdk/openai` is measured
+  // against the logging fake (the matrix's declared `cannot` carries the same
+  // reason).
+  const harnessName = resolved.harness?.name ?? DEFAULT_HARNESS;
+  if (modelCard.wire === "openai-responses" && harnessName === "opencode") {
     throw new RefusalError(
       refusalOf(
         "model_card_refused",
-        `Model "${resolved.modelRef}" speaks the openai-responses wire, which the "opencode" harness cannot speak yet; this request needs the pi harness or an openai-chat block.`,
+        `The "${harnessName}" harness cannot start model "${resolved.modelRef}" from provider "${providerName}": it cannot speak the "${modelCard.wire}" wire; this request needs the pi harness or an openai-chat block.`,
       ),
     );
   }
