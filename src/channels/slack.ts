@@ -261,6 +261,17 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
               const act = await actOnMissedMessage(m, {
                 botUserId: id,
                 ...(intake ? { intake } : {}),
+                reply: async (text) => {
+                  await new SlackIO(app.client, {
+                    channel: m.channel,
+                    user: m.user,
+                    text: m.text,
+                    ts: m.ts,
+                    threadTs: m.threadTs,
+                    botUserId: id,
+                    trigger: "thread-follow-up",
+                  }).reply(text);
+                },
                 dispatch: (extra) => {
                   void handle(
                     deps,
@@ -468,6 +479,8 @@ export async function actOnMissedMessage(
   opts: {
     botUserId: string;
     intake?: SlackIntakeGate;
+    /** Render a typed intake failure on the missed reply's thread. */
+    reply?: (text: string) => Promise<void>;
     /** Dispatch through `handle()` — fire-and-forget, like a live event. */
     dispatch: (extra: { trigger: "mention" | "thread-follow-up"; intakeDecided?: true }) => void;
     /** The same-process seen-set; the module-level one unless a test injects its own. */
@@ -525,6 +538,13 @@ export async function actOnMissedMessage(
         log(
           `[intake] ${key} ${decision.verdict} (${decision.source}, receipt ${decision.receipt}): ${decision.reason} — decided at catch-up`,
         );
+        if (decision.providerFailure !== undefined && decision.receipt !== "existing") {
+          try {
+            await opts.reply?.(decision.reason);
+          } catch (err) {
+            log(`[catch-up] ${key}: provider failure could not be rendered — ${describeError(err)}`);
+          }
+        }
         decided = true;
         silent = decision.verdict !== "addressed";
       }
@@ -922,6 +942,19 @@ async function gateThreadReply(
     intake.deps,
   );
   span.setAttrs({ intake: decision.verdict, intakeSource: decision.source, intakeReceipt: decision.receipt });
+  if (decision.providerFailure !== undefined && decision.receipt !== "existing") {
+    try {
+      await new SlackIO(client, ev).reply(decision.reason);
+    } catch (err) {
+      console.error(
+        `[intake] ${ev.channel}:${ev.ts} provider failure could not be rendered — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    console.log(
+      `[intake] ${ev.channel}:${ev.ts} ${decision.verdict} (${decision.source}, receipt ${decision.receipt}): ${decision.reason}`,
+    );
+    return { proceed: false };
+  }
   if (decision.verdict !== "addressed" || decision.receipt === "existing") {
     console.log(
       `[intake] ${ev.channel}:${ev.ts} ${decision.verdict} (${decision.source}, receipt ${decision.receipt}): ${decision.reason}`,

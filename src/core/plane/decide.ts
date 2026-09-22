@@ -10,6 +10,7 @@
 // literal where `clock:check` expects it.)
 
 import { PLANE, minutesToMs } from "../budgets.js";
+import type { ProviderFailureCause } from "../provider.js";
 import type { PlaneFinding } from "./findings.js";
 
 // ---- endings and their causes (record 0064, "Endings and the watches") ------------------------
@@ -139,6 +140,9 @@ export interface PlaneLevelRow {
   side: "below" | "above";
   reportedAt: number;
   generation: string;
+  /** A provider row's typed down cause; absent on resident rows, provider-up,
+   * and reports from an older bot generation. */
+  cause?: ProviderFailureCause;
 }
 
 /** The side a resident's level reads for an observer that knows the current
@@ -300,7 +304,13 @@ export type PlaneEvent =
   /** A provider's level as the model proxy reported it: `up` on a relayed
    *  success, `down` on a failure past its one retry. `up` re-issues every
    *  turn held parked on the provider, once each. */
-  | { kind: "provider_level"; at: number; provider: string; level: "up" | "down" }
+  | {
+      kind: "provider_level";
+      at: number;
+      provider: string;
+      level: "up" | "down";
+      cause?: ProviderFailureCause;
+    }
   /** A run parked on its provider (record 0064): the harness holds the turn,
    *  the lease keeps counting, and the provider's next `up` steers it once. */
   | { kind: "park"; at: number; runId: string; provider: string }
@@ -692,7 +702,13 @@ function onHeartbeat(
  *  then walks the queue for anything waiting on `provider_up`. */
 function onProviderLevel(
   state: PlaneState,
-  event: { kind: "provider_level"; at: number; provider: string; level: "up" | "down" },
+  event: {
+    kind: "provider_level";
+    at: number;
+    provider: string;
+    level: "up" | "down";
+    cause?: ProviderFailureCause;
+  },
 ): PlaneDecision {
   const row: PlaneLevelRow = {
     resident: event.provider,
@@ -700,6 +716,7 @@ function onProviderLevel(
     side: event.level === "up" ? "below" : "above",
     reportedAt: event.at,
     generation: "",
+    ...(event.level === "down" && event.cause !== undefined ? { cause: event.cause } : {}),
   };
   const levels = [...state.levels.filter((l) => !(l.resident === event.provider && l.name === "provider")), row];
   const writes: PlaneWrite[] = [{ table: "plane_levels", op: "put", row }];

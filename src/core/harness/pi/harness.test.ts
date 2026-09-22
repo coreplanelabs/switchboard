@@ -7,6 +7,7 @@ import type { AgentDef } from "../../../agents/registry.js";
 import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../../execution/executor.js";
 import { ResidentExecutor } from "../../../execution/resident.js";
 import type { ChatMessage } from "../../chatMessage.js";
+import { classifyProviderFailure, providerFailureParks } from "../../provider.js";
 import {
   abortFailedAfterEndNote,
   abortReaskedNote,
@@ -77,8 +78,6 @@ import {
 import { FakeHarnessContainer, NETWORK_LOST_TEXT, TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import {
   compactionSteer,
-  isParkedProviderError,
-  isTransientProviderError,
   ModelPolicyRefusedError,
   ModelTransientFailureError,
   PiContainerReplacedError,
@@ -100,6 +99,10 @@ import { isPiFacts, type HarnessRun, type PiHarnessFacts } from "../contract.js"
 // deaths, and the two ways back after a restart.
 
 const NOW = 1_700_000_000_000;
+const TRANSIENT_PROVIDER_SENTENCE =
+  "The model provider is temporarily unavailable; your work is kept and will continue when service recovers.";
+const PERMANENT_PROVIDER_SENTENCE =
+  "The model provider refused the call; the request ended without exposing the provider's response.";
 const paths = piRunPaths("run-7");
 
 /** A row's pi facts as a previous generation wrote them: the discriminator and a relaunch count of 0 unless the test says otherwise. */
@@ -670,7 +673,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
         { type: "agent_settled" },
       );
     });
-    await expect(failed.start()).rejects.toThrow("the model call failed: 403 revoked");
+    await expect(failed.start()).rejects.toThrow(PERMANENT_PROVIDER_SENTENCE);
     expect(failed.container.commands().some((c) => c.type === "steer")).toBe(true);
     expect(failed.inbox.drain().map((i) => i.text)).toEqual(["also bump the version"]);
     expect(failed.steps.every((s) => s.inboxConsumedSeq === 0)).toBe(true);
@@ -1027,11 +1030,13 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     const answer = await w.start();
     // The wind-down's own words, naming the failed call where the write-up would have been.
     expect(answer).toBe(
-      "Stopped at the 20-minute budget without finishing; the model call failed during the wind-down (This operation was aborted), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.",
+      `Stopped at the 20-minute budget without finishing; the model call failed during the wind-down (${TRANSIENT_PROVIDER_SENTENCE}), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
     );
     expect(w.notes.some((note) => note.includes("the loop's time is up while a model call was in flight"))).toBe(true);
     expect(
-      w.notes.some((note) => note.includes("the model call failed during the wind-down (This operation was aborted)")),
+      w.notes.some((note) =>
+        note.includes(`the model call failed during the wind-down (${TRANSIENT_PROVIDER_SENTENCE})`),
+      ),
     ).toBe(true);
     // The wind-down instruction was steered; the run never became a failure.
     expect(
@@ -1070,13 +1075,38 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
         { type: "agent_settled" },
       );
     });
-    await expect(errored.start()).rejects.toThrow("the model call failed: 403 revoked");
+    await expect(errored.start()).rejects.toThrow(PERMANENT_PROVIDER_SENTENCE);
   });
 
   // Feature: docs/reference/specs/harness-pi.md item 6 — a transient provider
   // failure (a gateway 5xx, a stream cut mid-message) retries on the bounded
   // ladder (issue 1932): each attempt a note on the record, its wait charged
   // to the lease; a failure past the ladder fails the run in plain words.
+  it("a typed 402 credit-limit failure holds the turn and resumes it instead of ending the run", async () => {
+    const slept: number[] = [];
+    const w = world({ providerPark: true, sleep: async (ms) => void slept.push(ms) });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) {
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage:
+                '402 {"error":{"type":"provider_failure","cause":"credit-or-quota-exhausted","message":"The model provider\'s credit or quota is exhausted; your work is kept and will continue when service recovers."}}',
+            },
+          },
+          { type: "agent_settled" },
+        );
+      } else finalTurn(c, "recovered after credit returned");
+    });
+    await expect(w.start()).resolves.toBe("recovered after credit returned");
+    expect(w.notes.some((note) => note.includes("the turn is held and retry 1 waits"))).toBe(true);
+    expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
+  });
+
   it("a 5xx then success: the transient failure is retried after the ladder's first backoff — pi is re-prompted and the retry's answer is the run's", async () => {
     const slept: number[] = [];
     const w = world({ sleep: async (ms) => void slept.push(ms) });
@@ -1210,14 +1240,14 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
         { type: "agent_settled" },
       ),
     );
-    await expect(auth.start()).rejects.toThrow("the model call failed: 403 revoked");
+    await expect(auth.start()).rejects.toThrow(PERMANENT_PROVIDER_SENTENCE);
     expect(auth.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
   });
 
-  // The classifier is anchored: a transient token embedded in a non-transient
-  // message (a status code inside an id, `terminated` or a retryable number in
-  // an auth error's words) never earns the retry.
-  it("isTransientProviderError matches real transient failures and never a non-transient message carrying one of its tokens", () => {
+  // The adapter seam is anchored: a transient token embedded in a
+  // non-transient message never earns the retry, and the harness consumes only
+  // the resulting cause.
+  it("the ProviderFailure seam classifies real transient answers without promoting embedded tokens", () => {
     for (const m of [
       "Anthropic stream ended before message_stop",
       "Stream ended without finish_reason",
@@ -1234,7 +1264,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       "status code 429",
       "<html><title>Bad Gateway</title><body>cloudflare</body></html>",
     ])
-      expect(isTransientProviderError(m), m).toBe(true);
+      expect(providerFailureParks(classifyProviderFailure({ error: m }).cause), m).toBe(true);
     for (const m of [
       "403 revoked",
       "401 invalid x-api-key",
@@ -1245,7 +1275,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       "prompt is 429000 tokens over the limit",
       "invalid_request_error: max_tokens must be positive",
     ])
-      expect(isTransientProviderError(m), m).toBe(false);
+      expect(providerFailureParks(classifyProviderFailure({ error: m }).cause), m).toBe(false);
   });
 
   // Feature: docs/reference/specs/model-proxy.md item 12a — the harness half
@@ -1435,28 +1465,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
   });
 
-  // The park classifier's line: a whole-call failure the proxy parks on — its
-  // own 502 or a relayed 5xx past its retry — never a post-success stream cut
-  // (no park exists, so a hold would wait on a steer that never comes) and
-  // never a 429, which the proxy relays without parking.
-  it("isParkedProviderError matches the failures the proxy parks on and never a stream cut or a sub-5xx status", () => {
-    for (const m of [
-      "502 the model provider did not answer",
-      "upstream_unreachable",
-      "HTTP 503 Service Unavailable",
-      "Anthropic API error 529: overloaded_error",
-      "api error 500",
-    ])
-      expect(isParkedProviderError(m), m).toBe(true);
-    for (const m of [
-      "Anthropic stream ended before message_stop",
-      "fetch failed",
-      "connection terminated",
-      "status code 429",
-      "403 revoked",
-      "model claude-502-test not found",
-    ])
-      expect(isParkedProviderError(m), m).toBe(false);
+  it("the harness's park decision is the typed cause set, not a second prose classifier", () => {
+    for (const cause of ["transient", "rate-limited", "credit-or-quota-exhausted"] as const)
+      expect(providerFailureParks(cause), cause).toBe(true);
+    for (const cause of ["key-absent", "key-invalid", "model-unknown", "permanent"] as const)
+      expect(providerFailureParks(cause), cause).toBe(false);
   });
 
   // The release path's two race windows (model-proxy item 12a): the plane's
@@ -1614,10 +1627,9 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   });
 
   // A call the provider refused under its usage policy is the failure by name:
-  // the run fails at once (the same words would be refused again), the note
-  // keeps the provider's explanation for the run page, and the error the
-  // thread reads says how to go on, never the provider's words.
-  it("a call refused under the provider's usage policy fails the run by name at once — no retry, the provider's words on a policy_refusal note, the error's message the one sentence the thread reads", async () => {
+  // the run fails at once, and the note and thread both receive the permanent
+  // cause's one sentence, never the provider's explanation.
+  it("a call refused under the provider's usage policy fails the run by name at once — no retry, one rendered cause on the note and in the thread, no provider words", async () => {
     const w = world();
     scriptedPi(w.container, (_n, c) =>
       c.emit(
@@ -1640,15 +1652,10 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     );
     expect(failed).toBeInstanceOf(ModelPolicyRefusedError);
     expect((failed as Error).message).toBe(POLICY_REFUSAL_REPLY);
-    expect((failed as ModelPolicyRefusedError).providerMessage).toBe(
-      "this request was blocked by the provider's classifier",
-    );
+    expect((failed as ModelPolicyRefusedError).providerFailure).toMatchObject({ cause: "permanent" });
     expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
     expect(w.events.filter((e) => e.type === "run_note" && e.kind === "policy_refusal")).toEqual([
-      expect.objectContaining({
-        summary:
-          "the model refused the call under the provider's usage policy: this request was blocked by the provider's classifier",
-      }),
+      expect.objectContaining({ summary: PERMANENT_PROVIDER_SENTENCE }),
     ]);
   });
 
@@ -1797,7 +1804,7 @@ describe("runPiHarness — after a bot restart", () => {
       .map((e) => (e as { kind: string; summary: string }).summary);
     expect(notes[0]).toMatch(/^resumed after a restart: pi still runs in the container \(pid 4242\)/);
     expect(notes).toContainEqual(
-      expect.stringMatching(/^a model call failed while the bot was away \(fetch failed\); continuing$/),
+      `a model call failed while the bot was away (${TRANSIENT_PROVIDER_SENTENCE}); continuing`,
     );
     // The failed call is a note, never a turn (session-log item 2): the one
     // step this generation mirrors lands right after the transcript it resumed
@@ -1843,7 +1850,7 @@ describe("runPiHarness — after a bot restart", () => {
       w.events
         .filter((e) => e.type === "run_note" && e.kind === "harness_error")
         .map((e) => (e as { summary: string }).summary),
-    ).toEqual(["a model call failed while the bot was away (fetch failed); continuing"]);
+    ).toEqual([`a model call failed while the bot was away (${TRANSIENT_PROVIDER_SENTENCE}); continuing`]);
     expect(w.events.filter((e) => e.type === "tool_result").map((e) => e.callId)).toEqual(["c0", "c1"]);
   });
 
@@ -2108,7 +2115,7 @@ describe("runPiHarness — after a bot restart", () => {
       w.events
         .filter((e) => e.type === "run_note" && e.kind === "harness_error")
         .map((e) => (e as { summary: string }).summary),
-    ).toEqual(["a model call failed while the bot was away (fetch failed); continuing"]);
+    ).toEqual([`a model call failed while the bot was away (${TRANSIENT_PROVIDER_SENTENCE}); continuing`]);
     expect(w.facts.at(-1)!.sessionFile).toBe(`${paths.sessionDir}/s.jsonl`); // this generation's answer, not the stale one
     expect(w.steps.map((s) => s.turns)).toEqual([
       [
@@ -3908,9 +3915,9 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(noteKinds(w)).toContain("turn_budget_exhausted");
     expect(w.container.commands().some((c) => c.type === "steer")).toBe(false); // the wind-down steer never reached pi
     expect(w.notes).toContain(wrapUpUndeliveredNote("turns"));
-    expect(w.notes).toContain(windDownFailureNote("503"));
+    expect(w.notes).toContain(windDownFailureNote(TRANSIENT_PROVIDER_SENTENCE));
     // No label for a wrap-up that never went — but the failure the record holds reaches the thread too.
-    expect(session.answer).toBe(unlabelledAnswer("", "503"));
+    expect(session.answer).toBe(unlabelledAnswer("", TRANSIENT_PROVIDER_SENTENCE));
   });
 
   it("a catch-up burst is no time under a ticking clock: the records pi wrote during the reset come back in one chunk and are consumed one slow ledger write at a time for longer than the bound, the prompt's echo last among them — the prompt in doubt is never re-sent, since the gate reads its clock only once the reader has caught up", async () => {

@@ -28,6 +28,9 @@ import type {
 } from "@earendil-works/pi-ai";
 import {
   ANTHROPIC_API_KEY_ENV,
+  classifyProviderFailure,
+  ProviderFailure,
+  providerFailureOf,
   wireOf,
   type CompletionRequest,
   type CompletionResult,
@@ -166,7 +169,7 @@ export class PiAiProvider implements Provider {
     let key: string | undefined;
     if (this.keyEnv !== undefined) {
       const secret = this.secrets.named(this.keyEnv);
-      if (!secret) throw new Error(`Provider "${this.name}": ${this.keyEnv} is not set`);
+      if (!secret) throw new ProviderFailure("key-absent", { provider: this.name, model: req.model });
       key = secret.reveal();
     }
     const model = this.model(req.model, req.maxTokens, req.effort !== undefined);
@@ -174,9 +177,20 @@ export class PiAiProvider implements Provider {
       ...piStreamOptions(this.api, req, key),
       ...(this.fetchImpl ? { fetch: this.fetchImpl } : {}),
     };
-    const message = await this.api$()
-      .stream(model, toPiContext(req, model, this.clock), options)
-      .result();
+    let message: PiAssistantMessage;
+    try {
+      message = await this.api$()
+        .stream(model, toPiContext(req, model, this.clock), options)
+        .result();
+    } catch (err) {
+      const failure = providerFailureOf(err);
+      throw new ProviderFailure(failure.cause, {
+        ...(failure.status !== undefined ? { status: failure.status } : {}),
+        provider: this.name,
+        model: req.model,
+        ...(failure.operatorUrl !== undefined ? { operatorUrl: failure.operatorUrl } : {}),
+      });
+    }
     return fromPiMessage(message, this.name);
   }
 
@@ -382,7 +396,11 @@ const STOP_REASONS: Partial<Record<StopReason, CompletionResult["stopReason"]>> 
  *  and the model with pi's message — never a result. */
 export function fromPiMessage(message: PiAssistantMessage, provider: string): CompletionResult {
   if (message.stopReason === "error" || message.stopReason === "aborted") {
-    throw new Error(`Provider "${provider}" (${message.model}): ${message.errorMessage ?? "the model call failed"}`);
+    throw classifyProviderFailure({
+      error: message.errorMessage ?? "the model call failed",
+      provider,
+      model: message.model,
+    });
   }
   const content: ContentPart[] = [];
   for (const part of message.content) {

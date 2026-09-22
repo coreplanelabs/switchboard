@@ -533,12 +533,25 @@ describe("decide — the checkpoint steers and the provider condition (record 00
   });
 
   it("a provider down report writes the level row and nothing else; a park writes one park row, a second park of the same run is a no-op", () => {
-    const down = decide(emptyPlaneState(), { kind: "provider_level", at: 1_000, provider: "anthropic", level: "down" });
+    const down = decide(emptyPlaneState(), {
+      kind: "provider_level",
+      at: 1_000,
+      provider: "anthropic",
+      level: "down",
+      cause: "credit-or-quota-exhausted",
+    });
     expect(down.writes).toEqual([
       {
         table: "plane_levels",
         op: "put",
-        row: { resident: "anthropic", name: "provider", side: "above", reportedAt: 1_000, generation: "" },
+        row: {
+          resident: "anthropic",
+          name: "provider",
+          side: "above",
+          reportedAt: 1_000,
+          generation: "",
+          cause: "credit-or-quota-exhausted",
+        },
       },
     ]);
     const parked = decide(down.state, { kind: "park", at: 1_100, runId: "run-a", provider: "anthropic" });

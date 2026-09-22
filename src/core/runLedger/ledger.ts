@@ -6,6 +6,7 @@
 // means the transcript is complete up to it.
 
 import type { RunRecord } from "../runRecord.js";
+import type { ProviderFailureCause } from "../provider.js";
 import type {
   HeartbeatFacts,
   PlaneAckOutcome,
@@ -49,7 +50,7 @@ export type PlaneLevelPost =
     }
   /** The model proxy's provider level (record 0064): `up` on a relayed
    *  success, `down` on a failure past its one retry. */
-  | { provider: string; name: "provider"; side: "up" | "down" };
+  | { provider: string; name: "provider"; side: "up" | "down"; cause?: ProviderFailureCause };
 
 /** A refusal-by-name met at attach or exec (record 0064): the plane
  *  re-enters an admitted run's queue row at its old position. */

@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import type { Identity } from "../../../agents/registry.js";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
 import type { ChatMessage, ContentPart } from "../../chatMessage.js";
-import type { CompletionRequest, CompletionResult } from "../../provider.js";
+import { renderProviderFailure, type CompletionRequest, type CompletionResult } from "../../provider.js";
 import type { RunEvent, StopMode } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
@@ -50,7 +50,8 @@ import { TRANSPORT_LOST_TEXT } from "./fakeContainer.js";
 
 /** The wall clock every conformance run is given: the drivers' preset budget. */
 export const CONFORMANCE_MAX_MINUTES = 10;
-/** The provider's words when a scripted model call fails (`RunScript.failModelCall`), on every driver. */
+/** The provider's words a scripted model call fails with (`RunScript.failModelCall`).
+ * pi classifies them at its bridge; OpenCode's typed hold lands in record 0074 U2. */
 export const FAILED_MODEL_CALL_ERROR = "the provider closed the stream before the answer";
 /** Where a script's clock sits before the loop's end (`RunScript.nearLoopEndBeforeModelCall`):
  *  inside the loop, ahead of the wrap-up warning, with room for a short command. */
@@ -924,7 +925,8 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       // model call when the clock ran out, the call's failure is a note, and
       // the run answered under the budget's label — naming the failed call
       // where the write-up would have been — never as a failed model call.
-      assert.equal(answered(run), timeBudgetAnswer("", CONFORMANCE_MAX_MINUTES, FAILED_MODEL_CALL_ERROR));
+      const failure = run.harness === "pi" ? renderProviderFailure("permanent") : FAILED_MODEL_CALL_ERROR;
+      assert.equal(answered(run), timeBudgetAnswer("", CONFORMANCE_MAX_MINUTES, failure));
       const budget = notes(run).filter((n) => n.kind === "time_budget_exhausted");
       assert.deepEqual(
         budget.map((n) => n.summary),
@@ -934,7 +936,7 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       const failed = notes(run).filter((n) => n.kind === "harness_error");
       assert.equal(failed.length, 1, "the failed call is not exactly one harness_error note");
       assert.match(failed[0].summary, /during the wind-down/);
-      assert.ok(failed[0].summary.includes(FAILED_MODEL_CALL_ERROR), "the note does not carry the provider's words");
+      assert.ok(failed[0].summary.includes(failure), "the note does not carry the harness's failure rendering");
     },
   },
   {

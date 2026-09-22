@@ -1039,7 +1039,13 @@ export async function runBot(): Promise<void> {
       // and a park land on the write-through's plane routes, fire and forget —
       // the null write-through swallows both where no ledger is configured.
       plane: {
-        level: (provider, side) => void runLedger.planeLevel({ provider, name: "provider", side }),
+        level: (provider, side, cause) =>
+          void runLedger.planeLevel({
+            provider,
+            name: "provider",
+            side,
+            ...(side === "down" && cause !== undefined ? { cause } : {}),
+          }),
         park: (runId, provider) => void runLedger.planePark(runId, provider),
       },
     });

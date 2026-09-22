@@ -475,7 +475,7 @@ describe("reflect (one extractor call → store.write)", () => {
     expect(warnings.join("\n")).toMatch(/not valid JSON|not an object/);
   });
 
-  it("a provider failure is swallowed and reported through onWarn", async () => {
+  it("a provider failure is swallowed and reported through onWarn by typed cause, not provider prose", async () => {
     const provider: Provider = {
       name: "boom",
       async complete() {
@@ -486,7 +486,9 @@ describe("reflect (one extractor call → store.write)", () => {
     await expect(
       reflect({ ...base, provider, store: new InMemoryMemoryStore(), onWarn: (m) => warnings.push(m) }),
     ).resolves.toBeUndefined();
-    expect(warnings.join("\n")).toContain("rate limited");
+    expect(warnings).toEqual([
+      "reflection skipped: The model provider is rate-limited; your work is kept and will continue when capacity returns.",
+    ]);
   });
 
   it("a reply with nothing durable (no facts, empty summary) writes nothing", async () => {

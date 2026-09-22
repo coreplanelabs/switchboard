@@ -1534,6 +1534,28 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     expect(attrs).toMatchObject({ intake: "silent", intakeSource: "model", intakeReceipt: "inserted" });
   });
 
+  it("an intake provider failure is not silent: the door posts its one safe sentence and dispatches nothing", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const decide = vi.fn(async (): Promise<IntakeDecision> => ({
+      verdict: "silent",
+      source: "error",
+      receipt: "inserted",
+      providerFailure: "credit-or-quota-exhausted",
+      reason:
+        "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers.",
+    }));
+    const { gate } = gateOf({ decideIntake: decide as unknown as typeof decideIntake });
+    const out = await receiveSlackMessage(s.client, followUp(), spanStub().span, POLICY, [], gate);
+    expect(out).toBeUndefined();
+    expect(s.calls).toEqual(["chat.postMessage"]);
+    expect(s.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers.",
+      }),
+    );
+  });
+
   it("addressed: the verdict and its receipt come first, the 👀 and the downloads after, and the runs page rides out as thread for dispatch", async () => {
     const s = gateClient();
     stubDownloads(s.calls);
@@ -1997,6 +2019,36 @@ describe("the catch-up reads the receipt — onMissed's act (docs/reference/spec
     expect(act).toBe("silenced");
     expect(dispatched).toEqual([]);
     expect(seen.was("CCU", "120.000100")).toBe(true);
+  });
+
+  it("a caught-up intake provider failure renders the same sentence once and remains undispatched", async () => {
+    const reason =
+      "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers.";
+    const decide = vi.fn(async (): Promise<IntakeDecision> => ({
+      verdict: "silent",
+      source: "error",
+      receipt: "inserted",
+      providerFailure: "credit-or-quota-exhausted",
+      reason,
+    }));
+    const { gate } = catchGate({
+      ledger: receiptLedger(),
+      decide: decide as unknown as ReturnType<typeof verdictOf>,
+    });
+    const reply = vi.fn(async () => {});
+    const dispatch = vi.fn();
+    const act = await actOnMissedMessage(missedOf(), {
+      botUserId: BOT,
+      intake: gate,
+      seen: seenSet(),
+      log: () => {},
+      reply,
+      dispatch,
+    });
+    expect(act).toBe("silenced");
+    expect(reply).toHaveBeenCalledOnce();
+    expect(reply).toHaveBeenCalledWith(reason);
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("an always thread is dispatched exactly as today: no receipt read, no verdict, no intakeDecided — and so is a replay when no gate is wired", async () => {

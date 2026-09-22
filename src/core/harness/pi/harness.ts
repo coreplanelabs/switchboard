@@ -19,6 +19,13 @@ import { randomUUID } from "node:crypto";
 import type { PiCompactionConfig } from "../../../config.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import {
+  classifyProviderFailure,
+  providerFailureOf,
+  providerFailureParks,
+  renderProviderFailure,
+  type ProviderFailure,
+} from "../../provider.js";
+import {
   HarnessContainerReplacedError,
   HarnessGateBypassedError,
   HarnessMismatchError,
@@ -152,50 +159,12 @@ const PROVIDER_RETRY_PROMPT =
 const REISSUE_PROMPT =
   "The model provider is answering again and the held call is being re-issued; continue where you left off.";
 
-/** A provider failure worth one retry: a stream cut mid-message, a dropped
- *  connection, an overload or a retryable status code — never an auth or
- *  request error ("403 revoked" must fail the run at once, as before). The
- *  patterns are anchored so a token embedded in a non-transient message never
- *  matches: a status code counts only in an HTTP/status/error context (never a
- *  bare number inside an id or a count), `terminated` only as undici's whole
- *  bare message or a terminated connection/stream (never "request terminated:
- *  invalid api key"), and `network` only as a named network error. */
 /** pi's word for a model call its own abort ended: the turn a tool cut was
- *  in closes with this, before the steered write-up runs as the next turn. */
+ * in closes with this, before the steered write-up runs as the next turn. This
+ * distinguishes the run's intentional abort; provider recovery itself reads
+ * only `ProviderFailure.cause`. */
 export function isAbortedProviderError(message: string): boolean {
   return /\baborted\b/i.test(message);
-}
-
-/** The failure shape the model proxy parks the run on (model-proxy item 12a;
- *  record 0064): a whole-call failure — the proxy's own 502 when the provider
- *  never answered, or a relayed 5xx past its one retry. Never a stream cut
- *  after a relayed success: the proxy reported `up` for that call and parked
- *  nothing, so no reissue steer would ever release the hold — the retry
- *  ladder keeps those; a 429 is under the proxy's park floor and keeps it too. */
-export function isParkedProviderError(message: string): boolean {
-  return (
-    /the model provider did not answer|upstream_unreachable/i.test(message) ||
-    /(?:\bhttp\b[^a-z0-9]{0,8}|\bstatus(?: code)?\b[^0-9]{0,5}|\berror\b[^0-9]{0,5}|\bapi error\b[^0-9]{0,5})(500|502|503|504|529)\b/i.test(
-      message,
-    )
-  );
-}
-
-export function isTransientProviderError(message: string): boolean {
-  return (
-    /stream ended before message_stop|stream ended without finish_reason|ended before completion/i.test(message) ||
-    /^(?:AbortError:\s*)?(?:This|The) operation was aborted\.?$/i.test(message.trim()) ||
-    /ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|fetch failed|other side closed|network (error|failure)|(connection|stream) (reset|closed|terminated)|timed? ?out/i.test(
-      message,
-    ) ||
-    /^terminated$/i.test(message.trim()) ||
-    /overloaded/i.test(message) ||
-    /^\s*(408|425|429|5\d\d)\b/.test(message) ||
-    /<html[\s>][\s\S]{0,4000}\b(?:bad gateway|service unavailable|gateway timeout)\b/i.test(message) ||
-    /(?:\bhttp\b[^a-z0-9]{0,8}|\bstatus(?: code)?\b[^0-9]{0,5}|\berror\b[^0-9]{0,5}|\bapi error\b[^0-9]{0,5})(408|425|429|5\d\d)\b/i.test(
-      message,
-    )
-  );
 }
 
 /** The only ending a transport-class model failure may produce. Provider
@@ -408,21 +377,20 @@ export class PiContainerReplacedError extends HarnessContainerReplacedError {
 }
 
 /** What the thread reads when the provider refused the run's call under its
- *  usage policy: how to go on, in one sentence. The provider's own words stay
- *  on the run page (the `policy_refusal` note), never in the reply. */
-export const POLICY_REFUSAL_REPLY =
-  "the model refused this request under its usage policy — rephrase it and the thread continues";
+ * usage policy. It is the permanent cause's one renderer sentence; neither
+ * the reply nor the run page receives the provider's explanation. */
+export const POLICY_REFUSAL_REPLY = renderProviderFailure("permanent");
 
 /** The provider refused the run's model call under its usage policy — the
  *  stop reason its wire names, which pi keeps beside the error it maps the
  *  refusal to (`POLICY_REFUSAL_STOP_REASONS`; harness-pi item 6). The run
  *  fails, and this is the failure by name: never retried (the same words are
  *  refused again), its message the one sentence the thread reads, the
- *  provider's explanation on the run's `policy_refusal` note, and the record
- *  marked `failure: policy_refusal` (run-history item 57) so the session's
+ *  rendered cause on the run's `policy_refusal` note, and the record marked
+ *  `failure: policy_refusal` (run-history item 57) so the session's
  *  next seed leaves the refused request out (session-log item 9). */
 export class ModelPolicyRefusedError extends Error {
-  constructor(readonly providerMessage: string) {
+  constructor(readonly providerFailure: ProviderFailure) {
     super(POLICY_REFUSAL_REPLY);
     this.name = "ModelPolicyRefusedError";
   }
@@ -500,17 +468,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
   };
   /** The failure by name for a call the provider refused under its usage
-   *  policy (item 6): the provider's explanation goes on the record for the
-   *  run page — a note, not a card line, since the thread is told how to go
-   *  on and never the provider's words — and the error the run ends with
-   *  carries the thread's sentence. */
-  const policyRefused = (explanation: string): ModelPolicyRefusedError => {
-    emit({
-      type: "run_note",
-      kind: "policy_refusal",
-      summary: `the model refused the call under the provider's usage policy: ${explanation}`,
-    });
-    return new ModelPolicyRefusedError(explanation);
+   * policy (item 6): the run page and thread receive the permanent cause's one
+   * sentence; the provider's explanation reaches neither renderer. */
+  const policyRefused = (failure: ProviderFailure): ModelPolicyRefusedError => {
+    emit({ type: "run_note", kind: "policy_refusal", summary: renderProviderFailure(failure.cause) });
+    return new ModelPolicyRefusedError(failure);
   };
   const bridge = new PiBridge({
     emit,
@@ -1392,7 +1354,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  The plane's provider-up steer may release it early; otherwise the
      *  harness retries it on backoff until the loop's share of the lease is
      *  spent. The provider's body never becomes the run's ending. */
-    let heldTurn: string | undefined;
+    let heldTurn: ProviderFailure | undefined;
     /** pi settled on the held turn: the reissue prompt is sent only from then
      *  on — sent between the errored `message_end` and `agent_settled` pi
      *  refuses it mid-loop (`Agent is already processing`) and the release
@@ -1725,7 +1687,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       for (const command of unsent) sends.send(command);
       return outcome;
     };
-    let providerError: string | undefined;
+    let providerFailure: ProviderFailure | undefined;
     /** The failed call was refused under the provider's usage policy: the failure by name (item 6). */
     let providerRefusal = false;
     /** Retries of transport-class provider failures already sent. The ladder's
@@ -1899,7 +1861,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // again, so the try after this one is written without a model call. A
       // transient failure — an overload, a cut stream — arms nothing: pi's
       // next try is the retry.
-      if (obs.compactionFailed !== undefined && !isTransientProviderError(obs.compactionFailed)) {
+      if (
+        obs.compactionFailed !== undefined &&
+        !providerFailureParks(classifyProviderFailure({ error: obs.compactionFailed }).cause)
+      ) {
         compactionFailure = obs.compactionFailed;
         // … and is a checkpoint signal (item 7): the window may overflow before
         // the run's own wind-down, so the run loop pushes the tree's work now.
@@ -1943,8 +1908,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         }
       }
       if (obs.providerError !== undefined) {
+        const failure = obs.providerFailure ?? providerFailureOf(obs.providerError);
         if (catchingUp)
-          note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
+          note(
+            "harness_error",
+            `a model call failed while the bot was away (${renderProviderFailure(failure.cause)}); continuing`,
+          );
         else if (cutAborted && !finaleAborted && isAbortedProviderError(obs.providerError)) {
           // The cut turn closing on the cut's own abort (decision 0046, unit
           // seven): pi ends the turn the cut tool was in as an aborted model
@@ -1952,12 +1921,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // intentional abort is booked before the transient classifier, so
           // it never re-issues the turn the budget deliberately cut.
           cutAborted = false;
-        } else if (
-          obs.policyRefusal !== true &&
-          !writeUp &&
-          !finaleAborted &&
-          isTransientProviderError(obs.providerError)
-        ) {
+        } else if (obs.policyRefusal !== true && !writeUp && !finaleAborted && providerFailureParks(failure.cause)) {
           // Every transport-class failure has one recovery shape: hold the
           // failed turn, let a provider-up steer release it early, and arm a
           // local retry after backoff. The last rung repeats until the run's
@@ -1965,7 +1929,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // the ending — it may be a gateway's HTML page. An abort reaches
           // here only while an ordinary model stream is open; intentional
           // wind-down and tool-cut aborts were handled above or filtered out.
-          heldTurn = obs.providerError;
+          heldTurn = failure;
           parkSettled = false;
           const backoff = PROVIDER_RETRY_BACKOFFS_MS[Math.min(providerRetries, PROVIDER_RETRY_BACKOFFS_MS.length - 1)]!;
           run.onProgress?.(
@@ -1976,15 +1940,15 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // stop) — a model call that fails now, the finale bound's own abort
           // included, does not take the ending over: the wind-down's answer
           // stands, and the record says what failed under it.
-          writeUpFailed = obs.providerError;
-          note("harness_error", windDownFailureNote(obs.providerError));
+          writeUpFailed = renderProviderFailure(failure.cause);
+          note("harness_error", windDownFailureNote(writeUpFailed));
         } else {
-          providerError = obs.providerError;
+          providerFailure = failure;
           providerRefusal = obs.policyRefusal === true;
         }
       }
       if (obs.settled && !catchingUp) {
-        if (heldTurn !== undefined && providerError === undefined && !hardStopped && !writeUp && !finaleAborted) {
+        if (heldTurn !== undefined && providerFailure === undefined && !hardStopped && !writeUp && !finaleAborted) {
           // pi settled on the failed call. Keep the loop alive while the
           // backoff runs, so its lease, stops, inbox and provider-up effect all
           // remain live; the promise only marks the retry ready.
@@ -2139,17 +2103,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       answer = HARD_STOP_MESSAGE;
     } else {
       if (bypass) throw bypass;
-      if (providerError !== undefined) {
-        if (providerRefusal) throw policyRefused(providerError);
-        // Defensive fallback: transport failures normally enter the hold
-        // above. If one reaches this boundary, keep the same typed, sanitized
+      if (providerFailure !== undefined) {
+        if (providerRefusal) throw policyRefused(providerFailure);
+        // Defensive fallback: provider-down causes normally enter the hold
+        // above. If one reaches this boundary, keep the typed, sanitized
         // ending rather than exposing a provider body.
-        if (isTransientProviderError(providerError)) throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
-        throw new Error(
-          providerRetries > 0
-            ? `the model call failed after ${providerRetries} ${providerRetries === 1 ? "retry" : "retries"}: ${providerError}`
-            : `the model call failed: ${providerError}`,
-        );
+        if (providerFailureParks(providerFailure.cause)) throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+        throw providerFailure;
       }
       const text = bridge.answer() ?? "";
       // The ending the run loop composes the thread's answer from once its
@@ -2210,7 +2170,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       writeUpFailed = undefined;
       const id = `${ids.prompt}:follow-up:${++followUps}`;
       let turnSettled = false;
-      let turnError: string | undefined;
+      let turnFailure: ProviderFailure | undefined;
       /** The turn's failed call was refused under the provider's usage policy (item 6). */
       let turnRefusal = false;
       /** The turn threw — a refused prompt, a dead pi, a failed model call, a bypass — so its span ends `error`. */
@@ -2314,13 +2274,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           if (obs.response?.id === id && obs.response.success === false)
             throw new PromptRefused(String(obs.response.error ?? "no reason"));
           if (obs.providerError !== undefined) {
+            const failure = obs.providerFailure ?? providerFailureOf(obs.providerError);
             if (writeUp || finaleAborted) {
               // The turn is winding down: the aborted call's failure is not
               // the turn's ending — the write-up's label is (the loop's rule).
-              writeUpFailed = obs.providerError;
-              note("harness_error", windDownFailureNote(obs.providerError, "turn"));
+              writeUpFailed = renderProviderFailure(failure.cause);
+              note("harness_error", windDownFailureNote(writeUpFailed, "turn"));
             } else {
-              turnError = obs.providerError;
+              turnFailure = failure;
               turnRefusal = obs.policyRefusal === true;
             }
           }
@@ -2408,9 +2369,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             `pi exited before the turn settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`,
           );
         }
-        if (turnError !== undefined) {
-          if (turnRefusal) throw policyRefused(turnError);
-          throw new Error(`the model call failed: ${turnError}`);
+        if (turnFailure !== undefined) {
+          if (turnRefusal) throw policyRefused(turnFailure);
+          throw turnFailure;
         }
         const text = bridge.answer() ?? "";
         const turnEnding = windDownEndingOf(writeUp, text, writeUpFailed);
