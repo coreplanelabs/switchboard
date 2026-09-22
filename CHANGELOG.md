@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.260.4](https://github.com/coreplanelabs/switchboard/compare/v1.260.3...v1.260.4) (2026-09-22)
+
+
+### Bug fixes
+
+* **core:** keep recovery off the person's plate ([#2168](https://github.com/coreplanelabs/switchboard/issues/2168)) ([b43af4a](https://github.com/coreplanelabs/switchboard/commit/b43af4a5f4985010c0db485fb51cceb877124e57))
+* **resident:** ship rg and fd in the resident image ([#2193](https://github.com/coreplanelabs/switchboard/issues/2193)) ([3c5ae23](https://github.com/coreplanelabs/switchboard/commit/3c5ae2364dafe4f51887fd7b2103f65f5bd01839))
+
 ## [1.260.3](https://github.com/coreplanelabs/switchboard/compare/v1.260.2...v1.260.3) (2026-09-22)
 
 
