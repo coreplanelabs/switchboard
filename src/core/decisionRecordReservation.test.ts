@@ -13,6 +13,27 @@ const PROVIDER_RECORD_ASK =
   "Write the technical decision record (next free number in docs/decisions/, the repo's record shape) for one provider-failure cause.";
 
 describe("DecisionRecordAllocator", () => {
+  it("after a process restart, the durable reservation ledger advances past the first task's number", async () => {
+    const reservations = new Map<string, string>();
+    const durable = async (repo: string, taskKey: string, claimed: ReadonlySet<string>) => {
+      const key = `${repo}\n${taskKey}`;
+      const prior = reservations.get(key);
+      if (prior !== undefined) return prior;
+      const used = new Set([...claimed, ...reservations.values()]);
+      const highest = [...used].reduce((max, value) => Math.max(max, Number(value)), 0);
+      const number = String(highest + 1).padStart(4, "0");
+      reservations.set(key, number);
+      return number;
+    };
+    const githubClaims = async () => new Set(["0074"]);
+
+    const beforeRestart = new DecisionRecordAllocator(githubClaims, durable);
+    expect(await beforeRestart.reserve("acme/api", "effect-record")).toBe("0075");
+
+    const afterRestart = new DecisionRecordAllocator(githubClaims, durable);
+    expect(await afterRestart.reserve("acme/api", "provider-record")).toBe("0076");
+  });
+
   it("two concurrent admissions reserve consecutive numbers above main and every open pull request claim", async () => {
     let reads = 0;
     const allocator = new DecisionRecordAllocator(async () => {
@@ -49,6 +70,20 @@ describe("DecisionRecordAllocator", () => {
 });
 
 describe("decisionRecordNumberProblems", () => {
+  it("a child with a reservation that adds no decision record cannot pass", () => {
+    expect(
+      decisionRecordNumberProblems([], ["docs/decisions/0074-existing.md"], {
+        child: true,
+        reservation: "0075",
+      }),
+    ).toEqual([
+      {
+        path: "docs/decisions",
+        what: "this child has runner reservation 0075 but adds no decision record — it must add exactly one",
+      },
+    ]);
+  });
+
   it("a child adding a decision record without the reservation in its brief cannot pass", () => {
     expect(
       decisionRecordNumberProblems(["docs/decisions/0075-new.md"], ["docs/decisions/0074-existing.md"], {

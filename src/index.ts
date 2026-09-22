@@ -157,6 +157,7 @@ import {
   fetchCheckRunDetails,
   fetchMergeQueueState,
   fetchCommitChecks,
+  fetchDecisionRecordClaims,
   fetchPullRequestComments,
   fetchPullRequestFacts,
   fetchPullRequestTitleBody,
@@ -182,6 +183,7 @@ import { resolveGithubIdentity } from "./execution/githubApp.js";
 import { bindingOf } from "./execution/authorBinding.js";
 import { dispatchIdentityRewrite } from "./execution/identityRewrite.js";
 import { DEPLOY_RESTART_NOTICE, setShutdownNotice } from "./core/dispatch/run.js";
+import { DecisionRecordAllocator } from "./core/decisionRecordReservation.js";
 import { channelVisibilityOf, writeAbandonedRunRecords } from "./core/dispatch/record.js";
 import { createSteerSender, defaultAdmission } from "./core/dispatch/admission.js";
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
@@ -445,6 +447,13 @@ export async function runBot(): Promise<void> {
   // ledger on the state Worker; without one, the null store knows no instance
   // and the coordinator routes refuse every step by name.
   const coordinatorInstances = buildCoordinatorInstanceStore(runHistoryCfg, processSecrets);
+  const decisionRecordAllocator = new DecisionRecordAllocator(
+    fetchDecisionRecordClaims,
+    async (repo, taskKey, claimed, existing) => {
+      const reserved = await coordinatorInstances.reserveDecisionRecord(repo, taskKey, claimed, existing);
+      return reserved.ok ? reserved.number : undefined;
+    },
+  );
   // The plane's `admit` execution (record 0064, "The queue"): the object wrote
   // the admitted run's attaching row under an expired lease, so one reclaim
   // pass takes it and restarts it from the stored request under the plane's id
@@ -613,6 +622,7 @@ export async function runBot(): Promise<void> {
     runHistoryWriter,
     // The coordinator's instance records and unit rows (run-history items 49 and 50): what the ship branch writes when it hands an `agent:ship` request to the plan runner.
     coordinatorInstances,
+    reserveDecisionRecord: decisionRecordAllocator.reserve.bind(decisionRecordAllocator),
     workflow: workflowSender,
     runStore,
     threadsElsewhere,

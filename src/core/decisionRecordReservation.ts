@@ -55,6 +55,11 @@ export function decisionRecordNumberProblems(
   for (const row of added) countByNumber.set(row.number, (countByNumber.get(row.number) ?? 0) + 1);
 
   const problems: RecordProblem[] = [];
+  if (context.child && context.reservation !== undefined && added.length !== 1)
+    problems.push({
+      path: "docs/decisions",
+      what: `this child has runner reservation ${context.reservation} but adds ${added.length === 0 ? "no decision record" : `${added.length} decision records`} — it must add exactly one`,
+    });
   for (const row of added) {
     const onMain = mainByNumber.get(row.number);
     if (onMain !== undefined)
@@ -83,26 +88,31 @@ export function decisionRecordNumberProblems(
 }
 
 export type DecisionRecordClaims = (repo: string) => Promise<ReadonlySet<string>>;
+export type DurableDecisionRecordReservation = (
+  repo: string,
+  taskKey: string,
+  claimed: ReadonlySet<string>,
+  existing?: string,
+) => Promise<string | undefined>;
 
-/** Serializes allocations per repository inside one runner. GitHub remains the
- * durable claim ledger: every allocation begins from main plus open pull
- * requests, while this map closes the interval before a newly admitted child
- * has opened its pull request. */
+/** Serializes allocations per repository inside one runner. Every allocation
+ * begins from main plus open pull requests. Production also commits it through
+ * the state Worker's atomic durable ledger, while these maps provide the same
+ * ordering for a process without that store. */
 export class DecisionRecordAllocator {
   private readonly byTask = new Map<string, string>();
   private readonly claimed = new Map<string, Set<string>>();
   private readonly tails = new Map<string, Promise<void>>();
 
-  constructor(private readonly claims: DecisionRecordClaims) {}
+  constructor(
+    private readonly claims: DecisionRecordClaims,
+    private readonly durable?: DurableDecisionRecordReservation,
+  ) {}
 
   async reserve(repo: string, taskKey: string, existing?: string): Promise<string> {
     const cacheKey = `${repo}\n${taskKey}`;
-    const prior = existing ?? this.byTask.get(cacheKey);
-    if (prior !== undefined) {
-      this.byTask.set(cacheKey, prior);
-      this.claimedFor(repo).add(prior);
-      return prior;
-    }
+    const cached = this.byTask.get(cacheKey);
+    if (cached !== undefined) return cached;
 
     const previous = this.tails.get(repo) ?? Promise.resolve();
     let release!: () => void;
@@ -117,8 +127,14 @@ export class DecisionRecordAllocator {
       if (repeated !== undefined) return repeated;
       const used = new Set(await this.claims(repo));
       for (const number of this.claimedFor(repo)) used.add(number);
+      const prior = existing;
+      const durable = await this.durable?.(repo, taskKey, used, prior);
+      if (durable !== undefined && !/^\d{4}$/.test(durable))
+        throw new Error(`decision-record reservation store returned invalid number ${JSON.stringify(durable)}`);
+      if (prior !== undefined && durable !== undefined && durable !== prior)
+        throw new Error(`decision-record reservation store returned ${durable} for task already carrying ${prior}`);
       const highest = [...used].reduce((max, value) => (/^\d{4}$/.test(value) ? Math.max(max, Number(value)) : max), 0);
-      const number = String(highest + 1).padStart(4, "0");
+      const number = durable ?? prior ?? String(highest + 1).padStart(4, "0");
       this.byTask.set(cacheKey, number);
       this.claimedFor(repo).add(number);
       return number;

@@ -90,7 +90,7 @@ import {
   WorkspaceFiles,
   type StagedOutcome,
 } from "./dispatch/staging.js";
-import type { RunRecord, RunSeed } from "./runRecord.js";
+import { RUN_LIST_MAX_LIMIT, type RunRecord, type RunSeed } from "./runRecord.js";
 import {
   attachWorkspace,
   budgetClipLabel,
@@ -159,6 +159,31 @@ import { defaultDecisionRecordAllocator } from "./decisionRecordReservationWirin
 // parsing, layered resolution, permission gates, history assembly, executor
 // selection, and the agent run. Channels are pure transports (src/channels/).
 
+async function priorDecisionRecord(
+  store: CoreDeps["runStore"],
+  threadKey: string,
+  repo: string,
+  taskKey: string,
+): Promise<string | undefined> {
+  let before: number | undefined;
+  let beforeId: string | undefined;
+  for (;;) {
+    const rows = await store.list({
+      threadKey,
+      agent: "coding",
+      limit: RUN_LIST_MAX_LIMIT,
+      ...(before !== undefined ? { before, beforeId } : {}),
+    });
+    const match = rows.find((row) => row.repo === repo && row.recordTaskKey === taskKey && row.record !== undefined);
+    if (match?.record !== undefined) return match.record;
+    if (rows.length < RUN_LIST_MAX_LIMIT) return undefined;
+    const last = rows.at(-1)!;
+    if (last.finishedAt === before && last.id === beforeId) return undefined;
+    before = last.finishedAt;
+    beforeId = last.id;
+  }
+}
+
 export interface CoreDeps
   extends
     AdmissionDeps,
@@ -201,8 +226,6 @@ export interface CoreDeps
    * because `CoreDeps` is the one place a process declares what it runs with.
    */
   issueTracker?: IssueTracker;
-  /** Reserve a decision-record number for a stable direct-run task key. */
-  reserveDecisionRecord?: (repo: string, taskKey: string, existing?: string) => Promise<string>;
 }
 
 /** A plain reply into a thread an unfinished unit owns (record 0051's reply-as-event and gone-instance rules):
@@ -1321,9 +1344,7 @@ export async function dispatch(
         msg.threadKey,
         shipUnitText(directives.text, repoCtx.repo).trim(),
       );
-      const prior = (await deps.runStore.list({ threadKey: msg.threadKey, agent: "coding", limit: 200 })).find(
-        (row) => row.repo === repoCtx.repo && row.recordTaskKey === decisionRecordTask && row.record !== undefined,
-      )?.record;
+      const prior = await priorDecisionRecord(deps.runStore, msg.threadKey, repoCtx.repo, decisionRecordTask);
       const reserve =
         deps.reserveDecisionRecord ??
         ((repo: string, taskKey: string, existing?: string) =>

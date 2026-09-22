@@ -31,6 +31,7 @@ export type AppendEventResult = { ok: true; seq: number } | { ok: false; reason:
 export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type AnswerWakeResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type MarkStoppedResult = { ok: true } | { ok: false; reason: "unknown_instance" | "unavailable" };
+export type ReserveDecisionRecordResult = { ok: true; number: string } | { ok: false; reason: "unavailable" };
 
 /** The (instance, unit) a thread event belongs to. */
 export interface UnitEventKey {
@@ -56,6 +57,15 @@ export interface CoordinatorInstanceStore {
   putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult>;
   /** An instance's unit rows in the order they were first written — the plan's. */
   listUnits(instanceId: string): Promise<CoordinatorUnit[]>;
+  /** Atomically reserve a decision-record number. The durable implementation
+   * includes reservations already persisted on unit and run rows when choosing
+   * the next number, so another bot process cannot reuse one after a restart. */
+  reserveDecisionRecord(
+    repo: string,
+    taskKey: string,
+    claimed: ReadonlySet<string>,
+    existing?: string,
+  ): Promise<ReserveDecisionRecordResult>;
   /** The hard stop's mark on the instance row (record 0060; issue 1924):
    *  written when the hosted parent is sealed, read back by the runner's plan,
    *  spawn and read-record routes. Idempotent — a marked row keeps its first
@@ -90,6 +100,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   private readonly rows = new Map<string, string>();
   /** Insertion-ordered, so a replace keeps a row's place. */
   private readonly units = new Map<string, string>();
+  private readonly decisionRecords = new Map<string, string>();
   /** The unit event lists, by unit key — the Worker's `coordinator_unit_events` table mirrored. */
   private readonly events = new Map<string, ThreadEvent[]>();
   async put(instance: CoordinatorInstance): Promise<PutInstanceResult> {
@@ -117,6 +128,29 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     for (const [key, text] of this.units)
       if (key.startsWith(`${instanceId}\0`)) out.push(JSON.parse(text) as CoordinatorUnit);
     return out;
+  }
+  async reserveDecisionRecord(
+    repo: string,
+    taskKey: string,
+    claimed: ReadonlySet<string>,
+    existing?: string,
+  ): Promise<ReserveDecisionRecordResult> {
+    const key = `${repo}\n${taskKey}`;
+    const prior = this.decisionRecords.get(key);
+    if (prior !== undefined) return { ok: true, number: prior };
+    const used = new Set(claimed);
+    for (const [reservationKey, number] of this.decisionRecords)
+      if (reservationKey.startsWith(`${repo}\n`)) used.add(number);
+    for (const text of this.units.values()) {
+      const unit = JSON.parse(text) as CoordinatorUnit;
+      const instanceText = this.rows.get(unit.instanceId);
+      if (instanceText === undefined || (JSON.parse(instanceText) as CoordinatorInstance).repo !== repo) continue;
+      if (unit.record !== undefined) used.add(unit.record);
+    }
+    const highest = [...used].reduce((max, value) => (/^\d{4}$/.test(value) ? Math.max(max, Number(value)) : max), 0);
+    const number = existing ?? String(highest + 1).padStart(4, "0");
+    this.decisionRecords.set(key, number);
+    return { ok: true, number };
   }
   async markStopped(instanceId: string, at: number): Promise<MarkStoppedResult> {
     const text = this.rows.get(instanceId);
@@ -178,6 +212,14 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
   }
   async listUnits(_instanceId: string): Promise<CoordinatorUnit[]> {
     return [];
+  }
+  async reserveDecisionRecord(
+    _repo: string,
+    _taskKey: string,
+    _claimed: ReadonlySet<string>,
+    _existing?: string,
+  ): Promise<ReserveDecisionRecordResult> {
+    return { ok: false, reason: "unavailable" };
   }
   async markStopped(_instanceId: string, _at: number): Promise<MarkStoppedResult> {
     return { ok: false, reason: "unavailable" };
@@ -278,6 +320,23 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     if (!Array.isArray(d.units) || !d.units.every(isCoordinatorUnit))
       throw new Error("coordinator store /runs/coordinator/units/list: the answer is not a list of unit rows");
     return d.units;
+  }
+
+  async reserveDecisionRecord(
+    repo: string,
+    taskKey: string,
+    claimed: ReadonlySet<string>,
+    existing?: string,
+  ): Promise<ReserveDecisionRecordResult> {
+    const r = await this.post("/runs/decision-record/reserve", {
+      repo,
+      taskKey,
+      claimed: [...claimed],
+      ...(existing !== undefined ? { existing } : {}),
+    });
+    const d = r.data as { number?: unknown };
+    if (typeof d.number === "string" && /^\d{4}$/.test(d.number)) return { ok: true, number: d.number };
+    throw new Error(`coordinator store /runs/decision-record/reserve: unexpected answer (HTTP ${r.status})`);
   }
 
   async markStopped(instanceId: string, at: number): Promise<MarkStoppedResult> {

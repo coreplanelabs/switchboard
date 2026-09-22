@@ -72,17 +72,16 @@ function main(): number {
   const base = baseRecords(ref, history);
   if (base.kind === "found") problems.push(...immutabilityProblems(records, base.texts));
   const mainTip = history.commitOf("origin/main");
-  if (mainTip !== null)
-    problems.push(
-      ...decisionRecordNumberProblems(
-        records.map((record) => record.path),
-        history.recordPaths(mainTip),
-        {
-          child: process.env.SWITCHBOARD_RUN_ID !== undefined,
-          ...(process.env[DECISION_RECORD_ENV] !== undefined ? { reservation: process.env[DECISION_RECORD_ENV] } : {}),
-        },
-      ),
-    );
+  problems.push(
+    ...decisionRecordNumberProblems(
+      records.map((record) => record.path),
+      mainTip === null ? [] : history.recordPaths(mainTip),
+      {
+        child: process.env.SWITCHBOARD_RUN_ID !== undefined,
+        ...(process.env[DECISION_RECORD_ENV] !== undefined ? { reservation: process.env[DECISION_RECORD_ENV] } : {}),
+      },
+    ),
+  );
   for (const p of problems) console.error(`decisions:check ${p.path}: ${p.what}`);
   if (problems.length > 0) {
     console.error(`decisions:check FAILED — ${problems.length} problem(s) in ${records.length} record(s)`);

@@ -83,6 +83,9 @@ export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegi
    * Worker): the hand-off refuses by name and nothing runs.
    */
   coordinatorInstances?: CoordinatorInstanceStore;
+  /** Reserve one decision-record number through the composition root's durable
+   * allocator before the hand-off persists the unit row. */
+  reserveDecisionRecord?: (repo: string, taskKey: string, existing?: string) => Promise<string>;
   /**
    * The bot's request for a coordinator instance: `POST /admin/coordinator/instances`
    * on its own shim with the `coordinator` bearer (agent-ship.md item 16).
@@ -527,6 +530,9 @@ export async function runShipBranch(
               readFile: (repo, path, ref, opts) =>
                 githubCapabilityFor(deps, chatActorOf(deps.config, msg)).api.readFile(repo, path, ref, opts),
               instances: deps.coordinatorInstances ?? new NullCoordinatorInstanceStore(),
+              ...(deps.reserveDecisionRecord !== undefined
+                ? { reserveDecisionRecord: deps.reserveDecisionRecord }
+                : {}),
               create: deps.createCoordinatorInstance ?? ((id) => createInstanceViaShim(shim(), id)),
               status: deps.fetchCoordinatorInstanceStatus ?? ((id) => fetchInstanceStatusViaShim(shim(), id)),
             },
