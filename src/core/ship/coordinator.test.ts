@@ -192,6 +192,16 @@ function throughRoundZero(d: Driver, at = T0 + 10 * MIN): CoordinatorAction {
   return d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at });
 }
 
+/** A resumed unit re-reads its adopted pull request before dispatching a child. */
+function confirmCurrentPr(d: Driver, headSha: string, at = T0): CoordinatorAction {
+  expect(d.action).toMatchObject({ type: "pr-check", pr: 7 });
+  return d.answer({
+    type: "pr-check",
+    pr: { state: "open", prNumber: 7, url: PR_URL, headSha, headBranchExists: true },
+    at,
+  });
+}
+
 describe("the plan graph — units, their dependencies, their branches", () => {
   it("parsePlanGraph: every `### U<n>.` heading in order, its dependencies from the Dependencies bullet (lists, `to` ranges, `none`), each unit's slug and branch", () => {
     const graph = parsePlanGraph(PLAN, PLAN_ID);
@@ -1673,6 +1683,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         T0,
       ),
     );
+    confirmCurrentPr(d, HEAD_A);
     expect(d.action).toMatchObject({
       type: "spawn",
       step: "task/1/review",
@@ -2552,6 +2563,186 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
     expect(behind.state.pr).toBeUndefined();
   });
 
+  it("issue 2185: a person's merge between review dispatch and verdict ends the unit merged and never dispatches a findings child", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    expect(d.action).toMatchObject({ type: "spawn", preset: "review" });
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-2168-review", at: T0 + 10 * MIN });
+    expect(d.action).toMatchObject({ type: "wait", timeoutMs: MIN });
+    d.answer({ type: "wait", outcome: "timeout" });
+    d.answer({
+      type: "read-record",
+      run: { finished: false },
+      pullRequest: { ...merged(HEAD_B, "2026-09-22T05:50:58Z"), mergedBy: "justinhelmer" },
+      at: T0 + 11 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "steer", runId: "run-2168-review", reason: "merged" });
+    d.answer({ type: "steer", outcome: "steered", at: T0 + 11 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "two minors", findings: [FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      at: T0 + 14 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merged", by: "other", mergedBy: "justinhelmer" } });
+    expect(d.notes.some((note) => note.type === "round" && note.outcome === "request_changes")).toBe(false);
+    const report = renderUnitReport(d.state);
+    expect(report).toContain(`merged by justinhelmer at \`${HEAD_B.slice(0, 7)}\``);
+    expect(report).toContain("the pipeline observed that merge");
+    expect(report).not.toContain("person's merge");
+  });
+
+  it("agent-ship item 9: after a moved-head review child drains, the pull request is refreshed before another review and a merge or close ends the unit", () => {
+    for (const terminal of [
+      { ...merged(HEAD_C, "2026-09-22T05:55:00Z"), mergedBy: "merge-queue[bot]" } as PrCheck,
+      { state: "closed", prNumber: 7, url: PR_URL, closedBy: "maintainer" } as PrCheck,
+    ]) {
+      const d = fresh(input({ merge: "person", generated: true }));
+      throughRoundZero(d);
+      d.answer({ type: "spawn", outcome: "spawned", runId: "run-r1", at: T0 + 10 * MIN });
+      d.answer({ type: "wait", outcome: "timeout" });
+      d.answer({
+        type: "read-record",
+        run: { finished: false },
+        pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+        at: T0 + 11 * MIN,
+      });
+      expect(d.action).toMatchObject({ type: "steer", runId: "run-r1", reason: "head_moved" });
+      d.answer({ type: "steer", outcome: "steered", at: T0 + 11 * MIN });
+      d.answer({ type: "wait", outcome: "event" });
+      d.answer({
+        type: "read-record",
+        run: finished({ status: "completed", reviewPosted: false, reviewPostReason: "head moved" }),
+        at: T0 + 12 * MIN,
+      });
+      expect(d.action).toMatchObject({ type: "pr-check", step: "U10/1/review/superseded/pr-check", pr: 7 });
+      d.answer({ type: "pr-check", pr: terminal, at: T0 + 13 * MIN });
+      expect(d.action).toMatchObject({
+        type: "end",
+        ending: { kind: terminal.state === "merged" ? "merged" : "closed" },
+      });
+    }
+  });
+
+  it("issue 2185: a person's merge during a findings child steers it to end without a push, then ignores its eventual push", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-r1", at: T0 + 10 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "two minors", findings: [FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, headBranchExists: true },
+      at: T0 + 20 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "spawn", preset: "coding", round: { kind: "findings" } });
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-2168-fix", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "timeout" });
+    d.answer({
+      type: "read-record",
+      run: { finished: false },
+      pullRequest: { ...merged(HEAD_B, "2026-09-22T05:50:58Z"), mergedBy: "justinhelmer" },
+      at: T0 + 25 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "steer", runId: "run-2168-fix", reason: "merged" });
+    d.answer({ type: "steer", outcome: "steered", at: T0 + 25 * MIN });
+    expect(d.action).toMatchObject({ type: "wait", runId: "run-2168-fix" });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({ status: "completed", headSha: HEAD_C, pushed: [{ ref: input().unit.branch, sha: HEAD_C }] }),
+      at: T0 + 26 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merged", sha: HEAD_B, mergedBy: "justinhelmer" } });
+    expect(d.state.lastChildHead).not.toBe(HEAD_C);
+  });
+
+  it("issue 2185: a moved review head restarts that review at the fresh head, while a deleted head branch receives no child", () => {
+    const moved = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(moved);
+    moved.answer({ type: "spawn", outcome: "spawned", runId: "run-r1", at: T0 + 10 * MIN });
+    moved.answer({ type: "wait", outcome: "event" });
+    moved.answer({
+      type: "read-record",
+      run: finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "stale", findings: [FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      pullRequest: {
+        state: "open",
+        prNumber: 7,
+        url: PR_URL,
+        headSha: HEAD_B,
+        headBranchExists: true,
+      },
+      at: T0 + 20 * MIN,
+    });
+    expect(moved.action).toMatchObject({
+      type: "pr-check",
+      step: "U10/1/review/superseded/pr-check",
+      pr: 7,
+    });
+    moved.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 21 * MIN,
+    });
+    expect(moved.action).toMatchObject({
+      type: "spawn",
+      step: "U10/1/review/a2",
+      brief: { kind: "review", headSha: HEAD_B, round: 1 },
+    });
+    expect(moved.notes.some((note) => note.type === "round" && note.outcome === "request_changes")).toBe(false);
+
+    const deleted = new Driver(openUnitPipeline(input({ merge: "person", generated: true }), T0));
+    deleted.answer({
+      type: "pr-check",
+      pr: {
+        state: "open",
+        prNumber: 7,
+        url: PR_URL,
+        headSha: HEAD_A,
+        branchHead: HEAD_A,
+        headBranchExists: false,
+      },
+      at: T0,
+    });
+    expect(deleted.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    expect(renderUnitReport(deleted.state)).toContain("head branch no longer exists");
+  });
+
+  it("issue 2185: a pull request closed while review runs ends closed with the closer named and no child follows", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-r1", at: T0 + 10 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "stale", findings: [FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      pullRequest: { state: "closed", prNumber: 7, url: PR_URL, closedBy: "maintainer" },
+      at: T0 + 20 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "closed", closedBy: "maintainer" } });
+    expect(renderUnitReport(d.state)).toContain("closed by maintainer");
+  });
+
   it("a merge that lands during a round — the pr-check after the coding child answers merged — ends the unit merged the same way, the round noted completed and no review spawned; after a findings step the same, with the review rounds counted", () => {
     const d = fresh(input());
     d.answer({ type: "branch", ok: true, at: T0 });
@@ -3398,6 +3589,7 @@ describe("the held ending — every finding the round would act on is human-gate
         T0,
       ),
     );
+    confirmCurrentPr(d, HEAD_A);
     expect(d.action).toMatchObject({
       type: "spawn",
       preset: "coding",
@@ -3437,6 +3629,7 @@ describe("the held ending — every finding the round would act on is human-gate
       ),
     );
 
+    confirmCurrentPr(d, HEAD_A);
     runChild(d, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_B }), T0 + 5 * MIN);
     d.answer({
       type: "pr-check",
@@ -3487,6 +3680,7 @@ describe("the held ending — every finding the round would act on is human-gate
       ),
     );
 
+    confirmCurrentPr(d, HEAD_A);
     runChild(d, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_A }), T0 + 5 * MIN);
     d.answer({
       type: "pr-check",
@@ -3511,8 +3705,8 @@ describe("the held ending — every finding the round would act on is human-gate
   });
 
   it("an answered gate whose findings child dies at the reviewed head keeps the child's interrupted or failed ending — it never skips to re-review", () => {
-    const answeredGate = () =>
-      new Driver(
+    const answeredGate = () => {
+      const driver = new Driver(
         openUnitPipeline(
           input({
             merge: "person",
@@ -3537,6 +3731,9 @@ describe("the held ending — every finding the round would act on is human-gate
           T0,
         ),
       );
+      confirmCurrentPr(driver, HEAD_A);
+      return driver;
+    };
 
     const interrupted = answeredGate();
     runChild(interrupted, "run-f1", finished({ status: "interrupted" }), T0 + 5 * MIN);
@@ -3641,6 +3838,7 @@ describe("the held ending — every finding the round would act on is human-gate
         T0,
       ),
     );
+    confirmCurrentPr(d, HEAD_B);
     expect(d.action).toMatchObject({
       type: "spawn",
       step: "task/1/review",

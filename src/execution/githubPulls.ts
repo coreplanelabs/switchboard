@@ -406,6 +406,9 @@ export interface PullRequestFacts {
   headRef?: string;
   /** Head sha (40-hex) when well-formed. */
   headSha?: string;
+  /** Whether a same-repository head ref still exists. False is distinct from
+   * an unreadable lookup so ship never dispatches a child onto a deleted ref. */
+  headBranchExists?: boolean;
   /** True only on a POSITIVE match of head repo == base repo — a deleted-fork
    *  null head repo is false, never assumed same-repo. */
   sameRepoHead: boolean;
@@ -439,6 +442,10 @@ export interface PullRequestFacts {
    *  request — read only beside `mergedAt`, since GitHub reports a test-merge
    *  sha under the same field on an open one. */
   mergeCommitSha?: string;
+  /** The GitHub login that merged or closed the pull request, when GitHub
+   * reports it. These receipts let the unit's terminal report name the person. */
+  mergedBy?: string;
+  closedBy?: string;
 }
 
 /**
@@ -568,19 +575,41 @@ export async function fetchPullRequestFacts(pr: {
     mergeable_state?: unknown;
     merged_at?: unknown;
     merge_commit_sha?: unknown;
+    merged_by?: { login?: unknown };
+    closed_by?: { login?: unknown };
   } | null;
   if (!data || (data.state !== "open" && data.state !== "closed")) return undefined;
   const headRepo = typeof data.head?.repo?.full_name === "string" ? data.head.repo.full_name.toLowerCase() : undefined;
   const prSha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
   const sameRepoHead = headRepo === pr.repo.toLowerCase();
   const headRef = typeof data.head?.ref === "string" && data.head.ref ? data.head.ref : undefined;
+  const headBranchExists = sameRepoHead && headRef !== undefined ? await fetchRefExists(pr.repo, headRef) : undefined;
   // The ref's tip is the PR's head by definition; the PR object lags it after
   // a force-push (`headRefTipSha`). Same-repo heads only — a fork's ref does
   // not exist on the base repo.
   const sha =
-    sameRepoHead && headRef !== undefined
+    sameRepoHead && headRef !== undefined && headBranchExists !== false
       ? preferRefTip(`${pr.repo}#${pr.number}`, prSha, await headRefTipSha(pr.repo, headRef, headers), headRef)
       : prSha;
+  let closedBy = typeof data.closed_by?.login === "string" ? data.closed_by.login : undefined;
+  // Pull-request responses consistently carry `merged_by` but older GitHub
+  // shapes omit the closer. The issue representation of the same pull request
+  // carries `closed_by`, so read it only for a closed-unmerged row that needs
+  // the terminal receipt.
+  if (data.state === "closed" && !(typeof data.merged_at === "string" && data.merged_at) && closedBy === undefined) {
+    try {
+      const issue = await fetch(`https://api.github.com/repos/${pr.repo}/issues/${pr.number}`, {
+        headers,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      if (issue.ok) {
+        const row = (await issue.json().catch(() => null)) as { closed_by?: { login?: unknown } } | null;
+        if (typeof row?.closed_by?.login === "string") closedBy = row.closed_by.login;
+      }
+    } catch {
+      // The pull request state is still authoritative; only the actor is absent.
+    }
+  }
   return {
     state: data.state,
     ...(data.user && (typeof data.user.login === "string" || typeof data.user.id === "number")
@@ -593,6 +622,7 @@ export async function fetchPullRequestFacts(pr: {
       : {}),
     ...(headRef !== undefined ? { headRef } : {}),
     ...(sha ? { headSha: sha } : {}),
+    ...(headBranchExists !== undefined ? { headBranchExists } : {}),
     sameRepoHead,
     ...(typeof data.base?.ref === "string" && data.base.ref ? { baseRef: data.base.ref } : {}),
     ...(typeof data.html_url === "string" ? { htmlUrl: data.html_url } : {}),
@@ -611,8 +641,10 @@ export async function fetchPullRequestFacts(pr: {
           ...(typeof data.merge_commit_sha === "string" && /^[0-9a-f]{40}$/.test(data.merge_commit_sha)
             ? { mergeCommitSha: data.merge_commit_sha }
             : {}),
+          ...(typeof data.merged_by?.login === "string" ? { mergedBy: data.merged_by.login } : {}),
         }
       : {}),
+    ...(closedBy !== undefined ? { closedBy } : {}),
   };
 }
 

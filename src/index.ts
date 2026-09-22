@@ -188,7 +188,7 @@ import {
   DecisionRecordReservationUnavailableError,
 } from "./core/decisionRecordReservation.js";
 import { channelVisibilityOf, writeAbandonedRunRecords } from "./core/dispatch/record.js";
-import { createSteerSender, defaultAdmission } from "./core/dispatch/admission.js";
+import { createSteerSender, defaultAdmission, steerRun } from "./core/dispatch/admission.js";
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters ---
@@ -1180,6 +1180,34 @@ export async function runBot(): Promise<void> {
       registry: defaultRunRegistry,
       ledgerRuns: () => runLedger.liveRuns(),
       dispatch: (msg, io, opts) => dispatch(deps, msg, io, opts),
+      steerChild: async (runId, text, instance) => {
+        const run = defaultRunRegistry.getById(runId);
+        if (!run || run.finished || run.threadKey === undefined || run.agent === undefined) return false;
+        const outcome = await steerRun(
+          {
+            // The coordinator already owns this admitted child; revoking its
+            // stale PR authority is not a new request to run the agent.
+            config: { canRunAgent: () => true, grantsFor: (id) => config.grantsFor(id) },
+            runLedger,
+            admission: defaultAdmission,
+          },
+          {
+            userId: instance.userId,
+            channelId: instance.channelId,
+            ...(instance.userName !== undefined ? { userName: instance.userName } : {}),
+          },
+          {
+            runId,
+            threadKey: run.threadKey,
+            agent: run.agent,
+            ...(run.userId !== undefined ? { requesterId: run.userId } : {}),
+            ...(run.parentRunId !== undefined ? { parentRunId: run.parentRunId } : {}),
+            ...(run.parentInstanceId !== undefined ? { parentInstanceId: run.parentInstanceId } : {}),
+          },
+          text,
+        );
+        return outcome.kind === "steered";
+      },
       ioFor: (thread) => threadIoFor(thread),
       findOpenPrByHead,
       findMergedPrByHead,

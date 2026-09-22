@@ -53,6 +53,7 @@ import {
   type UnitStatus,
   renderUnitReport,
   reenterApprovedRebase,
+  reconcileTerminalPr,
   settleUnit,
   startUnit,
   type ChildFacts,
@@ -110,6 +111,7 @@ export type CoordinatorStepRoute =
   | "branch"
   | "spawn"
   | "read-record"
+  | "steer"
   | "pr-check"
   | "round"
   | "unit-end"
@@ -334,11 +336,25 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
   // The hard stop's mark, as the bot's answer carries it (record 0060; issue
   // 1924): a finished child's unit ends stopped on it.
   const stopped = a.body.stopped === true ? { stopped: true as const } : {};
+  const pullRequest = isRecord(a.body.pullRequest)
+    ? prCheckReturn(step, {
+        status: a.status,
+        body: { ok: true, ...a.body.pullRequest, at: a.body.at },
+      }).pr
+    : undefined;
   // The interrupted child restarted from its request (issue 1903): the bot
   // answers the live successor's id, and the machine keeps the wait on it.
   const restarted = typeof a.body.restartedAs === "string" ? { restartedAs: a.body.restartedAs } : {};
   if (!run.finished)
-    return { type: "read-record", step, run: { finished: false }, ...stopped, ...restarted, at: a.body.at };
+    return {
+      type: "read-record",
+      step,
+      run: { finished: false },
+      ...(pullRequest !== undefined ? { pullRequest } : {}),
+      ...stopped,
+      ...restarted,
+      at: a.body.at,
+    };
   if (typeof run.status !== "string") throw new UnreadableAnswer("read-record", a, "status");
   // The typed artifacts as the bot's record carries them — shape-checked where
   // they were written (the run record's validator), read here as they are.
@@ -367,6 +383,7 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
     type: "read-record",
     step,
     ...stopped,
+    ...(pullRequest !== undefined ? { pullRequest } : {}),
     run: {
       finished: true,
       status: run.status as Extract<ChildFacts, { finished: true }>["status"],
@@ -435,8 +452,8 @@ function entryHumanGate(v: unknown):
   };
 }
 
-function prCheckReturn(step: string, a: BotAnswer): StepReturn {
-  const { ok, state, prNumber, url, headSha, sha, mergedAt, at } = a.body;
+function prCheckReturn(step: string, a: BotAnswer): Extract<StepReturn, { type: "pr-check" }> {
+  const { ok, state, prNumber, url, headSha, sha, mergedAt, mergedBy, closedBy, at } = a.body;
   if (ok === true && state === "none") {
     const { unrecovered, aheadOfBase, prClosed } = a.body;
     return {
@@ -464,6 +481,7 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
         prNumber,
         url,
         ...(typeof headSha === "string" ? { headSha } : {}),
+        ...(typeof a.body.headBranchExists === "boolean" ? { headBranchExists: a.body.headBranchExists } : {}),
         // The entry facts (issue 1689): the branch's own tip and whether the
         // bot's approval stands at the head, read at the unit-start's pre-check
         // so a re-issued plan resumes at review or at the merge decision.
@@ -494,8 +512,34 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
     typeof sha === "string" &&
     typeof mergedAt === "string"
   )
-    return { type: "pr-check", step, pr: { state: "merged", prNumber, url, sha, mergedAt }, at };
+    return {
+      type: "pr-check",
+      step,
+      pr: {
+        state: "merged",
+        prNumber,
+        url,
+        sha,
+        mergedAt,
+        ...(typeof mergedBy === "string" ? { mergedBy } : {}),
+      },
+      at,
+    };
+  if (
+    ok === true &&
+    state === "closed" &&
+    typeof prNumber === "number" &&
+    typeof url === "string" &&
+    typeof closedBy === "string"
+  )
+    return { type: "pr-check", step, pr: { state: "closed", prNumber, url, closedBy }, at };
   throw new UnreadableAnswer("pr-check", a, "state");
+}
+
+function steerReturn(step: string, a: BotAnswer): Extract<StepReturn, { type: "steer" }> {
+  if (a.body.ok === true && (a.body.outcome === "steered" || a.body.outcome === "not_live"))
+    return { type: "steer", step, outcome: a.body.outcome, at: a.body.at };
+  throw new UnreadableAnswer("steer", a, "outcome");
 }
 
 /** The round's checks read as the bot answered it (record 0055): the runs at
@@ -510,6 +554,14 @@ function checksReturn(step: string, a: BotAnswer): StepReturn {
     type: "checks",
     step,
     ...(isRoundChecks(checks) ? { checks } : {}),
+    ...(isRecord(a.body.pullRequest)
+      ? {
+          pullRequest: prCheckReturn(step, {
+            status: a.status,
+            body: { ok: true, ...a.body.pullRequest, at },
+          }).pr,
+        }
+      : {}),
     // The pull request is a draft (issue 2063): the machine's table holds the
     // unit for the ready event instead of merging or ending without a cause.
     ...(draft === true ? { draft: true } : {}),
@@ -531,11 +583,31 @@ const isRoundChecks = (v: unknown): v is RoundChecks =>
   (v.expected === undefined || (Array.isArray(v.expected) && v.expected.every((n: unknown) => typeof n === "string")));
 
 function mergeReturn(step: string, a: BotAnswer): StepReturn {
-  const { ok, outcome, by, sha, mergedAt, reason, at } = a.body;
+  const { ok, outcome, by, sha, mergedAt, mergedBy, reason, at } = a.body;
   // The door found the pull request already merged after the approval: the
   // merge commit and the time ride the answer, and the unit ends `by: other`.
   if (ok === true && outcome === "merged" && by === "other" && typeof sha === "string" && typeof mergedAt === "string")
-    return { type: "merge", step, outcome: "merged", by: "other", sha, mergedAt, at };
+    return {
+      type: "merge",
+      step,
+      outcome: "merged",
+      by: "other",
+      sha,
+      mergedAt,
+      ...(typeof mergedBy === "string" ? { mergedBy } : {}),
+      at,
+    };
+  if (ok === true && outcome === "recheck" && isRecord(a.body.pullRequest))
+    return {
+      type: "merge",
+      step,
+      outcome: "recheck",
+      pullRequest: prCheckReturn(step, {
+        status: a.status,
+        body: { ok: true, ...a.body.pullRequest, at },
+      }).pr,
+      at,
+    };
   if (ok === true && outcome === "merged" && typeof sha === "string")
     return { type: "merge", step, outcome: "merged", sha, at };
   if (
@@ -676,6 +748,16 @@ async function perform(
         answerOf(
           "read-record",
           await step.do(action.step, STEP_CONFIG, () => call(bot, "read-record", { ...tag, runId: action.runId })),
+        ),
+      );
+    case "steer":
+      return steerReturn(
+        action.step,
+        answerOf(
+          "steer",
+          await step.do(action.step, STEP_CONFIG, () =>
+            call(bot, "steer", { ...tag, runId: action.runId, reason: action.reason }),
+          ),
         ),
       );
     case "pr-check":
@@ -939,11 +1021,17 @@ async function runUnit(
                 factsStep,
                 answerOf(
                   "pr-check",
-                  await step.do(factsStep, STEP_CONFIG, () => call(bot, "pr-check", { ...tag, checks: true })),
+                  await step.do(factsStep, STEP_CONFIG, () =>
+                    call(bot, "pr-check", {
+                      ...tag,
+                      checks: true,
+                      ...(state.pr !== undefined ? { pr: state.pr.number } : {}),
+                    }),
+                  ),
                 ),
               );
-              if (check.type === "pr-check" && check.pr.state === "merged")
-                endFacts = { merged: { sha: check.pr.sha, mergedAt: check.pr.mergedAt } };
+              if (check.type === "pr-check" && (check.pr.state === "merged" || check.pr.state === "closed"))
+                state = reconcileTerminalPr(state, check.pr);
               else if (check.type === "pr-check" && check.pr.state === "open")
                 endFacts = {
                   ...(check.pr.autoMergeEnabled !== undefined ? { autoMergeEnabled: check.pr.autoMergeEnabled } : {}),
@@ -973,6 +1061,7 @@ async function runUnit(
             state = reenterApprovedRebase(state);
             continue pipeline;
           }
+          const ending = state.ending ?? note.ending;
           // The last coding child's run is named so the bot can put its handoff
           // — the deviations it recorded — on the unit's board issue beside the
           // ending (agent-ship item 14).
@@ -981,20 +1070,20 @@ async function runUnit(
             // Two copies (routing-and-config item 28): the full report for the
             // row and the board, and the thread's at the request's verbosity.
             ending: {
-              kind: note.ending.kind,
+              kind: ending.kind,
               report: renderUnitReport(state, endFacts),
               threadReport: renderUnitReport(state, endFacts, state.input.verbosity ?? DEFAULT_VERBOSITY),
               // An idle ending carries its continuation facts (record 0051): the
               // bot writes them on the row's `idle` in place of an ending, with
               // the coding run id it already receives below.
-              ...(note.ending.kind === "idle"
+              ...(ending.kind === "idle"
                 ? {
-                    why: note.ending.why,
-                    renewalsLeft: note.ending.renewalsLeft,
-                    ...(note.ending.from !== undefined ? { from: note.ending.from } : {}),
-                    spendUsd: note.ending.spendUsd,
-                    ...(note.ending.handoff !== undefined ? { handoff: note.ending.handoff } : {}),
-                    ...(note.ending.humanGate !== undefined ? { humanGate: note.ending.humanGate } : {}),
+                    why: ending.why,
+                    renewalsLeft: ending.renewalsLeft,
+                    ...(ending.from !== undefined ? { from: ending.from } : {}),
+                    spendUsd: ending.spendUsd,
+                    ...(ending.handoff !== undefined ? { handoff: ending.handoff } : {}),
+                    ...(ending.humanGate !== undefined ? { humanGate: ending.humanGate } : {}),
                   }
                 : {}),
             },
@@ -1002,21 +1091,21 @@ async function runUnit(
             // A review_pending ending names the child's own last push so the next
             // attempt's pre-check can start at the review round (the row's lastPush)
             // — an idled one the same, off the idle's `from` (record 0051).
-            ...(note.ending.kind === "review_pending" && note.ending.headSha !== undefined
-              ? { headSha: note.ending.headSha }
-              : note.ending.kind === "idle" && note.ending.why === "review_pending" && note.ending.from !== undefined
-                ? { headSha: note.ending.from }
+            ...(ending.kind === "review_pending" && ending.headSha !== undefined
+              ? { headSha: ending.headSha }
+              : ending.kind === "idle" && ending.why === "review_pending" && ending.from !== undefined
+                ? { headSha: ending.from }
                 : {}),
             ...(state.lastCodingRunId !== undefined ? { codingRunId: state.lastCodingRunId } : {}),
             // A continued ending is a segment's end, not the unit's: the bot
             // writes the renewal as a row keyed by the next segment's index
             // (decision 0046), so a runner reclaimed here never renews twice.
-            ...(note.ending.kind === "continued"
+            ...(ending.kind === "continued"
               ? {
                   segment: {
-                    index: note.ending.segment,
-                    ...(note.ending.from !== undefined ? { from: note.ending.from } : {}),
-                    runId: note.ending.runId,
+                    index: ending.segment,
+                    ...(ending.from !== undefined ? { from: ending.from } : {}),
+                    runId: ending.runId,
                   },
                 }
               : {}),

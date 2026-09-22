@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MERGE_WAIT_CHUNK_MS, WAIT_CHUNK_MS } from "../ship/coordinator.js";
+import { MERGE_WAIT_CHUNK_MS, PR_TRANSITION_GUARD_MS, WAIT_CHUNK_MS } from "../ship/coordinator.js";
 import { checksSettledEventType, RUN_FINISHED_EVENT_PREFIX, type CoordinatorUnit } from "./contract.js";
 import {
   SPAWN_STEP_CONFIG,
@@ -301,14 +301,24 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
         timeout: WAIT_CHUNK_MS,
       },
       { kind: "wait", name: "U10/0/coding/wait/1/resumed", type: "child-resumed-run-c0", timeout: WAIT_CHUNK_MS },
-      { kind: "wait", name: "U10/1/review/wait/1", type: "run-finished-run-r1", timeout: WAIT_CHUNK_MS },
+      {
+        kind: "wait",
+        name: "U10/1/review/wait/1",
+        type: "run-finished-run-r1",
+        timeout: PR_TRANSITION_GUARD_MS,
+      },
       {
         kind: "wait",
         name: "U10/1/review/wait/1/interrupted",
         type: "child-interrupted-run-r1",
-        timeout: WAIT_CHUNK_MS,
+        timeout: PR_TRANSITION_GUARD_MS,
       },
-      { kind: "wait", name: "U10/1/review/wait/1/resumed", type: "child-resumed-run-r1", timeout: WAIT_CHUNK_MS },
+      {
+        kind: "wait",
+        name: "U10/1/review/wait/1/resumed",
+        type: "child-resumed-run-r1",
+        timeout: PR_TRANSITION_GUARD_MS,
+      },
     ]);
     // What the bot was asked, in the machine's words — the plan twice: the
     // opening read and the unit boundary's re-read of the selection.
@@ -2156,7 +2166,7 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
     expect(b.of("spawn")).toEqual([]);
     expect(b.of("pr-check")).toEqual([
       { parentInstanceId: INSTANCE, unit: "U10", entry: true },
-      { parentInstanceId: INSTANCE, unit: "U10", checks: true },
+      { parentInstanceId: INSTANCE, unit: "U10", checks: true, pr: 7 },
     ]);
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string } }>;
     expect(end.ending.kind).toBe("merge_ready");
@@ -2451,7 +2461,7 @@ describe("the plan runner's driver — a step that throws inside the walk become
 });
 
 describe("the plan runner's driver — a resume at review (agent-ship item 10)", () => {
-  it("a task row carrying a resume opens the unit at its first review round: no pr-check, no branch, no coding child; the review child is briefed with the pull request and the head, the approve on a ship branch ends merge-ready for a person, and the ending names no coding run", async () => {
+  it("a task row carrying a resume re-reads the pull request, then opens the unit at its first review round with no branch or coding child", async () => {
     const s = steps({ "task/1/review/wait/1": "event" });
     const b = bot({
       plan: [
@@ -2475,6 +2485,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       // The merge_ready ending reads the facts once more AT THE APPROVED HEAD
       // (agent-ship item 9): auto-merge was off at entry and is on now.
       "pr-check": [
+        prOpen(T0),
         prOpen(T0 + 5 * MIN, { autoMergeEnabled: true, checks: { total: 2, pending: [], failed: ["ci / package"] } }),
       ],
       round: [acked(), acked()],
@@ -2486,6 +2497,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     expect(s.names()).toEqual([
       "plan",
       "task/start",
+      "task/pr-check",
       "task/1/review",
       "task/note/1",
       "task/1/review/wait/1",
@@ -2497,9 +2509,10 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       "plan/2",
       "finish",
     ]);
-    // The one pr-check is the ending's facts read at the approved head — no
-    // pre-check ran (the resume path skips it).
-    expect(b.of("pr-check")).toEqual([{ parentInstanceId: "ship-run-s", unit: "task", checks: true }]);
+    expect(b.of("pr-check")).toEqual([
+      { parentInstanceId: "ship-run-s", unit: "task", entry: true, pr: 7 },
+      { parentInstanceId: "ship-run-s", unit: "task", checks: true, pr: 7 },
+    ]);
     expect(b.of("branch")).toEqual([]);
     expect(b.of("spawn")).toEqual([
       {
@@ -2557,6 +2570,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       // The head is mergeable and green but still carries a self-declared
       // fix-up commit, so it is not merge-ready.
       "pr-check": [
+        prOpen(T0),
         prOpen(T0 + 5 * MIN, {
           mergeableState: "clean",
           fixupCommits: ["fixup! fix the login"],
@@ -2601,6 +2615,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       spawn: [spawned("run-r1")],
       "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
       "pr-check": [
+        prOpen(T0),
         prOpen(T0 + 5 * MIN, {
           baseHasMergeQueue: true,
           checks: { total: 2, pending: [], failed: [] },
@@ -2620,7 +2635,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     expect(end.ending.report).toContain("`gh pr merge --auto`");
   });
 
-  it("the ending's facts read can find the pull request already merged — auto-merge fired, or a person merged, between the approval and the ending: the unit still ends merge_ready (the machine's ending stands) and the report names the merge by commit and time instead of a gate that has passed", async () => {
+  it("the ending's fresh facts read turns a person's merge between approval and the ending into the unit's terminal merged state", async () => {
     const s = steps({ "task/1/review/wait/1": "event" });
     const b = bot({
       plan: [
@@ -2641,22 +2656,56 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0", branch: "ship/fix-the-login-abc123", base: "main" })],
       spawn: [spawned("run-r1")],
       "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
-      "pr-check": [prMerged(T0 + 5 * MIN, "2026-09-16T00:46:19Z")],
+      "pr-check": [prOpen(T0), prMerged(T0 + 5 * MIN, "2026-09-16T00:46:19Z")],
       round: [acked(), acked()],
       "unit-end": [ok({ ok: true, told: true }, T0 + 5 * MIN)],
       finish: [ok({ ok: true, runId: "run-parent" }, T0 + 5 * MIN)],
     });
     const summary = await runPlan(s.runner, b.client, "ship-run-s");
-    expect(summary).toEqual({ instance: "ship-run-s", units: { task: "merge_ready" }, outcome: "completed" });
-    expect(s.names()).toContain("task/end/pr-facts");
+    expect(summary).toEqual({ instance: "ship-run-s", units: { task: "merged" }, outcome: "completed" });
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
-    expect(end.ending.kind).toBe("merge_ready");
-    expect(end.ending.report).toContain(`✅ Merge-ready after 1 review round: ${PR_URL}`);
-    expect(end.ending.report).toContain(
-      `Already merged: ${PR_URL} (merge commit \`${MERGED.slice(0, 7)}\`, merged 2026-09-16T00:46:19Z) — auto-merge or a person merged it after the approval; the pipeline merged nothing.`,
-    );
+    expect(end.ending.kind).toBe("merged");
+    expect(end.ending.report).toContain(`✅ Already merged: ${PR_URL}`);
     expect(end.ending.report).not.toContain("Remaining gate");
     expect(end.ending.report).not.toContain("Auto-merge is on");
+    expect(b.of("pr-check")[1]).toEqual({ parentInstanceId: "ship-run-s", unit: "task", checks: true, pr: 7 });
+  });
+
+  it("agent-ship item 9: the ending's fresh facts read follows the adopted pull request number, so a close after approval ends the unit closed instead of leaving it merge-ready", async () => {
+    const s = steps({ "task/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [
+        ok({
+          ok: true,
+          repo: "acme/api",
+          base: "main",
+          caps: { maxRounds: 2, maxMinutes: 240 },
+          units: [
+            row("task", {
+              slug: "task",
+              branch: "ship/fix-the-login-abc123",
+              resume: { pr: 7, headSha: HEAD, url: PR_URL },
+            }),
+          ],
+        }),
+      ],
+      "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0", branch: "ship/fix-the-login-abc123", base: "main" })],
+      spawn: [spawned("run-r1")],
+      "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
+      "pr-check": [
+        prOpen(T0),
+        ok({ ok: true, state: "closed", prNumber: 7, url: PR_URL, closedBy: "maintainer" }, T0 + 5 * MIN),
+      ],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 5 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 5 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, "ship-run-s");
+    expect(summary).toEqual({ instance: "ship-run-s", units: { task: "closed" }, outcome: "failed" });
+    expect(b.of("pr-check")[1]).toEqual({ parentInstanceId: "ship-run-s", unit: "task", checks: true, pr: 7 });
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
+    expect(end.ending.kind).toBe("closed");
+    expect(end.ending.report).toContain("closed by maintainer");
   });
 });
 

@@ -440,8 +440,9 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     };
   }
 
-  it("a review AgentDef with a verified head posts, pinned to it — and reports { posted: true }", async () => {
+  it("a standalone review with a verified head posts exactly as before, with only the post-publication head read", async () => {
     const h = harness();
+    let headReads = 0;
     const out = await runReviewPostStep({
       agent: AGENTS.review,
       requestText: "review acme/api#42",
@@ -453,14 +454,42 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       carried: undefined,
       hardStopped: false,
       post: h.post,
-      fetchPrHead: async () => HEAD,
+      fetchPrHead: async () => {
+        headReads += 1;
+        return HEAD;
+      },
       reply: h.reply,
       logKey: "t",
     });
     expect(h.posts).toHaveLength(1);
     expect(h.posts[0].target).toMatchObject({ repo: "acme/api", number: 42, commitId: HEAD });
     expect(h.posts[0].body.startsWith("LGTM:")).toBe(true);
+    expect(headReads).toBe(1);
     expect(out).toEqual({ posted: true, target: { repo: "acme/api", number: 42 }, head: HEAD, verdict: "approve" });
+  });
+
+  it("a pull request merged or closed while a ship review runs is re-read before posting, so the verdict stays recorded but Slack-only", async () => {
+    const h = harness();
+    const out = await runReviewPostStep({
+      agent: AGENTS.review,
+      requestText: "review acme/api#42",
+      repoCtx: { repo: "acme/api", pr: 42 },
+      heads: { reviewHead: HEAD, observedHead: HEAD },
+      verdict,
+      digest: undefined,
+      answer,
+      carried: undefined,
+      hardStopped: false,
+      guardTransition: true,
+      post: h.post,
+      fetchPrHead: async () => undefined,
+      reply: h.reply,
+      logKey: "t",
+    });
+    expect(h.posts).toEqual([]);
+    expect(out).toEqual({ posted: false, reason: "the pull request is no longer open at a readable head" });
+    expect(h.replies[0]).toContain("Review not posted");
+    expect(h.replies[0]).toContain("Slack-only");
   });
 
   it("a non-review AgentDef never posts, even with a resolved PR and a verdict", async () => {

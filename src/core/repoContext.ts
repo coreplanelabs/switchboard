@@ -871,7 +871,7 @@ async function openPrHeadSha(pr: {
  *  head-moved note (agent-review.md item 10) degrades to silence on unknown. */
 export async function currentPrHeadSha(pr: { repo: string; number: number }): Promise<string | undefined> {
   const head = await prHead(pr).catch(() => undefined);
-  return head?.sha;
+  return head?.state === "open" ? head.sha : undefined;
 }
 
 /** The commits a PR head carries over its base — `GET /repos/{repo}/compare/{base}...{sha}`

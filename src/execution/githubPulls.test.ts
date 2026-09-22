@@ -562,10 +562,70 @@ describe("githubPulls", () => {
         author: { login: "acme-switchboard[bot]", id: 318072483 },
         headRef: "ship/fix-x-abc123",
         headSha: "c".repeat(40),
+        headBranchExists: true,
         sameRepoHead: true,
         htmlUrl: "https://github.com/acme/api/pull/7",
       });
       expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
+    });
+
+    it("reports a deleted same-repository head ref explicitly so ship cannot dispatch a child onto it", async () => {
+      stubToken();
+      stubFetch((url) =>
+        url.includes("/git/ref/heads/")
+          ? new Response("{}", { status: 404 })
+          : new Response(JSON.stringify(openPr), { status: 200 }),
+      );
+      expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toMatchObject({
+        state: "open",
+        headRef: "ship/fix-x-abc123",
+        headBranchExists: false,
+      });
+    });
+
+    it("carries the merge actor and resolves a closed-unmerged pull request's closer from its issue representation", async () => {
+      stubToken();
+      stubFetch((url) => {
+        if (url.endsWith("/issues/7"))
+          return new Response(JSON.stringify({ closed_by: { login: "maintainer" } }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            ...openPr,
+            state: "closed",
+            merged_at: null,
+            merge_commit_sha: null,
+          }),
+          { status: 200 },
+        );
+      });
+      expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toMatchObject({
+        state: "closed",
+        closedBy: "maintainer",
+      });
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) =>
+          String(url).includes("/git/ref/heads/")
+            ? new Response(JSON.stringify({ object: { type: "commit", sha: "c".repeat(40) } }), { status: 200 })
+            : new Response(
+                JSON.stringify({
+                  ...openPr,
+                  state: "closed",
+                  merged_at: "2026-09-22T05:50:58Z",
+                  merge_commit_sha: "b".repeat(40),
+                  merged_by: { login: "justinhelmer" },
+                }),
+                { status: 200 },
+              ),
+        ),
+      );
+      expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toMatchObject({
+        state: "closed",
+        mergedAt: "2026-09-22T05:50:58Z",
+        mergeCommitSha: "b".repeat(40),
+        mergedBy: "justinhelmer",
+      });
     });
 
     it("autoMergeEnabled is true for a non-null auto_merge, false for null, absent when the field is missing (agent-ship item 9)", async () => {

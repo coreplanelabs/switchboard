@@ -240,6 +240,10 @@ export interface AdminCoordinatorDeps {
     io: ChannelIO,
     opts?: Pick<DispatchOptions, "coordinator" | "contract"> & { coordinator: CoordinatorTag },
   ) => Promise<DispatchOutcome>;
+  /** A terminal or moved pull request revokes a live child's authority. The
+   * coordinator folds a fixed instruction into that run as the requester; it
+   * never stops the process, so the child can leave a truthful final record. */
+  steerChild?: (runId: string, text: string, instance: CoordinatorInstance) => Promise<boolean>;
   /** The channel handle for a thread (the resume's `resumeSlackIO` from the
    *  row's parts — the card's ts when the handle must redraw it); undefined for
    *  a platform no thread can be rebuilt on. */
@@ -1220,6 +1224,56 @@ function reviewPostedByRecord(
   return same ? { reviewPosted: true } : undefined;
 }
 
+function headBranchStateUnknown(facts: PullRequestFacts): boolean {
+  return facts.state === "open" && facts.headBranchExists === undefined;
+}
+
+function headBranchStateError(repo: string, number: number): string {
+  return `could not verify whether ${repo}#${number}'s head branch exists`;
+}
+
+function pullRequestState(
+  number: number,
+  fallbackUrl: string,
+  facts: PullRequestFacts,
+): Record<string, unknown> | undefined {
+  if (headBranchStateUnknown(facts)) return undefined;
+  const url = facts.htmlUrl ?? fallbackUrl;
+  if (facts.mergedAt !== undefined && facts.mergeCommitSha !== undefined)
+    return {
+      state: "merged",
+      prNumber: number,
+      url,
+      sha: facts.mergeCommitSha,
+      mergedAt: facts.mergedAt,
+      ...(facts.mergedBy !== undefined ? { mergedBy: facts.mergedBy } : {}),
+    };
+  if (facts.state === "closed")
+    return { state: "closed", prNumber: number, url, closedBy: facts.closedBy ?? "unknown GitHub user" };
+  return {
+    state: "open",
+    prNumber: number,
+    url,
+    ...(facts.headSha !== undefined ? { headSha: facts.headSha } : {}),
+    ...(facts.headBranchExists !== undefined ? { headBranchExists: facts.headBranchExists } : {}),
+  };
+}
+
+async function childPullRequestState(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance | null | undefined,
+  unit: string | undefined,
+): Promise<Record<string, unknown> | undefined> {
+  if (instance == null || unit === undefined) return undefined;
+  const row = (await deps.instances.listUnits(instance.id)).find((candidate) => candidate.unit === unit);
+  if (row?.pr === undefined) return undefined;
+  const facts = await deps.fetchPrFacts({ repo: instance.repo, number: row.pr.number });
+  if (facts === undefined) throw new Error(`could not read ${instance.repo}#${row.pr.number}`);
+  const state = pullRequestState(row.pr.number, row.pr.url, facts);
+  if (state === undefined) throw new Error(headBranchStateError(instance.repo, row.pr.number));
+  return state;
+}
+
 async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -1233,7 +1287,20 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   const res = await deps.runs.getRun(body.runId);
   if (!res.ok || res.value.parentInstanceId !== id.value) return json(404, { ok: false, error: "not_found" });
   const view = res.value;
-  if (!view.finished) return json(200, { ok: true, run: coordinatorRunView(view, id.value, undefined), at });
+  const instanceRow = await deps.instances.get(id.value);
+  let pullRequest: Record<string, unknown> | undefined;
+  try {
+    pullRequest = await childPullRequestState(deps, instanceRow, typeof body.unit === "string" ? body.unit : undefined);
+  } catch (err) {
+    return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
+  }
+  if (!view.finished)
+    return json(200, {
+      ok: true,
+      run: coordinatorRunView(view, id.value, undefined),
+      ...(pullRequest !== undefined ? { pullRequest } : {}),
+      at,
+    });
   // Finished: the final reply and the typed artifacts the record carries — the
   // coding child's pull request, the review child's verdict and whether it
   // stands on the pull request, the coding run's dispositions.
@@ -1244,7 +1311,6 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   const pr = prOpenedOf(record.events);
   // The hard stop's mark (record 0060; issue 1924): a finished child's unit
   // ends stopped on it, whatever the child's own status.
-  const instanceRow = await deps.instances.get(id.value);
   // An interrupted child that restarted from its request (issue 1903: a
   // replaced container's child resumes by itself) is not the round's end: the
   // successor — a run of the same instance and idempotency key in the same
@@ -1257,6 +1323,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
         ok: true,
         ...(instanceRow?.stop !== undefined ? { stopped: true } : {}),
         run: { id: successor, finished: false },
+        ...(pullRequest !== undefined ? { pullRequest } : {}),
         restartedAs: successor,
         at,
       });
@@ -1271,6 +1338,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
         ok: true,
         ...(instanceRow?.stop !== undefined ? { stopped: true } : {}),
         run: { id: view.id, finished: false },
+        ...(pullRequest !== undefined ? { pullRequest } : {}),
         at,
       });
   }
@@ -1296,6 +1364,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   return json(200, {
     ok: true,
     ...(instanceRow?.stop !== undefined ? { stopped: true } : {}),
+    ...(pullRequest !== undefined ? { pullRequest } : {}),
     run: {
       ...coordinatorRunView(view, id.value, finalReply),
       ...(pr !== undefined ? { pr } : {}),
@@ -1517,6 +1586,34 @@ async function recoverPushedBranch(
   }
 }
 
+const CHILD_SUPERSESSION_REASONS = new Set(["merged", "closed", "head_moved", "branch_deleted"]);
+
+async function steerChild(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
+  const id = parseInstanceId(body.parentInstanceId);
+  if (!id.ok) return json(400, { ok: false, error: id.error });
+  if (typeof body.runId !== "string" || !RUN_ID_PATTERN.test(body.runId))
+    return json(400, { ok: false, error: "runId must be a run id" });
+  if (typeof body.reason !== "string" || !CHILD_SUPERSESSION_REASONS.has(body.reason))
+    return json(400, { ok: false, error: "reason must name a pull request transition" });
+  const at = (deps.clock ?? systemClock)();
+  const instance = await deps.instances.get(id.value);
+  if (instance === null) return json(404, { ok: false, error: "unknown_instance", at });
+  const child = await deps.runs.getRun(body.runId);
+  if (!child.ok || child.value.parentInstanceId !== instance.id)
+    return json(404, { ok: false, error: "not_found", at });
+  const reason =
+    body.reason === "merged"
+      ? "The pull request merged while this run was live."
+      : body.reason === "closed"
+        ? "The pull request closed while this run was live."
+        : body.reason === "head_moved"
+          ? "The pull request moved to another head while this review was live."
+          : "The pull request's head branch was deleted while this run was live.";
+  const text = `${reason} End now without a push or a review post. Record what already happened in the run's final reply.`;
+  const steered = (await deps.steerChild?.(body.runId, text, instance)) ?? false;
+  return json(200, { ok: true, outcome: steered ? "steered" : "not_live", at });
+}
+
 async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -1552,6 +1649,59 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       await deps.instances.putUnits([{ ...unit.row, pr }]);
   };
   try {
+    // Once the machine has adopted a pull request, its number is the authority:
+    // read and enrich it before any branch discovery. The unit branch may have
+    // another pull request, but entry, transition and ending reads all stay on
+    // the adopted one through a merge, close or force-push.
+    if (follow !== undefined) {
+      const facts = await deps.fetchPrFacts({ repo: instance.repo, number: follow });
+      if (facts === undefined) throw new Error(`could not read ${instance.repo}#${follow}`);
+      const fallbackUrl = unit.row?.pr?.url ?? `https://github.com/${instance.repo}/pull/${follow}`;
+      const state = pullRequestState(follow, fallbackUrl, facts);
+      if (state === undefined) throw new Error(headBranchStateError(instance.repo, follow));
+      await remember({ number: follow, url: String(state.url) });
+      if (state.state !== "open") return json(200, { ok: true, ...state, at });
+
+      const prRef = { repo: instance.repo, number: follow };
+      const headSha = facts.headSha;
+      const approved =
+        entry && headSha !== undefined ? await reviewPostedAt(deps, prRef, "approve", headSha) : undefined;
+      const humanGate = entry
+        ? await postedHumanGateAnswer(
+            deps,
+            prRef,
+            instance.userId,
+            instance.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY,
+          )
+        : undefined;
+      const entryChecks =
+        entry && headSha !== undefined
+          ? await deps.fetchCommitChecks(instance.repo, headSha).catch(() => undefined)
+          : undefined;
+      const checks =
+        body.checks === true && headSha !== undefined
+          ? await deps.fetchCommitChecks(instance.repo, headSha).catch(() => undefined)
+          : entryChecks;
+      const fixups = body.checks === true ? await deps.fixupCommitSubjects(prRef).catch(() => undefined) : undefined;
+      const queueBase = facts.baseRef ?? instance.base;
+      const baseHasMergeQueue =
+        body.checks === true && deps.branchHasMergeQueue !== undefined && queueBase !== undefined
+          ? await deps.branchHasMergeQueue(instance.repo, queueBase).catch(() => undefined)
+          : undefined;
+      return json(200, {
+        ok: true,
+        ...state,
+        ...(entry && headSha !== undefined ? { branchHead: headSha } : {}),
+        ...(approved !== undefined ? { approved } : {}),
+        ...(humanGate !== undefined ? { humanGate } : {}),
+        ...(facts.autoMergeEnabled !== undefined ? { autoMergeEnabled: facts.autoMergeEnabled } : {}),
+        ...(checks !== undefined ? { checks } : {}),
+        ...(body.checks === true && facts.mergeableState !== undefined ? { mergeableState: facts.mergeableState } : {}),
+        ...(fixups !== undefined ? { fixupCommits: fixups } : {}),
+        ...(typeof baseHasMergeQueue === "boolean" ? { baseHasMergeQueue } : {}),
+        at,
+      });
+    }
     const open = await deps.findOpenPrByHead(instance.repo, branch);
     if (open) {
       await remember({ number: open.number, url: open.htmlUrl });
@@ -1559,13 +1709,19 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         instanceId: instance.id,
         unit: unit.row?.unit ?? (body.unit as string),
       });
+      // The branch listing is discovery only. Re-read the pull request whole
+      // before this transition acts: the listing can lag a merge/close, and
+      // only the facts read proves the head ref still exists.
+      const liveFacts = await deps.fetchPrFacts({ repo: instance.repo, number: open.number });
+      if (liveFacts === undefined) throw new Error(`could not read ${instance.repo}#${open.number}`);
+      const current = pullRequestState(open.number, open.htmlUrl, liveFacts);
+      if (current === undefined) throw new Error(headBranchStateError(instance.repo, open.number));
+      if (current.state !== "open") return json(200, { ok: true, ...current, at });
       // The entry facts (issue 1689). The branch's tip comes from the pull
       // request's own facts read, which prefers the head ref's tip over the
       // possibly-stale listing sha; the approval and the checks are read at
-      // that tip. Each fact GitHub would not answer is left out, never guessed.
-      const entryFacts = entry
-        ? await deps.fetchPrFacts({ repo: instance.repo, number: open.number }).catch(() => undefined)
-        : undefined;
+      // that tip.
+      const entryFacts = entry ? liveFacts : undefined;
       const branchHead = entryFacts?.headSha;
       const entryHead = branchHead ?? open.headSha;
       const approved =
@@ -1598,7 +1754,7 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       // commits. Read only on the ending's facts read (`checks: true`);
       // GitHub unreadable leaves each field out, never fails the check.
       const prRef = { repo: instance.repo, number: open.number };
-      const facts = body.checks === true ? await deps.fetchPrFacts(prRef).catch(() => undefined) : undefined;
+      const facts = body.checks === true ? liveFacts : undefined;
       const fixups = body.checks === true ? await deps.fixupCommitSubjects(prRef).catch(() => undefined) : undefined;
       // The base's merge-queue rule beside the checks (issue 2011): read only
       // on the ending's facts read, so a `merge: person` report can say the
@@ -1613,7 +1769,8 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         state: "open",
         prNumber: open.number,
         url: open.htmlUrl,
-        ...(open.headSha !== undefined ? { headSha: open.headSha } : {}),
+        ...(liveFacts.headSha !== undefined ? { headSha: liveFacts.headSha } : {}),
+        ...(liveFacts.headBranchExists !== undefined ? { headBranchExists: liveFacts.headBranchExists } : {}),
         ...(branchHead !== undefined ? { branchHead } : {}),
         ...(approved !== undefined ? { approved } : {}),
         ...(humanGate !== undefined ? { humanGate } : {}),
@@ -1633,49 +1790,6 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     // runner's merge). Asked only now: an open pull request is the round's.
     const merged = await deps.findMergedPrByHead(instance.repo, branch);
     if (!merged) {
-      // The machine's adopted pull request heads another branch (issue 1799:
-      // the child worked the thread's own pull request, not the unit's branch),
-      // so before answering `none` the check follows it and answers what GitHub
-      // says NOW: open at a fresh head, merged, or verified closed (`prClosed`
-      // — the machine must not brief a review on it). An unreadable follow
-      // falls through to the plain answer, claiming nothing.
-      if (follow !== undefined && recover === undefined) {
-        const facts = await deps.fetchPrFacts({ repo: instance.repo, number: follow });
-        if (facts !== undefined) {
-          const url = facts.htmlUrl ?? `https://github.com/${instance.repo}/pull/${follow}`;
-          if (facts.mergedAt !== undefined && facts.mergeCommitSha !== undefined) {
-            await remember({ number: follow, url });
-            return json(200, {
-              ok: true,
-              state: "merged",
-              prNumber: follow,
-              url,
-              sha: facts.mergeCommitSha,
-              mergedAt: facts.mergedAt,
-              at,
-            });
-          }
-          if (facts.state === "open") {
-            await remember({ number: follow, url });
-            const checks =
-              body.checks === true && facts.headSha !== undefined
-                ? await deps.fetchCommitChecks(instance.repo, facts.headSha).catch(() => undefined)
-                : undefined;
-            return json(200, {
-              ok: true,
-              state: "open",
-              prNumber: follow,
-              url,
-              ...(facts.headSha !== undefined ? { headSha: facts.headSha } : {}),
-              ...(facts.autoMergeEnabled !== undefined ? { autoMergeEnabled: facts.autoMergeEnabled } : {}),
-              ...(checks !== undefined ? { checks } : {}),
-              at,
-            });
-          }
-          // Closed unmerged: said so, so the machine's endings are truthful.
-          return json(200, { ok: true, state: "none", prClosed: true, at });
-        }
-      }
       // A dead coding child's pushed work is recovered here: the pull request
       // is opened from the branch itself rather than the round ending aborted
       // with the work stranded (agent-ship items 10 and 15).
@@ -1703,15 +1817,11 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       return json(200, { ok: true, state: "none", unrecovered: recovered.why, at });
     }
     await remember({ number: merged.number, url: merged.htmlUrl });
-    return json(200, {
-      ok: true,
-      state: "merged",
-      prNumber: merged.number,
-      url: merged.htmlUrl,
-      sha: merged.sha,
-      mergedAt: merged.mergedAt,
-      at,
-    });
+    const mergedFacts = await deps.fetchPrFacts({ repo: instance.repo, number: merged.number });
+    if (mergedFacts === undefined) throw new Error(`could not read ${instance.repo}#${merged.number}`);
+    const state = pullRequestState(merged.number, merged.htmlUrl, mergedFacts);
+    if (state?.state !== "merged") throw new Error(`${instance.repo}#${merged.number} no longer reads merged`);
+    return json(200, { ok: true, ...state, at });
   } catch (err) {
     return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
   }
@@ -2683,6 +2793,13 @@ async function merge(
   }
   if (facts === undefined)
     return json(502, { ok: false, error: "github_unavailable", message: `${where} could not be read`, at });
+  if (headBranchStateUnknown(facts))
+    return json(502, {
+      ok: false,
+      error: "github_unavailable",
+      message: headBranchStateError(instance.repo, pr.number),
+      at,
+    });
   if (isReleasePullRequest(facts))
     return refused(`${where} is the release pull request — always a person's merge, never the runner's`);
   if (facts.state !== "open") {
@@ -2697,9 +2814,25 @@ async function merge(
         by: "other",
         sha: facts.mergeCommitSha,
         mergedAt: facts.mergedAt,
+        ...(facts.mergedBy !== undefined ? { mergedBy: facts.mergedBy } : {}),
         at,
       });
-    return refused(`${where} is ${facts.state}`);
+    const pullRequest = pullRequestState(
+      body.prNumber,
+      row.pr?.url ?? `https://github.com/${instance.repo}/pull/${body.prNumber}`,
+      facts,
+    );
+    return pullRequest === undefined
+      ? refused(`${where} is ${facts.state}`)
+      : json(200, { ok: true, outcome: "recheck", pullRequest, at });
+  }
+  if (facts.headBranchExists === false) {
+    const pullRequest = pullRequestState(
+      body.prNumber,
+      row.pr?.url ?? `https://github.com/${instance.repo}/pull/${body.prNumber}`,
+      facts,
+    );
+    if (pullRequest !== undefined) return json(200, { ok: true, outcome: "recheck", pullRequest, at });
   }
   if (body.queued === true) {
     // The pull request is in the base's merge queue (issue 2011): the door
@@ -2733,10 +2866,16 @@ async function merge(
   }
   if (facts.headRef !== row.branch)
     return refused(`${where} heads \`${facts.headRef ?? "?"}\`, not the unit's branch \`${row.branch}\``);
-  if (facts.headSha === undefined || !sameCommit(facts.headSha, headSha))
-    return refused(
-      `the head of ${where} moved: \`${facts.headSha?.slice(0, 7) ?? "?"}\` is not the approved \`${headSha.slice(0, 7)}\``,
+  if (facts.headSha === undefined || !sameCommit(facts.headSha, headSha)) {
+    const pullRequest = pullRequestState(
+      body.prNumber,
+      row.pr?.url ?? `https://github.com/${instance.repo}/pull/${body.prNumber}`,
+      facts,
     );
+    return pullRequest === undefined
+      ? refused(`the head of ${where} could not be read`)
+      : json(200, { ok: true, outcome: "recheck", pullRequest, at });
+  }
   // A conflicting approved head stays owned by this runner. The typed outcome
   // re-enters rung one; only a conflict git leaves buys a coding child. A
   // second base move takes this same path again under the run's remaining
@@ -2863,6 +3002,29 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   const unit = await unitRowOf(deps, instance, body.unit);
   if (!unit.ok) return unit.response;
   const log = deps.log ?? console.log;
+  // State, head and branch existence are read before even a recovery effect:
+  // checks on a terminal, moved or deleted head are no longer this unit's act.
+  const facts = await deps.fetchPrFacts({ repo: instance.repo, number: body.prNumber }).catch(() => undefined);
+  if (facts === undefined) return json(502, { ok: false, error: "github_unavailable", at });
+  if (headBranchStateUnknown(facts))
+    return json(502, {
+      ok: false,
+      error: "github_unavailable",
+      message: headBranchStateError(instance.repo, body.prNumber),
+      at,
+    });
+  const pullRequest = pullRequestState(
+    body.prNumber,
+    unit.row?.pr?.url ?? `https://github.com/${instance.repo}/pull/${body.prNumber}`,
+    facts,
+  );
+  if (
+    pullRequest !== undefined &&
+    (pullRequest.state !== "open" ||
+      pullRequest.headBranchExists === false ||
+      (typeof pullRequest.headSha === "string" && !sameCommit(pullRequest.headSha, headSha)))
+  )
+    return json(200, { ok: true, pullRequest, at });
   if (body.retry !== undefined && body.refire !== undefined)
     return json(400, { ok: false, error: "checks recovery must be retry or refire, not both" });
   if (body.retry !== undefined) {
@@ -2884,9 +3046,7 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   }
   // The pull request's own facts beside the runs (issue 2063): a draft head
   // is the machine's to hold — never to merge — and the base names the branch
-  // whose required checks say what the head must still gain. An unreadable
-  // answer leaves both out: the checks alone decide, as before.
-  const facts = await deps.fetchPrFacts({ repo: instance.repo, number: body.prNumber }).catch(() => undefined);
+  // whose required checks say what the head must still gain.
   let checks: RoundChecks | undefined;
   if (deps.fetchRoundChecks !== undefined) {
     checks = await deps.fetchRoundChecks(instance.repo, headSha, body.prNumber, facts?.baseRef).catch(() => undefined);
@@ -2924,7 +3084,8 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   return json(200, {
     ok: true,
     ...(checks !== undefined ? { checks } : {}),
-    ...(facts?.draft === true ? { draft: true } : {}),
+    ...(pullRequest !== undefined ? { pullRequest } : {}),
+    ...(facts.draft === true ? { draft: true } : {}),
     at,
   });
 }
@@ -3091,6 +3252,7 @@ type Step =
   | "branch"
   | "spawn"
   | "read-record"
+  | "steer"
   | "pr-check"
   | "round"
   | "unit-end"
@@ -3106,6 +3268,7 @@ const STEPS: readonly Step[] = [
   "branch",
   "spawn",
   "read-record",
+  "steer",
   "pr-check",
   "round",
   "unit-end",
@@ -3163,6 +3326,8 @@ export async function answerCoordinatorStep(
       return spawn(parsed.value, deps);
     case "read-record":
       return readRecord(parsed.value, deps);
+    case "steer":
+      return steerChild(parsed.value, deps);
     case "pr-check":
       return prCheck(parsed.value, deps);
     case "round":

@@ -551,6 +551,10 @@ export type CoordinatorAction =
   | { type: "spawn"; step: string; preset: ChildPreset; round: RoundRef; budgetMinutes: number; brief: Brief }
   | { type: "wait"; step: string; runId: string; timeoutMs: number }
   | { type: "read-record"; step: string; runId: string }
+  /** Tell a child whose pull request became terminal or moved to end at its
+   *  next turn boundary without publishing anything. This is a steer through
+   *  the child's inbox, never a stop that tears down its workspace. */
+  | { type: "steer"; step: string; runId: string; reason: ChildSupersession["reason"] }
   | {
       type: "pr-check";
       step: string;
@@ -663,6 +667,10 @@ export type PrCheck =
       prNumber: number;
       url: string;
       headSha?: string;
+      /** Whether the same-repository head ref still exists. False is decisive:
+       *  no child may be dispatched onto a deleted branch. Undefined means the
+       *  ref could not be asked, so the machine makes no claim from it. */
+      headBranchExists?: boolean;
       /** The unit branch's own tip, read beside the listing on the entry check
        *  (issue 1689): the listing's `headSha` can lag a force-push, so the
        *  machine resumes at review only when the pull request heads the
@@ -696,7 +704,17 @@ export type PrCheck =
         commentId: string;
       };
     }
-  | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string };
+  | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string; mergedBy?: string }
+  | { state: "closed"; prNumber: number; url: string; closedBy: string };
+
+/** Why a live child is being drained before the unit moves on. The pull
+ * request fact is the fresh read that decided it; a late child result remains
+ * on that child's record but is never folded back into the unit. */
+type ChildSupersession =
+  | { reason: "merged"; pullRequest: Extract<PrCheck, { state: "merged" }> }
+  | { reason: "closed"; pullRequest: Extract<PrCheck, { state: "closed" }> }
+  | { reason: "head_moved"; pullRequest: Extract<PrCheck, { state: "open" }> }
+  | { reason: "branch_deleted"; pullRequest: Extract<PrCheck, { state: "open" }> };
 
 /** What a step answered. Every bot answer carries `at`, the bot's clock — the machine's time. */
 export type StepReturn =
@@ -716,12 +734,32 @@ export type StepReturn =
   /** `restartedAs`: the interrupted child restarted from its request as this
    *  run (issue 1903 — a replaced container's child resumes by itself), so the
    *  machine keeps waiting on the successor instead of ending the unit. */
-  | { type: "read-record"; step: string; run: ChildFacts; stopped?: true; restartedAs?: string; at: number }
+  | {
+      type: "read-record";
+      step: string;
+      run: ChildFacts;
+      /** The unit's pull request read fresh in the same bot transition. */
+      pullRequest?: PrCheck;
+      stopped?: true;
+      restartedAs?: string;
+      at: number;
+    }
+  | { type: "steer"; step: string; outcome: "steered" | "not_live"; at: number }
   | { type: "pr-check"; step: string; pr: PrCheck; at: number }
   | { type: "merge"; step: string; outcome: "merged"; sha: string; at: number }
+  | { type: "merge"; step: string; outcome: "recheck"; pullRequest: PrCheck; at: number }
   // The door found the pull request already merged after the approval — auto-merge
   // fired, or a person merged — so the runner merged nothing (`by: other`).
-  | { type: "merge"; step: string; outcome: "merged"; by: "other"; sha: string; mergedAt: string; at: number }
+  | {
+      type: "merge";
+      step: string;
+      outcome: "merged";
+      by: "other";
+      sha: string;
+      mergedAt: string;
+      mergedBy?: string;
+      at: number;
+    }
   /** The door enqueued the pull request (or found it still queued), or the
    *  queue removed it — the reason is the queue's own (issue 2011). */
   | {
@@ -741,6 +779,8 @@ export type StepReturn =
       type: "checks";
       step: string;
       checks?: RoundChecks;
+      /** The pull request read in the same checks transition. */
+      pullRequest?: PrCheck;
       draft?: boolean;
       retried?: boolean;
       refired?: boolean;
@@ -822,7 +862,16 @@ export const checkFindingsOf = (findings: readonly Finding[] | undefined): Findi
  *  authorize stage never started. */
 export type UnitEnding =
   | { kind: "merged"; by: "runner"; pr: PrRef; sha: string; reviewRounds: number }
-  | { kind: "merged"; by: "other"; pr: PrRef; sha: string; mergedAt: string; reviewRounds: number }
+  | {
+      kind: "merged";
+      by: "other";
+      pr: PrRef;
+      sha: string;
+      mergedAt: string;
+      mergedBy?: string;
+      reviewRounds: number;
+    }
+  | { kind: "closed"; pr: PrRef; closedBy: string; reviewRounds: number }
   /** Round 0 found the unit's scope already on the base (agent-ship item 12):
    *  the coding child's handoff names where it landed and the branch has no
    *  commits over the base, so there is no pull request to open or review.
@@ -986,11 +1035,12 @@ export type UnitEnding =
  *  configured idle policy; a human-gated hold takes `parkHumanGate` instead,
  *  which always creates the pending idle question. */
 export type IdleWhy =
-  Exclude<UnitEnding["kind"], "idle" | "merged" | "already_landed" | "merge_ready" | "refused"> | RenewalWhy;
+  Exclude<UnitEnding["kind"], "idle" | "merged" | "closed" | "already_landed" | "merge_ready" | "refused"> | RenewalWhy;
 
 const NEVER_IDLES: ReadonlySet<UnitEnding["kind"]> = new Set([
   "idle",
   "merged",
+  "closed",
   "already_landed",
   "merge_ready",
   "refused",
@@ -1121,6 +1171,36 @@ type Phase =
   /** `until`: when the child's budget plus the margin runs out, counted from the spawn's answer — the wait's last slice ends there. */
   | { at: "wait"; round: RoundRef; runId: string; n: number; until: number }
   | { at: "read"; round: RoundRef; runId: string; n: number; until: number }
+  /** A live child lost authority because its pull request became terminal,
+   *  its reviewed head moved, or its branch disappeared. Steer once, then
+   *  drain the child to its recorded end while ignoring every late artifact. */
+  | {
+      at: "steer";
+      round: RoundRef;
+      runId: string;
+      n: number;
+      until: number;
+      supersession: ChildSupersession;
+    }
+  | {
+      at: "superseded-wait";
+      round: RoundRef;
+      runId: string;
+      n: number;
+      until: number;
+      supersession: ChildSupersession;
+    }
+  | {
+      at: "superseded-read";
+      round: RoundRef;
+      runId: string;
+      n: number;
+      until: number;
+      supersession: ChildSupersession;
+    }
+  /** A moved-head child has drained. Re-read the adopted pull request before
+   *  restarting review because it may have merged, closed or moved again. */
+  | { at: "superseded-pr-check"; round: RoundRef }
   | {
       at: "pr-check";
       round: RoundRef;
@@ -1196,6 +1276,9 @@ export interface UnitPipelineState {
   /** Approved-head rebases attempted in this run. Each fresh conflict may buy
    *  one fix round; the run's remaining lease, not pull-request lifetime, is the bound. */
   readonly rebaseAttempts: number;
+  /** Review dispatches superseded by an external head move. The count gives
+   * each restarted round a fresh durable `/a<n>` step identity. */
+  readonly reviewRestarts: number;
   readonly pr?: PrRef;
   readonly lastReviewHead?: string;
   readonly lastVerdictSummary?: string;
@@ -1234,6 +1317,10 @@ export const WAIT_MARGIN_MS = SHIP_WAIT.marginMinutes * MIN;
  *  margin and the merge poll are the same number), and it keeps a round to a
  *  few steps: a coding child's 90 minutes are eighteen waits and eighteen reads. */
 export const WAIT_CHUNK_MS = SHIP_WAIT.chunkMinutes * MIN;
+/** A shipped unit's child is polled more often than an unshipped coding round:
+ * a person's merge/close must reach its inbox before a minutes-long review or
+ * fix can publish against a terminal pull request. */
+export const PR_TRANSITION_GUARD_MS = MIN;
 /** The merge wait is a round of its own: its minutes are carved from the
  *  pipeline's remainder when the door is first asked (the merge wait's ask and
  *  floor are rows of `src/core/budgets.ts`), and the wait below is sliced
@@ -1257,6 +1344,7 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
     phase: { at: "pre-check" },
     reviewRounds: pending?.round ?? 0,
     rebaseAttempts: 0,
+    reviewRestarts: 0,
     spentMs: { coding: 0, review: 0, waiting: 0 },
     spendUsd: input.session?.spendUsd ?? 0,
     findingsByRound: pending ? { [pending.round]: pending.findings } : {},
@@ -1271,7 +1359,7 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
         }
       : {}),
   };
-  if (pending !== undefined) return enterRound(base, { index: pending.round, kind: "findings" }).state;
+  if (pending !== undefined) return base;
   if (!input.resume) return base;
   const url = input.resume.url ?? `https://github.com/${input.repo}/pull/${input.resume.pr}`;
   const resumed: UnitPipelineState = {
@@ -1279,7 +1367,7 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
     pr: { number: input.resume.pr, url },
     ...(input.resume.headSha !== undefined ? { lastReviewHead: input.resume.headSha } : {}),
   };
-  return nextReview(resumed).state;
+  return resumed;
 }
 
 const deadlineAt = (s: UnitPipelineState) =>
@@ -1406,7 +1494,12 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
   const p = s.phase;
   switch (p.at) {
     case "pre-check":
-      return { type: "pr-check", step: `${unit}/pr-check`, entry: true };
+      return {
+        type: "pr-check",
+        step: `${unit}/pr-check`,
+        entry: true,
+        ...(s.pr !== undefined ? { pr: s.pr.number } : {}),
+      };
     case "branch":
       return { type: "branch", step: `${unit}/branch`, branch: s.input.unit.branch, from: s.input.base };
     case "spawn": {
@@ -1430,10 +1523,36 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         type: "wait",
         step: `${roundStep(s, p.round)}/wait/${p.n}`,
         runId: p.runId,
-        timeoutMs: waitSliceMs(s.clock, p.until),
+        timeoutMs: Math.min(waitSliceMs(s.clock, p.until), s.pr !== undefined ? PR_TRANSITION_GUARD_MS : WAIT_CHUNK_MS),
       };
     case "read":
       return { type: "read-record", step: `${roundStep(s, p.round)}/read/${p.n}`, runId: p.runId };
+    case "steer":
+      return {
+        type: "steer",
+        step: `${roundStep(s, p.round)}/steer/${p.n}`,
+        runId: p.runId,
+        reason: p.supersession.reason,
+      };
+    case "superseded-wait":
+      return {
+        type: "wait",
+        step: `${roundStep(s, p.round)}/superseded/wait/${p.n}`,
+        runId: p.runId,
+        timeoutMs: waitSliceMs(s.clock, p.until),
+      };
+    case "superseded-read":
+      return {
+        type: "read-record",
+        step: `${roundStep(s, p.round)}/superseded/read/${p.n}`,
+        runId: p.runId,
+      };
+    case "superseded-pr-check":
+      return {
+        type: "pr-check",
+        step: `${roundStep(s, p.round)}/superseded/pr-check`,
+        ...(s.pr !== undefined ? { pr: s.pr.number } : {}),
+      };
     case "pr-check":
       return {
         type: "pr-check",
@@ -1522,7 +1641,10 @@ function idleEnding(s: UnitPipelineState, ending: UnitEnding): Extract<UnitEndin
   // waits for the person's word. Human-gated questions bypass this mapping:
   // `parkHumanGate` always parks them with their typed pending state.
   if (ending.kind === "held" && ending.cause !== "blocked") return undefined;
-  const old = ending as Exclude<UnitEnding, { kind: "idle" | "merged" | "already_landed" | "merge_ready" | "refused" }>;
+  const old = ending as Exclude<
+    UnitEnding,
+    { kind: "idle" | "merged" | "closed" | "already_landed" | "merge_ready" | "refused" }
+  >;
   const grant = s.input.grant ?? DEFAULT_GRANT;
   // Unspent: an idle spends no renewal — the wake's segment does (this plan's
   // fifth unit) — so the row says what the grant still holds.
@@ -2038,8 +2160,25 @@ function settleChecks(
   retried?: boolean,
   draft?: boolean,
   refired?: boolean,
+  pullRequest?: PrCheck,
 ): Transition {
   const { round } = p;
+  if (pullRequest?.state === "merged") return foundMerged(s, pullRequest);
+  if (pullRequest?.state === "closed") return foundClosed(s, pullRequest);
+  if (pullRequest?.state === "open" && pullRequest.headBranchExists === false) return missingHeadBranch(s, pullRequest);
+  if (pullRequest?.state === "open") {
+    const actual = normalizeHead(pullRequest.headSha);
+    if (actual !== undefined && !sameCommit(actual, p.headSha)) {
+      const reviewRestarts = s.reviewRestarts + 1;
+      const next: UnitPipelineState = {
+        ...s,
+        reviewRestarts,
+        pr: { number: pullRequest.prNumber, url: pullRequest.url },
+        lastReviewHead: actual,
+      };
+      return enterRound(next, { ...round, attempt: reviewRestarts + 1 });
+    }
+  }
   const wait = (over: Partial<Extract<Phase, { at: "checks-wait" }>>): Transition => ({
     state: {
       ...s,
@@ -2208,9 +2347,116 @@ function foundMerged(
   const ref: PrRef = { number: pr.prNumber, url: pr.url };
   return end(
     { ...s, pr: ref },
-    { kind: "merged", by: "other", pr: ref, sha: pr.sha, mergedAt: pr.mergedAt, reviewRounds: s.reviewRounds },
+    {
+      kind: "merged",
+      by: "other",
+      pr: ref,
+      sha: pr.sha,
+      mergedAt: pr.mergedAt,
+      ...(pr.mergedBy !== undefined ? { mergedBy: pr.mergedBy } : {}),
+      reviewRounds: s.reviewRounds,
+    },
     notes,
   );
+}
+
+/** A person closed the unit's pull request without merging it. Closed is a
+ * terminal unit state: no child, check, or merge step may follow. */
+function foundClosed(
+  s: UnitPipelineState,
+  pr: Extract<PrCheck, { state: "closed" }>,
+  notes: CoordinatorNote[] = [],
+): Transition {
+  const ref: PrRef = { number: pr.prNumber, url: pr.url };
+  return end(
+    { ...s, pr: ref },
+    { kind: "closed", pr: ref, closedBy: pr.closedBy, reviewRounds: s.reviewRounds },
+    notes,
+  );
+}
+
+function missingHeadBranch(
+  s: UnitPipelineState,
+  pr: Extract<PrCheck, { state: "open" }>,
+  notes: CoordinatorNote[] = [],
+): Transition {
+  const ref: PrRef = { number: pr.prNumber, url: pr.url };
+  return end(
+    { ...s, pr: ref },
+    {
+      kind: "aborted",
+      reason: `⚠️ ${pr.url} is still open, but its head branch no longer exists; no child was dispatched onto the deleted branch.`,
+      reviewRounds: s.reviewRounds,
+    },
+    notes,
+  );
+}
+
+/** What a fresh pull-request read says about a child already in flight. A
+ * review is pinned, so a moved head supersedes it; a coding child may itself
+ * be moving the head and is superseded only by a terminal or deleted ref. */
+function childSupersession(
+  s: UnitPipelineState,
+  round: RoundRef,
+  pr: PrCheck | undefined,
+): ChildSupersession | undefined {
+  if (pr?.state === "merged") return { reason: "merged", pullRequest: pr };
+  if (pr?.state === "closed") return { reason: "closed", pullRequest: pr };
+  if (pr?.state !== "open") return undefined;
+  if (pr.headBranchExists === false) return { reason: "branch_deleted", pullRequest: pr };
+  if (round.kind !== "review") return undefined;
+  const expected = normalizeHead(s.lastReviewHead);
+  const actual = normalizeHead(pr.headSha);
+  if (expected !== undefined && actual !== undefined && !sameCommit(expected, actual))
+    return { reason: "head_moved", pullRequest: pr };
+  return undefined;
+}
+
+function finishSupersededChild(s: UnitPipelineState, phase: Extract<Phase, { at: "superseded-read" }>): Transition {
+  const supersession = phase.supersession;
+  if (supersession.reason === "merged") return foundMerged(s, supersession.pullRequest);
+  if (supersession.reason === "closed") return foundClosed(s, supersession.pullRequest);
+  if (supersession.reason === "branch_deleted") return missingHeadBranch(s, supersession.pullRequest);
+  return {
+    state: {
+      ...s,
+      pr: { number: supersession.pullRequest.prNumber, url: supersession.pullRequest.url },
+      phase: { at: "superseded-pr-check", round: phase.round },
+    },
+    notes: [],
+  };
+}
+
+function restartSupersededReview(
+  s: UnitPipelineState,
+  round: RoundRef,
+  pr: Extract<PrCheck, { state: "open" }>,
+): Transition {
+  if (pr.headBranchExists === false) return missingHeadBranch(s, pr);
+  const head = normalizeHead(pr.headSha);
+  if (head === undefined)
+    return end(s, {
+      kind: "aborted",
+      reason: `⚠️ ${pr.url} moved while review was running, but its fresh head could not be read; no child was dispatched on a guessed head.`,
+      reviewRounds: s.reviewRounds,
+    });
+  const reviewRestarts = s.reviewRestarts + 1;
+  const next: UnitPipelineState = {
+    ...s,
+    reviewRestarts,
+    pr: { number: pr.prNumber, url: pr.url },
+    lastReviewHead: head,
+  };
+  return enterRound(next, { ...round, attempt: reviewRestarts + 1 });
+}
+
+/** Reconcile the ending-time facts read. A person can merge or close after
+ * the machine chose merge-ready but before the driver publishes it; terminal
+ * state wins and becomes the unit's actual ending, not merely report prose. */
+export function reconcileTerminalPr(s: UnitPipelineState, pr: PrCheck): UnitPipelineState {
+  if (pr.state === "merged") return foundMerged(s, pr).state;
+  if (pr.state === "closed") return foundClosed(s, pr).state;
+  return s;
 }
 
 /** The pull request heading the branch after round 0 or a findings step. */
@@ -2220,6 +2466,9 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
   // (or shipped into a pull request a person merged under it). The round
   // completed without a pull request of its own, and the unit is done.
   if (pr.state === "merged") return foundMerged(s, pr, [roundNote(round, "completed")]);
+  if (pr.state === "closed") return foundClosed(s, pr, [roundNote(round, "completed")]);
+  if (pr.state === "open" && pr.headBranchExists === false)
+    return missingHeadBranch(s, pr, [roundNote(round, "aborted")]);
   if (pr.state === "none") {
     // A dead child left nothing on the branch to recover: the unit ends with
     // the child's own reason — never the budget clip.
@@ -2516,6 +2765,8 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       // by the coding child and adopted at the round's own pr-check.
       const r = ret as Extract<StepReturn, { type: "pr-check" }>;
       if (r.pr.state === "merged") return foundMerged(clocked, r.pr);
+      if (r.pr.state === "closed") return foundClosed(clocked, r.pr);
+      if (r.pr.state === "open" && r.pr.headBranchExists === false) return missingHeadBranch(clocked, r.pr);
       // The open pull request still heads the branch — its head is the
       // branch's own tip (the entry facts, issue 1689) or the child's own last
       // push (the previous attempt ended `review_pending`, the row's
@@ -2527,6 +2778,25 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       // `merge: runner`, which re-verifies the approval and the checks itself.
       if (r.pr.state === "open") {
         const head = normalizeHead(r.pr.headSha);
+        const pending = s.input.session?.humanGate;
+        if (pending !== undefined) {
+          const adopted: UnitPipelineState = {
+            ...clocked,
+            pr: { number: r.pr.prNumber, url: r.pr.url },
+            ...(head !== undefined ? { lastReviewHead: head } : {}),
+          };
+          const expected = normalizeHead(pending.headSha);
+          if (head !== undefined && expected !== undefined && !sameCommit(head, expected)) return nextReview(adopted);
+          return enterRound(adopted, { index: pending.round, kind: "findings" });
+        }
+        if (s.input.resume !== undefined) {
+          const adopted: UnitPipelineState = {
+            ...clocked,
+            pr: { number: r.pr.prNumber, url: r.pr.url },
+            ...(head !== undefined ? { lastReviewHead: head } : {}),
+          };
+          return nextReview(adopted);
+        }
         const branchHead = normalizeHead(r.pr.branchHead);
         const lastPush = normalizeHead(s.input.lastPush);
         const atBranchHead = head !== undefined && branchHead !== undefined && sameCommit(head, branchHead);
@@ -2659,6 +2929,36 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       };
     case "read": {
       const r = ret as Extract<StepReturn, { type: "read-record" }>;
+      const supersession = childSupersession(clocked, p.round, r.pullRequest);
+      if (supersession !== undefined) {
+        // A finished child needs no steer; its verdict, dispositions or push
+        // remain on its own record but cannot change the terminal/moved PR.
+        if (r.run.finished) {
+          const terminalPhase: Extract<Phase, { at: "superseded-read" }> = {
+            at: "superseded-read",
+            round: p.round,
+            runId: p.runId,
+            n: p.n,
+            until: p.until,
+            supersession,
+          };
+          return finishSupersededChild(clocked, terminalPhase);
+        }
+        return {
+          state: {
+            ...clocked,
+            phase: {
+              at: "steer",
+              round: p.round,
+              runId: r.restartedAs ?? p.runId,
+              n: p.n,
+              until: p.until,
+              supersession,
+            },
+          },
+          notes: [],
+        };
+      }
       if (!r.run.finished)
         // `restartedAs` (issues 1903/1876): the child's container was replaced
         // and it restarted from its request as a new run — the round carries on
@@ -2741,11 +3041,74 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         ? settleReview(clocked, p.round, r.run)
         : settleCoding(clocked, p.round, p.runId, r.run);
     }
+    case "steer": {
+      // Delivery is best effort with respect to a child that may have ended
+      // between the fresh PR read and this effect. Either answer is followed
+      // by a record read; a late artifact is recorded there and ignored.
+      return {
+        state: {
+          ...clocked,
+          phase: {
+            at: "superseded-wait",
+            round: p.round,
+            runId: p.runId,
+            n: p.n,
+            until: p.until,
+            supersession: p.supersession,
+          },
+        },
+        notes: [],
+      };
+    }
+    case "superseded-wait":
+      return {
+        state: {
+          ...s,
+          phase: {
+            at: "superseded-read",
+            round: p.round,
+            runId: p.runId,
+            n: p.n,
+            until: p.until,
+            supersession: p.supersession,
+          },
+        },
+        notes: [],
+      };
+    case "superseded-read": {
+      const r = ret as Extract<StepReturn, { type: "read-record" }>;
+      if (r.run.finished) return finishSupersededChild(clocked, p);
+      return {
+        state: {
+          ...clocked,
+          phase: {
+            at: "superseded-wait",
+            round: p.round,
+            runId: r.restartedAs ?? p.runId,
+            n: p.n + 1,
+            until: p.until,
+            supersession: p.supersession,
+          },
+        },
+        notes: [],
+      };
+    }
+    case "superseded-pr-check": {
+      const r = ret as Extract<StepReturn, { type: "pr-check" }>;
+      if (r.pr.state === "merged") return foundMerged(clocked, r.pr);
+      if (r.pr.state === "closed") return foundClosed(clocked, r.pr);
+      if (r.pr.state === "open") return restartSupersededReview(clocked, p.round, r.pr);
+      return end(clocked, {
+        kind: "aborted",
+        reason: `⚠️ The adopted pull request disappeared after the superseded review child drained; no replacement review was dispatched.`,
+        reviewRounds: clocked.reviewRounds,
+      });
+    }
     case "pr-check":
       return settlePrCheck(clocked, p, (ret as Extract<StepReturn, { type: "pr-check" }>).pr);
     case "checks": {
       const r = ret as Extract<StepReturn, { type: "checks" }>;
-      return settleChecks(clocked, p, r.checks, r.retried, r.draft, r.refired);
+      return settleChecks(clocked, p, r.checks, r.retried, r.draft, r.refired, r.pullRequest);
     }
     case "checks-wait":
       // The event fired or the chunk elapsed either way the head is read again.
@@ -2769,6 +3132,35 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       };
     case "merge": {
       const r = ret as Extract<StepReturn, { type: "merge" }>;
+      if (r.outcome === "recheck") {
+        if (r.pullRequest.state === "merged") return foundMerged(clocked, r.pullRequest);
+        if (r.pullRequest.state === "closed") return foundClosed(clocked, r.pullRequest);
+        if (r.pullRequest.state === "open" && r.pullRequest.headBranchExists === false)
+          return missingHeadBranch(clocked, r.pullRequest);
+        if (r.pullRequest.state === "open") {
+          const actual = normalizeHead(r.pullRequest.headSha);
+          if (actual !== undefined && !sameCommit(actual, p.headSha)) {
+            const reviewRestarts = s.reviewRestarts + 1;
+            const next: UnitPipelineState = {
+              ...clocked,
+              reviewRestarts,
+              pr: { number: r.pullRequest.prNumber, url: r.pullRequest.url },
+              lastReviewHead: actual,
+            };
+            return enterRound(next, {
+              index: Math.max(1, s.reviewRounds),
+              kind: "review",
+              attempt: reviewRestarts + 1,
+            });
+          }
+        }
+        return end(clocked, {
+          kind: "merge_refused",
+          pr: p.pr,
+          reason: "the pull request changed before the merge and could not be reconciled",
+          reviewRounds: s.reviewRounds,
+        });
+      }
       if (r.outcome === "merged")
         // Found already merged at the door — auto-merge or a person, after the
         // approval: the unit is done, the runner merged nothing (`by: other`).
@@ -2779,6 +3171,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
               pr: p.pr,
               sha: r.sha,
               mergedAt: r.mergedAt,
+              ...(r.mergedBy !== undefined ? { mergedBy: r.mergedBy } : {}),
               reviewRounds: s.reviewRounds,
             })
           : end(clocked, { kind: "merged", by: "runner", pr: p.pr, sha: r.sha, reviewRounds: s.reviewRounds });
@@ -3067,7 +3460,9 @@ export function renderUnitReport(
   switch (e.kind) {
     case "merged":
       if (e.by === "other")
-        return `✅ Already merged: ${e.pr.url} (merge commit \`${e.sha.slice(0, 7)}\`, merged ${e.mergedAt}) — the pull request heading \`${s.input.unit.branch}\` was merged before this pipeline reached it, by a person or by an earlier pipeline of this plan; the pipeline merged nothing. The unit is done and its dependents start on a base that carries it.`;
+        return e.mergedBy !== undefined
+          ? `✅ Merged: ${e.pr.url} — merged by ${e.mergedBy} at \`${e.sha.slice(0, 7)}\` (${e.mergedAt}); the pipeline observed that merge and ran nothing further. The unit is done and its dependents start on a base that carries it.`
+          : `✅ Already merged: ${e.pr.url} (merge commit \`${e.sha.slice(0, 7)}\`, merged ${e.mergedAt}) — the pull request heading \`${s.input.unit.branch}\` was merged before this pipeline reached it, by a person or by an earlier pipeline of this plan; the pipeline merged nothing. The unit is done and its dependents start on a base that carries it.`;
       return [
         `✅ Merged after ${rounds}: ${e.pr.url} (squash \`${e.sha.slice(0, 7)}\`) — merged by the pipeline under \`plan:merge\`: the review approved at this head and the guards were green.`,
         aside(verdictLine),
@@ -3078,6 +3473,8 @@ export function renderUnitReport(
       ]
         .filter(Boolean)
         .join("\n");
+    case "closed":
+      return `⛔ Closed: ${e.pr.url} — closed by ${e.closedBy} without merging; the unit is terminal and no review, findings, checks or merge step follows.`;
     case "already_landed":
       // No compare link, no renewal line, no re-issue prompt: there was
       // nothing to ship, so none of them has a question to answer.

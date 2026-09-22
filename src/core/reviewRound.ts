@@ -713,6 +713,10 @@ export async function runReviewPostStep(input: {
   answer: string;
   carried: { reviewed: string; current: string; commits: number } | undefined;
   hardStopped: boolean;
+  /** Ship children re-read immediately before posting because their parent can
+   *  revoke the transition; standalone reviews keep their established single
+   *  post-publication head read. */
+  guardTransition?: boolean;
   /** The GitHub post; the dispatcher passes `deps.postReviewComment ?? postReviewComment`. */
   post: (target: ReviewCommentTarget, body: string) => Promise<void>;
   fetchPrHead: FetchPrHead;
@@ -833,6 +837,27 @@ export async function runReviewPostStep(input: {
         .reply(`ℹ️ Review not posted to ${where}: ${coverage.reason} — this verdict is Slack-only.`)
         .catch(() => {});
       skipReason = coverage.reason;
+      postTarget = null;
+    }
+  }
+  if (input.guardTransition === true && postTarget && reviewHead) {
+    // Final transition guard immediately before the write: the pull request
+    // must still be open at the head this verdict covers. `fetchPrHead`
+    // returns no head for a merged/closed or unreadable pull request, so every
+    // such race is Slack-only and the coordinator records the skipped verdict.
+    const where = `${postTarget.repo}#${postTarget.number}`;
+    const pinned = carried?.current ?? reviewHead;
+    const current = normalizeHead(
+      await input.fetchPrHead({ repo: postTarget.repo, number: postTarget.number }).catch(() => undefined),
+    );
+    if (current === undefined || !sameCommit(current, pinned)) {
+      const reason =
+        current === undefined
+          ? "the pull request is no longer open at a readable head"
+          : `the PR head moved to ${current.slice(0, 7)} after the review of ${pinned.slice(0, 7)}`;
+      console.log(`[review-post] ${logKey} skipped: ${reason} (${where})`);
+      await input.reply(`ℹ️ Review not posted to ${where}: ${reason} — this verdict is Slack-only.`).catch(() => {});
+      skipReason = reason;
       postTarget = null;
     }
   }

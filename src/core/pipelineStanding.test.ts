@@ -45,6 +45,7 @@ function roundStageDecided(o: ShipRoundOutcome): string {
 function endingStageDecided(k: UnitEnding["kind"]): string {
   switch (k) {
     case "merged":
+    case "closed":
     case "already_landed":
     case "merge_ready":
     case "held":
@@ -86,6 +87,7 @@ const ROUND_OUTCOME_WORDS = [
 
 const UNIT_ENDING_WORDS = [
   "merged",
+  "closed",
   "already_landed",
   "merge_ready",
   "held",

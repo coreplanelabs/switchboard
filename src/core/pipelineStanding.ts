@@ -116,6 +116,7 @@ export const ROUND_STAGE = {
  *  issue 2100) — closes the unit the same way. */
 export const ENDING_STAGE = {
   merged: "merged",
+  closed: "ended",
   already_landed: "merged",
   merge_ready: "merge-ready",
   held: "ended",
@@ -144,6 +145,7 @@ export const ENDING_STAGE = {
  *  2100), so a new ending kind fails the build here. */
 export const ENDING_WORDS = {
   merged: "merged",
+  closed: "closed",
   already_landed: "merged",
   merge_ready: "merge-ready",
   held: "held",
