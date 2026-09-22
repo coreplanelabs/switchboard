@@ -31,12 +31,14 @@ import {
   classifyProviderFailure,
   ProviderFailure,
   providerFailureOf,
+  providerSchemaRejectionOf,
   wireOf,
   type CompletionRequest,
   type CompletionResult,
   type Provider,
   type ProviderConfig,
   type TokenUsage,
+  type ToolDef,
   type Wire,
 } from "../provider.js";
 import type { ChatMessage, ContentPart, ToolResultContent } from "../chatMessage.js";
@@ -186,14 +188,20 @@ export class PiAiProvider implements Provider {
       const message = await this.api$()
         .stream(model, toPiContext(req, model, this.clock), options)
         .result();
-      return fromPiMessage(message, this.name);
+      return fromPiMessage(message, this.name, req.tools);
     } catch (err) {
       const failure = providerFailureOf(err);
+      const schemaRejection =
+        failure.schemaRejection ??
+        (failure.cause === "request-rejected" && failure.status === 400
+          ? providerSchemaRejectionOf(err, req.tools)
+          : undefined);
       throw new ProviderFailure(failure.cause, {
         ...(failure.status !== undefined ? { status: failure.status } : {}),
         provider: this.name,
         model: req.model,
         ...(failure.operatorUrl !== undefined ? { operatorUrl: failure.operatorUrl } : {}),
+        ...(schemaRejection !== undefined ? { schemaRejection } : {}),
         ...(failure.keyVariable !== undefined
           ? { keyVariable: failure.keyVariable }
           : failure.cause === "key-invalid" && this.keyEnv !== undefined
@@ -403,12 +411,24 @@ const STOP_REASONS: Partial<Record<StopReason, CompletionResult["stopReason"]>> 
  *  by name; anything pi has no word for here is `other`), the four counters
  *  as the usage. An error or an abort is a thrown error naming the provider
  *  and the model with pi's message — never a result. */
-export function fromPiMessage(message: PiAssistantMessage, provider: string): CompletionResult {
+export function fromPiMessage(
+  message: PiAssistantMessage,
+  provider: string,
+  tools?: readonly ToolDef[],
+): CompletionResult {
   if (message.stopReason === "error" || message.stopReason === "aborted") {
-    throw classifyProviderFailure({
-      error: message.errorMessage ?? "the model call failed",
-      provider,
-      model: message.model,
+    const raw = message.errorMessage ?? "the model call failed";
+    const failure = classifyProviderFailure({ error: raw, provider, model: message.model });
+    const schemaRejection =
+      failure.cause === "request-rejected" && failure.status === 400
+        ? providerSchemaRejectionOf(raw, tools)
+        : undefined;
+    throw new ProviderFailure(failure.cause, {
+      ...(failure.status !== undefined ? { status: failure.status } : {}),
+      ...(failure.provider !== undefined ? { provider: failure.provider } : {}),
+      ...(failure.model !== undefined ? { model: failure.model } : {}),
+      ...(failure.operatorUrl !== undefined ? { operatorUrl: failure.operatorUrl } : {}),
+      ...(schemaRejection !== undefined ? { schemaRejection } : {}),
     });
   }
   const content: ContentPart[] = [];

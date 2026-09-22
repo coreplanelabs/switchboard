@@ -32,8 +32,10 @@
 // that fails to validate). A call whose input the schema refuses is re-asked
 // with the violation named, at most the bounded retries, every attempt on
 // the event; after them `non_decision` falls to the configured default with
-// no second model. A failed model call is different: its typed provider cause
-// renders once and stops at the door, never falling through to `general`.
+// no second model. A provider schema 400 against a locally incompatible tool
+// is re-asked without that tool and recorded by tool and keyword; every other
+// failed model call renders its typed cause once and stops at the door, never
+// falling through to `general`.
 import { AGENTS, COMPOUND_PRESET, machineNeedsRepo } from "../../agents/registry.js";
 import {
   parseModelRef,
@@ -133,6 +135,10 @@ export const OPERATOR_READ_TOOLS = {
 /** The most read calls one turn may spend before it must act: the reads are
  *  grounding, not a budget for wandering. */
 export const OPERATOR_READS_MAX = 4;
+/** Provider schema refusals consume a separate repair budget: the measured
+ * catalogue has four tools carrying the one known incompatible construct, so
+ * an ordinary structured violation cannot spend any of these re-asks. */
+export const OPERATOR_SCHEMA_REASKS_MAX = 4;
 /** How long the operator may take before the event falls through to the
  *  readers (shadow: the decision is recorded as a refusal naming the
  *  timeout). The strong tier answers slower than the router's fast model. */
@@ -1022,6 +1028,13 @@ export function operatorMaxOutputTokens(): number {
   return Math.ceil(chars / 3);
 }
 
+function promptWithoutTool(prompt: RoutePrompt, omitted: string): RoutePrompt | undefined {
+  const kept = [prompt.tool, ...(prompt.tools ?? [])].filter((candidate) => candidate.name !== omitted);
+  const [tool, ...tools] = kept;
+  if (tool === undefined) return undefined;
+  return { ...prompt, tool, tools: tools.length > 0 ? tools : undefined };
+}
+
 /**
  * The operator's loop (record 0069, as amended): the prompt with the typed
  * tools, under ONE timeout covering the whole loop. A read tool call is
@@ -1034,9 +1047,12 @@ export function operatorMaxOutputTokens(): number {
  * carrying several tool calls is re-asked within the same shared retry budget;
  * after exhaustion, its sole action call passes the ordinary post-parse and
  * catalogue guards before it may be accepted, while zero or several actions
- * still return `non_decision`. A model that throws or times out crosses the
- * ProviderFailure seam and becomes a typed refusal with the cause's one safe
- * sentence. It never falls through to the configured default.
+ * still return `non_decision`. A boundary-vouched schema rejection crossing
+ * the typed ProviderFailure seam is re-asked without its named tool and with the tool
+ * and keyword on the attempts record and a repair budget separate from
+ * structured violations. Every generic 400, other throw or timeout becomes a
+ * typed refusal with the cause's one safe sentence. It never falls through to
+ * the configured default.
  */
 export async function runOperator(
   input: OperatorInput,
@@ -1045,7 +1061,7 @@ export async function runOperator(
 ): Promise<OperatorAnswer> {
   const now = opts.now ?? Date.now;
   const started = now();
-  const prompt = buildOperatorPrompt(input);
+  let prompt = buildOperatorPrompt(input);
   // The turn parse reads the author's FULL projection even on an owned thread
   // (issue 2027): a call naming a tool the owned turn was not offered is a
   // decision the executor folds into the owner, never a violation the loop
@@ -1078,6 +1094,7 @@ export async function runOperator(
   const turns: { answer: string; violation: string }[] = [];
   let reads = 0;
   let violations = 0;
+  let schemaReasks = 0;
   let noCallTurns = 0;
   const generalFloor = (): OperatorDecision => {
     // The floor goes through the exact parser used for a model-authored
@@ -1104,6 +1121,22 @@ export async function runOperator(
           const carried = attemptsOfThrow(err);
           if (carried) attempts.push(...carried);
           const failure = providerFailureOf(err);
+          const rejected =
+            failure.cause === "request-rejected" && failure.status === 400 ? failure.schemaRejection : undefined;
+          const offered =
+            rejected !== undefined &&
+            [prompt.tool, ...(prompt.tools ?? [])].some((candidate) => candidate.name === rejected.tool);
+          const retry =
+            offered && rejected !== undefined && schemaReasks < OPERATOR_SCHEMA_REASKS_MAX
+              ? promptWithoutTool(prompt, rejected.tool)
+              : undefined;
+          if (rejected !== undefined && retry !== undefined) {
+            const violation = `provider rejected tool "${rejected.tool}" schema keyword "${rejected.keyword}"; re-asked without that tool`;
+            attempts.push({ outcome: "violation", violation });
+            schemaReasks++;
+            prompt = retry;
+            continue;
+          }
           return answered(
             {
               kind: "refusal",
