@@ -152,10 +152,19 @@ RUN rm -f /usr/local/bin/bun \
 # The build asserts the binary with the probe the extract script uses at run
 # time (`command -v`): `unsquashfs -version` exits 1 on squashfs-tools 4.5 (this
 # base) when no filesystem is named, and failed the 1.2.0 image build that way.
+#
+# ripgrep (`rg`) + fd: the grep/find tools call these binaries directly. Ubuntu
+# packages fd as `fd-find` with the binary named `fdfind`, so the image exposes
+# the conventional `fd` name from /usr/local/bin (ahead of /usr/bin on PATH).
+# Both are image tools, never downloaded by a run; their PATH probes make a
+# missing package or link fail the image build instead of every resident run.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends squashfs-tools \
+  && apt-get install -y --no-install-recommends squashfs-tools ripgrep fd-find \
+  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
   && rm -rf /var/lib/apt/lists/* \
-  && command -v unsquashfs >/dev/null
+  && command -v unsquashfs >/dev/null \
+  && command -v rg >/dev/null \
+  && command -v fd >/dev/null
 
 # The toolchain for what a run BUILDS and LOOKS AT — the same layer as the
 # sandbox image's (deploy/cloudflare-sandbox/Dockerfile);
