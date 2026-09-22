@@ -40,6 +40,42 @@ import {
 import type { StructuredAttempt } from "./structured.js";
 import type { TurnEffortRequest } from "./turnEffort.js";
 
+/** A reasoning wire's cap must leave room for hidden reasoning before the
+ * visible structured answer. These canonical cap fields bound both on their
+ * respective reasoning APIs; a custom field stays at the visible-answer cap
+ * until its provider contract says otherwise. */
+const REASONING_COUNTING_CAP_FIELDS = new Set(["max_tokens", "max_completion_tokens", "max_output_tokens"]);
+/** The measured operator answer is small, but medium reasoning routinely
+ * crosses the old 374-token ceiling before any tool call. Four thousand tokens
+ * is the turn's reasoning allowance; the twenty-second door timeout remains
+ * the harder runaway bound. */
+export const REASONING_OUTPUT_TOKEN_ALLOWANCE = 4_096;
+
+/** Add the reasoning allowance when the wire's cap counts reasoning together
+ * with visible output. An unset effort delegates to the model's default; it
+ * does not prove that the model spends no reasoning tokens. */
+export function outputCapWithReasoning(visibleAnswerTokens: number, opts: { capField?: string } = {}): number {
+  return opts.capField !== undefined && REASONING_COUNTING_CAP_FIELDS.has(opts.capField)
+    ? visibleAnswerTokens + REASONING_OUTPUT_TOKEN_ALLOWANCE
+    : visibleAnswerTokens;
+}
+
+/** One cut turn gets one materially larger retry. A tiny prose-sized cap jumps
+ * to a full reasoning allowance; an already reasoning-sized cap doubles. */
+export function outputCapRetry(current: number): number {
+  return Math.max(current * 2, REASONING_OUTPUT_TOKEN_ALLOWANCE);
+}
+
+/** A partial structured answer is a recoverable cap fact, not a provider
+ * refusal. The operator retries it once and then takes its typed general floor
+ * so a cut answer cannot terminate an owned pipeline. */
+export class OutputCapError extends Error {
+  constructor(readonly maxTokens: number) {
+    super(`answer cut at the output cap (${maxTokens} tokens)`);
+    this.name = "OutputCapError";
+  }
+}
+
 /** The most a door reason may say on a record. */
 export const ROUTE_REASON_CAP = 120;
 /** The output cap's floor: a single route is one small JSON object. */
@@ -459,7 +495,7 @@ export function providerStructuredModel(
       ...(opts.effort ? { effort: opts.effort.effort, effortWord: opts.effort.effortWord } : {}),
       ...(forced ? { tools, toolChoice } : {}),
     });
-    if (result.stopReason === "max_tokens") throw new Error(`answer cut at the output cap (${call.maxTokens} tokens)`);
+    if (result.stopReason === "max_tokens") throw new OutputCapError(call.maxTokens);
     const calls = result.content.filter(
       (p): p is { type: "tool_use"; id: string; name: string; input: unknown } => p.type === "tool_use",
     );

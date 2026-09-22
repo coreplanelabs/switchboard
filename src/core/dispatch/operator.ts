@@ -73,7 +73,12 @@ import { renderConfirmationOffer, renderOperatorReceipt } from "./reply.js";
 import { OPERATOR_TAIL_BYTES, operatorTail, type OperatorTailTurn } from "./seed.js";
 import { turnEffort } from "./turnEffort.js";
 import { newestFinishedRunOf, type NewestFinishedRun } from "./thread.js";
+import { resolveModelCard } from "../modelCard.js";
+import { installedModelRegistry } from "../installedModelRegistry.js";
 import {
+  OutputCapError,
+  outputCapRetry,
+  outputCapWithReasoning,
   providerStructuredModel,
   quoteRequest,
   renderPresetTable,
@@ -1017,15 +1022,14 @@ export interface OperatorAnswer {
   attempts?: StructuredAttempt[];
 }
 
-/** The output cap for one turn's answer: the largest answer the parse
- *  accepts — one bind or ask with its lines and reasons — at the route
- *  stage's conservative three characters a token. The cap can be a constant
- *  because no call re-types the request (issue 2099): `bind_preset` carries
- *  the preset and the reason alone, the admitted message riding by reference,
- *  so a 1,900-character ask needs no more output than a five-word one. */
-export function operatorMaxOutputTokens(): number {
+/** The output cap for one turn's answer: the largest visible answer the
+ * parse accepts — one bind or ask with its lines and reasons — plus the
+ * reasoning allowance when the configured wire counts hidden reasoning under
+ * the same cap. No call re-types the request (issue 2099), so the visible half
+ * stays constant while the model capability decides the allowance. */
+export function operatorMaxOutputTokens(opts: { capField?: string } = {}): number {
   const chars = 2 * (ROUTE_RECEIPT_CAP + ROUTE_REASON_CAP + 40) + ROUTE_REASON_CAP + 80;
-  return Math.ceil(chars / 3);
+  return outputCapWithReasoning(Math.ceil(chars / 3), opts);
 }
 
 function promptWithoutTool(prompt: RoutePrompt, omitted: string): RoutePrompt | undefined {
@@ -1048,16 +1052,17 @@ function promptWithoutTool(prompt: RoutePrompt, omitted: string): RoutePrompt | 
  * after exhaustion, its sole action call passes the ordinary post-parse and
  * catalogue guards before it may be accepted, while zero or several actions
  * still return `non_decision`. A boundary-vouched schema rejection crossing
- * the typed ProviderFailure seam is re-asked without its named tool and with the tool
- * and keyword on the attempts record and a repair budget separate from
- * structured violations. Every generic 400, other throw or timeout becomes a
- * typed refusal with the cause's one safe sentence. It never falls through to
- * the configured default.
+ * the typed ProviderFailure seam is re-asked without its named tool, with the
+ * tool and keyword on the attempts record and a repair budget separate from
+ * structured violations. An output-cap cut retries once at a larger cap, then
+ * takes the typed general floor. Every generic 400, other throw or timeout
+ * becomes a typed refusal with the cause's one safe sentence. It never falls
+ * through to the configured default.
  */
 export async function runOperator(
   input: OperatorInput,
   model: RouteModel,
-  opts: { timeoutMs?: number; now?: () => number } = {},
+  opts: { timeoutMs?: number; now?: () => number; maxOutputTokens?: number } = {},
 ): Promise<OperatorAnswer> {
   const now = opts.now ?? Date.now;
   const started = now();
@@ -1096,23 +1101,35 @@ export async function runOperator(
   let violations = 0;
   let schemaReasks = 0;
   let noCallTurns = 0;
-  const generalFloor = (): OperatorDecision => {
+  let outputCapCuts = 0;
+  let maxOutputTokens = opts.maxOutputTokens ?? operatorMaxOutputTokens();
+  const generalFloor = (reason = "no_decision"): OperatorDecision => {
     // The floor goes through the exact parser used for a model-authored
     // bind_preset call. That keeps its line, redaction and preset hold on the
     // typed path instead of growing a second construction for the fallback.
-    const floor = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "no_decision" } },
-      ctx,
-    );
-    return floor.kind === "decision" ? floor.decision : { kind: "non_decision", reason: "no_decision" };
+    const floor = parseOperatorTurn({ tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason } }, ctx);
+    return floor.kind === "decision" ? floor.decision : { kind: "non_decision", reason };
   };
   const signal = AbortSignal.timeout(opts.timeoutMs ?? OPERATOR_TIMEOUT_MS);
   try {
     for (;;) {
       let answer: RouteToolCall | string;
       try {
-        answer = await model({ ...prompt, retries: turns }, { maxTokens: operatorMaxOutputTokens(), signal });
+        answer = await model({ ...prompt, retries: turns }, { maxTokens: maxOutputTokens, signal });
       } catch (err) {
+        // A cap cut is recoverable shape, not a provider refusal: retry once
+        // with a materially larger ceiling. If that is cut too, the typed
+        // general bind keeps an owned pipeline alive instead of ending it.
+        if (err instanceof OutputCapError) {
+          const violation = err.message;
+          attempts.push({ outcome: "violation", violation });
+          if (outputCapCuts++ === 0) {
+            turns.push({ answer: "", violation: `${violation}; retry with the larger output allowance` });
+            maxOutputTokens = outputCapRetry(maxOutputTokens);
+            continue;
+          }
+          return answered(generalFloor("output_cap"));
+        }
         // A multi-call answer (issue 2099) is a violation the loop re-asks,
         // never a failure the outer catch floors. Past the bounded retries,
         // the one action call present still passes the ordinary post-parse
@@ -1391,6 +1408,7 @@ export async function operatorStage(
   const { msg, mode } = ctx;
   const cfg = deps.config.config;
   let model = deps.operatorModel;
+  let maxOutputTokens: number | undefined;
   if (!model) {
     const modelRef = cfg.defaults.models["general"];
     if (!modelRef || !deps.completions) {
@@ -1404,6 +1422,8 @@ export async function operatorStage(
       // degraded or dropped tier is a log line, never a skipped operator.
       const effort = turnEffort(modelRef, cfg.defaults.efforts?.["general"], cfg.providers);
       if (effort.note) console.log(`[operator] ${msg.threadKey} effort: ${effort.note}`);
+      const card = resolveModelCard(modelRef, cfg.providers, installedModelRegistry);
+      maxOutputTokens = operatorMaxOutputTokens({ capField: card.capField });
       model = providerStructuredModel(deps.completions.get(ref.provider), ref.model, {
         ...(effort.request ? { effort: effort.request } : {}),
       });
@@ -1450,6 +1470,7 @@ export async function operatorStage(
           ...(ctx.owner ? { owner: ctx.owner } : {}),
         },
         model,
+        maxOutputTokens !== undefined ? { maxOutputTokens } : {},
       );
   if (answer.operatorDiagnostic !== undefined)
     console.log(`[operator] ${msg.threadKey} provider refusal: ${answer.operatorDiagnostic}`);
