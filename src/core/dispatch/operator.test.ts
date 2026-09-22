@@ -32,6 +32,7 @@ import {
 } from "./operator.js";
 import {
   MultiToolCallError,
+  providerStructuredModel,
   routablePresets,
   type RoutableCommand,
   type RouteModel,
@@ -487,6 +488,54 @@ describe("runOperator — the loop over a scripted model", () => {
       text: "The model provider is temporarily unavailable; this request did not start.",
     });
     expect(answer.decision.kind === "refusal" ? answer.decision.text : "").not.toMatch(/will continue|work is kept/);
+  });
+
+  it("an answer cut at the cap retries once at a larger cap and accepts the bind", async () => {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "openai",
+      async complete(req) {
+        requests.push(req);
+        if (requests.length === 1) return { content: [], stopReason: "max_tokens" };
+        return {
+          content: [
+            {
+              type: "tool_use",
+              id: "bind-1",
+              name: OPERATOR_BIND_TOOL,
+              input: { preset: "general", reason: "read ask" },
+            },
+          ],
+          stopReason: "tool_use",
+        };
+      },
+    };
+
+    const answer = await runOperator(input(), providerStructuredModel(provider, "gpt-5.4"));
+
+    expect(answer.decision).toMatchObject({ kind: "binds" });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.maxTokens).toBeGreaterThan(requests[0]!.maxTokens);
+  });
+
+  it("a second cut floors through the typed general bind, so a cut answer never ends a pipeline", async () => {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "openai",
+      async complete(req) {
+        requests.push(req);
+        return { content: [], stopReason: "max_tokens" };
+      },
+    };
+
+    const answer = await runOperator(input(), providerStructuredModel(provider, "gpt-5.4"));
+
+    expect(requests).toHaveLength(2);
+    expect(answer.decision).toEqual({
+      kind: "binds",
+      binds: [{ line: "agent:general list the runs", reason: "output_cap" }],
+      reason: "output_cap",
+    });
   });
 
   it("the prompt is open: the tool set carries no forced choice, so the model may end the turn", () => {
@@ -1217,4 +1266,70 @@ ${efforts}
     expect(bare[0].effort).toBeUndefined();
     expect(bare[0].effortWord).toBeUndefined();
   });
+
+  it.each([
+    {
+      wire: "openai-responses",
+      capField: "max_output_tokens",
+      effort: "medium",
+      effortLabel: "medium effort",
+      reasoningTokensBeforeBind: 4_096,
+    },
+    {
+      wire: "openai-responses",
+      capField: "max_output_tokens",
+      effort: undefined,
+      effortLabel: "unset effort",
+      reasoningTokensBeforeBind: 4_096,
+    },
+  ])(
+    "cap conformance: $wire with $effortLabel carries reasoning plus one bind on its first call",
+    async ({ wire, capField, effort, reasoningTokensBeforeBind }) => {
+      const configured = configOf(`
+organization: acme
+providers:
+  openai:
+    wire: ${wire}
+    baseUrl: https://api.openai.com/v1
+    models:
+      gpt-5.4:
+        capField: ${capField}
+defaults:
+  agent: general
+  models:
+    general: openai/gpt-5.4
+${effort === undefined ? "" : `  efforts:\n    general: ${effort}`}
+`);
+      const requests: CompletionRequest[] = [];
+      const completions = {
+        get: (): Provider => ({
+          name: "openai",
+          async complete(req) {
+            requests.push(req);
+            if (req.maxTokens < reasoningTokensBeforeBind + 200)
+              return { content: [], stopReason: "max_tokens" as const };
+            return {
+              content: [
+                {
+                  type: "tool_use" as const,
+                  id: "bind-1",
+                  name: OPERATOR_BIND_TOOL,
+                  input: { preset: "general", reason: "read ask" },
+                },
+              ],
+              stopReason: "tool_use" as const,
+            };
+          },
+        }),
+      };
+
+      const out = await operatorStage({ config: configured, completions }, { msg, mode: "shadow" });
+
+      expect(out).toMatchObject({ outcome: "binds" });
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({ maxTokens: expect.any(Number) });
+      expect(requests[0]!.effort).toBe(effort);
+      expect(requests[0]!.maxTokens).toBeGreaterThanOrEqual(reasoningTokensBeforeBind + 200);
+    },
+  );
 });
