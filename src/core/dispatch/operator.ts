@@ -1002,6 +1002,9 @@ export interface OperatorAnswer {
   decision: OperatorDecision;
   latencyMs: number;
   outputTokens: number;
+  /** Provider-safe context for the operator log. This is deliberately not
+   * persisted on the event or rendered to the requester. */
+  operatorDiagnostic?: string;
   /** The structured seam's attempts (record 0067), for the `operator` event;
    *  absent when the model call failed before any answer came back — a throw
    *  mid-loop keeps the attempts already collected. */
@@ -1063,10 +1066,11 @@ export async function runOperator(
   // the whole turn's estimate (three characters a token, as ever).
   let chars = 0;
   const attempts: StructuredAttempt[] = [];
-  const answered = (decision: OperatorDecision): OperatorAnswer => ({
+  const answered = (decision: OperatorDecision, operatorDiagnostic?: string): OperatorAnswer => ({
     decision,
     latencyMs: now() - started,
     outputTokens: Math.ceil(chars / 3),
+    ...(operatorDiagnostic !== undefined ? { operatorDiagnostic } : {}),
     ...(attempts.length > 0 ? { attempts } : {}),
   });
   // The turns so far, rendered by `providerStructuredModel` as assistant/user
@@ -1100,13 +1104,16 @@ export async function runOperator(
           const carried = attemptsOfThrow(err);
           if (carried) attempts.push(...carried);
           const failure = providerFailureOf(err);
-          return answered({
-            kind: "refusal",
-            cause: "provider",
-            providerFailure: failure.cause,
-            reason: failure.cause,
-            text: renderProviderFailure(failure.cause),
-          });
+          return answered(
+            {
+              kind: "refusal",
+              cause: "provider",
+              providerFailure: failure.cause,
+              reason: failure.cause,
+              text: renderProviderFailure(failure.cause),
+            },
+            failure.message,
+          );
         }
         const calls = JSON.stringify(err.calls);
         chars += calls.length;
@@ -1411,6 +1418,8 @@ export async function operatorStage(
         },
         model,
       );
+  if (answer.operatorDiagnostic !== undefined)
+    console.log(`[operator] ${msg.threadKey} provider refusal: ${answer.operatorDiagnostic}`);
   const event = operatorEventOf(mode, answer, ctx.intake);
   // A question keeps the ask it interrupted (issue 2046): the person's next
   // words in the thread join back onto it (`joinedAnswerRequest`) and bind as
@@ -1577,6 +1586,7 @@ export async function executeOperatorDecision(
     // A failed door call is an availability fact, not a routing decision. It
     // renders once and ends at the door even in an owned thread; falling
     // through would silently reinterpret the request as general or a steer.
+    io.requestFailed?.();
     await io.reply(event.refusalText ?? renderProviderFailure(event.providerFailure));
     await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
     return answered;

@@ -15,6 +15,7 @@ import {
 import {
   classifyProviderFailure,
   PROVIDER_FAILURE_CAUSES,
+  providerFailureParks,
   renderProviderFailure,
   WIRES,
   type ProviderFailureCause,
@@ -36,9 +37,20 @@ const FAILURE_MATRIX: ReadonlyArray<{
   body?: unknown;
   error?: unknown;
   operatorUrl?: string;
+  disposition: "park" | "end";
 }> = [
-  { cause: "transient", status: 503, body: { error: { type: "overloaded_error", message: "overloaded" } } },
-  { cause: "rate-limited", status: 429, body: { error: { code: "rate_limit_exceeded" } } },
+  {
+    cause: "transient",
+    status: 503,
+    body: { error: { type: "overloaded_error", message: "overloaded" } },
+    disposition: "park",
+  },
+  {
+    cause: "rate-limited",
+    status: 429,
+    body: { error: { code: "rate_limit_exceeded" } },
+    disposition: "park",
+  },
   {
     cause: "credit-or-quota-exhausted",
     status: 402,
@@ -49,10 +61,26 @@ const FAILURE_MATRIX: ReadonlyArray<{
       metadata: { limit_source: "openrouter_key_limit" },
     },
     operatorUrl: "https://openrouter.ai/workspaces/default/keys/key-test",
+    disposition: "park",
   },
-  { cause: "key-absent", status: 503, body: { error: { type: "provider_key_missing" } } },
-  { cause: "key-invalid", status: 401, body: { error: { type: "authentication_error" } } },
-  { cause: "model-unknown", status: 404, body: { error: { code: "model_not_found" } } },
+  {
+    cause: "key-absent",
+    status: 503,
+    body: { error: { type: "provider_key_missing" } },
+    disposition: "end",
+  },
+  {
+    cause: "key-invalid",
+    status: 401,
+    body: { error: { type: "authentication_error" } },
+    disposition: "end",
+  },
+  {
+    cause: "model-unknown",
+    status: 404,
+    body: { error: { code: "model_not_found" } },
+    disposition: "end",
+  },
   {
     cause: "request-rejected",
     status: 400,
@@ -63,18 +91,25 @@ const FAILURE_MATRIX: ReadonlyArray<{
         code: "invalid_json_schema",
       },
     },
+    disposition: "end",
   },
-  { cause: "permanent", status: 403, body: { error: { type: "content_filter" } } },
+  {
+    cause: "permanent",
+    status: 403,
+    body: { error: { type: "content_filter" } },
+    disposition: "end",
+  },
 ];
 
 describe("ProviderFailure — the closed failure matrix", () => {
   it.each(FAILURE_MATRIX)(
-    "classifies $cause from status and structured answer",
-    ({ cause, operatorUrl, ...answer }) => {
+    "classifies $cause from status and structured answer, then declares it must $disposition",
+    ({ cause, operatorUrl, disposition, ...answer }) => {
       expect(classifyProviderFailure(answer)).toMatchObject({
         cause,
         ...(operatorUrl !== undefined ? { operatorUrl } : {}),
       });
+      expect(providerFailureParks(cause)).toBe(disposition === "park");
     },
   );
 
@@ -86,7 +121,7 @@ describe("ProviderFailure — the closed failure matrix", () => {
     for (const cause of PROVIDER_FAILURE_CAUSES) {
       const sentence = renderProviderFailure(cause);
       expect(sentence.match(/[.!?](?:\s|$)/g)).toHaveLength(1);
-      expect(sentence).not.toMatch(/[{}]|https?:\/\/|code\"\s*:|message\"\s*:|metadata/i);
+      expect(sentence).not.toMatch(/[{}]|https?:\/\/|code"\s*:|message"\s*:|metadata/i);
       expect(sentence).not.toMatch(/\b(?:retry|re-send|visit|increase|contact|run)\b/i);
     }
   });
