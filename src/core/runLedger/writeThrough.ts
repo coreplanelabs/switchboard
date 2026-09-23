@@ -1025,6 +1025,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         turnIndex: report.firstIdx + turns.length,
         inFlight: report.inFlight,
         inboxConsumedSeq: report.inboxConsumedSeq,
+        ...(report.inboxDeferredSeqs?.length ? { inboxDeferredSeqs: report.inboxDeferredSeqs } : {}),
         remainingMs: report.remainingMs,
         turn: report.turn,
         iteration: report.iteration,

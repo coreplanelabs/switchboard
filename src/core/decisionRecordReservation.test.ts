@@ -4,6 +4,7 @@ import {
   DecisionRecordReservationUnavailableError,
   asksForDecisionRecord,
   decisionRecordNumberProblems,
+  durableDecisionRecordReservation,
 } from "./decisionRecordReservation.js";
 
 // Issue 2196 fixture: these are the two record-writing asks that were live
@@ -71,6 +72,21 @@ describe("DecisionRecordAllocator", () => {
     );
     storeAvailable = true;
     expect(await allocator.reserve("acme/api", "record-task")).toBe("0075");
+  });
+
+  // Feature: docs/reference/specs/agent-ship.md item 16 — a state-Worker
+  // timeout or non-2xx throw is the same typed unavailable reservation as its
+  // `{ ok: false }` answer, for ship and direct coding admission alike.
+  it("a throwing durable coordinator store becomes the typed unavailable reservation", async () => {
+    const reserve = durableDecisionRecordReservation({
+      reserveDecisionRecord: async () => {
+        throw new Error("state Worker timed out");
+      },
+    });
+
+    await expect(reserve("acme/api", "record-task", new Set(["0074"]))).rejects.toBeInstanceOf(
+      DecisionRecordReservationUnavailableError,
+    );
   });
 
   it("recognizes positive record-writing instructions, excludes negations, and gives an explicit marker priority", () => {

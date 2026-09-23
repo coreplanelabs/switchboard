@@ -183,10 +183,7 @@ import { resolveGithubIdentity } from "./execution/githubApp.js";
 import { bindingOf } from "./execution/authorBinding.js";
 import { dispatchIdentityRewrite } from "./execution/identityRewrite.js";
 import { DEPLOY_RESTART_NOTICE, setShutdownNotice } from "./core/dispatch/run.js";
-import {
-  DecisionRecordAllocator,
-  DecisionRecordReservationUnavailableError,
-} from "./core/decisionRecordReservation.js";
+import { DecisionRecordAllocator, durableDecisionRecordReservation } from "./core/decisionRecordReservation.js";
 import { channelVisibilityOf, writeAbandonedRunRecords } from "./core/dispatch/record.js";
 import { createSteerSender, defaultAdmission, steerRun } from "./core/dispatch/admission.js";
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
@@ -452,11 +449,7 @@ export async function runBot(): Promise<void> {
   const coordinatorInstances = buildCoordinatorInstanceStore(runHistoryCfg, processSecrets);
   const decisionRecordAllocator = new DecisionRecordAllocator(
     fetchDecisionRecordClaims,
-    async (repo, taskKey, claimed, existing) => {
-      const reserved = await coordinatorInstances.reserveDecisionRecord(repo, taskKey, claimed, existing);
-      if (!reserved.ok) throw new DecisionRecordReservationUnavailableError();
-      return reserved.number;
-    },
+    durableDecisionRecordReservation(coordinatorInstances),
   );
   // The plane's `admit` execution (record 0064, "The queue"): the object wrote
   // the admitted run's attaching row under an expired lease, so one reclaim

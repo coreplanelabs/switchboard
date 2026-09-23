@@ -489,6 +489,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   let paths: PiRunPaths | undefined;
   /** Hands the follow-ups pi was sent and never echoed back to the inbox; bound once the loop's drain exists. */
   let requeueUnechoed: () => void = () => {};
+  /** The ledger seqs of the follow-ups pi was sent and has not echoed; bound with `requeueUnechoed`. */
+  let unechoedSeqs: () => number[] = () => [];
   /** The loop or turn is over: drop what the gate and the transport still
    *  hold, close the stop owed, hear no more landings (defined with the gate,
    *  below; hoisted like `requeueUnechoed` so a loop that throws drops too). */
@@ -544,6 +546,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     seedLength: run.resume ? run.resume.messages.length + (run.resume.compactions?.length ?? 0) : run.messages.length,
     remainingMs: () => deadline - now(),
     ...(tail ? { mirroredTail: tail } : {}),
+    // The rows pi has not read yet: the cursor can pass one when a later row
+    // is consumed first (the plane's provider-up beside an ordinary steer).
+    owedInboxSeqs: () => [...(run.inbox?.pendingSeqs ?? []), ...unechoedSeqs()],
   });
   mirror.inboxConsumedSeq = run.resume?.inboxConsumedSeq ?? 0;
   placed = (event) => {
@@ -1355,6 +1360,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const [echoed] = unechoed.splice(at, 1);
       if (echoed!.seq > mirror.inboxConsumedSeq) mirror.inboxConsumedSeq = echoed!.seq;
     };
+    unechoedSeqs = () =>
+      unechoed.flatMap((u) => u.inputs.flatMap((i) => (i.ledgerSeq !== undefined ? [i.ledgerSeq] : [])));
     requeueUnechoed = () => {
       // A buffered reissue row goes with the loop, never back to the inbox: the
       // plane's sentence is a control signal for this loop's hold, and requeued
@@ -2390,7 +2397,18 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               if (obs.response.success === false) {
                 turnParkSettled = false;
                 note("harness_error", "the follow-up turn's model retry prompt was refused; the failure remains held");
-              } else clearTurnProviderHold();
+              } else {
+                // An up row can land after the retry prompt was sent but before
+                // its response is observed. Drain that race before clearing the
+                // hold, then checkpoint every buffered row the winning retry
+                // made redundant so a restart cannot offer it again.
+                drainTurnReissues();
+                mirror.inboxConsumedSeq = Math.max(
+                  mirror.inboxConsumedSeq,
+                  ...turnReissueRows.map((item) => item.ledgerSeq ?? 0),
+                );
+                clearTurnProviderHold();
+              }
             }
           }
           if (obs.response?.id === id && obs.response.success === false)

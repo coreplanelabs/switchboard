@@ -404,6 +404,45 @@ describe("run ledger — finishing, finish, handoff, reclaim (items 31, 33)", ()
     expect(live.find((x) => x.runId === "alive")?.ownerGen).toBe("g1");
     expect(live.find((x) => x.runId === "mine")?.ownerGen).toBe("g2"); // untouched by its own generation's reclaim
   });
+
+  it("reclaim offers the deferred rows at or below the cursor with every row past it; a malformed deferred list is refused", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "parked", "slack:C1:1.0"));
+    for (const text of ["ordinary", "earlier read", "provider up", "later"])
+      await post("/runs/inbox", { storeKey: key, runId: "parked", message: { text } });
+    for (const inboxDeferredSeqs of [[0], [1.5], "1", [-1]])
+      expect(
+        (
+          await post("/runs/step", {
+            storeKey: key,
+            runId: "parked",
+            gen: "g1",
+            record: { ...step({ inboxConsumedSeq: 3 }), inboxDeferredSeqs },
+          })
+        ).status,
+      ).toBe(400);
+    expect(
+      (
+        await post("/runs/step", {
+          storeKey: key,
+          runId: "parked",
+          gen: "g1",
+          record: step({ inboxConsumedSeq: 3, inboxDeferredSeqs: [1] }),
+        })
+      ).status,
+    ).toBe(200);
+    const r = await post("/runs/reclaim", {
+      storeKey: key,
+      gen: "g2",
+      now: Date.now() + LEASE_MS + 1_000,
+      leaseMs: LEASE_MS,
+    });
+    const [taken] = r.data.runs as Array<{ inbox: Array<{ seq: number; message: { text: string } }> }>;
+    expect(taken!.inbox.map((i) => [i.seq, i.message.text])).toEqual([
+      [1, "ordinary"],
+      [4, "later"],
+    ]);
+  });
 });
 
 // docs/reference/specs/run-history.md items 47–48: the coordinator's event rides

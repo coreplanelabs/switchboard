@@ -125,6 +125,32 @@ export class DecisionRecordReservationUnavailableError extends Error {
   }
 }
 
+type DecisionRecordReservationStore = {
+  reserveDecisionRecord(
+    repo: string,
+    taskKey: string,
+    claimed: ReadonlySet<string>,
+    existing?: string,
+  ): Promise<{ ok: true; number: string } | { ok: false }>;
+};
+
+/** Adapts the coordinator store's unavailable answer and transport throws to
+ * the one typed failure both admission paths render. */
+export function durableDecisionRecordReservation(
+  store: DecisionRecordReservationStore,
+): DurableDecisionRecordReservation {
+  return async (repo, taskKey, claimed, existing) => {
+    try {
+      const reserved = await store.reserveDecisionRecord(repo, taskKey, claimed, existing);
+      if (!reserved.ok) throw new DecisionRecordReservationUnavailableError();
+      return reserved.number;
+    } catch (error) {
+      if (error instanceof DecisionRecordReservationUnavailableError) throw error;
+      throw new DecisionRecordReservationUnavailableError();
+    }
+  };
+}
+
 /** Serializes allocations per repository inside one runner. Every allocation
  * begins from main plus open pull requests. Production commits through the
  * state Worker's atomic durable ledger; an unavailable durable callback fails

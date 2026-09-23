@@ -31,4 +31,7 @@ export interface StepReport {
   /** The highest run-ledger inbox seq among the follow-ups drained so far
    *  (run-history item 40): a resume folds in only what lies past it. */
   inboxConsumedSeq: number;
+  /** Inbox seqs at or below `inboxConsumedSeq` the run was handed and has not
+   *  read yet: a resume folds them in again beside what lies past the cursor. */
+  inboxDeferredSeqs?: number[];
 }

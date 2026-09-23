@@ -280,6 +280,20 @@ describe("InMemoryRunLedger", () => {
     expect(ledger.live.get("mine")).toMatchObject({ ownerGen: "g2", phase: "live", leaseUntil: 0 + LEASE_MS }); // untouched
   });
 
+  it("reclaim offers the deferred rows at or below the cursor with every row past it, and nothing else the cursor passed", async () => {
+    let t = 0;
+    const ledger = new InMemoryRunLedger(() => t);
+    await ledger.claim(claimReq("parked", "slack:C1:1.0"));
+    for (const text of ["ordinary", "earlier read", "provider up", "later"]) await ledger.pushInbox("parked", { text });
+    await ledger.step("parked", "g1", { ...stepRecord(1, 2), inboxConsumedSeq: 3, inboxDeferredSeqs: [1] }, []);
+    t = 40_000;
+    const [taken] = await ledger.reclaim("g2", t, LEASE_MS);
+    expect(taken!.inbox.map((i) => [i.seq, i.message.text])).toEqual([
+      [1, "ordinary"],
+      [4, "later"],
+    ]);
+  });
+
   it("handoff marks only this generation's live runs; finishing cannot be handed off; a reclaimed finishing run comes back live", async () => {
     let t = 0;
     const ledger = new InMemoryRunLedger(() => t);

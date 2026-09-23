@@ -107,7 +107,7 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
     expect(decision).toMatchObject({ verdict: "addressed", source: "model", reason: "a follow-up ask" });
   });
 
-  it("a timeout is silent with source: timeout; a thrown provider error is silent with source: error", async () => {
+  it("a timeout crosses the typed provider-failure seam as transient; a thrown provider error is silent with source: error", async () => {
     const timedOut: RouteModel = async () => {
       const err = new Error("the operation timed out");
       err.name = "TimeoutError";
@@ -116,6 +116,8 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
     expect(await decideIntake(input(), deps({ model: timedOut }))).toMatchObject({
       verdict: "silent",
       source: "timeout",
+      providerFailure: "transient",
+      reason: "The model provider is temporarily unavailable; this request did not start.",
     });
 
     const failing: RouteModel = async () => {
@@ -152,6 +154,23 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
   // Feature: docs/reference/specs/model-proxy.md item 12b — askStructured
   // retains earlier malformed attempts by wrapping a later throw; the typed
   // ProviderFailure inside that wrapper still owns the disposition.
+  it("a timeout after a malformed answer keeps the attempt and crosses as a transient provider failure", async () => {
+    let calls = 0;
+    const model: RouteModel = async () => {
+      if (calls++ === 0) return "not a verdict";
+      const err = new Error("the operation was aborted by the timeout");
+      err.name = "AbortError";
+      throw err;
+    };
+    expect(await decideIntake(input(), deps({ model }))).toMatchObject({
+      verdict: "silent",
+      source: "timeout",
+      providerFailure: "transient",
+      reason: "The model provider is temporarily unavailable; this request did not start.",
+      attempts: [{ outcome: "violation" }],
+    });
+  });
+
   it("a malformed answer followed by a 402 keeps the nested credit failure park-capable", async () => {
     let calls = 0;
     const model: RouteModel = async () => {

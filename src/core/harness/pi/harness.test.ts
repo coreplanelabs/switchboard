@@ -25,7 +25,8 @@ import {
   wrapUpInstruction,
 } from "../windDown.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
-import { deliverPlaneSteer } from "../../runLedger/writeThrough.js";
+import { InMemoryRunLedger } from "../../runLedger/inMemory.js";
+import { createLedgerWriteThrough, deliverPlaneSteer } from "../../runLedger/writeThrough.js";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { bearerHashOf, RunBearerStore } from "../../modelProxy/runBearers.js";
 import type { RunEvent } from "../../runEvents.js";
@@ -1161,6 +1162,182 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(String(prompts[2].id)).toContain(":reissue");
     expect(w.inbox.size).toBe(0);
     await session.end();
+  });
+
+  // Feature: docs/reference/specs/harness-pi.md item 6 — a provider-up row
+  // buffered while a post-loop local retry is in flight is consumed when that
+  // retry wins, so a restart cannot replay the row into a later provider hold.
+  it("a provider-up buffered during a successful follow-up retry is consumed before restart", async () => {
+    const w = world({ providerPark: true, sleep: async () => new Promise<void>((resolve) => setImmediate(resolve)) });
+    let prompts = 0;
+    w.container.onStdin = (line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry")
+        w.container.emit({ id: cmd.id, type: "response", command: "set_auto_retry", success: true });
+      if (cmd.type === "get_state")
+        w.container.emit({
+          id: cmd.id,
+          type: "response",
+          command: "get_state",
+          success: true,
+          data: { sessionFile: `${paths.sessionDir}/s.jsonl`, sessionId: "sid", isStreaming: false },
+        });
+      if (cmd.type !== "prompt") return;
+
+      const prompt = prompts++;
+      if (prompt === 2) {
+        w.inbox.push({
+          text: reissueSteerSentence("anthropic"),
+          userId: "plane",
+          userName: "plane",
+          at: NOW,
+          ledgerSeq: 3,
+        });
+        // One ordinary loop iteration lets the live inbox drain while the
+        // retry's prompt response is still pending.
+        w.container.emit({ type: "queue_update" });
+      }
+      w.container.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      if (prompt === 0) finalTurn(w.container, "loop done");
+      else if (prompt === 1)
+        w.container.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "502 the model provider did not answer",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else if (prompt === 2) finalTurn(w.container, "follow-up recovered on the local retry");
+      else w.container.loseTransport("word", "vm-new");
+    };
+
+    const session = await w.open();
+    await expect(
+      session.followUp({ text: "write the PR description", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+    ).resolves.toBe("follow-up recovered on the local retry");
+
+    const restart = await session
+      .followUp({ text: "one more turn", maxTurns: 4, maxMinutes: 5, toolContext: { executor } })
+      .catch((error: unknown) => error);
+    expect(restart).toBeInstanceOf(PiContainerReplacedError);
+    const consumedAtRestart = (restart as PiContainerReplacedError).record.inboxConsumedSeq;
+    expect(consumedAtRestart).toBe(3);
+    const durableInbox = [{ ledgerSeq: 3, text: reissueSteerSentence("anthropic") }];
+    expect(durableInbox.filter((row) => row.ledgerSeq > consumedAtRestart)).toEqual([]);
+  });
+
+  // Feature: docs/reference/specs/harness-pi.md item 6 — one drain hands pi an
+  // ordinary follow-up (a steer) and the plane's provider-up row (the reissue
+  // prompt). pi echoes the prompt first, so the inbox cursor passes the steer
+  // before pi has read it; the durable step names the steer deferred, so a
+  // process restart's reclaim offers it again and the next generation delivers
+  // it, while the consumed provider-up row is never replayed.
+  it("an ordinary follow-up the cursor passed beside a consumed provider-up row survives a process restart: the reclaim offers it and the next generation steers it into pi", async () => {
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const wt = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-A",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+      sleep: async () => {},
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      schedule: () => ({ cancel() {} }),
+    });
+    const w = world({ providerPark: true });
+    const opened = await wt.open({
+      runId: "run-7",
+      threadKey: "slack:C1:1.0",
+      startedAt: NOW,
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0", agent: "coding", model: "p/m" },
+      system: "You are the coding agent.",
+      tools: [],
+      seed: { messages: w.run.messages, budgetMs: 600_000 },
+    });
+    if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
+    const ledgerRun = opened.run;
+    let written = 0;
+    w.run.onStep = async (report) => {
+      await ledgerRun.step(report);
+      written++;
+    };
+    const ordinary = { text: "also bump the changelog", userId: "slack:UALICE", at: NOW };
+    const up = { text: reissueSteerSentence("anthropic"), userId: "plane", userName: "plane", at: NOW };
+    const where = { channelId: "slack:C1", threadKey: "slack:C1:1.0" };
+    const ordinarySeq = (await ledger.pushInbox("run-7", { ...where, ...ordinary })).seq!;
+    const upSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
+    expect(upSeq).toBeGreaterThan(ordinarySeq);
+
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "502 the model provider did not answer",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else {
+        // pi reads the reissue prompt first; the steer waits for its next
+        // boundary. The prompt's echo and the next step land, then the bot dies.
+        echoPrompt(c);
+        c.emit({
+          type: "message_end",
+          message: assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } }]),
+        });
+      }
+    });
+    const done = w.start().catch((error: unknown) => error);
+    await vi.waitFor(() => expect(w.notes.some((note) => note.includes("the turn is held"))).toBe(true));
+    w.inbox.push({ ...ordinary, ledgerSeq: ordinarySeq });
+    w.inbox.push({ ...up, ledgerSeq: upSeq });
+    await vi.waitFor(() => expect(written).toBe(1));
+    const steered = w.container.commands().filter((c) => c.type === "steer");
+    expect(steered).toHaveLength(1);
+    expect(String(steered[0]!.message)).toContain("also bump the changelog");
+
+    // The bot process dies here; the next generation reclaims the row.
+    ledger.live.get("run-7")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-B", NOW, 30_000);
+    expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(upSeq);
+    expect(reclaimed!.inbox.map((item) => item.seq)).toEqual([ordinarySeq]);
+    w.control.requestStop("hard");
+    await done;
+
+    const next = world();
+    for (const item of reclaimed!.inbox)
+      next.inbox.push({
+        text: String(item.message.text),
+        userId: String(item.message.userId),
+        at: Number(item.message.at),
+        ledgerSeq: item.seq,
+      });
+    scriptedPi(next.container, () => bashTurn(next, "c1", "ls", "files"));
+    const scripted = next.container.onStdin!;
+    next.container.onStdin = (line, c) => {
+      scripted(line, c);
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type !== "steer") return;
+      const echo = { role: "user", content: [{ type: "text", text: String(cmd.message) }] };
+      c.emit({ type: "message_start", message: echo }, { type: "message_end", message: echo });
+      finalTurn(c, "done");
+    };
+    await next.start();
+    const delivered = next.container.commands().filter((c) => c.type === "steer");
+    expect(delivered).toHaveLength(1);
+    expect(String(delivered[0]!.message)).toContain("also bump the changelog");
+    expect(String(delivered[0]!.message)).not.toContain(reissueSteerSentence("anthropic"));
+    expect(next.steps.at(-1)?.inboxConsumedSeq).toBe(ordinarySeq);
   });
 
   it("a 5xx then success: the transient failure is retried after the ladder's first backoff — pi is re-prompted and the retry's answer is the run's", async () => {

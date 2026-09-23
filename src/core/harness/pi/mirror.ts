@@ -97,6 +97,11 @@ export interface MirrorDeps {
    *  first row the mirror is about to write that equals it is that row, and
    *  is not written twice. */
   mirroredTail?: LedgerTail;
+  /** The ledger inbox seqs the run was handed and pi has not yet read — still
+   *  queued for the run, or steered and not echoed. Each report names those at
+   *  or below `inboxConsumedSeq` as deferred (run-history item 40), so the
+   *  cursor passing one never drops it from a resume. */
+  owedInboxSeqs?: () => readonly number[];
 }
 
 /** Feeds pi's finished messages to the ledger as the runner would: every
@@ -125,6 +130,14 @@ export class PiMirror {
   private readonly compactionRows: AssembledCompaction[] = [];
   /** The highest ledger inbox seq folded in so far (run-history item 40). */
   inboxConsumedSeq = 0;
+
+  /** The owed seqs the cursor has already passed, ascending; absent when none. */
+  private inboxDeferred(): { inboxDeferredSeqs?: number[] } {
+    const deferred = [...new Set(this.deps.owedInboxSeqs?.() ?? [])]
+      .filter((seq) => seq <= this.inboxConsumedSeq)
+      .sort((a, b) => a - b);
+    return deferred.length > 0 ? { inboxDeferredSeqs: deferred } : {};
+  }
 
   constructor(private readonly deps: MirrorDeps) {
     this.idx = deps.seedLength;
@@ -235,6 +248,7 @@ export class PiMirror {
       iteration: this.iteration++,
       remainingMs: Math.max(0, this.deps.remainingMs()),
       inboxConsumedSeq: this.inboxConsumedSeq,
+      ...this.inboxDeferred(),
     };
     this.idx += turns.length;
     this.lastAssistantIdx = this.idx - 1; // the assistant turn is the step's last row
@@ -264,6 +278,7 @@ export class PiMirror {
       iteration: this.iteration,
       remainingMs: Math.max(0, this.deps.remainingMs()),
       inboxConsumedSeq: this.inboxConsumedSeq,
+      ...this.inboxDeferred(),
     };
     this.idx += turns.length + 1;
     this.rows.push(...turns);
