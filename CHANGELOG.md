@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.261.0](https://github.com/coreplanelabs/switchboard/compare/v1.260.6...v1.261.0) (2026-09-23)
+
+
+### Features
+
+* **runs:** persist one server-owned live state ([#2303](https://github.com/coreplanelabs/switchboard/issues/2303)) ([d5442bd](https://github.com/coreplanelabs/switchboard/commit/d5442bd0297f17c693094347d55ecc2b8cf25196))
+
+
+### Bug fixes
+
+* **harness:** persist provider recovery checkpoints ([#2284](https://github.com/coreplanelabs/switchboard/issues/2284)) ([a03cdf3](https://github.com/coreplanelabs/switchboard/commit/a03cdf35946b9cef8eb0858d31079a9f27208088))
+
+
+### Documentation
+
+* **core:** separate request roles through effect execution ([#2301](https://github.com/coreplanelabs/switchboard/issues/2301)) ([db2e87a](https://github.com/coreplanelabs/switchboard/commit/db2e87aef544e625aad4397f69cb3ffb1ebac04b))
+* **docs:** accept durable plan work record ([#2295](https://github.com/coreplanelabs/switchboard/issues/2295)) ([5eb4fd4](https://github.com/coreplanelabs/switchboard/commit/5eb4fd40f81ae86e84749ffd9bed0fe79484cf6f))
+* **docs:** guide agent-led development ([#2296](https://github.com/coreplanelabs/switchboard/issues/2296)) ([6237ab3](https://github.com/coreplanelabs/switchboard/commit/6237ab3f13358f401d0c5280705fa894a9a6431e))
+* **docs:** move text planning into S2 ([#2304](https://github.com/coreplanelabs/switchboard/issues/2304)) ([a2438bf](https://github.com/coreplanelabs/switchboard/commit/a2438bf6469a93f42e5e54cc0597b7e65cb5c468))
+* **docs:** propose external plans before code starts ([#2287](https://github.com/coreplanelabs/switchboard/issues/2287)) ([4062fd2](https://github.com/coreplanelabs/switchboard/commit/4062fd2d8286fd8bfaccbb5fe15e5edbeb0f4185))
+
 ## [1.260.6](https://github.com/coreplanelabs/switchboard/compare/v1.260.5...v1.260.6) (2026-09-23)
 
 
