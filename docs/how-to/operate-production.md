@@ -31,6 +31,18 @@ npx --yes @coreplane/switchboard@<version> deploy all --affected
 | bot | the container is mid-rollout |
 | resident | any resident has work in flight (needs `RESIDENT_READ_TOKEN`); with `RESIDENT_DRAIN_TOKEN` the step first drains the fleet — new runs wait at their attach, the runs in flight finish — and waits up to 60 min for them instead of 30 min for a quiet minute |
 
+## Roll back the bot image
+
+Run the prior release's full bot deploy from the operator directory. Pin the released CLI; `--force` is the deliberate override for the supersede guard.
+
+```bash
+npx --yes <package>@<prior-version> deploy all --only bot --force
+```
+
+This deploy updates the existing container application; no application deletion is part of rollback. Success requires all three facts: the application version advanced, its target is the prior release's image, and `/healthz.build.commit` is the prior package's exact commit. A retained target or a different/short commit fails the bot step by name.
+
+`deploy images` only copies registry inventory. A Worker-version rollback with `wrangler rollback` changes only the Worker deployment, and `deploy restart` restarts the image selected by the container application's current target. None of those operations is a container-image rollback, alone or in combination; after them a newer application target remains newer.
+
 ## Change the config without a release
 
 ```bash

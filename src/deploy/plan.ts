@@ -87,8 +87,9 @@ export interface CapabilityCheck {
   needs: string;
 }
 
-/** The sandbox Worker's container class (deploy/cloudflare-sandbox/wrangler.jsonc `class_name`);
- *  wrangler names the Containers application `<script>-<class lowercased>`. */
+/** The bot and sandbox container classes from their wrangler templates; wrangler names each
+ *  Containers application `<script>-<class lowercased>`. */
+export const BOT_CONTAINER_CLASS = "SwitchboardServer";
 export const SANDBOX_CONTAINER_CLASS = "SwitchboardSandbox";
 /** The bearer every route on the sandbox Worker needs, `/healthz` included (execution.md item 13). */
 export const SANDBOX_BEARER_ENV = "SANDBOX_TOKEN";
@@ -110,9 +111,9 @@ export function containerApplicationName(script: string, className: string): str
 
 /** The static half of a live gate — WHICH proof a step needs; the profile supplies where to read it. */
 export type LiveGateSpec =
-  /** The bot: `/healthz` answered by a container that is not draining AND reporting
-   *  the deployed commit as its `build.commit` (src/deploy/liveGate.ts `decideLive`). */
-  | { kind: "health" }
+  /** The bot: its application advances to wrangler's target AND `/healthz` reports
+   *  the full deployed commit (src/deploy/botLiveGate.ts `decideBotLive`). */
+  | { kind: "bot"; containerClass: string }
   /** The sandbox: the Worker serves the deployed commit (bearer from `bearerEnv`),
    *  every RUNNING instance of its container application is on the application's
    *  version, and an `/exec` probe answers `echo ok` from an instance on that version
@@ -121,9 +122,10 @@ export type LiveGateSpec =
 
 /** A live gate bound to an installation: the spec plus the URL (and application) the profile gives it. */
 export type LiveGate =
-  | { kind: "health"; healthUrl: string }
+  | { kind: "bot"; healthUrl: string; containerApp: string }
   | { kind: "sandbox"; healthUrl: string; bearerEnv: string; containerApp: string };
 
+export type BotLiveGate = Extract<LiveGate, { kind: "bot" }>;
 export type SandboxLiveGate = Extract<LiveGate, { kind: "sandbox" }>;
 
 /** The static half of a Worker — true for every installation. */
@@ -243,10 +245,10 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
       ],
     },
     preflight: { forceEnv: DEPLOY_FORCE_ENV, baseUrlEnv: "SWITCHBOARD_BASE_URL" },
-    liveGate: { kind: "health" },
+    liveGate: { kind: "bot", containerClass: BOT_CONTAINER_CLASS },
     // The preflight reads the container application and the deploy pushes the image: both need Containers.
     capabilities: [CONTAINERS_CAPABILITY],
-    why: "container shim — preflight refuses only over a rollout in progress (runs in flight hand off); done only when the new container is live. A rotated bot secret needs no build: `wrangler secret put` alone leaves the running container on its old env — `deploy restart` restarts it on the current env",
+    why: "container shim — preflight refuses only over a rollout in progress (runs in flight hand off); done only when the application advances to the deployed image and /healthz serves the exact commit. A rotated bot secret needs no build: `wrangler secret put` alone leaves the running container on its old env — `deploy restart` restarts it on the current application target",
   },
   {
     name: "resident",
@@ -292,14 +294,10 @@ export const DEPLOY_ORDER: readonly WorkerName[] = WORKER_SPECS.map((w) => w.nam
 /** Pure: a gate spec bound to the installation — the Worker's `/healthz`, and for the
  *  sandbox the Containers application wrangler names from the profile's script name. */
 function bindLiveGate(gate: LiveGateSpec, script: string, healthUrl: string): LiveGate {
-  return gate.kind === "health"
-    ? { kind: "health", healthUrl }
-    : {
-        kind: "sandbox",
-        healthUrl,
-        bearerEnv: gate.bearerEnv,
-        containerApp: containerApplicationName(script, gate.containerClass),
-      };
+  const containerApp = containerApplicationName(script, gate.containerClass);
+  return gate.kind === "bot"
+    ? { kind: "bot", healthUrl, containerApp }
+    : { kind: "sandbox", healthUrl, bearerEnv: gate.bearerEnv, containerApp };
 }
 
 /** Pure: the Workers of one installation — each spec the profile has a Worker
@@ -319,8 +317,8 @@ export function workersFor(profile: DeploymentProfile): WorkerDef[] {
         script,
         baseUrl,
         healthUrl,
-        // A preflighted step with a health gate reads the same URL for its wait heartbeat.
-        ...(preflight ? { preflight: liveGate?.kind === "health" ? { ...preflight, healthUrl } : preflight } : {}),
+        // The bot preflight reads the same URL as its application + health live gate.
+        ...(preflight ? { preflight: liveGate?.kind === "bot" ? { ...preflight, healthUrl } : preflight } : {}),
         ...(liveGate ? { liveGate: bindLiveGate(liveGate, script, healthUrl) } : {}),
       },
     ];
@@ -371,7 +369,7 @@ export interface DeployStep {
   /** The fleet drain (resident-repos item 69): the Worker's origin to post `/drain` and `/undrain` at,
    *  and the env var holding the drain-only bearer. Present only for a Worker whose spec can drain. */
   drain?: { url: string; tokenEnv: string };
-  /** After the deploy, wait until the step's gate holds (the bot's drain; the sandbox's rollout + probe). */
+  /** After the deploy, wait until the step's gate holds (the bot's application + exact health; the sandbox's rollout + probe). */
   liveGate?: LiveGate;
   why: string;
 }
@@ -595,8 +593,8 @@ export function formatPlan(plan: DeployPlan): string {
         ? ` — needs ${s.requiredEnv.map((r) => (r.anyOf.length === 1 ? r.anyOf[0] : `one of ${r.anyOf.join(" / ")}`)).join(", ")}`
         : "";
     const live = s.liveGate
-      ? s.liveGate.kind === "health"
-        ? ` — then wait until live (${s.liveGate.healthUrl} not draining + build.commit == HEAD)`
+      ? s.liveGate.kind === "bot"
+        ? ` — then wait until live (${s.liveGate.containerApp} advances to the deployed image + ${s.liveGate.healthUrl} build.commit exactly == HEAD)`
         : ` — then wait until live (${s.liveGate.healthUrl} build.commit == HEAD + every running ${s.liveGate.containerApp} instance on the app version + an /exec probe answers ok from one)`
       : "";
     const cap =

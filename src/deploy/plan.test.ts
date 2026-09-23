@@ -147,7 +147,11 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
         baseUrlEnv: "SWITCHBOARD_BASE_URL",
         healthUrl: "https://sb.example.test/healthz",
       },
-      liveGate: { kind: "health", healthUrl: "https://sb.example.test/healthz" },
+      liveGate: {
+        kind: "bot",
+        healthUrl: "https://sb.example.test/healthz",
+        containerApp: "sb-switchboardserver",
+      },
     });
     // The sandbox's container application follows its script name: another script, another app.
     const renamed = workersFor({
@@ -202,8 +206,12 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
   it("the bot and the sandbox carry live gates — deployed ≠ live for a container rollout; memory and resident have none", () => {
     const byName = Object.fromEntries(WORKERS.map((w) => [w.name, w]));
     const specs = Object.fromEntries(WORKER_SPECS.map((w) => [w.name, w]));
-    expect(specs.bot.liveGate).toEqual({ kind: "health" });
-    expect(byName.bot.liveGate).toEqual({ kind: "health", healthUrl: BOT_HEALTH_URL });
+    expect(specs.bot.liveGate).toEqual({ kind: "bot", containerClass: "SwitchboardServer" });
+    expect(byName.bot.liveGate).toEqual({
+      kind: "bot",
+      healthUrl: BOT_HEALTH_URL,
+      containerApp: "switchboard-switchboardserver",
+    });
     expect(BOT_HEALTH_URL).toBe("https://switchboard.example.test/healthz");
     // The sandbox gate reads its Worker, its container application and an /exec probe, all with the
     // same bearer its /healthz needs — so the gate's bearer IS the health bearer — and the application is the
@@ -228,7 +236,11 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     const p = plan({ dryRun: true });
     expect(p.steps.find((s) => s.name === "bot")).toMatchObject({
       healthUrl: BOT_HEALTH_URL,
-      liveGate: { kind: "health", healthUrl: BOT_HEALTH_URL },
+      liveGate: {
+        kind: "bot",
+        healthUrl: BOT_HEALTH_URL,
+        containerApp: "switchboard-switchboardserver",
+      },
     });
     expect(p.steps.find((s) => s.name === "sandbox")).toMatchObject({ liveGate: byName.sandbox.liveGate });
     expect(p.steps.find((s) => s.name === "sandbox")).not.toHaveProperty("healthUrl"); // no preflight heartbeat
@@ -236,7 +248,7 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     expect(p.steps.find((s) => s.name === "resident")).not.toHaveProperty("healthUrl");
     const text = formatPlan(p);
     expect(text).toContain(
-      "then wait until live (https://switchboard.example.test/healthz not draining + build.commit == HEAD)",
+      "then wait until live (switchboard-switchboardserver advances to the deployed image + https://switchboard.example.test/healthz build.commit exactly == HEAD)",
     );
     expect(text).toContain(
       "then wait until live (https://switchboard-sandbox.example.test/healthz build.commit == HEAD + every running switchboard-sandbox-switchboardsandbox instance on the app version + an /exec probe answers ok from one)",
@@ -494,7 +506,11 @@ describe("planDeploy over a partial profile", () => {
     expect(p.steps[0]).toMatchObject({
       script: "switchboard",
       dir: "deploy/cloudflare",
-      liveGate: { kind: "health", healthUrl: BOT_HEALTH_URL },
+      liveGate: {
+        kind: "bot",
+        healthUrl: BOT_HEALTH_URL,
+        containerApp: "switchboard-switchboardserver",
+      },
       retryOnPreflightRefusal: true,
     });
     expect(p.config).toEqual({ source: "config/config.production.yaml", document: CONFIG_DOCUMENT_KEY });
