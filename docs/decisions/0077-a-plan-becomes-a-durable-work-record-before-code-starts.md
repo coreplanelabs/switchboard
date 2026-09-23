@@ -278,3 +278,23 @@ The gate passes only if the reader names the canonical store pin, plan id plus d
 ## Public hygiene
 
 This record carries only public repository paths, public record and pull-request numbers, public product/provider names, and public documentation links needed to test the design. It identifies the decision-maker by role, not by name, and contains no Slack channel, user or message id, private URL, credential, customer or unpublished commercial fact.
+
+## Amended 2026-09-23 — text planning moves into S2 before direct-task admission
+
+**Re-evaluation.** The accepted delivery order put fresh direct-task admission in S2 but did not introduce `plan` until S3. That boundary cannot produce the complete typed artifact required by this decision: either S2 would have to restore the generated one-unit path under another name or admit work without the planning contract. Both would contradict the reason this record was accepted. The minimum correction is to move only the text form of the already-decided `plan` contract into S2. Fresh S2 admission remains closed until this amendment is reviewed and accepted.
+
+**Revised slice boundary.** S1 is unchanged. S2 publishes or adopts the parent URL and introduces text-only `plan` before admitting a fresh direct task: admitted text carries a stable source identity, provenance, digest, authorized reader and completeness; the agent returns the complete typed `PlanDraft`; deterministic code validates, canonicalizes, pins and publishes it; and success returns the same `PlanRef`. A named planning question returns no executable reference. `ship` with a valid `PlanRef` skips planning; `ship` with fresh admitted text invokes this contract. S2 does not admit file, image, issue or thread sources, and it exposes neither standalone `plan` invocation nor revision.
+
+S3 extends that same contract and agent to file, image, issue and thread adapters, including durable artifact references and completeness failures, and adds standalone planning and revision. It does not add another planner. S4 is unchanged.
+
+This amendment changes no artifact, validator, canonical bytes, authority, publication, loader, pin, execution or composer rule. `PlanArtifact` and `PlanRef` keep their accepted shapes; the coordinator-store pin remains canonical; the provider URL remains the human address; execution still has one `(planId, digest)` loader; and record 0073's one active composer and controlled retirement of the old composer remain intact. Text planning is not a generated-task compiler, and neither S2 nor S3 may recreate a repository-path or generated execution loader.
+
+**Five-answer acceptance recheck — no regression.**
+
+1. Execution still starts only from a complete `PlanRef` whose `(planId, digest)` loads exact validated bytes from the canonical store; the provider URL alone remains insufficient because it addresses a mutable human projection.
+2. The parent issue still represents the plan, unit issues its units, a Project the portfolio and labels cross-cutting groups; provider types still stop at the publication adapter.
+3. After a pipeline starts, GitHub may be unavailable and an incomplete unit projection remains retryable because execution resumes from the pin; store unavailability still blocks admission.
+4. Global automerge still permits only an attempt by the initiating actor under that actor's current effective authority, confirmation and repository rules; revocation still prevents merge.
+5. Repository seeds still enter through the one-time bootstrap import and generated one-unit requests still disappear into one pinned-artifact execution path. Moving the real text planner earlier supplies that path's artifact; it creates no compatibility execution path, second loader or second composer.
+
+The accepted rationale and all five acceptance answers therefore stand. This amendment corrects only which delivery slice first supplies the already-accepted planning contract.
