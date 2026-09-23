@@ -111,7 +111,7 @@ import type { ChannelIO, IncomingMessage, StagedFile, StatusActivity, StatusHand
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
-import { artifactLink, cardActivity, quietActivity, replyAck } from "./reply.js";
+import { artifactLink, cardActivity, quietActivity, replyAck, threadPageLink } from "./reply.js";
 import { shows } from "../verbosity.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
@@ -1740,10 +1740,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // the final reply below. A hard stop observed nothing above and posts
     // nothing; a relaunch that ended the run likewise (`tailSkipped`).
     if (isCodingPrRun && !tailSkipped() && !endingSalvageAttempted) {
-      // The requester's bound login (record 0062): the assignee and the
-      // requested-by line — present only when an identity admin bound one.
+      // A child may run in its own unit thread: link the request that started
+      // the pipeline, with the copied message as fallback for older records.
+      const instance =
+        coordinator && deps.coordinatorInstances
+          ? await deps.coordinatorInstances.get(coordinator.parentInstanceId).catch(() => undefined)
+          : undefined;
+      const requester = instance?.userId === msg.userId ? instance : msg;
+      // A verified GitHub login controls assignment, never header visibility.
       const requestedLogin =
-        identitySeam !== undefined ? await identitySeam.requestedLogin(msg.userId).catch(() => undefined) : undefined;
+        identitySeam !== undefined
+          ? await identitySeam.requestedLogin(requester.userId).catch(() => undefined)
+          : undefined;
       prNote = await root.span("run.pr_post_step", () =>
         runCodingPrPostStep({
           verbosity: resolved.verbosity,
@@ -1755,6 +1763,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             remoteRepo: observedRemoteRepo,
           },
           description: prDescription,
+          requestedBy: {
+            name: requester.userName?.trim() || requestedLogin || requester.userId,
+            threadUrl: threadPageLink(requester.threadKey),
+          },
           target: prTarget,
           openPullRequest: deps.openPullRequest ?? openPullRequest,
           findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
@@ -1768,9 +1780,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                   pullRequestHead: identitySeam.pullRequestHead,
                   isAssignable: identitySeam.isAssignable,
                   addAssignee: identitySeam.addAssignee,
-                  ...(requestedLogin !== undefined
-                    ? { requestedBy: { login: requestedLogin, surface: msg.channelId } }
-                    : {}),
+                  ...(requestedLogin !== undefined ? { requestedLogin } : {}),
                 },
               }
             : {}),

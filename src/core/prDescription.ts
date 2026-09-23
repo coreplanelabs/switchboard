@@ -392,25 +392,37 @@ export interface RenderContext {
   /** The PR head the anchors are rendered against — the full 40-char sha, so
    *  the link lands on the exact lines whatever the branch does next. */
   headSha: string;
-  /** The requester behind the run, when a binding names their GitHub login
-   *  (record 0062): one BOT-written line in the agents block — the
-   *  agent's description object is unchanged. No binding, no line. */
+  /** Bot-owned request provenance, independent of GitHub identity binding. */
   requestedBy?: RequestedBy;
 }
 
-/** The requested-by line's facts: the bound login, the surface the request
- *  arrived on, and the display names of the senders who steered the run. */
+/** Display identity is provenance, not authority to author Git commits. */
 export interface RequestedBy {
-  login: string;
-  surface: string;
+  name: string;
+  threadUrl?: string;
   steeredBy?: string[];
 }
 
-/** The one bot-written line in the agents block (record 0062). */
+/** Names from channel profiles are text, never Markdown or GitHub mentions. */
+function requesterText(text: string): string {
+  return text
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/[\\`*_{}[\]()#!|~]/g, "\\$&")
+    .replace(/@/g, "&#64;");
+}
+
+/** The first visible line, shared by ordinary and recovered pull requests. */
 export function requestedByLine(by: RequestedBy): string {
   const steered =
-    by.steeredBy !== undefined && by.steeredBy.length > 0 ? `; steered by ${by.steeredBy.join(", ")}` : "";
-  return `Requested by @${by.login} in ${by.surface}${steered}`;
+    by.steeredBy !== undefined && by.steeredBy.length > 0
+      ? `; steered by ${by.steeredBy.map(requesterText).join(", ")}`
+      : "";
+  const thread = by.threadUrl ? ` · [Thread](${by.threadUrl})` : "";
+  return `Requested by **${requesterText(by.name) || "Unknown requester"}**${thread}${steered}`;
 }
 
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -484,6 +496,7 @@ export function renderPrDescriptionMarkdown(desc: PrDescription, ctx: RenderCont
     throw new Error(`renderPrDescriptionMarkdown: headSha must be a full 40-char lowercase sha, got "${ctx.headSha}"`);
 
   const out: string[] = [];
+  if (ctx.requestedBy) out.push(requestedByLine(ctx.requestedBy), "");
   out.push(desc.tldr, "");
   out.push(`${MAP_LABELS.why} ${desc.why}`, "");
   out.push(MAP_LABELS.whereToLook, "");
@@ -510,12 +523,7 @@ export function renderPrDescriptionMarkdown(desc: PrDescription, ctx: RenderCont
       ...desc.validation.criteria.map((c) => `| ${cell(c.criterion)} | ${cell(c.proof)} |`),
     ]),
   );
-  // The requester's line rides the agents block beside the agent's own notes
-  // (record 0062): bot-written from the binding, never from the object.
-  const agentLines = [
-    ...(desc.agentNotes ? [desc.agentNotes] : []),
-    ...(ctx.requestedBy ? [requestedByLine(ctx.requestedBy)] : []),
-  ];
+  const agentLines = desc.agentNotes ? [desc.agentNotes] : [];
   if (agentLines.length > 0) out.push(...details(FOLD_SUMMARIES.agents, agentLines));
   out.push(GENERATED_FOOTER, "");
   return out.join("\n");
@@ -583,6 +591,10 @@ export function parsePrDescriptionMarkdown(body: string): ParsedPrDescription {
     .replace(/\r\n?/g, "\n")
     .split("\n")
     .filter((l) => l.trim() !== GENERATED_FOOTER);
+  // Attribution is render context, not a model-authored TL;DR. Only consume
+  // our leading line; the same words elsewhere remain part of the description.
+  if (/^Requested by \*\*(?:\\.|[^*\\])+\*\*(?: · \[Thread\]\([^\s)]+\))?(?:; steered by .*)?$/.test(lines[0] ?? ""))
+    lines.shift();
   const fenced = fenceMask(lines);
   const description: ParsedPrDescription["description"] = { pointers: [] };
 

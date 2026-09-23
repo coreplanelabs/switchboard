@@ -636,7 +636,7 @@ export async function runCodingPrPostStep(input: {
    *  of the other paths). Present, the rewrite runs before the open or edit of
    *  the pushed branch, the pull request's head is pinned to the rebuilt tip,
    *  the requester's bound login is assigned after the pre-check answers 204,
-   *  and the body carries the requested-by line when a binding exists. */
+   *  independently of the body's requester attribution. */
   identity?: {
     /** rewriteRunCommits over the target's start state (identityRewrite.ts). */
     rewrite: (args: {
@@ -651,10 +651,11 @@ export async function runCodingPrPostStep(input: {
     isAssignable: (repo: string, login: string) => Promise<boolean | undefined>;
     /** POST the assignee (githubPulls.addAssignee); a failure is logged, never thrown. */
     addAssignee: (repo: string, number: number, login: string) => Promise<void>;
-    /** The requested-by line's facts — present only when the requester has a
-     *  binding, so the body carries the line only then. */
-    requestedBy?: RequestedBy;
+    /** Verified binding for assignment only; display names confer no authority. */
+    requestedLogin?: string;
   };
+  /** Request provenance is available even without a GitHub binding. */
+  requestedBy?: RequestedBy;
   /** True when the dispatcher already ran the description turn
    *  (descriptionTurn.ts) for this push and it still submitted nothing — the
    *  warning then says so, so the reader knows the system asked and the model
@@ -754,12 +755,8 @@ export async function runCodingPrPostStep(input: {
     });
   }
   const ownPr = target.ownPr;
-  // The requested-by line's facts (record 0062; pr-description.md item 5): a
-  // property of every rendered body, never of one path — a body is always
-  // re-rendered whole, so an edit that dropped the line would silently lose
-  // the attribution the open put on the pull request. Present only when a
-  // binding names the requester.
-  const requestedBy = input.identity?.requestedBy;
+  // Every open and edit renders the same request provenance.
+  const requestedBy = input.requestedBy;
   // The workspace branch IS the thread's own pull request's head branch, as
   // GitHub named it. A workspace on the base — the thread returned to the
   // default once that branch was gone (resident-repos.md item 16's second
@@ -1098,18 +1095,19 @@ export async function runCodingPrPostStep(input: {
         }
         // The assignee: the requester's bound login, added after the
         // pre-check answers 204 and skipped with one log line after a 404.
-        if (requestedBy !== undefined) {
-          const assignable = await input.identity.isAssignable(repo, requestedBy.login).catch(() => undefined);
+        const requestedLogin = input.identity.requestedLogin;
+        if (requestedLogin !== undefined) {
+          const assignable = await input.identity.isAssignable(repo, requestedLogin).catch(() => undefined);
           if (assignable === true)
             await input.identity
-              .addAssignee(repo, opened.number, requestedBy.login)
+              .addAssignee(repo, opened.number, requestedLogin)
               .catch((err: unknown) =>
                 console.error(
-                  `[pr-post] ${logKey} assignee add failed for ${requestedBy.login} on ${repo}#${opened.number}: ${err instanceof Error ? err.message : String(err)}`,
+                  `[pr-post] ${logKey} assignee add failed for ${requestedLogin} on ${repo}#${opened.number}: ${err instanceof Error ? err.message : String(err)}`,
                 ),
               );
           else if (assignable === false)
-            console.log(`[identity] ${logKey} ${requestedBy.login} is not assignable on ${repo}; skipped`);
+            console.log(`[identity] ${logKey} ${requestedLogin} is not assignable on ${repo}; skipped`);
         }
       }
       console.log(

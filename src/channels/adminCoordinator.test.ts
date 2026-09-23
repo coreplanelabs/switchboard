@@ -1581,6 +1581,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     expect(h.opens).toHaveLength(1);
     expect(h.opens[0]).toMatchObject({ repo: "acme/api", headBranch: "plan/orchestration/u12", base: "main" });
     expect(h.opens[0]!.body).toContain("ended before it could open the pull request");
+    expect(h.opens[0]!.body).toMatch(/^Requested by \*\*alice\*\*/);
 
     // The record holds a description: title and body come from it — the why
     // from `why`, or from `whatWhy` on a record written under the previous
@@ -1599,6 +1600,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       [{ title: "U12: the fix", tldr: "Two sentences." }, undefined],
     ] as const) {
       const d = harness();
+      d.deps.runPageBase = "https://bot.example/runs";
       await d.instances.put(INSTANCE);
       await d.store.put(describe(description));
       await handleCoordinatorRequest(
@@ -1606,7 +1608,11 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
         d.deps,
       );
       expect(d.opens[0]!.title).toBe("U12: the fix");
-      expect(d.opens[0]!.body.startsWith("Two sentences.\n\n")).toBe(true);
+      expect(
+        d.opens[0]!.body.startsWith(
+          "Requested by **alice** · [Thread](https://bot.example/threads/slack%3AC1%3A1.0)\n\nTwo sentences.\n\n",
+        ),
+      ).toBe(true);
       expect(d.opens[0]!.body).not.toContain("undefined");
       if (expectedWhy) expect(d.opens[0]!.body).toContain(`\n\n${expectedWhy}\n\n_Rendered by the plan runner`);
       else expect(d.opens[0]!.body).toContain("Two sentences.\n\n_Rendered by the plan runner");
@@ -1632,6 +1638,23 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       plain.deps,
     );
     expect(plain.opens).toHaveLength(0);
+  });
+
+  it("recovery attributes the durable requester even when the child record or display name is missing", async () => {
+    const h = harness();
+    h.deps.runPageBase = "https://bot.example/runs";
+    await h.instances.put({ ...INSTANCE, userName: undefined });
+    await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+        parentInstanceId: INSTANCE.id,
+        recover: { runId: "11111111-1111-4111-8111-111111111111" },
+      }),
+      h.deps,
+    );
+    expect(h.opens[0].body.split("\n")[0]).toBe(
+      "Requested by **slack:UALICE** · [Thread](https://bot.example/threads/slack%3AC1%3A1.0)",
+    );
+    expect(h.opens[0].body.split("\n")[0]).not.toContain("/runs/");
   });
 
   it("the recovered pull request's title (issue 1877): a submitted description's title is used as is; without one the unit's title becomes a conventional line scoped with the plan's area and cut to the 72-character cap at a word boundary — never the unit heading verbatim", async () => {

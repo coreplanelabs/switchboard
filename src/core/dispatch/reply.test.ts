@@ -13,8 +13,25 @@ import {
   renderRefusal,
   replyCommandOutput,
   runPageLink,
+  threadPageLink,
   type ReplyDeps,
 } from "./reply.js";
+
+describe("threadPageLink — tokenless request provenance", () => {
+  it("links full Slack and web thread keys without a capability token or viewer-relative lane", () => {
+    expect(threadPageLink("slack:C1:1.0", "https://bot.example/")).toBe("https://bot.example/threads/slack%3AC1%3A1.0");
+    expect(threadPageLink("web:person:conv-1", "https://bot.example/?t=secret#hash")).toBe(
+      "https://bot.example/threads/web%3Aperson%3Aconv-1",
+    );
+    expect(threadPageLink("slack:C1:1.0)", "https://bot.example")).toBe(
+      "https://bot.example/threads/slack%3AC1%3A1.0%29",
+    );
+  });
+  it("omits the link for a missing or invalid public base rather than inventing a destination", () => {
+    for (const base of ["", "   ", "not a url", "javascript:alert(1)", "https://user:secret@bot.example"])
+      expect(threadPageLink("slack:C1:1.0", base)).toBeUndefined();
+  });
+});
 import { refusalOf, REFUSAL_CODES, type RefusalCode } from "../refusal.js";
 import { profileRefusalReply } from "./authorize.js";
 import { refusalReply } from "../threadAdmission.js";

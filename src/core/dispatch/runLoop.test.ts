@@ -4055,6 +4055,50 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(out.prNote).toContain("PR opened");
   });
 
+  it("PR attribution uses the initiating requester and thread even without a binding or after a binding lookup failure", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example.com");
+    for (const binding of ["ivy-dev", undefined, new Error("GitHub unavailable")]) {
+      const { description, s, opened } = startStateFixture();
+      const requestedLogin = vi.fn(async () => {
+        if (binding instanceof Error) throw binding;
+        return binding;
+      });
+      s.deps.identityRewrite!.requestedLogin = requestedLogin;
+      const instances = new InMemoryCoordinatorInstanceStore();
+      await instances.put({
+        id: "plan-attribution",
+        kind: "ship",
+        userId: s.ctx.msg.userId,
+        userName: "Ivy",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1.0",
+        repo: "o/r",
+        branch: "plan/p/u1",
+        base: "main",
+        createdAt: NOW,
+      });
+      s.deps.coordinatorInstances = instances;
+      const resume = finishing("Done.", { agent: "coding", state: { prDescription: description } });
+      await runLoop(s.deps, {
+        ...s.ctx,
+        coordinator: {
+          parentInstanceId: "plan-attribution",
+          idempotencyKey: "plan-attribution:U12/0/coding",
+          base: "main",
+        },
+        resume,
+        messages: resume.plan.messages,
+      });
+      expect(opened).toHaveLength(1);
+      expect(opened[0]).toMatchObject({
+        body: expect.stringMatching(
+          /^Requested by \*\*Ivy\*\* · \[Thread\]\(https:\/\/bot.example.com\/threads\/slack%3AC1%3A1.0\)/,
+        ),
+      });
+      expect(requestedLogin).toHaveBeenCalledWith(s.ctx.msg.userId);
+    }
+  });
+
   it("on the pi harness no pi is started and the one the previous generation left is ended at its recorded pid and root (harness-pi item 8)", async () => {
     const container = new FakeHarnessContainer();
     const s = setup("", {

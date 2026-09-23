@@ -2087,7 +2087,7 @@ describe("salvageTargetOf — where the budget-end salvage may push, and when it
 // opened at the rebuilt tip with the count on the note and the `pr_opened`
 // event; the head is pinned after the open; the requester's bound login is
 // assigned after a 204 and skipped after a 404; the body carries the
-// requested-by line only with a binding (pr-description.md item 5).
+// requested-by line independently of a binding (pr-description.md item 5).
 describe("runCodingPrPostStep — the identity rewrite before the open (record 0062)", () => {
   const REBUILT = "f0e1d2c3b4a5968778695a4b3c2d1e0f12345678";
   const emptyStart = { kind: "known" as const, commits: [] };
@@ -2096,7 +2096,7 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
     rewrite?: RewriteResult;
     prHead?: string;
     assignable?: boolean | undefined;
-    requestedBy?: { login: string; surface: string };
+    requestedLogin?: string;
   }) {
     const rewrite = vi.fn(async () => over.rewrite ?? ({ kind: "clean" } as RewriteResult));
     const addAssignee = vi.fn(async () => undefined);
@@ -2108,7 +2108,7 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
         pullRequestHead,
         isAssignable,
         addAssignee,
-        ...(over.requestedBy !== undefined ? { requestedBy: over.requestedBy } : {}),
+        ...(over.requestedLogin !== undefined ? { requestedLogin: over.requestedLogin } : {}),
       },
       rewrite,
       addAssignee,
@@ -2199,7 +2199,7 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
       const seam = identityOf({
         prHead: HEAD,
         assignable,
-        requestedBy: { login: "ivy-dev", surface: "slack:C1" },
+        requestedLogin: "ivy-dev",
       });
       const note = await runCodingPrPostStep({ ...common(events, spy), identity: seam.identity });
       expect(seam.isAssignable).toHaveBeenCalledWith("acme/api", "ivy-dev");
@@ -2210,43 +2210,56 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
     }
   });
 
-  it("the body carries the requested-by line only with a binding (pr-description.md item 5)", async () => {
+  it("the body leads with requester attribution with or without a binding, while only a binding allows assignment", async () => {
+    const requestedBy = { name: "Ivy", threadUrl: "https://bot.example/threads/slack%3AC1%3A1.0" };
     const withBinding = openSpy();
     const seamBound = identityOf({
       prHead: HEAD,
       assignable: true,
-      requestedBy: { login: "ivy-dev", surface: "slack:C1" },
+      requestedLogin: "ivy-dev",
     });
-    await runCodingPrPostStep({ ...common([], withBinding), identity: seamBound.identity });
-    expect(withBinding.calls[0].body).toContain("Requested by @ivy-dev in slack:C1");
+    await runCodingPrPostStep({ ...common([], withBinding), requestedBy, identity: seamBound.identity });
+    expect(withBinding.calls[0].body.split("\n")[0]).toBe(
+      "Requested by **Ivy** · [Thread](https://bot.example/threads/slack%3AC1%3A1.0)",
+    );
 
     const noBinding = openSpy();
     const seamUnbound = identityOf({ prHead: HEAD });
-    await runCodingPrPostStep({ ...common([], noBinding), identity: seamUnbound.identity });
-    expect(noBinding.calls[0].body).not.toContain("Requested by");
+    await runCodingPrPostStep({ ...common([], noBinding), requestedBy, identity: seamUnbound.identity });
+    expect(noBinding.calls[0].body).toBe(withBinding.calls[0].body);
+    expect(seamUnbound.isAssignable).not.toHaveBeenCalled();
+    expect(seamUnbound.addAssignee).not.toHaveBeenCalled();
+    const noIdentity = openSpy();
+    await runCodingPrPostStep({ ...common([], noIdentity), requestedBy });
+    expect(noIdentity.calls[0].body).toBe(withBinding.calls[0].body);
   });
 
   it("the requested-by line survives a re-render: the ownPr edit (nothing pushed) and the unproven-push edit carry it like the open, so an edit never drops the attribution", async () => {
-    const requestedBy = { login: "ivy-dev", surface: "slack:C1" };
+    const requestedBy = { name: "Ivy", threadUrl: "https://bot.example/threads/slack%3AC1%3A1.0" };
     // The thread's own pull request, edited with nothing pushed (no rewrite runs).
-    const ownSeam = identityOf({ prHead: HEAD, requestedBy });
+    const ownSeam = identityOf({ prHead: HEAD });
     const ownEdits: Array<{ body: string }> = [];
     const base = common([], openSpy());
     await runCodingPrPostStep({
       ...base,
+      requestedBy,
       observed: observation({ branch: "main", checkedOut: "main" }),
       target: { ...base.target, ownPr: { number: 9, headSha: "c".repeat(40), state: "open" as const } },
       updatePullRequest: async (_repo: string, _number: number, patch: { body: string }) => void ownEdits.push(patch),
       identity: ownSeam.identity,
     });
     expect(ownEdits).toHaveLength(1);
-    expect(ownEdits[0].body).toContain("Requested by @ivy-dev in slack:C1");
+    expect(ownEdits[0].body.split("\n")[0]).toBe(
+      "Requested by **Ivy** · [Thread](https://bot.example/threads/slack%3AC1%3A1.0)",
+    );
+    expect(ownEdits[0].body.match(/Requested by/g)).toHaveLength(1);
 
     // The wind-down edit of an open pull request the run's unproven push heads.
-    const editSeam = identityOf({ requestedBy });
+    const editSeam = identityOf({});
     const edits: Array<{ body: string }> = [];
     await runCodingPrPostStep({
       ...common([], openSpy()),
+      requestedBy,
       observed: observation({ remoteHead: "b".repeat(40) }),
       findOpenPr: async (): Promise<OpenPrRef | null> => ({
         number: 700,
@@ -2257,7 +2270,7 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
       identity: editSeam.identity,
     });
     expect(edits).toHaveLength(1);
-    expect(edits[0].body).toContain("Requested by @ivy-dev in slack:C1");
+    expect(edits[0].body.split("\n")[0]).toBe(ownEdits[0].body.split("\n")[0]);
   });
 
   it("a pushed branch other than the one the start state was read for is judged over an EMPTY start state only when the run's own first push CREATED it (`[new branch]`)", async () => {
