@@ -31,7 +31,11 @@ const botStep = step({
   name: "bot",
   script: "switchboard",
   dir: "deploy/cloudflare",
-  liveGate: { kind: "health", healthUrl: "https://bot.example.test/healthz" },
+  liveGate: {
+    kind: "bot",
+    healthUrl: "https://bot.example.test/healthz",
+    containerApp: "switchboard-switchboardserver",
+  },
   healthUrl: "https://bot.example.test/healthz",
   wakeUrl: undefined as unknown as string,
 });

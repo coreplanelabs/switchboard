@@ -23,13 +23,10 @@ import { createLogSink } from "../core/trace/sinks.js";
 import type { Span } from "../core/trace/types.js";
 import { computeAffected, formatAffectedText, type AffectedProbe, type AffectedReport } from "./affected.js";
 import {
-  servedStartedAt,
-  decideLive,
   decideRestarted,
   heartbeatLine,
   preflightGaveUpLine,
   RESTART_GAVE_UP_WORDS,
-  LIVE_GATE_DEADLINE_MS,
   LIVE_GATE_POLL_MS,
   parseHealthz,
   type HealthzBody,
@@ -43,6 +40,7 @@ import {
   WORKER_DIRS,
   workersFor,
   type DeployHost,
+  type BotLiveGate,
   type DeployPlan,
   type DeployStep,
   type SandboxLiveGate,
@@ -77,6 +75,7 @@ import { classifyRestartResponse, type RestartPlan } from "./restart.js";
 import { postPlaneDeploy } from "./planeDeploy.js";
 import { PROJECT_FACTS_FILE, renderWorkerConfigs } from "./wranglerTemplate.js";
 import { supersededSteps } from "./supersede.js";
+import { decideBotLive } from "./botLiveGate.js";
 import {
   containerAppId,
   decideSandboxLive,
@@ -114,13 +113,13 @@ import {
 // flight — never bot runs in flight, which hand off and only warn) is waited
 // out and retried — never forced unless the plan says so — and the wait is
 // never silent: every poll prints a heartbeat naming what still refuses.
-// The bot step is done only when it is
-// LIVE, not merely deployed: after `wrangler deploy` the old container keeps
-// answering while it drains (up to 15 min), so the runner polls `/healthz`
-// until a non-draining container reports the deployed commit as its
-// `build.commit` (docs/decisions/0015-deploy-order-deployed-is-not-live.md:
-// trusting the upload says `deployed`, exit 0, while the old container is
-// still draining runs). The sandbox step is likewise done only when its
+// The bot step is done only when it is LIVE, not merely deployed: the runner
+// reads its independently managed container application before upload, then
+// requires its version and image target to move with wrangler's diff and polls
+// `/healthz` until a non-draining container reports the exact deployed commit.
+// Either control-plane or serving evidence alone can leave a rollback mixed
+// (docs/decisions/0015-deploy-order-deployed-is-not-live.md). The sandbox step
+// is likewise done only when its
 // Worker, its container rollout and an `echo ok` probe agree (a thread placed
 // during the image rollout lands on the previous image and every exec fails
 // with the SDK skew until the rollout replaces the instance). Only this file
@@ -636,42 +635,6 @@ export interface StepOutcome {
   reason?: string;
 }
 
-/**
- * After a gated step's deploy: poll `/healthz` until the NEW container answers
- * (not draining, `build.commit` == `expectedCommit`), logging every poll so the
- * drain is visible. Returns the live commit, or the reason it never went live
- * within the drain deadline (+ cold-start margin).
- */
-async function waitUntilLive(
-  step: DeployStep,
-  healthUrl: string,
-  expectedCommit: string,
-  io: DeployRunnerIO,
-  clock: () => number,
-  /** The container's `startedAt` read before the upload: what a draining
-   *  same-commit container must be later than to count as the new one. */
-  previousStartedAt: string | undefined,
-): Promise<GateOutcome> {
-  const started = clock();
-  for (;;) {
-    const elapsed = clock() - started;
-    const body = await fetchHealthz(healthUrl);
-    const d = decideLive(body, expectedCommit, elapsed, LIVE_GATE_DEADLINE_MS, {
-      ...(previousStartedAt !== undefined ? { previousStartedAt } : {}),
-    });
-    if (d.kind === "live") return { live: true, detail: `commit ${d.commit.slice(0, 7)}`, waitedMs: elapsed };
-    if (d.kind === "timeout")
-      return {
-        live: false,
-        reason: `${d.reason} — gave up after ${Math.round(elapsed / 60_000)} min (drain deadline ${LIVE_GATE_DEADLINE_MS / 60_000} min)`,
-      };
-    io.log(
-      `[deploy:all] ${step.name}: deployed, not live yet — ${d.reason} (${Math.floor(elapsed / 60_000)}m ${Math.floor((elapsed % 60_000) / 1000)}s)`,
-    );
-    await sleep(LIVE_GATE_POLL_MS);
-  }
-}
-
 /** What a live gate ends with: the facts that proved it, or the reason it never held. */
 type GateOutcome = { live: true; detail: string; waitedMs: number } | { live: false; reason: string };
 
@@ -680,7 +643,7 @@ type GateOutcome = { live: true; detail: string; waitedMs: number } | { live: fa
 /** The sandbox gate's I/O, injectable so the loop is unit-tested without a network, wrangler or a clock. */
 export interface SandboxGateDeps {
   env: Record<string, string | undefined>;
-  readHealth(url: string, bearer: string): Promise<HealthRead>;
+  readHealth(url: string, bearer?: string): Promise<HealthRead>;
   /** `wrangler containers info <app> --json` → the application's version and image, run in `dir`. */
   readAppState(dir: string, containerApp: string): Promise<Read<AppState>>;
   /** `wrangler containers instances <app> --json`, every page, run in `dir`. */
@@ -775,11 +738,47 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
   sleep,
 };
 
-/** What the sandbox gate knows about the rollout it waits for: the application as read BEFORE
+/** What an application gate knows about the rollout it waits for: the application as read BEFORE
  *  the upload, and the target wrangler's deploy output named (`null`: no container change printed). */
 export interface SandboxRollout {
   before: Read<AppState>;
   target: RolloutTarget | null;
+}
+
+/**
+ * After a bot deploy, poll the two independently managed surfaces: the container
+ * application must advance to wrangler's intended image, and `/healthz` must
+ * serve the full expected commit. Either fact alone is not rollback success.
+ */
+export async function waitUntilBotLive(
+  step: Pick<DeployStep, "name" | "dir">,
+  gate: BotLiveGate,
+  expectedCommit: string,
+  rollout: SandboxRollout,
+  io: Pick<DeployRunnerIO, "log">,
+  deps: SandboxGateDeps = defaultSandboxGateDeps,
+): Promise<GateOutcome> {
+  const started = deps.now();
+  for (;;) {
+    const elapsed = deps.now() - started;
+    const app = await deps.readAppState(step.dir, gate.containerApp);
+    const health = await deps.readHealth(gate.healthUrl);
+    const decision = decideBotLive({
+      containerApp: gate.containerApp,
+      health,
+      app,
+      before: rollout.before,
+      target: rollout.target,
+      expectedCommit,
+      elapsedMs: elapsed,
+    });
+    if (decision.kind === "live") return { live: true, detail: decision.summary, waitedMs: deps.now() - started };
+    if (decision.kind === "failed") return { live: false, reason: decision.reason };
+    io.log(
+      `[deploy:all] ${step.name}: deployed, not live yet — ${decision.reason} (${Math.floor(elapsed / 60_000)}m ${Math.floor((elapsed % 60_000) / 1000)}s)`,
+    );
+    await deps.sleep(LIVE_GATE_POLL_MS);
+  }
 }
 
 /**
@@ -847,12 +846,12 @@ export async function waitUntilSandboxLive(
   }
 }
 
-/** The sandbox's container application as it stands BEFORE the upload — the version the gate must see
- *  the rollout leave. A failed read is logged and returned as such: the gate then needs the
- *  deploy's image to show, and a deploy is never refused over it. */
+/** A container application as it stands BEFORE the upload — the version a full deploy must leave.
+ *  A failed sandbox read can fall back to the target image; the bot gate fails closed because rollback
+ *  needs both version advancement and the intended image. */
 async function readAppBeforeUpload(
   step: Pick<DeployStep, "name" | "dir">,
-  gate: SandboxLiveGate,
+  gate: BotLiveGate | SandboxLiveGate,
   io: Pick<DeployRunnerIO, "log">,
   deps: SandboxGateDeps,
 ): Promise<Read<AppState>> {
@@ -860,7 +859,9 @@ async function readAppBeforeUpload(
   io.log(
     "value" in before
       ? `[deploy:all] ${step.name}: container application at version ${before.value.version}${before.value.image ? ` (image ${shortImage(before.value.image)})` : ""} before the upload`
-      : `[deploy:all] ${step.name}: could not read the container application before the upload — ${before.error}; the gate will need the deploy's image to show`,
+      : gate.kind === "sandbox"
+        ? `[deploy:all] ${step.name}: could not read the container application before the upload — ${before.error}; the gate will need the deploy's image to show`
+        : `[deploy:all] ${step.name}: could not read the container application before the upload — ${before.error}; the gate requires a readable pre-deploy version to prove advancement`,
   );
   return before;
 }
@@ -1031,17 +1032,9 @@ async function deployStepLoop(
   const { started, waitMaxMs, deadline } = wait;
   for (;;) {
     io.log(`\n[deploy:all] ▶ ${step.name} (${step.script}) — ${step.dir}: ${step.command.join(" ")}`);
-    const sandbox =
-      step.liveGate?.kind === "sandbox"
-        ? { gate: step.liveGate, before: await readAppBeforeUpload(step, step.liveGate, io, deps) }
-        : undefined;
-    // The bot gate's pre-upload reading (liveGate.ts `decideLive`): the container's
-    // `startedAt` now, so a same-commit rollout is told from its draining
-    // predecessor. Best-effort — unreadable means the commit alone judges.
-    const previousStartedAt =
-      step.liveGate && step.liveGate.kind !== "sandbox"
-        ? await fetchHealthz(step.liveGate.healthUrl).then((b) => (b ? servedStartedAt(b) : undefined))
-        : undefined;
+    const application = step.liveGate
+      ? { before: await readAppBeforeUpload(step, step.liveGate, io, deps) }
+      : undefined;
     const r = await exec(step, io);
     const outcome = classifyDeployOutput(r.code, r.output);
     if (outcome.kind === "deployed") {
@@ -1056,17 +1049,26 @@ async function deployStepLoop(
       // The wait is the step's one child span: `waitedMs` is the number the
       // "live" line below prints, so the log and the span cannot disagree.
       const gate = await root.span("deploy.wait_live", async (wait) => {
-        let g: GateOutcome;
-        if (sandbox) {
-          const target = rolloutTargetFromDeployOutput(r.output);
-          const from = "value" in sandbox.before ? `version ${sandbox.before.value.version}` : "its pre-deploy version";
-          io.log(
-            target
-              ? `[deploy:all] ${step.name}: wrangler printed a container change — ${target.image ? `image ${shortImage(target.image)}` : "configuration only, image unchanged"}; the application must leave ${from}`
-              : `[deploy:all] ${step.name}: wrangler printed no container change — Worker-only deploy, no rollout expected`,
-          );
-          g = await waitUntilSandboxLive(step, sandbox.gate, expectedCommit, { ...sandbox, target }, io, deps);
-        } else g = await waitUntilLive(step, liveGate.healthUrl, expectedCommit, io, deps.now, previousStartedAt);
+        if (!application) throw new Error(`${step.name}: live gate has no application state`);
+        const target = rolloutTargetFromDeployOutput(r.output);
+        const from =
+          "value" in application.before ? `version ${application.before.value.version}` : "its pre-deploy version";
+        io.log(
+          target
+            ? `[deploy:all] ${step.name}: wrangler printed a container change — ${target.image ? `image ${shortImage(target.image)}` : "configuration only, image unchanged"}; the application must leave ${from}`
+            : `[deploy:all] ${step.name}: wrangler printed no container change — Worker-only deploy, no rollout expected`,
+        );
+        const g: GateOutcome =
+          liveGate.kind === "sandbox"
+            ? await waitUntilSandboxLive(
+                step,
+                liveGate,
+                expectedCommit,
+                { before: application.before, target },
+                io,
+                deps,
+              )
+            : await waitUntilBotLive(step, liveGate, expectedCommit, { before: application.before, target }, io, deps);
         wait.setAttrs(g.live ? { outcome: "live", waitedMs: g.waitedMs } : { outcome: "not_live" });
         return g;
       });
