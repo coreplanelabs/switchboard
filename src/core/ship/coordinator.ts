@@ -550,7 +550,7 @@ export type CoordinatorAction =
   | { type: "branch"; step: string; branch: string; from: string }
   | { type: "spawn"; step: string; preset: ChildPreset; round: RoundRef; budgetMinutes: number; brief: Brief }
   | { type: "wait"; step: string; runId: string; timeoutMs: number }
-  | { type: "read-record"; step: string; runId: string }
+  | { type: "read-record"; step: string; runId: string; finishedObserved?: true }
   /** Tell a child whose pull request became terminal or moved to end at its
    *  next turn boundary without publishing anything. This is a steer through
    *  the child's inbox, never a stop that tears down its workspace. */
@@ -1170,7 +1170,7 @@ type Phase =
   | { at: "busy-wait"; round: RoundRef; runId?: string; n: number }
   /** `until`: when the child's budget plus the margin runs out, counted from the spawn's answer — the wait's last slice ends there. */
   | { at: "wait"; round: RoundRef; runId: string; n: number; until: number }
-  | { at: "read"; round: RoundRef; runId: string; n: number; until: number }
+  | { at: "read"; round: RoundRef; runId: string; n: number; until: number; finishedObserved: boolean }
   /** A live child lost authority because its pull request became terminal,
    *  its reviewed head moved, or its branch disappeared. Steer once, then
    *  drain the child to its recorded end while ignoring every late artifact. */
@@ -1197,6 +1197,7 @@ type Phase =
       n: number;
       until: number;
       supersession: ChildSupersession;
+      finishedObserved: boolean;
     }
   /** A moved-head child has drained. Re-read the adopted pull request before
    *  restarting review because it may have merged, closed or moved again. */
@@ -1533,7 +1534,12 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         timeoutMs: Math.min(waitSliceMs(s.clock, p.until), s.pr !== undefined ? PR_TRANSITION_GUARD_MS : WAIT_CHUNK_MS),
       };
     case "read":
-      return { type: "read-record", step: `${roundStep(s, p.round)}/read/${p.n}`, runId: p.runId };
+      return {
+        type: "read-record",
+        step: `${roundStep(s, p.round)}/read/${p.n}`,
+        runId: p.runId,
+        ...(p.finishedObserved ? { finishedObserved: true as const } : {}),
+      };
     case "steer":
       return {
         type: "steer",
@@ -1553,6 +1559,7 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         type: "read-record",
         step: `${roundStep(s, p.round)}/superseded/read/${p.n}`,
         runId: p.runId,
+        ...(p.finishedObserved ? { finishedObserved: true as const } : {}),
       };
     case "superseded-pr-check":
       return {
@@ -2960,11 +2967,23 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         notes: [],
       };
     }
-    case "wait":
+    case "wait": {
+      const r = ret as Extract<StepReturn, { type: "wait" }>;
       return {
-        state: { ...s, phase: { at: "read", round: p.round, runId: p.runId, n: p.n, until: p.until } },
+        state: {
+          ...s,
+          phase: {
+            at: "read",
+            round: p.round,
+            runId: p.runId,
+            n: p.n,
+            until: p.until,
+            finishedObserved: r.outcome === "event",
+          },
+        },
         notes: [],
       };
+    }
     case "read": {
       const r = ret as Extract<StepReturn, { type: "read-record" }>;
       const supersession = childSupersession(clocked, p.round, r.pullRequest);
@@ -2979,6 +2998,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
             n: p.n,
             until: p.until,
             supersession,
+            finishedObserved: p.finishedObserved,
           };
           return finishSupersededChild(clocked, terminalPhase);
         }
@@ -3098,7 +3118,8 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         notes: [],
       };
     }
-    case "superseded-wait":
+    case "superseded-wait": {
+      const r = ret as Extract<StepReturn, { type: "wait" }>;
       return {
         state: {
           ...s,
@@ -3109,10 +3130,12 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
             n: p.n,
             until: p.until,
             supersession: p.supersession,
+            finishedObserved: r.outcome === "event",
           },
         },
         notes: [],
       };
+    }
     case "superseded-read": {
       const r = ret as Extract<StepReturn, { type: "read-record" }>;
       if (r.run.finished) return finishSupersededChild(clocked, p);

@@ -39,7 +39,15 @@
 // plan's re-issue. A task string's ship branch waits for a person. Node-free:
 // the shim Worker imports this by relative path.
 
-import { DAY_MS, DEFAULT_GRANT, GRANT_RENEWALS_MAX, IDLE_DAYS_MAX, type Grant, type GrantSource } from "../budgets.js";
+import {
+  DAY_MS,
+  DEFAULT_GRANT,
+  GRANT_RENEWALS_MAX,
+  IDLE_DAYS_MAX,
+  SHIP_RECORD_VISIBILITY,
+  type Grant,
+  type GrantSource,
+} from "../budgets.js";
 import { isFindingShape, type Finding } from "../reviewVerdict.js";
 import { DEFAULT_VERBOSITY, isVerbosity, type Verbosity } from "../verbosity.js";
 import {
@@ -640,13 +648,45 @@ async function call(
   bot: CoordinatorBot,
   route: CoordinatorStepRoute,
   body: Record<string, unknown>,
+  acceptOpaqueNotFound = false,
 ): Promise<BotReply> {
   const reply = await bot.step(route, body);
   const read = readBotAnswer(reply.status, reply.text);
-  if (!read.ok) throw new Error(`the bot did not answer ${route}: ${read.reason}`);
+  if (!read.ok) {
+    if (acceptOpaqueNotFound && isOpaqueNotFound(reply)) return reply;
+    throw new Error(`the bot did not answer ${route}: ${read.reason}`);
+  }
   const transient = transientRefusal(read.answer);
   if (transient !== undefined) throw new Error(transient);
   return reply;
+}
+
+/** The read door's authorization mask: absent and denied are deliberately the
+ *  same reply. The runner may pace that reply only from its own addressed
+ *  finish event; parsing it here never changes what another caller sees. */
+function isOpaqueNotFound(reply: BotReply): boolean {
+  if (reply.status !== 404) return false;
+  try {
+    const body = JSON.parse(reply.text) as { ok?: unknown; error?: unknown };
+    return body?.ok === false && body.error === "not_found";
+  } catch {
+    return false;
+  }
+}
+
+async function readRecordStep(
+  step: StepRunner,
+  bot: CoordinatorBot,
+  action: Extract<CoordinatorAction, { type: "read-record" }>,
+  body: Record<string, unknown>,
+): Promise<BotReply> {
+  for (let retry = 0; ; retry++) {
+    const name = retry === 0 ? action.step : `${action.step}/record-read/${retry}`;
+    const reply = await step.do(name, STEP_CONFIG, () => call(bot, "read-record", body, true));
+    if (!isOpaqueNotFound(reply) || action.finishedObserved !== true || retry >= SHIP_RECORD_VISIBILITY.retries)
+      return reply;
+    await step.sleep(`${action.step}/record-visible/${retry + 1}`, SHIP_RECORD_VISIBILITY.retryMs);
+  }
 }
 
 /** The answer a stored reply carries — the reply passed `call` once, so it reads the same on replay. */
@@ -745,10 +785,7 @@ async function perform(
     case "read-record":
       return readRecordReturn(
         action.step,
-        answerOf(
-          "read-record",
-          await step.do(action.step, STEP_CONFIG, () => call(bot, "read-record", { ...tag, runId: action.runId })),
-        ),
+        answerOf("read-record", await readRecordStep(step, bot, action, { ...tag, runId: action.runId })),
       );
     case "steer":
       return steerReturn(

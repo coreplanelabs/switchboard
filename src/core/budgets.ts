@@ -254,6 +254,11 @@ export const HOSTED_DEADLINE_MARGIN_MINUTES = 60;
  *  and the pause before a busy spawn is asked again. */
 export const SHIP_WAIT = { marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes: 5, busyRetryMinutes: 2 } as const;
 
+/** A finish event and the run record's durable write are separate deliveries.
+ *  After the runner receives its own event, it gives the record this short
+ *  visibility bound before treating an opaque absence as permanent. */
+export const SHIP_RECORD_VISIBILITY = { retries: 3, retryMs: secondsToMs(1) } as const;
+
 /** How long a restarting close gives its replacement dispatch to claim the
  *  same run before a read with no successor treats the close as final
  *  (run-history item 47a). One whole coordinator wait chunk lets an ordinary
