@@ -408,8 +408,8 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       console.log(
         `[dispatch] ${ctx.msg.threadKey} queued by the plane at position ${answer.position} (run ${answer.id}): ${waitingWords(answer.waiting)}`,
       );
-      // The queued card is the request's outcome, not an ack: it is said at
-      // every verbosity — at quiet the person still hears where their ask went.
+      // A queued request has no run card: its position and withdrawal command
+      // are the actionable intermediate result, visible at every level.
       await ctx.root.span("dispatch.admission", () => replyOutcome(ctx.io, queuedReply(answer)), {
         attrs: { outcome: "queued" },
       });

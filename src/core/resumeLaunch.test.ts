@@ -459,7 +459,11 @@ describe("launchResumes — the rehost branch (record 0060)", () => {
   it("launches the reclaimed parent and review child as a pair and rewrites the existing restart card once with the ledger's PR, step and live child", async () => {
     const registry = new RunRegistry();
     const runLedger = { adopt: () => ({ event: () => {} }) };
-    const deps = { runRegistry: registry, runLedger } as unknown as CoreDeps;
+    const deps = {
+      runRegistry: registry,
+      runLedger,
+      config: { verbosityFor: () => "quiet" },
+    } as unknown as CoreDeps;
     const cards: StatusUpdate[] = [];
     const dispatched: string[] = [];
     const parent: ResumableRun = {
@@ -521,6 +525,52 @@ describe("launchResumes — the rehost branch (record 0060)", () => {
     expect(card).toContain("child-review");
     expect(card).not.toContain("re-issue");
   });
+
+  it.each([{ level: "quiet" }, { level: "verbose" }, { level: "debug" }] as const)(
+    "rehosts the restart card at the durably recorded $level display level",
+    async ({ level }) => {
+      const registry = new RunRegistry();
+      const runLedger = { adopt: () => ({ event: () => {} }) };
+      const deps = {
+        runRegistry: registry,
+        runLedger,
+        config: { verbosityFor: () => "quiet" },
+      } as unknown as CoreDeps;
+      const displays: unknown[] = [];
+      const io: ChannelIO = {
+        reply: async () => {},
+        status: async (_initial, display) => {
+          displays.push(display);
+          return { update: () => {}, done: async () => {} };
+        },
+        history: async () => [],
+      };
+      const parent: ResumableRun = {
+        kind: "rehost",
+        row: {
+          ...hostedRow(),
+          card: { channel: "C1", ts: "1.1" },
+          meta: { ...hostedRow().meta, verbosity: level },
+        },
+        reclaimedFrom: "handoff",
+        hosting,
+        // Production records directive-stripped input; request-level display
+        // survives only in the durable row metadata.
+        events: [{ type: "input", messageId: "m1", text: "plan", at: 1, seq: 1 }],
+        children: [],
+      };
+
+      await launchResumes(deps, [parent], {
+        ioFor: () => io,
+        close: async () => {
+          throw new Error("the row rehosts");
+        },
+        agentFor: () => undefined,
+      });
+
+      expect(displays).toEqual([{ verbosity: level }]);
+    },
+  );
 
   it("recreates the registry row under the run's id — the original start, the label, a fresh live token, the events replayed — adopts the ledger row with the row's state and the highest replayed seq, mirrors only this generation's publishes, dispatches nothing, and onDone fires at once", async () => {
     const registry = new RunRegistry();

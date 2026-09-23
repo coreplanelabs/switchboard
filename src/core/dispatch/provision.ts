@@ -246,7 +246,7 @@ export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Pro
   // Coalesced: the run below refreshes it on every event, the channel sees at
   // most one edit per STATUS_UPDATE_MIN_MS, always the newest frame.
   const card = coalesceStatus(
-    await root.span("dispatch.ack_card", () => io.status(shell.ack())),
+    await root.span("dispatch.ack_card", () => io.status(shell.ack(), { verbosity: resolved.verbosity })),
     deps.statusUpdateMinMs ?? STATUS_UPDATE_MIN_MS,
   );
   // From here the card names the setup step in flight (the card sink's

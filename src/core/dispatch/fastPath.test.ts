@@ -50,6 +50,7 @@ function deps(withCommands: boolean): FastPathDeps {
     dataDir: dir,
     warn: () => {},
     audit: () => {},
+    steer: () => ({ send: async () => "↪ Folded into the *general* run run-1 — it picks this up at its next step." }),
   });
   return {
     config,
@@ -105,6 +106,14 @@ describe("answerChatCommand — stage A", () => {
     const { ctx, replies } = request("hello there, how are you", d);
     expect(await answerChatCommand(d, ctx)).toBe(false);
     expect(replies).toEqual([]);
+  });
+
+  it("a successful direct steer still runs but its routine receipt is silent at quiet", async () => {
+    const d = deps(true);
+    const { ctx, replies, history } = request("steer run run-1 continue", d);
+    expect(await answerChatCommand(d, ctx)).toBe(true);
+    expect(replies).toEqual([]);
+    expect(history).not.toHaveBeenCalled();
   });
 });
 

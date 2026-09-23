@@ -340,10 +340,10 @@ export function cardActivity(e: RunEvent): StatusActivity {
   return { kind: "line", text: activityLine(e) };
 }
 
-/** The activity as a quiet card paints it (routing-and-config item 28): a
- *  command becomes the caption Slack would draw over its code block — `→ bash`
- *  — and the block itself is kept for `verbose`; a line is a line. */
-export function quietActivity(activity: StatusActivity | undefined): StatusActivity | undefined {
+/** The compact activity a verbose card paints (routing-and-config item 28):
+ *  a command becomes the caption Slack would draw over its code block —
+ *  `→ bash`; a line is a line. Quiet omits activity entirely. */
+export function compactActivity(activity: StatusActivity | undefined): StatusActivity | undefined {
   if (activity?.kind === "command") return { kind: "line", text: `→ ${activity.tool}` };
   return activity;
 }
@@ -511,14 +511,14 @@ export async function replyAck(io: ChannelIO, verbosity: Verbosity, text: string
 }
 
 /**
- * A request's outcome that is neither a refusal nor an ack (record 0064: the
- * queued card — "a refusal becomes a queue position"): said at every
- * verbosity, because it is the answer to the ask, not material before it. The
- * renderer owns the reply so the producing modules stay behind the fence.
+ * A request's actionable outcome that has no run card (record 0064: the
+ * queued position and withdrawal command). It is said at every verbosity;
+ * unlike an acknowledgement, it is the only intermediate result of the ask.
  */
 export async function replyOutcome(io: ChannelIO, text: string): Promise<void> {
   return io.reply(text);
 }
+
 /**
  * The one caller of a channel's `offer` (record 0054): the Block Kit an
  * offered confirmation shows goes out through the reply stage, so the unit
@@ -610,7 +610,22 @@ export function cardLines(
  *  an attach that fails — reply the text as before. */
 export const LONG_COMMAND_REPLY_CHARS = 3_000;
 
-export async function replyCommandOutput(io: ChannelIO, parsed: ParsedChatCommand, text: string): Promise<void> {
+export async function replyCommandOutput(
+  io: ChannelIO,
+  parsed: ParsedChatCommand,
+  text: string,
+  display: { verbosity?: Verbosity; ok?: boolean } = {},
+): Promise<void> {
+  // `steer.run`'s successful text is the same routine fold acknowledgement as
+  // admission's `steerAck`, even when it came through a direct typed command
+  // or the operator. A failed steer is action-required and always speaks.
+  if (
+    parsed.kind === "invoke" &&
+    parsed.id === "steer.run" &&
+    display.ok === true &&
+    !shows(display.verbosity ?? "quiet", "verbose")
+  )
+    return;
   if (!io.attach || text.length <= LONG_COMMAND_REPLY_CHARS) return io.reply(text);
   const nl = text.indexOf("\n");
   const lead = nl === -1 ? text : text.slice(0, nl);

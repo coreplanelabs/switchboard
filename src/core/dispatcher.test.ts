@@ -6061,7 +6061,7 @@ describe("closed-card checklist and review verdict run link", () => {
     expect(last.detail).toBe("✓ Read the diff\n✓ Run tests");
   });
 
-  it("a bash call paints the card with a typed command activity — the full command, beside the checklist — and the close drops it", async () => {
+  it("debug paints typed activity beside the checklist, while quiet paints the checklist alone and every close drops activity", async () => {
     const command = "cd /workspace/api && python3 - <<'EOF'\np='docs/x.md'\nprint(open(p).read())\nEOF";
     let n = 0;
     const provider: Provider = {
@@ -6092,20 +6092,24 @@ describe("closed-card checklist and review verdict run link", () => {
     for (const s of statuses) expect(s.detail ?? "").not.toContain("→ $");
     // At debug the update_status round trip shows as activity like any tool's.
     expect(statuses.some((s) => s.activity?.kind === "line" && s.activity.text.includes("update_status"))).toBe(true);
-    // At quiet — the default — the same run paints the caption alone: the
-    // shell line is debug material (routing-and-config item 28), and the
-    // update_status round trip is bookkeeping — the checklist repaints the
-    // card, so no meta line restates that it was updated.
+    // At quiet the same run paints the checklist alone. Tool captions and the
+    // update_status round trip are internal activity, not a result or question.
     n = 0;
     const quiet = fakeIO();
     await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
     prHeadExecutor();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), quiet.io);
-    expect(quiet.statuses.some((s) => s.activity?.kind === "command")).toBe(false);
-    expect(quiet.statuses.some((s) => s.activity?.kind === "line" && s.activity.text === "→ bash")).toBe(true);
-    for (const s of quiet.statuses) expect(s.title).not.toMatch(/thinking \(|running bash/);
-    for (const s of quiet.statuses)
-      expect(s.activity?.kind === "line" ? s.activity.text : "").not.toContain("update_status");
+    expect(quiet.statuses.every((s) => s.activity === undefined)).toBe(true);
+    for (const s of quiet.statuses) expect(s.title).not.toMatch(/thinking \(|running bash|\/min|no tool call/);
+    // Verbose preserves the compact narration: the tool caption without the
+    // debug-only command block.
+    n = 0;
+    const verbose = fakeIO();
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "verbose" });
+    prHeadExecutor();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), verbose.io);
+    expect(verbose.statuses.some((s) => s.activity?.kind === "line" && s.activity.text === "→ bash")).toBe(true);
+    expect(verbose.statuses.some((s) => s.activity?.kind === "command")).toBe(false);
     const last = statuses[statuses.length - 1];
     expect(last.title).toContain("✅");
     expect(last.activity).toBeUndefined();
@@ -17636,9 +17640,10 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
   });
 
-  it("on: a bind of `steer` names a run and folds into it at that run's next boundary, whichever thread holds it — no hand-back for the write class, and the plan thread starts no rival run", async () => {
+  it("on at quiet: a steer bind folds into the named run without a routine receipt or hand-back, and the plan thread starts no rival run", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
     wireCommands(deps); // rebind the catalogue over the test's own registry and admission map
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
     // Two units live in two unit threads (record 0055); the reply lands in the
     // plan thread and NAMES the second unit's run.
     const u1 = registry.create("unit one", {
@@ -17669,12 +17674,13 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(item).toMatchObject({ text: "also cover the docs", userId: "slack:UADMIN" });
     expect(slot1.live.inbox.size).toBe(0);
     expect(deps.admission!.get("slack:CX:1.0")).toBeUndefined(); // the plan thread stays free: no rival run
-    // The write class hands nothing back: a steer bind is admission's, not the paste ladder's.
-    expect(replies.some((r) => r.includes(`Folded into the *general* run ${u2.id}`))).toBe(true);
-    expect(replies.some((r) => r.includes("To run this:"))).toBe(false);
+    // The write class hands nothing back: a steer bind is admission's routine
+    // acknowledgement, silent at quiet and never the paste ladder's hand-back.
+    expect(replies).toEqual([]);
+    expect(replies.some((reply) => reply.includes("To run this:"))).toBe(false);
   });
 
-  it("on: a plain reply's steer resolves to the thread's live owner, never the finished run id the model copied from its transcript", async () => {
+  it("on at verbose: a plain reply's steer resolves to the live owner, keeps its receipt, and never uses the finished transcript id", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
     wireCommands(deps);
     const ended = registry.create("the prior review", {
@@ -17697,10 +17703,10 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       binds: [{ line: `steer run ${ended.id} keep going`, reason: "copied the prior review id" }],
     });
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("keep going", "slack:UADMIN"), io);
+    await dispatch(deps, msg("verbosity:verbose keep going", "slack:UADMIN"), io);
     expect(deps.redispatched).toEqual([]);
     expect(slot.live.inbox.drain()).toMatchObject([{ text: "keep going", userId: "slack:UADMIN" }]);
-    expect(replies.some((r) => r.includes(`run ${owner.id}`))).toBe(true);
+    expect(replies.some((r) => r.includes(`Folded into the *coding* run ${owner.id}`))).toBe(true);
     expect(replies.some((r) => r.includes(`run ${ended.id} ended`))).toBe(false);
   });
 

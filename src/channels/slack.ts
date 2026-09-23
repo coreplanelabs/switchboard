@@ -24,6 +24,8 @@ import { pendingQuestionOf } from "../core/dispatch/operator.js";
 import type { RunView, RunsService } from "../core/runsService.js";
 import type { ConfirmationStore } from "../core/confirmations.js";
 import type { IntakeMode } from "../config/validate.js";
+import { parseDirectives } from "../directives.js";
+import { DEFAULT_VERBOSITY, shows, type Verbosity } from "../core/verbosity.js";
 import { renderOffer } from "../core/confirmations.js";
 import { type SlackThreadMessage, stripAppFooter, threadTurns } from "./slack/threadTurns.js";
 import {
@@ -693,6 +695,7 @@ async function handle(
           staging: deps.artifacts !== undefined,
           maxBytesPerMessage:
             deps.config.config.artifacts?.inbound?.maxBytesPerMessage ?? ARTIFACT_DEFAULTS.maxBytesPerMessage,
+          verbosityFor: (channelId, userId, request) => deps.config.verbosityFor(channelId, userId, request),
         },
         relayAppsOf(deps),
         intake,
@@ -727,6 +730,10 @@ async function handle(
 export interface StagingPolicy {
   staging: boolean;
   maxBytesPerMessage: number;
+  /** Fixed in adapter tests; production resolves after the Slack requester is
+   *  known so relayed messages use the person's scope, not the posting app. */
+  verbosity?: Verbosity;
+  verbosityFor?: (channelId: string, userId: string, request?: Verbosity) => Verbosity;
 }
 
 /** The operator's `slack.relayApps` — the bot ids whose relay footer names the
@@ -877,21 +884,40 @@ export async function receiveSlackMessage(
       threadRuns = gated.thread;
     }
   }
-  // Immediate receipt: react to the triggering message so the sender knows it
-  // was accepted, before any model/tool work starts. Fire-and-forget — a
-  // missing reactions:write scope (or a re-run reacting twice) must never
-  // block or fail the request itself.
-  client.reactions.add({ channel: ev.channel, timestamp: ev.ts, name: ACK_EMOJI }).catch((err: Error) => {
-    if (!err.message.includes("already_reacted")) console.error(`[ack] ${err.message}`);
-  });
-  // A replayed message says how late the pickup was — best-effort, like the
-  // ack, and overlapped with the file downloads (one Slack round-trip, not a
-  // serial one). Awaited before dispatch so the note precedes the run card.
-  const delayNote = ev.caughtUp
-    ? new SlackIO(client, ev).reply(catchUpDelayNote(ev.ts, systemClock())).catch((err: Error) => {
-        console.error(`[catch-up] ${ev.channel}:${ev.ts} delay note failed: ${err.message}`);
-      })
-    : Promise.resolve();
+  // Resolve the person before any visible receipt. A relayed post has no
+  // `ev.user`; using the posting app here would read the wrong verbosity scope.
+  // A person's post resolves without a call; an older relay footer costs one
+  // `conversations.replies`.
+  const requester = await resolveSlackRequester(
+    client,
+    {
+      channel: ev.channel,
+      ts: ev.ts,
+      threadTs: ev.threadTs,
+      ...(ev.user !== undefined ? { user: ev.user } : {}),
+      text: ev.rawText ?? ev.text,
+      ...(ev.poster !== undefined ? { poster: ev.poster } : {}),
+    },
+    relayApps,
+  );
+  span.setAttrs({ requester: requester.resolvedBy });
+  const verbosity =
+    policy.verbosityFor?.(`${PLATFORM}:${ev.channel}`, requester.userId, parseDirectives(ev.text).verbosity) ??
+    policy.verbosity ??
+    DEFAULT_VERBOSITY;
+  // The acceptance reaction and catch-up note are routine lifecycle
+  // acknowledgements. They remain byte-for-byte at verbose/debug, while quiet
+  // proceeds with the same downloads and dispatch without narrating the seam.
+  if (shows(verbosity, "verbose"))
+    client.reactions.add({ channel: ev.channel, timestamp: ev.ts, name: ACK_EMOJI }).catch((err: Error) => {
+      if (!err.message.includes("already_reacted")) console.error(`[ack] ${err.message}`);
+    });
+  const delayNote =
+    ev.caughtUp && shows(verbosity, "verbose")
+      ? new SlackIO(client, ev).reply(catchUpDelayNote(ev.ts, systemClock())).catch((err: Error) => {
+          console.error(`[catch-up] ${ev.channel}:${ev.ts} delay note failed: ${err.message}`);
+        })
+      : Promise.resolve();
   // Independent budgets, independent downloads — the two passes overlap.
   const [imagePass, documentPass] = await Promise.all([
     fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE),
@@ -929,23 +955,6 @@ export async function receiveSlackMessage(
   // lookup leaves the field undefined (the label falls back to the raw id) and
   // never fails the dispatch. Resolved in parallel so the two lookups don't add
   // up on the first message for a new channel/user.
-  // Who asked (item 13): the sender, or the person the configured relay app
-  // posted for — read before the name lookups, which take the resolved person.
-  // A person's post resolves without a call; an older relay footer costs one
-  // `conversations.replies`.
-  const requester = await resolveSlackRequester(
-    client,
-    {
-      channel: ev.channel,
-      ts: ev.ts,
-      threadTs: ev.threadTs,
-      ...(ev.user !== undefined ? { user: ev.user } : {}),
-      text: ev.rawText ?? ev.text,
-      ...(ev.poster !== undefined ? { poster: ev.poster } : {}),
-    },
-    relayApps,
-  );
-  span.setAttrs({ requester: requester.resolvedBy });
   const [channelName, userName, team] = await Promise.all([
     resolveChannelName(client, ev.channel),
     requester.slackUserId !== undefined
@@ -1503,23 +1512,25 @@ export class SlackIO implements ChannelIO {
     };
   }
 
-  async status(initial: StatusUpdate): Promise<StatusHandle> {
+  async status(initial: StatusUpdate, display: { verbosity?: Verbosity } = {}): Promise<StatusHandle> {
     // Card edits and the shimmer ride the status client and draw from the
     // process budget (docs/reference/specs/run-visibility.md item 8); the card's post
     // and a resumed card's first edit stay on the main client — they must land.
     const statusClient = this.opts.statusClient ?? this.client;
     const budget = this.opts.statusBudget ?? processStatusBudget;
     // Native Slack shimmer: rotating loading phrases shown inline in the
-    // thread ("Switchboard is <phrase>"). Works in channel threads since
-    // March 2026 with chat:write; auto-clears when the bot replies, times out
-    // after ~2 min idle, so re-up every 75s during long turns.
-    const setShimmer = () =>
+    // thread ("Switchboard is <phrase>"). It is lifecycle narration, so only
+    // verbose/debug set or re-up it. Quiet still clears any older owner: a
+    // resumed card edit does not trigger Slack's automatic clear, and an old
+    // owner's timer must not restore a status this request suppresses.
+    const shimmerVisible = shows(display.verbosity ?? DEFAULT_VERBOSITY, "verbose");
+    const setShimmer = (status: string = LOADING_PHRASES[0]) =>
       statusClient.assistant.threads
         .setStatus({
           channel_id: this.ev.channel,
           thread_ts: this.ev.threadTs,
-          status: LOADING_PHRASES[0],
-          loading_messages: LOADING_PHRASES,
+          status,
+          ...(status === "" ? {} : { loading_messages: LOADING_PHRASES }),
         })
         .catch((err: Error) => console.error(`[shimmer] ${err.message}`));
 
@@ -1555,14 +1566,20 @@ export class SlackIO implements ChannelIO {
     }
     liveCards.add(liveCardKey(this.ev.channel, ts));
     const card = `${this.ev.channel}:${ts}`;
-    // The newest run to start speaks for the thread's shimmer from here on; a
-    // sibling that finishes later must not clear or re-up over this run's voice.
+    // The newest verbose/debug run speaks for the thread's shimmer from here
+    // on; quiet removes an older owner's claim and clears the Slack-side value.
     const shimmerKey = `${this.ev.channel}:${this.ev.threadTs}`;
-    shimmerOwners.set(shimmerKey, card);
-    await setShimmer();
-    const shimmerTimer = setInterval(() => {
-      if (shimmerOwners.get(shimmerKey) === card) void setShimmer();
-    }, 75_000);
+    let shimmerTimer: ReturnType<typeof setInterval> | undefined;
+    if (shimmerVisible) {
+      shimmerOwners.set(shimmerKey, card);
+      await setShimmer();
+      shimmerTimer = setInterval(() => {
+        if (shimmerOwners.get(shimmerKey) === card) void setShimmer();
+      }, 75_000);
+    } else {
+      shimmerOwners.delete(shimmerKey);
+      await setShimmer("");
+    }
     budget.open(card);
     const edit = (frame: StatusUpdate) => statusClient.chat.update({ channel: this.ev.channel, ts, ...render(frame) });
     // Progress frames the budget refused: the card was stale until the next
@@ -1597,7 +1614,7 @@ export class SlackIO implements ChannelIO {
         void edit(frame).catch(() => {});
       },
       done: async (frame) => {
-        clearInterval(shimmerTimer);
+        if (shimmerTimer !== undefined) clearInterval(shimmerTimer);
         liveCards.delete(liveCardKey(this.ev.channel, ts));
         budget.close(card);
         // Funded now: one round trip before the reply, the common case. Not
@@ -1616,9 +1633,7 @@ export class SlackIO implements ChannelIO {
         // clear — the live sibling's shimmer keeps speaking for the thread.
         if (shimmerOwners.get(shimmerKey) !== card) return;
         shimmerOwners.delete(shimmerKey);
-        await statusClient.assistant.threads
-          .setStatus({ channel_id: this.ev.channel, thread_ts: this.ev.threadTs, status: "" })
-          .catch(() => {});
+        await setShimmer("").catch(() => {});
       },
     };
   }

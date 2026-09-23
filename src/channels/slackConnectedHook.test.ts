@@ -58,8 +58,13 @@ function fakeWebApi(historyMessages: object[]) {
 /** Build the app exactly as production does (env tokens, real receiver) and
  *  swap the fake Web API onto `app.client` — the same object the connected
  *  hook and `handle()` use. */
-function makeApp(config: object, api: ReturnType<typeof fakeWebApi>) {
-  const deps = { config: { config } } as unknown as CoreDeps;
+function makeApp(
+  config: { defaults?: { verbosity?: "quiet" | "verbose" | "debug" }; slack?: object },
+  api: ReturnType<typeof fakeWebApi>,
+) {
+  const deps = {
+    config: { config, verbosityFor: () => config.defaults?.verbosity ?? "quiet" },
+  } as unknown as CoreDeps;
   const { app, receiver } = createSlackApp(deps);
   Object.assign(app.client as unknown as Record<string, unknown>, api);
   return { app, receiver };
@@ -120,10 +125,10 @@ describe("connected-hook wiring (Bolt-level harness)", () => {
     expect(dispatchMock).not.toHaveBeenCalled();
   });
 
-  it("re-dispatches a missed mention through handle(): 👀 ack, ⏱ note and one dispatch — and a second connect skips it via the seen-set", async () => {
+  it("at verbose, re-dispatches a missed mention through handle(): 👀 ack, ⏱ note and one dispatch — and a second connect skips it via the seen-set", async () => {
     const ts = (Date.now() / 1000 - 120).toFixed(6); // 2 min ago: inside the window
     const api = fakeWebApi([{ ts, user: "UA", text: `<@${BOT}> hello there` }]);
-    const { receiver } = makeApp({}, api);
+    const { receiver } = makeApp({ defaults: { verbosity: "verbose" } }, api);
 
     receiver.client.emit("connected");
 
