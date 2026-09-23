@@ -41,6 +41,7 @@ import {
 } from "./images.js";
 import { WORK_AREA_DIR, type RootMode } from "./operatorRoot.js";
 import { profileUrls, type DeploymentProfile, type LoadedProfile, type WorkerKind } from "./profile.js";
+import type { ResidentRolloutReceipt } from "./residentRollout.js";
 
 /** Env vars removed from every deploy step's environment. */
 export const UNSET_ENV = ["CLOUDFLARE_ACCOUNT_ID"] as const;
@@ -90,6 +91,7 @@ export interface CapabilityCheck {
 /** The bot and sandbox container classes from their wrangler templates; wrangler names each
  *  Containers application `<script>-<class lowercased>`. */
 export const BOT_CONTAINER_CLASS = "SwitchboardServer";
+export const RESIDENT_CONTAINER_CLASS = "ResidentDO";
 export const SANDBOX_CONTAINER_CLASS = "SwitchboardSandbox";
 /** The bearer every route on the sandbox Worker needs, `/healthz` included (execution.md item 13). */
 export const SANDBOX_BEARER_ENV = "SANDBOX_TOKEN";
@@ -368,7 +370,10 @@ export interface DeployStep {
   healthUrl?: string;
   /** The fleet drain (resident-repos item 69): the Worker's origin to post `/drain` and `/undrain` at,
    *  and the env var holding the drain-only bearer. Present only for a Worker whose spec can drain. */
-  drain?: { url: string; tokenEnv: string };
+  drain?: { url: string; tokenEnv: string; seedDuringDrain?: number };
+  /** Registry-mode resident uploads may skip a container rollout only through
+   *  this verified receipt and a fresh exact `wrangler containers info` read. */
+  residentRollout?: { account: string; containerApp: string; receipt?: ResidentRolloutReceipt };
   /** After the deploy, wait until the step's gate holds (the bot's application + exact health; the sandbox's rollout + probe). */
   liveGate?: LiveGate;
   why: string;
@@ -501,6 +506,15 @@ export function planDeploy(
     ...(w.waitMaxMs !== undefined ? { waitMaxMs: w.waitMaxMs } : {}),
     ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
     ...(w.drain ? { drain: { url: w.baseUrl, tokenEnv: w.drain.tokenEnv } } : {}),
+    ...(w.name === "resident" && profile.images === "registry"
+      ? {
+          residentRollout: {
+            account: profile.account,
+            containerApp: containerApplicationName(w.script, RESIDENT_CONTAINER_CLASS),
+            ...(profile.residentRolloutReceipt ? { receipt: profile.residentRolloutReceipt } : {}),
+          },
+        }
+      : {}),
     ...(w.liveGate ? { liveGate: w.liveGate } : {}),
     ...(!w.liveGate && !w.healthBearerEnv ? { wakeUrl: w.healthUrl } : {}),
     // The plan says where a run's points will land (run-metrics.md item 6): the state Worker's

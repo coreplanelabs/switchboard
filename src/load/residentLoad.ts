@@ -24,13 +24,27 @@ export interface ResidentThreadClient {
 export interface ResidentLoadDeps {
   /** One client per synthetic thread; `readonly` for the review profile. */
   openClient(threadKey: string, readonly: boolean): ResidentThreadClient;
-  /** The operator `GET /status` view: lifecycle state and in-flight ops. */
-  status(): Promise<{ state: string; inFlight: number | null }>;
+  /** The operator `GET /status` view: lifecycle state, in-flight ops and the
+   *  resident's last persisted memory/disk pressure readings. */
+  status(): Promise<ResidentPressure>;
   /** The admin `purge-bindings` debug op. */
   purge(prefix: string): Promise<{ purged: number; keptLive: number }>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   signal?: AbortSignal;
+}
+
+export interface ResidentPressure {
+  state: string;
+  inFlight: number | null;
+  memoryPercent?: number | null;
+  cpuUsageUsec?: number | null;
+  diskUsedKiB?: number;
+  diskTotalKiB?: number;
+}
+
+export interface ResidentPressureSample extends ResidentPressure {
+  at: number;
 }
 
 export interface ResidentLoadParams {
@@ -59,6 +73,7 @@ export interface ResidentLoadOutcome {
   samples: Sample[];
   result: RunThreadsResult;
   purge: { purged: number; keptLive: number } | { failed: string };
+  pressure: ResidentPressureSample[];
 }
 
 export async function runResidentLoad(
@@ -81,6 +96,10 @@ export async function runResidentLoad(
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const samples: Sample[] = [];
+  const pressure: ResidentPressureSample[] = [{ at: now(), ...status }];
+  const samplePressure = async (): Promise<void> => {
+    pressure.push({ at: now(), ...(await deps.status()) });
+  };
   const record = async <T>(op: string, thread: number, fn: () => Promise<T>): Promise<T> => {
     const r = await timed(fn, now);
     samples.push({
@@ -118,6 +137,7 @@ export async function runResidentLoad(
           client.writeFile(`${HARNESS_DIR}/thread-${i}.txt`, `load ${params.runId} thread ${i}\n`),
         );
       }
+      await samplePressure();
       await sleep(params.pauseMs ?? 1_000);
     },
     teardown: async (i, client) => {
@@ -126,11 +146,12 @@ export async function runResidentLoad(
     },
   });
 
+  await samplePressure();
   let purge: ResidentLoadOutcome["purge"];
   try {
     purge = await deps.purge(purgePrefixFor(params.runId));
   } catch (err) {
     purge = { failed: err instanceof Error ? err.message : String(err) };
   }
-  return { samples, result, purge };
+  return { samples, result, purge, pressure };
 }

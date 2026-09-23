@@ -44,11 +44,16 @@ export function reconcileUrl(baseUrl: string): string {
 }
 
 /** The drain the step asks for: as long as its wait plus the margin, named by the commit it deploys. */
-export function drainBody(waitMaxMs: number, commit: string): { minutes: number; reason: string; by: string } {
+export function drainBody(
+  waitMaxMs: number,
+  commit: string,
+  seedDuringDrain = 0,
+): { minutes: number; reason: string; by: string; seedDuringDrain: number } {
   return {
     minutes: Math.ceil(waitMaxMs / MINUTE_MS) + DRAIN_MARGIN_MINUTES,
     reason: `deploy ${commit.slice(0, 7)}`,
     by: "deploy all",
+    seedDuringDrain,
   };
 }
 

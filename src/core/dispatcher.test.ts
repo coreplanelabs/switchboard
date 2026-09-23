@@ -1015,6 +1015,7 @@ describe("executor provisioning by agent resources", () => {
     const noteAt = events.findIndex((e) => e.type === "run_note" && e.kind === "drain_wait");
     expect(events[noteAt]).toMatchObject({
       summary: "waited 7 min at the fleet drain for a deploy to finish",
+      durationMs: 7 * 60_000 + 20_000,
     });
     const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
     expect(noteAt).toBeGreaterThan(-1);
@@ -1055,6 +1056,7 @@ describe("executor provisioning by agent resources", () => {
     const events = registry.snapshot("run-fell-cold", "tok")!.events;
     expect(events.find((e) => e.type === "run_note" && e.kind === "drain_wait")).toMatchObject({
       summary: "waited 3 min at the fleet drain for a deploy to finish",
+      durationMs: 3 * 60_000,
     });
   });
 
@@ -1632,6 +1634,7 @@ describe("resident repo dispatch", () => {
     // — so the run page, not only the card, says why this run went cold.
     const events = registry.snapshotById("run-cold")!.events;
     const noteAt = events.findIndex((e) => e.type === "run_note" && e.kind === "cold_sandbox");
+    expect(events[noteAt]).toMatchObject({ sandboxOutcome: "fresh" });
     const attachEndAt = events.findIndex((e) => e.type === "span_end" && e.name === "dispatch.workspace.attach");
     const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
     expect(events[noteAt]).toMatchObject({

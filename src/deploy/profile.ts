@@ -94,6 +94,18 @@ export const profileSchema = z.object({
   /** How the bot, resident and sandbox images reach wrangler (`IMAGE_MODES`).
    *  Absent means `build` — the checkout deploys what it builds. */
   images: z.enum(IMAGE_MODES).default("build"),
+  /** The only receipt that permits a registry-mode resident Worker upload to
+   *  leave its Containers application untouched. It pins the immutable account
+   *  manifest, the control-reset/pi proof, and the complete effective
+   *  configuration wrangler must report immediately before the upload. */
+  residentRolloutReceipt: z
+    .object({
+      manifestDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+      controlResetPiReceipt: z.string().trim().min(1),
+      configuration: z.record(z.string(), z.unknown()),
+      configurationFingerprint: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    })
+    .optional(),
   /** The Cloudflare Access application in front of the bot's dashboards, when
    *  there is one: the team domain the JWT is issued by and the app's AUD. */
   access: z.object({ teamDomain: hostname, aud: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),

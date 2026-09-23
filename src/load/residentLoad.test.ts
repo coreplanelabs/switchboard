@@ -97,6 +97,8 @@ describe("runResidentLoad", () => {
     expect(fake.purges).toEqual([purgePrefixFor("r1")]);
     expect(out.purge).toEqual({ purged: 0, keptLive: 0 });
     expect(out.result.started).toBe(3);
+    expect(out.pressure.length).toBeGreaterThanOrEqual(2);
+    expect(out.pressure.every((sample) => sample.state === "warm" && sample.inFlight === 0)).toBe(true);
   });
 
   it("the review profile attaches read-only and never writes", async () => {

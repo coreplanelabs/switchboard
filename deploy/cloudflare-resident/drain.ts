@@ -38,6 +38,12 @@ export interface DrainRecord {
    *  containers named in the registry's warning, never a silence to `until`.
    *  A record without it (an older build's) keeps `until` as its only end. */
   holdsUntil?: string;
+  /** Total number of new runs that may seed a cold sandbox from a resident
+   *  snapshot while this image-changing drain stands. Zero is wait-only. */
+  seedDuringDrain: number;
+  /** Run keys already admitted. Persisted on the registry DO so retries,
+   *  isolate resets and concurrent attaches consume one total cap. */
+  seedAdmissions?: string[];
   /** Whether `POST /undrain` already asked for the lift while holds stood:
    *  the record then clears itself on the last hold's report instead of
    *  waiting for a second lift. */
@@ -79,6 +85,9 @@ export function parseDrainRequest(body: Record<string, unknown>, now: number): D
     if (trimmed.length > max) return { error: `${name} must be at most ${max} characters` };
     return trimmed;
   };
+  const seedDuringDrain = body.seedDuringDrain ?? 0;
+  if (typeof seedDuringDrain !== "number" || !Number.isInteger(seedDuringDrain) || seedDuringDrain < 0)
+    return { ok: false, error: "seedDuringDrain must be a non-negative integer" };
   const reason = word(body.reason, "reason", REASON_MAX, "a deploy");
   if (typeof reason !== "string") return { ok: false, error: reason.error };
   const by = word(body.by, "by", BY_MAX, "admin");
@@ -90,6 +99,7 @@ export function parseDrainRequest(body: Record<string, unknown>, now: number): D
       until: new Date(now + minutesToMs(minutes)).toISOString(),
       by,
       reason,
+      seedDuringDrain,
     },
   };
 }
@@ -111,6 +121,13 @@ export function liveDrain(stored: unknown, now: number): DrainRecord | null {
   const until = Date.parse(r.until);
   if (!Number.isFinite(until) || until <= now) return null;
   const holds = Array.isArray(r.holds) ? r.holds.filter((h): h is string => typeof h === "string") : [];
+  const seedDuringDrain =
+    typeof r.seedDuringDrain === "number" && Number.isInteger(r.seedDuringDrain) && r.seedDuringDrain >= 0
+      ? r.seedDuringDrain
+      : 0;
+  const seedAdmissions = Array.isArray(r.seedAdmissions)
+    ? [...new Set(r.seedAdmissions.filter((run): run is string => typeof run === "string" && run !== ""))]
+    : [];
   const holdsUntil = typeof r.holdsUntil === "string" ? r.holdsUntil : undefined;
   // The hold's liveness (issue 2044): holds whose cycle bound has passed are a
   // cycle that never happened — the fleet reopens by construction, whoever
@@ -124,6 +141,8 @@ export function liveDrain(stored: unknown, now: number): DrainRecord | null {
     until: r.until,
     by: r.by,
     reason: r.reason,
+    seedDuringDrain,
+    ...(seedAdmissions.length > 0 ? { seedAdmissions } : {}),
     ...(holds.length > 0 ? { holds } : {}),
     ...(holds.length > 0 && holdsUntil !== undefined ? { holdsUntil } : {}),
     ...(r.liftAsked === true ? { liftAsked: true } : {}),
@@ -162,6 +181,22 @@ export function holdDrain(record: DrainRecord, resources: readonly string[], now
   return { ...record, holds, holdsUntil };
 }
 
+/** Atomic registry-DO decision for one run during a drain. The caller stores
+ *  `record` before answering an admission; a repeated run key is idempotent,
+ *  and the persisted distinct keys make the cap first-N total rather than per
+ *  isolate or per resident. */
+export function admitDrainSeed(
+  record: DrainRecord,
+  runKey: string,
+): { admitted: boolean; reason: "admitted" | "already-admitted" | "wait-only" | "cap-reached"; record: DrainRecord } {
+  const admissions = record.seedAdmissions ?? [];
+  if (admissions.includes(runKey)) return { admitted: true, reason: "already-admitted", record };
+  if (record.seedDuringDrain === 0) return { admitted: false, reason: "wait-only", record };
+  if (admissions.length >= record.seedDuringDrain) return { admitted: false, reason: "cap-reached", record };
+  const next = { ...record, seedAdmissions: [...admissions, runKey] };
+  return { admitted: true, reason: "admitted", record: next };
+}
+
 /** `POST /undrain`'s decision over the stored record: with no holds the drain
  *  clears; with holds outstanding the fleet STAYS closed — the record keeps
  *  standing with `liftAsked`, so the last container's new-image report lifts
@@ -193,10 +228,11 @@ export function reportImageCurrent(
 /** The `/attach` answer while the fleet is drained: a 503 whose body carries
  *  the record, so the bot waits for `until` at most and the card says why the
  *  run has not started. The `error` word `draining:` is the client's key. */
-export function drainRefusal(drain: DrainRecord): {
+export function drainRefusal(drain: DrainRecord, seedAdmitted = false): {
   error: string;
   status: 503;
   draining: DrainRecord;
+  seedAdmitted: boolean;
 } {
   return {
     error:
@@ -204,5 +240,6 @@ export function drainRefusal(drain: DrainRecord): {
       `ends by ${drain.until}) — the run waits at its attach and starts when the fleet reopens`,
     status: 503,
     draining: drain,
+    seedAdmitted,
   };
 }

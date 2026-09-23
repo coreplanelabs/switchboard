@@ -668,6 +668,12 @@ export type RunEvent =
        *  issues the refusal named. */
       description?: RecordedJson;
       issues?: DescriptionIssue[];
+      /** Exact measured drain wait on a `drain_wait` note. Legacy prose-only
+       *  records intentionally omit it and are rejected by `load:drain`. */
+      durationMs?: number;
+      /** Typed outcome on a `cold_sandbox` note: restored from the resident
+       *  snapshot or provisioned as a fresh clone. */
+      sandboxOutcome?: "seeded" | "fresh";
       spanId?: string;
       seq?: number;
       at?: number;

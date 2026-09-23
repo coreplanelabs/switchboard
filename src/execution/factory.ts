@@ -25,6 +25,7 @@ import {
 } from "./seedPlan.js";
 import {
   DRAIN_FALLBACK_WAIT_MS,
+  drainSeedAdmittedOf,
   drainWaitOf,
   ResidentExecutor,
   ResidentLeaseSpentError,
@@ -425,6 +426,9 @@ export async function makeExecutor(
   let failedAttach: ResidentTrace | undefined;
   /** The drain's share of a failed attach's wait, for the run's `drain_wait` note. */
   let drainWaitMs: number | undefined;
+  /** Preserved so a drain seed denial or failure keeps the typed wait instead
+   *  of silently provisioning a fresh clone. */
+  let failedAttachError: unknown;
   if (ctx.repo && opts.execution?.resident) {
     const resident = opts.execution.resident;
     const tokenEnv = resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN";
@@ -538,6 +542,7 @@ export async function makeExecutor(
         // is that failure, and falls cold as it always did.
         if (isRunStopError(err)) throw err;
         failedAttach = residentTraceOf(err);
+        failedAttachError = err;
         drainWaitMs = drainWaitOf(err);
         // Item 27: an attach that fails after a wait names the wait too — the
         // probe's through a typed blip (item 9) and the restore's alike, so a
@@ -568,6 +573,12 @@ export async function makeExecutor(
         (near ? ` (did you mean \`${near}\`?)` : "");
     }
     if (reason !== undefined) {
+      const drainFailure = failedAttachError !== undefined && (drainWaitMs !== undefined || drainSeedAdmittedOf(failedAttachError));
+      const drainSeedAdmitted = failedAttachError !== undefined && drainSeedAdmittedOf(failedAttachError);
+      // A drain's zero/denied path is wait-only. Only an atomically admitted
+      // run may use the snapshot; every failed, stale or missing admitted seed
+      // keeps the typed drain refusal instead of fresh-cloning around it.
+      if (drainFailure && !drainSeedAdmitted) throw failedAttachError;
       // The seed (docs/reference/specs/execution.md item 26): the resident could
       // not take the run, but its probe carried the snapshot handle — the
       // sandbox restores it before the run's first command instead of cloning
@@ -591,6 +602,7 @@ export async function makeExecutor(
           ...(drainWaitMs !== undefined ? { drainWaitMs } : {}),
         };
       }
+      if (drainFailure) throw failedAttachError;
       return {
         executor,
         note: `${reason} — using fresh sandbox${outcome ? ` (${outcome.why})` : ""}`,

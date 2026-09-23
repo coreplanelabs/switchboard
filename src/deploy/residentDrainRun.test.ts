@@ -15,6 +15,7 @@ import {
 } from "./residentDrain.js";
 import { RESIDENT_WAIT_MAX_MS, type DeployStep } from "./plan.js";
 import { deployStep, type SandboxGateDeps, type StepExec } from "./run.js";
+import { configurationFingerprint } from "./residentRollout.js";
 
 // Feature: docs/reference/specs/release-and-deploy.md item 31 — the resident
 // step drains the fleet: `POST /drain` before its first attempt when the admin
@@ -56,7 +57,11 @@ const residentStep: DeployStep = {
 };
 const plan = { waitMaxMs: 10 * 60_000, pollMs: 60_000 };
 
-function harness(env: Record<string, string>, posts: PostAnswer[] = [drained, lifted]) {
+function harness(
+  env: Record<string, string>,
+  posts: PostAnswer[] = [drained, lifted],
+  configuration?: Record<string, unknown>,
+) {
   const calls: { dep: string; args: unknown[] }[] = [];
   const lines: string[] = [];
   let clock = 0;
@@ -68,6 +73,8 @@ function harness(env: Record<string, string>, posts: PostAnswer[] = [drained, li
     },
     readHealth: async () => ({ error: "unscripted" }),
     readAppState: async () => ({ error: "unscripted" }),
+    readAppConfiguration: async () =>
+      configuration ? { value: configuration } : { error: "unscripted configuration" },
     readInstances: async () => ({ error: "unscripted" }),
     probeExec: async () => ({ body: { stdout: "", stderr: "", exitCode: 1 } }),
     postJson: async (...args) => {
@@ -96,6 +103,7 @@ describe("the pure pieces", () => {
       minutes: 65,
       reason: "deploy 62e4e9a",
       by: "deploy all",
+      seedDuringDrain: 0,
     });
     expect(drainSet(drained)).toBe(true);
     expect(drainUntil(drained)).toBe(UNTIL);
@@ -181,7 +189,7 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(h.calls[0].args).toEqual([
       "https://switchboard-resident.example.test/drain",
       "drn",
-      { minutes: 65, reason: "deploy 62e4e9a", by: "deploy all" },
+      { minutes: 65, reason: "deploy 62e4e9a", by: "deploy all", seedDuringDrain: 0 },
     ]);
     // The reconcile runs while the fleet is still drained; the lift follows it.
     expect(h.calls[4].args).toEqual(["https://switchboard-resident.example.test/reconcile", "drn", {}]);
@@ -194,6 +202,39 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(lines.at(-1)).toBe("[deploy:all] resident: fleet reopened");
     // The drained wait is the longer budget: the heartbeat counts against 60 min, not 30.
     expect(lines.some((l) => l.includes("(60 min left)"))).toBe(true);
+  });
+
+  it("a verified worker-only registry release reads the exact effective configuration, uploads with rollout none, and neither drains nor reconciles", async () => {
+    const account = "a".repeat(32);
+    const digest = `sha256:${"b".repeat(64)}`;
+    const configuration = {
+      image: `registry.cloudflare.com/${account}/switchboard-resident@${digest}`,
+      instance_type: { vcpu: 4, memory_mib: 12288, disk_mb: 20000 },
+      max_instances: 10,
+    };
+    const step: DeployStep = {
+      ...residentStep,
+      residentRollout: {
+        account,
+        containerApp: "switchboard-resident-residentdo",
+        receipt: {
+          manifestDigest: digest,
+          controlResetPiReceipt: "run:verified",
+          configuration,
+          configurationFingerprint: configurationFingerprint(configuration),
+        },
+      },
+    };
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [], configuration);
+    const seen: string[][] = [];
+    const r = await deployStep(step, plan, HEAD, h.io, h.deps, async (given) => {
+      seen.push(given.command);
+      return { code: 0, output: DEPLOYED };
+    });
+    expect(r.ok).toBe(true);
+    expect(seen).toEqual([["npm", "run", "deploy", "--", "--containers-rollout=none"]]);
+    expect(h.calls).toEqual([]);
+    expect(h.plain()[0]).toContain("resident container rollout none");
   });
 
   it("without the bearer: no POST at all, the line says the step waits without a drain, and the budget is the step's own", async () => {

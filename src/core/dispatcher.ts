@@ -2518,6 +2518,7 @@ export async function dispatch(
         type: "run_note",
         kind: "drain_wait",
         summary: `waited ${Math.max(1, Math.round(drainWaitMs / MINUTE_MS))} min at the fleet drain for a deploy to finish`,
+        durationMs: drainWaitMs,
         at: clock(),
       });
     if (fencedWhileAttaching) {
@@ -2690,7 +2691,13 @@ export async function dispatch(
     // <repo> · <ref>@<sha7>` (or "attached to the last snapshot"), not a
     // fallback. Head material, like every setup event ahead of the loop.
     if (note && !resident)
-      registry.publish(run.id, { type: "run_note", kind: "cold_sandbox", summary: oneLine(note), at: clock() });
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "cold_sandbox",
+        summary: oneLine(note),
+        sandboxOutcome: round.selection.seeded ? "seeded" : "fresh",
+        at: clock(),
+      });
     // A follow-up the resident kept off its thread's own PR branch says so on
     // its stream too (resident-repos item 16): the run page explains a run on
     // the default where the thread's pull request was expected, with the

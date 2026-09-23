@@ -350,6 +350,7 @@ import {
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
 import {
+  admitDrainSeed,
   drainRefusal,
   holdDrain,
   liftDrain,
@@ -1588,6 +1589,20 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     await this.pushDrainPost("above");
     await this.ctx.storage.setAlarm(Date.parse(record.until));
     return record;
+  }
+
+  /** Atomically consume the drain's persisted first-N seed cap for one run.
+   *  A repeated attach by the same run is idempotent; zero is wait-only. */
+  async admitDrainSeed(runKey: string): Promise<{
+    draining: DrainRecord | null;
+    admitted: boolean;
+    reason: "admitted" | "already-admitted" | "wait-only" | "cap-reached" | "not-draining";
+  }> {
+    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), systemClock());
+    if (record === null) return { draining: null, admitted: false, reason: "not-draining" };
+    const decision = admitDrainSeed(record, runKey);
+    if (decision.record !== record) await this.ctx.storage.put(DRAIN_KEY, decision.record);
+    return { draining: decision.record, admitted: decision.admitted, reason: decision.reason };
   }
 
   /** Admin-only by construction (POST /undrain): `cleared` when a record was
@@ -5541,11 +5556,16 @@ export class ResidentDO extends Sandbox<Env> {
       // the runs the drain waits FOR, and refusing them would hold the fleet
       // closed on the run it is closed for. Read before the image reconcile so
       // a refused attach never restarts a container.
-      const drain = await this.fleetDrain();
       const registered = (await this.ctx.storage.get(runRegKey(threadKey))) !== undefined;
-      if (drain && !registered) {
-        const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
-        return refusal;
+      if (!registered) {
+        const admission = await this.registry().admitDrainSeed(threadKey);
+        if (admission.draining) {
+          const refusal: ThreadErr & { draining: DrainRecord; seedAdmitted: boolean } = drainRefusal(
+            admission.draining,
+            admission.admitted,
+          );
+          return refusal;
+        }
       }
       // Item 70: above the soft memory threshold a NEW attach is refused like
       // `mirror-busy` (the bot falls back or waits, the card says why) — after

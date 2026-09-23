@@ -210,6 +210,10 @@ function stampDrainWait<E>(err: E, waitedMs: number): E {
  *  typed `ResidentDrainingError`, the attach's own refusal after the drain
  *  ended, or the wake hand-off's strike; undefined when the attach met no
  *  drain. */
+export function drainSeedAdmittedOf(err: unknown): boolean {
+  return err !== null && typeof err === "object" && (err as { seedAdmitted?: unknown }).seedAdmitted === true;
+}
+
 export function drainWaitOf(err: unknown): number | undefined {
   if (err === null || typeof err !== "object") return undefined;
   const stamped = (err as { drainWaitMs?: unknown }).drainWaitMs;
@@ -238,6 +242,7 @@ export class ResidentDrainingError extends ExecInfraError {
     readonly waitedMs: number,
     readonly until: string | undefined,
     words: string,
+    readonly seedAdmitted = false,
   ) {
     super(
       `resident /attach: the fleet is drained for a deploy and did not reopen within the ${Math.round(waitedMs / 1000)}s this run could wait` +
@@ -1156,6 +1161,14 @@ export class ResidentExecutor implements Executor {
     const answer = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
     if (answer.ok) return answer.binding;
     if (isDrainingRefusal(answer)) {
+      if (answer.data.seedAdmitted === true)
+        throw new ResidentDrainingError(
+          this.opts.resource,
+          0,
+          drainingUntil(answer),
+          refusalWords(answer),
+          true,
+        );
       const reopened = await this.awaitDrainEnd(answer, opts, span);
       return { ...reopened.binding, wokeAfterMs: reopened.waitedMs, drainWaitMs: reopened.waitedMs };
     }

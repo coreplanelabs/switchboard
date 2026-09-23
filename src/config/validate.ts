@@ -67,6 +67,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   grants: true,
   restrict: true,
   execution: true,
+  deploy: true,
   workspaceDir: true,
   memory: true,
   artifacts: true,
@@ -349,6 +350,15 @@ export function validateConfig(cfg: AppConfig): void {
   // The `metrics:` reader block (docs/reference/specs/run-metrics.md): refused by
   // field at load, like the costs block its credential rides with.
   parseMetricsConfig(cfg.metrics);
+  if (cfg.deploy !== undefined) {
+    if (typeof cfg.deploy !== "object" || cfg.deploy === null || Array.isArray(cfg.deploy))
+      throw new Error("config.yaml: deploy must be a mapping");
+    for (const key of unknownKeys(cfg.deploy, { seedDuringDrain: true }))
+      throw new Error(`config.yaml: unknown deploy key \`${key}\``);
+    const cap = cfg.deploy.seedDuringDrain;
+    if (cap !== undefined && (typeof cap !== "number" || !Number.isInteger(cap) || cap < 0))
+      throw new Error("config.yaml: deploy.seedDuringDrain must be a non-negative integer");
+  }
   if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory);
   if (cfg.tracing !== undefined) validateTracing(cfg.tracing);
   validateRuntimeOverrides(cfg.runtimeOverrides);

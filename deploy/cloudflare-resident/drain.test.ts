@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  admitDrainSeed,
   DRAIN_DEFAULT_MINUTES,
   DRAIN_MAX_MINUTES,
   HOLD_CYCLE_BOUND_MINUTES,
@@ -31,12 +32,16 @@ describe("parseDrainRequest — the record a drain asks for", () => {
         until: new Date(NOW + DRAIN_DEFAULT_MINUTES * 60_000).toISOString(),
         by: "admin",
         reason: "a deploy",
+        seedDuringDrain: 0,
       },
     });
   });
 
-  it("minutes, reason and by are taken as given, trimmed; `until` is since + minutes", () => {
-    const r = parseDrainRequest({ minutes: 65, reason: "  deploy 62e4e9a ", by: "deploy all" }, NOW);
+  it("minutes, reason, by and the first-N seed cap are taken as given; `until` is since + minutes", () => {
+    const r = parseDrainRequest(
+      { minutes: 65, reason: "  deploy 62e4e9a ", by: "deploy all", seedDuringDrain: 2 },
+      NOW,
+    );
     expect(r).toEqual({
       ok: true,
       record: {
@@ -44,6 +49,7 @@ describe("parseDrainRequest — the record a drain asks for", () => {
         until: "2026-09-18T06:05:00.000Z",
         by: "deploy all",
         reason: "deploy 62e4e9a",
+        seedDuringDrain: 2,
       },
     });
   });
@@ -76,6 +82,38 @@ describe("parseDrainRequest — the record a drain asks for", () => {
     expect(parseDrainRequest({ minutes: DRAIN_MAX_MINUTES }, NOW).ok).toBe(true);
     // Length is judged after the trim: padding never refuses a value that fits.
     expect(parseDrainRequest({ by: `  ${"x".repeat(80)}  ` }, NOW).ok).toBe(true);
+    expect(parseDrainRequest({ seedDuringDrain: -1 }, NOW)).toEqual({
+      ok: false,
+      error: "seedDuringDrain must be a non-negative integer",
+    });
+    expect(parseDrainRequest({ seedDuringDrain: 1.5 }, NOW)).toEqual({
+      ok: false,
+      error: "seedDuringDrain must be a non-negative integer",
+    });
+  });
+});
+
+describe("admitDrainSeed — persisted first-N total admission", () => {
+  const parsed = parseDrainRequest({ seedDuringDrain: 2 }, NOW);
+  if (!parsed.ok) throw new Error("fixture");
+
+  it("admits the first N distinct runs for the whole drain, idempotently, and denies every later run", () => {
+    const first = admitDrainSeed(parsed.record, "run-1");
+    expect(first).toMatchObject({ admitted: true, reason: "admitted" });
+    const repeated = admitDrainSeed(first.record, "run-1");
+    expect(repeated).toMatchObject({ admitted: true, reason: "already-admitted" });
+    expect(repeated.record.seedAdmissions).toEqual(["run-1"]);
+    const second = admitDrainSeed(repeated.record, "run-2");
+    expect(second).toMatchObject({ admitted: true, reason: "admitted" });
+    const denied = admitDrainSeed(second.record, "run-3");
+    expect(denied).toMatchObject({ admitted: false, reason: "cap-reached" });
+    expect(denied.record.seedAdmissions).toEqual(["run-1", "run-2"]);
+  });
+
+  it("zero is wait-only", () => {
+    const wait = parseDrainRequest({ seedDuringDrain: 0 }, NOW);
+    if (!wait.ok) throw new Error("fixture");
+    expect(admitDrainSeed(wait.record, "run-1")).toMatchObject({ admitted: false, reason: "wait-only" });
   });
 });
 

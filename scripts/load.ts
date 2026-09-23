@@ -40,6 +40,7 @@ import { simulateCards } from "../src/load/cardsLoad.js";
 import { runE2eLoad } from "../src/load/e2eLoad.js";
 import { durationStats, pageAll, peakConcurrency, realRuns } from "../src/load/history.js";
 import { runResidentLoad, type ResidentThreadClient } from "../src/load/residentLoad.js";
+import { drainReceiptSummary, type DrainReceiptRecord } from "../src/load/drainLoad.js";
 import { runSandboxLoad } from "../src/load/sandboxLoad.js";
 import {
   codingProfileScript,
@@ -176,6 +177,9 @@ const USAGE = `usage: tsx scripts/load.ts <command> [flags]
 commands
   history    peak concurrency and durations from the run store
              [--limit N]: stop after N runs have been read (default: unlimited, 0 = unlimited)
+             env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env)
+  drain      typed drain waits and cold-sandbox outcomes from finished run records only
+             [--since DATE] [--limit N]; incomplete or legacy receipts fail closed
              env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env)
   resident   N synthetic threads against one resident
              --resource repo:owner/name  --threads N  --hold S  --stagger S  --profile review|coding
@@ -420,6 +424,43 @@ async function history(f: Flags): Promise<boolean> {
   return writeResults("history", id, startedAt, { stateUrl: base }, summary, [], { peak, durations, byAgent }, notes);
 }
 
+async function drain(f: Flags): Promise<boolean> {
+  const id = runId();
+  const startedAt = new Date(systemClock()).toISOString();
+  const base = str(f, "state-url", process.env.SWITCHBOARD_STATE_WORKER_URL).replace(/\/$/, "");
+  const store = new WorkerRunStore({
+    baseUrl: base,
+    token: bearer(str(f, "token-env", "MEMORY_TOKEN")),
+    storeKey: "runs:default",
+  });
+  const sinceMs = typeof f.since === "string" ? Date.parse(f.since) : undefined;
+  if (sinceMs !== undefined && !Number.isFinite(sinceMs)) throw new Error(`--since is not a date: ${f.since}`);
+  const limit = num(f, "limit", 200);
+  const rows = await store.list({ limit: limit === 0 ? 200 : limit, ...(sinceMs !== undefined ? { sinceMs } : {}) });
+  const records = await Promise.all(rows.map((row) => store.get(row.id)));
+  if (records.some((record) => record === null)) throw new Error("a finished run disappeared while load:drain read it");
+  const receipt = drainReceiptSummary(records as DrainReceiptRecord[]);
+  const summary = summarize(
+    (records as DrainReceiptRecord[]).flatMap((record) =>
+      record.events.flatMap((event) =>
+        event.type === "run_note" && event.kind === "drain_wait" && typeof event.durationMs === "number"
+          ? [{ op: "drain-wait", startedAt: record.finishedAt! - event.durationMs, ms: event.durationMs, ok: true }]
+          : [],
+      ),
+    ),
+  );
+  return writeResults(
+    "drain",
+    id,
+    startedAt,
+    { stateUrl: base, ...(sinceMs !== undefined ? { since: new Date(sinceMs).toISOString() } : {}), limit },
+    summary,
+    [],
+    { receipt },
+    [`finished runs ${receipt.runs}, waits ${receipt.waits}, seeded ${receipt.seeded}, fresh ${receipt.fresh}`],
+  );
+}
+
 async function resident(f: Flags): Promise<boolean> {
   const id = runId();
   const startedAt = new Date(systemClock()).toISOString();
@@ -451,10 +492,21 @@ async function resident(f: Flags): Promise<boolean> {
         headers: { authorization: `Bearer ${operator}` },
         signal: AbortSignal.timeout(10_000),
       });
-      const data = (await res.json().catch(() => ({}))) as { state?: string; inFlight?: number };
+      const data = (await res.json().catch(() => ({}))) as {
+        state?: string;
+        inFlight?: number;
+        memory?: { percent?: number | null; cpuUsageUsec?: number | null };
+        disk?: { usedKiB?: number; totalKiB?: number };
+      };
       return {
         state: data.state ?? `http-${res.status}`,
         inFlight: typeof data.inFlight === "number" ? data.inFlight : null,
+        ...(data.memory
+          ? { memoryPercent: data.memory.percent ?? null, cpuUsageUsec: data.memory.cpuUsageUsec ?? null }
+          : {}),
+        ...(data.disk && typeof data.disk.usedKiB === "number" && typeof data.disk.totalKiB === "number"
+          ? { diskUsedKiB: data.disk.usedKiB, diskTotalKiB: data.disk.totalKiB }
+          : {}),
       };
     },
     purge: async (prefix) => {
@@ -485,7 +537,7 @@ async function resident(f: Flags): Promise<boolean> {
     { ...params, baseUrl },
     summary,
     checks,
-    { samples: out.samples, result: out.result, purge: out.purge },
+    { samples: out.samples, result: out.result, purge: out.purge, pressure: out.pressure },
     notes,
   );
 }
@@ -1877,6 +1929,7 @@ async function main(): Promise<number> {
   }
   const commands: Record<string, (f: Flags) => Promise<boolean>> = {
     history,
+    drain,
     resident,
     sandbox,
     e2e,

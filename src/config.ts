@@ -321,6 +321,12 @@ export interface ReviewConfig {
   addressSeverity?: AddressSeverity;
 }
 
+export interface DeployConfig {
+  /** First-N total runs admitted to a resident snapshot seed while an
+   *  image-changing fleet drain stands. Zero is wait-only. */
+  seedDuringDrain?: number;
+}
+
 export interface AppConfig {
   /**
    * The GitHub organization (or user) this installation serves — the account
@@ -376,6 +382,9 @@ export interface AppConfig {
    */
   restrict?: RestrictConfig;
   execution?: import("./execution/factory.js").ExecutionConfig;
+  /** Deploy-time resident drain policy, consumed by `deploy all` from the
+   *  same validated effective document the bot starts with. */
+  deploy?: DeployConfig;
   workspaceDir?: string;
   /**
    * Cross-session self-learning memory. Absent or `enabled:

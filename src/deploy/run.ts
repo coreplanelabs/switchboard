@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { residentRolloutDecision } from "./residentRollout.js";
 import {
   DRAINED_GAVE_UP_SUFFIX,
   drainBeganLine,
@@ -646,6 +647,9 @@ export interface SandboxGateDeps {
   readHealth(url: string, bearer?: string): Promise<HealthRead>;
   /** `wrangler containers info <app> --json` → the application's version and image, run in `dir`. */
   readAppState(dir: string, containerApp: string): Promise<Read<AppState>>;
+  /** The same fresh read's complete effective configuration. Optional only for
+   *  older injected test seams; absence fails closed to the draining rollout. */
+  readAppConfiguration?(dir: string, containerApp: string): Promise<Read<Record<string, unknown>>>;
   /** `wrangler containers instances <app> --json`, every page, run in `dir`. */
   readInstances(dir: string, containerApp: string): Promise<Read<ContainerInstance[]>>;
   /** `POST /exec` `echo ok` on the probe thread; the streamed body parsed. */
@@ -700,6 +704,19 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
     return state === null
       ? { error: `wrangler containers info ${id.value}: no numeric version in the output` }
       : { value: state };
+  },
+  readAppConfiguration: async (dir, containerApp) => {
+    const id = await resolveContainerAppId(dir, containerApp);
+    if ("error" in id) return id;
+    const info = await wranglerJson(dir, ["containers", "info", id.value, "--json"]);
+    if ("error" in info) return info;
+    const record = info.value;
+    if (typeof record !== "object" || record === null || Array.isArray(record))
+      return { error: `wrangler containers info ${id.value}: unexpected JSON shape` };
+    const configuration = (record as { configuration?: unknown }).configuration;
+    return typeof configuration === "object" && configuration !== null && !Array.isArray(configuration)
+      ? { value: configuration as Record<string, unknown> }
+      : { error: `wrangler containers info ${id.value}: no effective configuration in the output` };
   },
   readInstances: async (dir, containerApp) => {
     const id = await resolveContainerAppId(dir, containerApp);
@@ -933,17 +950,42 @@ async function deployStepTraced(
   root: Span,
 ): Promise<StepOutcome> {
   const started = deps.now();
+  // A registry-mode resident Worker-only release may leave the Containers
+  // application alone, but only after the fresh exact receipt gate. Every
+  // unknown or mismatch keeps the ordinary drain and rollout path.
+  let effectiveStep = step;
+  if (step.residentRollout) {
+    const currentRead = deps.readAppConfiguration
+      ? await deps.readAppConfiguration(step.dir, step.residentRollout.containerApp)
+      : { error: "the configuration reader is unavailable" };
+    const current = "value" in currentRead ? currentRead.value : undefined;
+    const decision = residentRolloutDecision({
+      account: step.residentRollout.account,
+      mode: "registry",
+      force: step.forcedBy !== undefined,
+      receipt: step.residentRollout.receipt,
+      current,
+    });
+    io.log(`[deploy:all] ${step.name}: resident container rollout ${decision.rollout} — ${decision.reason}`);
+    if (decision.rollout === "none") {
+      effectiveStep = {
+        ...step,
+        command: [...step.command, "--", "--containers-rollout=none"],
+        drain: undefined,
+      };
+    }
+  }
   // A step may carry its own budget (the resident's, sized for runs and a
   // provisioning rather than a rollout — plan.ts RESIDENT_WAIT_MAX_MS). A
   // drained fleet (release-and-deploy item 31) waits past a run's whole lease
   // instead: the wait ends when the runs in flight end, and nothing new lands.
-  const drain = await beginDrain(step, expectedCommit, io, deps);
+  const drain = await beginDrain(effectiveStep, expectedCommit, io, deps);
   const waitMaxMs = drain.drained
     ? Math.max(step.waitMaxMs ?? plan.waitMaxMs, RESIDENT_DRAINED_WAIT_MAX_MS)
     : (step.waitMaxMs ?? plan.waitMaxMs);
   const deadline = started + waitMaxMs;
   try {
-    const r = await deployStepLoop(step, plan, expectedCommit, io, deps, exec, root, {
+    const r = await deployStepLoop(effectiveStep, plan, expectedCommit, io, deps, exec, root, {
       started,
       waitMaxMs,
       deadline,
@@ -955,7 +997,7 @@ async function deployStepTraced(
     // (release-and-deploy item 31; resident-repos item 69's order). Only after
     // a deployed step: a failed or refused one changed no image, and the drain
     // must still lift promptly.
-    if (r.ok && drain.attempted) await reconcileFleet(step, io, deps);
+    if (r.ok && drain.attempted) await reconcileFleet(effectiveStep, io, deps);
     return r;
   } finally {
     // Whatever the step ended as — live, refused past the budget, failed — the
@@ -965,7 +1007,7 @@ async function deployStepTraced(
     // landed: a `/drain` whose answer was lost after the registry stored the
     // record would otherwise close the fleet for the record's whole life.
     // `/undrain` is idempotent, and a rejected bearer answers 401 to both alike.
-    if (drain.attempted) await endDrain(step, drain, io, deps);
+    if (drain.attempted) await endDrain(effectiveStep, drain, io, deps);
   }
 }
 
@@ -989,7 +1031,7 @@ async function beginDrain(
   const answer = await deps.postJson(
     drainUrl(step.drain.url),
     bearer,
-    drainBody(RESIDENT_DRAINED_WAIT_MAX_MS, expectedCommit),
+    drainBody(RESIDENT_DRAINED_WAIT_MAX_MS, expectedCommit, step.drain.seedDuringDrain ?? 0),
   );
   io.log(drainBeganLine(step.name, answer));
   return { attempted: true, drained: drainSet(answer), until: drainUntil(answer) };
@@ -1151,6 +1193,7 @@ export async function runDeployPlan(
   // source or an invalid config is a refusal up front, not a bot that fails to
   // start after the memory Worker has already rolled.
   let configToPush: Extract<ConfigRead, { ok: true }> | undefined;
+  let seedDuringDrain = 0;
   const stateWorkerUrl = plan.config.stateWorkerUrl;
   if (plan.steps.some((s) => s.name === "bot")) {
     if (stateWorkerUrl === undefined) {
@@ -1170,6 +1213,12 @@ export async function runDeployPlan(
       configToPush = read;
       io.log(`[deploy:all] config: ${read.how} validates; pushed to ${stateWorkerUrl} before the bot step`);
     }
+  }
+  if (plan.steps.some((s) => s.name === "resident")) {
+    const read = configToPush ?? (await readConfigForPush(plan.config.source));
+    if (!read.ok) return { kind: "refused", problems: [read.problem] };
+    seedDuringDrain = parseAppConfigText(read.text).deploy?.seedDuringDrain ?? 0;
+    io.log(`[deploy:all] resident drain: deploy.seedDuringDrain=${seedDuringDrain}${seedDuringDrain === 0 ? " (wait-only)" : " (first-N total snapshot seeds)"}`);
   }
   for (const w of plan.warnings) io.warn(`[deploy:all] WARNING ${w}`);
 
@@ -1251,7 +1300,11 @@ export async function runDeployPlan(
         results.push({ name: step.name, script: step.script, live: "not deployed", status: "npm ci failed" });
         break;
       }
-      const r = await deployStep(step, plan, expectedCommit, io, deps);
+      const effectiveStep =
+        step.name === "resident" && step.drain
+          ? { ...step, drain: { ...step.drain, seedDuringDrain } }
+          : step;
+      const r = await deployStep(effectiveStep, plan, expectedCommit, io, deps);
       // wrangler always prints `Current Version ID`; a deploy that exits 0 without one is odd enough to say so.
       results.push({
         name: step.name,
