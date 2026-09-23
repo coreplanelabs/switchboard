@@ -239,7 +239,7 @@ describe("ensureWorkArea over a fixture asset tree", () => {
     expect(existsSync(join(assets, WORK_AREA_STAMP))).toBe(false);
     expect(deps.lines).toEqual([
       `[deploy] materialised the shipped tree (version 1.2.0) under ${workArea}`,
-      `[deploy] npm ci --workspace deploy/cloudflare-memory under ${workArea}`,
+      `[deploy] npm ci --include-workspace-root --workspace deploy/cloudflare-memory under ${workArea}`,
     ]);
   });
 

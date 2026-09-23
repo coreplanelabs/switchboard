@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { PACKAGE_ROOT, PACKAGE_SOURCE_FILE, packageVersion } from "../packageRoot.js";
-import { cliVersionOnHost, OPERATOR_ROOT } from "./host.js";
+import { cliVersionOnHost, OPERATOR_ROOT, workAreaNpmCiArgs } from "./host.js";
 import { resolveOperatorRoot } from "./operatorRoot.js";
 
 // Feature: docs/reference/specs/release-and-deploy.md item 25 — one version source
@@ -14,6 +14,21 @@ import { resolveOperatorRoot } from "./operatorRoot.js";
 const temps: string[] = [];
 afterAll(() => {
   for (const t of temps) rmSync(t, { recursive: true, force: true });
+});
+
+describe("workAreaNpmCiArgs", () => {
+  it("installs the root runtime closure with every selected Worker", () => {
+    expect(workAreaNpmCiArgs(["deploy/cloudflare", "deploy/cloudflare-memory"])).toEqual([
+      "ci",
+      "--include-workspace-root",
+      "--no-audit",
+      "--no-fund",
+      "--workspace",
+      "deploy/cloudflare",
+      "--workspace",
+      "deploy/cloudflare-memory",
+    ]);
+  });
 });
 
 describe("cliVersionOnHost", () => {
