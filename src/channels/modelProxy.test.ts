@@ -16,6 +16,7 @@ import { proxyProviderFailureIsAuthenticated } from "../core/modelProxy/provider
 import { RunBearerStore, type RunBearerGrant } from "../core/modelProxy/runBearers.js";
 import type { ModelCard } from "../core/modelCard.js";
 import { classifyProviderFailure, type ProviderConfig, type ToolDef } from "../core/provider.js";
+import { shapeToolSchemasForWire } from "../core/providerToolSchemas.js";
 import { CommandRegistry } from "../core/commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
 import { operatorProjection, operatorTools } from "../core/dispatch/operator.js";
@@ -35,7 +36,6 @@ import {
   pinRequest,
   PROXY_PATHS,
   proxyShapeOf,
-  shapeToolSchemasForWire,
   SseMeter,
   type ModelProxyDeps,
   type ProxyRequest,
