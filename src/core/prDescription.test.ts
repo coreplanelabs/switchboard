@@ -546,26 +546,42 @@ describe("renderPrDescriptionMarkdown", () => {
     );
   });
 
-  // Feature: docs/reference/specs/pr-description.md item 5 (record 0062)
-  // — one BOT-written requested-by line in the agents block, present only when
-  // a binding names the requester's login; the object is unchanged.
-  it("the requested-by line rides the agents block only when the context carries a binding; steerers join when named", () => {
+  it("the requested-by line leads the body without a GitHub binding and stays outside the parsed description", () => {
     const plain = renderPrDescriptionMarkdown(desc(), CTX);
     expect(plain).not.toContain("Requested by");
-    const withBinding = renderPrDescriptionMarkdown(desc(), {
+    const requestedBy = { name: "Ivy", threadUrl: "https://bot.example/threads/slack%3AC1%3A1.0" };
+    const withRequester = renderPrDescriptionMarkdown(desc(), {
       ...CTX,
-      requestedBy: { login: "ivy-dev", surface: "slack:C1" },
+      requestedBy,
     });
-    expect(withBinding).toContain("Requested by @ivy-dev in slack:C1");
-    // The line lives in the For agents fold, beside the agent's own notes.
+    expect(withRequester).toMatch(
+      /^Requested by \*\*Ivy\*\* · \[Thread\]\(https:\/\/bot.example\/threads\/slack%3AC1%3A1.0\)\n\n/,
+    );
+    expect(withRequester).not.toContain("/runs/");
+    expect(parsePrDescriptionMarkdown(withRequester).description.tldr).toBe(desc().tldr);
     const withNotes = renderPrDescriptionMarkdown(desc({ agentNotes: "Skip the lockfile churn." }), {
       ...CTX,
-      requestedBy: { login: "ivy-dev", surface: "slack:C1", steeredBy: ["Raj", "Mona"] },
+      requestedBy: { ...requestedBy, steeredBy: ["Raj", "Mona"] },
     });
     const fold = withNotes.slice(withNotes.indexOf("For agents"));
     expect(fold).toContain("Skip the lockfile churn.");
-    expect(fold).toContain("Requested by @ivy-dev in slack:C1; steered by Raj, Mona");
-    expect(requestedByLine({ login: "ivy-dev", surface: "slack:C1" })).toBe("Requested by @ivy-dev in slack:C1");
+    expect(fold).not.toContain("Requested by");
+    expect(withNotes.split("\n")[0]).toContain("; steered by Raj, Mona");
+    expect(parsePrDescriptionMarkdown(withNotes).description.agentNotes).toBe("Skip the lockfile churn.");
+    expect(requestedByLine({ name: "slack:UIVY" })).toBe("Requested by **slack:UIVY**");
+  });
+
+  it("a malformed attribution prefix with repeated escapes stays description text", () => {
+    const malformed = `Requested by **${"\\)".repeat(20_000)}`;
+    const body = `${malformed}\n\n${renderPrDescriptionMarkdown(desc(), CTX)}`;
+    expect(parsePrDescriptionMarkdown(body).description.tldr).toContain(malformed);
+  });
+
+  it("requester display text cannot inject Markdown, mentions, HTML or a second header line", () => {
+    const line = requestedByLine({ name: "Ivy**\n[click](evil) <img> @everyone", steeredBy: ["<b>Raj</b>"] });
+    expect(line).toBe(
+      "Requested by **Ivy\\*\\* \\[click\\]\\(evil\\) &lt;img&gt; &#64;everyone**; steered by &lt;b&gt;Raj&lt;/b&gt;",
+    );
   });
 
   it("refuses a short sha or a non owner/name repo", () => {

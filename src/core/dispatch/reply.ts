@@ -56,6 +56,22 @@ export function runPageLink(id: string): string | undefined {
   return `${base.replace(/\/+$/, "")}/runs/${encodeURIComponent(id)}`;
 }
 
+/** A thread's tokenless, authenticated page. Full keys work across viewers'
+ *  own lanes; a bare web conversation id would resolve relative to the viewer. */
+export function threadPageLink(threadKey: string, publicBaseUrl = process.env.PUBLIC_BASE_URL): string | undefined {
+  if (!publicBaseUrl?.trim()) return undefined;
+  try {
+    const base = new URL(publicBaseUrl.trim());
+    if (!["https:", "http:"].includes(base.protocol) || base.username || base.password) return undefined;
+    base.search = "";
+    base.hash = "";
+    base.pathname = `${base.pathname.replace(/\/+$/, "")}/threads/${encodeURIComponent(threadKey).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
+    return base.href;
+  } catch {
+    return undefined;
+  }
+}
+
 /** One stored file's link: the run page's artifact proxy for `key`
  *  (`/runs/:id/artifacts/<key>`, live-view.md item 26), each key segment
  *  encoded so the route decodes them back; `?t=<token>` when the run's

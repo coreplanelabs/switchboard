@@ -56,6 +56,8 @@ import {
 } from "../core/budgets.js";
 import { DEFAULT_VERBOSITY, shows } from "../core/verbosity.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import { requestedByLine } from "../core/prDescription.js";
+import { threadPageLink } from "../core/dispatch/reply.js";
 import { AGENTS } from "../agents/registry.js";
 import { authorize } from "../core/authz/authorize.js";
 import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
@@ -1629,6 +1631,13 @@ async function recoverPushedBranch(
     if (subject !== undefined && checkPrTitle(subject, PR_TITLE_VOCABULARY).ok) title = subject;
   }
   title ??= recoveredFallbackTitle(row, branch, instance.plan?.id ?? parsePlanBranch(branch)?.planId);
+  // Recovery has no normal coding post-step, but the durable instance still
+  // owns the requester and the original thread even when its child is gone.
+  const header = requestedByLine({
+    name: instance.userName?.trim() || instance.userId,
+    threadUrl: threadPageLink(instance.threadKey, deps.runPageBase?.replace(/\/runs\/?$/, "") ?? ""),
+  });
+  prBody = `${header}\n\n${prBody}`;
   // The identity rewrite before the open (record 0062): the recover path
   // opens over the same guarantee the coding post-step gives — the commits
   // carry only the allowed identities. Unreadable is thrown for the caller's
