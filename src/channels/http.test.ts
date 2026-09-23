@@ -146,6 +146,68 @@ describe("handleIngressRequest (transport gating + dispatch)", () => {
     expect(d.calls[0].msg.threadKey).toBe("http:locked:default");
   });
 
+  it("rejects bad channel/thread types, empty values, delimiters, and overlong values at the HTTP boundary", async () => {
+    const d = fakeDispatch();
+    const invalidBodies = [
+      { text: "hi", channel: 7 },
+      { text: "hi", thread: false },
+      { text: "hi", channel: "" },
+      { text: "hi", thread: "" },
+      { text: "hi", channel: "ops:admin" },
+      { text: "hi", thread: "topic:child" },
+      { text: "hi", channel: "ops#host" },
+      { text: "hi", thread: "topic#host" },
+      { text: "hi", channel: "c".repeat(129) },
+      { text: "hi", thread: "t".repeat(129) },
+    ];
+    for (const body of invalidBodies) {
+      const res = await handleIngressRequest(
+        { method: "POST", headers: bearer("tok"), body: JSON.stringify(body) },
+        deps,
+        { auth: good, dispatch: d.fn },
+      );
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it("rejects ambiguous pairs from distinct pinned credentials and cannot forge a #host thread", async () => {
+    const d = fakeDispatch();
+    const isolated = authConfig({
+      left: { subject: "left", channel: "a" },
+      right: { subject: "right", channel: "a:b" },
+      host: { subject: "host", channel: "ops" },
+    });
+    const attempts = [
+      ["left", { text: "hi", thread: "b:c" }],
+      ["right", { text: "hi", thread: "c" }],
+      ["host", { text: "hi", thread: "topic#host" }],
+    ] as const;
+    for (const [token, body] of attempts) {
+      const res = await handleIngressRequest(
+        { method: "POST", headers: bearer(token), body: JSON.stringify(body) },
+        deps,
+        { auth: isolated, dispatch: d.fn },
+      );
+      expect(res.status).toBe(400);
+    }
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it("rejects empty and overlong identity-pinned channels before composing a thread key", async () => {
+    const d = fakeDispatch();
+    for (const channel of ["", "ops:admin", "ops#host", "x".repeat(129)]) {
+      const auth = authConfig({ tok: { subject: "alice", channel } });
+      const res = await handleIngressRequest(
+        { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "hi" }) },
+        deps,
+        { auth, dispatch: d.fn },
+      );
+      expect(res.status).toBe(400);
+    }
+    expect(d.calls).toHaveLength(0);
+  });
+
   // authorization.md item 15: a token entry's `email` binds the credential to a person.
   it("a token bound to a person by email → the message is the person's (userId, userName) and names the credential as authenticatedAs; the dispatch gate still asks about the credential", async () => {
     const d = fakeDispatch();
