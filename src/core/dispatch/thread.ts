@@ -184,6 +184,9 @@ export type ThreadOwner =
    *  owns that pipeline's task, branch and pull request, so its next plain
    *  reply re-issues the same plan instead of becoming a new task. */
   | { kind: "pipeline"; instanceId: string; run: RunView; unit: CoordinatorUnit }
+  /** More than one ended unit claims the same thread. No continuation may
+   *  guess which durable task the person's words address. */
+  | { kind: "pipeline_ambiguous"; instanceId: string; run: RunView; units: CoordinatorUnit[] }
   | { kind: "session"; agent: string }
   | { kind: "none" };
 
@@ -199,7 +202,7 @@ export async function ownerOf(
     const units = await unitsOf(instanceId).catch(() => [] as CoordinatorUnit[]);
     const unit = units.find((u) => u.threadKey === threadKey && u.ending === undefined);
     if (unit !== undefined) return { kind: "unit", instanceId, unit };
-    const ended = units.find(
+    const ended = units.filter(
       (u) =>
         u.threadKey === threadKey &&
         u.ending !== undefined &&
@@ -207,7 +210,9 @@ export async function ownerOf(
         u.ending.kind !== "already_landed",
     );
     const ship = runs.find((r) => r.instanceId === instanceId && r.finished);
-    if (ended !== undefined && ship !== undefined) return { kind: "pipeline", instanceId, run: ship, unit: ended };
+    if (ended.length === 1 && ship !== undefined) return { kind: "pipeline", instanceId, run: ship, unit: ended[0]! };
+    if (ended.length > 1 && ship !== undefined)
+      return { kind: "pipeline_ambiguous", instanceId, run: ship, units: ended };
   }
   const agent = stickyAgentOf(runs);
   if (agent !== undefined) return { kind: "session", agent };

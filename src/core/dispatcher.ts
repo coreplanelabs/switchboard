@@ -23,6 +23,7 @@ import {
   closeResumedRow,
   defaultAdmission,
   foldCarriedInbox,
+  STEER_OWNER_REFUSED,
   type AdmissionContext,
   type AdmissionDeps,
   type DispatchFollowUp,
@@ -79,8 +80,10 @@ import {
   authorizePrHead,
   authorizeProfile,
   authorizeRepo,
+  authorizeSteerOwner,
   type AuthorizeDeps,
 } from "./dispatch/authorize.js";
+import { effectiveGrants } from "./authz/authorize.js";
 import { buildConversation, textTurnsOf, type TextTurn } from "./dispatch/messages.js";
 import {
   attachmentsLine,
@@ -128,6 +131,7 @@ import {
   type CarriedRunIdentity,
 } from "./dispatch/reattach.js";
 import { workspaceBindingFor } from "../execution/factory.js";
+import { fetchPullRequestFacts } from "../execution/githubPulls.js";
 import { fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
@@ -146,7 +150,13 @@ import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import { createRunsService, type RunsService, type RunView } from "./runsService.js";
-import { unitKeyOf, unitNudgeEventType, type CoordinatorTag, type CoordinatorUnit } from "./coordinator/contract.js";
+import {
+  unitKeyOf,
+  unitNudgeEventType,
+  type CoordinatorInstance,
+  type CoordinatorTag,
+  type CoordinatorUnit,
+} from "./coordinator/contract.js";
 import type { DispatchOutcome } from "./dispatch/outcome.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
@@ -434,6 +444,44 @@ export interface DispatchOptions {
  *  spawning parent relays to its model as a named tool result. */
 export type { DispatchOutcome } from "./dispatch/outcome.js";
 
+type ContinuationBudget =
+  | { kind: "remaining"; caps: { maxRounds: number; maxMinutes: number } }
+  | { kind: "exhausted"; budget: "wall-clock" | "review-round" }
+  | { kind: "unavailable" };
+
+/** The budget an ended generated pipeline may carry into its next attempt.
+ *  Both inputs are durable coordinator facts: the unit's persisted wall-clock
+ *  window and review boundaries against the caps the original hand-off stored.
+ *  A missing or contradictory fact fails closed instead of recreating either
+ *  cap from today's config or from the original request directive. */
+function continuationBudgetOf(
+  instance: Pick<CoordinatorInstance, "caps">,
+  unit: Pick<CoordinatorUnit, "ending" | "rounds" | "startedAt">,
+): ContinuationBudget {
+  if (unit.ending?.kind === "wall_clock_cap" || unit.ending?.kind === "review_pending")
+    return { kind: "exhausted", budget: "wall-clock" };
+  if (unit.ending?.kind === "round_cap") return { kind: "exhausted", budget: "review-round" };
+  const caps = instance.caps;
+  if (
+    caps === undefined ||
+    unit.startedAt === undefined ||
+    unit.ending === undefined ||
+    caps.maxMinutes <= 0 ||
+    caps.maxRounds <= 0 ||
+    unit.ending.at < unit.startedAt
+  )
+    return { kind: "unavailable" };
+  const remainingMinutes = caps.maxMinutes - (unit.ending.at - unit.startedAt) / MINUTE_MS;
+  if (remainingMinutes <= 0) return { kind: "exhausted", budget: "wall-clock" };
+  const reviewRounds = unit.rounds.reduce(
+    (highest, round) => (round.agent === "review" ? Math.max(highest, round.index) : highest),
+    0,
+  );
+  const remainingRounds = caps.maxRounds - reviewRounds;
+  if (remainingRounds <= 0) return { kind: "exhausted", budget: "review-round" };
+  return { kind: "remaining", caps: { maxRounds: remainingRounds, maxMinutes: remainingMinutes } };
+}
+
 export async function dispatch(
   deps: CoreDeps,
   msg: IncomingMessage,
@@ -663,7 +711,10 @@ export async function dispatch(
     // `routing.operator: shadow` or `on`, ONE operator turn per admitted chat
     // event — here, ahead of stage A and outside the deterministic live-thread
     // and directive short-circuits, or the shadow week would never see the
-    // replies and typed lines the readers answer. Under `shadow` the decision
+    // replies and typed lines the readers answer. The deterministic exception
+    // under `on` is an ended pipeline's continuation-shaped reply: owner
+    // resolution bypasses the operator before any model or command can run.
+    // Under `shadow` the decision
     // only rides the record, beside the routed request: onto the live run a
     // reply is folded into (below, beside admission's fold), onto stage A's
     // inline run for a typed line, onto the agent run's events otherwise —
@@ -690,7 +741,7 @@ export async function dispatch(
     const typedDecision =
       parseDirectives(msg.text).agent !== undefined ||
       (deps.commands !== undefined && parseChatCommand(msg.text, deps.commands) !== null);
-    const operatorMode = configuredOperator === "on" && typedDecision ? "off" : configuredOperator;
+    let operatorMode = configuredOperator === "on" && typedDecision ? "off" : configuredOperator;
     let operatorEvent: OperatorEventFields | undefined;
     // The preset an `on` decision binds on the person's own words, with the
     // decision's event on the run.
@@ -706,37 +757,65 @@ export async function dispatch(
     // The repository the typed bind carries. Target resolution treats it as a
     // fallback below an explicit current-message target.
     let operatorRepo: string | undefined;
-    // An ended generated pipeline's stable plan id: read from its coordinator
-    // row and handed to ship so a formatted durable input cannot mint a new id.
+    // An ended generated pipeline's stable plan id and remaining caps: read
+    // from its coordinator rows and handed to ship so neither a formatted
+    // durable input nor today's config can mint a new identity or budget.
     let reissuePlanId: string | undefined;
+    let reissueCaps: { maxRounds: number; maxMinutes: number } | undefined;
     // The thread page the operator reads (newest first): the tail's session
     // keys and, on the newest record, an `on` question still pending — whose
     // "yes" this event may be (routing-and-config item 29). Read here once and
     // reused below, so the operator costs the dispatch no second page.
     let operatorThread: RunView[] | undefined;
-    // The thread's owner off the page (record 0051's owner order), read at most
-    // once per dispatch: computed here for the operator when a slot answers
-    // nothing, reused by the unit-owned branch below.
+    // The thread's owner off the page (record 0051's owner order), with unit
+    // rows cached per instance so the operator view and an ended-owner check
+    // still cost at most one durable read.
     let pageOwner: ThreadOwner | undefined;
     if (operatorMode !== "off") {
       const runsService = deps.runs ?? createRunsService({ registry, store: deps.runStore });
       operatorThread = opts.thread ?? (await readThread(runsService, msg.threadKey));
+      if (operatorThread !== undefined && deps.coordinatorInstances !== undefined) {
+        const unitReads = new Map<string, Promise<CoordinatorUnit[]>>();
+        const unitsOf = (id: string) => {
+          let read = unitReads.get(id);
+          if (read === undefined) {
+            read = deps.coordinatorInstances!.listUnits(id);
+            unitReads.set(id, read);
+          }
+          return read;
+        };
+        pageOwner = await ownerOf(operatorThread, unitsOf, msg.threadKey);
+        // An ended generated pipeline is a deterministic continuation door,
+        // not an operator decision. Bypass the model before any read command
+        // can substitute for the reply. When a concurrent continuation has
+        // already claimed the local slot, ignore that new live row only for
+        // this historical-owner check; ordinary admission below folds the
+        // duplicate into the winner without another operator turn.
+        if (operatorMode === "on" && parseDirectives(msg.text).agent === undefined) {
+          const continuationOwner =
+            pageOwner.kind === "pipeline" || pageOwner.kind === "pipeline_ambiguous"
+              ? pageOwner
+              : await ownerOf(
+                  operatorThread.filter((run) => run.finished),
+                  unitsOf,
+                  msg.threadKey,
+                );
+          if (continuationOwner.kind === "pipeline" || continuationOwner.kind === "pipeline_ambiguous") {
+            pageOwner = continuationOwner;
+            operatorMode = "off";
+          }
+        }
+      }
+    }
+    if (operatorMode !== "off") {
       // The thread's owner as the operator reads it (issue 2027; record 0051's
       // owner order; thread-admission item 9): a live run — the local slot, one
       // live on another generation, or the page's unfinished run (a hosted
-      // pipeline runner) — else the page's idle unit or ended generated
-      // pipeline. Under an owner the turn's projection narrows to steers and
-      // reads, the prompt says the reply is the owner's follow-up, and the
-      // executor folds any other decision; an ended pipeline folds steers too.
+      // pipeline runner) — else the page's idle unit. Under an owner the turn's
+      // projection narrows to steers and reads, and the prompt says the reply
+      // is the owner's follow-up. Ended pipelines bypassed this turn above.
       const slot = admission.get(msg.threadKey);
       const liveElsewhere = deps.threadsElsewhere.get(msg.threadKey) !== undefined;
-      if (
-        slot === undefined &&
-        !liveElsewhere &&
-        operatorThread !== undefined &&
-        deps.coordinatorInstances !== undefined
-      )
-        pageOwner = await ownerOf(operatorThread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey);
       // A pending question's free-text answer (issue 2046; routing-and-config
       // item 29): when the thread's newest record is an `on` question and this
       // reply is not the bare "yes" the proposal path binds, the person's words
@@ -768,7 +847,9 @@ export async function dispatch(
               ? { kind: "unit", unit: pageOwner.unit.unit }
               : pageOwner?.kind === "pipeline"
                 ? { kind: "pipeline", unit: pageOwner.unit.unit }
-                : undefined;
+                : pageOwner?.kind === "pipeline_ambiguous"
+                  ? { kind: "pipeline", unit: pageOwner.units.map((unit) => unit.unit).join(", ") }
+                  : undefined;
       operatorEvent = await root.span("dispatch.operator", () =>
         operatorStage(deps, {
           msg: doorMsg,
@@ -825,9 +906,9 @@ export async function dispatch(
         // `kind: "fold"` (issue 2027; thread-admission item 9): the decision was
         // neither steers-and-reads nor a question in an owned thread, so the
         // words are the owner's follow-up — the dispatch runs on to admission's
-        // fold (a live run), the unit's one thread event (an idle unit), or the
-        // durable task re-issue (an ended pipeline), the decision's event riding
-        // the fold or a door record, no prose posted.
+        // fold (a live run) or the unit's one thread event (an idle unit), the
+        // decision's event riding the fold or a door record, no prose posted.
+        // An ended pipeline's deterministic continuation bypassed this turn.
         // A confirmed "yes" to a question minted before the thread became
         // owned folds the proposal's own words: the person's message is the
         // word "yes", which tells the owner nothing.
@@ -865,9 +946,9 @@ export async function dispatch(
     // (`resolveRun`'s own `operatorPreset` field, `agentSource: "operator"`
     // below) — never written into `directives.agent`, so admission's follow-up
     // rule and the thread-owner rule below keep reading the person's typed
-    // intent alone: a preset bind into a thread a live run, an idle unit or an
-    // ended pipeline owns folds or is refused by the owner's rule, never refused as an agent
-    // request nobody typed and never started as a rival run (issue 2010's
+    // intent alone: a preset bind into a thread a live run or idle unit owns
+    // folds or is refused by the owner's rule, never refused as an agent request
+    // nobody typed and never started as a rival run (issue 2010's
     // class). A confirmed proposal carries its own task: its tail is the
     // request, since the person's message was the word "yes".
     if (operatorRequest !== undefined) directives.text = operatorRequest;
@@ -984,25 +1065,135 @@ export async function dispatch(
         await recordPendingOperator();
         return ended;
       }
+      if (owner.kind === "pipeline_ambiguous" && directives.agent === undefined) {
+        await io.reply(
+          `This thread matches multiple ended plan units (${owner.units.map((unit) => unit.unit).join(", ")}), so continuation is ambiguous. Nothing started.`,
+        );
+        await recordPendingOperator();
+        return ended;
+      }
       if (owner.kind === "pipeline" && directives.agent === undefined) {
         // The ended generated pipeline still owns this thread until its unit
         // merges. Its durable parent input — not this reply — is the task that
-        // re-issues the stable plan id, branch and open pull request. If that
-        // source cannot be read, ask instead of manufacturing a task from a
-        // fragment whose meaning depended on the old pipeline.
-        const original = await shipRequestOf(runsService, owner.run.id);
-        if (original === undefined) {
+        // re-issues the stable plan id, branch and open pull request. Any
+        // missing or contradictory durable fact names its blocker instead of
+        // manufacturing a task from a fragment or running a substitute read.
+        const instance = await deps.coordinatorInstances.get(owner.instanceId).catch(() => null);
+        if (instance === null) {
           await io.reply(
-            "This ship pipeline ended, but its original task could not be read. What was the pipeline's original task?",
+            `The ended pipeline's record \`${owner.instanceId}\` is unavailable, so continuation did not start.`,
           );
           await recordPendingOperator();
           return ended;
         }
-        const instance = await deps.coordinatorInstances.get(owner.instanceId).catch(() => null);
-        if (instance?.plan?.path === undefined) reissuePlanId = instance?.plan?.id;
-        directives.text = original;
+        const actor = chatActorOf(deps.config, msg);
+        if (
+          authorizeSteerOwner({
+            caller: { ids: actorIdsOf(actor), grants: effectiveGrants(actor) },
+            target: { runId: owner.run.id, requesterId: instance.userId },
+          }).kind === "refused"
+        ) {
+          await io.reply(STEER_OWNER_REFUSED);
+          await recordPendingOperator();
+          return ended;
+        }
+        if (instance.threadKey !== msg.threadKey || instance.plan === undefined || instance.plan.path !== undefined) {
+          await io.reply(
+            `The ended pipeline's durable generated-task identity does not match this thread, so continuation did not start.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        if (instance.repo !== owner.run.repo || instance.branch !== owner.unit.branch) {
+          await io.reply(
+            `The ended pipeline's repository or branch identity no longer matches unit ${owner.unit.unit}, so continuation did not start.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        const continuationBudget = continuationBudgetOf(instance, owner.unit);
+        if (continuationBudget.kind === "unavailable") {
+          await io.reply(
+            `Unit ${owner.unit.unit} does not retain a complete durable wall-clock and review-round budget, so continuation did not start. Nothing else ran.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        if (continuationBudget.kind === "exhausted") {
+          await io.reply(
+            `Unit ${owner.unit.unit} exhausted the ended pipeline's ${continuationBudget.budget} budget, so continuation did not start. Nothing else ran.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        const original = await shipRequestOf(runsService, owner.run.id);
+        if (original === undefined) {
+          await io.reply(
+            `The ended pipeline's original task is unavailable from run \`${owner.run.id}\`, so continuation did not start.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        const recordedPr = owner.unit.pr;
+        if (recordedPr === undefined) {
+          await io.reply(
+            `Unit ${owner.unit.unit} does not retain a durable pull request identity, so continuation did not start. Nothing else ran.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        const expectedHead = owner.unit.lastPush;
+        if (expectedHead === undefined) {
+          await io.reply(
+            `Unit ${owner.unit.unit} does not retain the pull request's durable expected head, so continuation did not start. Nothing else ran.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        const target = { repo: instance.repo, number: recordedPr.number };
+        const facts = await (deps.fetchPrFacts ?? fetchPullRequestFacts)(target).catch(() => undefined);
+        if (facts === undefined) {
+          await io.reply(
+            `GitHub did not return current facts for ${instance.repo}#${recordedPr.number}, so continuation did not start.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        if (facts.state !== "open") {
+          await io.reply(
+            `${instance.repo}#${recordedPr.number} is closed, so this ended pipeline has no open pull request to continue. Nothing started.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        const verifiedHead = facts.verifiedHead;
+        if (
+          !facts.sameRepoHead ||
+          facts.headBranchExists !== true ||
+          facts.headRef !== owner.unit.branch ||
+          verifiedHead === undefined ||
+          verifiedHead.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+          verifiedHead.ref !== owner.unit.branch ||
+          facts.headSha !== verifiedHead.sha
+        ) {
+          await io.reply(
+            `${instance.repo}#${recordedPr.number} no longer has the pipeline's verifiable \`${owner.unit.branch}\` head, so continuation did not start.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        if (verifiedHead.sha !== expectedHead) {
+          await io.reply(
+            `${instance.repo}#${recordedPr.number} moved from the pipeline's expected head \`${expectedHead}\` to \`${verifiedHead.sha}\`, so continuation did not start. Nothing else ran.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        reissuePlanId = instance.plan.id;
+        reissueCaps = continuationBudget.caps;
+        const durableRequest = parseDirectives(original);
+        Object.assign(directives, durableRequest, { agent: undefined, budget: reissueCaps.maxMinutes });
         operatorPreset = "ship";
-        operatorRequest = original;
         settled = resolveCurrent();
         ({ sticky, resolved, agentSource } = settled);
         agentSource = "sticky";
@@ -1396,6 +1587,9 @@ export async function dispatch(
         card,
         directives,
         ...(reissuePlanId !== undefined ? { reissuePlanId } : {}),
+        ...(reissueCaps !== undefined
+          ? { reissueCaps: { ...reissueCaps, maxMinutes: Math.min(reissueCaps.maxMinutes, profile.minutes) } }
+          : {}),
         sticky,
         history,
         repoCtx,

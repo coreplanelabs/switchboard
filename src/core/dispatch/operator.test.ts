@@ -820,6 +820,9 @@ describe("the projection and the prompt order", () => {
     const unitPrompt = buildOperatorPrompt(input({ projection: p, owner: { kind: "unit", unit: "U12" } }));
     expect(unitPrompt.user).toContain("This thread is owned by the unfinished plan unit U12");
     expect(unitPrompt.user).not.toContain("<words>");
+    const endedPrompt = buildOperatorPrompt(input({ projection: p, owner: { kind: "pipeline", unit: "U12" } }));
+    expect(endedPrompt.user).toContain("the ended pipeline for unmerged plan unit U12");
+    expect(endedPrompt.user).toContain("an informational command or question is not fulfillment");
   });
 
   it("a tail turn carrying </turn> cannot close its own fence: the tags are bent like quoteRequest's", () => {

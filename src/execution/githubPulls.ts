@@ -404,10 +404,16 @@ export interface PullRequestFacts {
   /** Head branch name (a fork's head ref is still reported; `sameRepoHead`
    *  says whether it lives on the base repo). */
   headRef?: string;
-  /** Head sha (40-hex) when well-formed. */
+  /** Head sha (40-hex) when well-formed. Other readers prefer a readable ref
+   * tip over a lagging PR object, so this is not itself an exact-head receipt. */
   headSha?: string;
+  /** One positive, attributable remote-head receipt. Present only when the PR
+   * object's head and one successful commit-ref read agree exactly; consumers
+   * that must fail closed use this instead of combining best-effort fields. */
+  verifiedHead?: { repo: string; ref: string; sha: string };
   /** Whether a same-repository head ref still exists. False is distinct from
-   * an unreadable lookup so ship never dispatches a child onto a deleted ref. */
+   * an unreadable or malformed lookup. This field is compatibility state, not
+   * proof of a tip; exact-head consumers require `verifiedHead`. */
   headBranchExists?: boolean;
   /** True only on a POSITIVE match of head repo == base repo — a deleted-fork
    *  null head repo is false, never assumed same-repo. */
@@ -448,27 +454,14 @@ export interface PullRequestFacts {
   closedBy?: string;
 }
 
-/**
- * The tip of `refs/heads/<branch>` on `repo` — `GET /repos/{repo}/git/ref/heads/{branch}`
- * — or undefined when the ref cannot be read (no such branch, a non-2xx, a
- * network failure, a malformed sha) or does not point at a commit object.
- * Never throws.
- *
- * Why the PR's head is read from the REF and not only from the PR object:
- * after a force-push GitHub's pull-request object (`head.sha`, `commits`) can
- * lag the branch ref by minutes (observed live: four minutes, while the new
- * commit object was already fetchable by sha). The ref IS the PR's head by
- * definition; the PR object follows it. A review attached at the lagging
- * `head.sha` reviews a head nobody asked about and refuses with a mismatch —
- * so every PR-head reader here prefers the ref's tip when the two disagree
- * (`preferRefTip`), and says so in the log. Cross-fork heads have no ref on the
- * base repo; those keep the PR object's sha.
- */
-export async function headRefTipSha(
-  repo: string,
-  branch: string,
-  headers: Record<string, string>,
-): Promise<string | undefined> {
+type HeadRefRead = { kind: "verified"; sha: string } | { kind: "missing" } | { kind: "unverified" };
+
+/** One read of `refs/heads/<branch>` on `repo`. A valid commit target is the
+ * only positive result; 404 is known missing; every other status, network
+ * failure, or malformed body is unverified. Keeping existence and tip in one
+ * result prevents a successful existence probe from lending authority to a
+ * later failed tip lookup. */
+async function readHeadRef(repo: string, branch: string, headers: Record<string, string>): Promise<HeadRefRead> {
   let res: Response;
   try {
     res = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/${encodeGithubRef(branch)}`, {
@@ -476,15 +469,42 @@ export async function headRefTipSha(
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch {
-    return undefined;
+    return { kind: "unverified" };
   }
-  if (!res.ok) return undefined;
+  if (res.status === 404) return { kind: "missing" };
+  if (!res.ok) return { kind: "unverified" };
   const data = (await res.json().catch(() => null)) as { object?: { sha?: unknown; type?: unknown } } | null;
   // A branch ref points at a commit; anything else (an annotated tag object,
   // a malformed answer) is not a head to pin a review to.
-  if (data?.object?.type !== "commit") return undefined;
-  const sha = data.object.sha;
-  return typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+  const sha = data?.object?.sha;
+  return data?.object?.type === "commit" && typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha)
+    ? { kind: "verified", sha }
+    : { kind: "unverified" };
+}
+
+/**
+ * The tip of `refs/heads/<branch>` on `repo` — `GET /repos/{repo}/git/ref/heads/{branch}`
+ * — or undefined when the ref cannot be positively read as a commit. Never
+ * throws. This best-effort helper serves ordinary PR-head readers; fail-closed
+ * consumers use `PullRequestFacts.verifiedHead`.
+ *
+ * Why the PR's head is read from the REF and not only from the PR object:
+ * after a force-push GitHub's pull-request object (`head.sha`, `commits`) can
+ * lag the branch ref by minutes (observed live: four minutes, while the new
+ * commit object was already fetchable by sha). The ref IS the PR's head by
+ * definition; the PR object follows it. A review attached at the lagging
+ * `head.sha` reviews a head nobody asked about and refuses with a mismatch —
+ * so ordinary PR-head readers prefer the ref's tip when the two disagree
+ * (`preferRefTip`), and say so in the log. Cross-fork heads have no ref on the
+ * base repo; those keep the PR object's sha.
+ */
+export async function headRefTipSha(
+  repo: string,
+  branch: string,
+  headers: Record<string, string>,
+): Promise<string | undefined> {
+  const read = await readHeadRef(repo, branch, headers);
+  return read.kind === "verified" ? read.sha : undefined;
 }
 
 /** The head sha a PR-head reader should report: the ref's tip when it is known
@@ -583,14 +603,19 @@ export async function fetchPullRequestFacts(pr: {
   const prSha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
   const sameRepoHead = headRepo === pr.repo.toLowerCase();
   const headRef = typeof data.head?.ref === "string" && data.head.ref ? data.head.ref : undefined;
-  const headBranchExists = sameRepoHead && headRef !== undefined ? await fetchRefExists(pr.repo, headRef) : undefined;
-  // The ref's tip is the PR's head by definition; the PR object lags it after
-  // a force-push (`headRefTipSha`). Same-repo heads only — a fork's ref does
-  // not exist on the base repo.
+  // One ref read owns both existence and tip. A separate successful existence
+  // read must never make a failed tip read look verified.
+  const headRead = sameRepoHead && headRef !== undefined ? await readHeadRef(pr.repo, headRef, headers) : undefined;
+  const headBranchExists = headRead?.kind === "verified" ? true : headRead?.kind === "missing" ? false : undefined;
+  const refTip = headRead?.kind === "verified" ? headRead.sha : undefined;
+  // Ordinary readers still prefer a positively read ref tip over a lagging PR
+  // object. The fail-closed receipt below exists only when both sources agree.
   const sha =
-    sameRepoHead && headRef !== undefined && headBranchExists !== false
-      ? preferRefTip(`${pr.repo}#${pr.number}`, prSha, await headRefTipSha(pr.repo, headRef, headers), headRef)
-      : prSha;
+    sameRepoHead && headRef !== undefined ? preferRefTip(`${pr.repo}#${pr.number}`, prSha, refTip, headRef) : prSha;
+  const verifiedHead =
+    sameRepoHead && headRef !== undefined && prSha !== undefined && refTip === prSha
+      ? { repo: pr.repo, ref: headRef, sha: refTip }
+      : undefined;
   let closedBy = typeof data.closed_by?.login === "string" ? data.closed_by.login : undefined;
   // Pull-request responses consistently carry `merged_by` but older GitHub
   // shapes omit the closer. The issue representation of the same pull request
@@ -622,6 +647,7 @@ export async function fetchPullRequestFacts(pr: {
       : {}),
     ...(headRef !== undefined ? { headRef } : {}),
     ...(sha ? { headSha: sha } : {}),
+    ...(verifiedHead !== undefined ? { verifiedHead } : {}),
     ...(headBranchExists !== undefined ? { headBranchExists } : {}),
     sameRepoHead,
     ...(typeof data.base?.ref === "string" && data.base.ref ? { baseRef: data.base.ref } : {}),

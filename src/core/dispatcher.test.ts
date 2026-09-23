@@ -16244,6 +16244,7 @@ describe("the references step in dispatch (record 0037)", () => {
 describe("a unit-owned thread (record 0051's reply-as-event and gone-instance rules)", () => {
   const INSTANCE = "plan-fix-the-login-6435ec";
   const THREAD = "slack:CX:1.0";
+  const OPERATOR_ON_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
   const unitRow = (over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
     instanceId: INSTANCE,
     unit: "U12",
@@ -16255,9 +16256,9 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     ...over,
   });
 
-  async function unitOwnedSetup(over: Partial<CoordinatorUnit> = {}) {
+  async function unitOwnedSetup(over: Partial<CoordinatorUnit> = {}, yaml = YAML_FIXTURE) {
     const provider = capturingProvider();
-    const deps = makeDeps(YAML_FIXTURE, provider);
+    const deps = makeDeps(yaml, provider);
     // The page names the instance through the coordinator child's tag — a
     // child is never the sticky session, so a fresh route is the default agent.
     await threadWithFinishedRun(deps, "coding", {
@@ -16274,6 +16275,80 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       }),
     };
     return { provider, deps, instances, sends, key: { instanceId: INSTANCE, unit: "U12" } };
+  }
+
+  const armSubstituteOperatorRead = (deps: TestDeps) => {
+    wireCommands(deps);
+    const operator = vi.fn<RouteModel>(async () => ({
+      tool: mcpToolName("plane.show"),
+      input: { reason: "inspect the ended pipeline instead" },
+    }));
+    deps.operatorModel = operator;
+    return operator;
+  };
+
+  async function endedPrContinuationSetup() {
+    const branch = "plan/fix-the-login-6435ec/u12";
+    const recordedHead = "1111111111111111111111111111111111111111";
+    const s = await unitOwnedSetup(
+      {
+        branch,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        lastPush: recordedHead,
+        startedAt: 500,
+        ending: { kind: "aborted", report: "aborted after review", at: 1_000 },
+      },
+      OPERATOR_ON_YAML,
+    );
+    const operator = armSubstituteOperatorRead(s.deps);
+    await s.instances.put({
+      id: INSTANCE,
+      kind: "ship",
+      userId: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey: THREAD,
+      repo: "acme/api",
+      branch,
+      base: "main",
+      createdAt: 500,
+      plan: { id: "fix-the-login-6435ec" },
+      merge: "person",
+      caps: { maxRounds: 3, maxMinutes: 180 },
+      runId: "ship-parent",
+    });
+    const shipParent = {
+      id: "ship-parent",
+      startedAt: 500,
+      finishedAt: 1_000,
+      finished: true,
+      status: "failed",
+      eventCount: 3,
+      agent: "ship",
+      repo: "acme/api",
+      threadKey: THREAD,
+      userId: "slack:UADMIN",
+      instanceId: INSTANCE,
+    } satisfies RunView;
+    s.deps.runs = {
+      listRuns: vi.fn(async () => ({ runs: [shipParent] })),
+      getRun: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          ...shipParent,
+          events: [
+            {
+              type: "input" as const,
+              text: "in acme/api: fix the login redirect",
+              messageId: "source",
+              at: 500,
+            },
+          ],
+        },
+      })),
+    } as unknown as NonNullable<CoreDeps["runs"]>;
+    const shipBranch = vi.fn(async () => ({ hostedLive: false }));
+    s.deps.shipBranch = shipBranch;
+    return { ...s, branch, recordedHead, operator, shipBranch, shipParent };
   }
 
   it("a plain reply appends one event with mode steer, sends one nudge, acks, calls no router and starts no run", async () => {
@@ -16433,13 +16508,28 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.provider.requests[0]!.model).toBe("general-model");
   });
 
-  it("a reply after an aborted generated pipeline re-issues that pipeline from its branch with the original task, never a new task made from the reply", async () => {
+  it("a reply after an aborted generated pipeline requires the current remote head before re-issuing its durable task and remaining budgets", async () => {
     const branch = "plan/fix-the-login-6435ec/u12";
     const originalTask = "in acme/api: fix the login redirect and its regression";
-    const s = await unitOwnedSetup({
-      branch,
-      ending: { kind: "aborted", report: "aborted after review", at: 1_000 },
-    });
+    const durableRequest = `budget:180 ${originalTask}`;
+    const recordedHead = "1111111111111111111111111111111111111111";
+    const movedHead = "2222222222222222222222222222222222222222";
+    const startedAt = 500;
+    const s = await unitOwnedSetup(
+      {
+        branch,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        lastPush: recordedHead,
+        startedAt,
+        rounds: [
+          { index: 1, agent: "review", outcome: "started", at: startedAt + 30 * MINUTE_MS },
+          { index: 1, agent: "review", outcome: "request_changes", at: startedAt + 40 * MINUTE_MS },
+        ],
+        ending: { kind: "aborted", report: "aborted after review", at: startedAt + 45 * MINUTE_MS },
+      },
+      OPERATOR_ON_YAML,
+    );
+    const operator = armSubstituteOperatorRead(s.deps);
     await s.instances.put({
       id: INSTANCE,
       kind: "ship",
@@ -16452,6 +16542,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       createdAt: 500,
       plan: { id: "fix-the-login-6435ec" },
       merge: "person",
+      caps: { maxRounds: 3, maxMinutes: 180 },
       runId: "ship-parent",
     });
     const shipParent: RunView = {
@@ -16467,30 +16558,547 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       userId: "slack:UADMIN",
       instanceId: INSTANCE,
     };
+    const getRun = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false as const, reason: "not_found" as const })
+      .mockResolvedValue({
+        ok: true as const,
+        value: {
+          ...shipParent,
+          events: [{ type: "input" as const, text: durableRequest, messageId: "source", at: 500 }],
+        },
+      });
+    s.deps.runs = {
+      listRuns: vi.fn(async () => ({ runs: [shipParent] })),
+      getRun,
+    } as unknown as NonNullable<CoreDeps["runs"]>;
+    s.deps.fetchPrFacts = vi
+      .fn()
+      .mockResolvedValueOnce({
+        state: "open" as const,
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: "plan/stale/u12",
+        headSha: movedHead,
+        baseRef: "main",
+        htmlUrl: "https://github.com/acme/api/pull/7",
+      })
+      .mockResolvedValueOnce({
+        state: "open" as const,
+        sameRepoHead: true,
+        headBranchExists: false,
+        headRef: branch,
+        headSha: recordedHead,
+        baseRef: "main",
+        htmlUrl: "https://github.com/acme/api/pull/7",
+      })
+      .mockResolvedValueOnce({
+        state: "open" as const,
+        sameRepoHead: true,
+        headRef: branch,
+        headSha: recordedHead,
+        baseRef: "main",
+        htmlUrl: "https://github.com/acme/api/pull/7",
+      })
+      .mockRejectedValueOnce(new Error("GitHub branch ref lookup failed"))
+      .mockResolvedValueOnce({
+        state: "open" as const,
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: branch,
+        headSha: movedHead,
+        verifiedHead: { repo: "acme/api", ref: branch, sha: movedHead },
+        baseRef: "main",
+        htmlUrl: "https://github.com/acme/api/pull/7",
+      })
+      // A prior existence read may say true while the branch-tip read fails.
+      // The PR object's matching sha is stale fallback data, not attributable
+      // proof that the expected ref still points at the durable head.
+      .mockResolvedValueOnce({
+        state: "open" as const,
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: branch,
+        headSha: recordedHead,
+        baseRef: "main",
+        htmlUrl: "https://github.com/acme/api/pull/7",
+      })
+      .mockResolvedValue({
+        state: "open" as const,
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: branch,
+        headSha: recordedHead,
+        verifiedHead: { repo: "acme/api", ref: branch, sha: recordedHead },
+        baseRef: "main",
+        htmlUrl: "https://github.com/acme/api/pull/7",
+      });
+    let reissued:
+      | {
+          agent: string;
+          task: string;
+          budget: number;
+          remainingCaps?: { maxRounds: number; maxMinutes: number };
+          planId?: string;
+        }
+      | undefined;
+    const shipBranch = vi.fn(async (_deps, _msg, _io, ctx) => {
+      reissued = {
+        agent: ctx.agent.name,
+        task: ctx.directives.text,
+        budget: ctx.profile.minutes,
+        ...("reissueCaps" in ctx && ctx.reissueCaps !== undefined ? { remainingCaps: ctx.reissueCaps } : {}),
+        ...(ctx.reissuePlanId !== undefined ? { planId: ctx.reissuePlanId } : {}),
+      };
+      return { hostedLive: false };
+    });
+    s.deps.shipBranch = shipBranch;
+
+    const denied = fakeIO();
+    await dispatch(s.deps, msg("continue", "slack:UX"), denied.io, { thread: [shipParent] });
+    expect(denied.replies).toEqual([STEER_OWNER_REFUSED]);
+    expect(s.deps.runs.getRun).not.toHaveBeenCalled();
+    expect(reissued).toBeUndefined();
+
+    const missing = fakeIO();
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), missing.io, { thread: [shipParent] });
+    expect(missing.replies).toEqual([
+      "The ended pipeline's original task is unavailable from run `ship-parent`, so continuation did not start.",
+    ]);
+    expect(reissued).toBeUndefined();
+
+    const [persistedUnit] = await s.instances.listUnits(INSTANCE);
+    const unitWithoutExpectedHead = { ...persistedUnit! };
+    delete unitWithoutExpectedHead.lastPush;
+    await s.instances.putUnits([unitWithoutExpectedHead]);
+    const headless = fakeIO();
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), headless.io, { thread: [shipParent] });
+    expect(headless.replies).toEqual([
+      "Unit U12 does not retain the pull request's durable expected head, so continuation did not start. Nothing else ran.",
+    ]);
+    expect(s.deps.fetchPrFacts).not.toHaveBeenCalled();
+    expect(shipBranch).not.toHaveBeenCalled();
+    await s.instances.putUnits([{ ...unitWithoutExpectedHead, lastPush: recordedHead }]);
+
+    const stale = fakeIO();
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), stale.io, { thread: [shipParent] });
+    expect(stale.replies).toEqual([
+      `acme/api#7 no longer has the pipeline's verifiable \`${branch}\` head, so continuation did not start.`,
+    ]);
+    expect(reissued).toBeUndefined();
+
+    const deleted = fakeIO();
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), deleted.io, { thread: [shipParent] });
+    expect(deleted.replies).toEqual([
+      `acme/api#7 no longer has the pipeline's verifiable \`${branch}\` head, so continuation did not start.`,
+    ]);
+    expect(shipBranch).not.toHaveBeenCalled();
+
+    const unverified = fakeIO();
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), unverified.io, { thread: [shipParent] });
+    expect(unverified.replies).toEqual([
+      `acme/api#7 no longer has the pipeline's verifiable \`${branch}\` head, so continuation did not start.`,
+    ]);
+    expect(shipBranch).not.toHaveBeenCalled();
+
+    const unreadable = fakeIO();
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), unreadable.io, { thread: [shipParent] });
+    expect(unreadable.replies).toEqual([
+      "GitHub did not return current facts for acme/api#7, so continuation did not start.",
+    ]);
+    expect(shipBranch).not.toHaveBeenCalled();
+
+    const moved = fakeIO();
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), moved.io, { thread: [shipParent] });
+    expect(moved.replies).toEqual([
+      `acme/api#7 moved from the pipeline's expected head \`${recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
+    ]);
+    expect(shipBranch).not.toHaveBeenCalled();
+
+    const tipUnreadable = fakeIO();
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), tipUnreadable.io, { thread: [shipParent] });
+    expect(tipUnreadable.replies).toEqual([
+      `acme/api#7 no longer has the pipeline's verifiable \`${branch}\` head, so continuation did not start.`,
+    ]);
+    expect(shipBranch).not.toHaveBeenCalled();
+    expect(operator).not.toHaveBeenCalled();
+    expect(s.deps.invoked).toEqual([]);
+    expect(s.provider.requests).toHaveLength(0);
+
+    await dispatch(s.deps, msg("hold after this round", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] });
+
+    expect(operator).not.toHaveBeenCalled();
+    expect(s.deps.invoked).toEqual([]);
+    expect(reissued).toEqual({
+      agent: "ship",
+      task: originalTask,
+      budget: 135,
+      remainingCaps: { maxRounds: 2, maxMinutes: 135 },
+      planId: "fix-the-login-6435ec",
+    });
+    expect(shipBranch).toHaveBeenCalledOnce();
+    expect(s.deps.runs.getRun).toHaveBeenCalledTimes(9);
+    expect(s.deps.fetchPrFacts).toHaveBeenCalledTimes(7);
+    for (let call = 1; call <= 7; call += 1)
+      expect(s.deps.fetchPrFacts).toHaveBeenNthCalledWith(call, { repo: "acme/api", number: 7 });
+    expect(await s.instances.listUnits(INSTANCE)).toMatchObject([{ branch, lastPush: recordedHead }]);
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
+  it.each([
+    ["durable PR identity missing", "pr-unrecorded"],
+    ["durable expected head missing", "expected-head-unrecorded"],
+    ["PR facts unknown", "pr-unknown"],
+    ["PR facts error", "pr-error"],
+    ["branch existence false", "ref-missing"],
+    ["branch existence/tip unknown", "ref-unknown"],
+    ["branch existence/tip error", "ref-error"],
+    ["tip missing from a successful ref response", "tip-missing"],
+    ["PR head missing", "pr-head-missing"],
+    ["PR head stale behind the branch tip", "pr-stale"],
+    ["PR and branch moved together", "both-moved"],
+    ["PR head mismatches the branch tip", "pr-mismatch"],
+    ["wrong PR branch", "wrong-branch"],
+    ["exact verified agreement", "exact"],
+  ] as const)("the production PR reader fails closed before continuation side effects: %s", async (_name, scenario) => {
+    const s = await endedPrContinuationSetup();
+    if (scenario === "pr-unrecorded" || scenario === "expected-head-unrecorded") {
+      const [unit] = await s.instances.listUnits(INSTANCE);
+      const incomplete = { ...unit! };
+      if (scenario === "pr-unrecorded") delete incomplete.pr;
+      else delete incomplete.lastPush;
+      await s.instances.putUnits([incomplete]);
+    }
+    const movedHead = "2222222222222222222222222222222222222222";
+    const prSha =
+      scenario === "pr-head-missing"
+        ? undefined
+        : scenario === "both-moved" || scenario === "pr-mismatch"
+          ? movedHead
+          : s.recordedHead;
+    const headRef = scenario === "wrong-branch" ? "plan/stale/u12" : s.branch;
+    const branchSha = scenario === "pr-stale" || scenario === "both-moved" ? movedHead : s.recordedHead;
+    const urls: string[] = [];
+    vi.stubEnv("GH_TOKEN", "ghp_read_only_fixture");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (rawUrl: string | URL | Request) => {
+        const url = String(rawUrl);
+        urls.push(url);
+        if (url.endsWith("/pulls/7")) {
+          if (scenario === "pr-error") throw new Error("pull request read reset");
+          if (scenario === "pr-unknown") return new Response("{}", { status: 503 });
+          return new Response(
+            JSON.stringify({
+              state: "open",
+              html_url: "https://github.com/acme/api/pull/7",
+              head: {
+                ref: headRef,
+                ...(prSha === undefined ? {} : { sha: prSha }),
+                repo: { full_name: "acme/api" },
+              },
+              base: { ref: "main" },
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/git/ref/heads/")) {
+          if (scenario === "ref-error") throw new Error("branch ref read reset");
+          if (scenario === "ref-missing") return new Response("{}", { status: 404 });
+          if (scenario === "ref-unknown") return new Response("{}", { status: 503 });
+          if (scenario === "tip-missing") return new Response("{}", { status: 200 });
+          return new Response(JSON.stringify({ object: { type: "commit", sha: branchSha } }), { status: 200 });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+    const { io, replies } = fakeIO();
+
+    try {
+      await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
+    } finally {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+
+    if (scenario === "exact") {
+      expect(replies).toEqual([]);
+      expect(s.shipBranch).toHaveBeenCalledOnce();
+    } else {
+      const expectedReply =
+        scenario === "pr-unrecorded"
+          ? "Unit U12 does not retain a durable pull request identity, so continuation did not start. Nothing else ran."
+          : scenario === "expected-head-unrecorded"
+            ? "Unit U12 does not retain the pull request's durable expected head, so continuation did not start. Nothing else ran."
+            : scenario === "pr-error" || scenario === "pr-unknown"
+              ? "GitHub did not return current facts for acme/api#7, so continuation did not start."
+              : scenario === "both-moved"
+                ? `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`
+                : `acme/api#7 no longer has the pipeline's verifiable \`${s.branch}\` head, so continuation did not start.`;
+      expect(replies).toEqual([expectedReply]);
+      expect(s.shipBranch).not.toHaveBeenCalled();
+    }
+    if (scenario === "pr-unrecorded" || scenario === "expected-head-unrecorded") expect(urls).toEqual([]);
+    expect(urls.filter((url) => url.includes("/git/ref/heads/"))).toHaveLength(
+      scenario === "pr-unrecorded" ||
+        scenario === "expected-head-unrecorded" ||
+        scenario === "pr-error" ||
+        scenario === "pr-unknown"
+        ? 0
+        : 1,
+    );
+    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.deps.invoked).toEqual([]);
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
+  it("repeated concurrent replies cannot start a second pipeline while the first verified continuation owns the thread", async () => {
+    const branch = "plan/fix-the-login-6435ec/u12";
+    const recordedHead = "1111111111111111111111111111111111111111";
+    const s = await unitOwnedSetup(
+      {
+        branch,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        lastPush: recordedHead,
+        startedAt: 500,
+        ending: { kind: "aborted", report: "aborted", at: 1_000 },
+      },
+      OPERATOR_ON_YAML,
+    );
+    const operator = armSubstituteOperatorRead(s.deps);
+    await s.instances.put({
+      id: INSTANCE,
+      kind: "ship",
+      userId: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey: THREAD,
+      repo: "acme/api",
+      branch,
+      createdAt: 500,
+      plan: { id: "fix-the-login-6435ec" },
+      merge: "person",
+      caps: { maxRounds: 3, maxMinutes: 180 },
+      runId: "ship-parent",
+    });
+    const shipParent = {
+      id: "ship-parent",
+      startedAt: 500,
+      finishedAt: 1_000,
+      finished: true,
+      status: "failed",
+      eventCount: 3,
+      agent: "ship",
+      repo: "acme/api",
+      threadKey: THREAD,
+      userId: "slack:UADMIN",
+      instanceId: INSTANCE,
+    } satisfies RunView;
     s.deps.runs = {
       listRuns: vi.fn(async () => ({ runs: [shipParent] })),
       getRun: vi.fn(async () => ({
         ok: true as const,
         value: {
           ...shipParent,
-          events: [{ type: "input" as const, text: originalTask, messageId: "source", at: 500 }],
+          events: [{ type: "input" as const, text: "in acme/api: fix the login", messageId: "source", at: 500 }],
         },
       })),
     } as unknown as NonNullable<CoreDeps["runs"]>;
-    let reissued: { agent: string; task: string; planId?: string } | undefined;
-    s.deps.shipBranch = async (_deps, _msg, _io, ctx) => {
-      reissued = {
-        agent: ctx.agent.name,
-        task: ctx.directives.text,
-        ...(ctx.reissuePlanId !== undefined ? { planId: ctx.reissuePlanId } : {}),
-      };
+    s.deps.fetchPrFacts = vi.fn(async () => ({
+      state: "open" as const,
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: branch,
+      headSha: recordedHead,
+      verifiedHead: { repo: "acme/api", ref: branch, sha: recordedHead },
+      baseRef: "main",
+      htmlUrl: "https://github.com/acme/api/pull/7",
+    }));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let started!: () => void;
+    const continuationStarted = new Promise<void>((resolve) => (started = resolve));
+    s.deps.shipBranch = vi.fn(async () => {
+      started();
+      await held;
       return { hostedLive: false };
-    };
+    });
 
-    await dispatch(s.deps, msg("hold after this round", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] });
+    const first = dispatch(s.deps, msg("continue", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] });
+    await continuationStarted;
+    const repeats = await Promise.all([
+      dispatch(s.deps, msg("continue", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] }),
+      dispatch(s.deps, msg("continue", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] }),
+    ]);
+    expect(repeats.every((outcome) => outcome.status === "completed")).toBe(true);
+    expect(s.deps.shipBranch).toHaveBeenCalledOnce();
+    expect(s.deps.fetchPrFacts).toHaveBeenCalledOnce();
+    expect(s.deps.runs.getRun).toHaveBeenCalledOnce();
+    expect(operator).not.toHaveBeenCalled();
+    expect(s.deps.invoked).toEqual([]);
+    expect(s.provider.requests).toHaveLength(0);
+    release();
+    await first;
+  });
 
-    expect(reissued).toEqual({ agent: "ship", task: originalTask, planId: "fix-the-login-6435ec" });
-    expect(await s.instances.listUnits(INSTANCE)).toMatchObject([{ branch }]);
+  it("an ended pipeline with no remaining wall-clock budget names the blocker and starts no replacement lease", async () => {
+    const s = await unitOwnedSetup(
+      {
+        ending: { kind: "wall_clock_cap", report: "budget exhausted", at: 1_000 },
+      },
+      OPERATOR_ON_YAML,
+    );
+    const operator = armSubstituteOperatorRead(s.deps);
+    await s.instances.put({
+      id: INSTANCE,
+      kind: "ship",
+      userId: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey: THREAD,
+      repo: "acme/api",
+      branch: "plan/fix-the-login-6435ec/u12",
+      createdAt: 500,
+      plan: { id: "fix-the-login-6435ec" },
+      merge: "person",
+      runId: "ship-parent",
+    });
+    const shipParent = {
+      id: "ship-parent",
+      startedAt: 500,
+      finishedAt: 1_000,
+      finished: true,
+      status: "failed",
+      eventCount: 3,
+      agent: "ship",
+      repo: "acme/api",
+      threadKey: THREAD,
+      userId: "slack:UADMIN",
+      instanceId: INSTANCE,
+    } satisfies RunView;
+    s.deps.runs = {
+      listRuns: vi.fn(async () => ({ runs: [shipParent] })),
+      getRun: vi.fn(),
+    } as unknown as NonNullable<CoreDeps["runs"]>;
+    s.deps.shipBranch = vi.fn(async () => ({ hostedLive: false }));
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [shipParent] });
+
+    expect(replies).toEqual([
+      "Unit U12 exhausted the ended pipeline's wall-clock budget, so continuation did not start. Nothing else ran.",
+    ]);
+    expect(s.deps.runs.getRun).not.toHaveBeenCalled();
+    expect(s.deps.shipBranch).not.toHaveBeenCalled();
+    expect(operator).not.toHaveBeenCalled();
+    expect(s.deps.invoked).toEqual([]);
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
+  it("an ended pipeline with no remaining review-round budget names the blocker and starts no replacement lease", async () => {
+    const s = await unitOwnedSetup(
+      {
+        ending: { kind: "round_cap", report: "rounds exhausted", at: 1_000 },
+      },
+      OPERATOR_ON_YAML,
+    );
+    const operator = armSubstituteOperatorRead(s.deps);
+    await s.instances.put({
+      id: INSTANCE,
+      kind: "ship",
+      userId: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey: THREAD,
+      repo: "acme/api",
+      branch: "plan/fix-the-login-6435ec/u12",
+      createdAt: 500,
+      plan: { id: "fix-the-login-6435ec" },
+      merge: "person",
+      runId: "ship-parent",
+    });
+    const shipParent = {
+      id: "ship-parent",
+      startedAt: 500,
+      finishedAt: 1_000,
+      finished: true,
+      status: "failed",
+      eventCount: 3,
+      agent: "ship",
+      repo: "acme/api",
+      threadKey: THREAD,
+      userId: "slack:UADMIN",
+      instanceId: INSTANCE,
+    } satisfies RunView;
+    s.deps.runs = {
+      listRuns: vi.fn(async () => ({ runs: [shipParent] })),
+      getRun: vi.fn(),
+    } as unknown as NonNullable<CoreDeps["runs"]>;
+    s.deps.shipBranch = vi.fn(async () => ({ hostedLive: false }));
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [shipParent] });
+
+    expect(replies).toEqual([
+      "Unit U12 exhausted the ended pipeline's review-round budget, so continuation did not start. Nothing else ran.",
+    ]);
+    expect(s.deps.runs.getRun).not.toHaveBeenCalled();
+    expect(s.deps.shipBranch).not.toHaveBeenCalled();
+    expect(operator).not.toHaveBeenCalled();
+    expect(s.deps.invoked).toEqual([]);
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
+  it("an ended thread claimed by multiple units names the ambiguity and starts no substitute work", async () => {
+    const s = await unitOwnedSetup({ ending: { kind: "aborted", report: "aborted", at: 1_000 } }, OPERATOR_ON_YAML);
+    const operator = armSubstituteOperatorRead(s.deps);
+    await s.instances.putUnits([
+      unitRow({
+        unit: "U13",
+        slug: "u13",
+        ending: { kind: "review_pending", report: "review pending", at: 1_100 },
+      }),
+    ]);
+    await s.instances.put({
+      id: INSTANCE,
+      kind: "ship",
+      userId: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey: THREAD,
+      repo: "acme/api",
+      branch: "plan/fix-the-login-6435ec/u12",
+      createdAt: 500,
+      plan: { id: "fix-the-login-6435ec" },
+      merge: "person",
+      runId: "ship-parent",
+    });
+    const shipParent = {
+      id: "ship-parent",
+      startedAt: 500,
+      finishedAt: 1_000,
+      finished: true,
+      status: "failed",
+      eventCount: 3,
+      agent: "ship",
+      repo: "acme/api",
+      threadKey: THREAD,
+      userId: "slack:UADMIN",
+      instanceId: INSTANCE,
+    } satisfies RunView;
+    s.deps.runs = {
+      listRuns: vi.fn(async () => ({ runs: [shipParent] })),
+      getRun: vi.fn(),
+    } as unknown as NonNullable<CoreDeps["runs"]>;
+    s.deps.shipBranch = vi.fn(async () => ({ hostedLive: false }));
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [shipParent] });
+
+    expect(replies).toEqual([
+      "This thread matches multiple ended plan units (U12, U13), so continuation is ambiguous. Nothing started.",
+    ]);
+    expect(s.deps.runs.getRun).not.toHaveBeenCalled();
+    expect(s.deps.shipBranch).not.toHaveBeenCalled();
+    expect(operator).not.toHaveBeenCalled();
+    expect(s.deps.invoked).toEqual([]);
     expect(s.provider.requests).toHaveLength(0);
   });
 
@@ -17096,11 +17704,13 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(replies.some((r) => r.includes(`run ${ended.id} ended`))).toBe(false);
   });
 
-  it("on: an ended pipeline folds a stale steer decision into re-issuing its original task, never the ended transcript run", async () => {
+  it("on: an ended abort card followed by plain continue bypasses the operator and starts one durable continuation", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
     wireCommands(deps);
     const threadKey = "slack:CX:1.0";
     const instanceId = "plan-fix-the-login-6435ec";
+    const branch = "plan/fix-the-login-6435ec/u12";
+    const head = "1111111111111111111111111111111111111111";
     const originalTask = "in acme/api: fix the login redirect and its regression";
     const stale = registry.create("the ended review round", {
       agent: "review",
@@ -17117,11 +17727,12 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       channelId: "slack:CX",
       threadKey,
       repo: "acme/api",
-      branch: "plan/fix-the-login-6435ec/u12",
+      branch,
       base: "main",
       createdAt: 500,
       plan: { id: "fix-the-login-6435ec" },
       merge: "person",
+      caps: { maxRounds: 3, maxMinutes: 180 },
       runId: "ship-parent",
     });
     await instances.putUnits([
@@ -17129,10 +17740,13 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         instanceId,
         unit: "U12",
         slug: "u12",
-        branch: "plan/fix-the-login-6435ec/u12",
+        branch,
         dependsOn: [],
         rounds: [],
         threadKey,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        lastPush: head,
+        startedAt: 500,
         ending: { kind: "aborted", report: "aborted after review", at: 1_000 },
       },
     ]);
@@ -17161,9 +17775,19 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       })),
     } as unknown as NonNullable<CoreDeps["runs"]>;
     deps.operatorModel = decides({
-      reason: "continue the pipeline",
-      binds: [{ line: `steer run ${stale.id} keep going`, reason: "copied the ended review id" }],
+      reason: "show the ended unit before continuing",
+      binds: [{ line: "plane show", reason: "inspect the plane first" }],
     });
+    deps.fetchPrFacts = vi.fn(async () => ({
+      state: "open" as const,
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: branch,
+      headSha: head,
+      verifiedHead: { repo: "acme/api", ref: branch, sha: head },
+      baseRef: "main",
+      htmlUrl: "https://github.com/acme/api/pull/7",
+    }));
     let reissued: { agent: string; task: string; planId?: string } | undefined;
     deps.shipBranch = async (_deps, _msg, _io, ctx) => {
       reissued = {
@@ -17175,11 +17799,14 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     };
     const { io, replies } = fakeIO();
 
-    await dispatch(deps, msg("keep going", "slack:UADMIN"), io, { thread: [shipParent] });
+    await dispatch(deps, msg("continue", "slack:UADMIN"), io, { thread: [shipParent] });
 
+    expect(deps.operatorModel).not.toHaveBeenCalled();
     expect(deps.invoked).toEqual([]);
     expect(reissued).toEqual({ agent: "ship", task: originalTask, planId: "fix-the-login-6435ec" });
-    expect(replies.some((r) => r.includes(`run ${stale.id} ended`))).toBe(false);
+    expect(deps.runs.getRun).toHaveBeenCalledOnce();
+    expect(deps.fetchPrFacts).toHaveBeenCalledOnce();
+    expect(replies.some((r) => r.includes("Plane"))).toBe(false);
   });
 
   it("on: admission runs after the operator — a reply into a thread whose run is live executes the decision instead of folding, and the live run's inbox stays empty", async () => {
