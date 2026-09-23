@@ -94,18 +94,15 @@ export interface ShipCaps {
  *  named none. */
 export type InterruptionCause = "bot_restart" | "container_replaced" | "sandbox_fault";
 
-/** What a ship pipeline's thread and card say when its child died under it
- *  (run-history item 36): the work it did stands on GitHub with nobody driving
- *  it, so the note names the actual cause (issue 1876 — the site is reached by
- *  a bot restart, a resident container replacement and a sandbox fault, and
- *  only the ledger's word picks one; with none the sentence claims no cause),
- *  the PR when one was opened and the exact re-issue that continues the loop —
- *  the same entry the preflight's resume-at-review takes (agent-ship item 10).
- *  Without a PR the task itself is the re-issue: round 0 runs again on the
- *  pipeline's own deterministic branch. A child whose container was replaced
- *  resumes from its request by itself (issue 1903) and the pipeline keeps
- *  waiting — this note is written only when that resume failed or no resume
- *  applied. */
+/** What a ship pipeline's thread and card say when a run died under it
+ *  (run-history item 36): the note names the recorded cause and only remote
+ *  facts that were proved. A recorded pull request is not proof that the
+ *  stopped run's latest commit reached it. A continuation is named only for
+ *  an idle unit, whose reply wake is durable; otherwise the note names a new
+ *  ship run as the next action without promising that a reply resumes work.
+ *  A run whose container was replaced first resumes from its request by itself
+ *  (issue 1903); this note is written only when that resume failed or did not
+ *  apply. */
 /** The cause an interruption's recorded words name (issue 1876): the ledger
  *  that saw the roll wrote them — the relaunch refusals and the lost-workspace
  *  notes name the replaced container, the sandbox executor's wordings the
@@ -134,23 +131,21 @@ export function interruptionCauseOfWords(words: string): InterruptionCause | und
 }
 
 export function shipInterruptedNote(prUrl?: string, cause?: InterruptionCause, idle = false): string {
-  const stands = prUrl
-    ? `Its work stands on GitHub: ${prUrl}.`
-    : "Whatever it pushed stands on its pipeline branch; no PR was opened yet.";
-  const continuation = idle
-    ? "The next reply in this thread continues the unit."
-    : prUrl
-      ? `The pipeline kept its task, branch and pull request; the next reply in this thread continues the review loop at ${prUrl}.`
-      : "The pipeline kept its task and branch; the next reply in this thread starts round 0 again on that branch.";
   const opening =
     cause === "container_replaced"
-      ? "⚠️ The resident container running this pipeline's child was replaced (a deploy's image swap) and the child could not resume, so the pipeline stopped."
+      ? "⚠️ Work stopped before the next review because the repository container was replaced and the run could not continue."
       : cause === "sandbox_fault"
-        ? "⚠️ The sandbox running this pipeline's child failed and the child could not resume, so the pipeline stopped."
+        ? "⚠️ Work stopped before the next review because the sandbox failed and the run could not continue."
         : cause === "bot_restart"
-          ? "⚠️ The bot restarted while this ship pipeline was running, so the pipeline stopped."
-          : "⚠️ This ship pipeline's child was interrupted and could not resume, so the pipeline stopped.";
-  return `${opening} ${stands} ${continuation}`;
+          ? "⚠️ Work stopped before the next review because Switchboard restarted and the run could not continue."
+          : "⚠️ Work stopped before the next review because the run could not continue.";
+  const saved = prUrl
+    ? `The existing pull request is ${prUrl}; Switchboard did not verify the stopped run's latest commit there.`
+    : "No open pull request was verified for the stopped run's latest commit.";
+  const next = idle
+    ? "The unit remains live; a reply in this thread is recorded as its continuation action."
+    : "No review was started. Next action: start ship again after the remote branch and pull request state can be verified.";
+  return `${opening} ${saved} ${next}`;
 }
 
 // ---- the plan graph --------------------------------------------------------------------------------
@@ -704,7 +699,17 @@ export type PrCheck =
         commentId: string;
       };
     }
-  | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string; mergedBy?: string }
+  | {
+      state: "merged";
+      prNumber: number;
+      url: string;
+      /** The pull request's last source head, distinct from `sha`, the commit
+       *  the merge put on the base. Required for exact findings reconciliation. */
+      headSha?: string;
+      sha: string;
+      mergedAt: string;
+      mergedBy?: string;
+    }
   | { state: "closed"; prNumber: number; url: string; closedBy: string };
 
 /** Why a live child is being drained before the unit moves on. The pull
@@ -952,6 +957,15 @@ export type UnitEnding =
       round?: RoundRef;
       reviewRounds: number;
       finalReply?: string;
+      /** The mechanical WIP checkpoint recorded before this terminal abort. */
+      checkpoint?: { branch: string; sha: string };
+      /** A completed findings run could not safely advance to review. These
+       *  causes render their own saved-work, failure and next-action facts,
+       *  without the generic continuation promise. */
+      findingsStop?: "incomplete_outputs" | "unfinished" | "missing_remote" | "head_mismatch" | "remote_unreadable";
+      observedHead?: string;
+      remoteHead?: string;
+      missingOutputs?: string[];
       /** A round-0 end without a pull request that was judged for renewal and
        *  refused: the decision and the card's sentence (decision 0046). */
       renewal?: { decision: Extract<RenewalDecision, { renew: false }>; line: string };
@@ -1000,8 +1014,8 @@ export type UnitEnding =
   /** The unit idles instead of ending (record 0051): with the resolved
    *  `ship.idleDays` above zero, `end()` wraps an idling kind — every kind but
    *  the four ended ones (`merged`, `already_landed`, `merge_ready`,
-   *  `refused`) — in this ending: the old kind as `why`, the old kind's
-   *  report unchanged, and what a continuation needs (the renewals the grant
+   *  `refused`) — in this ending: the old kind as `why`, its outcome report
+   *  with the terminal restart replaced by the durable wake action, and what a continuation needs (the renewals the grant
    *  still holds — unspent: the wake spends one, this plan's fifth unit — the
    *  head to continue from, the last coding child's run, the spend and its
    *  handoff). `runId` is absent when the pipeline capped before any coding
@@ -1212,10 +1226,14 @@ type Phase =
       childPushed?: PushedHeadFact[];
       childLeaseStartedAt?: number;
       childHandoff?: Handoff;
-      /** Open or recover a pull request from the branch. A completed child
-       *  whose same-head salvage merely republished ready work needs this path
-       *  without being classified as dead. */
+      /** Open or recover a pull request from the branch. A completed round-zero
+       *  child whose same-head salvage merely republished ready work needs this
+       *  path without being classified as dead. */
       recover?: true;
+      /** A completed findings run supplied every typed result. The next step
+       *  must independently prove an open branch and pull request at exactly
+       *  `childHead`; neither a push record nor this flag is remote evidence. */
+      findingsReady?: true;
       /** The coding child died (`failed` or `interrupted`) after it may have
        *  pushed: the pr-check recovers a pushed branch by opening its pull
        *  request; with nothing pushed the unit ends with the child's own reason. */
@@ -1863,6 +1881,13 @@ function interruptedCheckpoint(
   return { branch: found.ref, sha: found.sha };
 }
 
+/** A full commit id for findings completion and remote reconciliation. A
+ * prefix can identify a commit for display, but cannot prove exact equality. */
+function fullHead(value: unknown): string | undefined {
+  const head = normalizeHead(value);
+  return head?.length === 40 ? head : undefined;
+}
+
 /** A coding run's confirmed end: round 0's child, or the run a findings step dispatched. */
 function settleCoding(
   s: UnitPipelineState,
@@ -1890,8 +1915,8 @@ function settleCoding(
         }
       : {}),
   };
-  const readySalvage = completedSameHeadSalvage(next, facts.pushed, facts);
-  const checkpoint = interruptedCheckpoint(next, facts.pushed, facts);
+  const readySalvage = round.kind === "coding" && completedSameHeadSalvage(next, facts.pushed, facts);
+  const checkpoint = interruptedCheckpoint(next, facts.pushed, round.kind === "findings" ? undefined : facts);
   const mode = stopMode(facts.status);
   if (mode !== undefined)
     return end(
@@ -1905,6 +1930,64 @@ function settleCoding(
         ...(checkpoint !== undefined ? { checkpoint } : {}),
       },
       [roundNote(round, "stopped")],
+    );
+  // Findings rounds have their own typed completion contract. They do not
+  // require round zero's handoff, but they do require a completed run, one
+  // matching disposition for every finding, an updated PR description and a
+  // final observed head. Only then may a fresh remote read decide readiness.
+  if (round.kind === "findings" && facts.status === "completed") {
+    const issued = next.findingsByRound[round.index] ?? [];
+    const matched = matchDispositions(issued, facts.dispositions ?? []).matched;
+    const missingOutputs = issued
+      .filter((finding) => !matched.some((disposition) => disposition.findingId === finding.id))
+      .map((finding) => `missing disposition for ${finding.id}`);
+    if (facts.description !== true) missingOutputs.push("missing updated pull request description");
+    const observedHead = fullHead(facts.headSha);
+    if (observedHead === undefined) missingOutputs.push("missing final observed commit");
+    if (missingOutputs.length > 0)
+      return end(
+        next,
+        {
+          kind: "aborted",
+          reason: "The completed findings work did not record every required result.",
+          findingsStop: "incomplete_outputs",
+          ...(observedHead !== undefined ? { observedHead } : {}),
+          missingOutputs,
+          round,
+          reviewRounds: next.reviewRounds,
+        },
+        [roundNote(round, "aborted")],
+      );
+    return {
+      state: {
+        ...next,
+        phase: {
+          at: "pr-check",
+          round,
+          runId,
+          childHead: observedHead,
+          findingsReady: true,
+          ...(facts.finalReply !== undefined ? { finalReply: facts.finalReply } : {}),
+        },
+      },
+      notes: [],
+    };
+  }
+  // A findings run must be completed before any remote state can make it
+  // review-ready. A failed run stays resumable even when its record says a
+  // push was attempted; no remote read upgrades an unfinished result.
+  if (round.kind === "findings")
+    return end(
+      next,
+      {
+        kind: "aborted",
+        reason: "The findings work did not complete, so no review was started.",
+        findingsStop: "unfinished",
+        ...(fullHead(facts.headSha) !== undefined ? { observedHead: fullHead(facts.headSha) } : {}),
+        round,
+        reviewRounds: next.reviewRounds,
+      },
+      [roundNote(round, "aborted")],
     );
   // A mechanical WIP push means the child did not declare the work ready for
   // review, whatever terminal status its own answer produced. Keep the unit
@@ -1921,7 +2004,8 @@ function settleCoding(
       next,
       {
         kind: "aborted",
-        reason: `⚠️ The coding child ended because ${cause}; the branch carries the interrupted work at \`${checkpoint.sha.slice(0, 7)}\` on \`${checkpoint.branch}\`. The next reply in this thread resumes from that checkpoint instead of starting over.`,
+        reason: `⚠️ The coding child ended because ${cause}.`,
+        checkpoint,
         round,
         reviewRounds: next.reviewRounds,
       },
@@ -2457,9 +2541,27 @@ function childSupersession(
   return undefined;
 }
 
-function finishSupersededChild(s: UnitPipelineState, phase: Extract<Phase, { at: "superseded-read" }>): Transition {
+function finishSupersededChild(
+  s: UnitPipelineState,
+  phase: Extract<Phase, { at: "superseded-read" }>,
+  facts: Extract<ChildFacts, { finished: true }>,
+): Transition {
   const supersession = phase.supersession;
-  if (supersession.reason === "merged") return foundMerged(s, supersession.pullRequest);
+  if (supersession.reason === "merged") {
+    // A findings child can observe a merge before its own record is read. Fold
+    // that record through the same typed-output gate as an ordinary completion,
+    // then reconcile the merged PR's source head with the completed child head.
+    // Neither the earlier terminal observation nor steering the child proves
+    // that its final commit reached the pull request before the merge.
+    if (phase.round.kind === "findings") {
+      const settled = settleCoding(s, phase.round, phase.runId, facts);
+      const ready = settled.state.phase;
+      if (ready.at === "pr-check" && ready.findingsReady === true)
+        return settlePrCheck(settled.state, ready, supersession.pullRequest);
+      return settled;
+    }
+    return foundMerged(s, supersession.pullRequest);
+  }
   if (supersession.reason === "closed") return foundClosed(s, supersession.pullRequest);
   if (supersession.reason === "branch_deleted") return missingHeadBranch(s, supersession.pullRequest);
   return {
@@ -2507,6 +2609,87 @@ export function reconcileTerminalPr(s: UnitPipelineState, pr: PrCheck): UnitPipe
 /** The pull request heading the branch after round 0 or a findings step. */
 function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-check" }>, pr: PrCheck): Transition {
   const { round } = phase;
+  // A completed findings run is not ready because it says it pushed. It is
+  // ready only when this independent read sees the adopted pull request at the
+  // exact full observed source head (and, while open, its live branch). Every
+  // other remote fact is a resumable stop with no review or merged success.
+  if (phase.findingsReady === true) {
+    const observedHead = fullHead(phase.childHead)!;
+    const withPr = pr.state !== "none" ? { ...s, pr: { number: pr.prNumber, url: pr.url } } : s;
+    if (pr.state === "merged") {
+      const remoteHead = fullHead(pr.headSha);
+      if (remoteHead === undefined)
+        return end(
+          withPr,
+          {
+            kind: "aborted",
+            reason: "The merged pull request's exact source head could not be verified.",
+            findingsStop: "remote_unreadable",
+            observedHead,
+            round,
+            reviewRounds: withPr.reviewRounds,
+          },
+          [roundNote(round, "aborted")],
+        );
+      if (remoteHead !== observedHead)
+        return end(
+          withPr,
+          {
+            kind: "aborted",
+            reason: "The merged pull request does not hold the completed changes.",
+            findingsStop: "head_mismatch",
+            observedHead,
+            remoteHead,
+            round,
+            reviewRounds: withPr.reviewRounds,
+          },
+          [roundNote(round, "aborted")],
+        );
+      return foundMerged(withPr, pr, [roundNote(round, "completed")]);
+    }
+    if (pr.state !== "open" || pr.headBranchExists === false)
+      return end(
+        withPr,
+        {
+          kind: "aborted",
+          reason: "No open pull request and branch could be verified for the completed changes.",
+          findingsStop: "missing_remote",
+          observedHead,
+          round,
+          reviewRounds: withPr.reviewRounds,
+        },
+        [roundNote(round, "aborted")],
+      );
+    const remoteHead = fullHead(pr.headSha);
+    if (pr.headBranchExists !== true || remoteHead === undefined)
+      return end(
+        withPr,
+        {
+          kind: "aborted",
+          reason: "The open pull request's branch and exact head could not be verified.",
+          findingsStop: "remote_unreadable",
+          observedHead,
+          round,
+          reviewRounds: withPr.reviewRounds,
+        },
+        [roundNote(round, "aborted")],
+      );
+    if (remoteHead !== observedHead)
+      return end(
+        withPr,
+        {
+          kind: "aborted",
+          reason: "The pull request does not hold the completed changes.",
+          findingsStop: "head_mismatch",
+          observedHead,
+          remoteHead,
+          round,
+          reviewRounds: withPr.reviewRounds,
+        },
+        [roundNote(round, "aborted")],
+      );
+    return roundOnOpenPr(withPr, phase, pr);
+  }
   // The merge landed during the round: the child found nothing left to ship
   // (or shipped into a pull request a person merged under it). The round
   // completed without a pull request of its own, and the unit is done.
@@ -3000,7 +3183,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
             supersession,
             finishedObserved: p.finishedObserved,
           };
-          return finishSupersededChild(clocked, terminalPhase);
+          return finishSupersededChild(clocked, terminalPhase, r.run);
         }
         return {
           state: {
@@ -3066,10 +3249,26 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
             },
             [roundNote(p.round, "aborted")],
           );
-        // A dead CODING child may have pushed normally before the ledger closed
-        // it: the pr-check recovers that branch. A review child has nothing on
-        // the branch to recover, so its interruption still ends the unit at once.
-        if (p.round.kind !== "review")
+        // A findings run must complete before another review. An interrupted
+        // one remains resumable even if it recorded an attempted push; round
+        // zero keeps its established recovery check.
+        if (p.round.kind === "findings")
+          return end(
+            clocked,
+            {
+              kind: "interrupted",
+              round: p.round,
+              runId: p.runId,
+              reviewRounds: s.reviewRounds,
+              ...(cause !== undefined ? { cause } : {}),
+            },
+            [roundNote(p.round, "aborted")],
+          );
+        // A dead round-zero coding child may have pushed normally before the
+        // ledger closed it: the pr-check recovers that branch. A review child
+        // has nothing on the branch to recover, so its interruption ends the
+        // unit at once.
+        if (p.round.kind === "coding")
           return {
             state: {
               ...clocked,
@@ -3138,7 +3337,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
     }
     case "superseded-read": {
       const r = ret as Extract<StepReturn, { type: "read-record" }>;
-      if (r.run.finished) return finishSupersededChild(clocked, p);
+      if (r.run.finished) return finishSupersededChild(clocked, p, r.run);
       return {
         state: {
           ...clocked,
@@ -3503,10 +3702,21 @@ export function renderUnitReport(
    *  after 2 review rounds: <url>`, `Held: <the human-gated row>`, `Stopped`,
    *  `Round cap reached: <counts>` — and the verdict, the findings left below
    *  the gate, the declined ones, the remaining-gate sentence, the level in
-   *  force, the grant, the write-up pointer, the budget split, the re-issue
-   *  prompt and a segment boundary are `verbose` asides; the full detail
-   *  stays on the pull request, where the round routes put it. */
+   *  force, the grant, the write-up pointer, the budget split, the restart or
+   *  durable-wake action and a segment boundary are `verbose` asides; the full
+   *  detail stays on the pull request, where the round routes put it. */
   verbosity: Verbosity = "verbose",
+): string {
+  return renderUnitReportWithWake(s, facts, verbosity, false);
+}
+
+/** The internal idle render is the only caller allowed to claim an indexed
+ *  wake will durably record a reply as the continuation action. */
+function renderUnitReportWithWake(
+  s: UnitPipelineState,
+  facts: MergeReadyFacts | undefined,
+  verbosity: Verbosity,
+  durableWake: boolean,
 ): string {
   const e = s.ending;
   if (!e) return "";
@@ -3514,12 +3724,20 @@ export function renderUnitReport(
   const rounds = `${e.reviewRounds} review round${e.reviewRounds === 1 ? "" : "s"}`;
   const prUrl = s.pr?.url;
   const prLine = prUrl ? ` PR: ${prUrl}` : "";
-  // The re-issue line keys on the instance's mark, never on who merges: a
-  // generated plan is re-issued with the request's own text, a seeded one by
-  // its plan path — and a seeded plan can be a person's merge too.
-  const continuation = s.input.generated
-    ? `The pipeline kept this unit's task and branch; the next reply in this thread continues it${prUrl ? ` from the open pull request (${prUrl})` : " from the branch head"}.`
-    : `The unit's dependents in this plan stay blocked; the next run of this plan recognizes the unit's branch and pull request.`;
+  const nextAction = (checkpoint?: { branch: string; sha: string }): string => {
+    if (durableWake)
+      return `The unit remains live; a reply in this thread is recorded as its continuation action${prUrl ? ` from the open pull request (${prUrl})` : " from the saved branch state"}.`;
+    const reconcile = checkpoint
+      ? `verify \`${checkpoint.sha.slice(0, 7)}\` is on \`${checkpoint.branch}\`, then reconcile the remote branch and pull request if needed`
+      : prUrl
+        ? `verify the remote branch and pull request (${prUrl}) agree, then reconcile them if needed`
+        : "verify the remote branch and reconcile any saved checkpoint if needed";
+    const restart = s.input.generated
+      ? `then start ship again with ${prUrl ?? "the original task"}`
+      : "then start this plan again";
+    const blocked = s.input.generated ? "" : "The unit's dependents in this plan stay blocked. ";
+    return `${blocked}Next action: ${reconcile}, ${restart}.`;
+  };
   const declined = [...(s.dispositionsByRound[e.reviewRounds - 1] ?? [])].filter((d) => d.disposition === "declined");
   const declinedLine = `Declined findings: ${declined.length > 0 ? declined.map((d) => `${d.findingId}${d.note ? ` — ${d.note}` : ""}`).join("; ") : "none"}`;
   const verdictLine = `Verdict: LGTM${s.lastVerdictSummary ? ` — ${s.lastVerdictSummary}` : ""}`;
@@ -3544,7 +3762,7 @@ export function renderUnitReport(
   const checkpointLine = (checkpoint: { branch: string; sha: string } | undefined) =>
     checkpoint === undefined
       ? undefined
-      : `The branch carries the interrupted work at \`${checkpoint.sha.slice(0, 7)}\` on \`${checkpoint.branch}\`; the next reply in this thread resumes from it instead of starting over.`;
+      : `The run recorded \`${checkpoint.sha.slice(0, 7)}\` on \`${checkpoint.branch}\` as pushed, but Switchboard did not independently verify that commit on the remote branch or an open pull request.`;
   switch (e.kind) {
     case "merged":
       if (e.by === "other")
@@ -3605,9 +3823,9 @@ export function renderUnitReport(
       if (e.cause === "draft") {
         const link = e.pr !== undefined ? ` — ${e.pr.url}` : "";
         if (!shows(verbosity, "verbose")) return `⏸️ Held: draft — GitHub still marks the pull request as draft${link}`;
-        const draftContinuation = s.input.generated
-          ? `The pipeline kept the task, branch and pull request${e.pr !== undefined ? ` (${e.pr.url})` : ""}; after GitHub marks it ready, the next reply in this thread resumes at the review round.`
-          : `The unit stays held while GitHub marks the pull request as a draft; ${continuation.charAt(0).toLowerCase()}${continuation.slice(1)}`;
+        const draftContinuation = `Next action: mark the pull request ready in GitHub, then ${nextAction()
+          .replace(/^The unit's dependents in this plan stay blocked\. Next action: /, "")
+          .replace(/^Next action: /, "")}`;
         return join([
           `⏸️ Held after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — the pull request is a draft, so nothing can merge and no fix round would change anything.`,
           draftContinuation,
@@ -3623,7 +3841,9 @@ export function renderUnitReport(
         return join([
           `⏸️ Held after ${rounds}: the coding child of round ${e.round.index} concluded its round blocked instead of opening a pull request — ${e.reason}.${prLine}`,
           writeUpPointer(s, e.round.kind, e.runId),
-          `No renewal was spent and no second coding child ran — a concluded round is not renewed (a renewal continues a budget that ran out mid-work). The child's answer remains the thread's open question; the next reply is treated as its answer. ${continuation}`,
+          durableWake
+            ? `No renewal was spent and no second coding child ran — a concluded round is not renewed (a renewal continues a budget that ran out mid-work). The child's answer remains the thread's open question. ${nextAction()}`
+            : `No renewal was spent and no second coding child ran — a concluded round is not renewed (a renewal continues a budget that ran out mid-work). The child's answer remains unresolved. ${nextAction()}`,
         ]);
       }
       // A human-gated row is a question to a person. The enclosing idle keeps
@@ -3651,8 +3871,8 @@ export function renderUnitReport(
       return join([
         `⚠️ The review approved ${e.pr.url} but the pipeline did not merge it: ${e.reason}. A person decides what becomes of the pull request.`,
         s.input.generated
-          ? continuation
-          : "The approved work remains on the branch. This is a bug: the pipeline has no automatic recovery for this refused merge, so the unit's dependents remain blocked.",
+          ? `Next action: merge or close the pull request, then start ship again with ${e.pr.url} so the result is reconciled.`
+          : "The approved work remains on the branch. This is a bug: the pipeline has no automatic recovery for this refused merge. Next action: merge or close the pull request, then start this plan again so its dependents can be reconciled.",
       ]);
     case "round_cap": {
       // The quiet copy counts the last review's open findings, only the
@@ -3671,7 +3891,7 @@ export function renderUnitReport(
         failedChecks.length > 0
           ? `🧢 Ship stopped at a cap: the ${e.maxRounds}-round cap — the review of round ${e.reviewRounds} approved, but ${failedChecks.map((f) => `\`${f.id}\``).join(", ")} failed at the approved head and no fix round remains.${prLine}`
           : `🧢 Ship stopped at a cap: the ${e.maxRounds}-round cap — no approval after ${rounds}.${prLine}`;
-      return join([headline, splitReport(s), continuation]);
+      return join([headline, splitReport(s), nextAction()]);
     }
     case "wall_clock_cap":
       if (!shows(verbosity, "verbose")) return `🧢 Out of budget — no approval after ${rounds}.${prLine}`;
@@ -3679,13 +3899,13 @@ export function renderUnitReport(
         `🧢 Ship stopped at a cap: the remaining pipeline time (~${Math.max(0, Math.round(e.remainingMs / MIN))} min of the ${s.input.caps.maxMinutes}-minute budget) cannot hold another round${e.refused ? ` (the ${e.refused.round} round would get ${e.refused.minutes} min, under its floor of ${e.refused.floor})` : ""} — no approval after ${rounds}.${prLine}`,
         budgetSplitLine(e.spent, s.input.caps.maxMinutes),
         splitReport(s),
-        continuation,
+        nextAction(),
       ]);
     case "review_pending":
       return join([
         `⏳ Review pending: the coding child shipped ${e.pr.url}${e.headSha !== undefined ? ` (head \`${e.headSha.slice(0, 7)}\`)` : ""} but the remaining pipeline time cannot hold the review round — the work stands, only the review is missing. The next pipeline starts at the review round while the pull request still heads at the child's own last push.`,
         aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
-        aside(continuation),
+        aside(nextAction()),
       ]);
     case "stopped":
       if (!shows(verbosity, "verbose"))
@@ -3701,12 +3921,50 @@ export function renderUnitReport(
         e.postedReview
           ? "ℹ️ A changes-requested review was posted this round before the stop — its findings stand on the PR."
           : undefined,
-        continuation,
+        nextAction(e.checkpoint),
       ]);
     case "aborted":
+      if (e.findingsStop !== undefined) {
+        const observed = e.observedHead?.slice(0, 7);
+        const branch = s.input.unit.branch;
+        if (e.findingsStop === "incomplete_outputs")
+          return join([
+            `⚠️ Review did not restart: the completed findings work did not record every required result (${(e.missingOutputs ?? []).join("; ")}).`,
+            observed !== undefined
+              ? `Saved-work fact: The run ended at \`${observed}\`, but remote state was not checked; Switchboard cannot claim that commit is on the branch or pull request.`
+              : "Saved-work fact: The run did not record a final commit, and remote state was not checked.",
+            "Next action: a new findings run must record every disposition, the updated pull request description and its final commit before remote reconciliation.",
+          ]);
+        if (e.findingsStop === "unfinished")
+          return join([
+            "⚠️ Review did not restart: the findings work did not complete.",
+            observed !== undefined
+              ? `Saved-work fact: the stopped run recorded \`${observed}\`, but Switchboard did not verify it on the remote branch or pull request.`
+              : "Saved-work fact: no completed commit was recorded, and remote state was not checked.",
+            "Next action: start a new findings run; review can begin only after it completes every required result and Switchboard verifies its exact remote head.",
+          ]);
+        if (e.findingsStop === "missing_remote")
+          return join([
+            `⚠️ Review did not restart: The completed changes ended at \`${observed}\`, but no open pull request was found for \`${branch}\`.`,
+            `Saved-work fact: The run recorded completed commit \`${observed}\`; Switchboard did not verify that commit on the remote branch or a pull request.`,
+            "Next action: reconcile the branch and open pull request, then start ship again so it can verify the exact head before review.",
+          ]);
+        if (e.findingsStop === "head_mismatch")
+          return join([
+            `⚠️ Review did not restart: The completed changes ended at \`${observed}\`, but the pull request is at \`${e.remoteHead?.slice(0, 7)}\` (${s.pr?.url}).`,
+            "Saved-work fact: the pull request's current commit is verified, but the completed changes are not verified there. No review ran on either commit.",
+            "Next action: reconcile the pull request to the completed commit, then start ship again so it can verify that exact head before review.",
+          ]);
+        return join([
+          `⚠️ Review did not restart: The pull request exists (${s.pr?.url}), but its exact head could not be verified.`,
+          `Saved-work fact: the run recorded completed commit \`${observed}\`; Switchboard did not start review for \`${observed}\` and cannot claim the pull request contains it.`,
+          "Next action: retry ship when the pull request state is readable so it can verify the exact head before review.",
+        ]);
+      }
       if (!shows(verbosity, "verbose")) return `⚠️ Aborted after ${rounds}: ${e.reason}${prLine}`;
       return join([
         e.reason,
+        checkpointLine(e.checkpoint),
         writeUpPointer(
           s,
           e.round?.kind ?? "coding",
@@ -3714,7 +3972,7 @@ export function renderUnitReport(
         ),
         e.renewal !== undefined ? `🔁 Not renewed: ${e.renewal.line}.` : undefined,
         `⚠️ Ship aborted after ${rounds}.`,
-        continuation,
+        nextAction(e.checkpoint),
       ]);
     case "continued":
       // A segment boundary is the runner continuing — an acknowledgement, verbose
@@ -3723,8 +3981,8 @@ export function renderUnitReport(
       if (!shows(verbosity, "verbose")) return "";
       return join([
         writeUpPointer(s, e.round.kind, e.runId),
-        s.input.idleDays && s.input.idleDays > 0
-          ? `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. The next reply in this thread continues it; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`
+        durableWake
+          ? `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. A reply in this thread is recorded as its continuation action; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`
           : `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. A fresh ${s.input.caps.maxMinutes}-minute budget opens in this thread${e.from !== undefined ? ` from \`${e.from.slice(0, 7)}\`` : ""}, with the last run's write-up as its request; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`,
         aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
       ]);
@@ -3735,7 +3993,7 @@ export function renderUnitReport(
         `⚠️ The coding child of round ${e.round.index} (run ${e.runId}) died on a provider transient — a model-gateway 5xx, a cut stream or a gateway timeout past the harness's retry ladder — with nothing pushed, after the round was already re-run once for the same reason. The task itself was never the problem.`,
         writeUpPointer(s, e.round.kind, s.lastCodingRunId),
         `⚠️ This is a bug: ship ended after ${rounds} because its automatic provider retry was spent.`,
-        continuation,
+        nextAction(),
       ]);
     case "no_verdict":
       if (!shows(verbosity, "verbose"))
@@ -3744,20 +4002,20 @@ export function renderUnitReport(
         `⚠️ Review round ${e.round.index} ended without a submitted verdict (budget, refusal, or stop) — ship never converts that into a request for changes, so no findings step ran.`,
         writeUpPointer(s, e.round.kind, s.reviewRunByRound[e.round.index]),
         `⚠️ Ship aborted after ${rounds}.`,
-        continuation,
+        nextAction(),
       ]);
     case "interrupted":
-      return join([shipInterruptedNote(prUrl, e.cause, (s.input.idleDays ?? 0) > 0), checkpointLine(e.checkpoint)]);
+      return join([shipInterruptedNote(prUrl, e.cause, durableWake), checkpointLine(e.checkpoint)]);
     case "idle_expired":
       return "⌛ Idle expired: no reply continued this unit before its idle window closed.";
     case "refused":
       return join([
         `🚫 The ${presetOf(e.round.kind)} child of round ${e.round.index} was refused by the authorize stage (${e.refusal})${e.message ? `: ${e.message}` : ""} — every child is authorized as the requesting user, so the pipeline ends here.`,
-        aside(continuation),
+        aside(nextAction()),
       ]);
     case "idle":
-      // The old kind's sentence at this copy's level — the report is unchanged
-      // by the idle at every verbosity (record 0051).
-      return renderUnitReport({ ...s, ending: e.idled }, facts, verbosity);
+      // Keep the old kind's outcome at this copy's level, but render the
+      // indexed wake's durable reply action instead of a terminal restart.
+      return renderUnitReportWithWake({ ...s, ending: e.idled }, facts, verbosity, true);
   }
 }

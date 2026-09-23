@@ -158,6 +158,11 @@ const finished = (facts: Omit<Extract<ChildFacts, { finished: true }>, "finished
   ...facts,
 });
 
+/** A findings run that supplied the round's required PR-description output. */
+const findingsCompleted = (
+  facts: Omit<Extract<ChildFacts, { finished: true }>, "finished" | "status" | "description">,
+): ChildFacts => finished({ status: "completed", description: true, ...facts });
+
 /** Run a child round to its confirmed end: the spawn, the wait (an event) and the read-record. */
 function runChild(d: Driver, runId: string, facts: ChildFacts, at: number): CoordinatorAction {
   expect(d.action.type).toBe("spawn");
@@ -201,6 +206,185 @@ function confirmCurrentPr(d: Driver, headSha: string, at = T0): CoordinatorActio
     at,
   });
 }
+
+/** Reach round 1's findings step after a posted changes-requested review. */
+function throughFindingsRequest(d: Driver, findings: Finding[] = [FINDING]): CoordinatorAction {
+  throughRoundZero(d);
+  runChild(
+    d,
+    "run-r1",
+    finished({
+      status: "completed",
+      verdict: { verdict: "request_changes", summary: "changes needed", findings },
+      reviewPosted: true,
+      reviewHead: HEAD_A,
+    }),
+    T0 + 20 * MIN,
+  );
+  return d.action;
+}
+
+describe("completed findings recovery — typed completion plus independently verified remote head", () => {
+  const completeFindings = (d: Driver, over: Partial<Extract<ChildFacts, { finished: true }>> = {}) =>
+    finished({
+      status: "completed",
+      dispositions: [FIXED],
+      description: true,
+      headSha: HEAD_B,
+      // A salvage record explains how the run tried to publish, but is not
+      // proof that the remote branch or pull request received the commit.
+      pushed: [{ ref: d.state.input.unit.branch, sha: HEAD_B, by: "salvage" }],
+      ...over,
+    });
+
+  it("advances a completed findings run without a round-zero handoff only after the open pull request and branch independently show its exact observed head, and a duplicate check cannot start a second review", () => {
+    const d = fresh(input({ merge: "person" }));
+    throughFindingsRequest(d);
+    runChild(d, "run-f1", completeFindings(d), T0 + 30 * MIN);
+
+    expect(d.action).toMatchObject({ type: "pr-check", step: "U10/1/findings/pr-check", pr: 7 });
+    const check = d.action;
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 31 * MIN,
+    });
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      step: "U10/2/review",
+      brief: { kind: "review", pr: 7, headSha: HEAD_B, prior: { reviewRunId: "run-r1", codingRunId: "run-f1" } },
+    });
+    expect(d.rounds().filter((round) => round === "1 coding pr_opened")).toHaveLength(1);
+
+    const duplicate = applyReturn(d.state, {
+      type: "pr-check",
+      step: check.step,
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 32 * MIN,
+    });
+    expect(duplicate.state).toBe(d.state);
+    expect(duplicate.notes).toEqual([]);
+  });
+
+  it("keeps a completed findings run resumable when no open pull request can be verified, without treating its push record as saved remote work", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    runChild(d, "run-f1", completeFindings(d), T0 + 30 * MIN);
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 31 * MIN });
+
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted", findingsStop: "missing_remote" } });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain(
+      `The completed changes ended at \`${HEAD_B.slice(0, 7)}\`, but no open pull request was found`,
+    );
+    expect(report).toContain("Switchboard did not verify that commit on the remote branch or a pull request");
+    expect(report).toContain("Next action: reconcile the branch and open pull request, then start ship again");
+    expect(report).not.toMatch(/coding child|interrupted work|ended because|next reply/i);
+  });
+
+  it("keeps a completed findings run resumable when the open pull request is at a different head, and names both observed facts without claiming the fix was saved there", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    runChild(d, "run-f1", completeFindings(d), T0 + 30 * MIN);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_C, headBranchExists: true },
+      at: T0 + 31 * MIN,
+    });
+
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted", findingsStop: "head_mismatch" } });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain(`The completed changes ended at \`${HEAD_B.slice(0, 7)}\``);
+    expect(report).toContain(`the pull request is at \`${HEAD_C.slice(0, 7)}\``);
+    expect(report).toContain("No review ran on either commit");
+    expect(report).not.toMatch(/saved in the pull request|interrupted work|next reply/i);
+  });
+
+  it("does not call an older pull request head landed when it merged after the completed findings push failed", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    runChild(d, "run-f1", completeFindings(d), T0 + 30 * MIN);
+    d.answer({
+      type: "pr-check",
+      pr: {
+        state: "merged",
+        prNumber: 7,
+        url: PR_URL,
+        headSha: HEAD_A,
+        sha: HEAD_C,
+        mergedAt: "2026-09-13T23:55:59Z",
+      },
+      at: T0 + 31 * MIN,
+    });
+
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "aborted",
+        findingsStop: "head_mismatch",
+        observedHead: HEAD_B,
+        remoteHead: HEAD_A,
+      },
+    });
+    expect(renderUnitReport(d.state)).toContain(`the pull request is at \`${HEAD_A.slice(0, 7)}\``);
+    expect(renderUnitReport(d.state)).not.toMatch(/Already merged|Merged:/);
+  });
+
+  it("keeps a completed findings run resumable when the open pull request's branch or exact head is unreadable", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    runChild(d, "run-f1", completeFindings(d), T0 + 30 * MIN);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL },
+      at: T0 + 31 * MIN,
+    });
+
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted", findingsStop: "remote_unreadable" } });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain(`The pull request exists (${PR_URL}), but its exact head could not be verified`);
+    expect(report).toContain(`Switchboard did not start review for \`${HEAD_B.slice(0, 7)}\``);
+    expect(report).toContain("Next action: retry ship when the pull request state is readable");
+    expect(report).not.toMatch(/coding child|interrupted work|next reply/i);
+  });
+
+  it("requires one matching disposition per finding and the updated description before consulting remote state", () => {
+    const second: Finding = { id: "F2", severity: "minor", file: "src/b.ts", title: "missing guard" };
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d, [FINDING, second]);
+    runChild(d, "run-f1", completeFindings(d, { dispositions: [FIXED], description: false }), T0 + 30 * MIN);
+
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted", findingsStop: "incomplete_outputs" } });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("the completed findings work did not record every required result");
+    expect(report).toContain("missing disposition for F2");
+    expect(report).toContain("missing updated pull request description");
+    expect(report).toContain(`The run ended at \`${HEAD_B.slice(0, 7)}\`, but remote state was not checked`);
+    expect(report).not.toMatch(/interrupted work|ended because|next reply/i);
+  });
+
+  it("reports a genuinely interrupted findings run as stopped before review without calling completed work interrupted or promising continuation", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    runChild(
+      d,
+      "run-f1",
+      finished({
+        status: "interrupted",
+        interruption: "container_replaced",
+        pushed: [{ ref: d.state.input.unit.branch, sha: HEAD_B, by: "salvage" }],
+      }),
+      T0 + 30 * MIN,
+    );
+
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "interrupted" } });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("Work stopped before the next review because the repository container was replaced");
+    expect(report).toContain(`The run recorded \`${HEAD_B.slice(0, 7)}\` on \`${d.state.input.unit.branch}\``);
+    expect(report).toContain("did not independently verify that commit on the remote branch or an open pull request");
+    expect(report).not.toMatch(/coding child|interrupted work|ended because|next reply/i);
+  });
+});
 
 describe("the plan graph — units, their dependencies, their branches", () => {
   it("parsePlanGraph: every `### U<n>.` heading in order, its dependencies from the Dependencies bullet (lists, `to` ranges, `none`), each unit's slug and branch", () => {
@@ -582,14 +766,18 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       brief: { kind: "findings", pr: 7, reviewRunId: "run-r1", unit: "U10" },
     });
     expect(JSON.stringify(d.action)).not.toContain('"fix"');
-    runChild(d, "run-f1", finished({ status: "completed", dispositions: [DECLINED], headSha: HEAD_B }), T0 + 40 * MIN);
+    runChild(d, "run-f1", findingsCompleted({ dispositions: [DECLINED], headSha: HEAD_B }), T0 + 40 * MIN);
     // One spelling end to end (record 0066): the step names, the round refs and the
     // ledger's rows all say `findings` — nothing translates it back to `fix`.
     expect(JSON.stringify(d.state)).not.toContain('"fix"');
     expect(d.state.findingsRunByRound).toEqual({ 1: "run-f1" });
     expect(d.state.lastCodingRunId).toBe("run-f1");
     expect(d.action).toMatchObject({ type: "pr-check", step: "U10/1/findings/pr-check" });
-    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B }, at: T0 + 40 * MIN });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 40 * MIN,
+    });
     expect(d.action).toMatchObject({
       type: "spawn",
       step: "U10/2/review",
@@ -719,13 +907,16 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     runChild(
       wide,
       "run-f1",
-      finished({ status: "completed", dispositions: [DECLINED, stray], headSha: HEAD_B }),
+      findingsCompleted({
+        dispositions: [DECLINED, { ...FIXED, findingId: "F2" }, stray],
+        headSha: HEAD_B,
+      }),
       T0 + 40 * MIN,
     );
-    expect(wide.state.dispositionsByRound).toEqual({ 1: [DECLINED] });
+    expect(wide.state.dispositionsByRound).toEqual({ 1: [DECLINED, { ...FIXED, findingId: "F2" }] });
     wide.answer({
       type: "pr-check",
-      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B },
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
       at: T0 + 40 * MIN,
     });
     runChild(
@@ -744,7 +935,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(report).toContain(
       "Declined (disposition recorded):\n  - [minor] F1 src/a.ts:3 — off by one — the loop is exclusive",
     );
-    expect(report).toContain("Unaddressed (no disposition):\n  - [nit] F2 src/b.ts — rename");
+    expect(report).toContain("Claimed fixed but still flagged:\n  - [nit] F2 src/b.ts — rename — counted from zero");
     expect(report).not.toContain("F9");
   });
 
@@ -959,6 +1150,14 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(soft.rounds()).toEqual(["0 coding started", "0 coding stopped"]);
     expect(renderUnitReport(soft.state)).toContain("⏹ Ship stopped by operator (soft stop) after 0 review rounds.");
 
+    const generated = fresh(input({ merge: "person", generated: true }));
+    generated.answer({ type: "branch", ok: true, at: T0 });
+    runChild(generated, "run-c0", finished({ status: "stopped_soft", finalReply: "stopping" }), T0 + 5 * MIN);
+    const stoppedReport = renderUnitReport(generated.state);
+    expect(stoppedReport).toContain("Next action: verify the remote branch");
+    expect(stoppedReport).toContain("then start ship again with the original task");
+    expect(stoppedReport).not.toMatch(/next reply/i);
+
     const hard = fresh(input({ merge: "person" }));
     throughRoundZero(hard);
     runChild(hard, "run-r1", finished({ status: "stopped_hard" }), T0 + 20 * MIN);
@@ -1140,13 +1339,13 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         kind: "aborted",
         renewal: {
           decision: { renew: false, why: "no_progress", renewalsLeft: 6 },
-          line: "no progress on the last budget; 6 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; the next reply in this thread continues the original task",
+          line: "no progress on the last budget; 6 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; start ship again with the original task",
         },
       },
     });
     expect(stuck.rounds()).toEqual(["0 coding started", "0 coding aborted"]);
     expect(renderUnitReport(stuck.state)).toContain(
-      "🔁 Not renewed: no progress on the last budget; 6 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; the next reply in this thread continues the original task.",
+      "🔁 Not renewed: no progress on the last budget; 6 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; start ship again with the original task.",
     );
 
     // The cap: progress, but the session's spend reached it.
@@ -1450,10 +1649,10 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       }),
       T0 + 20 * MIN,
     );
-    runChild(stale, "run-f1", finished({ status: "completed", dispositions: [FIXED] }), T0 + 30 * MIN);
+    runChild(stale, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_A }), T0 + 30 * MIN);
     stale.answer({
       type: "pr-check",
-      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, headBranchExists: true },
       at: T0 + 30 * MIN,
     });
     expect(stale.action).toMatchObject({
@@ -1476,10 +1675,10 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       }),
       T0 + 20 * MIN,
     );
-    runChild(declinedAll, "run-f1", finished({ status: "completed", dispositions: [DECLINED] }), T0 + 30 * MIN);
+    runChild(declinedAll, "run-f1", findingsCompleted({ dispositions: [DECLINED], headSha: HEAD_A }), T0 + 30 * MIN);
     declinedAll.answer({
       type: "pr-check",
-      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, headBranchExists: true },
       at: T0 + 30 * MIN,
     });
     expect(declinedAll.action).toMatchObject({ type: "spawn", step: "U10/2/review" });
@@ -1620,8 +1819,10 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     const report = renderUnitReport(d.state);
     expect(report).toContain("the approval could not be posted");
     expect(report).toContain("digest covered 3 of 5 files");
-    expect(report).toContain("the next run of this plan recognizes the unit's branch and pull request");
-    expect(report).not.toMatch(/Re-run ship/);
+    expect(report).toContain("The unit's dependents in this plan stay blocked");
+    expect(report).toContain("Next action: verify the remote branch and pull request");
+    expect(report).toContain("then start this plan again");
+    expect(report).not.toMatch(/next reply/i);
   });
 
   it("an approve GitHub shows no post for — with no recorded reason — aborts naming the pull request's silence, and a generated unit is told to re-issue ship with the PR URL", () => {
@@ -1641,8 +1842,10 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
     const report = renderUnitReport(d.state);
     expect(report).toContain("the pull request carries no approving review");
-    expect(report).toContain("the next reply in this thread continues it from the open pull request");
-    // The re-issue line for a generated instance names the same text, never a plan path.
+    expect(report).toContain(`Next action: verify the remote branch and pull request (${PR_URL}) agree`);
+    expect(report).toContain(`then start ship again with ${PR_URL}`);
+    expect(report).not.toMatch(/next reply/i);
+    // The restart action for a generated instance names the request target, never a plan path.
     expect(report).not.toContain(".md");
   });
 
@@ -1665,11 +1868,12 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       return renderUnitReport(d.state);
     };
     const seeded = silent(false);
-    expect(seeded).toContain("the next run of this plan recognizes the unit's branch and pull request");
-    expect(seeded).not.toContain("the next reply in this thread");
+    expect(seeded).toContain("The unit's dependents in this plan stay blocked");
+    expect(seeded).toContain("then start this plan again");
+    expect(seeded).not.toMatch(/next reply/i);
     const generated = silent(true);
-    expect(generated).toContain("the next reply in this thread continues it from the open pull request");
-    expect(generated).not.toContain("the next run of this plan");
+    expect(generated).toContain(`then start ship again with ${PR_URL}`);
+    expect(generated).not.toMatch(/next reply/i);
   });
 
   it("a resume at review (an open pull request of ship's own named by the requester) skips the branch and round 0", () => {
@@ -1745,9 +1949,13 @@ describe("the transient re-run — round 0 dies on a provider transient with not
     );
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
     const report = renderUnitReport(d.state);
-    expect(report).toContain(`the branch carries the interrupted work at \`${HEAD_A.slice(0, 7)}\``);
+    expect(report).toContain(
+      `The run recorded \`${HEAD_A.slice(0, 7)}\` on \`${d.state.input.unit.branch}\` as pushed`,
+    );
     expect(report).toContain("the model provider's transport retry budget was spent");
-    expect(report).toContain("The next reply in this thread resumes from that checkpoint");
+    expect(report).toContain(`Next action: verify \`${HEAD_A.slice(0, 7)}\` is on \`${d.state.input.unit.branch}\``);
+    expect(report).toContain("then start this plan again");
+    expect(report).not.toMatch(/next reply/i);
     expect(report).not.toContain("Bad Gateway");
   });
 
@@ -1789,9 +1997,12 @@ describe("the transient re-run — round 0 dies on a provider transient with not
       ending: { kind: "aborted", round: { index: 0, kind: "coding" } },
     });
     const report = renderUnitReport(d.state);
-    expect(report).toContain(`branch carries the interrupted work at \`${HEAD_A.slice(0, 7)}\``);
-    expect(report).toContain(`\`${d.state.input.unit.branch}\``);
-    expect(report).toContain("The next reply in this thread resumes from that checkpoint");
+    expect(report).toContain(
+      `The run recorded \`${HEAD_A.slice(0, 7)}\` on \`${d.state.input.unit.branch}\` as pushed`,
+    );
+    expect(report).toContain(`Next action: verify \`${HEAD_A.slice(0, 7)}\` is on \`${d.state.input.unit.branch}\``);
+    expect(report).toContain("then start this plan again");
+    expect(report).not.toMatch(/next reply/i);
     expect(report).not.toContain("discarded");
   });
 
@@ -1865,7 +2076,8 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
       ending: { kind: "interrupted", checkpoint: { branch: d.state.input.unit.branch, sha: HEAD_A } },
     });
     const report = renderUnitReport(d.state);
-    expect(report).toContain(`branch carries the interrupted work at \`${HEAD_A.slice(0, 7)}\``);
+    expect(report).toContain(`The run recorded \`${HEAD_A.slice(0, 7)}\``);
+    expect(report).toContain("did not independently verify that commit on the remote branch or an open pull request");
     expect(report).not.toContain("discarded");
   });
 
@@ -1980,7 +2192,9 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     runChild(withPr, "run-r1", finished({ status: "interrupted" }), T0 + 20 * MIN);
     expect(withPr.action).toMatchObject({ type: "end", ending: { kind: "interrupted", runId: "run-r1" } });
     expect(renderUnitReport(withPr.state)).toBe(shipInterruptedNote(PR_URL));
-    expect(shipInterruptedNote(PR_URL, undefined, true)).toContain("The next reply in this thread continues the unit");
+    expect(shipInterruptedNote(PR_URL, undefined, true)).toContain(
+      "The unit remains live; a reply in this thread is recorded as its continuation action",
+    );
     expect(shipInterruptedNote(PR_URL, undefined, true)).not.toContain("re-issue `agent:ship`");
   });
 
@@ -2022,17 +2236,15 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
       return renderUnitReport(d.state);
     };
     expect(endedWith("container_replaced")).toContain(
-      "The resident container running this pipeline's child was replaced (a deploy's image swap) and the child could not resume, so the pipeline stopped.",
+      "Work stopped before the next review because the repository container was replaced and the run could not continue.",
     );
     expect(endedWith("bot_restart")).toContain(
-      "The bot restarted while this ship pipeline was running, so the pipeline stopped.",
+      "Work stopped before the next review because Switchboard restarted and the run could not continue.",
     );
     expect(endedWith("sandbox_fault")).toContain(
-      "The sandbox running this pipeline's child failed and the child could not resume, so the pipeline stopped.",
+      "Work stopped before the next review because the sandbox failed and the run could not continue.",
     );
-    expect(endedWith(undefined)).toContain(
-      "This ship pipeline's child was interrupted and could not resume, so the pipeline stopped.",
-    );
+    expect(endedWith(undefined)).toContain("Work stopped before the next review because the run could not continue.");
   });
 
   it("interruptionCauseOfWords classifies the ledger's own words (issue 1876): the relaunch and lost-workspace notes name the container, sandbox words the sandbox, restart words the bot, anything else no cause — each pattern anchored on the writers' exact phrases, so an unrelated word cannot classify", () => {
@@ -2067,7 +2279,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     expect(interruptionCauseOfWords("the run wrote to /workspace/sandbox-notes.md and failed")).toBeUndefined();
   });
 
-  it("a findings child that died at an unchanged head ends with the child's own reason — interrupted with the ship-restart note naming the pull request, failed as an abort naming the failure — never as the round's inaction", () => {
+  it("a findings run that did not complete remains resumable without another review, whether it was interrupted, failed or recorded an attempted push", () => {
     const reviewed = (d: ReturnType<typeof fresh>) => {
       throughRoundZero(d);
       runChild(
@@ -2082,17 +2294,9 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
         T0 + 20 * MIN,
       );
     };
-    // The bot rolled under the findings child before it pushed: the recover
-    // pr-check finds the round's own pull request still at the reviewed head.
     const interrupted = fresh(input({ merge: "person" }));
     reviewed(interrupted);
     runChild(interrupted, "run-f1", finished({ status: "interrupted" }), T0 + 30 * MIN);
-    expect(interrupted.action).toMatchObject({ type: "pr-check", recover: { runId: "run-f1" } });
-    interrupted.answer({
-      type: "pr-check",
-      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
-      at: T0 + 30 * MIN,
-    });
     expect(interrupted.action).toMatchObject({
       type: "end",
       ending: { kind: "interrupted", runId: "run-f1", round: { index: 1, kind: "findings" } },
@@ -2102,31 +2306,29 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
 
     const failed = fresh(input({ merge: "person" }));
     reviewed(failed);
-    runChild(failed, "run-f1", finished({ status: "failed" }), T0 + 30 * MIN);
-    failed.answer({
-      type: "pr-check",
-      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
-      at: T0 + 30 * MIN,
-    });
+    runChild(failed, "run-f1", finished({ status: "failed", headSha: HEAD_A }), T0 + 30 * MIN);
     expect(failed.action).toMatchObject({
       type: "end",
-      ending: { kind: "aborted", round: { index: 1, kind: "findings" } },
+      ending: { kind: "aborted", findingsStop: "unfinished", round: { index: 1, kind: "findings" } },
     });
     const report = renderUnitReport(failed.state);
-    expect(report).toContain("ended `failed`");
-    expect(report).toContain("still sits at");
-    expect(report).not.toContain("produced no new head");
+    expect(report).toContain("the findings work did not complete");
+    expect(report).toContain("did not verify it on the remote branch or pull request");
+    expect(report).not.toMatch(/coding child|next reply/i);
 
-    // A dead child that DID push carries the round on to review as before.
     const pushed = fresh(input({ merge: "person" }));
     reviewed(pushed);
-    runChild(pushed, "run-f1", finished({ status: "interrupted" }), T0 + 30 * MIN);
-    pushed.answer({
-      type: "pr-check",
-      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B },
-      at: T0 + 30 * MIN,
-    });
-    expect(pushed.action).toMatchObject({ type: "spawn", preset: "review" });
+    runChild(
+      pushed,
+      "run-f1",
+      finished({
+        status: "interrupted",
+        pushed: [{ ref: pushed.state.input.unit.branch, sha: HEAD_B, by: "salvage" }],
+      }),
+      T0 + 30 * MIN,
+    );
+    expect(pushed.action).toMatchObject({ type: "end", ending: { kind: "interrupted" } });
+    expect(renderUnitReport(pushed.state)).not.toContain("saved in the pull request");
   });
 
   it("a spawn answering `alreadySpawned` proceeds to the wait on that run without a second child", () => {
@@ -2311,10 +2513,16 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
       }),
       T0 + 20 * MIN,
     );
-    runChild(adopt, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_C }), T0 + 30 * MIN);
+    runChild(adopt, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_C }), T0 + 30 * MIN);
     adopt.answer({
       type: "pr-check",
-      pr: { state: "open", prNumber: 9, url: "https://github.com/acme/api/pull/9", headSha: HEAD_C },
+      pr: {
+        state: "open",
+        prNumber: 9,
+        url: "https://github.com/acme/api/pull/9",
+        headSha: HEAD_C,
+        headBranchExists: true,
+      },
       at: T0 + 30 * MIN,
     });
     expect(adopt.action).toMatchObject({ type: "spawn", step: "U10/2/review", brief: { pr: 9, headSha: HEAD_C } });
@@ -2332,7 +2540,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
       }),
       T0 + 20 * MIN,
     );
-    runChild(gone, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_C }), T0 + 30 * MIN);
+    runChild(gone, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_C }), T0 + 30 * MIN);
     // The findings pr-check carries the adopted pull request for the bot to
     // follow, and its answer VERIFIED it closed: only then does the unit abort.
     expect(gone.action).toMatchObject({ type: "pr-check", pr: 7 });
@@ -2366,15 +2574,15 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
         T0 + 20 * MIN,
       );
       expect(d.action).toMatchObject({ type: "spawn", round: { index: 1, kind: "findings" } });
-      runChild(
-        d,
-        "run-f1",
-        finished({ status: "completed", dispositions: [FIXED], headSha: headAfterFix }),
-        T0 + 30 * MIN,
-      );
-      // The unit's branch still heads nothing; the check follows the pull request.
+      runChild(d, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: headAfterFix }), T0 + 30 * MIN);
+      // The unit's branch still heads nothing; the check follows and reads the
+      // adopted pull request itself, including its exact remote head.
       expect(d.action).toMatchObject({ type: "pr-check", pr: 7 });
-      return d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 30 * MIN });
+      return d.answer({
+        type: "pr-check",
+        pr: { state: "open", prNumber: 7, url: PR_URL, headSha: headAfterFix, headBranchExists: true },
+        at: T0 + 30 * MIN,
+      });
     };
 
     // Repushed: the re-review runs on the held pull request at the pushed head.
@@ -2422,8 +2630,15 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
 describe("the unit pipeline — a pull request already merged: a re-issued plan, or a merge that lands during a round", () => {
   const MERGED_AT = "2026-09-13T23:55:59Z";
   const graph = parsePlanGraph(PLAN, PLAN_ID);
-  const merged = (sha: string, mergedAt = MERGED_AT) =>
-    ({ state: "merged", prNumber: 7, url: PR_URL, sha, mergedAt }) as const;
+  const merged = (sha: string, mergedAt = MERGED_AT, headSha?: string) =>
+    ({
+      state: "merged",
+      prNumber: 7,
+      url: PR_URL,
+      ...(headSha !== undefined ? { headSha } : {}),
+      sha,
+      mergedAt,
+    }) as const;
 
   it("a unit whose pull request merged before the attempt — a person's merge, or an earlier attempt's — ends merged at the pre-check under `<unit>/pr-check`: no branch, no child, no round; the report says it was already merged and when, never that the runner merged it; the cursor marks it done and its dependents become ready; the same return applied twice changes nothing", () => {
     const d = new Driver(openUnitPipeline(input(), T0));
@@ -2652,7 +2867,7 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
     }
   });
 
-  it("issue 2185: a person's merge during a findings child steers it to end without a push, then ignores its eventual push", () => {
+  it("issue 2185: a person's merge during a findings child steers it, then accepts only completed output at the merged source head", () => {
     const d = fresh(input({ merge: "person", generated: true }));
     throughRoundZero(d);
     d.answer({ type: "spawn", outcome: "spawned", runId: "run-r1", at: T0 + 10 * MIN });
@@ -2674,7 +2889,7 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
     d.answer({
       type: "read-record",
       run: { finished: false },
-      pullRequest: { ...merged(HEAD_B, "2026-09-22T05:50:58Z"), mergedBy: "justinhelmer" },
+      pullRequest: { ...merged(HEAD_B, "2026-09-22T05:50:58Z", HEAD_B), mergedBy: "justinhelmer" },
       at: T0 + 25 * MIN,
     });
     expect(d.action).toMatchObject({ type: "steer", runId: "run-2168-fix", reason: "merged" });
@@ -2683,11 +2898,11 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
     d.answer({ type: "wait", outcome: "event" });
     d.answer({
       type: "read-record",
-      run: finished({ status: "completed", headSha: HEAD_C, pushed: [{ ref: input().unit.branch, sha: HEAD_C }] }),
+      run: findingsCompleted({ headSha: HEAD_B, dispositions: [FIXED] }),
       at: T0 + 26 * MIN,
     });
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merged", sha: HEAD_B, mergedBy: "justinhelmer" } });
-    expect(d.state.lastChildHead).not.toBe(HEAD_C);
+    expect(d.state.lastChildHead).toBe(HEAD_B);
   });
 
   it("issue 2185: a moved review head restarts that review at the fresh head, while a deleted head branch receives no child", () => {
@@ -2812,9 +3027,9 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
       }),
       T0 + 20 * MIN,
     );
-    runChild(fix, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_B }), T0 + 30 * MIN);
+    runChild(fix, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_B }), T0 + 30 * MIN);
     expect(fix.action).toMatchObject({ type: "pr-check", step: "U10/1/findings/pr-check" });
-    fix.answer({ type: "pr-check", pr: merged(HEAD_C), at: T0 + 30 * MIN });
+    fix.answer({ type: "pr-check", pr: merged(HEAD_C, MERGED_AT, HEAD_B), at: T0 + 30 * MIN });
     expect(fix.action).toMatchObject({
       type: "end",
       ending: { kind: "merged", by: "other", sha: HEAD_C, reviewRounds: 1 },
@@ -2893,8 +3108,7 @@ describe("the round verdict — the checks step at the reviewed head (record 005
     runChild(
       d,
       "run-f1",
-      finished({
-        status: "completed",
+      findingsCompleted({
         headSha: HEAD_B,
         dispositions: [{ findingId: "check:ci / bot", disposition: "fixed", note: "fixed the start path" }],
       }),
@@ -2903,7 +3117,11 @@ describe("the round verdict — the checks step at the reviewed head (record 005
     expect(d.state.dispositionsByRound[1]).toEqual([
       { findingId: "check:ci / bot", disposition: "fixed", note: "fixed the start path" },
     ]);
-    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B }, at: T0 + 40 * MIN });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 40 * MIN,
+    });
     // The re-review brief carries the prior round's check findings beside the
     // prior run ids, so the reviewer verifies them like any finding.
     expect(d.action).toMatchObject({
@@ -3069,14 +3287,17 @@ describe("the round verdict — the checks step at the reviewed head (record 005
     runChild(
       d,
       "run-f1",
-      finished({
-        status: "completed",
+      findingsCompleted({
         headSha: HEAD_B,
         dispositions: [{ findingId: "check:ci / bot", disposition: "fixed", note: "fixed" }],
       }),
       T0 + 30 * MIN,
     );
-    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B }, at: T0 + 30 * MIN });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 30 * MIN,
+    });
     // The re-review brief likewise: prior run ids only, no checks rows.
     const review = d.action;
     expect(review).toMatchObject({ type: "spawn", step: "U10/2/review", brief: { kind: "review", round: 2 } });
@@ -3577,10 +3798,10 @@ describe("the held ending — every finding the round would act on is human-gate
         answers: ["alice: The independent reader supplied the required three-part quote."],
       },
     });
-    runChild(d, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_B }), T0 + 5 * MIN);
+    runChild(d, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_B }), T0 + 5 * MIN);
     d.answer({
       type: "pr-check",
-      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B },
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
       at: T0 + 5 * MIN,
     });
     expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 2, kind: "review" } });
@@ -3653,10 +3874,10 @@ describe("the held ending — every finding the round would act on is human-gate
     );
 
     confirmCurrentPr(d, HEAD_A);
-    runChild(d, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_B }), T0 + 5 * MIN);
+    runChild(d, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_B }), T0 + 5 * MIN);
     d.answer({
       type: "pr-check",
-      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B },
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
       at: T0 + 5 * MIN,
     });
     expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 2, kind: "review" } });
@@ -3704,10 +3925,10 @@ describe("the held ending — every finding the round would act on is human-gate
     );
 
     confirmCurrentPr(d, HEAD_A);
-    runChild(d, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_A }), T0 + 5 * MIN);
+    runChild(d, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_A }), T0 + 5 * MIN);
     d.answer({
       type: "pr-check",
-      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, headBranchExists: true },
       at: T0 + 5 * MIN,
     });
     expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 2, kind: "review" } });
@@ -3781,7 +4002,8 @@ describe("the held ending — every finding the round would act on is human-gate
       type: "end",
       ending: { kind: "aborted", round: { index: 1, kind: "findings" } },
     });
-    expect(renderUnitReport(failed.state)).toContain("ended `failed`");
+    expect(renderUnitReport(failed.state)).toContain("the findings work did not complete");
+    expect(renderUnitReport(failed.state)).not.toMatch(/coding child|next reply/i);
   });
 
   it("a gated approve whose gated findings are all human-gated parks too — the defense-in-depth gate never routes a person's receipt into an unanswered fix round", () => {
@@ -3891,9 +4113,9 @@ describe("the unit report — the child's write-up is pointed at, never repeated
     expect(report).toContain(`${BASE}/run-c0`);
     expect(report).toContain("⚠️ Ship ended at round 0: the coding round ended without opening a pull request");
     expect(report).toContain("⚠️ Ship aborted after 0 review rounds.");
-    expect(report).toContain(
-      "The pipeline kept this unit's task and branch; the next reply in this thread continues it",
-    );
+    expect(report).toContain("Next action: verify the remote branch");
+    expect(report).toContain("then start ship again with the original task");
+    expect(report).not.toMatch(/next reply/i);
   });
 
   it("without a runPageBase the pointer names the run id and never fabricates a link", () => {
@@ -4026,10 +4248,10 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
     });
     // The round boundary keeps the old kind's outcome — the row and the card say what happened.
     expect(d.rounds()).toEqual(["0 coding started", "0 coding stopped"]);
-    // The report is the old kind's sentence, unchanged.
+    // The outcome stays the old kind's sentence; the indexed idle wake supplies the supported continuation action.
     const report = renderUnitReport(d.state);
     expect(report).toContain("⏹ Ship stopped by operator (soft stop) after 0 review rounds.");
-    expect(report).toContain("the next run of this plan recognizes the unit's branch and pull request");
+    expect(report).toContain("The unit remains live; a reply in this thread is recorded as its continuation action");
     expect(d.notes.at(-1)).toMatchObject({ type: "ended", ending: { kind: "idle", why: "stopped" } });
   });
 
@@ -4063,7 +4285,7 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
       },
     });
     expect(renderUnitReport(d.state)).toContain("🔁 The unit's budget ran out with the unit unfinished");
-    expect(renderUnitReport(d.state)).toContain("The next reply in this thread continues it");
+    expect(renderUnitReport(d.state)).toContain("A reply in this thread is recorded as its continuation action");
   });
 
   it("every other idling kind maps to `idle` with itself as `why` and its report intact: the caps, review_pending, merge_refused, no_verdict, an abort and an interrupt", () => {
@@ -4178,7 +4400,7 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
     expect(cut.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "interrupted", runId: "run-c0" } });
   });
 
-  it("an idled ending's thread copy speaks at the request's level: at quiet the asides stay out, and every render at idleDays 7 is byte for byte the render at 0", () => {
+  it("an idled ending's thread copy keeps the outcome at every level while only verbose copies replace terminal restart with the durable wake", () => {
     // The same wall_clock_cap, once idling and once not.
     const capped = (idleDays: number) => {
       const d = fresh(input({ merge: "person", idleDays }));
@@ -4211,8 +4433,14 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
     const plain = capped(0);
     expect(idle.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "wall_clock_cap" } });
     expect(plain.action).toMatchObject({ type: "end", ending: { kind: "wall_clock_cap" } });
-    for (const level of ["quiet", "verbose", "debug"] as const)
-      expect(renderUnitReport(idle.state, undefined, level)).toBe(renderUnitReport(plain.state, undefined, level));
+    expect(renderUnitReport(idle.state, undefined, "quiet")).toBe(renderUnitReport(plain.state, undefined, "quiet"));
+    for (const level of ["verbose", "debug"] as const) {
+      const idleReport = renderUnitReport(idle.state, undefined, level);
+      const terminalReport = renderUnitReport(plain.state, undefined, level);
+      expect(idleReport).toContain("reply in this thread is recorded as its continuation action");
+      expect(terminalReport).toContain("Next action:");
+      expect(terminalReport).not.toMatch(/next reply/i);
+    }
     // The cap's aside — the budget split — is verbose material in the thread's copy.
     expect(renderUnitReport(idle.state)).toContain("Budget split (240 min):");
     const quiet = renderUnitReport(idle.state, undefined, "quiet");

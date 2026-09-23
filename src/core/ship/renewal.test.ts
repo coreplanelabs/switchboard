@@ -275,18 +275,16 @@ describe("renderRenewal — the card's words, as the record's trace has them", (
     expect(renderRenewal(decision, { renewals: 3 })).toBe("the pipeline no longer fits");
   });
 
-  it("a stop names the clause and, when renewals remain, what actually spends one — no keyword the router does not have", () => {
+  it("a terminal stop names the clause, what spends a renewal and a concrete restart action — only an idle wake names a reply", () => {
     expect(renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 5 }, { renewals: 6 })).toBe(
-      "no progress on the last budget; 5 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; the next reply in this thread continues the original task",
+      "no progress on the last budget; 5 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; start ship again with the original task",
     );
     expect(renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 1 }, { renewals: 6 })).toBe(
-      "no progress on the last budget; 1 renewal left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; the next reply in this thread continues the original task",
+      "no progress on the last budget; 1 renewal left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; start ship again with the original task",
     );
-    // The line teaches no keyword: follow-ups route by thread context
-    // (routing-and-config item 3), so no rendered stop may say "reply continue".
     expect(
       renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 5 }, { renewals: 6 }),
-    ).not.toContain("reply continue");
+    ).not.toMatch(/next reply/i);
     expect(renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 0 }, { renewals: 0 })).toBe(
       "no progress on the last budget; no renewals left",
     );

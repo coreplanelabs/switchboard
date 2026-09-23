@@ -298,7 +298,7 @@ describe("reclaimRuns", () => {
     expect(ledger.live.get("bare")).toBeUndefined();
   });
 
-  it("an interrupted closure narrates durable continuation for ship and names a non-resumable ordinary run as a bug; a run that replied gets no note", async () => {
+  it("an interrupted closure reports only verified ship state and names a non-resumable ordinary run as a bug; a run that replied gets no note", async () => {
     const { ledger, run } = harness();
     await ledger.claim(claim("ship-pr", "slack:C1:1.0", "g1", { meta: { ...claim("x", "t").meta, agent: "ship" } }));
     await ledger.append("ship-pr", "g1", [
@@ -317,10 +317,13 @@ describe("reclaimRuns", () => {
       prUrl: "https://github.com/acme/api/pull/12",
     });
     expect(byId["ship-pr"].note).toContain("https://github.com/acme/api/pull/12");
-    expect(byId["ship-pr"].note).toContain("the next reply in this thread continues the review loop");
+    expect(byId["ship-pr"].note).toContain("did not verify the stopped run's latest commit there");
+    expect(byId["ship-pr"].note).toContain("Next action: start ship again");
+    expect(byId["ship-pr"].note).not.toMatch(/next reply|continues the review loop/i);
     expect(byId["ship-bare"].prUrl).toBeUndefined();
-    expect(byId["ship-bare"].note).toContain("no PR was opened yet");
-    expect(byId["ship-bare"].note).toContain("the next reply in this thread starts round 0 again on that branch");
+    expect(byId["ship-bare"].note).toContain("No open pull request was verified");
+    expect(byId["ship-bare"].note).toContain("Next action: start ship again");
+    expect(byId["ship-bare"].note).not.toMatch(/next reply|starts round 0/i);
     expect(byId.plain.note).toContain("This is a bug");
     expect(byId.replied.note).toBeUndefined();
     // The boot gap IS a bot restart — the one closure that may claim it (issue 1876).
@@ -764,7 +767,7 @@ describe("reclaimRuns — the hosted parent's classification (record 0060)", () 
       status: "interrupted",
       agent: "ship",
       why: expect.stringMatching(/hosted past its deadline/),
-      note: expect.stringContaining("the next reply in this thread starts round 0 again"),
+      note: expect.stringContaining("Next action: start ship again"),
     });
     expect(ledger.finished.get("r-ship")).toMatchObject({ id: "r-ship", threadKey: "web:s:c9", status: "interrupted" });
     expect(ledger.live.has("r-ship")).toBe(false);

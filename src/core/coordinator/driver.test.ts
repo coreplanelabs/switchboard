@@ -961,7 +961,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(summary.units).toEqual({ U10: "interrupted" });
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
     expect(end.ending.kind).toBe("interrupted");
-    expect(end.ending.report).toContain("the pipeline stopped");
+    expect(end.ending.report).toContain("Work stopped before the next review");
   });
 
   it("a fresh process's read-record expiry ends the unit on the recorded container-replacement interruption, never on its wall-clock cap", async () => {
@@ -987,7 +987,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(summary.units).toEqual({ U10: "interrupted" });
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
     expect(end.ending.kind).toBe("interrupted");
-    expect(end.ending.report).toContain("The resident container running this pipeline's child was replaced");
+    expect(end.ending.report).toContain("the repository container was replaced and the run could not continue");
     expect(end.ending.report).not.toContain("wall-clock");
   });
 
@@ -1056,7 +1056,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(waits).toEqual(["U10/0/coding/wait/1", "U10/0/coding/wait/1/interrupted", "U10/0/coding/wait/1/resumed"]);
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
     expect(end.ending.kind).toBe("interrupted");
-    expect(end.ending.report).toContain("the pipeline stopped");
+    expect(end.ending.report).toContain("Work stopped before the next review");
   });
 
   it("a deploy roll's child-resumed event keeps the wait (item 47a): the signal is consumed, the next resumed wait is armed under the next durable name, and the chunk still ends as a timeout confirmed by read-record — a live child is waited on again, never a lost round", async () => {
@@ -1257,7 +1257,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(t.names().filter((n) => n.includes("merge"))).toEqual([]);
   });
 
-  it("the plan answer's `generated` mark reaches the machine: a generated unit's ending is re-issued with the request's text, a plan answer without the mark is a seeded plan re-issued by its plan", async () => {
+  it("the plan answer's `generated` mark reaches the machine: a terminal generated unit names a ship restart while a seeded unit names a plan restart", async () => {
     const script = (generated: boolean | undefined) => {
       const units = [row("U10", { slug: "u10", branch: "plan/warm-the-cache-abc123/u10" })];
       const base = {
@@ -1301,10 +1301,12 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       const [end] = b.of("unit-end") as Array<{ ending: { report: string } }>;
       return end!.ending.report;
     };
-    expect(await report(true)).toContain("the next reply in this thread continues it from the open pull request");
-    expect(await report(undefined)).toContain(
-      "the next run of this plan recognizes the unit's branch and pull request",
-    );
+    const generated = await report(true);
+    expect(generated).toContain(`then start ship again with ${PR_URL}`);
+    expect(generated).not.toMatch(/next reply/i);
+    const seeded = await report(undefined);
+    expect(seeded).toContain("then start this plan again");
+    expect(seeded).not.toMatch(/next reply/i);
   });
 
   it("the plan answer's runPageBase reaches the machine: an aborted unit's report links the coding child's run page instead of repeating its write-up (issue 1806)", async () => {
@@ -1475,6 +1477,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
             finished: true,
             status: "completed",
             headSha: HEAD_2,
+            description: true,
             dispositions: [{ findingId: "F1", disposition: "fixed", note: "counted from zero" }],
           },
           T0 + 30 * MIN,
@@ -1494,7 +1497,17 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "pr-check": [
         prNone(),
         prOpen(T0 + 10 * MIN),
-        ok({ ok: true, state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_2 }, T0 + 30 * MIN),
+        ok(
+          {
+            ok: true,
+            state: "open",
+            prNumber: 7,
+            url: PR_URL,
+            headSha: HEAD_2,
+            headBranchExists: true,
+          },
+          T0 + 30 * MIN,
+        ),
       ],
       round: [acked(), acked(), acked(), acked(), acked(), acked(), acked(), acked()],
       merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 41 * MIN)],
@@ -1560,6 +1573,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
             finished: true,
             status: "completed",
             headSha: HEAD_2,
+            description: true,
             dispositions: [{ findingId: "F1", disposition: "fixed", note: "counted from zero" }],
           },
           T0 + 30 * MIN,
@@ -1579,7 +1593,17 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "pr-check": [
         prNone(),
         prOpen(T0 + 10 * MIN),
-        ok({ ok: true, state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_2 }, T0 + 30 * MIN),
+        ok(
+          {
+            ok: true,
+            state: "open",
+            prNumber: 7,
+            url: PR_URL,
+            headSha: HEAD_2,
+            headBranchExists: true,
+          },
+          T0 + 30 * MIN,
+        ),
       ],
       round: [acked(), acked(), acked(), acked(), acked(), acked(), acked(), acked()],
       merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 41 * MIN)],
@@ -2265,7 +2289,17 @@ describe("the plan runner's driver — a step that throws inside the walk become
       "read-record": [
         codingDone("run-c0", T0 + 10 * MIN),
         reviewApproved("run-r1", T0 + 20 * MIN),
-        record({ id: "run-f1", finished: true, status: "completed", headSha: HEAD_2 }, T0 + 30 * MIN),
+        record(
+          {
+            id: "run-f1",
+            finished: true,
+            status: "completed",
+            headSha: HEAD_2,
+            description: true,
+            dispositions: [{ findingId: "check:ci", disposition: "fixed", note: "fixed the failing check" }],
+          },
+          T0 + 30 * MIN,
+        ),
         // Round 2's LGTM landed on GitHub, but the record never becomes
         // visible. The event-qualified short ladder is spent before the final
         // opaque answer leaves the read and records the failed ending.
@@ -2279,7 +2313,17 @@ describe("the plan runner's driver — a step that throws inside the walk become
       "pr-check": [
         prNone(),
         prOpen(T0 + 10 * MIN),
-        ok({ ok: true, state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_2 }, T0 + 30 * MIN),
+        ok(
+          {
+            ok: true,
+            state: "open",
+            prNumber: 7,
+            url: PR_URL,
+            headSha: HEAD_2,
+            headBranchExists: true,
+          },
+          T0 + 30 * MIN,
+        ),
       ],
       round: Array.from({ length: 10 }, () => acked()),
       "unit-end": [acked(T0 + 40 * MIN)],
@@ -2300,9 +2344,10 @@ describe("the plan runner's driver — a step that throws inside the walk become
       step: "U10/2/review/read/1",
       round: 2,
     });
-    expect(ends[0]!.ending.report).toContain("The runner failed after round 2's review verdict");
+    expect(ends[0]!.ending.report).toContain("Switchboard failed after round 2's review verdict");
     expect(ends[0]!.ending.report).toContain("not_found");
-    expect(ends[0]!.ending.report).toContain("The unit remains bound to this thread; the next reply continues it");
+    expect(ends[0]!.ending.report).toContain("No continuation action was scheduled");
+    expect(ends[0]!.ending.report).not.toContain("next reply");
     // One line: the message never carries a stack or a second line.
     expect(ends[0]!.ending.report.split("\n")[0]).toContain("HTTP 404");
     expect(b.of("read-record").filter((body) => body.runId === "run-r2")).toHaveLength(
@@ -2313,6 +2358,61 @@ describe("the plan runner's driver — a step that throws inside the walk become
     );
     expect(s.names()).toContain("U10/end/threw");
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
+  });
+
+  it("a completed findings run whose pull request stays unreadable exhausts the bounded retries, starts no review and posts plain saved-work, failure and next-action facts", async () => {
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U10/1/review/wait/1": "event",
+      "U10/1/findings/wait/1": "event",
+    });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN), spawned("run-f1", T0 + 21 * MIN)],
+      "read-record": [
+        codingDone("run-c0", T0 + 10 * MIN),
+        reviewApproved("run-r1", T0 + 20 * MIN),
+        record(
+          {
+            id: "run-f1",
+            finished: true,
+            status: "completed",
+            headSha: HEAD_2,
+            description: true,
+            dispositions: [{ findingId: "check:ci", disposition: "fixed", note: "fixed the failing check" }],
+          },
+          T0 + 30 * MIN,
+        ),
+      ],
+      checks: [ok({ ok: true, checks: red }, T0 + 21 * MIN)],
+      "pr-check": [
+        prNone(),
+        prOpen(T0 + 10 * MIN),
+        ...Array.from({ length: STEP_RETRIES.limit + 1 }, () => new Error("GitHub head read failed")),
+      ],
+      round: Array.from({ length: 8 }, () => acked()),
+      "unit-end": [acked(T0 + 31 * MIN)],
+      finish: [acked(T0 + 31 * MIN)],
+    });
+
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("GitHub head read failed");
+    const [end] = b.of("unit-end") as Array<{
+      ending: { kind: string; cause?: string; step?: string; round?: number; report: string; threadReport: string };
+    }>;
+    expect(end!.ending).toMatchObject({
+      kind: "failed",
+      cause: "step_threw",
+      step: "U10/1/findings/pr-check",
+      round: 1,
+    });
+    expect(end!.ending.threadReport).toContain("Review did not restart");
+    expect(end!.ending.threadReport).toContain(`the existing pull request is ${PR_URL}`);
+    expect(end!.ending.threadReport).toContain("current branch and exact head were not verified");
+    expect(end!.ending.threadReport).toContain("No review was started. Next action: retry ship");
+    expect(end!.ending.threadReport).not.toMatch(/coding child|interrupted work|ended because|next reply/i);
+    expect(b.of("spawn")).toHaveLength(3);
   });
 
   it("a step whose retries are exhausted inside the platform's ladder ends the same way: the checks step's twelve retries spent, the ending names the checks step of round 1 and the throw's message, and the original error still fails the instance", async () => {
@@ -2340,7 +2440,7 @@ describe("the plan runner's driver — a step that throws inside the walk become
       step: "U10/1/review/checks/1",
       round: 1,
     });
-    expect(ends[0]!.ending.report).toContain("The runner failed after round 1's review verdict");
+    expect(ends[0]!.ending.report).toContain("Switchboard failed after round 1's review verdict");
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
   });
 

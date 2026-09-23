@@ -510,8 +510,9 @@ function prCheckReturn(step: string, a: BotAnswer): Extract<StepReturn, { type: 
       },
       at,
     };
-  // A merged pull request is read whole or not at all: the merge commit and
-  // the time are what the unit's ending and its report carry.
+  // A merged pull request is read whole or not at all: its source head is
+  // retained for findings reconciliation, while the merge commit and time
+  // are what the unit's ending and report carry.
   if (
     ok === true &&
     state === "merged" &&
@@ -527,6 +528,7 @@ function prCheckReturn(step: string, a: BotAnswer): Extract<StepReturn, { type: 
         state: "merged",
         prNumber,
         url,
+        ...(typeof headSha === "string" ? { headSha } : {}),
         sha,
         mergedAt,
         ...(typeof mergedBy === "string" ? { mergedBy } : {}),
@@ -923,9 +925,19 @@ async function tellStepThrew(
       : at.round.kind === "review" && /\/review\/(read|checks)\b/.test(at.step)
         ? `after round ${at.round.index}'s review verdict (\`${at.step}\`)`
         : `in round ${at.round.index} (\`${at.step}\`)`;
-  const report =
-    `⚠️ The runner failed ${where}: ${line}\n\n` +
-    "The unit remains bound to this thread; the next reply continues it, and a pull request already approved with green checks resumes at the checks step, never at a fresh coding round.";
+  const findingsReconcile = at.round?.kind === "findings" && /\/findings(?:\/a\d+)?\/pr-check$/.test(at.step);
+  const report = findingsReconcile
+    ? [
+        `⚠️ Review did not restart because Switchboard could not read the pull request after the completed findings work: ${line}`,
+        pr !== undefined
+          ? `Saved-work fact: the existing pull request is ${pr.url}, but its current branch and exact head were not verified.`
+          : "Saved-work fact: no open pull request or exact remote head was verified.",
+        "No review was started. Next action: retry ship when the pull request is readable so Switchboard can verify the exact head first.",
+      ].join("\n\n")
+    : [
+        `⚠️ Switchboard failed ${where}: ${line}`,
+        "The unit remains resumable from its recorded branch and pull request facts. No continuation action was scheduled. Next action: start ship again after the failing operation is available.",
+      ].join("\n\n");
   const body = {
     ...tag,
     ending: {
