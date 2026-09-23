@@ -28,8 +28,20 @@ import { boundRequester, type PersonLookup } from "./requester.js";
 const PLATFORM = "http";
 const DEFAULT_CHANNEL = "default";
 const DEFAULT_THREAD = "default";
+/** A channel or thread is one unambiguous segment of an ingress key. */
+export const INGRESS_COMPONENT_MAX_LENGTH = 128;
 /** Reject bodies larger than this before buffering them fully. */
 export const MAX_BODY_BYTES = 1_000_000; // 1 MB
+
+/** Validate one caller-controlled key segment before any namespaced key is composed. */
+export function ingressComponentError(name: "channel" | "thread", value: string): string | undefined {
+  if (value.length === 0) return `\`${name}\` must be a non-empty string`;
+  if (value.length > INGRESS_COMPONENT_MAX_LENGTH) {
+    return `\`${name}\` must be at most ${INGRESS_COMPONENT_MAX_LENGTH} characters`;
+  }
+  if (/[:#]/.test(value)) return `\`${name}\` must not contain ':' or '#'`;
+  return undefined;
+}
 
 /** The identity a token maps to (`subject` → `userId` "http:<subject>"; an
  *  optional `channel` pins the config scope regardless of the request body).
@@ -193,11 +205,15 @@ function parseBody(raw: string): { body: IngressBody } | { error: string } {
   if (typeof obj.text !== "string" || obj.text.trim() === "") {
     return { error: "`text` is required and must be a non-empty string" };
   }
-  if (obj.channel !== undefined && typeof obj.channel !== "string") {
-    return { error: "`channel` must be a string" };
+  if (obj.channel !== undefined) {
+    if (typeof obj.channel !== "string") return { error: "`channel` must be a string" };
+    const error = ingressComponentError("channel", obj.channel);
+    if (error) return { error };
   }
-  if (obj.thread !== undefined && typeof obj.thread !== "string") {
-    return { error: "`thread` must be a string" };
+  if (obj.thread !== undefined) {
+    if (typeof obj.thread !== "string") return { error: "`thread` must be a string" };
+    const error = ingressComponentError("thread", obj.thread);
+    if (error) return { error };
   }
   if (obj.async !== undefined && typeof obj.async !== "boolean") {
     return { error: "`async` must be a boolean" };
@@ -304,6 +320,10 @@ async function handleAuthorized(
   const parsed = parseBody(body);
   if ("error" in parsed) {
     return { status: 400, body: { error: parsed.error } };
+  }
+  if (identity.channel !== undefined) {
+    const error = ingressComponentError("channel", identity.channel);
+    if (error) return { status: 400, body: { error } };
   }
   // The request's root (docs/reference/specs/tracing.md): started once the caller's
   // identity is established and the body parsed; `dispatch()` ends it.

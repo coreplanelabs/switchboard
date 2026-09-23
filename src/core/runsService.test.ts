@@ -11,7 +11,8 @@ import type { RunRecord } from "./runRecord.js";
 import { RunRegistry, type RunRegistryOptions } from "./runRegistry.js";
 import { parseModelPrices } from "./modelPricing.js";
 import { InMemoryRunStore, type RunStore } from "./runStore.js";
-import { createRunsService, type RunActor, type RunsService } from "./runsService.js";
+import { createRunsService, runResource, type RunActor, type RunsService } from "./runsService.js";
+import { authorize } from "./authz/authorize.js";
 import { assembleRunRecord } from "./dispatch/record.js";
 import { pipelineOfEvents } from "./pipelineStanding.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
@@ -2531,6 +2532,29 @@ describe("RunsService — a queued ask on the plane (record 0064)", () => {
     expect(whole.ok && whole.value.queued?.position).toBe(1);
     // An id neither live, stored nor queued stays not_found.
     expect(await svc.getRun("q-run-99")).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it("authorizes a queued run with its stamped request channel, not a channel re-derived from the thread key", async () => {
+    const { svc, ledger } = planeSetup();
+    ledger.planeQueuedRows.set(
+      "q-run-channel",
+      queuedRow("q-run-channel", {
+        requester: "http:requester",
+        threadKey: "http:honest:forged:thread",
+        request: { channelId: "http:honest", text: "queued ask" },
+      }),
+    );
+    const found = await svc.getRun("q-run-channel");
+    expect(found.ok).toBe(true);
+    if (!found.ok) return;
+    expect(found.value.channelId).toBe("http:honest");
+    const actorOn = (channelId: string) => ({
+      kind: "service" as const,
+      id: `http:viewer-${channelId}`,
+      grants: { actions: new Set(["runs:read"]), channels: new Set([channelId]), repos: new Set<string>() },
+    });
+    expect(authorize(actorOn("http:honest"), "runs:read", runResource(found.value)).allow).toBe(true);
+    expect(authorize(actorOn("http:honest:forged"), "runs:read", runResource(found.value)).allow).toBe(false);
   });
 
   it("stopRun withdraws a queued id — the reply's runs stop lever — for either mode; the queue knows the id but not as waiting is a conflict", async () => {

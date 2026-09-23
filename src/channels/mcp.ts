@@ -18,6 +18,7 @@ import { boundRequester, type PersonLookup } from "./requester.js";
 import {
   authorizeRequest,
   hasDispatch,
+  ingressComponentError,
   MAX_BODY_BYTES,
   readBody,
   type DispatchFn,
@@ -321,11 +322,19 @@ async function route(
       if (typeof args.text !== "string" || args.text.trim() === "") {
         return err(id, INVALID_PARAMS, "`text` is required and must be a non-empty string");
       }
-      if (args.channel !== undefined && typeof args.channel !== "string") {
-        return err(id, INVALID_PARAMS, "`channel` must be a string");
+      if (args.channel !== undefined) {
+        if (typeof args.channel !== "string") return err(id, INVALID_PARAMS, "`channel` must be a string");
+        const error = ingressComponentError("channel", args.channel);
+        if (error) return err(id, INVALID_PARAMS, error);
       }
-      if (args.thread !== undefined && typeof args.thread !== "string") {
-        return err(id, INVALID_PARAMS, "`thread` must be a string");
+      if (args.thread !== undefined) {
+        if (typeof args.thread !== "string") return err(id, INVALID_PARAMS, "`thread` must be a string");
+        const error = ingressComponentError("thread", args.thread);
+        if (error) return err(id, INVALID_PARAMS, error);
+      }
+      if (identity.channel !== undefined) {
+        const error = ingressComponentError("channel", identity.channel);
+        if (error) return err(id, INVALID_PARAMS, error);
       }
       // The request's root (docs/reference/specs/tracing.md), once the caller is known.
       const receivedAt = systemClock();

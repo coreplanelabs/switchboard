@@ -771,11 +771,20 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     try {
       const row = await ledger.planeQueued(id);
       if (!row) return null;
+      const stampedChannel = row.request.channelId;
       const channelAt = row.threadKey.lastIndexOf(":");
+      // Current rows carry the adapter-stamped channel in their durable request.
+      // Fall back only for rows written before that stamp existed.
+      const channelId =
+        typeof stampedChannel === "string"
+          ? stampedChannel
+          : channelAt > 0
+            ? row.threadKey.slice(0, channelAt)
+            : undefined;
       const waiting = waitingWords(row.conditions);
       return {
         id: row.runId,
-        ...(channelAt > 0 ? { channelId: row.threadKey.slice(0, channelAt) } : {}),
+        ...(channelId !== undefined ? { channelId } : {}),
         userId: row.requester,
         threadKey: row.threadKey,
         startedAt: row.queuedAt,
