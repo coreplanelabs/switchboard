@@ -107,7 +107,7 @@ Each workspace has its own `verify` (`-w web|docs|deploy/<worker>|packages/switc
 
 ## Switchboard develops Switchboard
 
-The product's own agents follow these rules: `agent:review` reviews every PR (read-only, never a merge), `agent:coding` implements issues, `agent:ship` runs the loop end to end, `friction propose` files the process's improvement issues. Details: [How we work](docs/explanation/how-we-work.md#switchboard-develops-switchboard).
+Start work and reply to or steer runs in the configured chat channel so asks stay visible and dogfood the product. Use Switchboard MCP for deterministic run facts, health and diagnostics; see [MCP ingress](docs/reference/specs/mcp-ingress.md) and [operating guidance](docs/how-to/operate-production.md).
 
 ## Working locally
 
