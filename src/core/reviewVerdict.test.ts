@@ -12,6 +12,7 @@ import {
   isReviewVerdictShape,
   verdictCountsLine,
   LGTM_TOKEN,
+  MAX_REVIEW_POST_CODE_POINTS,
   NO_VERDICT_LINE,
   parseDispositionsInput,
   parseVerdictInput,
@@ -221,6 +222,40 @@ describe("review verdict → post body", () => {
     expect(buildReviewPostBody("x", undefined).split("\n").at(-1)).toBe(
       '<!-- switchboard:verdict {"verdict":"none"} -->',
     );
+  });
+
+  it("clips only oversized prose at Unicode code-point boundaries and keeps the typed marker", () => {
+    const v = parseVerdictInput({ verdict: "approve", summary: "ok", findings: [] })!;
+    const clippedProse = (body: string): string =>
+      body.match(/<summary>Full review<\/summary>\n\n(.*)\n\n_\(review truncated/u)?.[1] ?? "";
+    const asciiBody = buildReviewPostBody("x".repeat(MAX_REVIEW_POST_CODE_POINTS), v, TARGET);
+    const proseBudget = [...clippedProse(asciiBody)].length;
+    const retainedEmoji = "😀";
+    const omittedEmoji = "🙂";
+    const body = buildReviewPostBody(
+      `${"x".repeat(proseBudget - 1)}${retainedEmoji}${omittedEmoji}${"x".repeat(MAX_REVIEW_POST_CODE_POINTS)}`,
+      v,
+      TARGET,
+    );
+
+    expect([...body]).toHaveLength(MAX_REVIEW_POST_CODE_POINTS);
+    expect(clippedProse(body)).toBe(`${"x".repeat(proseBudget - 1)}${retainedEmoji}`);
+    expect(body).not.toContain(omittedEmoji);
+    expect(body).toContain("_(review truncated to fit GitHub's review size limit)_");
+    expect(body.split("\n").at(-1)).toBe(
+      `<!-- switchboard:verdict {"verdict":"approve","head":"${HEAD}","findings":[]} -->`,
+    );
+    expect(body).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
+  });
+
+  it("clipping cannot restore approval after the severity gate downgraded the typed verdict", () => {
+    const v = parseVerdictInput({ verdict: "approve", summary: "ship it", findings: [MINOR] })!;
+    const body = buildReviewPostBody(`LGTM: prose says approve ${"x".repeat(70_000)}`, v, TARGET);
+
+    expect([...body].length).toBeLessThanOrEqual(MAX_REVIEW_POST_CODE_POINTS);
+    expect(body.startsWith(CHANGES_TOKEN)).toBe(true);
+    expect(body).toContain('<!-- switchboard:verdict {"verdict":"request_changes"');
+    expect(body).not.toMatch(/^LGTM:/);
   });
 
   it("summary is collapsed to one line so the token line cannot be split", () => {

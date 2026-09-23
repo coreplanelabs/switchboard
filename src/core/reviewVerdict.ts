@@ -150,6 +150,10 @@ export interface ReviewVerdict {
 export const LGTM_TOKEN = "LGTM:";
 export const CHANGES_TOKEN = "Changes requested:";
 export const NO_VERDICT_LINE = "No verdict submitted — not approving.";
+/** Conservative ceiling below GitHub's 65,536-character review-body limit.
+ * Counted as Unicode code points so clipping never splits a surrogate pair. */
+export const MAX_REVIEW_POST_CODE_POINTS = 65_000;
+const REVIEW_TRUNCATION_NOTE = "_(review truncated to fit GitHub's review size limit)_";
 
 /** Parse an arbitrary tool input into a verdict, or null when it is not one.
  *  `addressSeverity` is the level in force for the run (default `minor`): an
@@ -383,7 +387,11 @@ function verdictMarker(verdict: ReviewVerdict | undefined, target: ReviewBodyTar
  * `approve`), a GitHub alert callout with the verdict word, the pinned head
  * and the finding counts, the findings as a table (severity, id + title, the
  * file linked at the head), the model's text folded under `Full review`, and
- * the machine-readable marker last. The prose decides nothing above the fold.
+ * the machine-readable marker last. Only the prose may be clipped to fit the
+ * platform: every fixed verdict section and the marker remain byte-for-byte.
+ * If those sections leave no room for a visible bounded review, the oversized
+ * body is returned so the publication boundary can refuse it instead of
+ * silently dropping the write-up. The prose decides nothing above the fold.
  */
 export function buildReviewPostBody(
   answer: string,
@@ -395,10 +403,10 @@ export function buildReviewPostBody(
     ...(target ? [`head \`${target.head.slice(0, 7)}\``] : []),
     verdict ? findingCounts(verdict.findings) : "the run ended without a submit_verdict call",
   ];
-  const parts: string[] = [verdictLine(verdict), `> [!${calloutKind(verdict)}]\n> ${facts.join(" · ")}`];
+  const fixedParts: string[] = [verdictLine(verdict), `> [!${calloutKind(verdict)}]\n> ${facts.join(" · ")}`];
   const findings = verdict?.findings ?? [];
   if (findings.length > 0) {
-    parts.push(
+    fixedParts.push(
       [
         "| Severity | Finding | Where |",
         "| --- | --- | --- |",
@@ -409,10 +417,29 @@ export function buildReviewPostBody(
       ].join("\n"),
     );
   }
+
+  const marker = verdictMarker(verdict, target);
+  const fixedBody = [...fixedParts, marker].join("\n\n");
   const prose = answer.trim();
-  if (prose) parts.push(`<details>\n<summary>Full review</summary>\n\n${prose}\n\n</details>`);
-  parts.push(verdictMarker(verdict, target));
-  return parts.join("\n\n");
+  if (!prose) return fixedBody;
+
+  const details = (text: string, truncated: boolean): string =>
+    `<details>\n<summary>Full review</summary>\n\n${text}${truncated ? `${text ? "\n\n" : ""}${REVIEW_TRUNCATION_NOTE}` : ""}\n\n</details>`;
+  const render = (text: string, truncated: boolean): string =>
+    [...fixedParts, details(text, truncated), marker].join("\n\n");
+  const full = render(prose, false);
+  if ([...full].length <= MAX_REVIEW_POST_CODE_POINTS) return full;
+
+  const clippedShell = render("", true);
+  const proseSeparatorCodePoints = 2; // the blank line before the note when clipped prose is present
+  const proseBudget = MAX_REVIEW_POST_CODE_POINTS - [...clippedShell].length - proseSeparatorCodePoints;
+  if (proseBudget > 0) return render([...prose].slice(0, proseBudget).join(""), true);
+  if ([...clippedShell].length <= MAX_REVIEW_POST_CODE_POINTS) return clippedShell;
+
+  // A successful post must retain a visible write-up. Return the full body
+  // oversized when even the bounded shell cannot fit, so postReviewComment
+  // rejects before fetch and the review remains on the Slack-only path.
+  return full;
 }
 
 /**

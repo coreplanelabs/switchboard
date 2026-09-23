@@ -1,5 +1,6 @@
 import { resolveGithubToken } from "./githubApp.js";
 import { redactAndCap } from "../core/redact.js";
+import { MAX_REVIEW_POST_CODE_POINTS } from "../core/reviewVerdict.js";
 
 // Posting a review back to a PR. The bot process posts the comment
 // itself over the GitHub REST API with the App installation token — never a
@@ -17,9 +18,10 @@ import { redactAndCap } from "../core/redact.js";
 // it carries `commit_id`, which lets that workflow refuse to approve a review
 // pinned to a commit that is no longer the PR head.
 
-// GitHub rejects a comment body over 65536 chars; clip with a visible note so a
-// huge review still posts instead of 422-ing.
-const MAX_COMMENT_CHARS = 65000;
+// GitHub rejects a review body over 65,536 characters. reviewVerdict.ts fits
+// only the prose while preserving every structured verdict section. This
+// publication boundary refuses anything still oversized: clipping an assembled
+// review could retain `LGTM:` while deleting the authoritative typed marker.
 
 export interface ReviewCommentTarget {
   /** `owner/name` */
@@ -37,15 +39,17 @@ export interface ReviewCommentTarget {
  * best-effort (the Slack reply is the primary delivery).
  */
 export async function postReviewComment(target: ReviewCommentTarget, body: string): Promise<void> {
+  const codePoints = [...body].length;
+  if (codePoints > MAX_REVIEW_POST_CODE_POINTS) {
+    throw new Error(
+      `PR review body is ${codePoints} Unicode code points, over the ${MAX_REVIEW_POST_CODE_POINTS} limit; refusing to clip the structured verdict`,
+    );
+  }
   const token = await resolveGithubToken();
   if (!token) {
     throw new Error("no GitHub credential available to post the PR review comment");
   }
-  const clipped =
-    body.length > MAX_COMMENT_CHARS
-      ? `${body.slice(0, MAX_COMMENT_CHARS)}\n\n_(review truncated to fit GitHub's comment size limit)_`
-      : body;
-  const payload: Record<string, string> = { event: "COMMENT", body: clipped };
+  const payload: Record<string, string> = { event: "COMMENT", body };
   if (target.commitId) payload.commit_id = target.commitId;
   const res = await fetch(`https://api.github.com/repos/${target.repo}/pulls/${target.number}/reviews`, {
     method: "POST",
