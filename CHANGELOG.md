@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.260.6](https://github.com/coreplanelabs/switchboard/compare/v1.260.5...v1.260.6) (2026-09-23)
+
+
+### Bug fixes
+
+* **core:** keep provider recovery and admission failures typed ([#2232](https://github.com/coreplanelabs/switchboard/issues/2232)) ([e2e99f1](https://github.com/coreplanelabs/switchboard/commit/e2e99f116ab0536ef482ec76f806e6c1cf1a7e98))
+* **core:** size background turns for hidden reasoning ([#2276](https://github.com/coreplanelabs/switchboard/issues/2276)) ([44df09d](https://github.com/coreplanelabs/switchboard/commit/44df09daef6affb2e1a3904b6eca92b9c851c216))
+* **review:** recover workspaces at pull request heads ([#2263](https://github.com/coreplanelabs/switchboard/issues/2263)) ([648751a](https://github.com/coreplanelabs/switchboard/commit/648751a9b7ec3d1343e83c4327814daf85c84e76))
+* **ship:** recover read-record races and reissues ([#2264](https://github.com/coreplanelabs/switchboard/issues/2264)) ([4bbbfad](https://github.com/coreplanelabs/switchboard/commit/4bbbfade80195b53d7e834f01c0bce7549575a69))
+
 ## [1.260.5](https://github.com/coreplanelabs/switchboard/compare/v1.260.4...v1.260.5) (2026-09-22)
 
 
