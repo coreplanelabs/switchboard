@@ -26,7 +26,6 @@ import {
 import { isRunStopError } from "../../execution/executor.js";
 import type { ResidentStep } from "../../execution/residentStepTrace.js";
 import { graftResidentSteps, residentTraceOf } from "../../execution/residentTrace.js";
-import { displayNameOf } from "../trace/displayNames.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { memoryContextBlock, type MemoryStore } from "../memory/index.js";
 import { provisionalBearerExpiresAt } from "../budgets.js";
@@ -41,6 +40,7 @@ import type { ResidentFleetFacts } from "../residentFleet.js";
 import { attachRoundWorkspace, makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
 import { ownPrOf, type RepoContext } from "../repoContext.js";
 import { redactSecrets, type AgentSource, type RunEvent } from "../runEvents.js";
+import { RunEventLane } from "../runEventLane.js";
 import { oneLine } from "../redact.js";
 import type { ControlDecision, ModelCard } from "../modelCard.js";
 import { MAX_EVENT_BYTES, utf8ByteLength, type RunSeed } from "../runRecord.js";
@@ -57,6 +57,8 @@ import type { ChannelVisibility } from "../authz/types.js";
 import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, type StatusHandle } from "../types.js";
 import type { AdmissionDeps, DispatchFollowUp, RestartContext, ResumeContext, RunHooks } from "./admission.js";
 import type { CarriedRunIdentity } from "./reattach.js";
+import type { ResidentLiveStateObserver } from "../runLiveState.js";
+import { liveStateWords } from "../plane/decide.js";
 import type { AuthorizeDeps, GateCard, GateContext } from "./authorize.js";
 import { channelVisibilityOf, type RecordDeps } from "./record.js";
 import {
@@ -298,6 +300,7 @@ export interface RegisteredRun {
   runId: string;
   channelVisibility: ChannelVisibility;
   liveUrl: string | undefined;
+  events: RunEventLane;
   publishText: (
     type: "input" | "context" | "answer",
     text: string,
@@ -487,17 +490,21 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     {
       id: runId,
       startedAt,
+      ...(carriedRow?.liveState !== undefined
+        ? { liveState: { liveState: carriedRow.liveState, liveStateSeq: carriedRow.liveStateSeq } }
+        : {}),
       ...(resume
         ? { replay: resume.events }
         : ctx.restartCarried
-          ? { replay: ctx.restartCarried.events, token: ctx.restartCarried.token }
+          ? { replay: ctx.restartCarried.events, token: ctx.restartCarried.token, resetLiveState: true }
           : {}),
     },
   );
   // The replacement is ONE line on the transcript (item 54), in user words,
   // between the replayed segment and the turn the restart publishes next.
+  const events = new RunEventLane((event) => registry.publish(run.id, event));
   if (ctx.restartCarried)
-    registry.publish(run.id, { type: "run_note", kind: "resumed", summary: ctx.restartCarried.note, at: clock() });
+    events.publish({ type: "run_note", kind: "resumed", summary: ctx.restartCarried.note, at: clock() });
   // With no PUBLIC_BASE_URL the link is simply omitted — the feature
   // degrades gracefully, the run is otherwise unchanged. The card carries it
   // from here, and a follow-up's ack/refusal can link the run page
@@ -514,7 +521,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // (`isHeadMaterial`: `request`, `slack.receive`, `dispatch.*`), so the
   // protected head still runs unbroken from the first event through the
   // request published next.
-  trace.bindRun(run.id, (e) => registry.publish(run.id, e));
+  trace.bindRun(run.id, (event) => events.publish(event));
   // The narrative events the dispatcher itself publishes — the request, the
   // thread context, the final answer — go straight to the registry: redacted
   // like every event, uncapped (the run record is the source of truth; the
@@ -539,7 +546,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     // budget already truncates `text` and must not be starved by a second
     // copy (docs/reference/specs/llm-output.md item 5).
     const withRaw = raw !== undefined ? { ...event, raw: redactSecrets(raw) } : event;
-    registry.publish(run.id, utf8ByteLength(JSON.stringify(withRaw)) <= MAX_EVENT_BYTES ? withRaw : event);
+    events.publish(utf8ByteLength(JSON.stringify(withRaw)) <= MAX_EVENT_BYTES ? withRaw : event);
     console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
   };
   // The request is the first content event of the run record (live-view item
@@ -571,7 +578,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   if (!resume && ctx.references) {
     const { conversations, blocks } = ctx.references;
     conversations.forEach((rc, i) => {
-      registry.publish(run.id, {
+      events.publish({
         type: "reference",
         url: rc.permalink,
         channelId: rc.ref.channelId,
@@ -588,7 +595,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // owner/repo · ref · #PR · sha. Straight after the request; published once
   // more if the attach adopts a moved PR head below (readers take the latest).
   const publishMeta = (repoCtx: RepoContext) =>
-    registry.publish(run.id, {
+    events.publish({
       type: "run_meta",
       agent: agent.name,
       agentSource,
@@ -625,7 +632,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   if (!resume)
     for (const d of cardDecisions ?? []) {
       if (d.outcome !== "degraded") continue;
-      registry.publish(run.id, {
+      events.publish({
         type: "run_note",
         kind: "control_degraded",
         summary: oneLine(
@@ -642,10 +649,10 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // The router's decision (routing-and-config item 21), right after the meta
   // it explains: the preset, the reason the card carries, the model that
   // decided, a compound's parts — or the rejection that left the run on the default.
-  if (!resume && route) registry.publish(run.id, { type: "route", ...route, at: clock() });
+  if (!resume && route) events.publish({ type: "route", ...route, at: clock() });
   // The operator's shadow decision (record 0057; run-history item 60), beside
   // the route event it disagrees or agrees with.
-  if (!resume && ctx.operator) registry.publish(run.id, { type: "operator", ...ctx.operator, at: clock() });
+  if (!resume && ctx.operator) events.publish({ type: "operator", ...ctx.operator, at: clock() });
   // The thread context fed to the model follows the request as `context`
   // events — text only, attachments as metadata lines, bounded to
   // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES. A spawned
@@ -654,7 +661,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   if (!resume && deps.config.config.runHistory?.includeContext !== false) {
     for (const text of contextMessageTexts(seedTurns ?? history, humanize)) publishText("context", text);
   }
-  return { run, runId, channelVisibility, liveUrl, publishText, publishMeta };
+  return { run, runId, channelVisibility, liveUrl, events, publishText, publishMeta };
 }
 
 /** A fresh request's reservation on the ledger: the row (undefined when the
@@ -819,10 +826,8 @@ export interface AttachContext {
    *  GitHub binding names the commits' author pair in the workspace's env
    *  (record 0062; execution.md item 5). Absent, the bot pair authors. */
   requester?: string;
-  /** The card's setup-note sink (issue 2044): the drain wait paints `waiting
-   *  for the deploy to finish · N min` through it. Absent, the wait is silent
-   *  on the card (a caller without one). */
-  onSetupNote?: (note: string | undefined) => void;
+  /** Awaited observations from the resident's two wait states. */
+  onLiveStateObservation?: ResidentLiveStateObserver;
 }
 
 /** How a recorded workspace's re-attach ended: the round's workspace
@@ -857,7 +862,7 @@ async function attachRound(
   ctx: AttachContext,
 ): Promise<RoundWorkspace> {
   const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal, remainingMs, requester } = ctx;
-  const { onSetupNote } = ctx;
+  const { onLiveStateObservation } = ctx;
   // A review target's PR-derived ref is authoritative. Passing `ownPr` asks
   // the resident to preserve or conditionally move a sticky thread binding;
   // that is right for a coding follow-up, but can keep a plan unit's branch
@@ -901,7 +906,7 @@ async function attachRound(
           ...(stopSignal !== undefined ? { stopSignal } : {}),
           ...(remainingMs !== undefined ? { remainingMs } : {}),
           ...(requester !== undefined ? { requester } : {}),
-          ...(onSetupNote !== undefined ? { onSetupNote } : {}),
+          ...(onLiveStateObservation !== undefined ? { onLiveStateObservation } : {}),
         },
         logKey: threadKey,
         span,
@@ -997,10 +1002,10 @@ export async function attachWorkspace(
       clock,
       // The requester whose binding names the author pair (record 0062).
       requester: msg.userId,
-      // A run admitted onto a drained fleet says so (issue 2044): the drain
-      // wait paints its one line here, and its end restores the attach label
-      // the card sink painted at the span's start.
-      onSetupNote: (note) => shell.setSetupLabel(note ?? `${displayNameOf("dispatch.workspace.attach")}…`),
+      onLiveStateObservation: async (observation) => {
+        await ctx.onLiveStateObservation?.(observation);
+        shell.setSetupLabel(`${liveStateWords(observation.state)}…`);
+      },
       ...(reattach !== undefined ? { reattach } : {}),
       ...(stopSignal !== undefined ? { stopSignal } : {}),
       ...(remainingMs !== undefined ? { remainingMs } : {}),

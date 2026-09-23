@@ -134,6 +134,8 @@ import {
   type IntakeWriteResult,
   type LivePhase,
   type LiveRunRow,
+  type LiveStateAssignRequest,
+  type LiveStateAssignResult,
   type ReclaimedRun,
   type RunState,
   type SessionHit,
@@ -154,6 +156,7 @@ import { isRunMetricsPoint, pointTurnsFinal, type RunMetricsPoint } from "../../
 import { AnalyticsEngineSink, NullSink, type RunMetricsSink } from "./runMetricsSink.ts";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.ts";
 import { systemClock } from "../../src/core/trace/clock.ts";
+import { assignRunLiveState } from "../../src/core/runLiveState.ts";
 import { createTracer } from "../../src/core/trace/tracer.ts";
 import { startAdoptedRoot, workerLogSink } from "../../src/core/trace/workerTrace.ts";
 
@@ -1539,6 +1542,9 @@ type LiveRow = {
 };
 
 function rowToLive(r: LiveRow): LiveRunRow {
+  const state = JSON.parse(r.state_json) as RunState;
+  const liveState = state.liveState as LiveRunRow["liveState"];
+  const liveStateSeq = state.liveStateSeq;
   return {
     runId: r.run_id,
     threadKey: r.thread_key,
@@ -1551,7 +1557,9 @@ function rowToLive(r: LiveRow): LiveRunRow {
     card: r.card_json ? (JSON.parse(r.card_json) as LiveRunRow["card"]) : null,
     system: r.system_text,
     tools: JSON.parse(r.tools_json) as LiveRunRow["tools"],
-    state: JSON.parse(r.state_json) as RunState,
+    state,
+    ...(liveState !== undefined ? { liveState } : {}),
+    ...(typeof liveStateSeq === "number" ? { liveStateSeq } : {}),
   };
 }
 
@@ -3074,6 +3082,78 @@ export class RunHistoryDO extends DurableObject<Env> {
         record.step,
         JSON.stringify(record),
       );
+    });
+    return out;
+  }
+
+  async assignLiveState(
+    runId: string,
+    gen: string,
+    assignment: LiveStateAssignRequest,
+  ): Promise<LiveStateAssignResult> {
+    let out: LiveStateAssignResult = { ok: false, reason: "unknown-run" };
+    this.ctx.storage.transactionSync(() => {
+      const row = this.liveRow(runId);
+      const fence = checkFence(row, gen);
+      if (!fence.ok) {
+        out = fence;
+        return;
+      }
+      if (!row) {
+        out = { ok: false, reason: "unknown-run" };
+        return;
+      }
+      const result = assignRunLiveState(
+        assignment.restart ? undefined : row.liveState,
+        row.liveStateSeq ?? 0,
+        assignment,
+      );
+      if (!result.ok) {
+        out = result;
+        return;
+      }
+      let liveStateSeq = row.liveStateSeq ?? 0;
+      const last = this.sql
+        .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_events WHERE run_id = ?`, runId)
+        .one().m;
+      let lastEventSeq = last ?? 0;
+      for (const source of assignment.sourceEvents ?? []) {
+        if (source.seq <= lastEventSeq) {
+          out = { ok: false, reason: "stale-sequence" };
+          return;
+        }
+        lastEventSeq = source.seq;
+      }
+      const boundarySeq = result.event ? (assignment.eventSeq ?? lastEventSeq + 1) : undefined;
+      if (boundarySeq !== undefined && boundarySeq <= lastEventSeq) {
+        out = { ok: false, reason: "stale-sequence" };
+        return;
+      }
+      for (const source of assignment.sourceEvents ?? []) {
+        this.sql.exec(
+          `INSERT INTO run_events (run_id, seq, json) VALUES (?, ?, ?)`,
+          runId,
+          source.seq,
+          JSON.stringify(source),
+        );
+        liveStateSeq = source.seq;
+      }
+      if (result.event && boundarySeq !== undefined) {
+        liveStateSeq = boundarySeq;
+        this.sql.exec(
+          `INSERT INTO run_events (run_id, seq, json) VALUES (?, ?, ?)`,
+          runId,
+          liveStateSeq,
+          JSON.stringify({ ...result.event, seq: liveStateSeq }),
+        );
+      }
+      const state = { ...row.state, ...assignment.statePatch, liveState: result.liveState, liveStateSeq };
+      this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(state), runId);
+      out = {
+        ...result,
+        ...(result.event ? { event: { ...result.event, seq: liveStateSeq } } : {}),
+        liveStateSeq,
+      };
     });
     return out;
   }
@@ -5116,6 +5196,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/claim",
   "/runs/heartbeat",
   "/runs/append",
+  "/runs/live-state",
   "/runs/step",
   "/runs/state",
   "/runs/inbox",
@@ -5953,6 +6034,13 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     const r = await stub.appendEvents(runId.value, g.value, events);
     console.log(`[runs/append] ${key.value} ${runId.value} <- ${events.length} event(s), ok=${r.ok}`);
     return fenced(r);
+  }
+  if (pathname === "/runs/live-state") {
+    if (typeof b.assignment !== "object" || b.assignment === null)
+      return json({ error: "assignment must be an object" }, 400);
+    const assignment = b.assignment as unknown as LiveStateAssignRequest;
+    const r = await stub.assignLiveState(runId.value, g.value, assignment);
+    return r.ok ? json(r) : json(r, r.reason === "fenced" || r.reason === "unknown-run" ? 409 : 400);
   }
   if (pathname === "/runs/step") {
     const record = parseStep(b.record);

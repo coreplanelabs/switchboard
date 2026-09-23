@@ -254,6 +254,47 @@ describe("run ledger — the fence (item 28)", () => {
 });
 
 describe("run ledger — steps, events, inbox, state (items 30–31)", () => {
+  it("live-state assignment commits its boundary and projection together, while a pre-commit refusal exposes neither half", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "state-1", "slack:C1:state"));
+    const admitted = await post("/runs/live-state", {
+      storeKey: key,
+      runId: "state-1",
+      gen: "g1",
+      assignment: { expectedSeq: 0, eventSeq: 1, at: 100, state: "admitted", bound: 1_000 },
+    });
+    expect(admitted).toMatchObject({
+      status: 200,
+      data: { ok: true, liveState: { state: "admitted", since: 100, bound: 1_000 }, liveStateSeq: 1 },
+    });
+    let live = (await post("/runs/live", { storeKey: key })).data.runs as Array<Record<string, unknown>>;
+    expect(live[0]).toMatchObject({
+      liveState: { state: "admitted", since: 100, bound: 1_000 },
+      liveStateSeq: 1,
+    });
+    expect((await post("/runs/live-events", { storeKey: key, runId: "state-1" })).data.events).toHaveLength(1);
+
+    expect(
+      await post("/runs/live-state", {
+        storeKey: key,
+        runId: "state-1",
+        gen: "g1",
+        assignment: {
+          expectedSeq: 1,
+          at: 200,
+          state: "working",
+          bound: 900,
+          sourceEvents: [{ type: "tool_call", tool: "bash", summary: "x", seq: 1, at: 200 }],
+        },
+      }),
+    ).toEqual({ status: 400, data: { ok: false, reason: "stale-sequence" } });
+    live = (await post("/runs/live", { storeKey: key })).data.runs as Array<Record<string, unknown>>;
+    expect(live[0]).toMatchObject({
+      liveState: { state: "admitted", since: 100, bound: 1_000 },
+      liveStateSeq: 1,
+    });
+    expect((await post("/runs/live-events", { storeKey: key, runId: "state-1" })).data.events).toHaveLength(1);
+  });
   it("append lands event rows keyed by seq while the run is live (the finished-runs routes do not see a live run — its events reach them with the finish record); an over-cap event is 400; step records replace by step number", async () => {
     const key = storeKey();
     await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"));
@@ -1478,6 +1519,9 @@ describe("the plane's admission stage — /plane/admit, reservations, the seal's
       waiting: [{ kind: "thread_free", threadKey: t, met: false }],
     });
     const queuedId = two.data.id as string;
+    const queued = await post("/plane/queued", { storeKey: key, runId: queuedId });
+    expect(queued.data.row).toMatchObject({ runId: queuedId, state: "waiting" });
+    expect(queued.data.row).not.toHaveProperty("liveState");
     // The ledger claim promotes the reservation: the row retires in the claim's
     // transaction and the live row holds the thread from there.
     expect((await post("/runs/claim", claimBody(key, "r1", t))).status).toBe(200);

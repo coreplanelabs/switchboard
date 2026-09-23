@@ -102,7 +102,7 @@ import { FakeHarnessContainer } from "./harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "./harness/pi/testing/providerPi.js";
 import { SOFT_STOP_INSTRUCTION } from "./harness/windDown.js";
 import { ThreadsElsewhere, type ThreadElsewhere } from "./runLedger/threadsElsewhere.js";
-import type { ClaimRequest, StepRecord } from "./runLedger/types.js";
+import type { AppendableEvent, ClaimRequest, StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
 import { mcpToolName } from "./commandSurface.js";
@@ -8675,9 +8675,9 @@ describe("run history write path", () => {
 
   it("more published events than the backlog holds: eventCount is the published total, storedEventCount the backlog length, truncated true — and the protected head (input, context, run_meta) is what survives, with the newest events after it", async () => {
     // The head — the root's start, the setup spans, the input, 12 context turns,
-    // the run meta — is about 30 events; a 36-event backlog leaves room for a
-    // few of the run's own, so the trim drops from after the head.
-    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", backlogLimit: 36 });
+    // the run meta and admission states — is about 32 events; a 42-event
+    // backlog leaves room for the answer and post spans while still trimming.
+    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", backlogLimit: 42 });
     const { deps, store, writer } = wired(toolThenAnswer(), { registry });
     const history: HistoryItem[] = Array.from({ length: 12 }, (_, i) => ({
       role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
@@ -8851,7 +8851,16 @@ describe("run history write path", () => {
       const tomb = puts[0];
       expect(tomb.id).toBe("run-h");
       expect(tomb.finishedAt).toBe(tomb.startedAt); // provisional: nobody knows a crash's real death time
-      expect(runShapeOf(tomb.events)).toEqual(["+request", "input", "run_meta", "run_note", "run_note", "context"]);
+      expect(runShapeOf(tomb.events)).toEqual([
+        "+request",
+        "input",
+        "run_meta",
+        "run_note",
+        "run_note",
+        "context",
+        "run_state",
+        "run_state",
+      ]);
       expect(tomb).toMatchObject({
         agent: "general",
         model: "anthropic/general-model",
@@ -10654,12 +10663,14 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
   it("the run is reserved on the ledger BEFORE the workspace attach (item 42): an attaching row with the request (text, sender, link, attachments), the card and no prompt, under the id the run will have, and the registry row — label, token, the same start — exists from that moment too; the claim once the prompt exists promotes that row in place — one row, one id — and the finish clears it", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     let rowAtAttach: ReturnType<InMemoryRunLedger["live"]["get"]>;
+    let durableEventsAtAttach: AppendableEvent[] = [];
     let registryAtAttach: ReturnType<RunRegistry["getById"]> = null;
     let indexAtAttach: ReturnType<RunRegistry["listActive"]> = [];
     let streamAtAttach: RunEvent[] = [];
     const real = vi.mocked(makeExecutor).getMockImplementation()!;
     vi.mocked(makeExecutor).mockImplementationOnce(async (...args) => {
       rowAtAttach = structuredClone(ledger.live.get("run-l"));
+      durableEventsAtAttach = await ledger.readEvents("run-l");
       registryAtAttach = registry.getById("run-l");
       indexAtAttach = registry.listActive();
       streamAtAttach = registry.snapshotById("run-l")?.events ?? [];
@@ -10711,6 +10722,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       "run_note",
       "run_note",
       "context",
+      "run_state",
     ]);
     // The attach span has started (its start streamed live, the mock runs inside it).
     expect(streamAtAttach.map((e) => (e.type === "span_start" ? e.name : e.type))).toEqual(
@@ -10728,6 +10740,13 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       phase: "attaching",
       system: "",
       tools: [],
+      liveState: {
+        state: "admitted",
+        since: expect.any(Number),
+        bound: expect.any(Number),
+        detail: "waiting to attach the workspace",
+      },
+      liveStateSeq: expect.any(Number),
       card: { channel: "CX", ts: "1.2" },
       meta: {
         agent: "general",
@@ -10746,6 +10765,14 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         },
       },
     });
+    expect(durableEventsAtAttach.at(-1)).toMatchObject({
+      type: "run_state",
+      state: "admitted",
+      detail: "waiting to attach the workspace",
+      seq: rowAtAttach!.liveStateSeq,
+    });
+    expect(registryAtAttach).toMatchObject({ liveStateSeq: rowAtAttach!.liveStateSeq });
+    expect(rowAtAttach!.liveState!.bound).toBeGreaterThan(rowAtAttach!.liveState!.since);
     // At the first model call: the same row, promoted — the prompt landed, the request kept, the start unchanged.
     expect(rowAtFirstCall).toMatchObject({
       runId: "run-l",
@@ -10760,6 +10787,70 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.live.size).toBe(0);
     expect(ledger.finished.get("run-l")?.status).toBe("completed");
     expect(warnings).toEqual([]);
+  });
+
+  it("a staging callback waits behind durable admission before publishing its artifact", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    let admissionReached!: () => void;
+    const admissionStarted = new Promise<void>((resolve) => (admissionReached = resolve));
+    let releaseAdmission!: () => void;
+    const admissionGate = new Promise<void>((resolve) => (releaseAdmission = resolve));
+    const assignLiveState = ledger.assignLiveState.bind(ledger);
+    ledger.assignLiveState = async (...args) => {
+      if (args[2].state === "admitted") {
+        admissionReached();
+        await admissionGate;
+      }
+      return assignLiveState(...args);
+    };
+
+    let answerCopy!: (response: Response) => void;
+    const copyResponse = new Promise<Response>((resolve) => (answerCopy = resolve));
+    const artifacts = new InMemoryArtifactStore({ bucket: "test", fetch: async () => copyResponse });
+    const provider = capturingProvider();
+    const { deps, registry, writer } = wired(provider, { ledger, yaml: REMOTE_YAML_FIXTURE });
+    deps.artifacts = artifacts;
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: {
+        exec: async () => "",
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => ({ released: true }),
+      },
+    });
+    const current = {
+      name: "clip.mp4",
+      size: 3_120,
+      type: "video/mp4",
+      url: "https://files.slack.com/files-pri/T1-F1/clip.mp4",
+      messageId: "1700000000.000200",
+    };
+    const copyKey = "threads/slack-CX-1.0/in/1700000000.000200/1-clip.mp4";
+    const { io } = ioWithCard();
+    const running = dispatch(deps, { ...msg("agent:coding use this clip", "slack:UADMIN"), staged: [current] }, io);
+
+    await admissionStarted;
+    answerCopy(
+      new Response(new Uint8Array(current.size), {
+        status: 200,
+        headers: { "content-type": current.type },
+      }),
+    );
+    await vi.waitFor(() => expect(artifacts.objects.has(copyKey)).toBe(true));
+    await new Promise((resolve) => setImmediate(resolve));
+    const beforeAdmission = registry.snapshotById("run-l")?.events.filter((event) => event.type === "artifact") ?? [];
+    releaseAdmission();
+    await running;
+    await writer.settled();
+
+    expect(beforeAdmission).toEqual([]);
+    const events = registry.snapshotById("run-l")?.events ?? [];
+    const admittedAt = events.findIndex((event) => event.type === "run_state" && event.state === "admitted");
+    const artifactEvents = events.filter((event) => event.type === "artifact");
+    expect(artifactEvents.map((event) => event.key)).toEqual([copyKey]);
+    expect(artifactEvents.every((event) => events.indexOf(event) > admittedAt)).toBe(true);
   });
 
   // docs/reference/specs/run-history.md item 48; docs/reference/specs/thread-admission.md

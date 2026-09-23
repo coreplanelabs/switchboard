@@ -4,6 +4,7 @@ import { RUN_DEADLINE_RESERVE_MS, attachBoundWithinRun } from "./bashTimeout.js"
 import { oneLine } from "../core/redact.js";
 import type { Backend } from "../core/trace/attrs.js";
 import type { Span } from "../core/trace/types.js";
+import type { ResidentLiveStateObserver } from "../core/runLiveState.js";
 import type { ResidentStep } from "./residentStepTrace.js";
 import { residentTraceOf, type ResidentTrace } from "./residentTrace.js";
 import { mkdirSync } from "node:fs";
@@ -160,11 +161,8 @@ export interface ExecutorContext {
    *  GitHub binding names the commits' author pair (record 0062;
    *  `gitIdentityEnvs`). Absent, the bot pair authors. */
   requester?: string;
-  /** The card's setup-note sink (issue 2044): the resident executor's drain
-   *  wait paints `waiting for the deploy to finish · N min` through it while
-   *  the run is admitted onto a drained fleet, and clears it when the wait
-   *  ends. Absent for a caller without a card (the CLI, tests). */
-  onSetupNote?: (note: string | undefined) => void;
+  /** Awaited observations from the resident's two wait states. */
+  onLiveStateObservation?: ResidentLiveStateObserver;
 }
 
 /** Where a run's workspace is (docs/reference/specs/run-history.md item 54):
@@ -508,7 +506,7 @@ export async function makeExecutor(
             resolveEnvs: () => gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
             ...(ctx.ownPr !== undefined ? { ownPr: ctx.ownPr } : {}),
             ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
-            ...(ctx.onSetupNote !== undefined ? { onSetupNote: ctx.onSetupNote } : {}),
+            ...(ctx.onLiveStateObservation !== undefined ? { onLiveStateObservation: ctx.onLiveStateObservation } : {}),
           },
           nonWarm,
           span,
@@ -777,7 +775,7 @@ async function reattachWorkspace(
     // resident holds its own credential, so the pairs alone ride.
     resolveEnvs: () => gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
     ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
-    ...(ctx.onSetupNote !== undefined ? { onSetupNote: ctx.onSetupNote } : {}),
+    ...(ctx.onLiveStateObservation !== undefined ? { onLiveStateObservation: ctx.onLiveStateObservation } : {}),
   });
   let binding: ResidentBinding;
   try {

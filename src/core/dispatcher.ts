@@ -1,10 +1,12 @@
 import { getAgent } from "../agents/registry.js";
-import { MINUTE_MS } from "./budgets.js";
+import { MINUTE_MS, minutesToMs } from "./budgets.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { systemClock } from "./trace/index.js";
 import type { SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
 import type { RunOwner } from "./trace/streamSpans.js";
+import { assignRunLiveState, type ResidentLiveStateObservation } from "./runLiveState.js";
+import { liveStateWords } from "./plane/decide.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
 import { cardShapeLineOf, queuedCaption } from "./runShape.js";
 import type { RepoContext } from "./repoContext.js";
@@ -1547,17 +1549,17 @@ export async function dispatch(
       ...(operatorEvent ? { operator: operatorEvent } : {}),
       ...(references.conversations.length > 0 ? { references } : {}),
     });
-    const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
+    const { run, runId, channelVisibility, liveUrl, events, publishText, publishMeta } = registration;
     registered = run;
     // What the session seed could not do (session-log item 9), on the record
     // before the first turn — the run is not changed by it.
     for (const summary of seedNotes)
-      registry.publish(run.id, { type: "run_note", kind: "seed", summary: oneLine(summary), at: clock() });
+      events.publish({ type: "run_note", kind: "seed", summary: oneLine(summary), at: clock() });
     // A redispatched request's record names the question it answered
     // (record 0054; run-history item 2): the code the refusal carried, so the
     // Yes-run is traceable to the question whose proposal it ran.
     if (opts.redispatch)
-      registry.publish(run.id, {
+      events.publish({
         type: "run_note",
         kind: "redispatch",
         summary: `confirmed after question ${opts.redispatch.code}`,
@@ -1584,7 +1586,7 @@ export async function dispatch(
             threadKey: msg.threadKey,
             nextIndex: nextStagedIndex,
             preserveWorkspaceIndexes: true,
-            publish: (e) => registry.publish(runId, e),
+            publish: (event) => events.publish(event),
           })
         : undefined;
     // The thread's files (record 0033): the one catalogue — what the thread's
@@ -1618,7 +1620,7 @@ export async function dispatch(
               {
                 nextIndex: nextStagedIndex,
                 messageId: messageIdOf(msg, runId),
-                publish: (e) => registry.publish(runId, e),
+                publish: (event) => events.publish(event),
               },
             ),
           )
@@ -1656,7 +1658,7 @@ export async function dispatch(
       // this run, and a reader of its record should see why. Head material,
       // like the cold-sandbox note below: a setup fact ahead of the loop.
       if (reservation.untrackedWhy !== undefined) {
-        registry.publish(runId, {
+        events.publish({
           type: "run_note",
           kind: "ledger_untracked",
           summary: redactAndCap(
@@ -1670,6 +1672,124 @@ export async function dispatch(
         shell.note("debug", "untracked by the ledger");
       }
     }
+
+    // Admission owns the first live condition. Its absolute bound is the
+    // effective run budget already admitted for this profile, and the durable
+    // assignment acknowledges before the registry exposes the boundary or
+    // workspace attachment starts. Legacy resumed rows gain the same first
+    // state before they continue; rows that already carry one keep it.
+    if (typeof registry.commitLiveState === "function") {
+      await events.write(async () => {
+        const current = registry.getById(runId);
+        if (current && current.liveState === undefined) {
+          const at = clock();
+          const eventSeq = current.eventCount + 1;
+          const assignment = {
+            expectedSeq: 0,
+            eventSeq,
+            at,
+            state: "admitted" as const,
+            bound: resume
+              ? at + resume.plan.remainingMs
+              : Math.max(startedAt + minutesToMs(profile.minutes), at + minutesToMs(profile.minutes)),
+            detail: "waiting to attach the workspace",
+            // A reservation is not subscribed to the registry until promotion.
+            // Commit the setup stream that already exists with admission, or
+            // advancing its ledger cursor here would make promotion skip it.
+            ...(reserved
+              ? {
+                  sourceEvents: (registry.snapshotById(runId)?.events ?? []).map((event) => ({
+                    ...event,
+                    seq: event.seq!,
+                  })),
+                }
+              : {}),
+            ...((current.liveStateSeq ?? 0) > 0 ? { restart: true } : {}),
+          };
+          const tracked = reserved ?? ledgerRun;
+          if (tracked?.tracked()) {
+            let committed = await tracked.assignLiveState(assignment);
+            // A failed finish can leave the predecessor's row standing. Its
+            // stream is already durable, so retry the new segment against that
+            // projection sequence without inserting the replay twice.
+            if (!committed.ok && committed.reason === "stale-sequence" && (current.liveStateSeq ?? 0) > 0)
+              committed = await tracked.assignLiveState({
+                ...assignment,
+                expectedSeq: current.liveStateSeq ?? 0,
+                sourceEvents: undefined,
+                restart: true,
+              });
+            if (!committed.ok || !registry.commitLiveState(runId, committed))
+              throw new Error(
+                `live state admission was not committed (${committed.ok ? "registry sequence" : committed.reason})`,
+              );
+          } else {
+            const expectedSeq = current.liveStateSeq ?? 0;
+            const local = assignRunLiveState(undefined, expectedSeq, { ...assignment, expectedSeq });
+            if (!local.ok || !local.event) throw new Error("live state admission was invalid");
+            registry.commitLiveState(runId, {
+              ...local,
+              event: { ...local.event, seq: eventSeq },
+              liveStateSeq: eventSeq,
+            });
+          }
+        }
+      });
+    }
+
+    const assignLive = async (
+      next:
+        | Pick<ResidentLiveStateObservation, "state" | "bound">
+        | {
+            state: "preparing" | "working" | "falling_back" | "waiting_provider" | "wrapping_up";
+            bound: number;
+          },
+      at: number,
+      detail?: string,
+    ): Promise<boolean> => {
+      if (typeof registry.commitLiveState !== "function") return true;
+      let accepted = false;
+      await events.write(async () => {
+        const summary = registry.getById(runId);
+        if (!summary) return;
+        const eventSeq = summary.eventCount + 1;
+        const assignment = {
+          expectedSeq: summary.liveStateSeq ?? 0,
+          eventSeq,
+          at,
+          state: next.state,
+          bound: next.bound,
+          ...(detail !== undefined ? { detail } : {}),
+        };
+        const tracked = ledgerRun ?? reserved;
+        if (tracked) {
+          const committed = await tracked.assignLiveState(assignment);
+          accepted = committed.ok && (registry.commitLiveState?.(runId, committed) ?? true);
+          return;
+        }
+        const local = assignRunLiveState(summary.liveState, summary.liveStateSeq ?? 0, assignment);
+        if (!local.ok) return;
+        accepted =
+          registry.commitLiveState?.(runId, {
+            ...local,
+            ...(local.event ? { event: { ...local.event, seq: eventSeq } } : {}),
+            liveStateSeq: local.event ? eventSeq : (summary.liveStateSeq ?? 0),
+          }) ?? true;
+      });
+      return accepted;
+    };
+    let residentAttachAttempt = 0;
+    const observeResidentLiveState = async (observation: ResidentLiveStateObservation): Promise<void> => {
+      if (observation.attempt < residentAttachAttempt) return;
+      residentAttachAttempt = observation.attempt;
+      const accepted = await assignLive(
+        { state: observation.state, bound: observation.bound },
+        clock(),
+        liveStateWords(observation.state),
+      );
+      if (!accepted) throw new Error("resident live-state observation was stale or could not be committed");
+      shell.setSetupLabel(`${liveStateWords(observation.state)}…`);
+    };
 
     // The workspace attach (dispatch/provision.ts): the setup step that takes
     // minutes on a cold clone, and the ask-once refusal when no branch is bound.
@@ -1696,6 +1816,7 @@ export async function dispatch(
       // starts the lease every attach the executor opens is clipped to the
       // run's remaining clock (execution.md item 9).
       ...(control ? { stopSignal: control.hardSignal, remainingMs: () => control.remainingMs() } : {}),
+      onLiveStateObservation: observeResidentLiveState,
     });
     if (attach.kind === "refused") return ended;
     if (attach.kind === "stopped") {
@@ -1762,6 +1883,21 @@ export async function dispatch(
       return ended;
     }
     const { round } = attach;
+    if (typeof registry.commitLiveState === "function") {
+      const summary = registry.getById(runId);
+      const bound = summary?.liveState?.bound ?? startedAt + minutesToMs(profile.minutes);
+      if (
+        summary?.liveState &&
+        (summary.liveState.state === "waiting_deploy" || summary.liveState.state === "waiting_repository") &&
+        round.selection.backend !== "resident"
+      ) {
+        if (!(await assignLive({ state: "falling_back", bound }, clock(), "switching to a fallback workspace")))
+          throw new Error("fallback live state could not be committed");
+      }
+      if (!(await assignLive({ state: "preparing", bound }, clock(), "preparing the workspace")))
+        throw new Error("preparation live state could not be committed");
+      shell.setSetupLabel(`${liveStateWords("preparing")}…`);
+    }
     // A resumed row learns the binding it re-attached on, complete: a row
     // written before the binding was recorded carried only its meta's word.
     if (resume && ledgerRun) {
@@ -2031,6 +2167,12 @@ export async function dispatch(
       markUntracked: () => shell.note("debug", "untracked by the ledger"),
       ...(seedActors !== undefined ? { seedActors } : {}),
     });
+    if (typeof registry.commitLiveState === "function") {
+      const summary = registry.getById(runId);
+      const bound = summary?.liveState?.bound ?? startedAt + minutesToMs(profile.minutes);
+      if (!(await assignLive({ state: "working", bound }, clock(), "model turn")))
+        throw new Error("working live state could not be committed");
+    }
     // The run's reach into its own session log (session-log item 10): the
     // `recall` and `notes` tools over the row's place in the log, once the
     // claim set it; a run without a session (untracked, a ship pipeline, no
@@ -2092,6 +2234,7 @@ export async function dispatch(
       mcpForRun,
       run,
       registry,
+      events,
       round,
       admitted,
       ledgerRun,

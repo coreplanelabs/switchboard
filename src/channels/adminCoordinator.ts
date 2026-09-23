@@ -119,7 +119,7 @@ import { BOT_SCOPES, checkPrTitle, TITLE_MAX_LENGTH } from "../core/prTitle.mjs"
 import PR_TITLE_VOCABULARY from "../core/prTitleVocabulary.json" with { type: "json" };
 import { isHandoffShape, renderHandoffComment, type Handoff } from "../core/ship/handoff.js";
 import { normalizeHead, sameCommit } from "../core/reviewedHead.js";
-import { endingWordOf, roundOutcomeWordOf } from "../core/pipelineStanding.js";
+import { endingWordOf, hostedStageDetail, pipelineStandingOf, roundOutcomeWordOf } from "../core/pipelineStanding.js";
 import {
   DEFAULT_ADDRESS_SEVERITY,
   resolveShipCaps,
@@ -229,7 +229,7 @@ export interface AdminCoordinatorDeps {
   /** The registry the hosted parent run lives in (record 0060): the four
    *  runner routes write the pipeline's facts to it through `hostPublish`,
    *  and `finish` ends and seals the row. */
-  registry: Pick<RunRegistry, "publish" | "finish" | "getById" | "snapshotById" | "seal">;
+  registry: Pick<RunRegistry, "publish" | "finish" | "getById" | "snapshotById" | "seal" | "commitLiveState">;
   /** The ledger runs this generation drives (`LedgerWriteThrough.liveRuns`):
    *  the hosted parent's handle, whose state carries the deadline every runner
    *  write renews (`hosting.until`) and whose sink `finish` seals the record
@@ -1934,23 +1934,80 @@ async function hostRunOf(deps: AdminCoordinatorDeps, instance: CoordinatorInstan
  *  slack (record 0046's lease shape) — so a pipeline whose Workflow dies
  *  without `finish` is closed by the reclaim within that window of its last
  *  word, and a live one is never closed under it. */
-function hostPublish(
+async function hostPublish(
   deps: AdminCoordinatorDeps,
   instance: CoordinatorInstance,
   runId: string,
   events: RunEvent[],
   at: number,
-): void {
-  for (const event of events) deps.registry.publish(runId, event);
+): Promise<void> {
   const caps = instance.caps ?? resolveShipCaps(undefined);
   const hosting: HostingState = {
     instanceId: instance.id,
     until: at + minutesToMs(caps.maxMinutes + HOSTED_DEADLINE_MARGIN_MINUTES),
   };
-  deps
-    .ledgerRuns()
-    .find((run) => run.runId === runId)
-    ?.setState({ hosting });
+  const ledgerRun = deps.ledgerRuns().find((run) => run.runId === runId);
+  let summary = deps.registry.getById(runId);
+  if (ledgerRun && summary) {
+    // A parent reclaimed from a writer predating live state is backfilled at
+    // the first host fact, preserving read compatibility without inventing a
+    // rival source for current writers.
+    if (summary.liveState === undefined) {
+      const admitted = await ledgerRun.assignLiveState({
+        expectedSeq: 0,
+        eventSeq: summary.eventCount + 1,
+        at,
+        state: "admitted",
+        bound: hosting.until,
+        detail: "waiting for the pipeline hand-off",
+      });
+      if (!admitted.ok || !deps.registry.commitLiveState(runId, admitted))
+        throw new Error(
+          `hosted live state backfill was not committed (${admitted.ok ? "registry sequence" : admitted.reason})`,
+        );
+      summary = deps.registry.getById(runId);
+      if (!summary) throw new Error("hosted run disappeared during live-state backfill");
+      const working = await ledgerRun.assignLiveState({
+        expectedSeq: summary.liveStateSeq ?? 0,
+        eventSeq: summary.eventCount + 1,
+        at,
+        state: "working",
+        bound: hosting.until,
+        detail: "pipeline starting",
+        statePatch: { hosting },
+      });
+      if (!working.ok || !deps.registry.commitLiveState(runId, working))
+        throw new Error(
+          `hosted working backfill was not committed (${working.ok ? "registry sequence" : working.reason})`,
+        );
+      summary = deps.registry.getById(runId);
+      if (!summary) throw new Error("hosted run disappeared after live-state backfill");
+    }
+    const firstSeq = summary.eventCount + 1;
+    const sourceEvents = events.map((event, index) => ({ ...event, seq: firstSeq + index }));
+    const prior =
+      deps.registry
+        .snapshotById(runId)
+        ?.events.filter((event) => event.type === "ship_round" || event.type === "ship_unit") ?? [];
+    const standing = pipelineStandingOf([...prior, ...events]);
+    const stage = standing.changes.at(-1)?.stage ?? "idle";
+    const committed = await ledgerRun.assignLiveState({
+      expectedSeq: summary.liveStateSeq ?? 0,
+      at,
+      state: "working",
+      bound: hosting.until,
+      detail: hostedStageDetail(stage),
+      statePatch: { hosting },
+      sourceEvents,
+    });
+    if (!committed.ok || !deps.registry.commitLiveState(runId, committed))
+      throw new Error(
+        `hosted live state refresh was not committed (${committed.ok ? "registry sequence" : committed.reason})`,
+      );
+  } else {
+    ledgerRun?.setState({ hosting });
+  }
+  for (const event of events) deps.registry.publish(runId, event);
 }
 
 /** Record 0060: the run the routes write to is the instance's own — a body naming any
@@ -2056,7 +2113,7 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
   row = { ...row, startedAt: row.startedAt ?? at };
   await deps.instances.putUnits([row]);
   if (host.kind === "host")
-    hostPublish(
+    await hostPublish(
       deps,
       instance,
       host.runId,
@@ -2269,7 +2326,7 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   await deps.instances.putUnits([updated]);
   if (host.kind === "host") {
     const thread = unitThread(instance, updated, units.length);
-    hostPublish(
+    await hostPublish(
       deps,
       instance,
       host.runId,
@@ -2601,7 +2658,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     deps.runnerOwnership?.release(instance.repo, updated.pr.number);
   const thread = unitThread(instance, updated, units.length);
   if (host.kind === "host")
-    hostPublish(
+    await hostPublish(
       deps,
       instance,
       host.runId,
@@ -3218,15 +3275,54 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
   if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
   const units = await deps.instances.listUnits(instance.id);
   if (host.kind === "host") {
-    // The answer enters the stream before finish() — a publish on a finished
-    // run is a no-op — so the record's last content event is the summary.
-    hostPublish(
-      deps,
-      instance,
-      host.runId,
-      [{ type: "answer", text: planSummary(units, isGenerated(instance)), at }],
-      at,
-    );
+    const ledgerRun = deps.ledgerRuns().find((run) => run.runId === host.runId);
+    let summary = deps.registry.getById(host.runId);
+    if (ledgerRun && summary) {
+      if (summary.liveState === undefined) {
+        await hostPublish(deps, instance, host.runId, [], at);
+        summary = deps.registry.getById(host.runId);
+        if (!summary) throw new Error("hosted run disappeared during finish backfill");
+      }
+      const bound = summary.liveState?.bound ?? at + minutesToMs(HOSTED_DEADLINE_MARGIN_MINUTES);
+      const wrapping = await ledgerRun.assignLiveState({
+        expectedSeq: summary.liveStateSeq ?? 0,
+        eventSeq: summary.eventCount + 1,
+        at,
+        state: "wrapping_up",
+        bound,
+        detail: "writing the pipeline summary",
+      });
+      if (!wrapping.ok || !deps.registry.commitLiveState(host.runId, wrapping))
+        throw new Error(`hosted wrap-up was not committed (${wrapping.ok ? "registry sequence" : wrapping.reason})`);
+      summary = deps.registry.getById(host.runId);
+      if (!summary) throw new Error("hosted run disappeared during wrap-up");
+      const answer: RunEvent = { type: "answer", text: planSummary(units, isGenerated(instance)), at };
+      const answerSeq = summary.eventCount + 1;
+      const refreshed = await ledgerRun.assignLiveState({
+        expectedSeq: summary.liveStateSeq ?? 0,
+        at,
+        state: "wrapping_up",
+        bound,
+        detail: "writing the pipeline summary",
+        sourceEvents: [{ ...answer, seq: answerSeq }],
+      });
+      if (!refreshed.ok || !deps.registry.commitLiveState(host.runId, refreshed))
+        throw new Error(`hosted summary was not committed (${refreshed.ok ? "registry sequence" : refreshed.reason})`);
+      deps.registry.publish(host.runId, answer);
+      summary = deps.registry.getById(host.runId);
+      if (!summary) throw new Error("hosted run disappeared before ending");
+      const ended = await ledgerRun.assignLiveState({
+        expectedSeq: summary.liveStateSeq ?? 0,
+        eventSeq: summary.eventCount + 1,
+        at,
+        state: "ended",
+        cause: body.outcome === "completed" ? "completed" : "failed",
+      });
+      if (!ended.ok || !deps.registry.commitLiveState(host.runId, ended))
+        throw new Error(`hosted ending was not committed (${ended.ok ? "registry sequence" : ended.reason})`);
+    } else {
+      deps.registry.publish(host.runId, { type: "answer", text: planSummary(units, isGenerated(instance)), at });
+    }
     deps.registry.finish(host.runId, body.outcome);
   }
   await drawCard(deps, instance, units, { icon: body.outcome === "completed" ? "✅" : "⚠️" }).catch(() => {});

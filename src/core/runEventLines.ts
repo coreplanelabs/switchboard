@@ -1,4 +1,6 @@
 import { RUN_NOTE_KINDS, type RunEvent, type RunNoteKind } from "./runEvents.js";
+import { RUN_LIVE_STATE_NAMES, type RunLiveStateName } from "./runLiveState.js";
+import { PLANE_ENDING_CAUSES, type PlaneEndingCause } from "./plane/decide.js";
 
 // Parsing a SAVED run-event stream — the input of
 // `friction analyze`: one JSON object per line, OR a raw SSE capture of
@@ -8,6 +10,8 @@ import { RUN_NOTE_KINDS, type RunEvent, type RunNoteKind } from "./runEvents.js"
 // Derived from the union, so a new note kind reaches `friction analyze` the day
 // it is added (docs/reference/specs/tracing.md).
 const NOTE_KINDS = new Set<RunNoteKind>(RUN_NOTE_KINDS);
+const LIVE_STATES = new Set<RunLiveStateName>(RUN_LIVE_STATE_NAMES);
+const ENDING_CAUSES = new Set<PlaneEndingCause>(PLANE_ENDING_CAUSES);
 
 /**
  * Parse run events from text: one JSON object per line, OR a raw SSE capture of
@@ -124,6 +128,15 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.url === "string" && typeof o.number === "number" && typeof o.created === "boolean";
     case "pushed_head":
       return typeof o.ref === "string" && typeof o.sha === "string" && (o.by === "push" || o.by === "salvage");
+    case "run_state":
+      return (
+        typeof o.state === "string" &&
+        LIVE_STATES.has(o.state as RunLiveStateName) &&
+        typeof o.since === "number" &&
+        (o.state === "ended"
+          ? typeof o.cause === "string" && ENDING_CAUSES.has(o.cause as PlaneEndingCause)
+          : typeof o.bound === "number")
+      );
     case "review_posted":
       return typeof o.repo === "string" && typeof o.number === "number" && typeof o.head === "string";
     case "ship_round":

@@ -8,6 +8,7 @@
 //   POST /runs/claim            {storeKey, run}                          → 200 {ok:true} | 409 {ok:false, reason:"thread-live", live}
 //   POST /runs/heartbeat        {storeKey, runId, gen, leaseMs}          → {ok, stop, phase} | 409 fenced
 //   POST /runs/append           {storeKey, runId, gen, events}           → {ok} | 409 fenced
+//   POST /runs/live-state       {storeKey, runId, gen, assignment}       → atomic event + projection
 //   POST /runs/step             {storeKey, runId, gen, record}           → {ok} | 409 fenced   (after the transcript write)
 //   POST /runs/state            {storeKey, runId, gen, state}            → {ok} | 409 fenced
 //   POST /runs/inbox            {storeKey, runId, message}               → {ok, seq}
@@ -77,6 +78,8 @@ import {
   type ClaimResult,
   type FenceResult,
   type LiveRunRow,
+  type LiveStateAssignRequest,
+  type LiveStateAssignResult,
   type ReclaimedRun,
   type RunState,
   type StepRecord,
@@ -435,6 +438,16 @@ export class WorkerRunLedger implements RunLedger {
     this.checkIds(runId, gen);
     if (events.length === 0) return { ok: true };
     return this.fenceResult(await this.post("/runs/append", { storeKey: this.opts.storeKey, runId, gen, events }));
+  }
+
+  async assignLiveState(
+    runId: string,
+    gen: string,
+    assignment: LiveStateAssignRequest,
+  ): Promise<LiveStateAssignResult> {
+    this.checkIds(runId, gen);
+    const r = await this.post("/runs/live-state", { storeKey: this.opts.storeKey, runId, gen, assignment });
+    return r.data as unknown as LiveStateAssignResult;
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {

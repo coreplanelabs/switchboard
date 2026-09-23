@@ -9,6 +9,7 @@ import type { ChannelVisibility } from "../authz/types.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RunEvent } from "../runEvents.js";
 import type { RunSeed, RunSession } from "../runRecord.js";
+import type { AssignRunLiveStateInput, AssignRunLiveStateResult, RunLiveState } from "../runLiveState.js";
 
 /** How long a generation's claim on a run lasts without a heartbeat. */
 export const LEASE_MS = 30_000;
@@ -158,7 +159,27 @@ export interface LiveRunRow {
   /** The tool definitions the run was started with, verbatim. */
   tools: ToolDef[];
   state: RunState;
+  /** The restart-safe live-condition projection. Optional on legacy rows. */
+  liveState?: RunLiveState;
+  /** Stream sequence that most recently produced or refreshed `liveState`. */
+  liveStateSeq?: number;
 }
+
+/** The atomic live-condition assignment request and answer shared by both ledger implementations. */
+export type LiveStateAssignRequest = AssignRunLiveStateInput & {
+  /** Registry sequence reserved for a changed boundary before fan-out. */
+  eventSeq?: number;
+  /** Other durable row facts that must commit with the projection (for example hosting). */
+  statePatch?: RunState;
+  /** Existing activity facts committed with a same-state projection refresh. */
+  sourceEvents?: AppendableEvent[];
+  /** A new execution segment under the same run id starts after an ended predecessor. */
+  restart?: boolean;
+};
+export type LiveStateAssignResult =
+  | (Extract<AssignRunLiveStateResult, { ok: true }> & { liveStateSeq: number })
+  | Extract<AssignRunLiveStateResult, { ok: false }>
+  | { ok: false; reason: "fenced" | "unknown-run" };
 
 /** One tool call the step dispatched; `tool` decides how a resume settles it.
  *  `boundMs` is the bound the call declared (a bash `timeout`), when it stated

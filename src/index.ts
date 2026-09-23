@@ -109,6 +109,7 @@ import {
   OPENAI_RESPONSES_PATH,
 } from "./channels/modelProxy.js";
 import { RunBearerStore } from "./core/modelProxy/runBearers.js";
+import { createProviderLiveStateCoordinator } from "./core/providerLiveStateCoordinator.js";
 import { PiHarness } from "./core/harness/pi/piHarness.js";
 import { OpenCodeHarness } from "./core/harness/opencode/harness.js";
 import type { HarnessRoster } from "./core/harness/roster.js";
@@ -1036,6 +1037,13 @@ export async function runBot(): Promise<void> {
     // metered as its own `model.turn` spans, forwarded to the real provider with
     // the real key from this process's secrets. The shim forwards both paths
     // blind and the Access gate does not cover them: the bearer is the whole door.
+    const providerLiveState = createProviderLiveStateCoordinator({
+      runLedger,
+      ledger: ledgerClient,
+      registry: defaultRunRegistry,
+      clock: systemClock,
+      warn: (message) => console.warn(`[provider-state] ${message}`),
+    });
     const modelProxy = createModelProxyHandler({
       bearers: runBearers,
       providers: () => config.config.providers,
@@ -1044,18 +1052,11 @@ export async function runBot(): Promise<void> {
       ...(costsCfg?.prices ? { prices: () => costsCfg.prices } : {}),
       secrets: processSecrets,
       clock: systemClock,
-      // The plane's provider seam (model-proxy item 12a; record 0064): a level
-      // and a park land on the write-through's plane routes, fire and forget —
-      // the null write-through swallows both where no ledger is configured.
+      // The plane's provider seam (model-proxy item 12a; record 0064): one
+      // coordinator sequences level and park writes; the proxy never waits.
       plane: {
-        level: (provider, side, cause) =>
-          void runLedger.planeLevel({
-            provider,
-            name: "provider",
-            side,
-            ...(side === "down" && cause !== undefined ? { cause } : {}),
-          }),
-        park: (runId, provider) => void runLedger.planePark(runId, provider),
+        level: (provider, side, cause) => void providerLiveState.level(provider, side, cause),
+        park: (runId, provider) => void providerLiveState.park(runId, provider),
       },
     });
     // The harness routes (docs/reference/specs/harness-pi.md item 7): what a

@@ -86,12 +86,15 @@ import { reviewPostOptedOut } from "../reviewPost.js";
 import { startReviewReadingDiff } from "../readingDiff.js";
 import { startReviewDescription } from "../reviewDescription.js";
 import { isSpanRecord, redactAndCap, type RunEvent } from "../runEvents.js";
+import { RunEventLane } from "../runEventLane.js";
 import { oneLine } from "../redact.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
 import { callsInFlight, pushedBranchesOf, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
+import { assignRunLiveState } from "../runLiveState.js";
+import { causeOfClose } from "../plane/decide.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
 import type { WaitCapability } from "./awaitChildren.js";
 import type { SpawnCapability } from "./spawn.js";
@@ -183,6 +186,8 @@ export interface RunLoopContext {
   mcpForRun: McpToolsForRun;
   run: RunHandle;
   registry: RunRegistry;
+  /** The registration-time lane shared with the request trace. */
+  events?: RunEventLane;
   round: RoundWorkspace;
   admitted: LiveThread<DispatchFollowUp>;
   ledgerRun: LedgerRun | undefined;
@@ -303,6 +308,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     coordinator,
     seed,
   } = ctx;
+  const events = ctx.events ?? new RunEventLane((event) => registry.publish(run.id, event));
   // The def the runner and the post-run turns read: the preset with the
   // EFFECTIVE budget (its deadline, wrap-up warning and budget label read
   // `maxMinutes`) — a copy, never the shared registry entry.
@@ -462,18 +468,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // page, the post-run friction diagnosis and the run record all read it back
   // via `registry.snapshot` — there is no second copy to drift from it.
   let recordedPushedBranch: string | undefined;
-  const onEvent = (e: RunEvent) => {
+  let modelBudgetEndsAt: number | undefined;
+  const publishEvent = (e: RunEvent, startsRunBudget: boolean) => {
     registry.publish(run.id, e); // feed the external live-view stream
     if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md): the card and its clock ignore it
-    if (e.type === "lease") {
-      // The harness's clocks: head material for the record (harness-pi item
-      // 15), not activity — the card and its clock ignore it. The run's control
-      // starts its lease clock on it, whichever harness published it, so every
-      // attach the run's resident executor opens is clipped to the run
-      // (execution.md item 9); a resume's is started from the record's remainder below.
-      run.control.startLease(() => e.endsAt - clock());
-      return;
-    }
+    if (startsRunBudget) return; // budget metadata, not activity
     if (e.type === "tool_call") toolCalls++;
     if (e.type === "run_note" && e.kind === "time_budget_exhausted") budgetEnded = true;
     if (isCodingPrRun) {
@@ -493,6 +492,58 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     console.log(`[tool] ${msg.threadKey} ${activityText(cardActivity(e))}`);
     lastActivity = bookkeeping && !showBookkeeping ? undefined : cardActivity(e);
     card.update(currentFrame());
+  };
+  const onEvent = (e: RunEvent) => {
+    // A harness starts consuming the run budget in the same turn that emits
+    // its boundary. Start the control synchronously; publication still goes
+    // through the ordered lane below with every other event.
+    const startsRunBudget = e.type === "lease";
+    if (startsRunBudget) {
+      modelBudgetEndsAt = e.endsAt;
+      run.control.startLease(() => e.endsAt - clock());
+    }
+    // One ordered lane owns every streamed event. Tool projection may await the
+    // ledger, so letting later events publish outside this lane would let them
+    // consume the sequence the durable source event is about to commit.
+    void events.write(async () => {
+      if ((e.type === "tool_call" || e.type === "tool_result") && typeof registry.commitLiveState === "function") {
+        const summary = registry.getById(run.id);
+        if (summary?.liveState?.state === "working") {
+          const at = e.at ?? clock();
+          const bound =
+            e.type === "tool_call" && e.boundMs !== undefined
+              ? at + e.boundMs
+              : (modelBudgetEndsAt ?? summary.liveState.bound);
+          if (bound !== undefined) {
+            const sourceSeq = summary.eventCount + 1;
+            const assignment = {
+              expectedSeq: summary.liveStateSeq ?? 0,
+              at,
+              state: "working" as const,
+              bound,
+              detail: e.type === "tool_call" ? "running a tool" : "model turn",
+              sourceEvents: [{ ...e, seq: sourceSeq }],
+            };
+            try {
+              if (ledgerRun?.tracked()) {
+                const committed = await ledgerRun.assignLiveState(assignment);
+                if (committed.ok) registry.commitLiveState(run.id, committed);
+              } else {
+                const local = assignRunLiveState(summary.liveState, summary.liveStateSeq ?? 0, assignment);
+                if (local.ok) registry.commitLiveState(run.id, { ...local, liveStateSeq: sourceSeq });
+              }
+            } catch (err) {
+              // Projection is a durable convenience; the run's event stream is
+              // still the operator log and must survive a failed projection.
+              console.warn(
+                `[run] ${msg.threadKey} live-state projection failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+        }
+      }
+      publishEvent(e, startsRunBudget);
+    });
   };
   // A configured MCP server that did not answer discovery is a fact of the
   // run (docs/reference/specs/mcp-tools.md item 8): one note per server, before the
@@ -540,7 +591,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     descriptionArtifact = startReviewDescription({
       store: deps.runStore,
       repoCtx,
-      publish: (e) => registry.publish(run.id, e),
+      publish: (event) => events.publish(event),
     });
     // One background span (docs/reference/specs/tracing.md): concurrent with the loop,
     // structure for the partition, never a counted term — started under the
@@ -550,7 +601,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       cfg: deps.config.config.review?.readingDiff,
       env: publicEnv(),
       baseRef: repoCtx.baseRef,
-      publish: (e) => registry.publish(run.id, e),
+      publish: (event) => events.publish(event),
       parent: root,
     }).baseline.then((published) => {
       console.log(`[reading-diff] ${msg.threadKey} baseline ${published ? "published" : "none"}`);
@@ -727,10 +778,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       if (interrupted === undefined) runFailed = true;
       throw err;
     } finally {
+      // Session end may emit the cut/result that settles an open call. Its
+      // publication lane must drain before teardown judges the record.
+      await events.drain();
       const calls = callsInFlight(recordEvents(), statusNow());
       commandInFlight = calls.length > 0;
       if (commandInFlight)
-        registry.publish(run.id, {
+        events.publish({
           type: "run_note",
           kind: "workspace_torn_down",
           summary: redactAndCap(
@@ -935,7 +989,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         const staged = await stageIntoWorkspace(files, {
           store: deps.artifacts!,
           threadKey: msg.threadKey,
-          publish: (e) => registry.publish(run.id, e),
+          publish: (event) => events.publish(event),
           nextIndex: nextStagedIndex,
           executor,
           resident: round.selection.resident !== undefined,
@@ -1652,7 +1706,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       return { workspace, description: prDescription !== undefined ? "submitted" : "not_submitted" };
     };
     if (leftBehind) {
-      registry.publish(run.id, {
+      events.publish({
         type: "run_note",
         kind: "work_left_behind",
         summary: oneLine(workLeftBehindSummary(leftBehind)),
@@ -1666,7 +1720,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // redacted like every payload, so the run page's review panel renders
     // the same object the GitHub body is rendered from.
     if (prDescription) {
-      registry.publish(run.id, {
+      events.publish({
         type: "pr_description",
         description: redactPrDescription(prDescription),
         at: clock(),
@@ -1721,7 +1775,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               }
             : {}),
           descriptionTurnRan,
-          publish: (e) => registry.publish(run.id, e),
+          publish: (event) => events.publish(event),
           logKey: msg.threadKey,
         }),
       );
@@ -1805,7 +1859,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
           reply: (text) => io.reply(text),
           ack: (text) => replyAck(io, resolved.verbosity, text),
-          publish: (e) => registry.publish(run.id, e),
+          publish: (event) => events.publish(event),
           logKey: msg.threadKey,
         }),
       );
@@ -1819,7 +1873,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // The record must say why a failed run failed even when the reply is
       // never delivered (run-history.md): the error's message, redacted and
       // capped, published before the finish below closes the stream.
-      registry.publish(run.id, {
+      events.publish({
         type: "run_note",
         kind: "run_failed",
         summary: redactAndCap(err instanceof Error ? err.message : String(err), ENDING_NOTE_MAX),
@@ -1837,7 +1891,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     await endHarness().catch((endErr: unknown) => {
       const detail = `the harness session's end failed after the loop's own error: ${endErr instanceof Error ? endErr.message : String(endErr)}`;
       console.warn(`[run] ${msg.threadKey} ${detail}`);
-      registry.publish(run.id, {
+      events.publish({
         type: "run_note",
         kind: "harness_error",
         summary: redactAndCap(detail, ENDING_NOTE_MAX),
@@ -1849,7 +1903,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // before the release removes it, whatever raised the ending.
     await preserveCodingChildWork("ending").catch((salvageErr: unknown) => {
       const summary = `the interrupted-work checkpoint failed before teardown: ${salvageErr instanceof Error ? salvageErr.message : String(salvageErr)}`;
-      registry.publish(run.id, { type: "run_note", kind: "work_salvage", summary, at: clock() });
+      events.publish({ type: "run_note", kind: "work_salvage", summary, at: clock() });
       shell.note("quiet", summary);
     });
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
@@ -1859,7 +1913,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // the parent's read-record and the run page read the roll as a fact. The
     // Workflow wake rides the terminal record's put (item 47).
     if (coordinator !== undefined)
-      registry.publish(run.id, {
+      events.publish({
         type: "child_interrupted",
         parentInstanceId: coordinator.parentInstanceId,
         reason: redactAndCap(interrupted.message, ENDING_NOTE_MAX),
@@ -1876,7 +1930,50 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     };
   } finally {
     clearInterval(heartbeat);
+    await events.drain();
     const status = statusNow();
+    // The two final boundaries land before the registry closes. A tracked run
+    // commits each boundary durably before fan-out; an untracked run keeps the
+    // same local projection so every admitted run still has one condition.
+    if (typeof registry.commitLiveState === "function") {
+      const commitBoundary = async (state: "wrapping_up" | "ended", at: number): Promise<void> => {
+        const summary = registry.getById(run.id);
+        if (!summary) return;
+        const eventSeq = summary.eventCount + 1;
+        const assignment =
+          state === "ended"
+            ? {
+                expectedSeq: summary.liveStateSeq ?? 0,
+                eventSeq,
+                at,
+                state,
+                cause: causeOfClose(status, interrupted !== undefined),
+              }
+            : {
+                expectedSeq: summary.liveStateSeq ?? 0,
+                eventSeq,
+                at,
+                state,
+                bound: summary.liveState?.bound ?? at,
+                detail: "writing the final answer",
+              };
+        if (ledgerRun?.tracked()) {
+          const committed = await ledgerRun.assignLiveState(assignment);
+          if (committed.ok) registry.commitLiveState(run.id, committed);
+          return;
+        }
+        const local = assignRunLiveState(summary.liveState, summary.liveStateSeq ?? 0, assignment);
+        if (!local.ok || !local.event) return;
+        registry.commitLiveState(run.id, {
+          ...local,
+          event: { ...local.event, seq: eventSeq },
+          liveStateSeq: eventSeq,
+        });
+      };
+      const at = clock();
+      await commitBoundary("wrapping_up", at);
+      await commitBoundary("ended", clock());
+    }
     // Close the live-view stream and start the TTL, handing the registry the
     // terminal status so every summary projects it (the index, `runs list`)
     // instead of re-deriving it. The one status the registry cannot know is
@@ -1893,11 +1990,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // it is looking at a head-truncated stream. Read with or without a
     // writer: the closed card's shape line comes from this diagnosis too.
     const snap = registry.snapshot(run.id, run.token);
-    const events = snap?.events ?? [];
+    const recordEventList = snap?.events ?? [];
     const finishedAt = snap?.finishedAt ?? clock(); // the registry's finish clock: row and record agree
     // The diagnosis over the run's window (docs/reference/specs/tracing.md): its shape is
     // what the closed card and the record carry.
-    const diagnosis = analyzeRunFriction(events, {
+    const diagnosis = analyzeRunFriction(recordEventList, {
       finished: true,
       truncated: snap?.truncated ?? false,
       window: { start: snap?.receivedAt ?? startedAt, end: finishedAt },

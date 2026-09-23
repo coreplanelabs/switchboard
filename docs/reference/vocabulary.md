@@ -31,6 +31,24 @@ The person is the <a id="requester"></a>**requester** — one word on every surf
 
 The twelve are the domain nouns. A noun's **values** — an outcome's `merged`, `merge-ready`, `idle`, `aborted`, `failed`, `stopped`, `held`, `round cap reached`, `out of budget`; an agent's preset names; a model's name — and **plain English** (issue, minutes, branch, model, effort) are not nouns and need no row. A surface prints a value or plain English freely; what it may not print is an internal word: the outcome and round-outcome tokens the code keeps (`merge_ready`, `round_cap`, `checks_failed`, …) are translated at every surface by `ENDING_WORDS`/`ROUND_OUTCOME_WORDS` (`src/core/pipelineStanding.ts`), the binding [agent-ship.md](specs/agent-ship.md) item 12a proves.
 
+### Run live-condition values
+
+<!-- generated:run-live-state-values · npm run docs:gen — rendered from src/docs/vocabulary.ts, do not edit by hand -->
+
+| Value | User wording | Carried by |
+| --- | --- | --- |
+| `admitted` | admitted | `RunLiveState` (`src/core/runLiveState.ts`) |
+| `waiting_deploy` | waiting for the current deploy | `RunLiveState` (`src/core/runLiveState.ts`) |
+| `waiting_repository` | waiting for the repository container | `RunLiveState` (`src/core/runLiveState.ts`) |
+| `falling_back` | switching to a fallback workspace | `RunLiveState` (`src/core/runLiveState.ts`) |
+| `preparing` | preparing the workspace | `RunLiveState` (`src/core/runLiveState.ts`) |
+| `working` | working | `RunLiveState` (`src/core/runLiveState.ts`) |
+| `waiting_provider` | waiting for the model provider | `RunLiveState` (`src/core/runLiveState.ts`) |
+| `wrapping_up` | wrapping up | `RunLiveState` (`src/core/runLiveState.ts`) |
+| `ended` | ended | `RunLiveState` (`src/core/runLiveState.ts`) |
+
+<!-- /generated:run-live-state-values -->
+
 ## By rule, not only by enumeration
 
 - A **user surface** is anything the product prints to a person who has not opened the repository: a card or reply string the bot code prints, a command or tool summary the registry publishes, a web label, and the non-spec docs trees (reference, how-to, tutorials, explanation). Specs, decision records, plans, code and code comments are not user surfaces.

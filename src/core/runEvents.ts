@@ -5,6 +5,7 @@ import type { DescriptionIssue, PrDescription, RecordedJson, RenderedPointer } f
 import type { HarnessScope } from "./harness/scope.js";
 import type { ModelCard } from "./modelCard.js";
 import type { ProviderFailureCause } from "./provider.js";
+import type { RunStateEvent } from "./runLiveState.js";
 
 /** The `pr_description` review artifact minus the event envelope
  *  (docs/reference/specs/reading-diff.md item 7). */
@@ -492,6 +493,7 @@ export function isHeadMaterial(event: RunEvent): boolean {
     case "context":
     case "reference":
     case "run_meta":
+    case "run_state":
     case "route":
       return true;
     case "run_note":
@@ -923,6 +925,9 @@ export type RunEvent =
    *  start of the loop; a resumed run carries the original. Head material,
    *  like `run_meta`. Additive: unknown → ignored. */
   | { type: "lease"; startedAt: number; endsAt: number; loopEndsAt: number; seq?: number; at?: number }
+  /** A server-owned live-condition boundary. Same-state refreshes update the
+   *  durable projection beside their source event and do not emit this event. */
+  | RunStateEvent
   /** A head the run pushed (docs/reference/specs/run-history.md item 2; decision
    *  0046): the branch and the sha the coding post-step observed on the remote
    *  (`by: "push"`), or the budget-end salvage pushed (`by: "salvage"`),

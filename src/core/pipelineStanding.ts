@@ -12,6 +12,30 @@ import type { UnitEnding } from "./ship/coordinator.js";
 /** The stage vocabulary (record 0065): what every surface says a unit is in. */
 export type Stage = "coding" | "review" | "fix" | "approved" | "merge-ready" | "merged" | "idle" | "ended";
 
+export const HOSTED_PIPELINE_STARTING_DETAIL = "pipeline starting";
+
+/** Safe detail for a hosted parent's shared `working` state, total over Stage. */
+export function hostedStageDetail(stage: Stage): string {
+  switch (stage) {
+    case "coding":
+      return "coding a unit";
+    case "review":
+      return "reviewing a unit";
+    case "fix":
+      return "fixing review findings";
+    case "approved":
+      return "waiting for checks and merge";
+    case "merge-ready":
+      return "ready for a person to merge";
+    case "merged":
+      return "a unit merged";
+    case "idle":
+      return "waiting for the next pipeline step";
+    case "ended":
+      return "finishing the pipeline";
+  }
+}
+
 export const STAGES = [
   "coding",
   "review",

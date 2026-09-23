@@ -51,10 +51,12 @@ import { contextMessageTexts } from "./messages.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { githubCapabilityFor, shutdownNotice, type RunDeps } from "./run.js";
 import { defaultRunRegistry, REPLAY_EVERYTHING } from "../runRegistry.js";
+import { assignRunLiveState } from "../runLiveState.js";
+import { HOSTED_PIPELINE_STARTING_DETAIL } from "../pipelineStanding.js";
 import { createCardShell } from "../statusCardFrame.js";
 import type { RunEnding } from "../runEnding.js";
 import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, type StatusHandle } from "../types.js";
-import { refusalOf, type Refusal } from "../refusal.js";
+import { refusalOf, RefusalError, type Refusal } from "../refusal.js";
 import { renderRefusal, replyAck } from "./reply.js";
 import { shows, type Verbosity } from "../verbosity.js";
 import { REFUSAL_SENTENCES } from "./reply.js";
@@ -465,6 +467,34 @@ export async function runShipBranch(
         ...REPLAY_EVERYTHING,
       });
     }
+    const admittedAt = clock();
+    const admittedEventSeq = (registry.getById(run.id)?.eventCount ?? 0) + 1;
+    const admittedAssignment = {
+      expectedSeq: 0,
+      eventSeq: admittedEventSeq,
+      at: admittedAt,
+      state: "admitted" as const,
+      bound: admittedAt + minutesToMs(profile.minutes),
+      detail: "waiting for the pipeline to start",
+    };
+    if (ledgerRun) {
+      const committed = await ledgerRun.assignLiveState(admittedAssignment);
+      if (!committed.ok || !registry.commitLiveState(run.id, committed))
+        throw new RefusalError(
+          refusalOf(
+            "setup_failed",
+            `hosted live state start was not committed (${committed.ok ? "registry sequence" : committed.reason})`,
+          ),
+        );
+    } else {
+      const local = assignRunLiveState(undefined, 0, admittedAssignment);
+      if (local.ok && local.event)
+        registry.commitLiveState(run.id, {
+          ...local,
+          event: { ...local.event, seq: admittedEventSeq },
+          liveStateSeq: admittedEventSeq,
+        });
+    }
     // One pipeline per thread (record 0060; agent-ship item 16): the host key's
     // claim answering `thread-live` means another pipeline is hosted in this
     // thread right now — refused by name, never run untracked beside it. Every
@@ -572,7 +602,23 @@ export async function runShipBranch(
           instanceId: outcome.instanceId,
           until: clock() + minutesToMs(caps.maxMinutes + HOSTED_DEADLINE_MARGIN_MINUTES),
         };
-        ledgerRun.setState({ hosting });
+        const summary = registry.getById(run.id);
+        const committed = await ledgerRun.assignLiveState({
+          expectedSeq: summary?.liveStateSeq ?? 0,
+          eventSeq: (summary?.eventCount ?? 0) + 1,
+          at: clock(),
+          state: "working",
+          bound: hosting.until,
+          detail: HOSTED_PIPELINE_STARTING_DETAIL,
+          statePatch: { hosting },
+        });
+        if (!committed.ok || !registry.commitLiveState(run.id, committed))
+          throw new RefusalError(
+            refusalOf(
+              "setup_failed",
+              `hosted live state transition was not committed (${committed.ok ? "registry sequence" : committed.reason})`,
+            ),
+          );
         registry.publish(run.id, {
           type: "run_meta",
           agent: agent.name,

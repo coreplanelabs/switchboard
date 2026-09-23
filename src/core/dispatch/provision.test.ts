@@ -955,11 +955,11 @@ describe("reattachWorkspace — the run's recorded workspace re-attached without
     });
     expect(gated).toEqual({ kind: "attached", round: bound });
     expect(attachState.rounds).toHaveLength(2);
-    // The gate path alone carries the card's setup-note sink (issue 2044): the
+    // The gate path alone carries the awaited resident observation sink: the
     // mid-run re-attach has no card to paint, so the factory sees the same
     // round input less that one sink.
-    const { onSetupNote, ...gateRound } = attachState.rounds[1] as Record<string, unknown>;
-    expect(typeof onSetupNote).toBe("function");
+    const { onLiveStateObservation, ...gateRound } = attachState.rounds[1] as Record<string, unknown>;
+    expect(typeof onLiveStateObservation).toBe("function");
     expect(attachState.rounds[0]).toEqual(gateRound);
     expect(attachState.rounds[0]).toMatchObject({
       threadKey: THREAD,

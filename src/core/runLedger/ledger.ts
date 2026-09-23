@@ -72,6 +72,8 @@ import type {
   IntakeWriteResult,
   LivePhase,
   LiveRunRow,
+  LiveStateAssignRequest,
+  LiveStateAssignResult,
   ReclaimedRun,
   RunState,
   StepRecord,
@@ -152,6 +154,8 @@ export interface RunLedger {
    *  without facts (a hosted parent, an older wiring) still extends its lease. */
   heartbeat(runId: string, gen: string, leaseMs: number, facts?: HeartbeatFacts): Promise<HeartbeatResult>;
   append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult>;
+  /** Validate and commit a state boundary plus row projection in one transaction. */
+  assignLiveState(runId: string, gen: string, assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult>;
   setState(runId: string, gen: string, state: RunState): Promise<FenceResult>;
   /** Any generation: a steer arrives on whichever container is up. */
   pushInbox(runId: string, message: Record<string, unknown>): Promise<{ ok: boolean; seq?: number }>;

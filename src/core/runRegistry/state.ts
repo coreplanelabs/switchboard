@@ -3,6 +3,7 @@ import type { PipelineSummary } from "../pipelineStanding.js";
 import type { RunEvent } from "../runEvents.js";
 import type { InFlightCall } from "../runPace.js";
 import type { RunSeed, RunStatus } from "../runRecord.js";
+import type { RunLiveState } from "../runLiveState.js";
 import type { RunControl } from "./runControl.js";
 
 // The row a run occupies in the registry while it is live (`RunState`), the
@@ -145,6 +146,9 @@ export interface RunState {
   paceEventAts: number[];
   lastToolCallAt?: number;
   inFlight?: InFlightCall;
+  /** Restart-safe, server-owned live condition and the event sequence that won. */
+  liveState?: RunLiveState;
+  liveStateSeq?: number;
   /** Total events published (monotonic; unlike backlog, never trimmed). */
   eventCount: number;
   /** Content events published (span records excluded); monotonic like `eventCount`. */
