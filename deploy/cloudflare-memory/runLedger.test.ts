@@ -193,6 +193,70 @@ describe("run ledger — claim and admission (item 29)", () => {
     expect((await post("/runs/abandon", { storeKey: key, runId: "r9", gen: "g2" })).status).toBe(409);
   });
 
+  it("promotion preserves live state assigned while the run was attaching and accepts its next transition", async () => {
+    const key = storeKey();
+    const reserve = claimBody(key, "promoted", "slack:C1:promoted", "g1", {
+      phase: "attaching",
+      system: "",
+      tools: [],
+      card: null,
+    });
+    expect(await post("/runs/claim", reserve)).toMatchObject({ status: 200, data: { ok: true } });
+
+    expect(
+      await post("/runs/live-state", {
+        storeKey: key,
+        runId: "promoted",
+        gen: "g1",
+        assignment: { expectedSeq: 0, eventSeq: 1, at: 100, state: "admitted", bound: 1_000 },
+      }),
+    ).toMatchObject({
+      status: 200,
+      data: {
+        ok: true,
+        liveState: { state: "admitted", since: 100, bound: 1_000 },
+        liveStateSeq: 1,
+      },
+    });
+
+    expect(
+      await post(
+        "/runs/claim",
+        claimBody(key, "promoted", "slack:C1:promoted", "g1", {
+          state: { binding: { backend: "resident", workspace: "/workspace/promoted" } },
+        }),
+      ),
+    ).toMatchObject({ status: 200, data: { ok: true } });
+    expect((await post("/runs/live", { storeKey: key })).data.runs).toMatchObject([
+      {
+        runId: "promoted",
+        phase: "live",
+        state: {
+          binding: { backend: "resident", workspace: "/workspace/promoted" },
+          liveState: { state: "admitted", since: 100, bound: 1_000 },
+          liveStateSeq: 1,
+        },
+      },
+    ]);
+
+    expect(
+      await post("/runs/live-state", {
+        storeKey: key,
+        runId: "promoted",
+        gen: "g1",
+        assignment: { expectedSeq: 1, eventSeq: 2, at: 200, state: "working", bound: 1_000 },
+      }),
+    ).toMatchObject({
+      status: 200,
+      data: {
+        ok: true,
+        liveState: { state: "working", since: 200, bound: 1_000 },
+        liveStateSeq: 2,
+      },
+    });
+    expect((await post("/runs/live", { storeKey: key })).data.runs).toHaveLength(1);
+  });
+
   it("validates: a bad run id, gen, lease, or missing fields → 400; no bearer → 401", async () => {
     const key = storeKey();
     expect((await post("/runs/claim", claimBody(key, "bad id!", "t"))).status).toBe(400);

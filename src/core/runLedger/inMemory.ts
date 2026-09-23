@@ -149,7 +149,7 @@ export class InMemoryRunLedger implements RunLedger {
           card: req.card ?? null,
           system: req.system,
           tools: req.tools,
-          state: req.state ?? {},
+          state: { ...existing!.state, ...(req.state ?? {}) },
         });
         return decision;
       case "insert":
