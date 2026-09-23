@@ -92,6 +92,30 @@ const step = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+function timeSealedRunStages(
+  onTestFailed: (handler: () => void) => void,
+  now = () => performance.now(),
+  emit = (message: string) => console.error(message),
+) {
+  const completed: Array<{ stage: string; elapsedMs: number }> = [];
+  let pending: { stage: string; startedAt: number } | undefined;
+  onTestFailed(() => {
+    const pendingStage = pending ? `${pending.stage}=${Math.round(now() - pending.startedAt)}ms` : "none";
+    const completedStages = completed.map(({ stage, elapsedMs }) => `${stage}=${elapsedMs}ms`).join(", ") || "none";
+    emit(`[memory diagnostics] sealed-run stages: completed=${completedStages}; pending=${pendingStage}`);
+  });
+  return async <T>(stage: string, operation: () => Promise<T>): Promise<T> => {
+    const startedAt = now();
+    pending = { stage, startedAt };
+    try {
+      return await operation();
+    } finally {
+      completed.push({ stage, elapsedMs: Math.round(now() - startedAt) });
+      pending = undefined;
+    }
+  };
+}
+
 describe("run ledger — claim and admission (item 29)", () => {
   it("claim → 200; a second run on the same thread → 409 thread-live naming the live run; the owner's re-claim is idempotent; /runs/live lists it", async () => {
     const key = storeKey();
@@ -1656,21 +1680,58 @@ describe("the plane's admission stage — /plane/admit, reservations, the seal's
     });
   });
 
-  it("effects for a sealed run are dropped at the seal: an admitted-then-finished run's open admit goes with its finish", async () => {
+  const sealedRunFailureOutput: string[] = [];
+
+  it.fails("the real onTestFailed lifecycle emits completed and pending sealed-run stages", async (context) => {
+    let now = 10;
+    const timed = timeSealedRunStages(
+      (handler) => context.onTestFailed(handler),
+      () => now,
+      (message) => sealedRunFailureOutput.push(message),
+    );
+    await timed("admit", async () => {
+      now = 15;
+    });
+    void timed("claim", () => new Promise(() => {}));
+    now = 24;
+
+    expect("forced failure").toBe("success");
+  });
+
+  it("preserves completed and pending stage diagnostics from the genuine failure", () => {
+    expect(sealedRunFailureOutput).toEqual([
+      "[memory diagnostics] sealed-run stages: completed=admit=5ms; pending=claim=9ms",
+    ]);
+  });
+
+  it("effects for a sealed run are dropped at the seal: an admitted-then-finished run's open admit goes with its finish", async (context) => {
+    const timed = timeSealedRunStages((handler) => context.onTestFailed(handler));
     const key = storeKey();
     const t = "slack:C5:5.0";
-    await admit(key, t, "one");
-    await post("/runs/claim", claimBody(key, "r1", t));
-    const q = (await admit(key, t, "two")).data.id as string;
-    await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", t) });
+    await timed("admit", () => admit(key, t, "one"));
+    await timed("claim", () => post("/runs/claim", claimBody(key, "r1", t)));
+    const q = (await timed("queued admit", () => admit(key, t, "two"))).data.id as string;
+    await timed("first finish", () =>
+      post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", t) }),
+    );
     // The plane's attaching row is another generation's with an expired lease:
     // the reclaim takes it (the restart-from-request path) and its finish seals it.
-    const reclaimed = await post("/runs/reclaim", { storeKey: key, gen: "g2", now: Date.now(), leaseMs: LEASE_MS });
+    const reclaimed = await timed("reclaim", () =>
+      post("/runs/reclaim", { storeKey: key, gen: "g2", now: Date.now(), leaseMs: LEASE_MS }),
+    );
     expect((reclaimed.data.runs as Array<{ row: { runId: string } }>).map((r) => r.row.runId)).toContain(q);
-    expect((await post("/runs/finish", { storeKey: key, runId: q, gen: "g2", record: record(q, t) })).status).toBe(200);
-    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
-      expect(inst.openPlaneEffects()).toEqual([]);
-    });
+    expect(
+      (
+        await timed("second finish", () =>
+          post("/runs/finish", { storeKey: key, runId: q, gen: "g2", record: record(q, t) }),
+        )
+      ).status,
+    ).toBe(200);
+    await timed("final inspection", () =>
+      runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+        expect(inst.openPlaneEffects()).toEqual([]);
+      }),
+    );
   });
 
   it("a push that fails leaves the effect on the next heartbeat answer: the bot answered 404, nothing was acked, and the offer rides the heartbeat", async () => {
