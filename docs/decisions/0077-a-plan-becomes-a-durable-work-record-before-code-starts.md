@@ -1,6 +1,6 @@
 ---
 title: A plan becomes a durable work record before code starts
-status: proposed
+status: accepted
 date: 2026-09-22
 pattern: Store-canonical plan — one source-neutral front door pins a validated artifact; a provider URL addresses its human projection; execution composes plan, code and review from the pinned copy
 ---
