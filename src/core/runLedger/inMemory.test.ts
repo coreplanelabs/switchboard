@@ -511,6 +511,64 @@ describe("InMemoryRunLedger", () => {
     expect(await ledger.abandon("r6", "g1")).toEqual({ ok: false, reason: "unknown-run" });
   });
 
+  it("promotion preserves live state assigned while the run was attaching and accepts its next transition", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const reserve: ClaimRequest = {
+      ...claimReq("promoted", "slack:C1:promoted"),
+      phase: "attaching",
+      system: "",
+      tools: [],
+      card: null,
+    };
+    expect(await ledger.claim(reserve)).toEqual({ ok: true });
+
+    const admitted = await ledger.assignLiveState("promoted", "g1", {
+      expectedSeq: 0,
+      eventSeq: 1,
+      at: 100,
+      state: "admitted",
+      bound: 1_000,
+    });
+    expect(admitted).toMatchObject({
+      ok: true,
+      liveState: { state: "admitted", since: 100, bound: 1_000 },
+      liveStateSeq: 1,
+    });
+
+    expect(
+      await ledger.claim({
+        ...claimReq("promoted", "slack:C1:promoted"),
+        state: { binding: { backend: "resident", workspace: "/workspace/promoted" } },
+      }),
+    ).toEqual({ ok: true });
+    expect(await ledger.listLive()).toMatchObject([
+      {
+        runId: "promoted",
+        phase: "live",
+        state: {
+          binding: { backend: "resident", workspace: "/workspace/promoted" },
+          liveState: { state: "admitted", since: 100, bound: 1_000 },
+          liveStateSeq: 1,
+        },
+      },
+    ]);
+
+    expect(
+      await ledger.assignLiveState("promoted", "g1", {
+        expectedSeq: 1,
+        eventSeq: 2,
+        at: 200,
+        state: "working",
+        bound: 1_000,
+      }),
+    ).toMatchObject({
+      ok: true,
+      liveState: { state: "working", since: 200, bound: 1_000 },
+      liveStateSeq: 2,
+    });
+    expect(await ledger.listLive()).toHaveLength(1);
+  });
+
   it("reclaim takes the expired and handed-off runs, gives them to the new generation with the last step, the unconsumed inbox and the jobs, and re-fences the transcript", async () => {
     let t = 0;
     const ledger = new InMemoryRunLedger(() => t);

@@ -2963,7 +2963,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             req.card ? JSON.stringify(req.card) : null,
             req.system,
             JSON.stringify(req.tools),
-            JSON.stringify(req.state ?? {}),
+            JSON.stringify({ ...existing!.state, ...(req.state ?? {}) }),
             req.runId,
           );
           this.registerSession(req);
