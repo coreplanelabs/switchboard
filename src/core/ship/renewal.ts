@@ -162,7 +162,7 @@ export function renderRenewal(
 ): string {
   const recourse = options.idle
     ? "the next reply in this thread continues the unit"
-    : "the next reply in this thread continues the original task";
+    : "start ship again with the original task";
   const senders = options.senders?.length
     ? `, with ${options.senders.length} message${options.senders.length === 1 ? "" : "s"} from ${options.senders.join(", ")}`
     : "";

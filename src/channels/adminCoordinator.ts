@@ -1257,6 +1257,7 @@ function pullRequestState(
       state: "merged",
       prNumber: number,
       url,
+      ...(facts.headSha !== undefined ? { headSha: facts.headSha } : {}),
       sha: facts.mergeCommitSha,
       mergedAt: facts.mergedAt,
       ...(facts.mergedBy !== undefined ? { mergedBy: facts.mergedBy } : {}),
@@ -1361,6 +1362,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   const record = full.ok ? full.value : view;
   const finalReply = finalReplyOf(record.events);
   const reviewAskedAt = reviewAskedAtOf(record.events);
+  const description = record.events?.some((event) => event.type === "pr_description") === true;
   const opened = prOpenedOf(record.events);
   const pr = opened !== undefined ? { number: opened.number, url: opened.url, created: opened.created } : undefined;
   // The hard stop's mark (record 0060; issue 1924): a finished child's unit
@@ -1443,6 +1445,10 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
       ...(posted !== undefined ? { reviewPosted: posted.reviewPosted } : {}),
       ...(posted?.reviewPostReason !== undefined ? { reviewPostReason: posted.reviewPostReason } : {}),
       ...(record.dispositions !== undefined ? { dispositions: record.dispositions } : {}),
+      // Findings readiness requires the typed description output. Its event is
+      // durable on the child record, so the runner can verify it without
+      // trusting final-reply prose.
+      ...(description ? { description: true } : {}),
       ...(record.handoff !== undefined ? { handoff: true } : {}),
       // The renewal's facts (decision 0046): progress is read off these.
       ...(record.pushed !== undefined ? { pushed: record.pushed } : {}),

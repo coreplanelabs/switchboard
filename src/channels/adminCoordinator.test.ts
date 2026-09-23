@@ -1979,8 +1979,15 @@ describe("pr-check keeps the machine's adopted pull request authoritative before
   });
 
   it("a followed pull request that merged answers merged with the merge receipt; one closed unmerged answers the terminal closed state with its closer", async () => {
+    const mergedHead = "8".repeat(40);
     const merged = harness({
-      prFacts: { state: "closed", sameRepoHead: true, mergedAt: "2026-09-13T23:55:59Z", mergeCommitSha: SHA },
+      prFacts: {
+        state: "closed",
+        sameRepoHead: true,
+        headSha: mergedHead,
+        mergedAt: "2026-09-13T23:55:59Z",
+        mergeCommitSha: SHA,
+      },
     });
     await merged.instances.put(INSTANCE);
     expect((await followCheck(merged.deps)).body).toEqual({
@@ -1988,6 +1995,7 @@ describe("pr-check keeps the machine's adopted pull request authoritative before
       state: "merged",
       prNumber: 7,
       url: "https://github.com/acme/api/pull/7",
+      headSha: mergedHead,
       sha: SHA,
       mergedAt: "2026-09-13T23:55:59Z",
       at: NOW,
@@ -3520,6 +3528,144 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       });
       expect(reviewReads).toBe(2);
       expect(sleeps).toEqual([{ name: "U10/1/review/read/1/record-visible/1", ms: SHIP_RECORD_VISIBILITY.retryMs }]);
+    });
+
+    it("a finished findings read-record carrying an older merged PR head stops at exact-head reconciliation", async () => {
+      const MERGED_HEAD = "a".repeat(40);
+      const COMPLETED_HEAD = "b".repeat(40);
+      const h = await planHarness({
+        prFacts: {
+          state: "closed",
+          sameRepoHead: true,
+          headSha: MERGED_HEAD,
+          mergedAt: "2026-09-23T01:02:03Z",
+          mergeCommitSha: "c".repeat(40),
+          htmlUrl: "https://github.com/acme/api/pull/7",
+        },
+      });
+      await h.instances.putUnits([
+        unitRow("U10", {
+          threadKey: "slack:C1:2.0",
+          pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        }),
+      ]);
+      const events: RunEvent[] = [
+        { type: "input", messageId: "m1", text: "address F1", seq: 1 },
+        {
+          type: "pr_description",
+          description: { title: "fix(ship): reconcile the completed findings head", tldr: "T." },
+          seq: 2,
+        } as unknown as RunEvent,
+        { type: "answer", text: "Addressed F1 and pushed the branch.", seq: 3 },
+      ];
+      await h.store.put(
+        record("run-f1", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          idempotencyKey: `${PLAN_INSTANCE.id}:U10/1/findings`,
+          threadKey: "slack:C1:2.0",
+          headSha: COMPLETED_HEAD,
+          dispositions: [{ findingId: "F1", disposition: "fixed", note: "fenced merged reconciliation" }],
+          events,
+          eventCount: events.length,
+          storedEventCount: events.length,
+        }),
+      );
+
+      const driver = {
+        state: openUnitPipeline(
+          {
+            unit: { id: "U10", branch: "plan/fixture/u10" },
+            repo: PLAN_INSTANCE.repo,
+            base: PLAN_INSTANCE.base!,
+            caps: { maxRounds: 3, maxMinutes: 240 },
+            merge: "person",
+            generated: false,
+          },
+          NOW - 60_000,
+        ),
+      };
+      const feed = (answer: Record<string, unknown>) => {
+        const action = nextAction(driver.state);
+        if (action.type === "end") throw new Error("the unit ended before the scripted answer");
+        driver.state = applyReturn(driver.state, { ...answer, step: action.step } as StepReturn).state;
+      };
+      feed({ type: "pr-check", pr: { state: "none" }, at: NOW - 60_000 });
+      feed({ type: "branch", ok: true, at: NOW - 59_000 });
+      feed({ type: "spawn", outcome: "spawned", runId: "run-c0", at: NOW - 58_000 });
+      feed({ type: "wait", outcome: "event" });
+      feed({
+        type: "read-record",
+        run: {
+          finished: true,
+          status: "completed",
+          handoff: true,
+          pr: { number: 7, url: "https://github.com/acme/api/pull/7", created: true },
+        },
+        at: NOW - 50_000,
+      });
+      feed({
+        type: "pr-check",
+        pr: {
+          state: "open",
+          prNumber: 7,
+          url: "https://github.com/acme/api/pull/7",
+          headSha: MERGED_HEAD,
+          headBranchExists: true,
+        },
+        at: NOW - 49_000,
+      });
+      feed({ type: "spawn", outcome: "spawned", runId: "run-r1", at: NOW - 48_000 });
+      feed({ type: "wait", outcome: "event" });
+      feed({
+        type: "read-record",
+        run: {
+          finished: true,
+          status: "completed",
+          verdict: {
+            verdict: "request_changes",
+            summary: "one major",
+            findings: [{ id: "F1", severity: "major", file: "src/core/ship/coordinator.ts", title: "head fence" }],
+          },
+          reviewPosted: true,
+          reviewHead: MERGED_HEAD,
+        },
+        pullRequest: {
+          state: "open",
+          prNumber: 7,
+          url: "https://github.com/acme/api/pull/7",
+          headSha: MERGED_HEAD,
+          headBranchExists: true,
+        },
+        at: NOW - 40_000,
+      });
+      feed({ type: "spawn", outcome: "spawned", runId: "run-f1", at: NOW - 30_000 });
+      feed({ type: "wait", outcome: "event" });
+
+      const read = await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+          parentInstanceId: PLAN_INSTANCE.id,
+          runId: "run-f1",
+          unit: "U10",
+        }),
+        h.deps,
+      );
+      expect(read.status).toBe(200);
+      expect(read.body).toMatchObject({
+        run: { finished: true, headSha: COMPLETED_HEAD, description: true },
+        pullRequest: { state: "merged", headSha: MERGED_HEAD },
+      });
+      const body = read.body as { run: ChildFacts; pullRequest: Record<string, unknown>; at: number };
+      feed({ type: "read-record", run: body.run, pullRequest: body.pullRequest, at: body.at });
+
+      expect(nextAction(driver.state)).toMatchObject({
+        type: "end",
+        ending: {
+          kind: "aborted",
+          findingsStop: "head_mismatch",
+          observedHead: COMPLETED_HEAD,
+          remoteHead: MERGED_HEAD,
+        },
+      });
     });
   });
 
