@@ -272,6 +272,8 @@ export function activityLine(e: RunEvent): string {
       return "context for the run recorded"; // published straight to the registry too — never arrives here
     case "lease":
       return "lease started"; // the harness's clocks: head material the run loop keeps off the card — never arrives here
+    case "run_state":
+      return ""; // Existing renderers stay until the surface cutover to the shared wording table.
     case "skill_use":
       return `📚 skill ${e.skill} loaded`;
     case "artifact":

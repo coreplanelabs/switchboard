@@ -4573,23 +4573,27 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       status: "completed",
       userName: "alice",
     });
-    // The run's own events, in seq order: the ship branch's two run_meta (the
-    // second naming the instance), each unit-end's ship_unit, the answer.
+    // The hosted parent backfills the two state boundaries, refreshes through
+    // unit events, then finishes working → wrapping_up → ended around its answer.
     expect(rec.events.map((e) => e.type)).toEqual([
       "run_meta",
       "run_meta",
+      "run_state",
+      "run_state",
       "ship_unit",
       "ship_unit",
       "ship_unit",
       "ship_unit",
+      "run_state",
       "answer",
+      "run_state",
     ]);
-    expect(rec.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(rec.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     // The record names the instance whose story it is (agent-ship item 17) in
     // its LAST run_meta carrying one, so its page can list the units.
     expect(rec.events[1]).toMatchObject({ type: "run_meta", agent: "ship", instanceId: PLAN_INSTANCE.id });
     expect(rec.parentInstanceId).toBeUndefined(); // the pipeline's own record is nobody's child
-    const summary = rec.events.at(-1);
+    const summary = rec.events.find((event) => event.type === "answer");
     expect(summary?.type === "answer" ? summary.text : "").toBe(
       "✅ U10 — merge-ready — https://github.com/acme/api/pull/7\n• U11 — not started",
     );
@@ -4690,7 +4694,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       status: 200,
       body: { ok: true, runId: "run-parent", at: NOW },
     });
-    const summary = h.written[0]!.events.at(-1)!;
+    const summary = h.written[0]!.events.find((event) => event.type === "answer")!;
     expect(summary.type === "answer" ? summary.text : "").toBe("✅ merge-ready — https://github.com/acme/api/pull/7");
     // The card closes with the task wording — no `U1 ·` prefix on the line.
     expect(closes).toHaveLength(1);

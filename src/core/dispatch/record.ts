@@ -411,6 +411,8 @@ export function assembleRunRecord(input: {
     ...(seal?.replyNote !== undefined ? { replyNote: seal.replyNote } : {}),
     ...(snap !== null ? { stepCount: snap.stepCount } : {}),
     status: input.status,
+    ...(snap?.liveState !== undefined ? { liveState: snap.liveState } : {}),
+    ...(snap?.liveStateSeq !== undefined ? { liveStateSeq: snap.liveStateSeq } : {}),
     eventCount: Math.max(snap?.eventCount ?? atFinish.length, seal?.eventCount ?? 0),
     storedEventCount: events.length,
     truncated: false,

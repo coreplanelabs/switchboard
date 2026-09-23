@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../chatMessage.js";
 import type { RunRecord } from "../runRecord.js";
 import { InMemoryRunLedger } from "./inMemory.js";
+import { RunRegistry } from "../runRegistry.js";
+import { HOSTED_PIPELINE_STARTING_DETAIL, STAGES, hostedStageDetail } from "../pipelineStanding.js";
+import type { AppendableEvent } from "./types.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES, GAP_MARKER } from "./sessionLog.js";
 import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest, type IntakeReceipt, type StepRecord } from "./types.js";
 
@@ -53,6 +56,270 @@ const record = (id: string): RunRecord =>
   }) as unknown as RunRecord;
 
 describe("InMemoryRunLedger", () => {
+  it("atomically commits a live-state boundary and row projection before registry subscribers see it", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim(claimReq("state-1", "slack:C1:state"));
+    const registry = new RunRegistry({ genId: () => "state-1", genToken: () => "token", now: () => 100 });
+    const run = registry.create(undefined, undefined, { id: "state-1" });
+    const seen: string[] = [];
+    registry.subscribe(run.id, run.token, { onEvent: (event) => seen.push(event.type) });
+
+    const committed = await ledger.assignLiveState("state-1", "g1", {
+      expectedSeq: 0,
+      eventSeq: 1,
+      at: 100,
+      state: "admitted",
+      bound: 1_000,
+    });
+    expect(committed.ok).toBe(true);
+    expect(seen).toEqual([]);
+    expect((await ledger.listLive())[0]).toMatchObject({
+      liveState: { state: "admitted", since: 100, bound: 1_000 },
+      liveStateSeq: 1,
+    });
+    expect((await ledger.readEvents("state-1")).map((event) => event.type)).toEqual(["run_state"]);
+    if (!committed.ok) throw new Error("assignment failed");
+    expect(registry.commitLiveState(run.id, committed)).toBe(true);
+    expect(seen).toEqual(["run_state"]);
+
+    const before = JSON.stringify((await ledger.listLive())[0]);
+    expect(
+      await ledger.assignLiveState("state-1", "g1", {
+        expectedSeq: 0,
+        eventSeq: 2,
+        at: 200,
+        state: "working",
+        bound: 900,
+      }),
+    ).toEqual({ ok: false, reason: "stale-sequence" });
+    expect(JSON.stringify((await ledger.listLive())[0])).toBe(before);
+    expect(await ledger.readEvents("state-1")).toHaveLength(1);
+    expect(seen).toEqual(["run_state"]);
+  });
+
+  it("an injected failure before commit exposes neither the event nor the live-state projection", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim(claimReq("state-fail", "slack:C1:state-fail"));
+    ledger.liveStateFailure.beforeCommit = true;
+
+    await expect(
+      ledger.assignLiveState("state-fail", "g1", {
+        expectedSeq: 0,
+        eventSeq: 1,
+        at: 100,
+        state: "admitted",
+        bound: 1_000,
+      }),
+    ).rejects.toThrow("live-state commit failed");
+
+    expect((await ledger.listLive())[0]).not.toHaveProperty("liveState");
+    expect(await ledger.readEvents("state-fail")).toEqual([]);
+  });
+
+  it.each([
+    ["deploy wait", "waiting_deploy", "waiting for the current deploy", false],
+    ["repository-container wait", "waiting_repository", "waiting for the repository container", false],
+    ["in-flight bounded tool", "working", "running a tool", false],
+    ["provider hold", "waiting_provider", "waiting for the model provider", false],
+    ["wrapping up", "wrapping_up", "writing the final answer", false],
+    ["hosted coding", "working", "coding a unit", true],
+    ["hosted review", "working", "reviewing a unit", true],
+  ] as const)(
+    "kill and rehost preserves the byte-exact live tuple during %s",
+    async (_name, target, detail, hosted) => {
+      const ledger = new InMemoryRunLedger(() => 0);
+      const id = `rehost-${_name.replaceAll(" ", "-")}`;
+      await ledger.claim({
+        ...claimReq(id, `slack:C1:${id}`),
+        ...(hosted
+          ? { meta: { ...claimReq(id, "unused").meta, threadKey: `slack:C1:${id}`, hosted: true as const } }
+          : {}),
+      });
+      let expectedSeq = 0;
+      let eventSeq = 1;
+      const assign = async (
+        state:
+          | "admitted"
+          | "waiting_deploy"
+          | "waiting_repository"
+          | "preparing"
+          | "working"
+          | "waiting_provider"
+          | "wrapping_up",
+        nextDetail: string,
+      ) => {
+        const result = await ledger.assignLiveState(id, "g1", {
+          expectedSeq,
+          eventSeq,
+          at: 100 + eventSeq,
+          state,
+          bound: hosted ? 5_000 : 1_000,
+          detail: nextDetail,
+          ...(hosted && state === "working"
+            ? { statePatch: { hosting: { instanceId: "pipeline-1", until: 5_000 } } }
+            : {}),
+        });
+        if (!result.ok) throw new Error(result.reason);
+        expectedSeq = result.liveStateSeq;
+        eventSeq++;
+      };
+      await assign("admitted", "admitted");
+      if (target === "waiting_deploy" || target === "waiting_repository") await assign(target, detail);
+      else {
+        await assign("preparing", "preparing the workspace");
+        await assign("working", target === "working" ? detail : "model turn");
+        if (target === "waiting_provider" || target === "wrapping_up") await assign(target, detail);
+      }
+      const before = (await ledger.listLive())[0]!;
+      const tuple = JSON.stringify(before.liveState);
+      await ledger.handoff("g1", [id]);
+      const reclaimed = await ledger.reclaim("g2", 200, LEASE_MS);
+      expect(reclaimed).toHaveLength(1);
+      expect(JSON.stringify(reclaimed[0]!.row.liveState)).toBe(tuple);
+      if (hosted) {
+        expect(reclaimed[0]!.row.liveState?.bound).toBe(5_000);
+        expect(reclaimed[0]!.row.state.hosting).toEqual({ instanceId: "pipeline-1", until: 5_000 });
+      }
+    },
+  );
+
+  it("hosted hand-off starts working directly, every stage refreshes one boundary, and finish wraps then ends", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim({
+      ...claimReq("host-stages", "slack:C1:host#host"),
+      meta: { ...claimReq("host-stages", "slack:C1:host").meta, hosted: true, threadKey: "slack:C1:host" },
+    });
+    const admitted = await ledger.assignLiveState("host-stages", "g1", {
+      expectedSeq: 0,
+      eventSeq: 1,
+      at: 100,
+      state: "admitted",
+      bound: 1_000,
+    });
+    if (!admitted.ok) throw new Error(admitted.reason);
+    const working = await ledger.assignLiveState("host-stages", "g1", {
+      expectedSeq: admitted.liveStateSeq,
+      eventSeq: 2,
+      at: 110,
+      state: "working",
+      bound: 5_000,
+      detail: HOSTED_PIPELINE_STARTING_DETAIL,
+      statePatch: { hosting: { instanceId: "pipeline-1", until: 5_000 } },
+    });
+    if (!working.ok) throw new Error(working.reason);
+    expect(working.liveState).toEqual({
+      state: "working",
+      since: 110,
+      bound: 5_000,
+      detail: "pipeline starting",
+    });
+
+    let expectedSeq = working.liveStateSeq;
+    let sourceSeq = 3;
+    for (const [index, stage] of STAGES.entries()) {
+      const until = 6_000 + index;
+      const source: AppendableEvent = {
+        type: "ship_round",
+        index,
+        agent: stage === "review" ? "review" : "coding",
+        outcome: stage === "idle" ? "idle" : stage === "approved" ? "approve" : "started",
+        at: 200 + index,
+        seq: sourceSeq,
+      };
+      const refreshed = await ledger.assignLiveState("host-stages", "g1", {
+        expectedSeq,
+        at: 200 + index,
+        state: "working",
+        bound: until,
+        detail: hostedStageDetail(stage),
+        statePatch: { hosting: { instanceId: "pipeline-1", until } },
+        sourceEvents: [source],
+      });
+      if (!refreshed.ok) throw new Error(refreshed.reason);
+      expect(refreshed.liveState).toEqual({
+        state: "working",
+        since: 110,
+        bound: until,
+        detail: hostedStageDetail(stage),
+      });
+      expect((await ledger.listLive())[0]!.state.hosting).toEqual({ instanceId: "pipeline-1", until });
+      expect((await ledger.readEvents("host-stages")).filter((event) => event.type === "run_state")).toHaveLength(2);
+      expectedSeq = refreshed.liveStateSeq;
+      sourceSeq++;
+    }
+    const wrapping = await ledger.assignLiveState("host-stages", "g1", {
+      expectedSeq,
+      eventSeq: sourceSeq,
+      at: 400,
+      state: "wrapping_up",
+      bound: 7_000,
+    });
+    if (!wrapping.ok) throw new Error(wrapping.reason);
+    const ended = await ledger.assignLiveState("host-stages", "g1", {
+      expectedSeq: wrapping.liveStateSeq,
+      eventSeq: sourceSeq + 1,
+      at: 500,
+      state: "ended",
+      cause: "completed",
+    });
+    if (!ended.ok) throw new Error(ended.reason);
+    expect(
+      (await ledger.readEvents("host-stages"))
+        .filter((event) => event.type === "run_state")
+        .map((event) => (event as { state: string }).state),
+    ).toEqual(["admitted", "working", "wrapping_up", "ended"]);
+  });
+
+  it("provider park uses the durable lease's absolute end and repeated park plus rehost preserve it", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim(claimReq("provider-bound", "slack:C1:provider"));
+    await ledger.append("provider-bound", "g1", [
+      { type: "lease", startedAt: 100, endsAt: 9_000, loopEndsAt: 8_000, at: 100, seq: 1 },
+    ]);
+    const admitted = await ledger.assignLiveState("provider-bound", "g1", {
+      expectedSeq: 0,
+      eventSeq: 2,
+      at: 100,
+      state: "admitted",
+      bound: 9_000,
+    });
+    if (!admitted.ok) throw new Error(admitted.reason);
+    const working = await ledger.assignLiveState("provider-bound", "g1", {
+      expectedSeq: admitted.liveStateSeq,
+      eventSeq: 3,
+      at: 200,
+      state: "working",
+      bound: 9_000,
+      detail: "model turn",
+    });
+    if (!working.ok) throw new Error(working.reason);
+    const parked = await ledger.assignLiveState("provider-bound", "g1", {
+      expectedSeq: working.liveStateSeq,
+      eventSeq: 4,
+      at: 300,
+      state: "waiting_provider",
+      bound: 9_000,
+      detail: "waiting for the model provider",
+    });
+    if (!parked.ok) throw new Error(parked.reason);
+    const repeated = await ledger.assignLiveState("provider-bound", "g1", {
+      expectedSeq: parked.liveStateSeq,
+      at: 400,
+      state: "waiting_provider",
+      bound: 9_000,
+      detail: "waiting for the model provider",
+    });
+    expect(repeated).toMatchObject({
+      ok: true,
+      liveState: { state: "waiting_provider", since: 300, bound: 9_000 },
+      liveStateSeq: 4,
+    });
+    await ledger.handoff("g1", ["provider-bound"]);
+    const [reclaimed] = await ledger.reclaim("g2", 500, LEASE_MS);
+    expect(reclaimed?.row.liveState).toEqual(repeated.ok ? repeated.liveState : undefined);
+    expect(reclaimed?.row.liveState).not.toHaveProperty("deadline");
+  });
+
   it("claim → seed → steps → finishing → finish: the live row exists between claim and finish, the transcript reads back whole", async () => {
     const ledger = new InMemoryRunLedger(() => 0);
     expect(await ledger.claim(claimReq("r1", "slack:C1:1.0"))).toEqual({ ok: true });

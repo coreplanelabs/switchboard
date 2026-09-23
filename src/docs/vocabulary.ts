@@ -15,6 +15,8 @@ import type { PlanePullRequestRow } from "../core/plane/table.js";
 import type { ReviewVerdict } from "../core/reviewVerdict.js";
 import type { RunRecord } from "../core/runRecord.js";
 import type { RunSummary } from "../core/runRegistry/projections.js";
+import { RUN_LIVE_STATE_NAMES, type RunLiveState } from "../core/runLiveState.js";
+import { liveStateWords } from "../core/plane/decide.js";
 import type { UnitEnding } from "../core/ship/coordinator.js";
 import type { FollowUpInput } from "../core/threadAdmission.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "../core/types.js";
@@ -27,6 +29,7 @@ import { cell } from "./reference.js";
 interface Carriers {
   RunSummary: RunSummary;
   RunRecord: RunRecord;
+  RunLiveState: RunLiveState;
   Preset: Preset;
   CoordinatorInstance: CoordinatorInstance;
   CoordinatorUnit: CoordinatorUnit;
@@ -219,6 +222,18 @@ export function renderVocabularyTable(rows: readonly VocabularyRow[]): string {
   return lines.join("\n");
 }
 
+/** The run noun's closed live-condition values and their sole user wording. */
+export function renderLiveStateValues(): string {
+  return [
+    "| Value | User wording | Carried by |",
+    "| --- | --- | --- |",
+    ...RUN_LIVE_STATE_NAMES.map(
+      (state) =>
+        `| \`${cell(state)}\` | ${cell(liveStateWords(state))} | \`RunLiveState\` (\`src/core/runLiveState.ts\`) |`,
+    ),
+  ].join("\n");
+}
+
 /** The note in the region's opening marker: what writes it, so a reader of the raw markdown edits the source. */
 export const VOCABULARY_REGION_NOTE = "npm run docs:gen — rendered from src/docs/vocabulary.ts, do not edit by hand";
 
@@ -226,5 +241,8 @@ export const VOCABULARY_REGION_NOTE = "npm run docs:gen — rendered from src/do
 export const VOCABULARY_REGIONS: Readonly<
   Record<string, Readonly<Record<string, (rows: readonly VocabularyRow[]) => string>>>
 > = {
-  "reference/vocabulary.md": { "vocabulary-nouns": renderVocabularyTable },
+  "reference/vocabulary.md": {
+    "vocabulary-nouns": renderVocabularyTable,
+    "run-live-state-values": () => renderLiveStateValues(),
+  },
 };

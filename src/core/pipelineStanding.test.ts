@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ENDING_STAGE,
   endingWordOf,
+  hostedStageDetail,
   pipelineOfEvents,
   pipelineStandingOf,
   ROUND_STAGE,
@@ -15,6 +16,21 @@ import type { RunEvent, ShipRoundOutcome } from "./runEvents.js";
 import type { UnitEnding } from "./ship/coordinator.js";
 
 // ---- the union pins (record 0065): a word added to either union must fail here ----
+
+describe("hosted pipeline live-state detail", () => {
+  it("maps every Stage to display-safe working detail", () => {
+    expect(Object.fromEntries(STAGES.map((stage) => [stage, hostedStageDetail(stage)]))).toEqual({
+      coding: "coding a unit",
+      review: "reviewing a unit",
+      fix: "fixing review findings",
+      approved: "waiting for checks and merge",
+      "merge-ready": "ready for a person to merge",
+      merged: "a unit merged",
+      idle: "waiting for the next pipeline step",
+      ended: "finishing the pipeline",
+    });
+  });
+});
 
 /** Compile-time exhaustive switch over `ShipRoundOutcome`: a new outcome makes
  *  this function fail to type-check until the fold's mapping decides it. */

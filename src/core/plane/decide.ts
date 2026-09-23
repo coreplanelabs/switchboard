@@ -12,6 +12,31 @@
 import { PLANE, minutesToMs } from "../budgets.js";
 import type { ProviderFailureCause } from "../provider.js";
 import type { PlaneFinding } from "./findings.js";
+import type { RunLiveStateName } from "../runLiveState.js";
+
+/** The one user wording table for the server-owned live condition. */
+export function liveStateWords(state: RunLiveStateName): string {
+  switch (state) {
+    case "admitted":
+      return "admitted";
+    case "waiting_deploy":
+      return "waiting for the current deploy";
+    case "waiting_repository":
+      return "waiting for the repository container";
+    case "falling_back":
+      return "switching to a fallback workspace";
+    case "preparing":
+      return "preparing the workspace";
+    case "working":
+      return "working";
+    case "waiting_provider":
+      return "waiting for the model provider";
+    case "wrapping_up":
+      return "wrapping up";
+    case "ended":
+      return "ended";
+  }
+}
 
 // ---- endings and their causes (record 0064, "Endings and the watches") ------------------------
 

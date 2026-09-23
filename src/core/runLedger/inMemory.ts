@@ -4,6 +4,7 @@
 
 import { INTAKE_DELIVERY_CLAIM_MS } from "../budgets.js";
 import { utf8ByteLength, type RunRecord } from "../runRecord.js";
+import { assignRunLiveState } from "../runLiveState.js";
 import {
   checkFence,
   decideClaim,
@@ -51,6 +52,8 @@ import type {
   IntakeReceipt,
   IntakeWriteResult,
   LiveRunRow,
+  LiveStateAssignRequest,
+  LiveStateAssignResult,
   ReclaimedRun,
   RunJob,
   RunState,
@@ -102,6 +105,9 @@ export class InMemoryRunLedger implements RunLedger {
   /** The failure toggle (run-history item 59): tests flip a flag to make the
    *  next intake write or read throw, the way a lost Worker does. */
   readonly intakeFailure: { write?: boolean; read?: boolean } = {};
+  /** Transaction failure injection for the reference live-state writer. The
+   *  drafts must remain invisible when the commit point throws. */
+  readonly liveStateFailure: { beforeCommit?: boolean } = {};
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -163,6 +169,10 @@ export class InMemoryRunLedger implements RunLedger {
       tools: req.tools,
       state: req.state ?? {},
     });
+    // A new live segment starts without a live-event table. Clear any prior
+    // generation's entries, then let the first append create the table so its
+    // absence still means that a pending event batch has not flushed.
+    this.events.delete(req.runId);
     // A row with a session owns nothing but its log — the Worker never owns a
     // per-run transcript object for a new claim, so a write of such a run that
     // misses the log is refused here as it is live. A claim without a session
@@ -340,6 +350,50 @@ export class InMemoryRunLedger implements RunLedger {
     list.push(...events);
     this.events.set(runId, list);
     return { ok: true };
+  }
+
+  async assignLiveState(
+    runId: string,
+    gen: string,
+    assignment: LiveStateAssignRequest,
+  ): Promise<LiveStateAssignResult> {
+    const row = this.live.get(runId);
+    const fence = checkFence(row, gen);
+    if (!fence.ok) return fence;
+    if (!row) return { ok: false, reason: "unknown-run" };
+    const result = assignRunLiveState(
+      assignment.restart ? undefined : row.liveState,
+      row.liveStateSeq ?? 0,
+      assignment,
+    );
+    if (!result.ok) return result;
+    let liveStateSeq = row.liveStateSeq ?? 0;
+    const events = [...(this.events.get(runId) ?? [])];
+    let lastEventSeq = Math.max(0, ...events.map((event) => event.seq));
+    for (const source of assignment.sourceEvents ?? []) {
+      if (source.seq <= lastEventSeq) return { ok: false, reason: "stale-sequence" };
+      lastEventSeq = source.seq;
+    }
+    const boundarySeq = result.event ? (assignment.eventSeq ?? lastEventSeq + 1) : undefined;
+    if (boundarySeq !== undefined && boundarySeq <= lastEventSeq) return { ok: false, reason: "stale-sequence" };
+    for (const source of assignment.sourceEvents ?? []) {
+      events.push(source);
+      liveStateSeq = source.seq;
+    }
+    if (result.event && boundarySeq !== undefined) {
+      liveStateSeq = boundarySeq;
+      events.push({ ...result.event, seq: liveStateSeq });
+    }
+    if (this.liveStateFailure.beforeCommit) throw new Error("live-state commit failed");
+    if ((assignment.sourceEvents?.length ?? 0) > 0 || result.event) this.events.set(runId, events);
+    row.state = { ...row.state, ...assignment.statePatch, liveState: result.liveState, liveStateSeq };
+    row.liveState = result.liveState;
+    row.liveStateSeq = liveStateSeq;
+    return {
+      ...result,
+      ...(result.event ? { event: { ...result.event, seq: liveStateSeq } } : {}),
+      liveStateSeq,
+    };
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {

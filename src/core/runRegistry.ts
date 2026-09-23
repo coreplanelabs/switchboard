@@ -33,6 +33,8 @@ import {
 } from "./runRegistry/projections.js";
 import { IndexFeed, type IndexSubscriber } from "./runRegistry/indexFeed.js";
 import { PACE_WINDOW_MS } from "./runPace.js";
+import { foldRunLiveState, type RunLiveStateMaterialized } from "./runLiveState.js";
+import type { LiveStateAssignResult } from "./runLedger/types.js";
 
 /** Hard cap on the pace ring (item 32): the window's stamps for a run far
  *  chattier than any real one; past it the oldest go first, like the backlog. */
@@ -80,6 +82,10 @@ export interface CreateOptions {
    *  the card's, the unit thread's — keeps opening the page across a
    *  container replacement. Absent, a fresh token is minted. */
   token?: string;
+  /** Durable row projection used on a reclaim; later replayed boundaries win by sequence. */
+  liveState?: RunLiveStateMaterialized;
+  /** A restart keeps the stream but begins a new live-state segment after the predecessor ended. */
+  resetLiveState?: boolean;
 }
 
 export interface RunHandle {
@@ -255,6 +261,10 @@ export class RunRegistry {
       if (!isSpanRecord(event)) run.stepCount++;
       appendToBacklog(run, this.bounds, { ...event, seq });
     }
+    const replayedLiveState = foldRunLiveState(opts.replay ?? [], opts.liveState);
+    const folded = opts.resetLiveState ? { liveStateSeq: replayedLiveState.liveStateSeq } : replayedLiveState;
+    run.liveState = folded.liveState;
+    run.liveStateSeq = folded.liveStateSeq;
     this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
     return { id, token, control: run.control, ...(stored !== undefined ? { label: stored } : {}) };
   }
@@ -361,6 +371,34 @@ export class RunRegistry {
     // summary is built cheaply from the run we already hold. A span record is
     // timing, not activity: it never repaints the index.
     if (!span) this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
+  }
+
+  /** Apply an assignment only after its durable transaction acknowledged. The
+   *  boundary keeps the ledger-assigned stream sequence; subscribers cannot
+   *  observe either half before this call. */
+  commitLiveState(id: string, committed: Extract<LiveStateAssignResult, { ok: true }>): boolean {
+    const run = this.runs.get(id);
+    if (!run || run.finished || run.sealedAt !== undefined) return false;
+    const event = committed.event;
+    if (event !== undefined) {
+      const seq = event.seq;
+      if (seq === undefined || seq !== run.eventCount + 1) return false;
+      run.eventCount = seq;
+      run.stepCount++;
+      const stamped: RunEvent = { ...event, seq };
+      appendToBacklog(run, this.bounds, stamped);
+      for (const sub of run.subscribers) {
+        try {
+          sub.onEvent(stamped, seq);
+        } catch {
+          // Subscriber failures never roll back the already-durable assignment.
+        }
+      }
+    }
+    run.liveState = committed.liveState;
+    run.liveStateSeq = committed.liveStateSeq;
+    this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
+    return true;
   }
 
   /** Mark a run finished — the agent stopped: stamp `finishedAt`, send every

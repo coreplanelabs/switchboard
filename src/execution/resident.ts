@@ -1,4 +1,4 @@
-import { DRAIN, MINUTE_MS } from "../core/budgets.js";
+import { DRAIN } from "../core/budgets.js";
 import { refusalOf, residentErrorCause, RefusalError } from "../core/refusal.js";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { classifyError } from "../core/trace/classify.js";
@@ -26,6 +26,7 @@ import type { ResidentStep } from "./residentStepTrace.js";
 import { sanitizeGraftedSteps, withResidentTrace } from "./residentTrace.js";
 import { repoResourceId } from "../core/residentAdmin.js";
 import { EXEC_CALL_MARGIN_MS, attachBoundWithinRun, clampBashTimeout } from "./bashTimeout.js";
+import type { ResidentLiveStateObserver } from "../core/runLiveState.js";
 import { DISK_PRESSURE_REASON } from "./residentDiskBudget.js";
 import {
   MEMORY_PRESSURE_REASON,
@@ -575,13 +576,8 @@ export interface ResidentExecutorOptions {
    *  never a token. Absent (a test, the CLI), the body carries only what a
    *  caller gave. */
   resolveEnvs?: () => Promise<Record<string, string>>;
-  /** The card's word while the run is admitted onto a drained fleet (issue
-   *  2044): called with one line in user words — `waiting for the deploy to
-   *  finish · N min` — on each poll of the drain wait, and with `undefined`
-   *  when the wait ends, so the card never counts an `attaching the
-   *  workspace…` silence through a deploy. Absent (a test, the CLI): the wait
-   *  is as it was. */
-  onSetupNote?: (note: string | undefined) => void;
+  /** Awaited, typed observations for the two resident waits it alone witnesses. */
+  onLiveStateObservation?: ResidentLiveStateObserver;
 }
 
 /** What a successful /attach reports about the thread's worktree. */
@@ -930,6 +926,7 @@ export class ResidentExecutor implements Executor {
   private runtimeReplacedStreak = 0;
 
   private lastBinding?: ResidentBinding;
+  private attachAttempt = 0;
 
   /** The thread's binding as the resident answered it on the most recent
    *  successful attach — including a mid-run re-attach after an eviction, which
@@ -1155,6 +1152,7 @@ export class ResidentExecutor implements Executor {
     span?: Span,
     opts: { signal?: AbortSignal; budgetMs?: number; drainBoundMs?: number } = {},
   ): Promise<ResidentBinding> {
+    this.attachAttempt++;
     const answer = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
     if (answer.ok) return answer.binding;
     if (isDrainingRefusal(answer)) {
@@ -1219,19 +1217,16 @@ export class ResidentExecutor implements Executor {
       t0 + (left === undefined ? DRAIN_WAIT_MAX_MS : Math.max(0, left - DRAIN_LEASE_RESERVE_MS)),
     );
     let answer = first;
-    // The card's one line while the run waits (issue 2044): user words, the
-    // minutes counted up on every poll, cleared however the wait ends — the
-    // silence of `attaching the workspace…` through a whole deploy is the
-    // incident this exists for.
-    const note = (now: number) =>
-      this.opts.onSetupNote?.(
-        `waiting for the deploy to finish · ${Math.max(1, Math.round((now - t0) / MINUTE_MS))} min`,
-      );
+    await this.opts.onLiveStateObservation?.({
+      state: "waiting_deploy",
+      bound: deadline,
+      reason: "deploy",
+      attempt: this.attachAttempt,
+    });
     const waitSpan = span?.start("dispatch.workspace.attach.drain-wait");
     try {
       for (;;) {
         const now = systemClock();
-        note(now);
         if (now >= deadline)
           throw new ResidentDrainingError(this.opts.resource, now - t0, drainingUntil(answer), refusalWords(answer));
         await wakePause(Math.min(DRAIN_POLL_MS, deadline - now), opts.signal, "/attach");
@@ -1275,7 +1270,7 @@ export class ResidentExecutor implements Executor {
       }
       throw err;
     } finally {
-      this.opts.onSetupNote?.(undefined);
+      // The server assigns the next lifecycle boundary; the resident never clears a state itself.
     }
   }
 
@@ -1701,6 +1696,13 @@ export class ResidentExecutor implements Executor {
     // the strikes', the binding's — is the whole wait, never short by one
     // probe, and a message after a re-attach counts the re-attach.
     const t0 = systemClock();
+    const wakeBound = t0 + wakeWaitBudget(opts.budgetMs);
+    await this.opts.onLiveStateObservation?.({
+      state: "waiting_repository",
+      bound: wakeBound,
+      reason: "repository_container",
+      attempt: this.attachAttempt,
+    });
     let transient = opts.origin === "transient-refusal";
     /** A definite engine view — no wake recovers from it — or a Worker that did not answer: refused. */
     const definite = (why: string): ExecInfraError => residentWakeStrike(route, refusal, why, "refused", opts.origin);

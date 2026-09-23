@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   BASH_TIMEOUT_MAX_MS,
   ExecCapacityError,
@@ -22,6 +22,7 @@ import {
   drainWaitOf,
   ResidentDrainingError,
   isDrainingRefusal,
+  type ResidentExecutorOptions,
 } from "./resident.js";
 import { classificationOf } from "../core/trace/classify.js";
 import { BASH_TIMEOUT_MS } from "./bashTimeout.js";
@@ -2627,20 +2628,47 @@ describe("ResidentExecutor.attach during a fleet drain (item 69)", () => {
     expect(calls.map(route)).toEqual(["/attach", "/attach", "/attach"]);
   });
 
+  it("the resident observation callback can type only the two waits and is awaited before polling", async () => {
+    type Observation = Parameters<NonNullable<ResidentExecutorOptions["onLiveStateObservation"]>>[0];
+    expectTypeOf<Observation["state"]>().toEqualTypeOf<"waiting_deploy" | "waiting_repository">();
+    const { calls } = stubFetch(draining, { raw: "\n" + JSON.stringify(ATTACH_OK) });
+    let accept!: () => void;
+    const accepted = new Promise<void>((resolve) => (accept = resolve));
+    const observations: Observation[] = [];
+    const ex = new ResidentExecutor({
+      ...OPTS,
+      onLiveStateObservation: async (observation) => {
+        observations.push(observation);
+        await accepted;
+      },
+    });
+    const attached = ex.attach();
+    await vi.advanceTimersByTimeAsync(DRAIN_POLL_MS);
+    expect(observations).toHaveLength(1);
+    expect(calls.map(route)).toEqual(["/attach"]);
+    accept();
+    await vi.advanceTimersByTimeAsync(DRAIN_POLL_MS);
+    await attached;
+    expect(calls.map(route)).toEqual(["/attach", "/attach"]);
+  });
+
   it("the wait says so on the card (issue 2044): `onSetupNote` paints `waiting for the deploy to finish · N min` on each poll, and clears it when the wait ends", async () => {
     stubFetch(draining, draining, draining, { raw: "\n" + JSON.stringify(ATTACH_OK) });
-    const notes: (string | undefined)[] = [];
-    const ex = new ResidentExecutor({ ...OPTS, onSetupNote: (n) => notes.push(n) });
+    const observations: unknown[] = [];
+    const ex = new ResidentExecutor({
+      ...OPTS,
+      onLiveStateObservation: async (observation) => void observations.push(observation),
+    });
     const p = ex.attach();
     await vi.advanceTimersByTimeAsync(3 * DRAIN_POLL_MS);
     await p;
-    // Under a minute in, the line rounds up to 1 min; at 90 s it reads 2 min
-    // (rounded); the wait's end clears the note so the attach label returns.
-    expect(notes).toEqual([
-      "waiting for the deploy to finish · 1 min",
-      "waiting for the deploy to finish · 1 min",
-      "waiting for the deploy to finish · 1 min",
-      undefined,
+    expect(observations).toEqual([
+      {
+        state: "waiting_deploy",
+        bound: expect.any(Number),
+        reason: "deploy",
+        attempt: 1,
+      },
     ]);
   });
 

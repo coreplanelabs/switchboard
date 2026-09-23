@@ -107,6 +107,9 @@ export interface RunView {
   schema?: number;
   finished: boolean;
   status?: RunRecord["status"];
+  /** Server-owned live condition, absent only for legacy/pre-admission rows. */
+  liveState?: RunRecord["liveState"];
+  liveStateSeq?: number;
   /** Total events published (monotonic; the backlog/record may hold fewer). */
   eventCount: number;
   storedEventCount?: number;
@@ -518,6 +521,8 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     ...(m.repo !== undefined ? { repo: m.repo } : {}),
     startedAt: row.startedAt,
     finished: false,
+    ...(row.liveState !== undefined ? { liveState: row.liveState } : {}),
+    ...(row.liveStateSeq !== undefined ? { liveStateSeq: row.liveStateSeq } : {}),
     eventCount: events.length,
     ...(activity !== undefined ? { activity } : {}),
     ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
@@ -559,6 +564,8 @@ function liveView(s: RunSummary): RunView {
     ...(s.stepCount !== undefined ? { stepCount: s.stepCount } : {}),
     ...(s.schema !== undefined ? { schema: s.schema } : {}),
     ...(s.status !== undefined ? { status: s.status } : {}),
+    ...(s.liveState !== undefined ? { liveState: s.liveState } : {}),
+    ...(s.liveStateSeq !== undefined ? { liveStateSeq: s.liveStateSeq } : {}),
     eventCount: s.eventCount,
     ...(s.stop ? { stop: s.stop } : {}),
     ...(s.activity !== undefined ? { activity: s.activity } : {}),

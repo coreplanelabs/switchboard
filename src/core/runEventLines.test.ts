@@ -21,6 +21,18 @@ describe("parseRunEventLines", () => {
     });
   });
 
+  it("parses run_state boundaries and rejects a live member without its absolute bound", () => {
+    const out = parseRunEventLines(
+      [
+        '{"type":"run_state","state":"working","since":100,"bound":900,"detail":"model turn","at":100}',
+        '{"type":"run_state","state":"ended","since":900,"cause":"completed","at":900}',
+        '{"type":"run_state","state":"working","since":100}',
+      ].join("\n"),
+    );
+    expect(out.events.map((event) => event.type)).toEqual(["run_state", "run_state"]);
+    expect(out.skipped).toBe(1);
+  });
+
   it("parses a raw SSE capture: data: frames, ignoring retry/event/comment lines and the end frame", () => {
     const text = [
       "retry: 3000",

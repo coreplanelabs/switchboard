@@ -217,6 +217,14 @@ export async function launchResumes(
         id: row.runId,
         startedAt: row.startedAt,
         replay: run.events,
+        ...(row.liveState !== undefined
+          ? {
+              liveState: {
+                liveState: row.liveState,
+                ...(row.liveStateSeq !== undefined ? { liveStateSeq: row.liveStateSeq } : {}),
+              },
+            }
+          : {}),
       });
       const adopted = deps.runLedger.adopt({
         runId: row.runId,

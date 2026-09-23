@@ -635,6 +635,50 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     end,
   });
 
+  it("serializes every streamed event behind durable tool projection and still publishes a tool event when projection fails", async () => {
+    const s = endingIn(async (_deps, run) => {
+      run.onEvent?.({ type: "tool_call", tool: "bash", summary: "$ true", callId: "ordered" });
+      run.onEvent?.({ type: "assistant", text: "between the call and result" });
+      run.onEvent?.({ type: "tool_result", tool: "bash", ok: true, summary: "exit 0", callId: "ordered" });
+      return sessionAnswering("done");
+    });
+    expect(
+      s.registry.commitLiveState("run-l", {
+        ok: true,
+        liveState: { state: "working", since: NOW, bound: NOW + 60_000, detail: "model turn" },
+        liveStateSeq: 0,
+      }),
+    ).toBe(true);
+    const ledgerRun = new NullLedgerRun("run-l", { put: async () => {}, abandoned: () => {} });
+    ledgerRun.tracked = () => true;
+    let sourceAssignments = 0;
+    ledgerRun.assignLiveState = async (assignment) => {
+      if (!assignment.sourceEvents?.length) return { ok: false, reason: "stale-sequence" };
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      sourceAssignments++;
+      if (sourceAssignments === 1) return { ok: false, reason: "stale-sequence" };
+      return {
+        ok: true,
+        liveState: { state: "working", since: NOW, bound: assignment.bound!, detail: assignment.detail },
+        liveStateSeq: assignment.sourceEvents.at(-1)!.seq,
+      };
+    };
+
+    await runLoop(s.deps, { ...s.ctx, ledgerRun });
+
+    expect(
+      s.registry
+        .snapshotById("run-l")!
+        .events.filter(
+          (event) =>
+            (event.type === "tool_call" && event.callId === "ordered") ||
+            (event.type === "tool_result" && event.callId === "ordered") ||
+            (event.type === "assistant" && event.text === "between the call and result"),
+        )
+        .map((event) => event.type),
+    ).toEqual(["tool_call", "assistant", "tool_result"]);
+  });
+
   it("the tool the finale interrupted — the run ends with its wind-down's answer, the call open on the record until the session's end cuts it as pi's does: the workspace is released `always`, torn down, not paired behind the command still running, and the record says why", async () => {
     const s = endingIn(async (_deps, run) => {
       openToolCall(run);

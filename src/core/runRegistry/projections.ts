@@ -3,6 +3,7 @@ import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import type { PipelineSummary } from "../pipelineStanding.js";
 import type { RunEvent, StopMode } from "../runEvents.js";
 import type { RunSeed, RunStatus } from "../runRecord.js";
+import type { RunLiveState } from "../runLiveState.js";
 import { eventsInWindow, type InFlightCall } from "../runPace.js";
 import type { RunState, SealedFrame } from "./state.js";
 
@@ -90,6 +91,9 @@ export interface RunSummary {
    *  `ship_round`/`ship_unit` events, present only once one was published —
    *  a hosted parent's row, never a model run's. */
   pipeline?: PipelineSummary;
+  /** Server-owned live condition; absent on rows written before it existed. */
+  liveState?: RunLiveState;
+  liveStateSeq?: number;
   /** Present only once a stop has been requested. */
   stop?: RunStopStatus;
   /** Present (true) once the history writer confirmed the run is in the durable
@@ -131,6 +135,9 @@ export interface RunSnapshot {
   /** True when the bounded backlog dropped events (`eventCount > events.length`):
    *  a consumer analyzing `events` is looking at a head-truncated stream. */
   truncated: boolean;
+  /** Current server-owned condition at the snapshot boundary. */
+  liveState?: RunLiveState;
+  liveStateSeq?: number;
 }
 
 /** What `seal()` returns, and what the record writer merges after the reply:
@@ -172,6 +179,8 @@ export function summaryOf(run: RunState, now: number): RunSummary {
     ...(m?.hosted ? { hosted: true as const } : {}),
     ...(run.instanceId !== undefined ? { instanceId: run.instanceId } : {}),
     ...(run.pipeline !== undefined ? { pipeline: run.pipeline } : {}),
+    ...(run.liveState !== undefined ? { liveState: run.liveState } : {}),
+    ...(run.liveStateSeq !== undefined ? { liveStateSeq: run.liveStateSeq } : {}),
     finished: run.finished,
     startedAt: run.startedAt,
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
@@ -214,6 +223,8 @@ export function snapshotOf(run: RunState): RunSnapshot {
     eventCount: run.eventCount,
     stepCount: run.stepCount,
     truncated: run.eventCount > run.backlog.length,
+    ...(run.liveState !== undefined ? { liveState: run.liveState } : {}),
+    ...(run.liveStateSeq !== undefined ? { liveStateSeq: run.liveStateSeq } : {}),
   };
 }
 

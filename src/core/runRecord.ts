@@ -5,6 +5,7 @@ import type { ProviderFailureCause } from "./provider.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isRunUsage, type RunUsage } from "./runUsage.js";
 import type { PushedBranch } from "../execution/residentRebind.js";
+import type { RunLiveState } from "./runLiveState.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
 import {
   type FindingDisposition,
@@ -124,6 +125,9 @@ export interface RunRecord {
   stepCount?: number;
   schema?: number;
   status: RunStatus;
+  /** Final server-owned live condition. Optional on records from older writers. */
+  liveState?: RunLiveState;
+  liveStateSeq?: number;
   /** Present on a tombstone record still in its provisional window — the
    *  start-of-run `interrupted` or the drain-deadline upgrade — before the
    *  run's final write lands. Absent on every final (finished) record. A

@@ -38,6 +38,8 @@ import {
   type IntakeReceipt,
   type IntakeWriteResult,
   type LiveRunMeta,
+  type LiveStateAssignRequest,
+  type LiveStateAssignResult,
   type RunState,
   type StepRecord,
   type StopMode,
@@ -246,6 +248,8 @@ export interface LedgerRun {
   step(report: StepReport): Promise<void>;
   /** A registry event, in publish order, with the registry's `seq`. */
   event(event: RunEvent, seq: number): void;
+  /** Flush older events, then atomically commit a live-state boundary and projection. */
+  assignLiveState(assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult>;
   /** Merge into the run's state and send it (coalesced: the newest wins). */
   setState(patch: RunState): void;
   /** `live → finishing`, before the reply — the double-answer gate (D9). */
@@ -492,6 +496,9 @@ export class NullLedgerRun implements LedgerRun {
   }
   event(_event: RunEvent, _seq: number): void {
     // no ledger to mirror onto
+  }
+  async assignLiveState(_assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult> {
+    return { ok: false, reason: "unknown-run" };
   }
   setState(_patch: RunState): void {
     // no ledger to mirror onto
@@ -1065,7 +1072,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
 
     event(event: RunEvent, seq: number): void {
-      if (this.detached || this.finished) return;
+      if (this.detached || this.finished || seq <= this.lastSeq) return;
       this.lastSeq = seq;
       // The heartbeat body's stream facts (record 0064): the last event's
       // time and the newest pushed head with its `clean` fact ride each beat.
@@ -1090,6 +1097,31 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           ...(e.clean !== undefined ? { clean: e.clean } : {}),
         };
       this.flusher.push({ ...event, seq });
+    }
+
+    async assignLiveState(assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult> {
+      if (this.detached || this.finished) return { ok: false, reason: "unknown-run" };
+      await this.flusher.flush();
+      await this.stateSending;
+      try {
+        const result = await ledger.assignLiveState(this.runId, gen, assignment);
+        if (!result.ok) {
+          if (result.reason === "fenced" || result.reason === "unknown-run")
+            this.detach(`live state refused (${result.reason})`);
+          return result;
+        }
+        this.state = {
+          ...this.state,
+          ...assignment.statePatch,
+          liveState: result.liveState,
+          liveStateSeq: result.liveStateSeq,
+        };
+        this.lastSeq = Math.max(this.lastSeq, result.liveStateSeq);
+        return result;
+      } catch (err) {
+        warn(`[ledger] ${this.threadKey} live state not written: ${describe(err)}`);
+        return { ok: false, reason: "unknown-run" };
+      }
     }
 
     setState(patch: RunState): void {
