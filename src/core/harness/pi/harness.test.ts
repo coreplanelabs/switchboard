@@ -1111,64 +1111,40 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
   });
 
-  // Feature: docs/reference/specs/model-proxy.md item 12a — post-loop turns
-  // share the run's provider hold: a description/verdict/re-review/follow-up
-  // turn stays live through a parked 402 and the provider-up release reissues
-  // that same turn instead of ending the run.
+  // Features: docs/reference/specs/model-proxy.md item 12a and
+  // docs/reference/specs/run-history.md item 40 — post-loop turns share the
+  // run's provider hold: a description/verdict/re-review/follow-up turn stays
+  // live through a parked 402, and every provider-up row that lands before the
+  // successful release response remains consumed after restart.
   it("a 402 during a follow-up turn parks and resumes on provider-up without ending the run", async () => {
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const wt = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-A",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+      sleep: async () => {},
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      schedule: () => ({ cancel() {} }),
+    });
     const w = world({ providerPark: true });
-    scriptedPi(w.container, (n, c) => {
-      if (n === 0) finalTurn(c, "loop done");
-      else if (n === 1)
-        c.emit(
-          {
-            type: "message_end",
-            message: {
-              role: "assistant",
-              content: [],
-              stopReason: "error",
-              errorMessage:
-                '402 {"error":{"type":"provider_failure","cause":"credit-or-quota-exhausted","message":"credit exhausted"}}',
-            },
-          },
-          { type: "agent_settled" },
-        );
-      else if (n === 2) {
-        echoPrompt(c);
-        finalTurn(c, "follow-up recovered");
-      } else finalTurn(c, "the session is still live");
+    const opened = await wt.open({
+      runId: "run-7",
+      threadKey: "slack:C1:1.0",
+      startedAt: NOW,
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0", agent: "coding", model: "p/m" },
+      system: "You are the coding agent.",
+      tools: [],
+      seed: { messages: w.run.messages, budgetMs: 600_000 },
     });
-    const session = await w.open();
-    const turn = session.followUp({
-      text: "write the PR description",
-      maxTurns: 4,
-      maxMinutes: 5,
-      toolContext: { executor },
-    });
-    await vi.waitFor(() => expect(w.notes.some((note) => note.includes("the turn is held"))).toBe(true));
-    w.inbox.push({
-      text: reissueSteerSentence("anthropic"),
-      userId: "plane",
-      userName: "plane",
-      at: NOW,
-      ledgerSeq: 3,
-    });
-    await expect(turn).resolves.toBe("follow-up recovered");
-    await expect(
-      session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
-    ).resolves.toBe("the session is still live");
-    const prompts = w.container.commands().filter((command) => command.type === "prompt");
-    expect(prompts).toHaveLength(4);
-    expect(String(prompts[2].id)).toContain(":reissue");
-    expect(w.inbox.size).toBe(0);
-    await session.end();
-  });
-
-  // Feature: docs/reference/specs/harness-pi.md item 6 — a provider-up row
-  // buffered while a post-loop local retry is in flight is consumed when that
-  // retry wins, so a restart cannot replay the row into a later provider hold.
-  it("a provider-up buffered during a successful follow-up retry is consumed before restart", async () => {
-    const w = world({ providerPark: true, sleep: async () => new Promise<void>((resolve) => setImmediate(resolve)) });
+    if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
+    const ledgerRun = opened.run;
+    w.run.onStep = ledgerRun.step.bind(ledgerRun);
+    const up = { text: reissueSteerSentence("anthropic"), userId: "plane", userName: "plane", at: NOW };
+    const where = { channelId: "slack:C1", threadKey: "slack:C1:1.0" };
+    const firstUpSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
+    const inFlightUpSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
     let prompts = 0;
     w.container.onStdin = (line) => {
       const cmd = JSON.parse(line) as Record<string, unknown>;
@@ -1186,14 +1162,113 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
 
       const prompt = prompts++;
       if (prompt === 2) {
-        w.inbox.push({
-          text: reissueSteerSentence("anthropic"),
-          userId: "plane",
-          userName: "plane",
-          at: NOW,
-          ledgerSeq: 3,
+        // The release prompt is already in flight. A second provider-up row
+        // landing now must be checkpointed with the row that caused it.
+        w.inbox.push({ ...up, ledgerSeq: inFlightUpSeq });
+        w.container.emit({ type: "queue_update" });
+      }
+      w.container.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      if (prompt === 0) finalTurn(w.container, "loop done");
+      else if (prompt === 1)
+        w.container.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage:
+                '402 {"error":{"type":"provider_failure","cause":"credit-or-quota-exhausted","message":"credit exhausted"}}',
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else {
+        echoPrompt(w.container);
+        finalTurn(w.container, "follow-up recovered");
+      }
+    };
+
+    const session = await w.open();
+    const turn = session.followUp({
+      text: "write the PR description",
+      maxTurns: 4,
+      maxMinutes: 5,
+      toolContext: { executor },
+    });
+    await vi.waitFor(() => expect(w.notes.some((note) => note.includes("the turn is held"))).toBe(true));
+    w.inbox.push({ ...up, ledgerSeq: firstUpSeq });
+    await expect(turn).resolves.toBe("follow-up recovered");
+
+    ledger.live.get("run-7")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-B", NOW, 30_000);
+    expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(inFlightUpSeq);
+    expect(reclaimed?.inbox).toEqual([]);
+    const promptsSent = w.container.commands().filter((command) => command.type === "prompt");
+    expect(promptsSent).toHaveLength(3);
+    expect(String(promptsSent[2].id)).toContain(":reissue");
+    expect(w.inbox.size).toBe(0);
+    await session.end();
+  });
+
+  // Features: docs/reference/specs/harness-pi.md item 6 and
+  // docs/reference/specs/run-history.md item 40 — a provider-up row buffered
+  // while a post-loop local retry is in flight is durably consumed when that
+  // retry wins. A restart must keep an ordinary row beside it deferred without
+  // replaying the provider-up row into a later hold, and the session transcript
+  // remains the loop's rather than absorbing the follow-up turn.
+  it("a provider-up buffered during a successful follow-up retry stays consumed across a process restart while an ordinary follow-up beside it survives", async () => {
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const wt = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-A",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+      sleep: async () => {},
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      schedule: () => ({ cancel() {} }),
+    });
+    const w = world({ providerPark: true, sleep: async () => new Promise<void>((resolve) => setImmediate(resolve)) });
+    const opened = await wt.open({
+      runId: "run-7",
+      threadKey: "slack:C1:1.0",
+      startedAt: NOW,
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0", agent: "coding", model: "p/m" },
+      system: "You are the coding agent.",
+      tools: [],
+      seed: { messages: w.run.messages, budgetMs: 600_000 },
+    });
+    if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
+    const ledgerRun = opened.run;
+    w.run.onStep = ledgerRun.step.bind(ledgerRun);
+    const ordinary = { text: "also bump the changelog", userId: "slack:UALICE", at: NOW };
+    const up = { text: reissueSteerSentence("anthropic"), userId: "plane", userName: "plane", at: NOW };
+    const where = { channelId: "slack:C1", threadKey: "slack:C1:1.0" };
+    const ordinarySeq = (await ledger.pushInbox("run-7", { ...where, ...ordinary })).seq!;
+    const upSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
+    expect(upSeq).toBeGreaterThan(ordinarySeq);
+
+    let prompts = 0;
+    w.container.onStdin = (line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry")
+        w.container.emit({ id: cmd.id, type: "response", command: "set_auto_retry", success: true });
+      if (cmd.type === "get_state")
+        w.container.emit({
+          id: cmd.id,
+          type: "response",
+          command: "get_state",
+          success: true,
+          data: { sessionFile: `${paths.sessionDir}/s.jsonl`, sessionId: "sid", isStreaming: false },
         });
-        // One ordinary loop iteration lets the live inbox drain while the
+      if (cmd.type !== "prompt") return;
+
+      const prompt = prompts++;
+      if (prompt === 2) {
+        w.inbox.push({ ...ordinary, ledgerSeq: ordinarySeq });
+        w.inbox.push({ ...up, ledgerSeq: upSeq });
+        // One ordinary loop iteration drains the live inbox while the local
         // retry's prompt response is still pending.
         w.container.emit({ type: "queue_update" });
       }
@@ -1213,22 +1288,24 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
           { type: "agent_settled" },
         );
       else if (prompt === 2) finalTurn(w.container, "follow-up recovered on the local retry");
-      else w.container.loseTransport("word", "vm-new");
     };
 
     const session = await w.open();
+    const loopTranscript = await ledger.readSession(ledgerRun.session!.key, 0);
     await expect(
       session.followUp({ text: "write the PR description", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
     ).resolves.toBe("follow-up recovered on the local retry");
+    expect(await ledger.readSession(ledgerRun.session!.key, 0)).toEqual(loopTranscript);
 
-    const restart = await session
-      .followUp({ text: "one more turn", maxTurns: 4, maxMinutes: 5, toolContext: { executor } })
-      .catch((error: unknown) => error);
-    expect(restart).toBeInstanceOf(PiContainerReplacedError);
-    const consumedAtRestart = (restart as PiContainerReplacedError).record.inboxConsumedSeq;
-    expect(consumedAtRestart).toBe(3);
-    const durableInbox = [{ ledgerSeq: 3, text: reissueSteerSentence("anthropic") }];
-    expect(durableInbox.filter((row) => row.ledgerSeq > consumedAtRestart)).toEqual([]);
+    // The bot process dies here; reclaim must use the durable cursor, not the
+    // in-process relaunch record, and offer only the ordinary deferred row.
+    ledger.live.get("run-7")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-B", NOW, 30_000);
+    expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(upSeq);
+    expect(reclaimed?.lastStep?.inboxDeferredSeqs).toEqual([ordinarySeq]);
+    expect(reclaimed!.inbox.map((item) => item.seq)).toEqual([ordinarySeq]);
+    expect(reclaimed!.inbox[0]!.message.text).toBe(ordinary.text);
+    await session.end();
   });
 
   // Feature: docs/reference/specs/harness-pi.md item 6 — one drain hands pi an
@@ -1289,7 +1366,8 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
         );
       else {
         // pi reads the reissue prompt first; the steer waits for its next
-        // boundary. The prompt's echo and the next step land, then the bot dies.
+        // boundary. The release cursor checkpoint, prompt echo and next step
+        // land, then the bot dies.
         echoPrompt(c);
         c.emit({
           type: "message_end",
@@ -1301,7 +1379,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     await vi.waitFor(() => expect(w.notes.some((note) => note.includes("the turn is held"))).toBe(true));
     w.inbox.push({ ...ordinary, ledgerSeq: ordinarySeq });
     w.inbox.push({ ...up, ledgerSeq: upSeq });
-    await vi.waitFor(() => expect(written).toBe(1));
+    await vi.waitFor(() => expect(written).toBe(2));
     const steered = w.container.commands().filter((c) => c.type === "steer");
     expect(steered).toHaveLength(1);
     expect(String(steered[0]!.message)).toContain("also bump the changelog");
@@ -1338,6 +1416,173 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(String(delivered[0]!.message)).toContain("also bump the changelog");
     expect(String(delivered[0]!.message)).not.toContain(reissueSteerSentence("anthropic"));
     expect(next.steps.at(-1)?.inboxConsumedSeq).toBe(ordinarySeq);
+  });
+
+  // Feature: docs/reference/specs/harness-pi.md item 6 — a provider-up row
+  // buffered while the main loop's local retry is in flight is durably
+  // consumed when that retry wins, so reclaim cannot offer the stale control
+  // row to a later provider hold after the bot process restarts.
+  it("a provider-up buffered during a successful main-loop retry stays consumed across a process restart", async () => {
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const wt = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-A",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+      sleep: async () => {},
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      schedule: () => ({ cancel() {} }),
+    });
+    const w = world({ providerPark: true, sleep: async () => new Promise<void>((resolve) => setImmediate(resolve)) });
+    const opened = await wt.open({
+      runId: "run-7",
+      threadKey: "slack:C1:1.0",
+      startedAt: NOW,
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0", agent: "coding", model: "p/m" },
+      system: "You are the coding agent.",
+      tools: [],
+      seed: { messages: w.run.messages, budgetMs: 600_000 },
+    });
+    if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
+    w.run.onStep = opened.run.step.bind(opened.run);
+    const up = { text: reissueSteerSentence("anthropic"), userId: "plane", userName: "plane", at: NOW };
+    const upSeq = (await ledger.pushInbox("run-7", { channelId: "slack:C1", threadKey: "slack:C1:1.0", ...up })).seq!;
+
+    let prompts = 0;
+    w.container.onStdin = (line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry")
+        w.container.emit({ id: cmd.id, type: "response", command: "set_auto_retry", success: true });
+      if (cmd.type === "get_state")
+        w.container.emit({
+          id: cmd.id,
+          type: "response",
+          command: "get_state",
+          success: true,
+          data: { sessionFile: `${paths.sessionDir}/s.jsonl`, sessionId: "sid", isStreaming: false },
+        });
+      if (cmd.type !== "prompt") return;
+
+      const prompt = prompts++;
+      if (prompt === 1) {
+        // The local retry is already in flight. Its success handler must drain
+        // this row before clearing the hold that makes it redundant.
+        w.inbox.push({ ...up, ledgerSeq: upSeq });
+        w.container.emit({ type: "queue_update" });
+      }
+      w.container.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      if (prompt === 0)
+        w.container.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "502 the model provider did not answer",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else finalTurn(w.container, "recovered on the local retry");
+    };
+
+    await expect(w.start()).resolves.toBe("recovered on the local retry");
+
+    ledger.live.get("run-7")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-B", NOW, 30_000);
+    expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(upSeq);
+    expect(reclaimed?.inbox).toEqual([]);
+  });
+
+  // Feature: docs/reference/specs/harness-pi.md item 6 — every provider-up
+  // row in a main-loop release is durably consumed, including one that arrives
+  // while the reissue prompt is in flight, so reclaim cannot replay it into a
+  // later provider hold after the bot process restarts.
+  it("provider-up rows buffered during a successful main-loop reissue stay consumed across a process restart", async () => {
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const wt = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-A",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+      sleep: async () => {},
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      schedule: () => ({ cancel() {} }),
+    });
+    const w = world({ providerPark: true });
+    const opened = await wt.open({
+      runId: "run-7",
+      threadKey: "slack:C1:1.0",
+      startedAt: NOW,
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0", agent: "coding", model: "p/m" },
+      system: "You are the coding agent.",
+      tools: [],
+      seed: { messages: w.run.messages, budgetMs: 600_000 },
+    });
+    if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
+    w.run.onStep = opened.run.step.bind(opened.run);
+    const up = { text: reissueSteerSentence("anthropic"), userId: "plane", userName: "plane", at: NOW };
+    const where = { channelId: "slack:C1", threadKey: "slack:C1:1.0" };
+    const firstUpSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
+    const inFlightUpSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
+
+    let prompts = 0;
+    w.container.onStdin = (line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry")
+        w.container.emit({ id: cmd.id, type: "response", command: "set_auto_retry", success: true });
+      if (cmd.type === "get_state")
+        w.container.emit({
+          id: cmd.id,
+          type: "response",
+          command: "get_state",
+          success: true,
+          data: { sessionFile: `${paths.sessionDir}/s.jsonl`, sessionId: "sid", isStreaming: false },
+        });
+      if (cmd.type !== "prompt") return;
+
+      const prompt = prompts++;
+      if (prompt === 1) {
+        // The release prompt is already in flight. Its success handler must
+        // drain and checkpoint this second row with the row that caused it.
+        w.inbox.push({ ...up, ledgerSeq: inFlightUpSeq });
+        w.container.emit({ type: "queue_update" });
+      }
+      w.container.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      if (prompt === 0)
+        w.container.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "502 the model provider did not answer",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else {
+        echoPrompt(w.container);
+        finalTurn(w.container, "recovered on the plane reissue");
+      }
+    };
+
+    const done = w.start();
+    await vi.waitFor(() => expect(w.notes.some((note) => note.includes("the turn is held"))).toBe(true));
+    w.inbox.push({ ...up, ledgerSeq: firstUpSeq });
+    await expect(done).resolves.toBe("recovered on the plane reissue");
+
+    ledger.live.get("run-7")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-B", NOW, 30_000);
+    expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(inFlightUpSeq);
+    expect(reclaimed?.inbox).toEqual([]);
+    const promptsSent = w.container.commands().filter((command) => command.type === "prompt");
+    expect(promptsSent).toHaveLength(2);
+    expect(String(promptsSent[1]!.id)).toContain(":reissue");
   });
 
   it("a 5xx then success: the transient failure is retried after the ladder's first backoff — pi is re-prompted and the retry's answer is the run's", async () => {

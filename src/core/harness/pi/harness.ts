@@ -1388,6 +1388,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     let pendingReissue: FollowUpInput[] = [];
     /** The reissue prompt in flight, by its id: its response settles the release. */
     let reissueInFlight: string | undefined;
+    /** The provider-up rows carried by that prompt. Rows arriving after it was
+     *  sent stay in `pendingReissue`; a successful response checkpoints both
+     *  collections before either is cleared. */
+    let reissueInFlightRows: FollowUpInput[] = [];
     /** Reissue prompts sent, for their ids: one per release. */
     let reissues = 0;
     /** A held turn's local retry: armed only after pi settled on the failed
@@ -1410,20 +1414,21 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       providerRetryWait = undefined;
       providerRetryGeneration += 1;
       pendingReissue = [];
+      reissueInFlightRows = [];
     };
     const maybeReissue = () => {
       if (heldTurn === undefined || !parkSettled || reissueInFlight !== undefined || retryInFlight !== undefined)
         return;
       if (pendingReissue.length === 0) return;
       if (loopEnded || hardStopped || writeUp !== undefined || finaleAborted) return;
-      const batch = pendingReissue.splice(0);
+      reissueInFlightRows = pendingReissue.splice(0);
       reissues += 1;
       const id = reissues === 1 ? `${ids.prompt}:reissue` : `${ids.prompt}:reissue:${reissues}`;
       reissueInFlight = id;
       unechoed.push({
         message: REISSUE_PROMPT,
-        seq: Math.max(0, ...batch.map((i) => i.ledgerSeq ?? 0)),
-        inputs: batch,
+        seq: Math.max(0, ...reissueInFlightRows.map((i) => i.ledgerSeq ?? 0)),
+        inputs: reissueInFlightRows,
       });
       sends.send({ id, type: "prompt", message: REISSUE_PROMPT });
     };
@@ -1836,8 +1841,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           save();
         }
         if (reissueInFlight !== undefined && r.id === reissueInFlight) {
-          reissueInFlight = undefined;
           if (r.success === false) {
+            reissueInFlight = undefined;
             // A refused release (model-proxy item 12a): pi was not at a turn
             // boundary after all, so the hold stands — the sent rows go back
             // in the buffer, the settle flag drops, and the next
@@ -1845,15 +1850,30 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             // would ever release again.
             parkSettled = false;
             const at = unechoed.findIndex((u) => u.message === REISSUE_PROMPT);
-            if (at >= 0) pendingReissue.push(...unechoed.splice(at, 1)[0]!.inputs);
+            if (at >= 0) unechoed.splice(at, 1);
+            pendingReissue.push(...reissueInFlightRows);
+            reissueInFlightRows = [];
             note(
               "harness_error",
               `the reissue prompt was refused (${String(r.error ?? "no reason")}); the turn stays held for the next settle`,
             );
           } else {
-            // The release landed: the hold is over. Reissue rows still buffered
-            // were this same recovery's — dropped, so a stale one never
-            // releases a later hold before the plane has said the provider is up.
+            // Another up row can land after the release prompt was sent but
+            // before its response is observed. Finish that drain, then consume
+            // both the prompt's rows and the newly buffered rows durably before
+            // clearing the hold. The accepted prompt no longer stays owed: its
+            // rows are control signals, not follow-ups to replay on restart.
+            drainFollowUps();
+            await steers;
+            const at = unechoed.findIndex((u) => u.message === REISSUE_PROMPT);
+            if (at >= 0) unechoed.splice(at, 1);
+            mirror.inboxConsumedSeq = Math.max(
+              mirror.inboxConsumedSeq,
+              ...reissueInFlightRows.map((item) => item.ledgerSeq ?? 0),
+              ...pendingReissue.map((item) => item.ledgerSeq ?? 0),
+            );
+            await mirror.checkpointInbox();
+            reissueInFlight = undefined;
             clearProviderHold();
           }
         }
@@ -1862,7 +1882,20 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           if (r.success === false) {
             parkSettled = false;
             note("harness_error", "the model retry prompt was refused; the transport failure remains held");
-          } else clearProviderHold();
+          } else {
+            // An up row can land after the retry prompt was sent but before
+            // its response is observed. Finish the inbox drain already queued
+            // by that arrival, then durably consume every buffered control row
+            // before clearing the hold that made it redundant.
+            drainFollowUps();
+            await steers;
+            mirror.inboxConsumedSeq = Math.max(
+              mirror.inboxConsumedSeq,
+              ...pendingReissue.map((item) => item.ledgerSeq ?? 0),
+            );
+            await mirror.checkpointInbox();
+            clearProviderHold();
+          }
         }
         if (r.id === ids.prompt) {
           catchingUp = false;
@@ -2385,10 +2418,17 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
                   `the follow-up turn's reissue prompt was refused (${String(obs.response.error ?? "no reason")}); the turn stays held for the next settle`,
                 );
               } else {
+                // Another up row can land after the release prompt was sent but
+                // before its response is observed. Drain that race and persist
+                // both the rows that caused the prompt and those it made
+                // redundant before clearing the hold.
+                drainTurnReissues();
                 mirror.inboxConsumedSeq = Math.max(
                   mirror.inboxConsumedSeq,
                   ...turnReissueInFlightRows.map((item) => item.ledgerSeq ?? 0),
+                  ...turnReissueRows.map((item) => item.ledgerSeq ?? 0),
                 );
+                await mirror.checkpointInbox();
                 clearTurnProviderHold();
               }
             }
@@ -2407,6 +2447,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
                   mirror.inboxConsumedSeq,
                   ...turnReissueRows.map((item) => item.ledgerSeq ?? 0),
                 );
+                await mirror.checkpointInbox();
                 clearTurnProviderHold();
               }
             }

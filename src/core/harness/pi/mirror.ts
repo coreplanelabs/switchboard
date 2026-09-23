@@ -117,6 +117,11 @@ export class PiMirror {
   private seedEchoPending = false;
   private mirroredTail: LedgerTail | undefined;
   private iteration = 0;
+  /** The loop counters on the last transcript-bearing step. A cursor-only
+   * checkpoint repeats them so a post-loop turn cannot become part of the
+   * resumable model loop merely by consuming a control row. */
+  private lastTurn = 0;
+  private lastIteration = 0;
   /** The rows written since the mirror started, and the compaction entries
    *  among them by position — kept whether or not the ledger is wired, so
    *  the harness holds this generation's copy of the record it wrote
@@ -250,6 +255,8 @@ export class PiMirror {
       inboxConsumedSeq: this.inboxConsumedSeq,
       ...this.inboxDeferred(),
     };
+    this.lastTurn = report.turn;
+    this.lastIteration = report.iteration;
     this.idx += turns.length;
     this.lastAssistantIdx = this.idx - 1; // the assistant turn is the step's last row
     this.rows.push(...turns);
@@ -280,12 +287,31 @@ export class PiMirror {
       inboxConsumedSeq: this.inboxConsumedSeq,
       ...this.inboxDeferred(),
     };
+    this.lastTurn = report.turn;
+    this.lastIteration = report.iteration;
     this.idx += turns.length + 1;
     this.rows.push(...turns);
     this.compactionRows.push({ before: this.rows.length, entry });
     if (!this.deps.onStep) return false;
     await this.deps.onStep(report);
     return true;
+  }
+
+  /** Persist only the inbox cursor and its deferred exceptions. Post-loop
+   * turns deliberately stay out of the resumable transcript, but a control
+   * row they consume must survive a bot restart just as a loop step does. */
+  async checkpointInbox(): Promise<void> {
+    if (!this.deps.onStep) return;
+    await this.deps.onStep({
+      turns: [],
+      firstIdx: this.idx,
+      inFlight: [],
+      turn: this.lastTurn,
+      iteration: this.lastIteration,
+      remainingMs: Math.max(0, this.deps.remainingMs()),
+      inboxConsumedSeq: this.inboxConsumedSeq,
+      ...this.inboxDeferred(),
+    });
   }
 }
 
