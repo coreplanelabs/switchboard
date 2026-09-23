@@ -42,6 +42,7 @@ import {
   type Wire,
 } from "../provider.js";
 import type { ChatMessage, ContentPart, ToolResultContent } from "../chatMessage.js";
+import { shapeToolSchemasForWire } from "../providerToolSchemas.js";
 import { processSecrets, type Secrets } from "../../secrets.js";
 import { systemClock } from "../trace/clock.js";
 import type { Clock } from "../trace/types.js";
@@ -185,8 +186,11 @@ export class PiAiProvider implements Provider {
       ...(this.fetchImpl ? { fetch: this.fetchImpl } : {}),
     };
     try {
+      const context = toPiContext(req, model, this.clock);
+      const wire = this.api === "openai-completions" ? "openai-chat" : this.api;
+      const shaped = shapeToolSchemasForWire(wire, context as unknown as Record<string, unknown>);
       const message = await this.api$()
-        .stream(model, toPiContext(req, model, this.clock), options)
+        .stream(model, shaped.body as unknown as Context, options)
         .result();
       return fromPiMessage(message, this.name, req.tools);
     } catch (err) {
