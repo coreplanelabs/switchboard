@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.261.1](https://github.com/coreplanelabs/switchboard/compare/v1.261.0...v1.261.1) (2026-09-23)
+
+
+### Bug fixes
+
+* **coding:** show the requester and thread above every PR description ([#2326](https://github.com/coreplanelabs/switchboard/issues/2326)) ([c873c50](https://github.com/coreplanelabs/switchboard/commit/c873c50e2ee2caf51379ce79f3ae1471944d5c28))
+* **deploy:** fence bot rollbacks with application state ([#2323](https://github.com/coreplanelabs/switchboard/issues/2323)) ([37007ea](https://github.com/coreplanelabs/switchboard/commit/37007ea9a6990bbd4ea8a3d1119107114866bbe3))
+* **deploy:** install package root dependencies ([#2315](https://github.com/coreplanelabs/switchboard/issues/2315)) ([fc66ac6](https://github.com/coreplanelabs/switchboard/commit/fc66ac6091c13709f680a8d6afb5e569aa1c0678))
+* **dispatcher:** resume ended pipelines from their threads ([#2324](https://github.com/coreplanelabs/switchboard/issues/2324)) ([438f898](https://github.com/coreplanelabs/switchboard/commit/438f8985e5d32f54f17e245a9f532488899dda5e))
+* isolate ingress thread identities ([#2313](https://github.com/coreplanelabs/switchboard/issues/2313)) ([54d6d6f](https://github.com/coreplanelabs/switchboard/commit/54d6d6f6d40a7ca03ec1d5f3b14ba32cea4e333f))
+* **providers:** shape direct Responses tools ([#2322](https://github.com/coreplanelabs/switchboard/issues/2322)) ([d7e5464](https://github.com/coreplanelabs/switchboard/commit/d7e5464dfd5f697b1bf51c7918906eda02caad8a))
+* **review:** preserve typed verdicts in oversized posts ([#2314](https://github.com/coreplanelabs/switchboard/issues/2314)) ([6c0d389](https://github.com/coreplanelabs/switchboard/commit/6c0d38985da9b7ac67fd721729487df92a92655e))
+* **runs:** preserve state during reservation promotion ([#2308](https://github.com/coreplanelabs/switchboard/issues/2308)) ([cc4eb54](https://github.com/coreplanelabs/switchboard/commit/cc4eb54931483878cf42f8c02ec72337d9e0f101))
+* **ship:** reconcile findings against the exact PR head ([#2310](https://github.com/coreplanelabs/switchboard/issues/2310)) ([9e6abc7](https://github.com/coreplanelabs/switchboard/commit/9e6abc7717ea100ca96098b0b48c34421ad83f05))
+
 ## [1.261.0](https://github.com/coreplanelabs/switchboard/compare/v1.260.6...v1.261.0) (2026-09-23)
 
 
