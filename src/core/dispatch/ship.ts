@@ -460,6 +460,7 @@ export async function runShipBranch(
               ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
               ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
               ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
+              verbosity: ctx.verbosity,
               profile,
             },
             card: card.handle ?? null,

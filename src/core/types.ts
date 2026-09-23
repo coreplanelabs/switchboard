@@ -1,3 +1,5 @@
+import type { Verbosity } from "./verbosity.js";
+
 // Channel abstraction. A channel (Slack, CLI, Discord, HTTP, ...) is only a
 // transport: it receives text from a user somewhere, hands it to the core
 // dispatcher as an IncomingMessage, and provides a ChannelIO for the core to
@@ -306,8 +308,10 @@ export interface ChannelIO {
    * the row lives in the config object until the click or the expiry.
    */
   offer?(offer: ConfirmationOffer): Promise<void>;
-  /** Create a progress indicator. Adapters may return a no-op handle. */
-  status(initial: StatusUpdate): Promise<StatusHandle>;
+  /** Create a progress indicator. Adapters may return a no-op handle. The
+   *  resolved verbosity reaches the transport so native lifecycle chrome can
+   *  follow the same display contract as replies and cards. */
+  status(initial: StatusUpdate, display?: { verbosity?: Verbosity }): Promise<StatusHandle>;
   /**
    * Prior turns of this conversation, oldest first, excluding the triggering
    * message and any bot status noise. Adapters without history return [].

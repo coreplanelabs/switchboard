@@ -47,20 +47,23 @@ import {
 import { REFERENCE_REFUSAL } from "./references.js";
 import { FOLLOW_UP_DROPPED_BY_STOP } from "./settle.js";
 import type { ChannelIO } from "../types.js";
-import { quietActivity, replyAck } from "./reply.js";
+import { compactActivity, replyAck } from "./reply.js";
 
 // Feature: docs/reference/specs/routing-and-config.md item 28 — an acknowledgement
 // is `verbose` material: the seam every ack goes through sends it at verbose
 // and debug and swallows it at quiet, so the person on the default hears the
 // result and nothing before it.
-describe("quietActivity — the card's activity at quiet (routing-and-config item 28)", () => {
+describe("compactActivity — the card's activity at verbose (routing-and-config item 28)", () => {
   it("a command becomes the caption naming the tool; a line and nothing stay as they are", () => {
-    expect(quietActivity({ kind: "command", tool: "bash", command: "npm test\nnpm run lint" })).toEqual({
+    expect(compactActivity({ kind: "command", tool: "bash", command: "npm test\nnpm run lint" })).toEqual({
       kind: "line",
       text: "→ bash",
     });
-    expect(quietActivity({ kind: "line", text: "✓ read_file: ok" })).toEqual({ kind: "line", text: "✓ read_file: ok" });
-    expect(quietActivity(undefined)).toBeUndefined();
+    expect(compactActivity({ kind: "line", text: "✓ read_file: ok" })).toEqual({
+      kind: "line",
+      text: "✓ read_file: ok",
+    });
+    expect(compactActivity(undefined)).toBeUndefined();
   });
 });
 
@@ -184,6 +187,25 @@ describe("replyCommandOutput", () => {
     const usage = io(true);
     await replyCommandOutput(usage.io, help, `usage\n${"y".repeat(LONG_COMMAND_REPLY_CHARS)}`);
     expect(usage.attach.mock.calls[0][0].name).toBe("command.md");
+  });
+
+  it("a successful steer receipt is verbose narration, while verbose and debug keep it and every failed steer remains visible", async () => {
+    const steer: ParsedChatCommand = {
+      kind: "invoke",
+      id: "steer.run",
+      input: { args: ["run-1", "continue"], options: {} },
+    };
+    const quiet = io(false);
+    await replyCommandOutput(quiet.io, steer, "↪ Folded into the run", { verbosity: "quiet", ok: true });
+    expect(quiet.reply).not.toHaveBeenCalled();
+    for (const verbosity of ["verbose", "debug"] as const) {
+      const visible = io(false);
+      await replyCommandOutput(visible.io, steer, "↪ Folded into the run", { verbosity, ok: true });
+      expect(visible.reply).toHaveBeenCalledWith("↪ Folded into the run");
+    }
+    const failed = io(false);
+    await replyCommandOutput(failed.io, steer, "the run ended; nothing to steer", { verbosity: "quiet", ok: false });
+    expect(failed.reply).toHaveBeenCalledWith("the run ended; nothing to steer");
   });
 });
 

@@ -69,7 +69,7 @@ import { decideExecution, type Surface } from "./execution.js";
 import { attemptsOfThrow, reAskTurn, type StructuredAttempt } from "./structured.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { recordOperatorDecision, runChatCommand, type OperatorEventFields } from "./commandRun.js";
-import { renderConfirmationOffer, renderOperatorReceipt } from "./reply.js";
+import { renderConfirmationOffer, renderOperatorReceipt, replyCommandOutput } from "./reply.js";
 import { OPERATOR_TAIL_BYTES, operatorTail, type OperatorTailTurn } from "./seed.js";
 import { turnEffort } from "./turnEffort.js";
 import { newestFinishedRunOf, type NewestFinishedRun } from "./thread.js";
@@ -1626,10 +1626,8 @@ export async function executeOperatorDecision(
   // The receipt (`bound:`) is the system's word on what it did for the person
   // — `verbose` material (routing-and-config item 28), resolved like the
   // stages that speak before a request resolves.
-  const verbose = shows(
-    deps.config.verbosityFor(msg.channelId, msg.userId, parseDirectives(msg.text).verbosity),
-    "verbose",
-  );
+  const verbosity = deps.config.verbosityFor(msg.channelId, msg.userId, parseDirectives(msg.text).verbosity);
+  const verbose = shows(verbosity, "verbose");
   const answered: OperatorExecution = { kind: "answered" };
   // Ownership already resolved this event to one ended pipeline. The operator
   // may use read tools while deciding, but none of its action outcomes may
@@ -1806,7 +1804,7 @@ export async function executeOperatorDecision(
     if (verbose) await io.reply(receipt);
     const res = await runChatCommand(deps, msg, io, invocation, ctx.ending, ctx.trace, { operator: executedEvent });
     carried = true;
-    if (res.text.length > 0) await io.reply(res.text);
+    if (res.text.length > 0) await replyCommandOutput(io, invocation, res.text, { verbosity, ok: res.ok });
   }
   // A decision nothing ran from records on a door record of its own, or the
   // shadow-vs-on ledger would have a hole.

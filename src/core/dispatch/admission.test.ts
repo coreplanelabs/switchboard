@@ -643,29 +643,32 @@ describe("admit — the plane's shadow outcome post (orchestration-plane item 8)
 describe('admit — the plane\'s admission ask under plane.admission: on (record 0064, "The queue")', () => {
   const ON = "plane:\n  admission: on\n";
 
-  it("an ask the plane queues holds nothing: the slot is released, no row is reserved or adopted — no heartbeat, nothing in the drain's held set — and the thread hears the position", async () => {
-    const { deps, ctx, ledger, admission, replies } = setup("write the report", { yaml: ON });
-    ledger.planeAdmitAnswer = {
-      kind: "queued",
-      id: "q-1",
-      position: 1,
-      waiting: [{ kind: "thread_free", threadKey: THREAD, met: false }],
-    };
-    const outcome = await admit(deps, ctx);
-    expect(outcome).toEqual({ kind: "queued", id: "q-1", position: 1 });
-    // The queued run holds nothing here: the admission slot is free again and
-    // the ledger saw no reserve, no adopt — no heartbeat starts, so the drain's
-    // held set never lists it.
-    expect(admission.get(THREAD)).toBeUndefined();
-    expect(ledger.reserved).toEqual([]);
-    expect(ledger.adopted).toEqual([]);
-    // The ask carried the request in the durable inbox's shape.
-    expect(ledger.planeAdmits).toHaveLength(1);
-    expect(ledger.planeAdmits[0]).toMatchObject({ requester: "slack:UX", threadKey: THREAD });
-    expect(ledger.planeAdmits[0]!.request.text).toBe("write the report");
-    expect(replies.join("\n")).toContain("queued at position 1");
-    expect(replies.join("\n")).toContain("runs stop q-1");
-  });
+  it.each([{ level: "quiet" }, { level: "verbose" }, { level: "debug" }] as const)(
+    "an ask the plane queues holds nothing and $level preserves its actionable position and withdrawal command",
+    async ({ level }) => {
+      const directive = level === "quiet" ? "" : `verbosity:${level} `;
+      const { deps, ctx, ledger, admission, replies } = setup(`${directive}write the report`, { yaml: ON });
+      ledger.planeAdmitAnswer = {
+        kind: "queued",
+        id: "q-1",
+        position: 1,
+        waiting: [{ kind: "thread_free", threadKey: THREAD, met: false }],
+      };
+      const outcome = await admit(deps, ctx);
+      expect(outcome).toEqual({ kind: "queued", id: "q-1", position: 1 });
+      // The queued run holds nothing here: the admission slot is free again and
+      // the ledger saw no reserve, no adopt — no heartbeat starts, so the drain's
+      // held set never lists it.
+      expect(admission.get(THREAD)).toBeUndefined();
+      expect(ledger.reserved).toEqual([]);
+      expect(ledger.adopted).toEqual([]);
+      expect(ledger.planeAdmits).toHaveLength(1);
+      expect(ledger.planeAdmits[0]).toMatchObject({ requester: "slack:UX", threadKey: THREAD });
+      expect(ledger.planeAdmits[0]!.request.text).toBe("write the report");
+      expect(replies.join("\n")).toContain("queued at position 1");
+      expect(replies.join("\n")).toContain("runs stop q-1");
+    },
+  );
 
   it("an admitted ask proceeds — asked once, the reservation is the object's to promote", async () => {
     const { deps, ctx, ledger } = setup("write the report", { yaml: ON });

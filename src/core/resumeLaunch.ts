@@ -7,6 +7,7 @@
 // exactly as the boot reclaim closes the rest.
 
 import type { AgentDef } from "../agents/registry.js";
+import { parseDirectives } from "../directives.js";
 import type { ChannelIO, IncomingMessage } from "./types.js";
 import type { CoreDeps, DispatchOptions } from "./dispatcher.js";
 import type { ResumeContext } from "./dispatch/admission.js";
@@ -256,7 +257,17 @@ export async function launchResumes(
               startedAt: row.startedAt,
               now: deps.clock ?? Date.now,
             });
-            await io.status(shell.live({ detail: [rehostCardDetail(run)] }));
+            // Hosted input events contain the directive-stripped request, so
+            // the row's resolved level is authoritative. Parsing remains only
+            // as a compatibility fallback for older hand-built records.
+            const verbosity =
+              row.meta.verbosity ??
+              deps.config.verbosityFor(
+                row.meta.channelId,
+                row.meta.userId,
+                parseDirectives(inputTextOf(run.events)).verbosity,
+              );
+            await io.status(shell.live({ detail: [rehostCardDetail(run)] }), { verbosity });
           } catch (err) {
             warn(
               `[resume] ${row.runId} ${row.threadKey}: restart card could not be written: ${err instanceof Error ? err.message : String(err)}`,

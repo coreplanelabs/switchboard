@@ -780,7 +780,7 @@ function watched(io: ChannelIO, on: { started: (id: string) => void; replied: (t
       on.replied(text);
       await io.reply(text);
     },
-    status: (initial) => io.status(initial),
+    status: (initial, display) => io.status(initial, display),
     history: () => io.history(),
     runStarted: (started) => {
       io.runStarted?.(started);
@@ -2281,12 +2281,13 @@ async function drawCard(
         }
       : undefined,
   );
+  const display = { verbosity: instance.verbosity ?? DEFAULT_VERBOSITY };
   if (!close) {
-    await io.status(shell.live({ detail }));
+    await io.status(shell.live({ detail }), display);
     return;
   }
   shell.freeze(clock());
-  const handle = await io.status(shell.live({ detail }));
+  const handle = await io.status(shell.live({ detail }), display);
   await handle.done(shell.close({ kind: "done", icon: close.icon, detail: detail.join("\n") }));
 }
 

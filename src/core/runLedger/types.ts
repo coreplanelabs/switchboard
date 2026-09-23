@@ -5,6 +5,7 @@
 
 import type { ChatMessage } from "../chatMessage.js";
 import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause, type ToolDef } from "../provider.js";
+import type { Verbosity } from "../verbosity.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RunEvent } from "../runEvents.js";
@@ -60,6 +61,9 @@ export interface LiveRunMeta {
   /** The app that relayed the request for the person (authorization.md item 14): a resume or restart keeps app ∩ person at the gates. */
   postedBy?: string;
   effort?: string;
+  /** The request's resolved display level. Hosted parents have no model loop
+   *  to rebuild it from, and their input event deliberately omits directives. */
+  verbosity?: Verbosity;
   /** Decision-record reservation assigned before the attach, so a restart of
    * the admitted task keeps the same brief and process environment. */
   record?: string;

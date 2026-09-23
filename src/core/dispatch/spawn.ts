@@ -244,7 +244,7 @@ function watchedChild(
       on.replied(text);
       await io.reply(text);
     },
-    status: (initial) => io.status(initial),
+    status: (initial, display) => io.status(initial, display),
     history: () => io.history(),
     runStarted: (started) => {
       io.runStarted?.(started);

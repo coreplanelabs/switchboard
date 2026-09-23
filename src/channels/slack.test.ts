@@ -304,6 +304,69 @@ describe("catchUpDelayNote", () => {
   });
 });
 
+// Feature: docs/reference/specs/slack-channel.md items 2–3 and routing-and-config.md
+// item 28 — quiet keeps the card lifecycle but suppresses Slack's routine
+// acceptance and native assistant-status narration. Verbose/debug retain it.
+describe("SlackIO.status — verbosity and shimmer lifecycle", () => {
+  const ev = { channel: "C1", user: "UA", text: "", ts: "1.0", threadTs: "1.0", botUserId: "UBOT" };
+  const budget = () => ({
+    open: vi.fn(),
+    close: vi.fn(),
+    tryProgress: vi.fn(() => true),
+    takeTerminal: vi.fn(() => 0),
+    tokens: vi.fn(() => 1),
+  });
+  const fixture = () => {
+    const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true, ts: "card.1" }));
+    const update = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
+    const setStatus = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
+    const main = guardOutbound({ chat: { postMessage, update } } as unknown as ConstructorParameters<
+      typeof SlackIO
+    >[0]);
+    const statusClient = guardOutbound({
+      chat: { update },
+      assistant: { threads: { setStatus } },
+    } as unknown as ConstructorParameters<typeof SlackIO>[0]);
+    return { main, statusClient, postMessage, update, setStatus };
+  };
+
+  afterEach(() => vi.useRealTimers());
+
+  it("quiet sets no shimmer or timer, while the card budget opens and closes and the terminal frame still lands", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const b = budget();
+    const handle = await new SlackIO(f.main, ev, { statusClient: f.statusClient, statusBudget: b }).status(
+      { title: "👀 coding", detail: "✱ Implement the fix" },
+      { verbosity: "quiet" },
+    );
+    expect(f.setStatus.mock.calls.map((call) => call[0])).toEqual([
+      expect.objectContaining({ channel_id: "C1", thread_ts: "1.0", status: "" }),
+    ]);
+    expect(b.open).toHaveBeenCalledWith("C1:card.1");
+    await vi.advanceTimersByTimeAsync(150_000);
+    expect(f.setStatus).toHaveBeenCalledTimes(1);
+    await handle.done({ title: "✅ coding · done", detail: "✓ Implement the fix" });
+    expect(b.close).toHaveBeenCalledWith("C1:card.1");
+    expect(f.update.mock.calls.at(-1)?.[0]).toMatchObject({ channel: "C1", ts: "card.1" });
+    expect(f.setStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["verbose", "debug"] as const)("%s sets, re-ups and clears the shimmer", async (verbosity) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const handle = await new SlackIO(f.main, ev, { statusClient: f.statusClient, statusBudget: budget() }).status(
+      { title: "👀 coding" },
+      { verbosity },
+    );
+    expect(f.setStatus).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(75_000);
+    expect(f.setStatus).toHaveBeenCalledTimes(2);
+    await handle.done({ title: "✅ coding · done" });
+    expect(f.setStatus.mock.calls.at(-1)?.[0]).toMatchObject({ status: "" });
+  });
+});
+
 // Feature: docs/reference/specs/run-history.md item 38 — a resumed run keeps the card the
 // previous generation posted: `status()` edits it instead of posting a second one.
 describe("SlackIO.status on a resumed run (existing card)", () => {
@@ -581,7 +644,10 @@ describe("SlackIO.status — status budget", () => {
   it("the card is posted on the main client; every edit, the shimmer and the close go through the status client", async () => {
     const { client, statusClient, main, status } = clients();
     const budget = openBudget();
-    const handle = await new SlackIO(client, ev, { statusClient, statusBudget: budget }).status({ title: "👀" });
+    const handle = await new SlackIO(client, ev, { statusClient, statusBudget: budget }).status(
+      { title: "👀" },
+      { verbosity: "verbose" },
+    );
     handle.update({ title: "⚡ 5s" });
     await handle.done({ title: "✅ 6s" });
     expect(main.postMessage).toHaveBeenCalledTimes(1);
@@ -745,13 +811,13 @@ describe("SlackIO.status — two runs in one thread (slack-channel.md item 3)", 
 
   it("finish then start: the finished run clears the thread's shimmer at once, and the sibling that starts right after sets its own within its first frame", async () => {
     const { io, status, shimmerStates } = fixture();
-    const a = await io("1.1").status({ title: "👀 coding" });
+    const a = await io("1.1").status({ title: "👀 coding" }, { verbosity: "verbose" });
     await a.done({ title: "✅ coding · done" });
     // The finished run's markers land before any sibling exists: the done frame
     // on its own card and the shimmer clear — the thread stops saying working.
     expect(status.update.mock.calls.at(-1)![0]).toMatchObject({ ts: "card.1", text: "✅ coding · done" });
     expect(shimmerStates()).toEqual([expect.stringContaining("…"), ""]);
-    await io("2.1").status({ title: "👀 review" });
+    await io("2.1").status({ title: "👀 review" }, { verbosity: "verbose" });
     // The sibling's own shimmer is set with its first frame, not left to a re-up.
     expect(shimmerStates()).toHaveLength(3);
     expect(shimmerStates().at(-1)).not.toBe("");
@@ -760,8 +826,8 @@ describe("SlackIO.status — two runs in one thread (slack-channel.md item 3)", 
   it("start during the other's finish: the finished run's card still closes to its done state, and its close never wipes the live sibling's shimmer", async () => {
     vi.useFakeTimers();
     const { io, status, shimmerStates } = fixture();
-    const a = await io("1.1").status({ title: "👀 coding" });
-    const b = await io("2.1").status({ title: "👀 review" }); // the sibling starts while A is finishing
+    const a = await io("1.1").status({ title: "👀 coding" }, { verbosity: "verbose" });
+    const b = await io("2.1").status({ title: "👀 review" }, { verbosity: "verbose" }); // the sibling starts while A is finishing
     // A is still running while B owns the thread's shimmer: A's live 75s re-up
     // is silenced by the ownership guard on its timer — only B's speaks.
     await vi.advanceTimersByTimeAsync(75_000);
@@ -1185,7 +1251,7 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
   afterEach(() => vi.unstubAllGlobals());
 
   const NOW = 160_000;
-  const POLICY = { staging: false, maxBytesPerMessage: 1_000_000 };
+  const POLICY = { staging: false, maxBytesPerMessage: 1_000_000, verbosity: "verbose" as const };
   let seq = 0;
   /** A fresh ts per event: unique (the module-level handled-set claims each) and
    *  recent (an old ts would make the redelivery guard pay its thread fetch). */
@@ -1432,7 +1498,7 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     expect(out?.message.staged).toBeUndefined();
   });
 
-  it("a caught-up message under always keeps its golden too: 👀, the ⏱ delay note, then the downloads", async () => {
+  it("a caught-up message at verbose keeps its golden: 👀, the ⏱ delay note, then the downloads", async () => {
     const s = gateClient();
     stubDownloads(s.calls);
     const { gate, decide } = gateOf({ mode: "always" });
@@ -1447,6 +1513,43 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     expect(out).toBeDefined();
     expect(decide).not.toHaveBeenCalled();
     expect(s.calls.slice(0, 2)).toEqual(["reactions.add", "chat.postMessage"]);
+    expect(s.calls).toContain("download");
+  });
+
+  it("the request directive and resolved requester reach verbosity resolution before Slack emits a receipt", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const verbosityFor = vi.fn(
+      (_channelId: string, _userId: string, request?: "quiet" | "verbose" | "debug") => request ?? "quiet",
+    );
+    const out = await receiveSlackMessage(
+      s.client,
+      followUp({ text: "verbosity:debug and the tests?" }),
+      spanStub().span,
+      { ...POLICY, verbosity: undefined, verbosityFor },
+      [],
+    );
+    expect(out).toBeDefined();
+    expect(verbosityFor).toHaveBeenCalledWith("slack:CGATE", "slack:UASKER", "debug");
+    expect(s.calls[0]).toBe("reactions.add");
+  });
+
+  it("quiet suppresses the acceptance reaction and catch-up lifecycle note without suppressing intake, downloads or dispatch", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const { gate, decide } = gateOf({ mode: "always" });
+    const out = await receiveSlackMessage(
+      s.client,
+      followUp({ ts: (Date.now() / 1000 - 120).toFixed(6), caughtUp: true }),
+      spanStub().span,
+      { ...POLICY, verbosity: "quiet" },
+      [],
+      gate,
+    );
+    expect(out).toBeDefined();
+    expect(decide).not.toHaveBeenCalled();
+    expect(s.calls).not.toContain("reactions.add");
+    expect(s.calls).not.toContain("chat.postMessage");
     expect(s.calls).toContain("download");
   });
 

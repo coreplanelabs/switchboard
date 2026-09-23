@@ -19,6 +19,7 @@ import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RecordDeps } from "./record.js";
 import { renderRefusal, replyCommandOutput } from "./reply.js";
 import { commandRefusalCode, refusalOf, type Guess } from "../refusal.js";
+import { parseDirectives } from "../../directives.js";
 // The command-run machinery the fast path and the router's command branch
 // share (commandRun.ts): invoked through the registry as the message's user,
 // recorded as an inline run when the command does work.
@@ -83,6 +84,9 @@ export interface RequestContext {
 export async function answerChatCommand(deps: FastPathDeps, ctx: RequestContext): Promise<boolean> {
   const { msg, io, ending, trace } = ctx;
   const root = trace.root;
+  // Stage A speaks before full request resolution, but the verbosity ladder is
+  // already deterministic from the message's directive and scopes.
+  const verbosity = deps.config.verbosityFor(msg.channelId, msg.userId, parseDirectives(msg.text).verbosity);
   // Stage A — the ONE text-only fast path: a
   // message that names a registered, chat-exposed command (`<group> <verb>
   // [args…] [--kebab-flag value…]`, or the bare word `help`) is answered
@@ -126,7 +130,7 @@ export async function answerChatCommand(deps: FastPathDeps, ctx: RequestContext)
                 }),
               );
             }
-          : () => root.span("post.reply", () => replyCommandOutput(io, chatCmd, res.text));
+          : () => root.span("post.reply", () => replyCommandOutput(io, chatCmd, res.text, { verbosity, ok: res.ok }));
       // The command run (if the command made one) seals after its reply.
       await ending.sealAfterReply(async () => {}, replyFn);
       if (res.followUp) postSettledOutcome(res.followUp, io, root);

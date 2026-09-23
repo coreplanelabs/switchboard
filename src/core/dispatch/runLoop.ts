@@ -111,7 +111,7 @@ import type { ChannelIO, IncomingMessage, StagedFile, StatusActivity, StatusHand
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
-import { artifactLink, cardActivity, quietActivity, replyAck, threadPageLink } from "./reply.js";
+import { artifactLink, cardActivity, compactActivity, replyAck, threadPageLink } from "./reply.js";
 import { shows } from "../verbosity.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
@@ -416,10 +416,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   };
   // The shutdown notice rides on the LIVE frame only: the closed card is
   // built from `shell.close` and never mentions the restart.
-  // The quiet-wait suffix and the running command's code block are for
-  // someone debugging the machinery (routing-and-config item 28): below
-  // `debug` the card keeps the checklist and a caption naming the tool,
-  // nothing more.
+  // Activity and pace are internal narration: quiet keeps the checklist and
+  // outcome alone, verbose keeps the existing short tool caption and pace,
+  // and debug adds the full command plus wait diagnosis.
+  const showsActivity = shows(resolved.verbosity, "verbose");
   const chatty = shows(resolved.verbosity, "debug");
   // The update_status round trip is bookkeeping: the checklist itself just
   // repainted the card, so below `verbose` its call/result pair never rides
@@ -428,11 +428,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const showBookkeeping = shows(resolved.verbosity, "verbose");
   const currentFrame = () =>
     shell.live({
-      // the pace mark rides every level (the stall signal is a fact, not chatter); the quiet suffix is debug's
-      suffix: chatty ? `${quietSuffix(clock() - lastActivityAt, inFlightTool)}${cardPace()}` : cardPace(),
+      suffix: showsActivity
+        ? chatty
+          ? `${quietSuffix(clock() - lastActivityAt, inFlightTool)}${cardPace()}`
+          : cardPace()
+        : "",
       notice: shutdownNotice(),
       detail: [checklist],
-      activity: chatty ? lastActivity : quietActivity(lastActivity),
+      activity: showsActivity ? (chatty ? lastActivity : compactActivity(lastActivity)) : undefined,
     });
   // The closed card keeps the run link (the run page outlives the run and
   // shows the final answer) and the agent's checklist; only the transient

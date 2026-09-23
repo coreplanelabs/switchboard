@@ -582,11 +582,26 @@ describe("runShipBranch — the host key and the hosted marker (record 0060)", (
         hosted: true,
         label: 'ship · acme/api · "in acme/api: fix the login redirect"',
         agent: "ship",
+        verbosity: "verbose",
       },
     });
     expect(s.claims[0].meta.session).toBeUndefined();
     expect(s.inner.sessions.size).toBe(0); // no session registered for a hosted claim
     expect(s.registry.getById("run-s")).toMatchObject({ hosted: true, threadKey: THREAD });
+  });
+
+  it("durably records a request-level verbosity override after the production input event strips its directive", async () => {
+    const s = ledgerSetup();
+    s.msg.text = "verbosity:debug agent:ship in acme/api: fix the login redirect";
+    s.ctx.directives = parseDirectives(s.msg.text);
+    s.ctx.verbosity = "debug";
+
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+
+    expect(s.claims[0]?.meta.verbosity).toBe("debug");
+    const input = s.registry.snapshot("run-s", "tok")?.events.find((event) => event.type === "input");
+    expect(input).toMatchObject({ type: "input", text: "agent:ship in acme/api: fix the login redirect" });
+    expect(input).not.toHaveProperty("text", expect.stringContaining("verbosity:debug"));
   });
 
   it("after a tracked, taken hand-off the parent stays live (record 0060): the registry row is unfinished, the ledger row is `live` with `state.hosting` (the instance and the deadline of the caps plus one hour), the stream carries a second run_meta naming the instance, the card still closes ✅ and the reply says where the plan runs", async () => {
