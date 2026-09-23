@@ -22,10 +22,12 @@
 // gate arrives in a later unit.
 import { providerFailureOf, renderProviderFailure, type ProviderFailureCause, type ToolDef } from "./provider.js";
 import { oneLine, redactAndCap } from "./redact.js";
-import { askStructured, attemptsOfThrow, type StructuredAttempt } from "./dispatch/structured.js";
+import { askStructured, attemptsOfThrow, StructuredAskError, type StructuredAttempt } from "./dispatch/structured.js";
 import { wrapUntrusted } from "./untrusted.js";
 import type { IntakeReceipt } from "./runLedger/types.js";
 import {
+  OutputCapError,
+  outputCapWithReasoning,
   ROUTE_MIN_OUTPUT_TOKENS,
   ROUTE_REASON_CAP,
   ROUTE_TIMEOUT_MS,
@@ -124,6 +126,10 @@ export interface IntakeInput {
 /** What intake runs on: the model seam, the ledger or null, and a clock. */
 export interface IntakeDeps {
   model: RouteModel;
+  /** The resolved model card's output-cap field. Canonical reasoning wires
+   * count hidden reasoning inside this cap, so the visible verdict needs the
+   * shared reasoning allowance too. */
+  capField?: string;
   ledger: IntakeLedger | null;
   now: () => number;
   /** The call's bound; default `ROUTE_TIMEOUT_MS`, the router's. */
@@ -248,7 +254,10 @@ async function askModel(
         floor: (violation): Parsed => ({ verdict: "silent", reason: violation, source: "error" }),
       },
       deps.model,
-      { maxTokens: ROUTE_MIN_OUTPUT_TOKENS, signal: AbortSignal.timeout(deps.timeoutMs ?? ROUTE_TIMEOUT_MS) },
+      {
+        maxTokens: outputCapWithReasoning(ROUTE_MIN_OUTPUT_TOKENS, { capField: deps.capField }),
+        signal: AbortSignal.timeout(deps.timeoutMs ?? ROUTE_TIMEOUT_MS),
+      },
     );
     return { ...seam.value, attempts: seam.attempts };
   } catch (err) {
@@ -260,6 +269,20 @@ async function askModel(
         reason: renderProviderFailure("transient", "ended"),
         source: "timeout",
         providerFailure: "transient",
+        ...(attempts ? { attempts } : {}),
+      };
+    }
+    const outputCapError =
+      err instanceof OutputCapError
+        ? err
+        : err instanceof StructuredAskError && err.cause instanceof OutputCapError
+          ? err.cause
+          : undefined;
+    if (outputCapError) {
+      return {
+        verdict: "silent",
+        reason: tidyReason(outputCapError.message),
+        source: "error",
         ...(attempts ? { attempts } : {}),
       };
     }

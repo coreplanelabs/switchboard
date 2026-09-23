@@ -1,5 +1,7 @@
 import { parseModelRef, type Provider, type ProviderConfig } from "../provider.js";
 import { turnEffort } from "../dispatch/turnEffort.js";
+import { installedModelRegistry } from "../installedModelRegistry.js";
+import { resolveModelCard } from "../modelCard.js";
 import type { Actor, ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";
 import type { MemoryConfig, MemoryRecord, MemoryStore } from "./types.js";
@@ -128,10 +130,13 @@ export function scheduleReflection(input: {
   const info = (m: string) => console.log(`[memory] ${input.threadKey} ${m}`);
   let provider: Provider;
   let model: string;
+  let capField: string | undefined;
   try {
-    const ref = parseModelRef(input.cfg.model ?? input.runModelRef);
+    const modelRef = input.cfg.model ?? input.runModelRef;
+    const ref = parseModelRef(modelRef);
     provider = input.providers.get(ref.provider);
     model = ref.model;
+    capField = resolveModelCard(modelRef, input.providerBlocks ?? {}, installedModelRegistry).capField;
   } catch (err) {
     warn(`reflection skipped: ${err instanceof Error ? err.message : String(err)}`);
     return;
@@ -145,6 +150,7 @@ export function scheduleReflection(input: {
       provider,
       model,
       ...(effort.request ? { effort: effort.request.effort, effortWord: effort.request.effortWord } : {}),
+      ...(capField !== undefined ? { capField } : {}),
       store: selectMemoryStore(input.cfg, input.store),
       scopeKeys: requestScopeKeys(input.organization, input.userId, { channelId: input.channelId, repo: input.repo }),
       actor: reflectionActor(input.actor, { channelId: input.channelId, repo: input.repo }),
