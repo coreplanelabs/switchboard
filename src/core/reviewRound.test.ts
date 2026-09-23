@@ -224,16 +224,19 @@ describe("guardAttachedHead (before any model call)", () => {
   // ever invoking a provider — no provider handle even reaches the unit.
   it("attached at the PR head → verified, no lookup", async () => {
     const fetchPrHead = vi.fn(async () => THIRD);
+    const reprovision = vi.fn(async () => ({ sha: THIRD }));
     const r = await guardAttachedHead({
       pr: { repo: "acme/api", number: 42 },
       expectedHeadSha: HEAD,
       attached: { sha: HEAD, ref: "patch-1" },
       fallbackRef: undefined,
       fetchPrHead,
+      reprovision,
       logKey: "t",
     });
     expect(r).toEqual({ outcome: "verified" });
     expect(fetchPrHead).not.toHaveBeenCalled();
+    expect(reprovision).not.toHaveBeenCalled();
   });
 
   it("attached at another commit that IS the PR's current head → adopted with that head", async () => {
@@ -243,6 +246,9 @@ describe("guardAttachedHead (before any model call)", () => {
       attached: { sha: OTHER, ref: "patch-1" },
       fallbackRef: undefined,
       fetchPrHead: async () => OTHER,
+      reprovision: async () => {
+        throw new Error("must not reprovision an adopted current head");
+      },
       logKey: "t",
     });
     expect(r).toEqual({ outcome: "adopted", headSha: OTHER });
@@ -255,14 +261,15 @@ describe("guardAttachedHead (before any model call)", () => {
       attached: { sha: OTHER, ref: "patch-1" },
       fallbackRef: undefined,
       fetchPrHead: async () => THIRD,
+      reprovision: async () => ({ sha: OTHER, ref: "patch-1", source: "workspace-observed" }),
       logKey: "t",
     });
     expect(r.outcome).toBe("refused");
     if (r.outcome === "refused") {
       expect(r.reply).toContain("acme/api#42");
       expect(r.reply).toContain(`workspace-observed HEAD for patch-1 is at ${OTHER}`);
-      expect(r.reply).toContain(`PR head is ${HEAD}`);
-      expect(r.reply).toContain("This is a bug: the workspace was not reprovisioned automatically at the new head");
+      expect(r.reply).toContain(`expected reviewed head is ${HEAD}`);
+      expect(r.reply).not.toMatch(/branch moved|push|force-push|bug/i);
       expect(r.reply).toContain("It is not a finding, and nothing was posted to GitHub");
     }
   });
@@ -276,15 +283,60 @@ describe("guardAttachedHead (before any model call)", () => {
       fetchPrHead: async () => {
         throw new Error("GitHub down");
       },
+      reprovision: async () => ({ sha: OTHER, ref: "patch-1", source: "workspace-observed" }),
       logKey: "t",
     });
     expect(r.outcome).toBe("refused");
     if (r.outcome === "refused") expect(r.reply).toContain("workspace-observed HEAD for patch-1");
   });
 
+  it("a failed reprovision keeps the initial observation separate from the retry failure", async () => {
+    const r = await guardAttachedHead({
+      pr: { repo: "acme/api", number: 42 },
+      expectedHeadSha: HEAD,
+      attached: { sha: OTHER, ref: "patch-1", source: "resident binding" },
+      fallbackRef: undefined,
+      fetchPrHead: async () => THIRD,
+      reprovision: async () => {
+        throw new Error("resident moveTo failed");
+      },
+      logKey: "t",
+    });
+    expect(r.outcome).toBe("refused");
+    if (r.outcome === "refused") {
+      expect(r.reply).toContain(`initial resident binding for patch-1 was at ${OTHER}`);
+      expect(r.reply).toContain("automatic reprovision failed before a retry HEAD could be observed");
+      expect(r.reply).not.toContain(`after one automatic reprovision, the resident binding for patch-1 is at ${OTHER}`);
+    }
+  });
+
+  it("an invalid retry head names the initial observation and the unreadable retry separately", async () => {
+    const r = await guardAttachedHead({
+      pr: { repo: "acme/api", number: 42 },
+      expectedHeadSha: HEAD,
+      attached: { sha: OTHER, ref: "patch-1", source: "resident binding" },
+      fallbackRef: undefined,
+      fetchPrHead: async () => THIRD,
+      reprovision: async () => ({ sha: "not-a-sha", ref: "patch-1", source: "resident binding" }),
+      logKey: "t",
+    });
+    expect(r.outcome).toBe("refused");
+    if (r.outcome === "refused") {
+      expect(r.reply).toContain(`initial resident binding for patch-1 was at ${OTHER}`);
+      expect(r.reply).toContain("resident binding for patch-1 could not be read after one automatic reprovision");
+      expect(r.reply).not.toContain(`after one automatic reprovision, the resident binding for patch-1 is at ${OTHER}`);
+    }
+  });
+
   it("an invalid expected head stays with the earlier preflight; an unreadable workspace head is refused as infrastructure", async () => {
     const fetchPrHead = vi.fn(async () => HEAD);
-    const base = { pr: { repo: "acme/api", number: 42 }, fallbackRef: undefined, fetchPrHead, logKey: "t" };
+    const base = {
+      pr: { repo: "acme/api", number: 42 },
+      fallbackRef: undefined,
+      fetchPrHead,
+      reprovision: async () => ({ sha: undefined }),
+      logKey: "t",
+    };
     expect(
       await guardAttachedHead({ ...base, expectedHeadSha: undefined, attached: { sha: OTHER, ref: "b" } }),
     ).toEqual({ outcome: "unverified" });
@@ -292,11 +344,14 @@ describe("guardAttachedHead (before any model call)", () => {
       ...base,
       expectedHeadSha: HEAD,
       attached: { sha: "not-a-sha", ref: "b", source: "workspace-observed" },
+      reprovision: async () => ({ sha: undefined, ref: "b", source: "workspace-observed" }),
     });
     expect(unreadable.outcome).toBe("refused");
     if (unreadable.outcome === "refused") {
-      expect(unreadable.reply).toContain("workspace-observed HEAD for b could not be read");
-      expect(unreadable.reply).toContain("This is a bug: the infrastructure failure was not retried automatically");
+      expect(unreadable.reply).toContain(
+        "workspace-observed HEAD for b could not be read after one automatic reprovision",
+      );
+      expect(unreadable.reply).not.toContain("This is a bug");
       expect(unreadable.reply).toContain("not a finding, and nothing was posted to GitHub");
     }
     expect(fetchPrHead).not.toHaveBeenCalled();

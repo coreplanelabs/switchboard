@@ -388,7 +388,7 @@ export async function authorizePrHead(
  *  the attach verified the worktree is at that head — or it was refused. */
 export type AttachedHeadGate =
   | { kind: "allowed"; repoCtx: RepoContext; verifiedAtAttach: boolean; headAdopted: boolean }
-  | { kind: "refused"; reason: "branch_moved" };
+  | { kind: "refused"; reason: "workspace_head_mismatch" };
 
 /**
  * A cold review starts in an empty per-thread workspace. Provision the exact
@@ -399,14 +399,24 @@ export type AttachedHeadGate =
  * resolved base are fetched beside the PR head because the review prompt diffs
  * against those remote-tracking refs.
  */
+function reviewCheckoutFacts(repoCtx: RepoContext & { repo: string; pr: number }): {
+  remote: string;
+  helper: string;
+  refspecs: string[];
+} {
+  return {
+    remote: `https://github.com/${repoCtx.repo}.git`,
+    helper: `!f() { test -n "$GH_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_TOKEN"; }; f`,
+    refspecs: [
+      "+HEAD:refs/remotes/origin/HEAD",
+      `+refs/pull/${repoCtx.pr}/head:refs/remotes/origin/pull/${repoCtx.pr}/head`,
+      ...(repoCtx.baseRef ? [`+refs/heads/${repoCtx.baseRef}:refs/remotes/origin/${repoCtx.baseRef}`] : []),
+    ],
+  };
+}
+
 function coldReviewCheckoutCommand(repoCtx: RepoContext & { repo: string; pr: number; headSha: string }): string {
-  const remote = `https://github.com/${repoCtx.repo}.git`;
-  const helper = `!f() { test -n "$GH_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_TOKEN"; }; f`;
-  const refspecs = [
-    "+HEAD:refs/remotes/origin/HEAD",
-    `+refs/pull/${repoCtx.pr}/head:refs/remotes/origin/pull/${repoCtx.pr}/head`,
-    ...(repoCtx.baseRef ? [`+refs/heads/${repoCtx.baseRef}:refs/remotes/origin/${repoCtx.baseRef}`] : []),
-  ];
+  const { remote, helper, refspecs } = reviewCheckoutFacts(repoCtx);
   return [
     "set -eu",
     "find . -mindepth 1 -maxdepth 1 ! -name attachments -exec rm -rf -- {} +",
@@ -417,13 +427,27 @@ function coldReviewCheckoutCommand(repoCtx: RepoContext & { repo: string; pr: nu
   ].join("\n");
 }
 
+/** Refresh an already-seeded review checkout at the same expected head. */
+function seededReviewCheckoutCommand(
+  repoCtx: RepoContext & { repo: string; pr: number; headSha: string },
+  workspace: string,
+): string {
+  const { helper, refspecs } = reviewCheckoutFacts(repoCtx);
+  const git = `git -C ${shellQuote(workspace)}`;
+  return [
+    "set -eu",
+    `${git} -c credential.helper= -c credential.helper=${shellQuote(helper)} fetch --force --no-tags origin ${refspecs.map(shellQuote).join(" ")}`,
+    `${git} checkout --detach --force ${shellQuote(repoCtx.headSha)}`,
+  ].join("\n");
+}
+
 /**
  * The attached-head guard (docs/reference/specs/agent-review.md item 10): every
  * PR review is at its resolved head before any model turn. Cold backends are
- * provisioned first; seeded backends are observed at their named checkout; a
- * resident's attach binding is its proof. Verified; adopted (a push raced the
- * request and the workspace is at the PR's head now); or refused (mismatch or
- * unreadable): the workspace is released and one named reply is sent.
+ * provisioned first; seeded and resident backends are observed through their
+ * executor. Verified; adopted (a push raced the request and the workspace is
+ * at the PR's head now); or refused (mismatch or unreadable): the workspace is
+ * released and one named reply is sent.
  */
 export async function authorizeAttachedHead(
   deps: AuthorizeDeps,
@@ -441,17 +465,16 @@ export async function authorizeAttachedHead(
   const { executor, resident, binding } = selection;
   let repoCtx = ctx.repoCtx;
   // Attach-head check (docs/reference/specs/agent-review.md item 10): every PR
-  // review proves the workspace's HEAD before any model turn. A resident's
-  // attach binding is the proof it just returned; every other backend is
-  // observed directly in the checkout. Unknown is a refusal, not permission
-  // for the model to turn an infrastructure failure into a finding.
+  // review proves the workspace's HEAD before any model turn. Every backend,
+  // including a resident whose attach returned SHA metadata, is observed
+  // directly in the checkout. Unknown is a refusal, not permission for the
+  // model to turn an infrastructure failure into a finding.
   let verifiedAtAttach = false;
   let headAdopted = false;
   if (!resume && agent.name === "review" && repoCtx.pr !== undefined && repoCtx.repo) {
     const pr = { repo: repoCtx.repo, number: repoCtx.pr };
     const expectedHeadSha = repoCtx.headSha;
     const guard = await root.span("dispatch.gate.attached_head", async (span) => {
-      const source = resident && binding?.sha !== undefined ? "resident binding" : "workspace-observed";
       const command = selection.seeded?.workspace
         ? `git -C ${shellQuote(selection.seeded.workspace)} rev-parse HEAD`
         : "git rev-parse HEAD";
@@ -461,19 +484,52 @@ export async function authorizeAttachedHead(
           { timeoutMs: BASH_TIMEOUT_MAX_MS },
         );
       }
-      const sha =
-        source === "resident binding"
-          ? binding?.sha
-          : await executor
-              .exec(command, { timeoutMs: 30_000 })
-              .then(parseRevParseOutput)
-              .catch(() => undefined);
+      const observeHead = () =>
+        executor
+          .exec(command, { timeoutMs: 30_000, span })
+          .then(parseRevParseOutput)
+          .catch(() => undefined);
+      const sha = await observeHead();
       const g = await guardAttachedHead({
         pr,
         expectedHeadSha,
-        attached: { sha, ref: binding?.ref ?? repoCtx.ref, source },
+        attached: { sha, ref: binding?.ref ?? repoCtx.ref, source: "workspace-observed" },
         fallbackRef: repoCtx.ref,
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+        reprovision: async (headSha) => {
+          if (executor.moveTo) {
+            await executor.moveTo(headSha, { span });
+            const observedSha = await observeHead();
+            if (selection.binding && observedSha !== undefined) {
+              selection.binding = {
+                ...selection.binding,
+                ref: repoCtx.ref ?? selection.binding.ref,
+                sha: observedSha,
+              };
+            }
+            return {
+              sha: observedSha,
+              ref: repoCtx.ref,
+              source: "workspace-observed" as const,
+            };
+          }
+          if (selection.seeded?.workspace) {
+            await executor.exec(
+              seededReviewCheckoutCommand(
+                { ...repoCtx, repo: pr.repo, pr: pr.number, headSha },
+                selection.seeded.workspace,
+              ),
+              { timeoutMs: BASH_TIMEOUT_MAX_MS, span },
+            );
+          } else {
+            await executor.exec(coldReviewCheckoutCommand({ ...repoCtx, repo: pr.repo, pr: pr.number, headSha }), {
+              timeoutMs: BASH_TIMEOUT_MAX_MS,
+              span,
+            });
+          }
+          const retried = await observeHead();
+          return { sha: retried, ref: repoCtx.ref, source: "workspace-observed" as const };
+        },
         logKey: msg.threadKey,
       });
       span.setAttrs({ outcome: g.outcome });
@@ -486,13 +542,18 @@ export async function authorizeAttachedHead(
       verifiedAtAttach = true;
       headAdopted = true;
     } else if (guard.outcome === "refused") {
-      await refuse(refusalOf("branch_moved", guard.reply), async () => {
+      await refuse(refusalOf("workspace_head_mismatch", guard.reply), async () => {
         if (executor.release) await executor.release("always").catch(() => {});
         await card.done(
-          shell.close({ kind: "not_started", icon: "🔀", reason: "branch moved", ...closeLines(clock(), false) }),
+          shell.close({
+            kind: "not_started",
+            icon: "🔀",
+            reason: "workspace head mismatch",
+            ...closeLines(clock(), false),
+          }),
         );
       });
-      return { kind: "refused", reason: "branch_moved" };
+      return { kind: "refused", reason: "workspace_head_mismatch" };
     }
   }
   return { kind: "allowed", repoCtx, verifiedAtAttach, headAdopted };

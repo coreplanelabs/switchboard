@@ -264,7 +264,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
     // lines, the references' one line — and the inventory's quote as a
     // literal, so a drifted builder fails here instead of shipping. Codes
     // whose text another module builds from live data (`pr_head_unknown` from
-    // `checkPrHeadPreflight`, `branch_moved` from `guardAttachedHead`,
+    // `checkPrHeadPreflight`, `workspace_head_mismatch` from `guardAttachedHead`,
     // `ship_preflight` from the ship preflight) are proven byte-identical by
     // those modules' own tests; the silent codes (`coordinator_thread_live`,
     // `workspace_lost`, `setup_failed`) and `uncaught` render nothing.
@@ -414,7 +414,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
     // another module's tested builder, or silent by design.
     const provenElsewhere: RefusalCode[] = [
       "pr_head_unknown",
-      "branch_moved",
+      "workspace_head_mismatch",
       // (record 0054): each producer's own test proves its sentences
       // byte-identical — the ship preflight's ten (preflight.test.ts), the
       // plan hand-off's fifteen (handOff.test.ts), the resolve parser

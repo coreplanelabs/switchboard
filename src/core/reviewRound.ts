@@ -275,14 +275,14 @@ export type AttachHeadGuard =
   | { outcome: "refused"; reply: string };
 
 /**
- * Compare the workspace head with the PR head the round resolved, BEFORE any
- * model call, on every backend. Equal → verified. Different well-formed shas
- * get one current-head lookup so an attach that raced a push may adopt the
- * current head; otherwise the run is refused and its workspace released. An
- * unreadable workspace head is refused too: without proof that the checkout is
- * the PR head, an infrastructure failure must never become a review finding or
- * a GitHub post. Only an invalid expected head remains `unverified`; the
- * earlier PR-head gate owns that refusal.
+ * Compare the checked-out workspace head with the PR head the round will
+ * review, BEFORE any model call, on every backend. Equal → verified. Different
+ * well-formed shas get one current-head lookup so an attach that raced a push
+ * may adopt the current head. Every other mismatch (and an unreadable first
+ * observation) gets one reprovision at the expected reviewed head and one
+ * re-check; only that failed recovery is refused. The refusal reports the two
+ * facts the guard established and no inferred cause. Only an invalid expected
+ * head remains `unverified`; the earlier PR-head gate owns that refusal.
  */
 export async function guardAttachedHead(input: {
   pr: { repo: string; number: number };
@@ -297,45 +297,95 @@ export async function guardAttachedHead(input: {
   /** Named in the refusal when the attach answered no ref. */
   fallbackRef: string | undefined;
   fetchPrHead: FetchPrHead;
+  /** Recreate the review checkout at the expected head and report its HEAD. */
+  reprovision: (expectedHeadSha: string) => Promise<{
+    sha: string | undefined;
+    ref?: string | undefined;
+    source?: "resident binding" | "workspace-observed";
+  }>;
   logKey: string;
 }): Promise<AttachHeadGuard> {
   const expected = normalizeHead(input.expectedHeadSha);
   if (!expected) return { outcome: "unverified" };
-  const attached = normalizeHead(input.attached.sha);
-  const source = input.attached.source ?? "workspace-observed";
   const where = `${input.pr.repo}#${input.pr.number}`;
-  const branch = input.attached.ref ?? input.fallbackRef;
-  const namedSource =
-    source === "resident binding"
+  type ObservedHead = {
+    sha: string | undefined;
+    ref?: string | undefined;
+    source?: "resident binding" | "workspace-observed";
+  };
+  const namedSource = (observed: ObservedHead): string => {
+    const source = observed.source ?? "workspace-observed";
+    const branch = observed.ref ?? input.fallbackRef;
+    return source === "resident binding"
       ? branch
         ? `${source} for ${branch}`
         : source
       : branch
         ? `${source} HEAD for ${branch}`
         : `${source} HEAD`;
-  if (!attached) {
-    console.log(`[review] ${input.logKey} not started: ${namedSource} unreadable, PR head ${expected} (${where})`);
+  };
+
+  const first = normalizeHead(input.attached.sha);
+  if (first && sameCommit(expected, first)) return { outcome: "verified" };
+  if (first) {
+    const current = normalizeHead(await input.fetchPrHead(input.pr).catch(() => undefined));
+    if (current && sameCommit(first, current)) {
+      console.log(
+        `[review] ${input.logKey} PR head moved since resolution: ${expected} → ${current}; the ${namedSource(input.attached)} is at the current head — reviewing it (${where})`,
+      );
+      return { outcome: "adopted", headSha: current };
+    }
+  }
+
+  let retried: ObservedHead;
+  let reprovisionFailed = false;
+  try {
+    retried = await input.reprovision(expected);
+  } catch {
+    reprovisionFailed = true;
+    retried = { sha: undefined };
+  }
+  const checked = normalizeHead(retried.sha);
+  if (checked && sameCommit(expected, checked)) {
+    console.log(`[review] ${input.logKey} workspace reprovisioned at reviewed head ${expected} (${where})`);
+    return { outcome: "verified" };
+  }
+
+  const initial = first
+    ? `the initial ${namedSource(input.attached)} was at ${first}`
+    : `the initial ${namedSource(input.attached)} could not be read`;
+  if (reprovisionFailed) {
+    console.log(
+      `[review] ${input.logKey} not started: ${initial}; reprovision failed before retry HEAD observation, expected reviewed head ${expected} (${where})`,
+    );
     return {
       outcome: "refused",
       reply:
-        `🔀 Review of ${where} not started: ${namedSource} could not be read, so the workspace cannot be verified against PR head ${expected}. ` +
-        `This is a bug: the infrastructure failure was not retried automatically. It is not a finding, and nothing was posted to GitHub.`,
+        `🔀 Review of ${where} not started: ${initial}, and the automatic reprovision failed before a retry HEAD could be observed; the expected reviewed head is ${expected}. ` +
+        `It is not a finding, and nothing was posted to GitHub.`,
     };
   }
-  if (sameCommit(expected, attached)) return { outcome: "verified" };
-  const current = normalizeHead(await input.fetchPrHead(input.pr).catch(() => undefined));
-  if (current && sameCommit(attached, current)) {
+
+  const source = namedSource(retried);
+  if (!checked) {
     console.log(
-      `[review] ${input.logKey} PR head moved since resolution: ${expected} → ${current}; the ${namedSource} is at the current head — reviewing it (${where})`,
+      `[review] ${input.logKey} not started: ${initial}; ${source} unreadable after reprovision, expected reviewed head ${expected} (${where})`,
     );
-    return { outcome: "adopted", headSha: current };
+    return {
+      outcome: "refused",
+      reply:
+        `🔀 Review of ${where} not started: ${initial}, and the ${source} could not be read after one automatic reprovision, so it could not be verified; the expected reviewed head is ${expected}. ` +
+        `It is not a finding, and nothing was posted to GitHub.`,
+    };
   }
-  console.log(`[review] ${input.logKey} not started: ${namedSource} ${attached}, PR head ${expected} (${where})`);
+  console.log(
+    `[review] ${input.logKey} not started: ${source} ${checked} after reprovision, expected reviewed head ${expected} (${where})`,
+  );
   return {
     outcome: "refused",
     reply:
-      `🔀 Review of ${where} not started: the ${namedSource} is at ${attached}, but the PR head is ${expected} — the branch moved while the workspace was being prepared (a push or force-push). ` +
-      `This is a bug: the workspace was not reprovisioned automatically at the new head. It is not a finding, and nothing was posted to GitHub.`,
+      `🔀 Review of ${where} not started: after one automatic reprovision, the ${source} is at ${checked}, but the expected reviewed head is ${expected}. ` +
+      `It is not a finding, and nothing was posted to GitHub.`,
   };
 }
 
