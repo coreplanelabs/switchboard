@@ -1,4 +1,5 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import {
   existsSync,
   mkdirSync,
@@ -10,8 +11,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { workAreaNpmCiArgs } from "../../src/deploy/host.js";
 
 // Feature: docs/reference/specs/packaging.md items 3–4 — the package works
 // once installed from its tarball, the way `npx <the package>` will run it:
@@ -250,6 +252,75 @@ describe("the installed CLI", () => {
     expect(r.stdout).toContain("deploy/profile.example.json");
     expect(r.stdout).toContain("memory");
     expect(r.stdout).toContain("bot");
+  });
+
+  it("the packed artifact installs the root runtime closure and dry-builds every Worker with no repository node_modules", () => {
+    const work = join(tmp, "work-build");
+    mkdirSync(work);
+    const init = switchboard(
+      work,
+      "init",
+      "--organization",
+      "acme",
+      "--anthropic-key",
+      "sk-test",
+      "--cloudflare",
+      "0".repeat(32),
+      "--zone",
+      "example.com",
+    );
+    expect(init.status, init.stderr).toBe(0);
+
+    const installedBundle = readFileSync(
+      join(tmp, "install", "node_modules", facts.npmPackage, "dist", "cli.js"),
+      "utf8",
+    );
+    expect(installedBundle).toContain("--include-workspace-root");
+
+    const workArea = join(work, ".switchboard");
+    const workerDirs = readdirSync(join(workArea, "deploy"), { withFileTypes: true })
+      .filter(
+        (entry) =>
+          entry.isDirectory() &&
+          existsSync(join(workArea, "deploy", entry.name, "worker.ts")) &&
+          existsSync(join(workArea, "deploy", entry.name, "wrangler.jsonc")),
+      )
+      .map((entry) => `deploy/${entry.name}`)
+      .sort();
+    expect(workerDirs).toEqual([
+      "deploy/cloudflare",
+      "deploy/cloudflare-memory",
+      "deploy/cloudflare-resident",
+      "deploy/cloudflare-sandbox",
+    ]);
+
+    const cleanPath = process.env.PATH?.split(delimiter)
+      .filter((entry) => !resolve(entry).startsWith(REPO_ROOT))
+      .join(delimiter);
+    const { CLOUDFLARE_API_TOKEN: _token, NODE_PATH: _nodePath, ...baseEnv } = process.env;
+    const env = { ...baseEnv, PATH: cleanPath };
+    execFileSync("npm", workAreaNpmCiArgs(workerDirs), {
+      cwd: workArea,
+      env,
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+
+    const fromWorkArea = createRequire(join(workArea, "package.json"));
+    const installedRoot = join(workArea, "node_modules");
+    expect(fromWorkArea.resolve("zod/package.json")).toMatch(`${installedRoot}/zod/package.json`);
+    const wrangler = join(installedRoot, ".bin", "wrangler");
+    expect(realpathSync(wrangler).startsWith(installedRoot)).toBe(true);
+    for (const worker of workerDirs) {
+      const outdir = join(work, "dry-builds", worker.replace("deploy/", ""));
+      const built = spawnSync(wrangler, ["deploy", "--dry-run", "--outdir", outdir], {
+        cwd: join(workArea, worker),
+        env,
+        encoding: "utf8",
+      });
+      expect(built.status, `${worker}:\n${built.stdout}\n${built.stderr}`).toBe(0);
+      expect(readdirSync(outdir).length, worker).toBeGreaterThan(0);
+    }
   });
 
   it("`init --cloudflare` in an empty directory writes the profile there and renders the Worker configs under .switchboard/ — no checkout, no install; `deploy plan` then plans that installation from that directory with no credential and no network, naming no path of the package or the repository", () => {

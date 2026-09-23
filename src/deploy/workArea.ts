@@ -9,11 +9,12 @@ import type { OperatorRoot } from "./operatorRoot.js";
 // those directories do not exist: the shipped tree — the Worker directories,
 // the sources their `worker.ts` import, the root manifest and lockfile — is
 // copied out of the package's `dist/assets/` into `<root>/.switchboard/`, and
-// each Worker the operator deploys is installed there with `npm ci --workspace
-// deploy/<worker>` against the shipped lockfile: the exact versions the
-// release was tested with, and nothing the operator's machine resolved for
-// itself. A stamp file records the CLI version the copy came from and the
-// Workers installed so far; a CLI at another version starts the work area
+// each Worker the operator deploys is installed there with `npm ci
+// --include-workspace-root --workspace deploy/<worker>` against the shipped
+// lockfile: the Worker's tooling and the root runtime closure its shipped
+// source imports, at the exact versions the release was tested with. A stamp
+// file records the CLI version the copy came from and the Workers installed
+// so far; a CLI at another version starts the work area
 // over, and a Worker already installed is not installed again. Prebuilt
 // bundles would remove the install — a later optimisation; today wrangler
 // runs in the materialised directory exactly as it does in a checkout.
@@ -26,7 +27,7 @@ export const WORK_AREA_STAMP = ".materialised.json";
 
 export interface WorkAreaStamp {
   version: string;
-  /** The Worker directories (`deploy/<worker>`) `npm ci` has installed in this work area. */
+  /** The Worker directories (`deploy/<worker>`) the root-inclusive `npm ci` has installed here. */
   installed: string[];
 }
 
@@ -100,7 +101,7 @@ export function readWorkAreaState(workArea: string): WorkAreaState {
 }
 
 export interface WorkAreaDeps {
-  /** `npm ci --workspace <w>…` in `cwd`; the exit code and the combined output. */
+  /** `npm ci --include-workspace-root --workspace <w>…` in `cwd`; its exit code and combined output. */
   install(cwd: string, workspaces: readonly string[]): Promise<{ code: number; output: string }>;
   log(line: string): void;
 }
@@ -130,7 +131,9 @@ export async function ensureWorkArea(
     deps.log(`[deploy] materialised the shipped tree (version ${version}) under ${at.workArea}`);
   }
   if (plan.install.length > 0) {
-    deps.log(`[deploy] npm ci --workspace ${plan.install.join(" --workspace ")} under ${at.workArea}`);
+    deps.log(
+      `[deploy] npm ci --include-workspace-root --workspace ${plan.install.join(" --workspace ")} under ${at.workArea}`,
+    );
     const r = await deps.install(at.workArea, plan.install);
     if (r.code !== 0)
       return {

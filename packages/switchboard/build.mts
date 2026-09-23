@@ -11,8 +11,9 @@
 //                    tooling — the Worker templates, sources, manifests and Dockerfiles —
 //                    the sources under src/ each Worker's worker.ts imports, and the root
 //                    manifest and lockfile, so a deploy from the package can materialise a
-//                    Worker directory and `npm ci --workspace` it at the release's pinned
-//                    versions (src/deploy/workArea.ts); the dashboard's built bundle
+//                    Worker directory and `npm ci --include-workspace-root --workspace` it
+//                    with the root runtime closure at the release's pinned versions
+//                    (src/deploy/workArea.ts); the dashboard's built bundle
 //                    (web/dist, built here first) the bot serves from the package root
 //                    (src/channels/webAssets.ts `webDistDir`); plus source.json, the version
 //                    and commit this build came from (src/packageRoot.ts `parsePackageSource`)

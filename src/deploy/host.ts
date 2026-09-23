@@ -43,11 +43,25 @@ export function cliVersionOnHost(at: OperatorRoot = OPERATOR_ROOT): string {
   return at.mode === "package" ? packageSourceOnHost(at).version : packageVersion();
 }
 
-/** `npm ci --workspace <w>…` in `cwd`, output collected; never throws. */
+/** The package work area's install: selected Worker tooling plus the root runtime closure their source imports. */
+export function workAreaNpmCiArgs(workspaces: readonly string[]): string[] {
+  return [
+    "ci",
+    "--include-workspace-root",
+    "--no-audit",
+    "--no-fund",
+    ...workspaces.flatMap((w) => ["--workspace", w]),
+  ];
+}
+
+/** `npm ci --include-workspace-root --workspace <w>…` in `cwd`, output collected; never throws. */
 function npmCi(cwd: string, workspaces: readonly string[]): Promise<{ code: number; output: string }> {
   return new Promise((resolve) => {
-    const args = ["ci", "--no-audit", "--no-fund", ...workspaces.flatMap((w) => ["--workspace", w])];
-    const child = spawn("npm", args, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("npm", workAreaNpmCiArgs(workspaces), {
+      cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     let output = "";
     child.stdout.on("data", (c: Buffer) => (output += c.toString()));
     child.stderr.on("data", (c: Buffer) => (output += c.toString()));
