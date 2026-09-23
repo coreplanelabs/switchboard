@@ -293,6 +293,20 @@ export interface RunFinishedPayload {
   parentInstanceId: string;
 }
 
+/** Durable authority for publishing another commit to an existing pull
+ * request. Every identity field is repeated deliberately: publication is
+ * allowed only when the unit, checkout and a fresh remote read all agree with
+ * this exact record. */
+export interface ExistingPrPublicationBinding {
+  repo: string;
+  pr: number;
+  headRef: string;
+  baseRef: string;
+  expectedHeadSha: string;
+  publicationRef: string;
+  owner: { instanceId: string; unit: string };
+}
+
 /** What a coordinator's spawn stamps on the child's every row: the instance
  *  the child belongs to and the key the spawn carried — and, for the child's
  *  own post-step, the base its pull request targets. */
@@ -310,6 +324,10 @@ export interface CoordinatorTag {
    *  back off its ledger events; `coordinatorFields` still leaves it off the
    *  rows, so rows and records keep the shape written before it existed. */
   base?: string;
+  /** The existing-PR publication authority this child received from its
+   * durable unit row and current Workflow round. Published on the run's event
+   * stream so a rehost retains the same fence. */
+  publication?: ExistingPrPublicationBinding;
 }
 
 /** The tag as the two flat record fields, or nothing — so a row, a summary
@@ -489,6 +507,9 @@ export interface CoordinatorUnit {
    *  — no pre-check, no branch, no round 0. A task string's row only; written by
    *  the hand-off, read by the driver into the machine's input. */
   resume?: { pr: number; headSha?: string; url?: string };
+  /** Exact existing-PR publication authority. Absent for a fresh unit branch;
+   * an adopted or resumed PR may publish only through this binding. */
+  publication?: ExistingPrPublicationBinding;
   /** The decision-record number reserved at admission for this unit. A unit
    * that writes a record carries it through every attempt and briefs its child
    * as `record: NNNN`; the child never scans the directory for a number. */
@@ -549,6 +570,23 @@ const isResume = (v: unknown): boolean =>
   isFinite(v.pr) &&
   (v.headSha === undefined || isText(v.headSha)) &&
   (v.url === undefined || isText(v.url, 2048));
+const isFullSha = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
+const isPublication = (v: unknown): v is ExistingPrPublicationBinding =>
+  isObject(v) &&
+  typeof v.repo === "string" &&
+  REPO_SLUG.test(v.repo) &&
+  typeof v.pr === "number" &&
+  Number.isInteger(v.pr) &&
+  v.pr > 0 &&
+  isText(v.headRef) &&
+  isText(v.baseRef) &&
+  isFullSha(v.expectedHeadSha) &&
+  isText(v.publicationRef) &&
+  isObject(v.owner) &&
+  typeof v.owner.instanceId === "string" &&
+  INSTANCE_ID_PATTERN.test(v.owner.instanceId) &&
+  typeof v.owner.unit === "string" &&
+  UNIT_PATTERN.test(v.owner.unit);
 const isThread = (v: unknown): boolean => isObject(v) && isText(v.threadKey) && isOptionalText(v.sourceUrl);
 
 /** Structural check on a record from outside the process (a Worker response, an HTTP body). */
@@ -663,6 +701,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (r.issue !== undefined && !isFinite(r.issue)) return false;
   if (r.pr !== undefined && !isPr(r.pr)) return false;
   if (r.resume !== undefined && !isResume(r.resume)) return false;
+  if (r.publication !== undefined && !isPublication(r.publication)) return false;
   if (r.record !== undefined && (typeof r.record !== "string" || !/^\d{4}$/.test(r.record))) return false;
   if (r.lastPush !== undefined && !isText(r.lastPush)) return false;
   if (r.segments !== undefined && (!Array.isArray(r.segments) || !r.segments.every(isSegment))) return false;

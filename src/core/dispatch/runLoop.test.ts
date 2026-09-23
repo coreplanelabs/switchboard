@@ -1181,6 +1181,149 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
   });
 
+  it("a blocked existing-PR publication keeps the local checkpoint attached and renders truthful partial status without an alternate push", async () => {
+    const EXPECTED = "a".repeat(40);
+    const MOVED = "b".repeat(40);
+    const LOCAL = "c".repeat(40);
+    const BRANCH = "fix/existing";
+    const unit = `U${1}`;
+    const publication = {
+      repo: "o/r",
+      pr: 7,
+      headRef: BRANCH,
+      baseRef: "main",
+      expectedHeadSha: EXPECTED,
+      publicationRef: BRANCH,
+      owner: { instanceId: "coord-p", unit },
+    };
+    const commands: string[] = [];
+    const s = setup("the local fix is complete", {
+      agent: "coding",
+      coding: true,
+      repoCtx: { repo: "o/r", pr: 7, ref: BRANCH, baseRef: "main", headSha: EXPECTED },
+      binding: { ref: BRANCH, sha: EXPECTED, workspace: "/srv/wt/existing" },
+      coordinator: {
+        parentInstanceId: "coord-p",
+        idempotencyKey: `coord-p:${unit}/1/findings`,
+        base: "main",
+        publication,
+      },
+      executor: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${LOCAL}\n`;
+          if (/rev-parse @\{u\}/.test(cmd)) return `${MOVED}\n`;
+          if (/status --porcelain/.test(cmd)) return "";
+          if (/rev-list --count/.test(cmd)) return "1\n";
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${MOVED}\trefs/heads/${BRANCH}\n`;
+          return "";
+        },
+      },
+    });
+    s.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: BRANCH,
+      baseRef: "main",
+      headSha: MOVED,
+    });
+
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.answer).toBe("the local fix is complete");
+    expect(commands.some((command) => command.startsWith("git push"))).toBe(false);
+    const card = `${s.ctx.shell.label}\n${JSON.stringify([...s.frames, ...s.closes])}`;
+    expect(card).toContain("kept the local checkpoint");
+    expect(card).toContain("retention beyond this run is unverified");
+    expect(card).not.toContain("discarded at the run's end");
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual([]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    expect(record.headSha).toBe(LOCAL);
+    expect(record.events).toContainEqual(
+      expect.objectContaining({
+        type: "run_note",
+        kind: "publication_blocked",
+        summary: expect.stringContaining(LOCAL.slice(0, 7)),
+      }),
+    );
+    expect(record.pushed ?? []).toEqual([]);
+  });
+
+  it("a concurrent branch move that rejects the atomic lease keeps the unpublished checkpoint attached", async () => {
+    const EXPECTED = "a".repeat(40);
+    const MOVED = "c".repeat(40);
+    const LOCAL = "b".repeat(40);
+    const BRANCH = "fix/existing";
+    const unit = `U${1}`;
+    const publication = {
+      repo: "o/r",
+      pr: 7,
+      headRef: BRANCH,
+      baseRef: "main",
+      expectedHeadSha: EXPECTED,
+      publicationRef: BRANCH,
+      owner: { instanceId: "coord-p", unit },
+    };
+    const commands: string[] = [];
+    const s = setup("the local fix is complete", {
+      agent: "coding",
+      coding: true,
+      repoCtx: { repo: "o/r", pr: 7, ref: BRANCH, baseRef: "main", headSha: EXPECTED },
+      binding: { ref: BRANCH, sha: EXPECTED, workspace: "/srv/wt/existing" },
+      coordinator: {
+        parentInstanceId: "coord-p",
+        idempotencyKey: `coord-p:${unit}/1/findings`,
+        base: "main",
+        publication,
+      },
+      executor: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (cmd.startsWith("git push --force-with-lease="))
+            throw new Error("rejected: stale info — the branch moved concurrently");
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${LOCAL}\n`;
+          if (/rev-parse @\{u\}/.test(cmd)) return `${EXPECTED}\n`;
+          if (/status --porcelain/.test(cmd)) return "";
+          if (/rev-list --count/.test(cmd)) return "1\n";
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${MOVED}\trefs/heads/${BRANCH}\n`;
+          return "";
+        },
+      },
+    });
+    s.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: BRANCH,
+      baseRef: "main",
+      headSha: EXPECTED,
+    });
+
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(commands).toContain(
+      `git push --force-with-lease='refs/heads/${BRANCH}:${EXPECTED}' origin 'HEAD:refs/heads/${BRANCH}'`,
+    );
+    expect(out.answer).toBe("the local fix is complete");
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual([]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    expect(record.events).toContainEqual(
+      expect.objectContaining({
+        type: "run_note",
+        kind: "publication_blocked",
+        summary: expect.stringContaining("atomic leased push was rejected"),
+      }),
+    );
+    expect(record.pushed ?? []).toEqual([]);
+  });
+
   it("a stopped coding child checkpoints its WIP before the hard-stop teardown", async () => {
     const HEAD = "c1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     const BRANCH = "unit-work";
@@ -1636,6 +1779,126 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(overflowed.notes).toHaveLength(1);
   });
 
+  // execution item 30: an atomic rejection revokes the live harness's receipt,
+  // not just the mechanical salvage paths that read the run-loop variable.
+  it("a rejected compaction checkpoint revokes the open harness's publication receipt before the continuing model can push", async () => {
+    const EXPECTED = "a".repeat(40);
+    const LOCAL = "b".repeat(40);
+    const BRANCH = "fix/existing";
+    const unit = `U${1}`;
+    const publication = {
+      repo: "o/r",
+      pr: 7,
+      headRef: BRANCH,
+      baseRef: "main",
+      expectedHeadSha: EXPECTED,
+      publicationRef: BRANCH,
+      owner: { instanceId: "coord-p", unit },
+    };
+    const PUSH = `git push --force-with-lease=refs/heads/${BRANCH}:${EXPECTED} origin HEAD:refs/heads/${BRANCH}`;
+    const registry = new HarnessRegistry();
+    const container = new FakeHarnessContainer();
+    const commands: string[] = [];
+    let laterPush: ReturnType<typeof authorizeToolCall> | undefined;
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type !== "prompt") return;
+      c.emit(
+        { id: cmd.id, type: "response", command: "prompt", success: true },
+        { type: "agent_start" },
+        {
+          type: "compaction_end",
+          reason: "threshold",
+          result: undefined,
+          aborted: false,
+          errorMessage: "the provider refused the summary",
+        },
+      );
+      void (async () => {
+        for (let i = 0; i < 200 && !commands.some((command) => command.startsWith("git push --force-with-lease=")); i++)
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        const live = registry.get("run-l")!;
+        const input = { command: PUSH };
+        const call = {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "p1", name: "bash", arguments: input }],
+          stopReason: "toolUse",
+        };
+        c.emit(
+          { type: "message_end", message: call },
+          { type: "tool_execution_start", toolCallId: "p1", toolName: "bash", args: input },
+        );
+        laterPush = authorizeToolCall(live, { toolCallId: "p1", tool: "bash", input });
+        c.emit(
+          {
+            type: "tool_execution_end",
+            toolCallId: "p1",
+            toolName: "bash",
+            result: { content: [{ type: "text", text: laterPush.allow ? "pushed" : laterPush.reason }] },
+            isError: !laterPush.allow,
+          },
+          { type: "turn_end", message: call, toolResults: [] },
+        );
+        const done = { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" };
+        c.emit(
+          { type: "message_end", message: done },
+          { type: "turn_end", message: done, toolResults: [] },
+          { type: "agent_settled" },
+        );
+      })();
+    };
+    const s = setup("", {
+      agent: "coding",
+      yaml: PI_YAML,
+      coding: true,
+      repoCtx: { repo: "o/r", pr: 7, ref: BRANCH, baseRef: "main", headSha: EXPECTED },
+      binding: { ref: BRANCH, sha: EXPECTED, workspace: "/srv/wt/existing" },
+      coordinator: {
+        parentInstanceId: "coord-p",
+        idempotencyKey: `coord-p:${unit}/1/findings`,
+        base: "main",
+        publication,
+      },
+      harness: {
+        harnesses: roster(),
+        registry,
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => container,
+        pollMs: 1,
+        tickMs: 5,
+      },
+      bearer: "sbr_run-l.s3cret",
+      executor: {
+        exec: async (command: string) => {
+          commands.push(command);
+          if (command.startsWith("git push --force-with-lease=")) throw new Error("rejected: stale info");
+          if (/rev-parse --abbrev-ref HEAD/.test(command)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(command)) return `${LOCAL}\n`;
+          if (/status --porcelain/.test(command)) return " M src/a.ts\n";
+          if (/rev-list --count/.test(command)) return "1\n";
+          return "";
+        },
+      },
+    });
+    s.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: BRANCH,
+      baseRef: "main",
+      headSha: EXPECTED,
+    });
+
+    expect(answered(await runLoop(s.deps, s.ctx)).answer).toBe("done");
+    expect(laterPush).toEqual({
+      allow: false,
+      reason: expect.stringContaining("existing-PR publication blocked: the atomic leased push was rejected"),
+    });
+    expect(commands.filter((command) => command.startsWith("git push --force-with-lease="))).toHaveLength(1);
+  });
+
   // harness-pi item 6: the finale answer reads what the ending established.
   // The loop's answer is composed AFTER the salvage, the description turn and
   // the PR post-step, from the ending the harness handed over: even a clean
@@ -1989,12 +2252,14 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     }
     const rulesOf = async ({
       instances,
+      freshHead,
       ...thread
     }: {
       repoCtx: RepoContext;
       coordinator?: CoordinatorTag;
       binding?: ResidentBinding;
       instances?: InMemoryCoordinatorInstanceStore;
+      freshHead?: string;
     }) => {
       const container = new FakeHarnessContainer();
       const registry = new RecordingRegistry();
@@ -2012,6 +2277,15 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
         ...thread,
       });
       if (instances) s.deps.coordinatorInstances = instances;
+      if (thread.coordinator?.publication !== undefined)
+        s.deps.fetchPrFacts = async () => ({
+          state: "open",
+          sameRepoHead: true,
+          headBranchExists: true,
+          headRef: thread.coordinator!.publication!.headRef,
+          baseRef: thread.coordinator!.publication!.baseRef,
+          headSha: freshHead ?? thread.coordinator!.publication!.expectedHeadSha,
+        });
       await runLoop(s.deps, s.ctx);
       return seen.pop()!;
     };
@@ -2046,6 +2320,55 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     });
     expect(push(child, "unit/u26")).toBe("allowed");
     expect(push(child, "feat/trunk")).toBe("refused");
+
+    // An adopted existing PR carries a durable target and is re-read before
+    // the harness opens. The same-head receipt permits only an atomic leased
+    // push; movement blocks every publication without inventing another ref.
+    const expected = "a".repeat(40);
+    const unit = `U${1}`;
+    const publication = {
+      repo: "o/r",
+      pr: 7,
+      headRef: "fix/existing",
+      baseRef: "main",
+      expectedHeadSha: expected,
+      publicationRef: "fix/existing",
+      owner: { instanceId: "coord-p", unit },
+    };
+    const publicationTag: CoordinatorTag = {
+      parentInstanceId: "coord-p",
+      idempotencyKey: `coord-p:${unit}/1/findings`,
+      base: "main",
+      publication,
+    };
+    const existing = await rulesOf({
+      repoCtx: { repo: "o/r", pr: 7, ref: "fix/existing", headSha: expected },
+      binding: { ref: "fix/existing", sha: expected, workspace: "/srv/wt/existing" },
+      coordinator: publicationTag,
+    });
+    expect(existing).toMatchObject({
+      branch: "fix/existing",
+      protectedBranches: ["main"],
+      publication: { authority: { ref: "fix/existing", expectedHeadSha: expected } },
+    });
+    expect(
+      judgeToolCall(
+        "bash",
+        {
+          command: `git push --force-with-lease=refs/heads/fix/existing:${expected} origin HEAD:refs/heads/fix/existing`,
+        },
+        existing,
+      ),
+    ).toEqual({ verdict: "allowed" });
+    const moved = await rulesOf({
+      repoCtx: { repo: "o/r", pr: 7, ref: "fix/existing", headSha: expected },
+      binding: { ref: "fix/existing", sha: expected, workspace: "/srv/wt/existing" },
+      coordinator: publicationTag,
+      freshHead: "b".repeat(40),
+    });
+    expect(moved.publication).toMatchObject({ authority: { blocked: expect.stringContaining("head moved") } });
+    expect(push(moved, "fix/existing")).toBe("refused");
+    expect(push(moved, "fix/alternate")).toBe("refused");
     // A unit child resumed from a row written before the tag carried a base
     // (run-history item 48a's second guard): the base is read from the
     // coordinator store BEFORE the session opens, so the push rules see it —
@@ -3707,6 +4030,102 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     ...(mode ? { mode } : {}),
     at: seq,
     seq,
+  });
+
+  it("a verification-blocked existing PR with a clean checkout performs no PR lookup, edit, or create", async () => {
+    const EXPECTED = "a".repeat(40);
+    const MOVED = "c".repeat(40);
+    const BRANCH = "fix/existing";
+    const unit = `U${1}`;
+    const publication = {
+      repo: "o/r",
+      pr: 7,
+      headRef: BRANCH,
+      baseRef: "main",
+      expectedHeadSha: EXPECTED,
+      publicationRef: BRANCH,
+      owner: { instanceId: "coord-p", unit },
+    };
+    const description: PrDescription = {
+      title: "fix(core): fence existing PR publication",
+      tldr: "Keeps existing pull requests unchanged after publication is blocked. This prevents stale intent from mutating or recreating them.",
+      why: "The exact-head receipt no longer authorizes publication after the branch moves.",
+      pointers: [
+        { label: "Publication fence", text: "Skips every PR write.", anchor: { path: "src/a", from: 1, to: 2 } },
+      ],
+      feedbackWanted: "The fail-closed boundary.",
+      risk: "Low.",
+      verified: "Unit test.",
+      decisions: [],
+      validation: { criteria: [{ criterion: "blocked publication", proof: "green" }] },
+    };
+    const submitting = watched(piHarness);
+    submitting.harness.open = async (_deps, run) => {
+      run.toolContext.onPrDescription?.(description);
+      return {
+        answer: "the local fix is complete",
+        followUp: async () => "",
+        remainingMs: () => 20 * 60_000,
+        end: async () => {},
+      };
+    };
+    const s = setup("", {
+      agent: "coding",
+      coding: true,
+      harness: {
+        harnesses: roster(submitting.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      repoCtx: {
+        repo: "o/r",
+        pr: 7,
+        prFromRecord: true,
+        refFromPr: true,
+        ref: BRANCH,
+        baseRef: "main",
+        headSha: EXPECTED,
+      },
+      binding: { ref: BRANCH, sha: EXPECTED, workspace: "/srv/wt/existing" },
+      coordinator: {
+        parentInstanceId: "coord-p",
+        idempotencyKey: `coord-p:${unit}/1/findings`,
+        base: "main",
+        publication,
+      },
+      executor: {
+        exec: async (cmd: string) => {
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${EXPECTED}\n`;
+          if (/rev-parse @\{u\}/.test(cmd)) return `${EXPECTED}\n`;
+          if (/status --porcelain/.test(cmd)) return "";
+          if (/rev-list --count/.test(cmd)) return "0\n";
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${MOVED}\trefs/heads/${BRANCH}\n`;
+          return "";
+        },
+      },
+    });
+    s.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: BRANCH,
+      baseRef: "main",
+      headSha: MOVED,
+    });
+    const find = vi.fn(async () => ({ number: 7, htmlUrl: "https://github.com/o/r/pull/7" }));
+    const update = vi.fn(async () => {});
+    const open = vi.fn(async () => ({ number: 8, htmlUrl: "https://github.com/o/r/pull/8", created: true }));
+    s.deps.findOpenPrByHead = find;
+    s.deps.updatePullRequest = update;
+    s.deps.openPullRequest = open;
+
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.prNote).toBeUndefined();
+    expect(find).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("the model is never called: the transcript's final turn is the answer, published and finished `completed`, and a `resumed` note on the stream says the loop had ended before the restart", async () => {

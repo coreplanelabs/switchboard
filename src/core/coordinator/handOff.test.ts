@@ -501,6 +501,15 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
         dependsOn: [],
         rounds: [],
         resume: { pr: 7, headSha: "a".repeat(40), url: "https://github.com/acme/api/pull/7" },
+        publication: {
+          repo: "acme/api",
+          pr: 7,
+          headRef: "feat/wake-cache",
+          baseRef: "main",
+          expectedHeadSha: "a".repeat(40),
+          publicationRef: "feat/wake-cache",
+          owner: { instanceId: id, unit: `U${1}` },
+        },
       },
     ]);
     // Without a url the reply builds the pull request's from the number.
@@ -508,12 +517,17 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     const again = await handOffToCoordinator(
       bare.deps,
       input({
-        entry: { repo: "acme/api", branch: "feat/wake-cache", base: "main", resume: { pr: 9 } },
+        entry: {
+          repo: "acme/api",
+          branch: "feat/wake-cache",
+          base: "main",
+          resume: { pr: 9, headSha: "b".repeat(40) },
+        },
         requestText: "acme/api#9",
       }),
     );
     expect(again.reply).toContain("the review loop of https://github.com/acme/api/pull/9 resumes");
-    expect((await bare.instances.listUnits(id))[0]!.resume).toEqual({ pr: 9 });
+    expect((await bare.instances.listUnits(id))[0]!.resume).toEqual({ pr: 9, headSha: "b".repeat(40) });
   });
 
   it("refusals before anything is written: a plan file the repository does not have at the base, a plan whose name is not a plan id, no base branch, a plan without units; each names the reason and creates nothing", async () => {

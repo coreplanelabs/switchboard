@@ -301,6 +301,25 @@ describe("isCoordinatorUnit — one unit's row", () => {
     expect(isCoordinatorUnit({ ...unit, resume: "7" })).toBe(false);
   });
 
+  it("an existing-PR publication binding requires complete repository, PR, ref, full-head and owner identity", () => {
+    const publication = {
+      repo: "acme/api",
+      pr: 7,
+      headRef: "fix/existing",
+      baseRef: "main",
+      expectedHeadSha: "a".repeat(40),
+      publicationRef: "fix/existing",
+      owner: { instanceId: instance.id, unit: unit.unit },
+    };
+    expect(isCoordinatorUnit({ ...unit, publication })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, publication: { ...publication, expectedHeadSha: "aaaaaaa" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, publication: { ...publication, repo: "not-a-slug" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, publication: { ...publication, pr: 0 } })).toBe(false);
+    expect(
+      isCoordinatorUnit({ ...unit, publication: { ...publication, owner: { ...publication.owner, unit: "" } } }),
+    ).toBe(false);
+  });
+
   it("the review thread is a thread key with an optional link, beside the unit's own thread; a review thread without its key, with a malformed link, or as a bare string is refused", () => {
     expect(isCoordinatorUnit({ ...unit, reviewThread: { threadKey: "slack:C1:3.0" } })).toBe(true);
     expect(isCoordinatorUnit({ ...unit, reviewThread: undefined })).toBe(true);

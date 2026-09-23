@@ -51,7 +51,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
         repo: "acme/api",
         branch: "feat/rate-limit",
         base: "release/1.x",
-        adopt: { pr: 7, url: PR_URL },
+        adopt: { pr: 7, headSha: HEAD, url: PR_URL },
       },
     });
   });
@@ -469,14 +469,11 @@ describe("shipPreflight — the base ref existence check before the pipeline bra
     expect(refExists).not.toHaveBeenCalled();
   });
 
-  it("a pull request's missing base falls back to the repository default — adopt and resume alike", async () => {
+  it("an existing pull request whose bound base is missing fails closed instead of publishing against a fallback", async () => {
     const adopt = await shipPreflight(
       input({ repoCtx: { repo: "acme/api", pr: 7 }, prFacts: async () => openPr(), refExists: async () => false }),
     );
-    expect(adopt).toMatchObject({
-      ok: true,
-      entry: { branch: "feat/rate-limit", base: "main", baseFallback: { requested: "release/1.x" } },
-    });
+    expect(adopt).toMatchObject({ ok: false, where: "pull request base branch missing" });
     const resume = await shipPreflight(
       input({
         requestText: PR_URL,
@@ -485,13 +482,10 @@ describe("shipPreflight — the base ref existence check before the pipeline bra
         refExists: async () => false,
       }),
     );
-    expect(resume).toMatchObject({
-      ok: true,
-      entry: { branch: "feat/rate-limit", base: "main", baseFallback: { requested: "release/1.x" } },
-    });
+    expect(resume).toMatchObject({ ok: false, where: "pull request base branch missing" });
   });
 
-  it("a pull request's own base that exists leaves the adopt unchanged; a PR without its own base spends no lookup", async () => {
+  it("a pull request's own base that exists leaves the adopt unchanged; a PR without its own base fails before a lookup", async () => {
     const refExists = vi.fn(async () => true);
     const adopt = await shipPreflight(
       input({ repoCtx: { repo: "acme/api", pr: 7 }, prFacts: async () => openPr(), refExists }),
@@ -506,7 +500,7 @@ describe("shipPreflight — the base ref existence check before the pipeline bra
         refExists: noBase,
       }),
     );
-    expect(fallback).toMatchObject({ ok: true, entry: { base: "main" } });
+    expect(fallback).toMatchObject({ ok: false, where: "base branch unknown" });
     expect(noBase).not.toHaveBeenCalled();
   });
 });
@@ -561,7 +555,7 @@ describe("shipPreflight — the entry table over (task text, PR source, thread's
         repo: "acme/api",
         branch: "feat/rate-limit",
         base: "release/1.x",
-        adopt: { pr: 7, url: PR_URL },
+        adopt: { pr: 7, headSha: HEAD, url: PR_URL },
       },
     });
   });

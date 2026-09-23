@@ -69,6 +69,15 @@ export function reachFor(identity: Identity): ReadonlySet<string> {
  *  outside the run's identity's reach altogether (`outside-profile`). */
 export type ToolVerdict = { verdict: "allowed" } | { verdict: "refused" | "outside-profile"; reason: string };
 
+export type ExistingPrPublicationAuthority = { ref: string; expectedHeadSha: string } | { blocked: string };
+
+/** A live existing-PR publication capability. The run loop replaces
+ * `authority` when any atomic push is rejected, so every harness gate holding
+ * this fence observes the revocation before it judges the next tool call. */
+export interface ExistingPrPublicationFence {
+  authority: ExistingPrPublicationAuthority;
+}
+
 export interface ToolRuleContext {
   /** The run's identity — the preset's (`AgentDef.identity`): it decides the
    *  reach, and under `read` the shell never pushes or writes to GitHub. */
@@ -82,6 +91,11 @@ export interface ToolRuleContext {
   /** Branches a run without a branch of its own may never push to: the base
    *  its pull request would target, the repository's default. */
   protectedBranches?: readonly string[];
+  /** An existing pull request's live atomic publication fence. Blocked
+   * authority refuses every push; an allowed receipt requires the exact owned
+   * destination and an explicit force-with-lease pinned to the fresh expected
+   * head. The wrapper stays shared so a rejection can revoke an open harness. */
+  publication?: ExistingPrPublicationFence;
   /** How long until the LOOP ends, in ms, on the harness's clock — the moment
    *  the loop-end cut fires (`loopClock.loopEnd`; a follow-up turn's own
    *  deadline while a turn runs), never the lease's end: a bash call whose
@@ -249,9 +263,27 @@ function judgeBashTimeout(timeout: unknown, ctx: ToolRuleContext): ToolVerdict {
  *  is the same push as naming it. A run naming its own branch may push any but
  *  the protected ones: the base its pull request targets is never pushed to. */
 function judgePush(tail: string, ctx: ToolRuleContext): ToolVerdict {
-  const [remote, refspec] = pushArguments(tail);
+  const [remote, refspec, ...additionalRefspecs] = pushArguments(tail);
   if (remote !== undefined && remote !== "origin") {
     return refused(`repo:use — push to remote \`${remote}\`, not the run's repository (origin)`);
+  }
+  if (ctx.publication !== undefined) {
+    const publication = ctx.publication.authority;
+    if ("blocked" in publication) return refused(`repo:use — existing-PR publication blocked: ${publication.blocked}`);
+    if (refspec === undefined)
+      return refused("repo:use — existing-PR publication requires the explicit owned destination");
+    if (additionalRefspecs.length > 0)
+      return refused("repo:use — existing-PR publication allows exactly one owned destination");
+    const destination = refspec.replace(/^\+/, "").split(":").pop() ?? refspec;
+    const branch = destination === "HEAD" ? ctx.branch : destination.replace(/^refs\/heads\//, "");
+    if (branch !== publication.ref)
+      return refused(`repo:use — push to \`${branch}\`, not the owned publication ref ${publication.ref}`);
+    const lease = `--force-with-lease=refs/heads/${publication.ref}:${publication.expectedHeadSha}`;
+    if (!tail.split(/\s+/).includes(lease))
+      return refused(
+        `repo:use — existing-PR publication requires \`${lease}\` so concurrent movement fails atomically`,
+      );
+    return allowed;
   }
   // A push naming no refspec pushes the checked-out branch, which a rule over
   // the call's text alone cannot know: `git switch main && git push` passes

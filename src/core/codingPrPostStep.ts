@@ -291,9 +291,13 @@ export function salvageWorkOf(
  *  wind-down, so the tree is pushed the moment the failure is known. */
 export async function salvageBudgetPush(
   executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
-  opts: { branch: string; cue?: "budget" | "compaction" | "ending" | "completion" },
+  opts: {
+    branch: string;
+    cue?: "budget" | "compaction" | "ending" | "completion";
+    publication?: { ref: string; expectedHeadSha: string } | { blocked: string };
+  },
   span?: Span,
-): Promise<{ pushed: boolean; summary: string; head?: string }> {
+): Promise<{ pushed: boolean; summary: string; head?: string; publicationBlocked?: string }> {
   const trace = span ? { span } : undefined;
   const run = (cmd: string) => executor.exec(cmd, trace);
   const probe = (cmd: string) => run(cmd).catch(() => "");
@@ -345,7 +349,29 @@ export async function salvageBudgetPush(
     }
     const unpushed = parseCountOutput(await run("git rev-list --count HEAD --not --remotes")) ?? 0;
     if (!dirty && !endingCheckpoint && unpushed === 0) return { pushed: false, summary: words.nothing };
-    await run(`git push origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
+    if (opts.publication !== undefined && "blocked" in opts.publication)
+      return {
+        pushed: false,
+        summary: `${words.failedLead}: existing-PR publication is blocked (${opts.publication.blocked}) — the commit remains unpublished in the bound workspace; no alternate ref was created`,
+      };
+    const lease =
+      opts.publication !== undefined
+        ? ` --force-with-lease=${shellQuote(`refs/heads/${opts.publication.ref}:${opts.publication.expectedHeadSha}`)}`
+        : "";
+    try {
+      await run(`git push${lease} origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
+    } catch (err) {
+      if (opts.publication !== undefined) {
+        const detail = err instanceof Error ? err.message : String(err);
+        const publicationBlocked = `the atomic leased push was rejected: ${detail}`;
+        return {
+          pushed: false,
+          publicationBlocked,
+          summary: `${words.failedLead}: existing-PR publication is blocked (${publicationBlocked}) — the commit remains unpublished in the bound workspace; no alternate ref was created`,
+        };
+      }
+      throw err;
+    }
     const head = parseRevParseOutput(await probe("git rev-parse HEAD"));
     return {
       pushed: true,

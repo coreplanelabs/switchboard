@@ -54,7 +54,13 @@ export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent
   if (typeof parentInstanceId !== "string" || typeof idempotencyKey !== "string") return undefined;
   const tag = events.find((e) => e.type === "coordinator_tag");
   const base = tag?.type === "coordinator_tag" ? tag.base : undefined;
-  return { parentInstanceId, idempotencyKey, ...(base !== undefined ? { base } : {}) };
+  const publication = tag?.type === "coordinator_tag" ? tag.publication : undefined;
+  return {
+    parentInstanceId,
+    idempotencyKey,
+    ...(base !== undefined ? { base } : {}),
+    ...(publication !== undefined ? { publication } : {}),
+  };
 }
 
 /** The `resumed` note's words for a workspace that could not be re-attached. */

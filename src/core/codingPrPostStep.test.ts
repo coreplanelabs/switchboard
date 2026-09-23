@@ -1976,6 +1976,47 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     expect(w.commands).toContain("git push origin 'HEAD:refs/heads/plan/p/u1'");
   });
 
+  it("an existing-PR publication fence leaves committed work unpublished when blocked and uses the atomic lease when allowed", async () => {
+    const expected = "a".repeat(40);
+    const blocked = fakeExecutor({ "git status": " M src/a.ts\n", "git rev-list": "1\n" });
+    const denied = await salvageBudgetPush(blocked.executor, {
+      branch: "fix/existing",
+      publication: { blocked: "the fresh pull-request head moved" },
+    });
+    expect(denied).toMatchObject({ pushed: false });
+    expect(denied.summary).toContain("commit remains unpublished in the bound workspace");
+    expect(denied.summary).toContain("no alternate ref was created");
+    expect(blocked.commands.some((command) => command.startsWith("git commit -m"))).toBe(true);
+    expect(blocked.commands.some((command) => command.startsWith("git push"))).toBe(false);
+
+    const allowed = fakeExecutor({
+      "git status": "\n",
+      "git rev-list": "1\n",
+      "git rev-parse HEAD": "b".repeat(40),
+    });
+    const pushed = await salvageBudgetPush(allowed.executor, {
+      branch: "fix/existing",
+      cue: "completion",
+      publication: { ref: "fix/existing", expectedHeadSha: expected },
+    });
+    expect(pushed).toMatchObject({ pushed: true, head: "b".repeat(40) });
+    expect(allowed.commands).toContain(
+      `git push --force-with-lease='refs/heads/fix/existing:${expected}' origin 'HEAD:refs/heads/fix/existing'`,
+    );
+
+    const moved = fakeExecutor({ "git status": "\n", "git rev-list": "1\n" }, { failOn: "git push" });
+    const rejected = await salvageBudgetPush(moved.executor, {
+      branch: "fix/existing",
+      cue: "completion",
+      publication: { ref: "fix/existing", expectedHeadSha: expected },
+    });
+    expect(rejected).toMatchObject({
+      pushed: false,
+      publicationBlocked: expect.stringContaining("atomic leased push was rejected"),
+    });
+    expect(rejected.summary).toContain("commit remains unpublished in the bound workspace");
+  });
+
   it("a completed child with no work leaves the ordinary PR post-step free to run", async () => {
     const w = fakeExecutor({ "git status": "\n", "git rev-list": "0\n" });
     const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "completion" });

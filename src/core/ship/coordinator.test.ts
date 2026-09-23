@@ -763,7 +763,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       preset: "coding",
       round: { index: 1, kind: "findings" },
       budgetMinutes: ASKS.coding,
-      brief: { kind: "findings", pr: 7, reviewRunId: "run-r1", unit: "U10" },
+      brief: { kind: "findings", pr: 7, headSha: HEAD_A, reviewRunId: "run-r1", unit: "U10" },
     });
     expect(JSON.stringify(d.action)).not.toContain('"fix"');
     runChild(d, "run-f1", findingsCompleted({ dispositions: [DECLINED], headSha: HEAD_B }), T0 + 40 * MIN);

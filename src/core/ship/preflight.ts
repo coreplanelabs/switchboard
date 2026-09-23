@@ -77,10 +77,10 @@ export interface ShipEntry {
    *  branch. Undefined → the hand-off reports "no base" honestly. */
   base: string | undefined;
   /** Resume-at-review: the user-named, same-repo open PR (any author). */
-  resume?: { pr: number; headSha?: string; url?: string };
+  resume?: { pr: number; headSha: string; url?: string };
   /** Adopt: the thread's open PR a generated task runs on — round 0 pushes to
    *  its head branch, the pre-check finds it (spec item 10). */
-  adopt?: { pr: number; url?: string };
+  adopt?: { pr: number; headSha: string; url?: string };
   /** The pull request's own auto-merge fact, named at entry (spec item 9) —
    *  never refused. */
   autoMergeEnabled?: boolean;
@@ -293,7 +293,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
             `🚫 ${where}'s head branch lives on a fork, not on \`${repo}\` — ship cannot drive it.`,
           );
         }
-        const branch = facts.headRef ?? repoCtx.ref;
+        const branch = facts.headRef;
         if (!branch) {
           return refuse(
             "ship_preflight_head_unknown",
@@ -302,22 +302,46 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
             `🚫 Could not determine ${where}'s head branch, so ship cannot bind the thread's worktree to it — refusing fail-closed.`,
           );
         }
+        const headSha = facts.headSha;
+        if (headSha === undefined || !/^[0-9a-f]{40}$/i.test(headSha)) {
+          return refuse(
+            "ship_preflight_head_unknown",
+            "full head commit unknown",
+            "not started (head commit unknown)",
+            `🚫 Could not determine ${where}'s full head commit, so ship cannot fence publication to it — refusing fail-closed.`,
+          );
+        }
+        if (facts.baseRef === undefined) {
+          return refuse(
+            "ship_preflight_head_unknown",
+            "base branch unknown",
+            "not started (base branch unknown)",
+            `🚫 Could not determine ${where}'s base branch, so ship cannot bind publication to it — refusing fail-closed.`,
+          );
+        }
         // The PR's OWN base wins: a PR opened against a non-default base must
         // not run against the default branch. repoCtx.baseRef carries the same
         // fact when the thread context resolved the PR; the default branch is
         // the last resort — an adopt still carries the PR's base when the
         // repository lookup failed.
-        const ownBase = facts.baseRef ?? repoCtx.baseRef;
-        // A stale typed base is a door mistake or a repository change, not a
-        // reason to hand recovery to the person. A positive 404 falls back to
-        // the repository default and the entry names what the door read; an
-        // unanswerable lookup proceeds unchanged.
+        const ownBase = facts.baseRef;
+        // Existing-PR publication is exact: a positive 404 for its recorded
+        // base refuses instead of silently retargeting the pull request. An
+        // unanswerable lookup proceeds unchanged; the publication fence's
+        // fresh PR read and atomic head lease still fail closed at push time.
         const ownBaseExists =
           ownBase !== undefined && input.refExists
             ? await input.refExists(repo, ownBase).catch(() => undefined)
             : undefined;
-        const baseFallback = ownBase !== undefined && ownBaseExists === false ? { requested: ownBase } : undefined;
-        const base = resolveBaseRef([ownBaseExists === false ? undefined : ownBase], info?.defaultBranch);
+        if (ownBaseExists === false) {
+          return refuse(
+            "ship_preflight_head_unknown",
+            "pull request base branch missing",
+            "not started (base branch missing)",
+            `🚫 ${where}'s base branch \`${ownBase}\` is not present in \`${repo}\`, so ship cannot establish an exact publication binding — refusing fail-closed.`,
+          );
+        }
+        const base = resolveBaseRef([ownBase], info?.defaultBranch);
         const autoMerge = facts.autoMergeEnabled !== undefined ? { autoMergeEnabled: facts.autoMergeEnabled } : {};
         if (task) {
           // Adopt (spec item 10): a generated task in the thread of an open
@@ -329,8 +353,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
               repo,
               branch,
               base,
-              adopt: { pr: repoCtx.pr, ...(facts.htmlUrl !== undefined ? { url: facts.htmlUrl } : {}) },
-              ...(baseFallback !== undefined ? { baseFallback } : {}),
+              adopt: { pr: repoCtx.pr, headSha, ...(facts.htmlUrl !== undefined ? { url: facts.htmlUrl } : {}) },
               ...autoMerge,
             },
           };
@@ -345,10 +368,9 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
             base,
             resume: {
               pr: repoCtx.pr,
-              headSha: facts.headSha ?? repoCtx.headSha,
+              headSha,
               ...(facts.htmlUrl !== undefined ? { url: facts.htmlUrl } : {}),
             },
-            ...(baseFallback !== undefined ? { baseFallback } : {}),
             ...autoMerge,
           },
         };
