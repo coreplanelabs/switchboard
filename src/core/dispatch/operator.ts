@@ -252,11 +252,9 @@ export function ownerNote(owner: OperatorThreadOwner): string {
     owner.kind === "live" && owner.runId !== undefined
       ? ` bind \`steer run ${owner.runId} <words>\` to deliver it,`
       : "";
-  const fold =
-    owner.kind === "pipeline"
-      ? " Any steer decision also folds, so the pipeline's original task is re-issued instead of targeting an ended transcript run."
-      : "";
-  return `This thread is owned by ${who}: the request below is a follow-up for that owner. To act on it,${steer} bind a read command, or ask a question. Any other decision — a refusal, a preset, a write — folds the whole message into the owner unchanged and posts no answer.${fold}`;
+  if (owner.kind === "pipeline")
+    return `This thread is owned by ${who}: the request below is a continuation of that durable task. Read tools may ground the decision, but every action folds into the owner so the current pull request is re-read and the pipeline resumes; an informational command or question is not fulfillment.`;
+  return `This thread is owned by ${who}: the request below is a follow-up for that owner. To act on it,${steer} bind a read command, or ask a question. Any other decision — a refusal, a preset, a write — folds the whole message into the owner unchanged and posts no answer.`;
 }
 
 /** The projection, filtered by the author's allowed presets and commands: a
@@ -914,9 +912,14 @@ function runnableProposal(proposal: string, ctx: OperatorTurnContext): boolean {
  *  on unsteered) and any bind that would start or write beside the owner (a
  *  preset line, a write command, an unparseable line) is the steer of the
  *  whole message instead: the caller folds the words into the owner and posts
- *  no reply text. A question is the caller's to render before this is asked. */
+ *  no reply text. A question is normally the caller's to render before this
+ *  is asked; an ended pipeline is the exception, because every action there
+ *  folds to its one deterministic continuation. */
 function ownedDecisionRuns(event: OperatorEventFields, owner: OperatorThreadOwner, commands?: ChatCommands): boolean {
-  if (event.outcome !== "binds") return false;
+  // An ended pipeline has one deterministic act: continue its durable task.
+  // No model-authored action — including an informational registry read — can
+  // answer the person's continuation instead of reaching that act.
+  if (owner.kind === "pipeline" || event.outcome !== "binds") return false;
   return (event.binds ?? []).every((bind) => {
     const parsed = commands ? parseChatCommand(bind.line, commands) : null;
     if (parsed?.kind !== "invoke") return false;
@@ -928,8 +931,7 @@ function ownedDecisionRuns(event: OperatorEventFields, owner: OperatorThreadOwne
     // the fold meets the seed refusal naming where to reply. An ended pipeline
     // has no live steer target either: folding reaches the dispatcher's durable
     // task re-issue path instead of letting a transcript's stale run id answer.
-    if (def.id === "steer.run")
-      return owner.kind !== "pipeline" && !(owner.kind === "live" && owner.runId === undefined);
+    if (def.id === "steer.run") return !(owner.kind === "live" && owner.runId === undefined);
     return boundBlastRadius(def as CommandDef<unknown>, parsed.input) === "read";
   });
 }
@@ -1629,6 +1631,11 @@ export async function executeOperatorDecision(
     "verbose",
   );
   const answered: OperatorExecution = { kind: "answered" };
+  // Ownership already resolved this event to one ended pipeline. The operator
+  // may use read tools while deciding, but none of its action outcomes may
+  // replace continuation: a read/status command, question, refusal, preset or
+  // stale steer all fold to the dispatcher's durable continuation path.
+  if (ctx.owner?.kind === "pipeline") return { kind: "fold" };
   if (event.outcome === "question") {
     // The `question` cell: rendered, then parked as the thread's pending
     // question on a door record — the person's next words are its answer.

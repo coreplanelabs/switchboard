@@ -359,7 +359,7 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
     expect(await ownerOf([child], async () => [endedMergeReady], THREAD)).toEqual({ kind: "none" });
   });
 
-  it("an ended ship pipeline still owns its generated unit's thread until that unit merges", async () => {
+  it("an ended ship pipeline still owns its generated unit's thread until that unit merges, but multiple ended units in one thread are ambiguous", async () => {
     const aborted = unit({ ending: { kind: "aborted", report: "aborted", at: 2_000 } });
     const ship = run({
       id: "ship-parent",
@@ -372,6 +372,13 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
       instanceId: "ship_acme_api_1",
       run: ship,
       unit: aborted,
+    });
+    const second = unit({ unit: "U13", slug: "u13", ending: { kind: "review_pending", report: "pending", at: 2_100 } });
+    expect(await ownerOf([ship], async () => [aborted, second], THREAD)).toEqual({
+      kind: "pipeline_ambiguous",
+      instanceId: "ship_acme_api_1",
+      run: ship,
+      units: [aborted, second],
     });
     const merged = unit({ ending: { kind: "merged", report: "merged", at: 2_000 } });
     expect(await ownerOf([ship], async () => [merged], THREAD)).toEqual({ kind: "none" });

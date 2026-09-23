@@ -556,17 +556,25 @@ describe("githubPulls", () => {
 
     it("parses state, author login+id, head ref/sha, and a POSITIVE same-repo head match", async () => {
       stubToken();
-      const calls = stubFetch(() => new Response(JSON.stringify(openPr), { status: 200 }));
+      const calls = stubFetch((url) =>
+        url.includes("/git/ref/heads/")
+          ? new Response(JSON.stringify({ object: { type: "commit", sha: "c".repeat(40) } }), { status: 200 })
+          : new Response(JSON.stringify(openPr), { status: 200 }),
+      );
       expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toEqual({
         state: "open",
         author: { login: "acme-switchboard[bot]", id: 318072483 },
         headRef: "ship/fix-x-abc123",
         headSha: "c".repeat(40),
+        verifiedHead: { repo: "acme/api", ref: "ship/fix-x-abc123", sha: "c".repeat(40) },
         headBranchExists: true,
         sameRepoHead: true,
         htmlUrl: "https://github.com/acme/api/pull/7",
       });
-      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
+      expect(calls.map((call) => call.url)).toEqual([
+        "https://api.github.com/repos/acme/api/pulls/7",
+        "https://api.github.com/repos/acme/api/git/ref/heads/ship/fix-x-abc123",
+      ]);
     });
 
     it("reports a deleted same-repository head ref explicitly so ship cannot dispatch a child onto it", async () => {
@@ -581,6 +589,87 @@ describe("githubPulls", () => {
         headRef: "ship/fix-x-abc123",
         headBranchExists: false,
       });
+    });
+
+    it("one ref read yields a positive attributable head only for exact PR/ref agreement; missing, unknown, malformed, absent, and mismatched heads stay unverified", async () => {
+      stubToken();
+      const EXPECTED = "c".repeat(40);
+      const MOVED = "d".repeat(40);
+      const cases = [
+        {
+          name: "missing ref",
+          prHead: EXPECTED,
+          ref: () => new Response("{}", { status: 404 }),
+          exists: false,
+          head: EXPECTED,
+        },
+        {
+          name: "unknown ref",
+          prHead: EXPECTED,
+          ref: () => new Response("{}", { status: 503 }),
+          exists: undefined,
+          head: EXPECTED,
+        },
+        {
+          name: "malformed tip",
+          prHead: EXPECTED,
+          ref: () => new Response(JSON.stringify({ object: { type: "commit" } }), { status: 200 }),
+          exists: undefined,
+          head: EXPECTED,
+        },
+        {
+          name: "missing PR head",
+          prHead: undefined,
+          ref: () => new Response(JSON.stringify({ object: { type: "commit", sha: EXPECTED } }), { status: 200 }),
+          exists: true,
+          head: EXPECTED,
+        },
+        {
+          name: "branch tip differs from PR head",
+          prHead: EXPECTED,
+          ref: () => new Response(JSON.stringify({ object: { type: "commit", sha: MOVED } }), { status: 200 }),
+          exists: true,
+          head: MOVED,
+        },
+        {
+          name: "exact agreement",
+          prHead: EXPECTED,
+          ref: () => new Response(JSON.stringify({ object: { type: "commit", sha: EXPECTED } }), { status: 200 }),
+          exists: true,
+          head: EXPECTED,
+          verified: { repo: "acme/api", ref: "ship/fix-x-abc123", sha: EXPECTED },
+        },
+      ] as const;
+
+      for (const scenario of cases) {
+        const head = {
+          ...openPr.head,
+          ...(scenario.prHead === undefined ? {} : { sha: scenario.prHead }),
+        };
+        if (scenario.prHead === undefined) delete (head as { sha?: string }).sha;
+        const calls = stubFetch((url) =>
+          url.includes("/git/ref/heads/")
+            ? scenario.ref()
+            : new Response(JSON.stringify({ ...openPr, head }), { status: 200 }),
+        );
+        const facts = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+        expect(facts?.headBranchExists, scenario.name).toBe(scenario.exists);
+        expect(facts?.headSha, scenario.name).toBe(scenario.head);
+        expect(facts?.verifiedHead, scenario.name).toEqual("verified" in scenario ? scenario.verified : undefined);
+        expect(calls, scenario.name).toHaveLength(2);
+      }
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          if (url.includes("/git/ref/heads/")) throw new Error("ref read reset");
+          return new Response(JSON.stringify(openPr), { status: 200 });
+        }),
+      );
+      const errored = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+      expect(errored?.headBranchExists).toBeUndefined();
+      expect(errored?.verifiedHead).toBeUndefined();
+      expect(errored?.headSha).toBe(EXPECTED);
     });
 
     it("carries the merge actor and resolves a closed-unmerged pull request's closer from its issue representation", async () => {
@@ -832,6 +921,8 @@ describe("githubPulls", () => {
       const facts = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
       expect(facts?.headSha).toBe(TIP);
       expect(facts?.headRef).toBe("ship/fix-x-abc123");
+      expect(facts?.verifiedHead).toBeUndefined();
+      expect(calls).toHaveLength(2);
       expect(calls[1].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/ship/fix-x-abc123");
       expect(log.mock.calls.some((c) => String(c[0]).startsWith("[pr-head] acme/api#7"))).toBe(true);
       log.mockRestore();
@@ -853,7 +944,10 @@ describe("githubPulls", () => {
             ? new Response(JSON.stringify({ object }), { status: 200 })
             : new Response(JSON.stringify(openPr), { status: 200 }),
         );
-        expect((await fetchPullRequestFacts({ repo: "acme/api", number: 7 }))?.headSha).toBe("c".repeat(40));
+        const facts = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+        expect(facts?.headSha).toBe("c".repeat(40));
+        expect(facts?.headBranchExists).toBeUndefined();
+        expect(facts?.verifiedHead).toBeUndefined();
       }
     });
 
