@@ -745,6 +745,7 @@ export async function runBot(): Promise<void> {
   // A ledger-backed process fails closed until one complete live listing has
   // supplied that durable view.
   const runnerOwnership = new RunnerOwnershipFence(capabilities.runLedger);
+  deps.runnerOwnership = runnerOwnership;
   const pullsWiring: PullsCommandDeps["pulls"] = (() => {
     const state = sweepState;
     const chains = new Map<string, Promise<unknown>>();

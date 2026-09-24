@@ -53,6 +53,7 @@ export class RunnerOwnershipFence {
   private readonly recovered = new Set<string>();
   private readonly claimedOwners = new Map<string, RunnerPullOwner>();
   private readonly recoveredOwners = new Map<string, RunnerPullOwner>();
+  private readonly reservations = new Map<string, symbol>();
   private readonly localRecoveredInstances = new Set<string>();
   private recoveryComplete: boolean;
 
@@ -60,18 +61,88 @@ export class RunnerOwnershipFence {
     this.recoveryComplete = !requiresRecovery;
   }
 
-  claim(repo: string, prNumber: number, owner?: RunnerPullOwner): void {
+  /** Claim without displacing a different live runner. The read and write are
+   * synchronous, so a caller owns the process-local fence before its next
+   * awaited durable transition. Repeating the same owner's claim is idempotent. */
+  claim(repo: string, prNumber: number, owner?: RunnerPullOwner): boolean {
     const key = runnerOwnedPullKey(repo, prNumber);
+    const current = this.claimedOwners.get(key) ?? this.recoveredOwners.get(key);
+    const alreadyOwned = this.claimed.has(key) || this.recovered.has(key);
+    if (this.reservations.has(key)) return false;
+    if (
+      alreadyOwned &&
+      (owner === undefined ||
+        current === undefined ||
+        current.instanceId !== owner.instanceId ||
+        current.unit !== owner.unit)
+    )
+      return false;
     this.claimed.add(key);
     if (owner !== undefined) this.claimedOwners.set(key, owner);
+    return true;
   }
 
-  release(repo: string, prNumber: number): void {
+  /** Exclusively reserve an unowned pull request across an awaited durable
+   * transition. Even the same runner identity cannot reserve it twice: the
+   * returned token, not the owner fields, identifies the one caller. */
+  reserve(repo: string, prNumber: number, owner: RunnerPullOwner): symbol | undefined {
     const key = runnerOwnedPullKey(repo, prNumber);
+    if (this.claimed.has(key) || this.recovered.has(key) || this.reservations.has(key)) return undefined;
+    const token = Symbol(key);
+    this.reservations.set(key, token);
+    this.claimed.add(key);
+    this.claimedOwners.set(key, owner);
+    return token;
+  }
+
+  /** Move an exclusive recovery reservation to the durable attempt that is
+   * about to start. Both the unforgeable token and the currently recorded
+   * owner must still match; a stale caller can neither displace nor adopt a
+   * successor. The transfer consumes the reservation but retains ownership. */
+  transferReservation(
+    repo: string,
+    prNumber: number,
+    token: symbol,
+    currentOwner: RunnerPullOwner,
+    nextOwner: RunnerPullOwner,
+  ): boolean {
+    const key = runnerOwnedPullKey(repo, prNumber);
+    const current = this.claimedOwners.get(key);
+    if (
+      this.reservations.get(key) !== token ||
+      !this.claimed.has(key) ||
+      current?.instanceId !== currentOwner.instanceId ||
+      current.unit !== currentOwner.unit
+    )
+      return false;
+    this.reservations.delete(key);
+    this.claimedOwners.set(key, nextOwner);
+    return true;
+  }
+
+  releaseReservation(repo: string, prNumber: number, token: symbol): boolean {
+    const key = runnerOwnedPullKey(repo, prNumber);
+    if (this.reservations.get(key) !== token) return false;
+    this.reservations.delete(key);
+    this.claimed.delete(key);
+    this.claimedOwners.delete(key);
+    return true;
+  }
+
+  /** Release unconditionally for the runner's ordinary end, or conditionally
+   * for a provisional claim whose cleanup must not erase a successor. */
+  release(repo: string, prNumber: number, owner?: RunnerPullOwner): boolean {
+    const key = runnerOwnedPullKey(repo, prNumber);
+    if (owner !== undefined) {
+      const current = this.claimedOwners.get(key) ?? this.recoveredOwners.get(key);
+      if (current?.instanceId !== owner.instanceId || current.unit !== owner.unit) return false;
+    }
+    this.reservations.delete(key);
     this.claimed.delete(key);
     this.recovered.delete(key);
     this.claimedOwners.delete(key);
     this.recoveredOwners.delete(key);
+    return true;
   }
 
   owns(repo: string, prNumber: number): boolean {

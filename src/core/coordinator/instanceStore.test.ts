@@ -67,6 +67,19 @@ function workerDouble() {
       for (const u of body.units as CoordinatorUnit[]) units.set(`${u.instanceId}/${u.unit}`, JSON.stringify(u));
       return Response.json({ ok: true });
     }
+    if (path === "/runs/coordinator/units/claim-legacy-continuation") {
+      const expected = body.expected as CoordinatorUnit;
+      const recovered = body.recovered as CoordinatorUnit;
+      const key = `${expected.instanceId}/${expected.unit}`;
+      if (
+        recovered.instanceId !== expected.instanceId ||
+        recovered.unit !== expected.unit ||
+        units.get(key) !== JSON.stringify(expected)
+      )
+        return Response.json({ ok: false, reason: "stale" }, { status: 409 });
+      units.set(key, JSON.stringify(recovered));
+      return Response.json({ ok: true });
+    }
     if (path === "/runs/coordinator/units/list") {
       const out = [...units.entries()]
         .filter(([k]) => k.startsWith(`${body.instanceId as string}/`))
@@ -164,6 +177,36 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
       expect(await store.putUnits([reached])).toEqual({ ok: true });
       expect(await store.listUnits(instance.id)).toEqual([reached, unitRow("U13", { dependsOn: ["U12"] })]);
       expect(await store.listUnits("ship_none")).toEqual([]);
+    });
+
+    it("claimLegacyContinuation replaces only the exact expected row, so one caller wins and stale state is never overwritten", async () => {
+      const store = make();
+      const legacy = unitRow("U12", {
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        ending: { kind: "merge_ready", report: "ready", at: 2_000 },
+      });
+      const recovered = {
+        ...legacy,
+        lastPush: "1".repeat(40),
+        publication: {
+          repo: "acme/api",
+          pr: 7,
+          headRef: legacy.branch,
+          baseRef: "main",
+          expectedHeadSha: "1".repeat(40),
+          publicationRef: legacy.branch,
+          owner: { instanceId: instance.id, unit: "U12" },
+        },
+      } satisfies CoordinatorUnit;
+      await store.putUnits([legacy]);
+
+      expect(await store.claimLegacyContinuation(legacy, recovered)).toEqual({ ok: true });
+      expect(await store.claimLegacyContinuation(legacy, recovered)).toEqual({ ok: false, reason: "stale" });
+      expect(await store.claimLegacyContinuation({ ...legacy, unit: "U13" }, recovered)).toEqual({
+        ok: false,
+        reason: "stale",
+      });
+      expect(await store.listUnits(instance.id)).toEqual([recovered]);
     });
 
     // record 0051's reply-as-event rule: the unit's thread events — a sibling of the row,
@@ -316,6 +359,10 @@ describe("NullCoordinatorInstanceStore and the builder", () => {
     expect(await store.replace(instance)).toEqual({ ok: false, reason: "unavailable" });
     expect(await store.listUnits(instance.id)).toEqual([]);
     expect(await store.putUnits([unitRow("U12")])).toEqual({ ok: false, reason: "unavailable" });
+    expect(await store.claimLegacyContinuation(unitRow("U12"), unitRow("U12"))).toEqual({
+      ok: false,
+      reason: "unavailable",
+    });
     const key = { instanceId: instance.id, unit: "U12" };
     expect(await store.appendEvent(key, { sender: "slack:UALICE", text: "x", mode: "steer", at: 1 })).toEqual({
       ok: false,

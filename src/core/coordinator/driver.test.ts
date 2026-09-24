@@ -1530,7 +1530,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(rounds.filter((r) => r.outcome === "approve")).toHaveLength(2); // round 2's clean approve carries no gate
   });
 
-  it("a review that requests changes is followed by the findings step under `<unit>/<round>/findings`: a coding spawn briefed with the review run, its wait and read under that name, its pr-check, then the re-review briefed with the review run and the coding run that answered it; one unit-start per unit, and never a `fix` step", async () => {
+  it("a review that requests changes is followed by findings and re-review at the moved head; a person's merge ends merge-ready with that final reviewed head, one unit-start and never a `fix` step", async () => {
     const s = steps({
       "U10/0/coding/wait/1": "event",
       "U10/1/review/wait/1": "event",
@@ -1555,7 +1555,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       );
     const HEAD_2 = "b".repeat(40);
     const b = bot({
-      plan: [planAnswer([row("U10")])],
+      plan: [planAnswer([row("U10")], T0, "person")],
       "unit-start": [started("U10")],
       branch: [branched("U10")],
       spawn: [
@@ -1606,12 +1606,11 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
         ),
       ],
       round: [acked(), acked(), acked(), acked(), acked(), acked(), acked(), acked()],
-      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 41 * MIN)],
       "unit-end": [acked(T0 + 41 * MIN)],
       finish: [acked(T0 + 41 * MIN)],
     });
     const summary = await runPlan(s.runner, b.client, INSTANCE);
-    expect(summary.units).toEqual({ U10: "merged" });
+    expect(summary.units).toEqual({ U10: "merge_ready" });
     expect(s.names()).toEqual([
       "plan",
       "U10/start",
@@ -1640,7 +1639,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "U10/2/review/read/1",
       "U10/note/8",
       "U10/2/review/checks/1",
-      "U10/merge/1",
+      "U10/end/pr-facts",
       "U10/end",
       "plan/2",
       "finish",
@@ -1683,9 +1682,14 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "2 review started",
       "2 review approve",
     ]);
-    const [end] = b.of("unit-end") as Array<{ codingRunId?: string; ending: { kind: string } }>;
+    const [end] = b.of("unit-end") as Array<{
+      codingRunId?: string;
+      ending: { kind: string };
+      headSha?: string;
+    }>;
     expect(end.codingRunId).toBe("run-f1");
-    expect(end.ending.kind).toBe("merged");
+    expect(end.ending.kind).toBe("merge_ready");
+    expect(end.headSha).toBe(HEAD_2);
   });
 
   it("units run in the plan's order, one at a time; a merged unit frees its dependents, which start with the rebase onto the base that now carries it; a unit whose merge GitHub refused blocks its dependents, each told so as its own ending without a thread, and the plan finishes failed; a unit whose branch could not be created ends aborted and blocks its dependents the same way; a unit blocked by a blocked unit the plan lists after it is told so, never an ending that is not there", async () => {
@@ -2195,8 +2199,9 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
       { parentInstanceId: INSTANCE, unit: "U10", entry: true },
       { parentInstanceId: INSTANCE, unit: "U10", checks: true, pr: 7 },
     ]);
-    const [end] = b.of("unit-end") as Array<{ ending: { kind: string } }>;
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string }; headSha?: string }>;
     expect(end.ending.kind).toBe("merge_ready");
+    expect(end.headSha).toBe(HEAD);
   });
 
   it("an empty required-check launch carries the one pull_request refire through the Workflow step and records checks restarted on the round before the re-read", async () => {

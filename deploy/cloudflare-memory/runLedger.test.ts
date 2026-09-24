@@ -1035,6 +1035,38 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
     });
   });
 
+  it("claim-legacy-continuation atomically replaces only the exact expected row, so a concurrent or stale caller cannot erase newer state", async () => {
+    const key = storeKey();
+    const legacy = unit("U12", {
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      ending: { kind: "merge_ready", report: "ready", at: 2_000 },
+    });
+    const recovered = {
+      ...legacy,
+      lastPush: "1".repeat(40),
+      publication: {
+        repo: "acme/api",
+        pr: 7,
+        headRef: legacy.branch,
+        baseRef: "main",
+        expectedHeadSha: "1".repeat(40),
+        publicationRef: legacy.branch,
+        owner: { instanceId: INSTANCE_ID, unit: "U12" },
+      },
+    } satisfies CoordinatorUnit;
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [legacy] })).status).toBe(200);
+
+    expect(
+      await post("/runs/coordinator/units/claim-legacy-continuation", { storeKey: key, expected: legacy, recovered }),
+    ).toEqual({ status: 200, data: { ok: true } });
+    expect(
+      await post("/runs/coordinator/units/claim-legacy-continuation", { storeKey: key, expected: legacy, recovered }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "stale" } });
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: INSTANCE_ID })).data).toEqual({
+      units: [recovered],
+    });
+  });
+
   it("the validating wake boundary accepts a first-segment resume without inventing a renewal segment row", async () => {
     const key = storeKey();
     const row = unit("U12", {
@@ -1082,6 +1114,15 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
     const key = storeKey();
     expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [] })).status).toBe(400);
     expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [{ unit: "U12" }] })).status).toBe(400);
+    expect(
+      (
+        await post("/runs/coordinator/units/claim-legacy-continuation", {
+          storeKey: key,
+          expected: unit("U12"),
+          recovered: { ...unit("U12"), unit: "U13" },
+        })
+      ).status,
+    ).toBe(400);
     expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: "has:colon" })).status).toBe(400);
     expect(
       (

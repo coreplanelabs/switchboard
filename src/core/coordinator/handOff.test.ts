@@ -99,6 +99,94 @@ function harness(
 }
 
 describe("handOffToCoordinator — the ship request as a plan runner instance (item 16)", () => {
+  it("a hand-off refusal before the final start gate never reserves a legacy transition", async () => {
+    const h = harness();
+    let reserved = 0;
+
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        agentSource: "route",
+        beforeStart: async () => {
+          reserved += 1;
+          throw new Error("must not reserve");
+        },
+      }),
+    );
+
+    expect(out).toMatchObject({ status: "aborted", refusal: { code: "plan_routed_seed" } });
+    expect(reserved).toBe(0);
+  });
+
+  it("a provisional legacy transition transfers to the durable new attempt before create and rolls back when creation refuses", async () => {
+    const h = harness({ create: { kind: "failed", id: "plan-fixture", reason: "workflow unavailable" } });
+    let reserved = 0;
+    let committed = 0;
+    let completed = 0;
+    let aborted = 0;
+    let owner: { instanceId: string; unit: string } | undefined;
+
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        beforeStart: async () => {
+          reserved += 1;
+          return {
+            ok: true,
+            commit: async (next) => {
+              committed += 1;
+              owner = next;
+            },
+            complete: () => {
+              completed += 1;
+            },
+            abort: async () => {
+              aborted += 1;
+            },
+          };
+        },
+      }),
+    );
+
+    expect(out).toMatchObject({ status: "aborted", refusal: { code: "plan_start_failed" } });
+    expect(owner).toEqual({ instanceId: "plan-fixture", unit: "U10" });
+    expect({ reserved, committed, completed, aborted }).toEqual({
+      reserved: 1,
+      committed: 1,
+      completed: 0,
+      aborted: 1,
+    });
+  });
+
+  it("a refused ownership transfer aborts before the Workflow can start", async () => {
+    const h = harness();
+    let completed = 0;
+    let aborted = 0;
+
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        beforeStart: async () => ({
+          ok: true,
+          commit: async () => {
+            throw new Error("reservation owner changed");
+          },
+          complete: () => {
+            completed += 1;
+          },
+          abort: async () => {
+            aborted += 1;
+          },
+        }),
+      }),
+    );
+
+    expect(out).toMatchObject({ status: "aborted", refusal: { code: "setup_failed" } });
+    expect(out.reply).toContain("reservation owner changed");
+    expect(h.created).toEqual([]);
+    expect({ completed, aborted }).toEqual({ completed: 0, aborted: 1 });
+  });
+
   it("a plan request: the plan is read at the base ref, the instance is written under the plan's id with the requester, thread, card, caps and run id, one row per unit in the plan's order, the Workflow instance is created, and the reply says where the plan runs", async () => {
     const h = harness();
     const out = await handOffToCoordinator(h.deps, input());
