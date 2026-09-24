@@ -1067,6 +1067,44 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
     });
   });
 
+  it("the full-row CAS atomically binds an ordinary open pull request and rejects a stale PR-only write", async () => {
+    const key = storeKey();
+    const unbound = unit("U12");
+    const head = "a".repeat(40);
+    const bound = {
+      ...unbound,
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      publication: {
+        repo: "acme/api",
+        pr: 7,
+        headRef: unbound.branch,
+        baseRef: "main",
+        expectedHeadSha: head,
+        publicationRef: unbound.branch,
+        owner: { instanceId: INSTANCE_ID, unit: "U12" },
+      },
+    } satisfies CoordinatorUnit;
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unbound] })).status).toBe(200);
+
+    expect(
+      await post("/runs/coordinator/units/claim-legacy-continuation", {
+        storeKey: key,
+        expected: unbound,
+        recovered: bound,
+      }),
+    ).toEqual({ status: 200, data: { ok: true } });
+    expect(
+      await post("/runs/coordinator/units/claim-legacy-continuation", {
+        storeKey: key,
+        expected: unbound,
+        recovered: { ...unbound, pr: bound.pr },
+      }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "stale" } });
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: INSTANCE_ID })).data).toEqual({
+      units: [bound],
+    });
+  });
+
   it("the validating wake boundary accepts a first-segment resume without inventing a renewal segment row", async () => {
     const key = storeKey();
     const row = unit("U12", {

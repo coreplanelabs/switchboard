@@ -49,6 +49,7 @@ import { InMemoryGithubApi, type IssueSummary } from "../execution/githubApi.js"
 import type { GithubIdentity } from "../execution/githubApp.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
 import { pipelineOfEvents } from "../core/pipelineStanding.js";
+import { RunnerOwnershipFence } from "../core/runnerOwnership.js";
 import { parseModelPrices, type ModelPriceTable } from "../core/modelPricing.js";
 import {
   COORDINATOR_ADMIN_PREFIX,
@@ -254,6 +255,7 @@ function harness(
   const deps: AdminCoordinatorDeps = {
     tokens: "tokens" in over ? over.tokens : TOKENS,
     childAdmission: createCoordinatorChildAdmission(() => over.draining === true),
+    runnerOwnership: new RunnerOwnershipFence(false),
     grantsFor: (id) => GRANTS[id] ?? NO_GRANTS,
     instances,
     ...(over.runPageBase !== undefined ? { runPageBase: over.runPageBase } : {}),
@@ -619,8 +621,8 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       publication,
     };
     const ownership = (owner: { instanceId: string; unit: string } | undefined) => ({
-      claim: () => {},
-      release: () => {},
+      claim: () => true,
+      release: () => true,
       owner: () => owner,
     });
     const allowed = harness();
@@ -1378,7 +1380,20 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
 
   const salvageScenario = async (observedHead: string, salvageHead: string) => {
     const branch = INSTANCE.branch;
-    const h = harness({ openPr: { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", created: true } });
+    const h = harness({
+      openPr: { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", created: true },
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headRef: branch,
+        headSha: salvageHead,
+        verifiedHead: { repo: INSTANCE.repo, ref: branch, sha: salvageHead },
+        headBranchExists: true,
+        baseRef: INSTANCE.base,
+        htmlUrl: "https://github.com/acme/api/pull/77",
+      },
+    });
+    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
     const child = h.registry.create("coding · child", {
       agent: "coding",
       channelId: INSTANCE.channelId,
@@ -1460,11 +1475,101 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
     );
     expect(h.opens).toHaveLength(1);
     expect(opened.body).toMatchObject({ ok: true, state: "open", prNumber: 77 });
+    await expect(h.instances.listUnits(INSTANCE.id)).resolves.toEqual([
+      expect.objectContaining({
+        unit: "U12",
+        pr: { number: 77, url: "https://github.com/acme/api/pull/77" },
+        publication: {
+          repo: INSTANCE.repo,
+          pr: 77,
+          headRef: INSTANCE.branch,
+          baseRef: INSTANCE.base,
+          expectedHeadSha: HEAD,
+          publicationRef: INSTANCE.branch,
+          owner: { instanceId: INSTANCE.id, unit: "U12" },
+        },
+      }),
+    ]);
     feed({ type: "pr-check", pr: opened.body, at: NOW });
     expect(nextAction(driver.state)).toMatchObject({
       type: "spawn",
       preset: "review",
       round: { index: 1, kind: "review" },
+    });
+
+    const finding = {
+      id: "F1",
+      severity: "major" as const,
+      file: "src/channels/adminCoordinator.ts",
+      title: "persist the publication binding",
+    };
+    feed({ type: "spawn", outcome: "spawned", runId: "run-r1", at: NOW });
+    feed({ type: "wait", outcome: "event" });
+    feed({
+      type: "read-record",
+      run: {
+        finished: true,
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "binding required", findings: [finding] },
+        reviewPosted: true,
+        reviewHead: HEAD,
+      },
+      at: NOW,
+    });
+    const findings = nextAction(driver.state);
+    expect(findings).toMatchObject({
+      type: "spawn",
+      step: "U12/1/findings",
+      preset: "coding",
+      brief: { kind: "findings", unit: "U12", pr: 77, headSha: HEAD, reviewRunId: "run-r1" },
+    });
+    await h.store.put(
+      record("run-r1", {
+        parentInstanceId: INSTANCE.id,
+        idempotencyKey: `${INSTANCE.id}:U12/1/review`,
+        agent: "review",
+        threadKey: INSTANCE.threadKey,
+        verdict: { verdict: "request_changes", summary: "binding required", findings: [finding] },
+        reviewHead: HEAD,
+        reviewPost: {
+          posted: true,
+          target: { repo: INSTANCE.repo, number: 77 },
+          head: HEAD,
+          verdict: "request_changes",
+        },
+      }),
+    );
+    if (findings.type !== "spawn") throw new Error("expected the findings spawn");
+    const started = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        step: findings.step,
+        preset: findings.preset,
+        budget: findings.budgetMinutes,
+        brief: findings.brief,
+      }),
+      h.deps,
+    );
+    expect(started.status).toBe(200);
+    expect(h.dispatched.at(-1)).toMatchObject({
+      msg: { threadKey: INSTANCE.threadKey, userId: INSTANCE.userId },
+      opts: {
+        coordinator: {
+          parentInstanceId: INSTANCE.id,
+          idempotencyKey: `${INSTANCE.id}:U12/1/findings`,
+          base: INSTANCE.base,
+          publication: {
+            repo: INSTANCE.repo,
+            pr: 77,
+            headRef: INSTANCE.branch,
+            baseRef: INSTANCE.base,
+            expectedHeadSha: HEAD,
+            publicationRef: INSTANCE.branch,
+            owner: { instanceId: INSTANCE.id, unit: "U12" },
+          },
+        },
+      },
     });
   });
 
@@ -2036,6 +2141,140 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     await forbidden.instances.put(INSTANCE);
     expect((await recoverCheck(forbidden.deps)).status).toBe(502);
   });
+
+  const bindingRow = (over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
+    instanceId: INSTANCE.id,
+    unit: "U12",
+    slug: "u12",
+    branch: INSTANCE.branch,
+    dependsOn: [],
+    rounds: [],
+    ...over,
+  });
+  const bindingFacts = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
+    state: "open",
+    sameRepoHead: true,
+    headRef: INSTANCE.branch,
+    headSha: "a".repeat(40),
+    verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: "a".repeat(40) },
+    headBranchExists: true,
+    baseRef: INSTANCE.base,
+    htmlUrl: "https://github.com/acme/api/pull/77",
+    ...over,
+  });
+  const bindingHarness = async (facts: PullRequestFacts, row = bindingRow()) => {
+    const h = harness({ prFacts: facts });
+    await h.instances.put(INSTANCE);
+    await h.instances.putUnits([row]);
+    return h;
+  };
+  const recoverBinding = (deps: Parameters<typeof handleCoordinatorRequest>[1]) =>
+    handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recover: { runId: RUN },
+      }),
+      deps,
+    );
+
+  it.each([
+    [
+      "foreign repository",
+      bindingFacts({ verifiedHead: { repo: "other/api", ref: INSTANCE.branch, sha: "a".repeat(40) } }),
+      bindingRow(),
+    ],
+    [
+      "different pull request",
+      bindingFacts(),
+      bindingRow({ pr: { number: 78, url: "https://github.com/acme/api/pull/78" } }),
+    ],
+    [
+      "different head ref",
+      bindingFacts({
+        headRef: "feature/other",
+        verifiedHead: { repo: INSTANCE.repo, ref: "feature/other", sha: "a".repeat(40) },
+      }),
+      bindingRow(),
+    ],
+    ["different base", bindingFacts({ baseRef: "release" }), bindingRow()],
+    [
+      "unverified head",
+      bindingFacts({ verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: "b".repeat(40) } }),
+      bindingRow(),
+    ],
+    ["missing head ref", bindingFacts({ headBranchExists: false, verifiedHead: undefined }), bindingRow()],
+    [
+      "malformed full head",
+      bindingFacts({ headSha: "abc123", verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: "abc123" } }),
+      bindingRow(),
+    ],
+  ] as const)("an opened recovery with a %s fails closed before a PR-only row is stored", async (_name, facts, row) => {
+    const h = await bindingHarness(facts, row);
+    expect(await recoverBinding(h.deps)).toMatchObject({
+      status: 409,
+      body: { ok: false, error: "publication_facts_mismatch" },
+    });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it("a refused ownership claim, an unknown fence, a stale row and an unavailable store all release only this attempt's owner and store no PR-only row", async () => {
+    const refused = await bindingHarness(bindingFacts());
+    refused.deps.runnerOwnership = { claim: () => false, release: () => true, owner: () => undefined };
+    expect(await recoverBinding(refused.deps)).toMatchObject({
+      status: 409,
+      body: { error: "publication_ownership_changed" },
+    });
+    expect(await refused.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+
+    const unknown = await bindingHarness(bindingFacts());
+    delete unknown.deps.runnerOwnership;
+    expect(await recoverBinding(unknown.deps)).toMatchObject({
+      status: 409,
+      body: { error: "publication_ownership_unknown" },
+    });
+    expect(await unknown.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+
+    const stale = await bindingHarness(bindingFacts());
+    const staleFence = stale.deps.runnerOwnership!;
+    stale.instances.compareAndReplaceUnit = async () => ({ ok: false, reason: "stale" });
+    expect(await recoverBinding(stale.deps)).toMatchObject({
+      status: 409,
+      body: { error: "publication_binding_stale" },
+    });
+    expect(staleFence.owner(INSTANCE.repo, 77)).toBeUndefined();
+    expect(await stale.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+
+    const unavailable = await bindingHarness(bindingFacts());
+    const unavailableFence = unavailable.deps.runnerOwnership!;
+    unavailable.instances.compareAndReplaceUnit = async () => ({ ok: false, reason: "unavailable" });
+    expect(await recoverBinding(unavailable.deps)).toMatchObject({
+      status: 409,
+      body: { error: "publication_store_unavailable" },
+    });
+    expect(unavailableFence.owner(INSTANCE.repo, 77)).toBeUndefined();
+    expect(await unavailable.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+  });
+
+  it("a rival owner cannot be displaced, while exact already-bound replay is idempotent", async () => {
+    const rival = await bindingHarness(bindingFacts());
+    const rivalFence = rival.deps.runnerOwnership!;
+    expect(rivalFence.claim(INSTANCE.repo, 77, { instanceId: "ship_other", unit: "other" })).toBe(true);
+    expect(await recoverBinding(rival.deps)).toMatchObject({
+      status: 409,
+      body: { error: "publication_ownership_changed" },
+    });
+    expect(rivalFence.owner(INSTANCE.repo, 77)).toEqual({ instanceId: "ship_other", unit: "other" });
+    expect(await rival.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+
+    const replay = await bindingHarness(bindingFacts());
+    expect((await recoverBinding(replay.deps)).status).toBe(200);
+    const bound = (await replay.instances.listUnits(INSTANCE.id))[0]!;
+    expect((await recoverBinding(replay.deps)).status).toBe(200);
+    expect(await replay.instances.listUnits(INSTANCE.id)).toEqual([bound]);
+    expect(replay.deps.runnerOwnership!.owner(INSTANCE.repo, 77)).toEqual({ instanceId: INSTANCE.id, unit: "U12" });
+  });
 });
 
 describe("pr-check keeps the machine's adopted pull request authoritative before branch discovery (agent-ship items 9, 10 and 12)", () => {
@@ -2085,6 +2324,7 @@ describe("pr-check keeps the machine's adopted pull request authoritative before
         headRef: row.branch,
         baseRef: "main",
         headSha: SHA,
+        verifiedHead: { repo: INSTANCE.repo, ref: row.branch, sha: SHA },
         htmlUrl: "https://github.com/acme/api/pull/7",
       },
     });
@@ -3906,8 +4146,20 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
   });
 
   it("pr-check for a unit looks up the unit's branch and remembers the pull request on the row", async () => {
+    const discoveredHead = "a".repeat(40);
+    const discoveredBranch = unitRow("U10").branch;
+    const discoveredFacts: PullRequestFacts = {
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: discoveredBranch,
+      baseRef: "main",
+      headSha: discoveredHead,
+      verifiedHead: { repo: "acme/api", ref: discoveredBranch, sha: discoveredHead },
+    };
     const h = await planHarness({
-      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: discoveredHead },
+      prFacts: discoveredFacts,
     });
     expect(await call(h, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).toEqual({
       status: 200,
@@ -3916,26 +4168,34 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         state: "open",
         prNumber: 12,
         url: "https://github.com/acme/api/pull/12",
-        headSha: "abc123",
+        headSha: discoveredHead,
         headBranchExists: true,
         at: NOW,
       },
     });
     expect(h.prLookups).toEqual([["acme/api", "plan/fixture/u10"]]);
-    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].pr).toEqual({
-      number: 12,
-      url: "https://github.com/acme/api/pull/12",
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
+      pr: { number: 12, url: "https://github.com/acme/api/pull/12" },
+      publication: {
+        repo: "acme/api",
+        pr: 12,
+        headRef: discoveredBranch,
+        baseRef: "main",
+        expectedHeadSha: discoveredHead,
+        publicationRef: discoveredBranch,
+        owner: { instanceId: PLAN_INSTANCE.id, unit: "U10" },
+      },
     });
     expect((await call(h, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U99" })).status).toBe(404);
 
     // `checks: true` (the ending's facts read, record 0055) adds the check runs
     // at the head as the merge door reads them; without the flag nothing is asked.
     const withChecks = await planHarness({
-      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: discoveredHead },
       checks: { total: 3, pending: ["ci / web"], failed: ["ci / package"] },
       // The ready state rides beside the checks (agent-ship item 9): the pull
       // request's own mergeable state and the head's self-declared fix-ups.
-      prFacts: { state: "open", sameRepoHead: true, headSha: "abc123", mergeableState: "dirty" },
+      prFacts: { ...discoveredFacts, mergeableState: "dirty" },
       fixups: ["fixup! fix the login"],
       // The base's merge-queue rule rides the same read (issue 2011): the
       // merge:person report says the person's merge is queued.
@@ -3945,7 +4205,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       (await call(withChecks, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", checks: true })).body,
     ).toMatchObject({
       state: "open",
-      headSha: "abc123",
+      headSha: discoveredHead,
       checks: { total: 3, pending: ["ci / web"], failed: ["ci / package"] },
       mergeableState: "dirty",
       fixupCommits: ["fixup! fix the login"],

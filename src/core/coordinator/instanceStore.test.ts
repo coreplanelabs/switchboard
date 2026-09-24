@@ -69,15 +69,15 @@ function workerDouble() {
     }
     if (path === "/runs/coordinator/units/claim-legacy-continuation") {
       const expected = body.expected as CoordinatorUnit;
-      const recovered = body.recovered as CoordinatorUnit;
+      const replacement = body.recovered as CoordinatorUnit;
       const key = `${expected.instanceId}/${expected.unit}`;
       if (
-        recovered.instanceId !== expected.instanceId ||
-        recovered.unit !== expected.unit ||
+        replacement.instanceId !== expected.instanceId ||
+        replacement.unit !== expected.unit ||
         units.get(key) !== JSON.stringify(expected)
       )
         return Response.json({ ok: false, reason: "stale" }, { status: 409 });
-      units.set(key, JSON.stringify(recovered));
+      units.set(key, JSON.stringify(replacement));
       return Response.json({ ok: true });
     }
     if (path === "/runs/coordinator/units/list") {
@@ -200,13 +200,41 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
       } satisfies CoordinatorUnit;
       await store.putUnits([legacy]);
 
-      expect(await store.claimLegacyContinuation(legacy, recovered)).toEqual({ ok: true });
-      expect(await store.claimLegacyContinuation(legacy, recovered)).toEqual({ ok: false, reason: "stale" });
-      expect(await store.claimLegacyContinuation({ ...legacy, unit: "U13" }, recovered)).toEqual({
+      expect(await store.compareAndReplaceUnit(legacy, recovered)).toEqual({ ok: true });
+      expect(await store.compareAndReplaceUnit(legacy, recovered)).toEqual({ ok: false, reason: "stale" });
+      expect(await store.compareAndReplaceUnit({ ...legacy, unit: "U13" }, recovered)).toEqual({
         ok: false,
         reason: "stale",
       });
       expect(await store.listUnits(instance.id)).toEqual([recovered]);
+    });
+
+    it("compareAndReplaceUnit atomically binds an ordinary open pull request without exposing a PR-only row", async () => {
+      const store = make();
+      const unbound = unitRow("U12");
+      const head = "a".repeat(40);
+      const bound = {
+        ...unbound,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        publication: {
+          repo: "acme/api",
+          pr: 7,
+          headRef: unbound.branch,
+          baseRef: "main",
+          expectedHeadSha: head,
+          publicationRef: unbound.branch,
+          owner: { instanceId: instance.id, unit: "U12" },
+        },
+      } satisfies CoordinatorUnit;
+      await store.putUnits([unbound]);
+
+      expect(await store.compareAndReplaceUnit(unbound, bound)).toEqual({ ok: true });
+      expect(await store.listUnits(instance.id)).toEqual([bound]);
+      expect(await store.compareAndReplaceUnit(unbound, { ...unbound, pr: bound.pr })).toEqual({
+        ok: false,
+        reason: "stale",
+      });
+      expect(await store.listUnits(instance.id)).toEqual([bound]);
     });
 
     // record 0051's reply-as-event rule: the unit's thread events — a sibling of the row,
@@ -359,7 +387,7 @@ describe("NullCoordinatorInstanceStore and the builder", () => {
     expect(await store.replace(instance)).toEqual({ ok: false, reason: "unavailable" });
     expect(await store.listUnits(instance.id)).toEqual([]);
     expect(await store.putUnits([unitRow("U12")])).toEqual({ ok: false, reason: "unavailable" });
-    expect(await store.claimLegacyContinuation(unitRow("U12"), unitRow("U12"))).toEqual({
+    expect(await store.compareAndReplaceUnit(unitRow("U12"), unitRow("U12"))).toEqual({
       ok: false,
       reason: "unavailable",
     });
