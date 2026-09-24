@@ -16370,9 +16370,14 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       reviewCompleted?: boolean;
       childUserId?: string;
       childRepo?: string;
+      childBinding?: "exact" | "standalone" | "foreign-parent" | "wrong-unit";
       codingPr?: number;
+      codingRef?: string;
+      codingEvidence?: "pushed" | "head";
       reviewRepo?: string;
       reviewPr?: number;
+      listedBranch?: string;
+      listedPr?: number;
       facts?: Partial<Awaited<ReturnType<NonNullable<CoreDeps["fetchPrFacts"]>>>>;
       owner?: { instanceId: string; unit: string };
     } = {},
@@ -16392,8 +16397,12 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       repo: over.childRepo ?? "acme/api",
       userId: over.childUserId ?? "slack:UADMIN",
       threadKey: THREAD,
-      parentInstanceId: INSTANCE,
-      idempotencyKey: `${INSTANCE}:U12/${key}`,
+      ...(over.childBinding === "standalone"
+        ? {}
+        : {
+            parentInstanceId: over.childBinding === "foreign-parent" ? "plan-other" : INSTANCE,
+            idempotencyKey: `${INSTANCE}:${over.childBinding === "wrong-unit" ? "U13" : "U12"}/${key}`,
+          }),
       startedAt: 600,
       finishedAt: 900,
       finished: true,
@@ -16405,7 +16414,9 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       ...codingHeads.map((candidate, index) =>
         child(`run-c${index}`, "coding", `${index}/findings`, {
           ...(over.codingCompleted === false ? { status: "failed" as const } : {}),
-          headSha: candidate,
+          ...(over.codingEvidence === "head"
+            ? { headSha: candidate }
+            : { pushed: [{ ref: over.codingRef ?? s.branch, sha: candidate, by: "push" as const }] }),
           pr: {
             number: over.codingPr ?? 7,
             url: `https://github.com/acme/api/pull/${over.codingPr ?? 7}`,
@@ -16453,10 +16464,13 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
           unit: `${INSTANCE}:U12`,
           instanceId: INSTANCE,
           id: "U12",
-          branch: s.branch,
+          branch: over.listedBranch ?? s.branch,
           threads: { coding: THREAD },
           sourceUrls: {},
-          pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+          pr: {
+            number: over.listedPr ?? 7,
+            url: `https://github.com/acme/api/pull/${over.listedPr ?? 7}`,
+          },
           rounds: legacy.rounds,
           ending: legacy.ending,
           instance: { id: INSTANCE, repo: "acme/api", base: "main", createdAt: 500 },
@@ -16955,6 +16969,15 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
     expect(replies).toEqual([]);
     expect(s.runs.listUnitRuns).toHaveBeenCalledExactlyOnceWith(`${INSTANCE}:U12`, { kind: "all" });
+    expect(s.childRuns.find((run) => run.agent === "coding")).toMatchObject({
+      parentInstanceId: INSTANCE,
+      idempotencyKey: `${INSTANCE}:U12/0/findings`,
+      repo: "acme/api",
+      userId: "slack:UADMIN",
+      pr: { number: 7 },
+      pushed: [{ ref: s.branch, sha: s.head }],
+    });
+    expect(s.childRuns.find((run) => run.agent === "coding")).not.toHaveProperty("headSha");
     expect(s.deps.fetchPrFacts).toHaveBeenCalledExactlyOnceWith({ repo: "acme/api", number: 7 });
     expect(s.ownership.owner).toHaveBeenCalledTimes(2);
     expect(s.ownership.owner).toHaveBeenCalledWith("acme/api", 7);
@@ -16977,9 +17000,23 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.provider.requests).toHaveLength(0);
   });
 
+  it("legacy merge-ready recovery retains a coding record's exact final-head evidence", async () => {
+    const s = await legacyMergeReadySetup({ codingEvidence: "head" });
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
+
+    expect(replies).toEqual([]);
+    expect(s.deps.shipBranch).toHaveBeenCalledOnce();
+    expect(s.rowAtReissue()).toMatchObject({ lastPush: s.head });
+  });
+
   it("a real reissue transfers the recovered pull request to the new attempt, whose coding spawn passes the publication-owner gate", async () => {
     const s = await legacyMergeReadySetup();
+    const claimLegacy = vi.spyOn(s.instances, "claimLegacyContinuation");
     const fence = new RunnerOwnershipFence(false);
+    const reserve = vi.spyOn(fence, "reserve");
+    const transfer = vi.spyOn(fence, "transferReservation");
     s.deps.runnerOwnership = fence;
     Object.assign(s.shipParent, { pr: { number: 7, url: "https://github.com/acme/api/pull/7" } });
     delete s.deps.shipBranch;
@@ -17007,6 +17044,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const nextId = `${INSTANCE}-2`;
     const [next] = await s.instances.listUnits(nextId);
     const nextUnit = next!.unit;
+    expect(nextId).not.toBe(INSTANCE);
     expect(next).toMatchObject({
       instanceId: nextId,
       publication: {
@@ -17019,6 +17057,18 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
         owner: { instanceId: nextId, unit: nextUnit },
       },
     });
+    expect(claimLegacy).toHaveBeenCalledOnce();
+    expect(reserve).toHaveBeenCalledExactlyOnceWith("acme/api", 7, { instanceId: INSTANCE, unit: "U12" });
+    expect(transfer).toHaveBeenCalledExactlyOnceWith(
+      "acme/api",
+      7,
+      expect.any(Symbol),
+      { instanceId: INSTANCE, unit: "U12" },
+      { instanceId: nextId, unit: nextUnit },
+    );
+    expect(s.deps.fetchPrFacts).toHaveBeenCalledTimes(2);
+    expect(s.deps.fetchPrFacts).toHaveBeenNthCalledWith(1, { repo: "acme/api", number: 7 });
+    expect(s.deps.fetchPrFacts).toHaveBeenNthCalledWith(2, { repo: "acme/api", number: 7 });
     expect(fence.owner("acme/api", 7)).toEqual(next!.publication!.owner);
 
     const childRegistry = new RunRegistry();
@@ -17045,6 +17095,20 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       runnerOwnership: fence,
       clock: () => 1_700_000_000_000,
     } as unknown as AdminCoordinatorDeps;
+    const unitStart = await handleCoordinatorRequest(
+      {
+        method: "POST",
+        path: `${COORDINATOR_ADMIN_PREFIX}unit-start`,
+        headers: { authorization: "Bearer tok-coord" },
+        body: JSON.stringify({ parentInstanceId: nextId, unit: nextUnit }),
+      },
+      adminDeps,
+    );
+    expect(unitStart).toMatchObject({
+      status: 200,
+      body: { ok: true, threadKey: THREAD, branch: s.branch, base: "main" },
+    });
+
     const spawn = await handleCoordinatorRequest(
       {
         method: "POST",
@@ -17064,6 +17128,34 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(spawn).toMatchObject({ status: 200, body: { ok: true, runId: "run-reissued-child" } });
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]!.coordinator?.publication).toEqual(next!.publication);
+    expect(dispatched[0]!.coordinator?.publication).toMatchObject({
+      repo: "acme/api",
+      pr: 7,
+      headRef: s.branch,
+      expectedHeadSha: s.head,
+      publicationRef: s.branch,
+      owner: { instanceId: nextId, unit: nextUnit },
+    });
+
+    expect(fence.release("acme/api", 7, next!.publication!.owner)).toBe(true);
+    expect(fence.claim("acme/api", 7, { instanceId: "runner-other", unit: "other" })).toBe(true);
+    const refused = await handleCoordinatorRequest(
+      {
+        method: "POST",
+        path: `${COORDINATOR_ADMIN_PREFIX}spawn`,
+        headers: { authorization: "Bearer tok-coord" },
+        body: JSON.stringify({
+          parentInstanceId: nextId,
+          unit: nextUnit,
+          step: `${nextUnit}/1/findings`,
+          preset: "coding",
+          prompt: "continue the existing pull request",
+        }),
+      },
+      adminDeps,
+    );
+    expect(refused).toMatchObject({ status: 409, body: { ok: false, error: "publication_ownership_changed" } });
+    expect(dispatched).toHaveLength(1);
   });
 
   it("two concurrent legacy recoveries conditionally replace the same row once, so the losing caller fails closed without reissue", async () => {
@@ -17197,13 +17289,38 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     ],
     ["failed coding evidence", { codingCompleted: false }],
     ["failed review evidence", { reviewCompleted: false }],
+    ["a same-thread standalone run and review", { childBinding: "standalone" }],
+    ["children recorded for another parent", { childBinding: "foreign-parent" }],
+    ["children recorded for another unit", { childBinding: "wrong-unit" }],
     ["a child recorded for another requester", { childUserId: "slack:UOTHER" }],
     ["a child recorded for another repository", { childRepo: "other/api" }],
+    ["the unit view names another branch", { listedBranch: "plan/other/u12" }],
+    ["the unit view names another pull request", { listedPr: 8 }],
+    ["coding pushed another branch", { codingRef: "plan/other/u12" }],
+    ["coding and review attest different heads", { codingHeads: ["1".repeat(40)], reviewHeads: ["2".repeat(40)] }],
     ["coding names another pull request", { codingPr: 8 }],
     ["review names another repository", { reviewRepo: "other/api" }],
     ["review names another pull request", { reviewPr: 8 }],
   ] as const)("legacy merge-ready recovery fails closed on %s", async (_name, setup) => {
     const s = await legacyMergeReadySetup(setup);
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
+
+    expect(replies).toEqual([
+      "Unit U12 has no single exact reviewed head in its durable child records, so continuation did not start. Nothing else ran.",
+    ]);
+    expect(s.deps.fetchPrFacts).not.toHaveBeenCalled();
+    expect(s.ownership.owner).not.toHaveBeenCalled();
+    expect(s.deps.shipBranch).not.toHaveBeenCalled();
+    const [row] = await s.instances.listUnits(INSTANCE);
+    expect(row).not.toHaveProperty("lastPush");
+    expect(row).not.toHaveProperty("publication");
+  });
+
+  it("legacy merge-ready recovery fails closed when the exact unit's child evidence is unreadable", async () => {
+    const s = await legacyMergeReadySetup();
+    vi.mocked(s.runs.listUnitRuns).mockRejectedValueOnce(new Error("run history unavailable"));
     const { io, replies } = fakeIO();
 
     await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
