@@ -62,6 +62,9 @@ export interface CoordinatorInstanceStore {
   compareAndReplaceUnit(expected: CoordinatorUnit, replacement: CoordinatorUnit): Promise<CompareAndReplaceUnitResult>;
   /** An instance's unit rows in the order they were first written — the plan's. */
   listUnits(instanceId: string): Promise<CoordinatorUnit[]>;
+  /** Every row carrying an active original-unit recovery claim. Boot ownership
+   * recovery reads this index independently of the terminal parent Workflow. */
+  listActiveRecoveries(): Promise<CoordinatorUnit[]>;
   /** Atomically reserve a decision-record number. The durable implementation
    * includes reservations already persisted on unit and run rows when choosing
    * the next number, so another bot process cannot reuse one after a restart. */
@@ -143,6 +146,11 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     for (const [key, text] of this.units)
       if (key.startsWith(`${instanceId}\0`)) out.push(JSON.parse(text) as CoordinatorUnit);
     return out;
+  }
+  async listActiveRecoveries(): Promise<CoordinatorUnit[]> {
+    return [...this.units.values()]
+      .map((text) => JSON.parse(text) as CoordinatorUnit)
+      .filter((unit) => unit.recovery !== undefined);
   }
   async reserveDecisionRecord(
     repo: string,
@@ -232,6 +240,9 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
     return { ok: false, reason: "unavailable" };
   }
   async listUnits(_instanceId: string): Promise<CoordinatorUnit[]> {
+    return [];
+  }
+  async listActiveRecoveries(): Promise<CoordinatorUnit[]> {
     return [];
   }
   async reserveDecisionRecord(
@@ -358,6 +369,20 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     const d = r.data as { units?: unknown };
     if (!Array.isArray(d.units) || !d.units.every(isCoordinatorUnit))
       throw new Error("coordinator store /runs/coordinator/units/list: the answer is not a list of unit rows");
+    return d.units;
+  }
+
+  async listActiveRecoveries(): Promise<CoordinatorUnit[]> {
+    const r = await this.post("/runs/coordinator/units/list-active-recoveries", {});
+    const d = r.data as { units?: unknown };
+    if (
+      !Array.isArray(d.units) ||
+      !d.units.every(isCoordinatorUnit) ||
+      d.units.some((unit) => unit.recovery === undefined)
+    )
+      throw new Error(
+        "coordinator store /runs/coordinator/units/list-active-recoveries: the answer is not a recovery list",
+      );
     return d.units;
   }
 

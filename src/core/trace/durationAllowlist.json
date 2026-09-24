@@ -29,6 +29,7 @@
   "src/core/dispatch/references.ts": 1,
   "src/core/dispatch/run.ts": 1,
   "src/core/dispatch/seed.ts": 1,
+  "src/core/dispatcher.ts": 1,
   "src/core/drain.ts": 6,
   "src/core/frictionProposals.ts": 1,
   "src/core/harness/container.ts": 1,

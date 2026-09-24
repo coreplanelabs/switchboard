@@ -43,6 +43,31 @@ describe("recoverRunnerOwnedPulls", () => {
 
     expect(await recoverRunnerOwnedPulls(["runner_ended"], instances)).toEqual(new Set());
   });
+
+  it("rebuilds an active recovery claim even though its original parent Workflow is terminal", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put(instance("runner_recovery", "acme/api"));
+    await instances.putUnits([
+      {
+        ...unit("runner_recovery", "unit", 81),
+        recovery: {
+          kind: "review",
+          round: 2,
+          expectedHeadSha: "a".repeat(40),
+          remainingMs: 60_000,
+          claimedAt: 2,
+          step: "unit/recovery/2/review",
+          reviewRunId: "review-1",
+          previousEnding: { kind: "aborted", report: "recoverable", at: 1 },
+          workflowId: "recovery-review-1",
+          deadlineAt: 60_002,
+          reviewKey: "runner_recovery:unit/1/review",
+        },
+      },
+    ]);
+
+    expect(await recoverRunnerOwnedPulls([], instances)).toEqual(new Set(["acme/api#81"]));
+  });
 });
 
 describe("RunnerOwnershipFence", () => {
@@ -66,6 +91,16 @@ describe("RunnerOwnershipFence", () => {
     await fence.recover({ liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] }, instances);
     expect(fence.owns("acme/api", 77)).toBe(true);
     expect(fence.owner("acme/api", 77)).toEqual({ instanceId: "runner_live", unit: "unit" });
+  });
+
+  it("refuses claims and reservations while boot ownership reconstruction is incomplete", () => {
+    const fence = new RunnerOwnershipFence(true);
+    expect(() => fence.claim("acme/api", 77, { instanceId: "runner_live", unit: "unit" })).toThrow(
+      "runner ownership recovery is still in progress",
+    );
+    expect(() => fence.reserve("acme/api", 77, { instanceId: "runner_live", unit: "unit" })).toThrow(
+      "runner ownership recovery is still in progress",
+    );
   });
 
   it("recovers a current-generation hosted runner even when classification omitted it from resumable", async () => {

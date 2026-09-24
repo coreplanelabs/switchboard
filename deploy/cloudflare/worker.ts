@@ -325,7 +325,10 @@ async function handleCoordinatorInstances(request: Request, env: Env): Promise<R
       const existing = await (await env.SHIP_COORDINATOR.get(parsed.id)).status();
       outcome = { kind: "duplicate", id: parsed.id, status: existing.status };
     } catch {
-      outcome = { kind: "failed", id: parsed.id, reason };
+      // Creation may have committed before its response was lost. When the
+      // status read is also unavailable, do not call that a definite failure:
+      // the bot must retain its same-id claim for a later duplicate replay.
+      return json(503, { ok: false, error: "create_unanswered", message: reason });
     }
   }
   console.log(`[coordinator] ${auth.subject} → instance ${parsed.id}: ${outcome.kind}`);

@@ -1176,6 +1176,10 @@ export interface UnitPipelineInput {
    *  the report's pointer at a child's write-up links its run page with it and
    *  names the run id without it — the machine never reads an environment. */
   runPageBase?: string;
+  /** A terminal original unit re-entered at its unchanged reviewed head. The
+   * exact remaining lease is carried in milliseconds; the step prefix keeps
+   * every new durable step under `<original instance>:<unit>/recovery/...`. */
+  recovery?: { remainingMs: number; unitKey: string };
 }
 
 type Phase =
@@ -1398,8 +1402,56 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
   return resumed;
 }
 
+/** Open the narrow unchanged-head recovery directly at the one authorized
+ * child boundary. No branch, pre-check, fresh clock or round zero is invented;
+ * the caller has already CAS-claimed the durable row and verified GitHub. */
+export function openRecoveredUnitPipeline(
+  input: UnitPipelineInput,
+  at: number,
+  recovery: {
+    kind: "findings" | "review";
+    round: number;
+    pr: PrRef;
+    expectedHeadSha: string;
+    reviewRunId: string;
+    findingsRunId?: string;
+    findings?: Finding[];
+  },
+): UnitPipelineState {
+  const base: UnitPipelineState = {
+    input,
+    startedAt: at,
+    clock: at,
+    phase: { at: "ended" },
+    reviewRounds: recovery.round,
+    // These counters name actions inside this new recovery Workflow's distinct
+    // `/recovery/` step namespace; they are not lifetime-unit counters or
+    // budget inputs. The lifetime review-round count is the durable `round`
+    // above, while wall-clock and dollar enforcement come from the claim.
+    rebaseAttempts: 0,
+    reviewRestarts: 0,
+    pr: recovery.pr,
+    lastReviewHead: recovery.expectedHeadSha,
+    // Legacy terminal rows do not carry a complete lifetime category split or
+    // cumulative dollars. Recovery therefore measures only this checkpoint;
+    // admission refuses a cost-capped row rather than resetting an enforced
+    // total, and reports label this split as checkpoint-local.
+    spentMs: { coding: 0, review: 0, waiting: 0 },
+    spendUsd: 0,
+    findingsByRound: recovery.kind === "findings" ? { [recovery.round]: recovery.findings ?? [] } : {},
+    humanAnswersByRound: {},
+    dispositionsByRound: {},
+    reviewRunByRound:
+      recovery.findingsRunId !== undefined
+        ? { [recovery.round - 1]: recovery.reviewRunId }
+        : { [recovery.round]: recovery.reviewRunId },
+    findingsRunByRound: recovery.findingsRunId !== undefined ? { [recovery.round - 1]: recovery.findingsRunId } : {},
+  };
+  return enterRound(base, { index: recovery.round, kind: recovery.kind }).state;
+}
+
 const deadlineAt = (s: UnitPipelineState) =>
-  s.startedAt + (s.input.session?.resume?.leaseMs ?? s.input.caps.maxMinutes * MIN);
+  s.startedAt + (s.input.recovery?.remainingMs ?? s.input.session?.resume?.leaseMs ?? s.input.caps.maxMinutes * MIN);
 const remainingMs = (s: UnitPipelineState) => deadlineAt(s) - s.clock;
 
 /** The next slice of a wait: a chunk; the remainder when less is left before
@@ -1431,7 +1483,8 @@ export const stepPrefixOf = (unit: string, session: LeaseSegmentProgress | undef
   const segment = session !== undefined && session.segment > 1 ? `${unit}/s${session.segment}` : unit;
   return session?.resume !== undefined ? `${segment}/r${session.resume.attempt}` : segment;
 };
-const stepPrefix = (s: UnitPipelineState) => stepPrefixOf(s.input.unit.id, s.input.session);
+const stepPrefix = (s: UnitPipelineState) =>
+  s.input.recovery !== undefined ? `${s.input.unit.id}/recovery` : stepPrefixOf(s.input.unit.id, s.input.session);
 const roundStep = (s: UnitPipelineState, round: RoundRef) =>
   `${stepPrefix(s)}/${round.index}/${round.kind}${round.attempt !== undefined ? `/a${round.attempt}` : ""}`;
 
@@ -1592,7 +1645,9 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
       return {
         type: "pr-check",
         step: `${roundStep(s, p.round)}/pr-check`,
-        ...(p.dead !== undefined || p.recover === true ? { recover: { runId: p.runId } } : {}),
+        ...(p.dead !== undefined || p.recover === true || p.findingsReady === true
+          ? { recover: { runId: p.runId } }
+          : {}),
         // The adopted pull request rides the check so the bot can follow it
         // when nothing heads the unit's branch (issue 1799).
         ...(s.pr !== undefined ? { pr: s.pr.number } : {}),
@@ -3610,9 +3665,14 @@ function writeUpPointer(s: UnitPipelineState, kind: RoundKind, runId: string | u
 }
 
 /** How the budget went, in the card's words: coding, review, waiting minutes. */
-function budgetSplitLine(spent: ShipBudgetSpent, maxMinutes: number): string {
+function budgetSplitLine(s: UnitPipelineState, spent: ShipBudgetSpent): string {
   const min = (ms: number) => Math.round(ms / MIN);
-  return `Budget split (${maxMinutes} min): coding ${min(spent.coding)} min, review ${min(spent.review)} min, waiting ${min(spent.waiting)} min.`;
+  const recoveryMinutes = s.input.recovery === undefined ? undefined : min(s.input.recovery.remainingMs);
+  const label =
+    recoveryMinutes === undefined
+      ? `Budget split (${s.input.caps.maxMinutes} min)`
+      : `Recovery checkpoint split (${recoveryMinutes} min carried time budget; earlier activity is not included)`;
+  return `${label}: coding ${min(spent.coding)} min, review ${min(spent.review)} min, waiting ${min(spent.waiting)} min.`;
 }
 
 /** The cap report's declined-vs-unaddressed split over the last review round's findings. */
@@ -3738,6 +3798,8 @@ function renderUnitReportWithWake(
     const restart = s.input.generated
       ? `then start ship again with ${prUrl ?? "the original task"}`
       : "then start this plan again";
+    if (s.input.recovery !== undefined)
+      return `The recovery checkpoint for \`${s.input.recovery.unitKey}\` is terminal and its evidence is consumed; no replacement pipeline is available.`;
     const blocked = s.input.generated ? "" : "The unit's dependents in this plan stay blocked. ";
     return `${blocked}Next action: ${reconcile}, ${restart}.`;
   };
@@ -3900,14 +3962,14 @@ function renderUnitReportWithWake(
       if (!shows(verbosity, "verbose")) return `🧢 Out of budget — no approval after ${rounds}.${prLine}`;
       return join([
         `🧢 Ship stopped at a cap: the remaining pipeline time (~${Math.max(0, Math.round(e.remainingMs / MIN))} min of the ${s.input.caps.maxMinutes}-minute budget) cannot hold another round${e.refused ? ` (the ${e.refused.round} round would get ${e.refused.minutes} min, under its floor of ${e.refused.floor})` : ""} — no approval after ${rounds}.${prLine}`,
-        budgetSplitLine(e.spent, s.input.caps.maxMinutes),
+        budgetSplitLine(s, e.spent),
         splitReport(s),
         nextAction(),
       ]);
     case "review_pending":
       return join([
         `⏳ Review pending: the coding child shipped ${e.pr.url}${e.headSha !== undefined ? ` (head \`${e.headSha.slice(0, 7)}\`)` : ""} but the remaining pipeline time cannot hold the review round — the work stands, only the review is missing. The next pipeline starts at the review round while the pull request still heads at the child's own last push.`,
-        aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
+        aside(budgetSplitLine(s, e.spent)),
         aside(nextAction()),
       ]);
     case "stopped":
@@ -3936,7 +3998,9 @@ function renderUnitReportWithWake(
             observed !== undefined
               ? `Saved-work fact: The run ended at \`${observed}\`, but remote state was not checked; Switchboard cannot claim that commit is on the branch or pull request.`
               : "Saved-work fact: The run did not record a final commit, and remote state was not checked.",
-            "Next action: a new findings run must record every disposition, the updated pull request description and its final commit before remote reconciliation.",
+            s.input.recovery !== undefined
+              ? nextAction()
+              : "Next action: a new findings run must record every disposition, the updated pull request description and its final commit before remote reconciliation.",
           ]);
         if (e.findingsStop === "unfinished")
           return join([
@@ -3944,24 +4008,32 @@ function renderUnitReportWithWake(
             observed !== undefined
               ? `Saved-work fact: the stopped run recorded \`${observed}\`, but Switchboard did not verify it on the remote branch or pull request.`
               : "Saved-work fact: no completed commit was recorded, and remote state was not checked.",
-            "Next action: start a new findings run; review can begin only after it completes every required result and Switchboard verifies its exact remote head.",
+            s.input.recovery !== undefined
+              ? nextAction()
+              : "Next action: start a new findings run; review can begin only after it completes every required result and Switchboard verifies its exact remote head.",
           ]);
         if (e.findingsStop === "missing_remote")
           return join([
             `⚠️ Review did not restart: The completed changes ended at \`${observed}\`, but no open pull request was found for \`${branch}\`.`,
             `Saved-work fact: The run recorded completed commit \`${observed}\`; Switchboard did not verify that commit on the remote branch or a pull request.`,
-            "Next action: reconcile the branch and open pull request, then start ship again so it can verify the exact head before review.",
+            s.input.recovery !== undefined
+              ? nextAction()
+              : "Next action: reconcile the branch and open pull request, then start ship again so it can verify the exact head before review.",
           ]);
         if (e.findingsStop === "head_mismatch")
           return join([
             `⚠️ Review did not restart: The completed changes ended at \`${observed}\`, but the pull request is at \`${e.remoteHead?.slice(0, 7)}\` (${s.pr?.url}).`,
             "Saved-work fact: the pull request's current commit is verified, but the completed changes are not verified there. No review ran on either commit.",
-            "Next action: reconcile the pull request to the completed commit, then start ship again so it can verify that exact head before review.",
+            s.input.recovery !== undefined
+              ? nextAction()
+              : "Next action: reconcile the pull request to the completed commit, then start ship again so it can verify that exact head before review.",
           ]);
         return join([
           `⚠️ Review did not restart: The pull request exists (${s.pr?.url}), but its exact head could not be verified.`,
           `Saved-work fact: the run recorded completed commit \`${observed}\`; Switchboard did not start review for \`${observed}\` and cannot claim the pull request contains it.`,
-          "Next action: retry ship when the pull request state is readable so it can verify the exact head before review.",
+          s.input.recovery !== undefined
+            ? nextAction()
+            : "Next action: retry ship when the pull request state is readable so it can verify the exact head before review.",
         ]);
       }
       if (!shows(verbosity, "verbose")) return `⚠️ Aborted after ${rounds}: ${e.reason}${prLine}`;
@@ -3987,7 +4059,7 @@ function renderUnitReportWithWake(
         durableWake
           ? `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. A reply in this thread is recorded as its continuation action; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`
           : `🔁 The unit's budget ran out with the unit unfinished — ${e.line}. A fresh ${s.input.caps.maxMinutes}-minute budget opens in this thread${e.from !== undefined ? ` from \`${e.from.slice(0, 7)}\`` : ""}, with the last run's write-up as its request; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`,
-        aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
+        aside(budgetSplitLine(s, e.spent)),
       ]);
     case "transient":
       if (!shows(verbosity, "verbose"))
@@ -4008,7 +4080,11 @@ function renderUnitReportWithWake(
         nextAction(),
       ]);
     case "interrupted":
-      return join([shipInterruptedNote(prUrl, e.cause, durableWake), checkpointLine(e.checkpoint)]);
+      return join([
+        shipInterruptedNote(prUrl, e.cause, durableWake),
+        checkpointLine(e.checkpoint),
+        s.input.recovery !== undefined ? nextAction(e.checkpoint) : undefined,
+      ]);
     case "idle_expired":
       return "⌛ Idle expired: no reply continued this unit before its idle window closed.";
     case "refused":
@@ -4019,6 +4095,6 @@ function renderUnitReportWithWake(
     case "idle":
       // Keep the old kind's outcome at this copy's level, but render the
       // indexed wake's durable reply action instead of a terminal restart.
-      return renderUnitReportWithWake({ ...s, ending: e.idled }, facts, verbosity, true);
+      return renderUnitReportWithWake({ ...s, ending: e.idled }, facts, verbosity, s.input.recovery === undefined);
   }
 }

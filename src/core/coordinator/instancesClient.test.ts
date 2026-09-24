@@ -38,6 +38,20 @@ describe("createInstanceViaShim — the bot's request for a coordinator instance
     expect(JSON.parse(String(f.calls[0]!.init.body))).toEqual({ id: "plan-fixture", params: {} });
   });
 
+  it("forwards typed Workflow parameters unchanged", async () => {
+    const f = fetchDouble(201, { ok: true, id: "recovery-run-r1", created: true });
+    const params = { kind: "recover-original-unit" as const, parentInstanceId: "plan-fixture", unit: "U12" };
+
+    expect(
+      await createInstanceViaShim(
+        { baseUrl: "https://bot.example", tokens: TOKENS, fetch: f.impl },
+        "recovery-run-r1",
+        params,
+      ),
+    ).toEqual({ kind: "created", id: "recovery-run-r1" });
+    expect(JSON.parse(String(f.calls[0]!.init.body))).toEqual({ id: "recovery-run-r1", params });
+  });
+
   it("a duplicate and a failure come back as the shim said; a shim that cannot be reached, no base URL and no coordinator bearer are unanswered by reason and nothing is sent", async () => {
     const dup = fetchDouble(409, { ok: false, error: "duplicate_instance", id: "plan-fixture", status: "running" });
     expect(

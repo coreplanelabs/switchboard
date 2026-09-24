@@ -113,11 +113,33 @@ describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
   const tagged = row({}, { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding" });
 
   it("rebuilds the tag from the row's meta with the base the coordinator_tag event carried", () => {
+    const recovery = {
+      repo: "acme/api",
+      pr: 42,
+      headRef: "patch-1",
+      baseRef: "main",
+      expectedHeadSha: "e".repeat(40),
+      deadlineAt: 123_456,
+    };
     const tag = carriedCoordinatorTag(tagged, [
       { type: "input", messageId: "m1", text: "go", at: 1 },
-      { type: "coordinator_tag", parentInstanceId: "plan-p-2", unit: "U16", base: "feat/trunk", at: 2 },
+      {
+        type: "coordinator_tag",
+        parentInstanceId: "plan-p-2",
+        unit: "U16",
+        transportWorkflowId: "recovery-review-1",
+        recovery,
+        base: "feat/trunk",
+        at: 2,
+      },
     ]);
-    expect(tag).toEqual({ parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding", base: "feat/trunk" });
+    expect(tag).toEqual({
+      parentInstanceId: "plan-p-2",
+      idempotencyKey: "plan-p-2:U16/1/coding",
+      transportWorkflowId: "recovery-review-1",
+      recovery,
+      base: "feat/trunk",
+    });
   });
 
   it("a row written before the event existed carries the two meta fields and no base — the store guard's case", () => {
@@ -229,7 +251,11 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
     const w = world(resumeOf(row()));
     const restart = await abandonLostWorkspace({
       ...w.ctx,
-      coordinator: { parentInstanceId: "plan-fix-1", idempotencyKey: "plan-fix-1:U10/0/coding" },
+      coordinator: {
+        parentInstanceId: "plan-fix-1",
+        idempotencyKey: "plan-fix-1:U10/0/coding",
+        transportWorkflowId: "recovery-review-1",
+      },
       workflow,
     });
     expect(restart).toBeDefined();
@@ -242,7 +268,7 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
     expect(event.summary).toContain("the run's workspace could not be re-attached");
     expect(sent).toEqual([
       {
-        instance: "plan-fix-1",
+        instance: "recovery-review-1",
         type: "child-resumed-run-old",
         payload: {
           runId: "run-old",

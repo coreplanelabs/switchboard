@@ -10,6 +10,7 @@ import {
   MERGE_WAIT_CHUNK_MS,
   nextAction,
   openPlanCursor,
+  openRecoveredUnitPipeline,
   openUnitPipeline,
   parsePlanBranch,
   parsePlanGraph,
@@ -112,6 +113,38 @@ const MIN = 60_000;
 const FINDING: Finding = { id: "F1", severity: "minor", file: "src/a.ts", line: 3, title: "off by one" };
 const FIXED: FindingDisposition = { findingId: "F1", disposition: "fixed", note: "counted from zero" };
 const DECLINED: FindingDisposition = { findingId: "F1", disposition: "declined", note: "the loop is exclusive" };
+
+describe("original-unit recovery accounting", () => {
+  it("labels elapsed categories as checkpoint-local instead of claiming the legacy unit's missing lifetime history", () => {
+    const state = openRecoveredUnitPipeline(
+      input({ recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" } }),
+      T0,
+      {
+        kind: "review",
+        round: 2,
+        pr: { number: 7, url: PR_URL },
+        expectedHeadSha: HEAD_A,
+        reviewRunId: "run-review-1",
+      },
+    );
+    const capped: UnitPipelineState = {
+      ...state,
+      phase: { at: "ended" },
+      spentMs: { coding: 0, review: 5 * MIN, waiting: 2 * MIN },
+      ending: {
+        kind: "wall_clock_cap",
+        remainingMs: 0,
+        reviewRounds: 2,
+        spent: { coding: 0, review: 5 * MIN, waiting: 2 * MIN },
+      },
+    };
+
+    expect(renderUnitReport(capped)).toContain(
+      "Recovery checkpoint split (60 min carried time budget; earlier activity is not included): coding 0 min, review 5 min, waiting 2 min.",
+    );
+    expect(renderUnitReport(capped)).not.toContain("Budget split (240 min)");
+  });
+});
 
 function input(over: Partial<UnitPipelineInput> = {}): UnitPipelineInput {
   return {

@@ -117,6 +117,7 @@ import {
   sendRunFinished,
   STEP_NAME_PATTERN,
   UNIT_PATTERN,
+  unitOfIdempotencyKey,
   type CoordinatorInstance,
   type CoordinatorUnit,
   type RunFinishedSend,
@@ -2771,6 +2772,37 @@ export class RunHistoryDO extends DurableObject<Env> {
       .map((r) => JSON.parse(r.json) as CoordinatorUnit);
   }
 
+  async listActiveRecoveries(): Promise<CoordinatorUnit[]> {
+    return this.sql
+      .exec<{ json: string }>(
+        `SELECT json FROM coordinator_units
+         WHERE json_valid(json) = 0 OR json_type(json, '$.recovery') IS NOT NULL
+         ORDER BY rowid`,
+      )
+      .toArray()
+      .map((r) => {
+        const unit: unknown = JSON.parse(r.json);
+        if (!isCoordinatorUnit(unit) || unit.recovery === undefined)
+          throw new Error("active recovery index contains a malformed coordinator unit");
+        return unit;
+      });
+  }
+
+  private recoveryTransport(parentInstanceId: string, idempotencyKey: string | undefined): string | undefined {
+    const unit = idempotencyKey === undefined ? undefined : unitOfIdempotencyKey(idempotencyKey);
+    if (unit === undefined) return undefined;
+    const row = this.sql
+      .exec<{ json: string }>(
+        `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+        parentInstanceId,
+        unit,
+      )
+      .toArray()[0];
+    if (row === undefined) return undefined;
+    const parsed = JSON.parse(row.json) as CoordinatorUnit;
+    return parsed.recovery?.workflowId;
+  }
+
   // ---- the thread events of a unit-owned thread (record 0051's reply-as-event rule) --------------
 
   /** The next sequence assigned in one transaction, the per-event cap applied
@@ -3025,9 +3057,11 @@ export class RunHistoryDO extends DurableObject<Env> {
       // tells the waiting parent the child resumed — best effort, beside the
       // bot's own announcement; a duplicate is consumed and re-armed, harmless.
       if (req.meta.restartOf !== undefined && req.meta.parentInstanceId !== undefined) {
+        const recoveryTransport = this.recoveryTransport(req.meta.parentInstanceId, req.meta.idempotencyKey);
         const sent = await sendChildSignal(this.env.SHIP_COORDINATOR, {
           runId: req.runId,
           parentInstanceId: req.meta.parentInstanceId,
+          ...(recoveryTransport !== undefined ? { transportWorkflowId: recoveryTransport } : {}),
           kind: "resumed",
           reason: `restarted from run ${req.meta.restartOf}`,
           at: now,
@@ -3318,7 +3352,14 @@ export class RunHistoryDO extends DurableObject<Env> {
     if ((await this.ctx.storage.getAlarm()) === null)
       await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
     await this.refreshSessionBytes(record.session?.key);
-    const event = await sendRunFinished(this.env.SHIP_COORDINATOR, record);
+    const transportWorkflowId =
+      record.parentInstanceId === undefined
+        ? undefined
+        : this.recoveryTransport(record.parentInstanceId, record.idempotencyKey);
+    const event = await sendRunFinished(this.env.SHIP_COORDINATOR, {
+      ...record,
+      ...(transportWorkflowId !== undefined ? { transportWorkflowId } : {}),
+    });
     if (event.kind === "failed")
       console.warn(`[runs/finish] ${runId} → ${event.type} not delivered to ${event.instance}: ${event.reason}`);
     return { ...out, event: event.kind };
@@ -3654,7 +3695,11 @@ export class RunHistoryDO extends DurableObject<Env> {
     // `finishedAt` equals `startedAt`); the parent confirms by `read-record`
     // before it acts, so a duplicate send is harmless.
     if (result.stored && record.parentInstanceId !== undefined && record.finishedAt > record.startedAt) {
-      const event = await sendRunFinished(this.env.SHIP_COORDINATOR, record);
+      const transportWorkflowId = record.events.find((event) => event.type === "coordinator_tag")?.transportWorkflowId;
+      const event = await sendRunFinished(this.env.SHIP_COORDINATOR, {
+        ...record,
+        ...(transportWorkflowId !== undefined ? { transportWorkflowId } : {}),
+      });
       if (event.kind === "failed")
         console.warn(`[runs/put] ${record.id} → ${event.type} not delivered to ${event.instance}: ${event.reason}`);
     }
@@ -5220,6 +5265,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/stop",
   "/runs/coordinator/units/put",
   "/runs/coordinator/units/claim-legacy-continuation",
+  "/runs/coordinator/units/list-active-recoveries",
   "/runs/coordinator/units/list",
   "/runs/coordinator/events/append",
   "/runs/coordinator/events/list",
@@ -5935,6 +5981,8 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       return json({ error: "instanceId must be a Workflow instance id" }, 400);
     return json({ units: await stub.listUnits(b.instanceId) });
   }
+  if (pathname === "/runs/coordinator/units/list-active-recoveries")
+    return json({ units: await stub.listActiveRecoveries() });
   if (pathname === "/runs/coordinator/wake") {
     if (!isCoordinatorUnit(b.unit)) return json({ error: "unit must be a coordinator unit row" }, 400);
     if (typeof b.waitId !== "string" || !STEP_NAME_PATTERN.test(b.waitId))

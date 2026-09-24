@@ -36,6 +36,7 @@ import {
   processShimOptions,
 } from "../coordinator/instancesClient.js";
 import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
+import { parseUnitKey } from "../coordinator/contract.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../coordinator/instancesRoute.js";
 import { resolveAddressSeverity, resolveGrant, resolveIdleDays, resolveShipCaps } from "../shipPipeline.js";
 import { shipPreflight } from "../ship/preflight.js";
@@ -96,6 +97,12 @@ export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegi
    * see the id without a network call.
    */
   createCoordinatorInstance?: (id: string) => Promise<CreateInstanceAnswer>;
+  /** The explicit Slack recovery operation. It is deterministic coordinator
+   * work, not a generated-plan hand-off or a model run. */
+  recoverOriginalUnit?: (
+    key: { instanceId: string; unit: string },
+    caller: { userId: string; threadKey: string },
+  ) => Promise<{ status: number; body: Record<string, unknown> }>;
   /**
    * The bot's read of an earlier attempt's instance status on its own shim
    * (`GET /admin/coordinator/instances/<id>`), before a plan is re-issued.
@@ -128,6 +135,13 @@ export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegi
 export interface ShipBranchEnd {
   hostedLive: boolean;
 }
+
+export function parseOriginalUnitRecoveryRequest(text: string): { instanceId: string; unit: string } | undefined {
+  const match = /^recover\s+unit\s+(\S+)\s*$/i.exec(text.trim());
+  return match ? parseUnitKey(match[1]!) : undefined;
+}
+
+const namesOriginalUnitRecovery = (text: string): boolean => /^recover\s+unit(?:\s|$)/i.test(text.trim());
 
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
  *  branch must not re-derive, because the gates already ran against them. */
@@ -220,6 +234,46 @@ export async function runShipBranch(
   const clock = deps.clock ?? systemClock;
   // The same one-builder card shell as the main path, on the same label and clock.
   const shell = createCardShell({ label, startedAt: ctx.startedAt, now: clock });
+  const recovery = parseOriginalUnitRecoveryRequest(directives.text);
+  if (recovery === undefined && namesOriginalUnitRecovery(directives.text)) {
+    const reason = "original-unit recovery must be `recover unit <instanceId>:<unit>`";
+    await refuse(refusalOf("setup_failed", reason), () =>
+      card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
+    );
+    return { hostedLive: false };
+  }
+  if (recovery !== undefined) {
+    const answer = await root.span("dispatch.ship_recover_original_unit", () =>
+      deps.recoverOriginalUnit === undefined
+        ? Promise.resolve({ status: 503, body: { error: "original-unit recovery is unavailable" } })
+        : deps.recoverOriginalUnit(recovery, { userId: msg.userId, threadKey: msg.threadKey }),
+    );
+    if (answer.status !== 200) {
+      const reason = typeof answer.body.error === "string" ? answer.body.error : "original-unit recovery was refused";
+      await refuse(refusalOf("setup_failed", reason), () =>
+        card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
+      );
+      return { hostedLive: false };
+    }
+    const workflowId = typeof answer.body.workflowId === "string" ? answer.body.workflowId : "unknown";
+    const outcome =
+      answer.body.outcome === "already_started"
+        ? "already running"
+        : answer.body.outcome === "indeterminate"
+          ? "has an indeterminate start; its claim remains held for same-checkpoint replay"
+          : "started";
+    const text = `Original unit \`${recovery.instanceId}:${recovery.unit}\` recovery ${outcome} as durable checkpoint \`${workflowId}\`.`;
+    await replyAck(io, ctx.verbosity, text);
+    await card.done(
+      shell.close({
+        kind: "done",
+        icon: answer.body.outcome === "indeterminate" ? "⚠️" : "✅",
+        detail: text,
+        ...closeLines(clock(), true),
+      }),
+    );
+    return { hostedLive: false };
+  }
   // Record 0054: only a request that resolved NO repository pays for the
   // registry listing, and only to guess the one the person meant.
   const listSlugs = deps.residentSlugs ?? residentSlugsLister(deps.config.config.execution?.resident);

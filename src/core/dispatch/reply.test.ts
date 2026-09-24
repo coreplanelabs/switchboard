@@ -454,6 +454,9 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
     const provenElsewhere: RefusalCode[] = [
       "pr_head_unknown",
       "workspace_head_mismatch",
+      // dispatcher.test.ts proves the legacy continuation's named transient
+      // sentence when the publication fence is rebuilding.
+      "publication_ownership_unknown",
       // (record 0054): each producer's own test proves its sentences
       // byte-identical — the ship preflight's ten (preflight.test.ts), the
       // plan hand-off's fifteen (handOff.test.ts), the resolve parser

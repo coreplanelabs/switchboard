@@ -701,11 +701,25 @@ describe("run ledger — the coordinator's event and the key (items 47–48)", (
     expect(sent).toEqual([]);
     // The interrupted close written outside `finish`: one send, the record's status on it.
     expect(
-      await post("/runs/put", { storeKey: key, record: { ...childRecord("p1", "slack:C1:3.0", "interrupted") } }),
+      await post("/runs/put", {
+        storeKey: key,
+        record: {
+          ...childRecord("p1", "slack:C1:3.0", "interrupted"),
+          events: [
+            {
+              type: "coordinator_tag",
+              parentInstanceId: "ship_acme_api_1",
+              transportWorkflowId: "recovery-review-1",
+              at: 1,
+            },
+          ],
+          eventCount: 1,
+        },
+      }),
     ).toMatchObject({ status: 200, data: { ok: true, stored: true } });
     expect(sent).toEqual([
       {
-        instance: "ship_acme_api_1",
+        instance: "recovery-review-1",
         type: "run-finished-p1",
         payload: expect.objectContaining({ runId: "p1", status: "interrupted", parentInstanceId: "ship_acme_api_1" }),
       },
@@ -1103,6 +1117,46 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
     expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: INSTANCE_ID })).data).toEqual({
       units: [bound],
     });
+  });
+
+  it("lists only active recovery rows in SQL, ignores terminal history, and fails closed on malformed candidate JSON", async () => {
+    const key = storeKey();
+    const active = unit("U12", {
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      recovery: {
+        kind: "review",
+        round: 2,
+        expectedHeadSha: "a".repeat(40),
+        remainingMs: 60_000,
+        claimedAt: 2_000,
+        step: "U12/recovery/2/review",
+        reviewRunId: "review-1",
+        previousEnding: { kind: "aborted", report: "recoverable", at: 1_000 },
+        workflowId: "recovery-review-1",
+        deadlineAt: 62_000,
+        reviewKey: `${INSTANCE_ID}:U12/1/review`,
+      },
+    });
+    const terminal = unit("U13", {
+      ending: { kind: "merged", report: "done", at: 3_000 },
+    });
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [active, terminal] })).status).toBe(200);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+
+    await expect(runInDurableObject(stub, (inst: RunHistoryDO) => inst.listActiveRecoveries())).resolves.toEqual([
+      active,
+    ]);
+
+    await runInDurableObject(stub, async (_inst, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)`,
+        INSTANCE_ID,
+        "U14",
+        `{"recovery":`,
+        4_000,
+      );
+    });
+    await expect(runInDurableObject(stub, (inst: RunHistoryDO) => inst.listActiveRecoveries())).rejects.toThrow();
   });
 
   it("the validating wake boundary accepts a first-segment resume without inventing a renewal segment row", async () => {

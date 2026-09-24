@@ -16,7 +16,7 @@ export interface RunnerPullOwner {
 
 export async function recoverRunnerOwnedPullOwners(
   instanceIds: Iterable<string>,
-  instances: Pick<CoordinatorInstanceStore, "get" | "listUnits">,
+  instances: Pick<CoordinatorInstanceStore, "get" | "listUnits" | "listActiveRecoveries">,
 ): Promise<Map<string, RunnerPullOwner>> {
   const owned = new Map<string, RunnerPullOwner>();
   for (const instanceId of new Set(instanceIds)) {
@@ -27,12 +27,18 @@ export async function recoverRunnerOwnedPullOwners(
         owned.set(runnerOwnedPullKey(instance.repo, unit.pr.number), { instanceId, unit: unit.unit });
     }
   }
+  for (const unit of await instances.listActiveRecoveries()) {
+    if (unit.pr === undefined) continue;
+    const instance = await instances.get(unit.instanceId);
+    if (instance !== null)
+      owned.set(runnerOwnedPullKey(instance.repo, unit.pr.number), { instanceId: unit.instanceId, unit: unit.unit });
+  }
   return owned;
 }
 
 export async function recoverRunnerOwnedPulls(
   instanceIds: Iterable<string>,
-  instances: Pick<CoordinatorInstanceStore, "get" | "listUnits">,
+  instances: Pick<CoordinatorInstanceStore, "get" | "listUnits" | "listActiveRecoveries">,
 ): Promise<Set<string>> {
   return new Set((await recoverRunnerOwnedPullOwners(instanceIds, instances)).keys());
 }
@@ -65,6 +71,7 @@ export class RunnerOwnershipFence {
    * synchronous, so a caller owns the process-local fence before its next
    * awaited durable transition. Repeating the same owner's claim is idempotent. */
   claim(repo: string, prNumber: number, owner?: RunnerPullOwner): boolean {
+    if (!this.recoveryComplete) throw new Error("runner ownership recovery is still in progress");
     const key = runnerOwnedPullKey(repo, prNumber);
     const current = this.claimedOwners.get(key) ?? this.recoveredOwners.get(key);
     const alreadyOwned = this.claimed.has(key) || this.recovered.has(key);
@@ -86,6 +93,7 @@ export class RunnerOwnershipFence {
    * transition. Even the same runner identity cannot reserve it twice: the
    * returned token, not the owner fields, identifies the one caller. */
   reserve(repo: string, prNumber: number, owner: RunnerPullOwner): symbol | undefined {
+    if (!this.recoveryComplete) throw new Error("runner ownership recovery is still in progress");
     const key = runnerOwnedPullKey(repo, prNumber);
     if (this.claimed.has(key) || this.recovered.has(key) || this.reservations.has(key)) return undefined;
     const token = Symbol(key);
@@ -159,7 +167,7 @@ export class RunnerOwnershipFence {
 
   async recover(
     outcome: OwnershipRecoveryOutcome,
-    instances: Pick<CoordinatorInstanceStore, "get" | "listUnits">,
+    instances: Pick<CoordinatorInstanceStore, "get" | "listUnits" | "listActiveRecoveries">,
   ): Promise<void> {
     // A rehost is ours by the next listing, so remember its durable instance
     // even when this pass's listing failed. The next complete pass can then

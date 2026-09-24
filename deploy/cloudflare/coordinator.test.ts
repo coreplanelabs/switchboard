@@ -81,7 +81,11 @@ describe("the coordinator holds no credential", () => {
     );
     expect(source).not.toMatch(/https?:\/\/(?!switchboard-keepalive\.internal)/);
   });
-  it("runs the plan runner's driver and nothing of its own: `run()` is one `runPlan` over the platform's step and the container bot", () => {
+  it("selects the recovery driver only from typed recovery params and otherwise runs the plan driver", () => {
+    expect(source).toContain('if (event.payload.kind === "recover-original-unit")');
+    expect(source).toMatch(
+      /return runOriginalUnitRecovery\(workflowSteps\(step\), containerBot\(this\.env\), event\.instanceId, params\);/,
+    );
     expect(source).toMatch(/return runPlan\(workflowSteps\(step\), containerBot\(this\.env\), event\.instanceId\);/);
   });
 });

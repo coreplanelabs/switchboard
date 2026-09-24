@@ -562,6 +562,34 @@ describe("executor provisioning by agent resources", () => {
     expect(ctx).toMatchObject({ repo: "acme/api", ref: "patch-1", headSha: "e".repeat(40) });
   });
 
+  it("refuses a recovered review when asynchronous target resolution no longer matches its durable PR head", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "patch-1",
+      baseRef: "main",
+      pr: 42,
+      headSha: "f".repeat(40),
+    });
+    const { io, replies } = fakeIO();
+
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io, {
+      recovery: {
+        repo: "acme/api",
+        pr: 42,
+        headRef: "patch-1",
+        baseRef: "main",
+        expectedHeadSha: "e".repeat(40),
+        deadlineAt: Date.now() + 30 * 60_000,
+      },
+    });
+
+    expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(replies.join("\n")).toContain("recovered pull request moved");
+  });
+
   it("releases the executor's workspace when the run ends: if-idle for a coding run, always for a read-only agent", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -10345,6 +10373,80 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     expect(deps.admission!.size).toBe(0);
   });
 
+  it("an unconsumed recovery follow-up stays on the original unit and never becomes a fresh replacement turn", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    deps.coordinatorInstances = instances;
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io, {
+      coordinator: {
+        parentInstanceId: "plan-fixture",
+        idempotencyKey: "plan-fixture:U12/recovery/1/review",
+      },
+      recovery: {
+        repo: "acme/api",
+        pr: 42,
+        headRef: "patch-1",
+        baseRef: "main",
+        expectedHeadSha: "e".repeat(40),
+        deadlineAt: Date.now() + 20 * 60_000,
+      },
+    });
+    await firstStarted;
+    const second = fakeIO();
+    await dispatch(deps, threadMsg("and also the numbers", "slack:UY"), second.io);
+    await foldedIn(registry, "r1", "and also the numbers");
+    settle().fail(new Error("provider exploded"));
+    await run;
+
+    expect(requests).toHaveLength(1);
+    expect(await instances.listEvents({ instanceId: "plan-fixture", unit: "U12" }, true)).toEqual([
+      expect.objectContaining({ sender: "slack:UY", text: "and also the numbers", mode: "steer" }),
+    ]);
+  });
+
+  it("tells the sender when a drained recovery follow-up cannot be persisted", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    deps.coordinatorInstances = instances;
+    const append = vi.spyOn(instances, "appendEvent").mockResolvedValue({ ok: false, reason: "unavailable" });
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io, {
+      coordinator: {
+        parentInstanceId: "plan-fixture",
+        idempotencyKey: "plan-fixture:U12/recovery/1/review",
+      },
+      recovery: {
+        repo: "acme/api",
+        pr: 42,
+        headRef: "patch-1",
+        baseRef: "main",
+        expectedHeadSha: "e".repeat(40),
+        deadlineAt: Date.now() + 20 * 60_000,
+      },
+    });
+    await firstStarted;
+    const second = fakeIO();
+    await dispatch(deps, threadMsg("and also the numbers", "slack:UY"), second.io);
+    await foldedIn(registry, "r1", "and also the numbers");
+    settle().fail(new Error("provider exploded"));
+    await run;
+
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(requests).toHaveLength(1);
+    expect(second.replies.at(-1)).toContain("could not be saved");
+  });
+
   it("after an operator stop, an unconsumed follow-up is not run — its sender is told the run was stopped before reading it", async () => {
     let ids = 0;
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
@@ -16583,6 +16685,33 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.provider.requests).toHaveLength(0);
   });
 
+  it("a plain reply to an active original-unit recovery nudges its checkpoint Workflow while retaining the original unit event key", async () => {
+    const workflowId = "recovery-run-r1";
+    const s = await unitOwnedSetup({
+      recovery: {
+        kind: "review",
+        round: 1,
+        expectedHeadSha: "a".repeat(40),
+        remainingMs: 60_000,
+        claimedAt: 1_000,
+        step: "U12/recovery/1/review",
+        reviewRunId: "run-r1",
+        previousEnding: { kind: "no_verdict", report: "no verdict", at: 900 },
+        workflowId,
+        deadlineAt: 61_000,
+        reviewKey: `${INSTANCE}:U12/1/review`,
+      },
+    });
+    const { io } = fakeIO([{ role: "user", text: "agent:ship recover unit plan-fix-the-login-6435ec:U12" }]);
+
+    await dispatch(s.deps, msg("one more detail", "slack:UADMIN"), io);
+
+    expect(await s.instances.listEvents(s.key)).toEqual([
+      expect.objectContaining({ sender: "slack:UADMIN", text: "one more detail", mode: "steer" }),
+    ]);
+    expect(s.sends).toEqual([{ instance: workflowId, type: `unit-nudge-${INSTANCE}-U12` }]);
+  });
+
   it("attachments over the cap are recorded dropped", async () => {
     const s = await unitOwnedSetup();
     const { io } = fakeIO([{ role: "user", text: "hi" }]);
@@ -16722,6 +16851,36 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
     expect(s.sends).toEqual([]);
     expect(s.provider.requests[0]!.model).toBe("general-model");
+  });
+
+  it("a reply after terminal original-unit recovery cannot reissue replacement work", async () => {
+    const s = await unitOwnedSetup({
+      ending: { kind: "held", report: "terminal recovery hold", at: 1_000 },
+      recoveryReceipt: { reviewRunId: "review-1", workflowId: "recovery-review-1", at: 1_000 },
+      recoveryHold: {
+        cause: "draft",
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      },
+    });
+    const shipParent: RunView = {
+      id: "ship-parent",
+      startedAt: 500,
+      finishedAt: 1_000,
+      finished: true,
+      eventCount: 3,
+      agent: "ship",
+      threadKey: THREAD,
+      userId: "slack:UADMIN",
+      instanceId: INSTANCE,
+    };
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [shipParent] });
+
+    expect(replies).toEqual([
+      `The original-unit recovery for \`${INSTANCE}:U12\` is terminal and its evidence is consumed. This reply was not turned into replacement work.`,
+    ]);
+    expect(s.provider.requests).toHaveLength(0);
   });
 
   it("a reply after an aborted generated pipeline requires the current remote head before re-issuing its durable task and remaining budgets", async () => {
@@ -17190,6 +17349,42 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       instanceId: INSTANCE,
       unit: "U12",
     });
+  });
+
+  it("a legacy continuation returns publication_ownership_unknown when periodic ownership recovery starts before reservation", async () => {
+    const s = await legacyMergeReadySetup();
+    const fence = new RunnerOwnershipFence(false);
+    const readOwner = fence.owner.bind(fence);
+    let finishRecovery!: (rows: CoordinatorUnit[]) => void;
+    const activeRecoveries = new Promise<CoordinatorUnit[]>((resolve) => {
+      finishRecovery = resolve;
+    });
+    let recovery: Promise<void> | undefined;
+    vi.spyOn(fence, "owner").mockImplementation((repo, pr) => {
+      const owner = readOwner(repo, pr);
+      recovery ??= fence.recover(
+        { liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] },
+        {
+          get: s.instances.get.bind(s.instances),
+          listUnits: s.instances.listUnits.bind(s.instances),
+          listActiveRecoveries: () => activeRecoveries,
+        },
+      );
+      return owner;
+    });
+    s.deps.runnerOwnership = fence;
+    const { io, replies } = fakeIO();
+
+    const outcome = await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
+
+    expect(outcome).toMatchObject({ status: "refused", refusal: "publication_ownership_unknown" });
+    expect(replies).toEqual([
+      "Runner ownership for acme/api#7 is being rebuilt, so continuation did not start. Nothing else ran.",
+    ]);
+    expect(s.deps.shipBranch).not.toHaveBeenCalled();
+
+    finishRecovery([]);
+    await recovery;
   });
 
   it("an ownership claim that lands during the durable compare makes the legacy continuation lose without overwriting ownership or starting work", async () => {
