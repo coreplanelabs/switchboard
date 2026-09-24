@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.261.4](https://github.com/coreplanelabs/switchboard/compare/v1.261.3...v1.261.4) (2026-09-24)
+
+
+### Bug fixes
+
+* **dispatcher:** recover durable pushed heads ([#2342](https://github.com/coreplanelabs/switchboard/issues/2342)) ([afbad97](https://github.com/coreplanelabs/switchboard/commit/afbad972435d9eedbb71111d2094cc20457c4b4c))
+* **ship:** bind recovered pull requests before review ([#2346](https://github.com/coreplanelabs/switchboard/issues/2346)) ([b097224](https://github.com/coreplanelabs/switchboard/commit/b097224b6525af3bf4b6b9249f940b73dcdd9021))
+
 ## [1.261.3](https://github.com/coreplanelabs/switchboard/compare/v1.261.2...v1.261.3) (2026-09-24)
 
 
