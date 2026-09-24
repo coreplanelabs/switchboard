@@ -55,9 +55,13 @@ export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent
   const tag = events.find((e) => e.type === "coordinator_tag");
   const base = tag?.type === "coordinator_tag" ? tag.base : undefined;
   const publication = tag?.type === "coordinator_tag" ? tag.publication : undefined;
+  const transportWorkflowId = tag?.type === "coordinator_tag" ? tag.transportWorkflowId : undefined;
+  const recovery = tag?.type === "coordinator_tag" ? tag.recovery : undefined;
   return {
     parentInstanceId,
     idempotencyKey,
+    ...(transportWorkflowId !== undefined ? { transportWorkflowId } : {}),
+    ...(recovery !== undefined ? { recovery } : {}),
     ...(base !== undefined ? { base } : {}),
     ...(publication !== undefined ? { publication } : {}),
   };
@@ -156,6 +160,7 @@ export async function announceChildRoll(ctx: {
   const sent = await sendChildSignal(workflow, {
     runId,
     parentInstanceId: coordinator.parentInstanceId,
+    ...(coordinator.transportWorkflowId !== undefined ? { transportWorkflowId: coordinator.transportWorkflowId } : {}),
     kind,
     reason,
     at,
@@ -286,6 +291,9 @@ export async function recordRestartDeath(ctx: {
     const sent = await sendChildSignal(workflow, {
       runId: closed.id,
       parentInstanceId: coordinator.parentInstanceId,
+      ...(coordinator.transportWorkflowId !== undefined
+        ? { transportWorkflowId: coordinator.transportWorkflowId }
+        : {}),
       kind: "interrupted",
       reason: summary,
       at,

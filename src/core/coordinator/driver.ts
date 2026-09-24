@@ -55,6 +55,7 @@ import {
   cursorFinished,
   nextAction,
   openPlanCursor,
+  openRecoveredUnitPipeline,
   openUnitPipeline,
   readyUnits,
   type PlanCursor,
@@ -76,6 +77,7 @@ import {
   type ShipCaps,
   type StepReturn,
   type UnitEnding,
+  type UnitPipelineInput,
   type UnitPipelineState,
   stepPrefixOf,
   type LeaseSegmentProgress,
@@ -114,6 +116,7 @@ export interface StepRunner {
 }
 
 export type CoordinatorStepRoute =
+  | "recover-unit"
   | "plan"
   | "unit-start"
   | "branch"
@@ -159,6 +162,12 @@ export interface PlanRunSummary {
   outcome: "completed" | "failed";
 }
 
+export interface OriginalUnitRecoveryParams {
+  kind: "recover-original-unit";
+  parentInstanceId: string;
+  unit: string;
+}
+
 // ---- reading the bot ---------------------------------------------------------------------------------
 
 const REASON_MAX = 200;
@@ -199,6 +208,7 @@ const TRANSIENT = new Set([
   "unit_not_started",
   "not_host",
   "queued",
+  "publication_ownership_unknown",
 ]);
 export function transientRefusal(answer: BotAnswer): string | undefined {
   const { ok, error, message } = answer.body;
@@ -917,6 +927,8 @@ async function tellStepThrew(
   pr: { number: number; url: string } | undefined,
   at: StepAt,
   err: unknown,
+  recoveryUnitKey?: string,
+  recoveryWorkflowId?: string,
 ): Promise<void> {
   const line = oneLineOf(err);
   const where =
@@ -932,14 +944,19 @@ async function tellStepThrew(
         pr !== undefined
           ? `Saved-work fact: the existing pull request is ${pr.url}, but its current branch and exact head were not verified.`
           : "Saved-work fact: no open pull request or exact remote head was verified.",
-        "No review was started. Next action: retry ship when the pull request is readable so Switchboard can verify the exact head first.",
+        recoveryUnitKey !== undefined
+          ? `No review was started. The recovery attempt for \`${recoveryUnitKey}\` is terminal; a replacement pipeline is not available.`
+          : "No review was started. Next action: retry ship when the pull request is readable so Switchboard can verify the exact head first.",
       ].join("\n\n")
     : [
         `⚠️ Switchboard failed ${where}: ${line}`,
-        "The unit remains resumable from its recorded branch and pull request facts. No continuation action was scheduled. Next action: start ship again after the failing operation is available.",
+        recoveryUnitKey !== undefined
+          ? `The recovery attempt for \`${recoveryUnitKey}\` is terminal. No continuation or replacement pipeline was scheduled.`
+          : "The unit remains resumable from its recorded branch and pull request facts. No continuation action was scheduled. Next action: start ship again after the failing operation is available.",
       ].join("\n\n");
   const body = {
     ...tag,
+    ...(recoveryWorkflowId !== undefined ? { recoveryWorkflowId } : {}),
     ending: {
       kind: "failed",
       cause: "step_threw",
@@ -974,7 +991,8 @@ async function runUnit(
   // A renewal's segment names its steps under the segment (`U10/s2/…`), so
   // the Workflow's durable step cache never answers segment two with segment
   // one's results (decision 0046).
-  const prefix = stepPrefixOf(unit, session);
+  const row = plan.units.find((u) => u.unit === unit);
+  const prefix = row?.recovery !== undefined ? `${unit}/recovery` : stepPrefixOf(unit, session);
   const tag = { parentInstanceId: instanceId, unit };
   // Where the machine is, tracked for the step-threw ending (issue 2100). The
   // start belongs in the same net as the rest of the unit even though no
@@ -982,54 +1000,106 @@ async function runUnit(
   let last: StepAt = { step: `${prefix}/start` };
   let start: ReturnType<typeof readUnitStart>;
   try {
-    const startStep = `${prefix}/start`;
-    last = { step: startStep };
-    start = readUnitStart(
-      answerOf("unit-start", await step.do(startStep, STEP_CONFIG, () => call(bot, "unit-start", tag))),
-    );
+    if (row?.recovery !== undefined) start = { at: row.recovery.claimedAt };
+    else {
+      const startStep = `${prefix}/start`;
+      last = { step: startStep };
+      start = readUnitStart(
+        answerOf("unit-start", await step.do(startStep, STEP_CONFIG, () => call(bot, "unit-start", tag))),
+      );
+    }
   } catch (err) {
-    await tellStepThrew(step, bot, prefix, tag, undefined, last, err);
+    await tellStepThrew(
+      step,
+      bot,
+      prefix,
+      tag,
+      undefined,
+      last,
+      err,
+      row?.recovery !== undefined ? `${instanceId}:${unit}` : undefined,
+      row?.recovery?.workflowId,
+    );
     throw err;
   }
   // A resume at review (agent-ship item 10) rides the unit's row: the pull
   // request of ship's own the requester named opens the pipeline at its first
   // review round, with no pre-check, no branch and no round 0.
-  const row = plan.units.find((u) => u.unit === unit);
   const resume = row?.resume;
   // A previous attempt's `review_pending` head: the machine's pre-check starts
   // at the review round when the open pull request still heads exactly there.
   const lastPush = row?.lastPush;
-  let state: UnitPipelineState = openUnitPipeline(
-    {
-      unit: { id: unit, branch: node.branch },
-      repo: plan.repo,
-      base: plan.base,
-      caps: plan.caps,
-      // The instance's field decides who merges (record 0031's merge grant),
-      // carried here by the plan route: the hand-off wrote `runner` on a
-      // seeded plan and `person` on a task, and the door re-checks it — the
-      // branch's name never decides.
-      merge: plan.merge,
-      addressSeverity: plan.addressSeverity,
-      addressSeveritySource: plan.addressSeveritySource,
-      grant: plan.grant,
-      grantSource: plan.grantSource,
-      verbosity: plan.verbosity,
-      idleDays: plan.idleDays,
-      generated: plan.generated,
-      ...(plan.runPageBase !== undefined ? { runPageBase: plan.runPageBase } : {}),
-      ...(resume !== undefined ? { resume } : {}),
-      ...(lastPush !== undefined ? { lastPush } : {}),
-      ...(session !== undefined ? { session } : {}),
-    },
-    start.at,
-  );
+  const input: UnitPipelineInput = {
+    unit: { id: unit, branch: node.branch },
+    repo: plan.repo,
+    base: plan.base,
+    caps: plan.caps,
+    // The instance's field decides who merges (record 0031's merge grant),
+    // carried here by the plan route: the hand-off wrote `runner` on a
+    // seeded plan and `person` on a task, and the door re-checks it — the
+    // branch's name never decides.
+    merge: plan.merge,
+    addressSeverity: plan.addressSeverity,
+    addressSeveritySource: plan.addressSeveritySource,
+    // Recovery spends only the lease already carried by the claim. It never
+    // opens another segment or idles for a renewal in this checkpoint.
+    grant: row?.recovery !== undefined ? { renewals: 0 } : plan.grant,
+    grantSource: plan.grantSource,
+    verbosity: plan.verbosity,
+    idleDays: row?.recovery !== undefined ? 0 : plan.idleDays,
+    generated: plan.generated,
+    ...(plan.runPageBase !== undefined ? { runPageBase: plan.runPageBase } : {}),
+    ...(resume !== undefined ? { resume } : {}),
+    ...(lastPush !== undefined ? { lastPush } : {}),
+    ...(session !== undefined ? { session } : {}),
+    ...(row?.recovery !== undefined
+      ? { recovery: { remainingMs: row.recovery.remainingMs, unitKey: `${instanceId}:${unit}` } }
+      : {}),
+  };
+  let state: UnitPipelineState =
+    row?.recovery !== undefined
+      ? openRecoveredUnitPipeline(input, start.at, {
+          kind: row.recovery.kind,
+          round: row.recovery.round,
+          pr: row.pr!,
+          expectedHeadSha: row.recovery.expectedHeadSha,
+          reviewRunId: row.recovery.reviewRunId,
+          ...(row.recovery.findingsRunId !== undefined ? { findingsRunId: row.recovery.findingsRunId } : {}),
+          ...(row.recovery.findings !== undefined ? { findings: row.recovery.findings } : {}),
+        })
+      : openUnitPipeline(input, start.at);
   let notes = 0;
   let endedAt: number | undefined;
   try {
     pipeline: for (;;) {
       const action = nextAction(state);
-      if (action.type === "end") return { ...action.ending, ...(endedAt !== undefined ? { endedAt } : {}) };
+      if (action.type === "end") {
+        if (row?.recovery !== undefined && endedAt === undefined) {
+          const endStep = `${prefix}/end`;
+          const ending = action.ending;
+          const body = {
+            ...tag,
+            recoveryWorkflowId: row.recovery.workflowId,
+            ending: {
+              kind: ending.kind === "idle" && ending.humanGate !== undefined ? "held" : ending.kind,
+              ...(ending.kind === "held" && ending.cause !== undefined ? { holdCause: ending.cause } : {}),
+              report: renderUnitReport(state),
+              threadReport: renderUnitReport(state, undefined, state.input.verbosity ?? DEFAULT_VERBOSITY),
+              ...(ending.kind === "idle" && ending.humanGate !== undefined ? { humanGate: ending.humanGate } : {}),
+            },
+            ...(state.pr !== undefined ? { pr: state.pr } : {}),
+          };
+          const reply = await step.do(endStep, STEP_CONFIG, async () => {
+            const candidate = await call(bot, "unit-end", body);
+            const answer = answerOf("unit-end", candidate);
+            if (answer.status !== 200 || answer.body.ok !== true)
+              throw new UnreadableAnswer("unit-end", answer, "successful settlement");
+            return candidate;
+          });
+          endedAt = answerOf("unit-end", reply).body.at;
+        }
+        return { ...action.ending, ...(endedAt !== undefined ? { endedAt } : {}) };
+      }
       // Keep the current round across its non-round phases (for example merge)
       // while replacing it whenever the pipeline names a new one.
       last = {
@@ -1046,6 +1116,7 @@ async function runUnit(
         if (note.type === "round") {
           const body = {
             ...tag,
+            ...(row?.recovery !== undefined ? { recoveryWorkflowId: row.recovery.workflowId } : {}),
             index: note.index,
             agent: note.agent,
             outcome: note.outcome,
@@ -1053,7 +1124,13 @@ async function runUnit(
           };
           const noteStep = `${prefix}/note/${++notes}`;
           last = { step: noteStep, round: { index: note.index, kind: note.agent } };
-          await step.do(noteStep, STEP_CONFIG, () => call(bot, "round", body));
+          await step.do(noteStep, STEP_CONFIG, async () => {
+            const reply = await call(bot, "round", body);
+            const answer = answerOf("round", reply);
+            if (answer.status !== 200 || answer.body.ok !== true)
+              throw new UnreadableAnswer("round", answer, "successful round persistence");
+            return reply;
+          });
         } else {
           // A merge_ready ending names the pull request as it is at the APPROVED
           // head (agent-ship item 9): one more pr-check reads the facts fresh —
@@ -1116,10 +1193,15 @@ async function runUnit(
           // ending (agent-ship item 14).
           const body = {
             ...tag,
+            ...(row?.recovery !== undefined ? { recoveryWorkflowId: row.recovery.workflowId } : {}),
             // Two copies (routing-and-config item 28): the full report for the
             // row and the board, and the thread's at the request's verbosity.
             ending: {
-              kind: ending.kind,
+              kind:
+                row?.recovery !== undefined && ending.kind === "idle" && ending.humanGate !== undefined
+                  ? "held"
+                  : ending.kind,
+              ...(ending.kind === "held" && ending.cause !== undefined ? { holdCause: ending.cause } : {}),
               report: renderUnitReport(state, endFacts),
               threadReport: renderUnitReport(state, endFacts, state.input.verbosity ?? DEFAULT_VERBOSITY),
               // An idle ending carries its continuation facts (record 0051): the
@@ -1134,6 +1216,9 @@ async function runUnit(
                     ...(ending.handoff !== undefined ? { handoff: ending.handoff } : {}),
                     ...(ending.humanGate !== undefined ? { humanGate: ending.humanGate } : {}),
                   }
+                : {}),
+              ...(row?.recovery !== undefined && ending.kind === "idle" && ending.humanGate !== undefined
+                ? { humanGate: ending.humanGate }
                 : {}),
             },
             ...(state.pr !== undefined ? { pr: state.pr } : {}),
@@ -1165,7 +1250,13 @@ async function runUnit(
           last = { step: endStep, ...(last.round !== undefined ? { round: last.round } : {}) };
           const endAnswer = answerOf(
             "unit-end",
-            await step.do(endStep, STEP_CONFIG, () => call(bot, "unit-end", body)),
+            await step.do(endStep, STEP_CONFIG, async () => {
+              const reply = await call(bot, "unit-end", body);
+              const answer = answerOf("unit-end", reply);
+              if (answer.status !== 200 || answer.body.ok !== true)
+                throw new UnreadableAnswer("unit-end", answer, "successful settlement");
+              return reply;
+            }),
           );
           endedAt = endAnswer.body.at;
         }
@@ -1174,7 +1265,17 @@ async function runUnit(
   } catch (err) {
     // The walk-dies-before-unit-end path (issue 2100): the throw becomes the
     // unit's ending before it fails the instance, never the bare seal.
-    await tellStepThrew(step, bot, prefix, tag, state.pr, last, err);
+    await tellStepThrew(
+      step,
+      bot,
+      prefix,
+      tag,
+      state.pr,
+      last,
+      err,
+      row?.recovery !== undefined ? `${instanceId}:${unit}` : undefined,
+      row?.recovery?.workflowId,
+    );
     throw err;
   }
 }
@@ -1495,4 +1596,55 @@ export async function runPlan(step: StepRunner, bot: CoordinatorBot, instanceId:
   }
   await finish(summary.outcome);
   return summary;
+}
+
+/** A separate Workflow execution checkpoint that drives exactly one claimed
+ * original unit. Its platform instance id is transport only: every bot call,
+ * child tag and idempotency key continues to name `parentInstanceId + unit`. */
+export async function runOriginalUnitRecovery(
+  step: StepRunner,
+  bot: CoordinatorBot,
+  workflowId: string,
+  params: OriginalUnitRecoveryParams,
+): Promise<PlanRunSummary> {
+  const claim = answerOf(
+    "recover-unit",
+    await step.do("recovery-claim", STEP_CONFIG, async () => {
+      const reply = await call(bot, "recover-unit", {
+        parentInstanceId: params.parentInstanceId,
+        unit: params.unit,
+        workflowId,
+      });
+      const answer = answerOf("recover-unit", reply);
+      if (answer.status !== 200 || answer.body.ok !== true)
+        throw new UnreadableAnswer("recover-unit", answer, "successful recovery claim");
+      return reply;
+    }),
+  );
+  if (claim.body.ok !== true) throw new UnreadableAnswer("recover-unit", claim, "not ok");
+  const plan = readPlan(
+    answerOf(
+      "plan",
+      await step.do("recovery-plan", STEP_CONFIG, () =>
+        call(bot, "plan", { parentInstanceId: params.parentInstanceId }),
+      ),
+    ),
+  );
+  const row = plan.units.filter((candidate) => candidate.unit === params.unit);
+  if (row.length !== 1 || row[0]!.recovery?.workflowId !== workflowId)
+    throw new Error("the original unit's durable recovery claim no longer names this Workflow");
+  const unit = row[0]!;
+  const ending = await runUnit(
+    step,
+    bot,
+    params.parentInstanceId,
+    { id: unit.unit, title: unit.title ?? unit.unit, slug: unit.slug, branch: unit.branch, dependsOn: unit.dependsOn },
+    plan,
+  );
+  return {
+    instance: params.parentInstanceId,
+    ...(plan.planId !== undefined ? { planId: plan.planId } : {}),
+    units: { [params.unit]: ending.kind },
+    outcome: isSettledOutcome(ending.kind) ? "completed" : "failed",
+  };
 }

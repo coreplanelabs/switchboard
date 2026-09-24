@@ -56,7 +56,11 @@ function shimAddress(opts: ShimInstancesOptions): { base: string; bearer: string
 const unreachable = (err: unknown) =>
   `the shim could not be reached: ${err instanceof Error ? err.message : String(err)}`;
 
-export async function createInstanceViaShim(opts: ShimInstancesOptions, id: string): Promise<CreateInstanceAnswer> {
+export async function createInstanceViaShim(
+  opts: ShimInstancesOptions,
+  id: string,
+  params: object = {},
+): Promise<CreateInstanceAnswer> {
   const at = shimAddress(opts);
   if ("reason" in at) return { kind: "unanswered", reason: at.reason };
   const fetchImpl = opts.fetch ?? fetch;
@@ -64,7 +68,7 @@ export async function createInstanceViaShim(opts: ShimInstancesOptions, id: stri
     const res = await fetchImpl(`${at.base}${COORDINATOR_INSTANCES_PATH}`, {
       method: "POST",
       headers: { authorization: `Bearer ${at.bearer}`, "content-type": "application/json" },
-      body: JSON.stringify({ id, params: {} }),
+      body: JSON.stringify({ id, params }),
       signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     });
     return readCreateInstanceAnswer(res.status, await res.text().catch(() => ""));

@@ -153,6 +153,7 @@ import { createRunsService, type RunsService, type RunView } from "./runsService
 import {
   unitKeyOf,
   unitNudgeEventType,
+  unitOfIdempotencyKey,
   type CoordinatorInstance,
   type CoordinatorTag,
   type CoordinatorUnit,
@@ -323,7 +324,8 @@ async function answerUnitOwnedThread(
   // The nudge (record 0051): every append nudges, so the send doubles as the liveness probe.
   try {
     if (deps.workflow === undefined) throw new Error("no workflow sender in this process");
-    const handle = await deps.workflow.get(owner.instanceId);
+    const workflowId = owner.unit.recovery?.workflowId ?? owner.instanceId;
+    const handle = await deps.workflow.get(workflowId);
     await handle.sendEvent({ type: unitNudgeEventType(key), payload: {} });
   } catch (err) {
     // The gone instance (record 0051): the relay's "no such instance", or an instance that already ended,
@@ -335,12 +337,48 @@ async function answerUnitOwnedThread(
     // branch creates and reads instances at — so production reaches the route.
     const readStatus =
       deps.fetchCoordinatorInstanceStatus ?? ((id: string) => fetchInstanceStatusViaShim(processShimOptions(), id));
-    const status = await readStatus(owner.instanceId);
+    const workflowId = owner.unit.recovery?.workflowId ?? owner.instanceId;
+    const status = await readStatus(workflowId);
     const gone =
       status.kind === "absent" ||
       (status.kind === "status" && ["complete", "errored", "terminated"].includes(status.status));
     if (gone) {
       const why = status.kind === "absent" ? "no such instance" : status.status;
+      if (owner.unit.recovery !== undefined) {
+        const recovery = owner.unit.recovery;
+        const recoveryInstance = await store.get(owner.instanceId).catch(() => null);
+        const { recovery: _recovery, ...withoutRecovery } = owner.unit;
+        const closed = {
+          ...withoutRecovery,
+          recoveryReceipt: { reviewRunId: recovery.reviewRunId, workflowId: recovery.workflowId, at },
+          ending: {
+            kind: "terminated",
+            report: `the original-unit recovery checkpoint is gone (${why}); no replacement pipeline was started`,
+            at,
+          },
+        };
+        const replaced = await store.compareAndReplaceUnit(owner.unit, closed).catch(() => undefined);
+        if (replaced?.ok !== true) {
+          await replyAck(
+            io,
+            ctx.verbosity,
+            `📌 Noted for unit ${owner.unit.unit} (\`${unitKey}\`): its recovery checkpoint is gone, but the durable claim could not be closed safely — your message remains queued and no replacement ran.`,
+          );
+          return "acked";
+        }
+        if (recoveryInstance !== null && owner.unit.pr !== undefined)
+          deps.runnerOwnership?.release(recoveryInstance.repo, owner.unit.pr.number, {
+            instanceId: owner.instanceId,
+            unit: owner.unit.unit,
+          });
+        await store
+          .markConsumed(key, [appended.seq], `recovery-terminal:${recovery.workflowId}`)
+          .catch(() => undefined);
+        await io.reply(
+          `⚠️ Unit ${owner.unit.unit}'s original-unit recovery checkpoint \`${recovery.workflowId}\` is gone (${why}). The claim is closed; this message did not start replacement work.`,
+        );
+        return "acked";
+      }
       await store.putUnits([
         {
           ...owner.unit,
@@ -441,6 +479,17 @@ export interface DispatchOptions {
    *  run in flight on the thread refuses the request instead of taking it as
    *  a steer (thread-admission item 8). Absent for every other request. */
   coordinator?: CoordinatorTag;
+  /** A recovered original unit's immutable execution boundary. The dispatcher
+   * independently resolves review targets, so it must prove that resolution is
+   * still the claimed PR/ref/base/head before provisioning or model spend. */
+  recovery?: {
+    repo: string;
+    pr: number;
+    headRef: string;
+    baseRef: string;
+    expectedHeadSha: string;
+    deadlineAt: number;
+  };
   /** Set by the coordinator's spawn route for a plan unit's child (agent-ship
    *  item 13): the unit's contract, rendered once here — into a coding child's
    *  first user turn as its own text part, into a review child's system prompt
@@ -580,6 +629,11 @@ export async function dispatch(
   const ended: DispatchOutcome = { status: "completed" };
   const resume = opts.resume;
   const restart = opts.restart;
+  // Recovery authority is a durable fact of the coordinator child, not a
+  // process-local spawn option. A resume/restart rebuilds the full boundary
+  // from the run's coordinator event before any profile or target decision.
+  const coordinator = opts.coordinator ?? (resume ? carriedCoordinatorTag(resume.row, resume.events) : undefined);
+  const recovery = opts.recovery ?? coordinator?.recovery;
   const clock = deps.clock ?? systemClock;
   // The request's root (docs/reference/specs/tracing.md): the adapter's, started when our
   // process saw the message, or our own now. Every awaited step below is a
@@ -1162,6 +1216,13 @@ export async function dispatch(
         return ended;
       }
       if (owner.kind === "pipeline" && directives.agent === undefined) {
+        if (owner.unit.recoveryReceipt !== undefined || owner.unit.recoveryHold !== undefined) {
+          await io.reply(
+            `The original-unit recovery for \`${owner.instanceId}:${owner.unit.unit}\` is terminal and its evidence is consumed. This reply was not turned into replacement work.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
         // The ended generated pipeline still owns this thread until its unit
         // merges. Its durable parent input — not this reply — is the task that
         // re-issues the stable plan id, branch and open pull request. Any
@@ -1376,7 +1437,14 @@ export async function dispatch(
             return true;
           };
           reserveLegacyOwnership = () => {
-            token = runnerOwnership!.reserve(instance.repo, recordedPr.number, reservationOwner);
+            try {
+              token = runnerOwnership!.reserve(instance.repo, recordedPr.number, reservationOwner);
+            } catch {
+              return refusalOf(
+                "publication_ownership_unknown",
+                `Runner ownership for ${instance.repo}#${recordedPr.number} is being rebuilt, so continuation did not start. Nothing else ran.`,
+              );
+            }
             if (token !== undefined) return undefined;
             const competing = runnerOwnership!.owner(instance.repo, recordedPr.number);
             const sameContinuation =
@@ -1527,6 +1595,13 @@ export async function dispatch(
     // boundary caps is refused by name with no card, no row and no executor.
     // Every stage below reads the profile — the factory, the ledger row, the
     // runner — never the preset's own fields.
+    const recoveryRemainingMs = recovery === undefined ? undefined : Math.max(0, recovery.deadlineAt - clock());
+    const inheritedRemainingMs =
+      parent?.remainingMs === undefined
+        ? recoveryRemainingMs
+        : recoveryRemainingMs === undefined
+          ? parent.remainingMs
+          : Math.min(parent.remainingMs, recoveryRemainingMs);
     const profileGate = await authorizeProfile(deps, {
       msg,
       io,
@@ -1537,11 +1612,11 @@ export async function dispatch(
         resolved,
         resume,
         budget: directives.budget,
-        ...(parent?.remainingMs !== undefined ? { parentRemainingMs: parent.remainingMs } : {}),
+        ...(inheritedRemainingMs !== undefined ? { parentRemainingMs: inheritedRemainingMs } : {}),
       }),
     });
     if (profileGate.kind === "refused") return ended;
-    const { profile } = profileGate;
+    let { profile } = profileGate;
 
     // A legacy continuation claims the process-local PR fence only after both
     // identity gates, and before admission can fold a concurrent reply into
@@ -1549,7 +1624,7 @@ export async function dispatch(
     // final start gate; every later refusal releases this provisional token.
     const legacyOwnershipRefusal = reserveLegacyOwnership?.();
     if (legacyOwnershipRefusal !== undefined) {
-      await io.reply(legacyOwnershipRefusal.text);
+      await refuse(legacyOwnershipRefusal);
       await recordPendingOperator();
       return ended;
     }
@@ -1742,6 +1817,33 @@ export async function dispatch(
     // `let`: the attach-head check below may adopt the PR's current head when
     // the branch moved between resolution and attach (item 12).
     let repoCtx: RepoContext = await repoCtxP;
+
+    if (
+      recovery !== undefined &&
+      (agent.name === "review" || agent.name === "coding") &&
+      (repoCtx.repo?.toLowerCase() !== recovery.repo.toLowerCase() ||
+        repoCtx.pr !== recovery.pr ||
+        repoCtx.ref !== recovery.headRef ||
+        repoCtx.baseRef !== recovery.baseRef ||
+        repoCtx.headSha !== recovery.expectedHeadSha)
+    ) {
+      const reason = "the recovered pull request moved or no longer matches its durable target";
+      await refuse(refusalOf("setup_failed", reason), () =>
+        card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
+      );
+      return ended;
+    }
+    if (recovery !== undefined) {
+      const remainingMinutes = Math.floor((recovery.deadlineAt - clock()) / 60_000);
+      if (remainingMinutes <= 0) {
+        const reason = "the original unit's absolute recovery deadline expired during setup";
+        await refuse(refusalOf("setup_failed", reason), () =>
+          card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
+        );
+        return ended;
+      }
+      profile = { ...profile, minutes: Math.min(profile.minutes, remainingMinutes) };
+    }
 
     // A coordinator child's ref hint is its contract's branch, always (issue
     // 1860): a pull request cited in the child's own request text is a
@@ -1999,7 +2101,8 @@ export async function dispatch(
     // the spawn's dispatch options are gone with the process that spawned it,
     // so the tag is rebuilt from the adopted row's meta and the
     // `coordinator_tag` event the spawning dispatch published.
-    const coordinator = opts.coordinator ?? (resume ? carriedCoordinatorTag(resume.row, resume.events) : undefined);
+    // `coordinator` was reconstructed before profile resolution so its
+    // recovery deadline constrains every resumed/restarted phase.
     const registration = await registerRun(deps, {
       msg,
       io,
@@ -2492,6 +2595,21 @@ export async function dispatch(
     });
     if (headGate.kind === "refused") return ended;
     repoCtx = headGate.repoCtx;
+    if (
+      recovery !== undefined &&
+      (agent.name === "review" || agent.name === "coding") &&
+      (repoCtx.repo?.toLowerCase() !== recovery.repo.toLowerCase() ||
+        repoCtx.pr !== recovery.pr ||
+        repoCtx.ref !== recovery.headRef ||
+        repoCtx.baseRef !== recovery.baseRef ||
+        repoCtx.headSha !== recovery.expectedHeadSha)
+    ) {
+      const reason = "the recovered pull request moved during setup and no longer matches its durable target";
+      await refuse(refusalOf("setup_failed", reason), () =>
+        card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
+      );
+      return ended;
+    }
     const verifiedAtAttach = headGate.verifiedAtAttach;
     // The run's meta went out at the reservation with the head as resolved
     // then; the record and the page must name the head actually reviewed.
@@ -3052,6 +3170,60 @@ export async function dispatch(
           ...(restartRequest.coordinator !== undefined ? { coordinator: restartRequest.coordinator } : {}),
           ...(deps.workflow !== undefined ? { workflow: deps.workflow } : {}),
         });
+    } else if (
+      settled.kind === "handed-on" &&
+      recovery !== undefined &&
+      coordinator !== undefined &&
+      deps.coordinatorInstances !== undefined
+    ) {
+      const unit = unitOfIdempotencyKey(coordinator.idempotencyKey);
+      if (unit === undefined) {
+        console.error(
+          `[dispatch] ${msg.threadKey} could not retain ${settled.pending.length} recovery follow-up(s): the coordinator key names no unit`,
+        );
+      } else {
+        const key = { instanceId: coordinator.parentInstanceId, unit };
+        let retained = 0;
+        for (const pending of settled.pending) {
+          const attachments = [...(pending.msg.images ?? []), ...(pending.msg.documents ?? [])].map((asset) => ({
+            mediaType: asset.mediaType,
+            data: asset.data,
+            ...(asset.name !== undefined ? { name: asset.name } : {}),
+          }));
+          try {
+            const appended = await deps.coordinatorInstances.appendEvent(key, {
+              ...(pending.msg.messageId !== undefined ? { id: pending.msg.messageId } : {}),
+              sender: pending.msg.userId,
+              ...(pending.msg.userName !== undefined ? { senderName: pending.msg.userName } : {}),
+              text: pending.msg.text,
+              ...(attachments.length > 0 ? { attachments } : {}),
+              mode: "steer",
+              at: pending.at,
+            });
+            if (appended.ok) retained++;
+            else {
+              console.error(`[dispatch] ${msg.threadKey} could not retain a recovery follow-up: ${appended.reason}`);
+              await pending.io
+                .reply(
+                  "Your reply could not be saved on the recovered unit. No replacement work was started; please retry the reply.",
+                )
+                .catch(() => undefined);
+            }
+          } catch (err) {
+            console.error(
+              `[dispatch] ${msg.threadKey} could not retain a recovery follow-up: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            await pending.io
+              .reply(
+                "Your reply could not be saved on the recovered unit. No replacement work was started; please retry the reply.",
+              )
+              .catch(() => undefined);
+          }
+        }
+        console.log(
+          `[dispatch] ${msg.threadKey} retained ${retained}/${settled.pending.length} recovery follow-up(s) on ${key.instanceId}:${key.unit}; no fresh turn ran`,
+        );
+      }
     } else if (settled.kind === "handed-on") {
       const fresh = prepareFreshTurn(deps, { agent: settled.agent, pending: settled.pending, clock });
       await dispatch(deps, fresh.msg, fresh.io, fresh.opts).catch((err: unknown) =>

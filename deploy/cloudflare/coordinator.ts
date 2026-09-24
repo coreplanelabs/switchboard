@@ -22,7 +22,9 @@ import { NonRetryableError } from "cloudflare:workflows";
 import { COORDINATOR_IDENTITY, COORDINATOR_STEP_PATH_PREFIX } from "../../src/core/coordinator/contract.ts";
 import {
   readBotAnswer,
+  runOriginalUnitRecovery,
   runPlan,
+  type OriginalUnitRecoveryParams,
   type CoordinatorBot,
   type PlanRunSummary,
   type StepRunner,
@@ -38,7 +40,17 @@ export type CoordinatorEnv = Pick<Env, "SWITCHBOARD" | "SWITCHBOARD_INGRESS_TOKE
 /** What an instance is created with: nothing the driver reads — the instance
  *  id names the plan, and the bot's rows are the input (the coordinator's
  *  contract: ids only, never a task's text or a thread's contents). */
-export type ShipCoordinatorParams = Record<string, unknown>;
+export type ShipCoordinatorParams = Record<string, unknown> | OriginalUnitRecoveryParams;
+
+function originalUnitRecoveryParams(value: ShipCoordinatorParams): OriginalUnitRecoveryParams | undefined {
+  if (
+    value.kind !== "recover-original-unit" ||
+    typeof value.parentInstanceId !== "string" ||
+    typeof value.unit !== "string"
+  )
+    return undefined;
+  return { kind: value.kind, parentInstanceId: value.parentInstanceId, unit: value.unit };
+}
 
 /** The bot behind the container binding: the reply as the wire carried it.
  *  The transport's failures throw for the step's retry; the door's own refusal
@@ -81,6 +93,11 @@ function workflowSteps(step: WorkflowStep): StepRunner {
 
 export class ShipCoordinator extends WorkflowEntrypoint<CoordinatorEnv, ShipCoordinatorParams> {
   async run(event: Readonly<WorkflowEvent<ShipCoordinatorParams>>, step: WorkflowStep): Promise<PlanRunSummary> {
+    if (event.payload.kind === "recover-original-unit") {
+      const params = originalUnitRecoveryParams(event.payload);
+      if (params === undefined) throw new NonRetryableError("the original-unit recovery params are malformed");
+      return runOriginalUnitRecovery(workflowSteps(step), containerBot(this.env), event.instanceId, params);
+    }
     return runPlan(workflowSteps(step), containerBot(this.env), event.instanceId);
   }
 }

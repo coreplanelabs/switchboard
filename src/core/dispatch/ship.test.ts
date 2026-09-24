@@ -21,7 +21,7 @@ import { InMemoryCoordinatorInstanceStore, type CoordinatorInstanceStore } from 
 import { ThreadAdmission } from "../threadAdmission.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "../types.js";
 import type { DispatchFollowUp } from "./admission.js";
-import { runShipBranch, type ShipDeps } from "./ship.js";
+import { parseOriginalUnitRecoveryRequest, runShipBranch, type ShipDeps } from "./ship.js";
 
 // Feature: docs/reference/specs/agent-ship.md items 1–2 (the fork's preflight
 // refusal), 10 (the resume at review) and 16 (the hand-off): every `agent:ship`
@@ -173,6 +173,78 @@ const openBotPr = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
 describe("runShipBranch — the agent:ship fork hands every admitted request to the plan runner", () => {
   beforeEach(() => vi.stubEnv("PUBLIC_BASE_URL", ""));
   afterEach(() => vi.unstubAllEnvs());
+
+  it("recognizes only the explicit recover-unit grammar with a valid original unit key", () => {
+    expect(parseOriginalUnitRecoveryRequest("recover unit plan-old:U12")).toEqual({
+      instanceId: "plan-old",
+      unit: "U12",
+    });
+    expect(parseOriginalUnitRecoveryRequest("recover unit plan-old:U12 now")).toBeUndefined();
+    expect(parseOriginalUnitRecoveryRequest("recover plan-old:U12")).toBeUndefined();
+    expect(parseOriginalUnitRecoveryRequest("recover unit not-a-key")).toBeUndefined();
+  });
+
+  it("refuses recovery-shaped malformed text instead of handing it to a replacement generated plan", async () => {
+    const s = setup("slack:UADMIN", { text: "agent:ship recover unit not-a-key" });
+
+    const ending = await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+
+    expect(ending).toEqual({ hostedLive: false });
+    expect(s.refusals).toEqual(["setup_failed"]);
+    expect(s.created).toEqual([]);
+  });
+
+  it("runs explicit recovery before ordinary preflight and hands the resolved requester and thread to the deterministic coordinator operation", async () => {
+    const s = setup("slack:UADMIN", { text: "agent:ship recover unit plan-old:U12" });
+    const calls: Array<{ key: { instanceId: string; unit: string }; caller: { userId: string; threadKey: string } }> =
+      [];
+    s.deps.recoverOriginalUnit = async (key, caller) => {
+      calls.push({ key, caller });
+      return { status: 200, body: { ok: true, outcome: "started", workflowId: "recovery-run-r1" } };
+    };
+
+    const ending = await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+
+    expect(ending).toEqual({ hostedLive: false });
+    expect(calls).toEqual([
+      {
+        key: { instanceId: "plan-old", unit: "U12" },
+        caller: { userId: "slack:UADMIN", threadKey: THREAD },
+      },
+    ]);
+    expect(s.created).toEqual([]);
+    expect(s.replies).toEqual([
+      "Original unit `plan-old:U12` recovery started as durable checkpoint `recovery-run-r1`.",
+    ]);
+  });
+
+  it("reports an indeterminate Workflow start with the retained checkpoint instead of calling it refused", async () => {
+    const s = setup("slack:UADMIN", { text: "agent:ship recover unit plan-old:U12" });
+    s.deps.recoverOriginalUnit = async () => ({
+      status: 200,
+      body: { ok: true, outcome: "indeterminate", workflowId: "recovery-run-r1" },
+    });
+
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+
+    expect(s.refusals).toEqual([]);
+    expect(s.replies[0]).toContain("indeterminate start");
+    expect(s.replies[0]).toContain("recovery-run-r1");
+  });
+
+  it("surfaces a deterministic recovery refusal and never falls through to generated-plan hand-off", async () => {
+    const s = setup("slack:UADMIN", { text: "agent:ship recover unit plan-old:U12" });
+    s.deps.recoverOriginalUnit = async () => ({
+      status: 403,
+      body: { ok: false, error: "recovery_requester_mismatch" },
+    });
+
+    const ending = await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+
+    expect(ending).toEqual({ hostedLive: false });
+    expect(s.refusals).toEqual(["setup_failed"]);
+    expect(s.created).toEqual([]);
+  });
 
   it("refused at the preflight (ship allowed, coding not): one `dispatch.refuse` outcome, the card closes 🚫 naming the missing grant, the reply names it, no run exists and the runner is never asked", async () => {
     const s = setup("slack:UREV");

@@ -452,6 +452,10 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
       type: "coordinator_tag",
       parentInstanceId: coordinator.parentInstanceId,
       ...(unit !== undefined ? { unit } : {}),
+      ...(coordinator.transportWorkflowId !== undefined
+        ? { transportWorkflowId: coordinator.transportWorkflowId }
+        : {}),
+      ...(coordinator.recovery !== undefined ? { recovery: coordinator.recovery } : {}),
       ...(coordinator.base !== undefined ? { base: coordinator.base } : {}),
       ...(coordinator.publication !== undefined ? { publication: coordinator.publication } : {}),
       at: clock(),

@@ -7,6 +7,7 @@ import {
   STEP_CONFIG,
   STEP_RETRIES,
   readBotAnswer,
+  runOriginalUnitRecovery,
   runPlan,
   transientRefusal,
   type BotAnswer,
@@ -106,6 +107,232 @@ const prNone = (at = T0): BotReply => ok({ ok: true, state: "none" }, at);
 const prMerged = (at = T0, mergedAt = "2026-09-13T23:55:59Z"): BotReply =>
   ok({ ok: true, state: "merged", prNumber: 7, url: PR_URL, sha: MERGED, mergedAt }, at);
 const acked = (at = T0): BotReply => ok({ ok: true }, at);
+
+describe("runOriginalUnitRecovery", () => {
+  const WORKFLOW = "recovery-run-original-review";
+  const recoveryRow = (kind: "findings" | "review", over: Partial<CoordinatorUnit["recovery"]> = {}): CoordinatorUnit =>
+    row("U10", {
+      pr: { number: 7, url: PR_URL },
+      lastPush: HEAD,
+      recovery: {
+        kind,
+        round: 1,
+        expectedHeadSha: HEAD,
+        remainingMs: 60 * MIN,
+        claimedAt: T0,
+        step: `U10/recovery/1/${kind}`,
+        reviewRunId: "run-original-review",
+        previousEnding: { kind: "aborted", report: "original terminal state", at: T0 - MIN },
+        workflowId: WORKFLOW,
+        deadlineAt: T0 + 60 * MIN,
+        reviewKey: `${INSTANCE}:U10/1/review`,
+        ...over,
+      },
+    });
+
+  it("continues request_changes through the original findings namespace and re-review without a start, branch, or generated unit", async () => {
+    const HEAD_2 = "b".repeat(40);
+    const s = steps({
+      "U10/recovery/1/findings/wait/1": "event",
+      "U10/recovery/2/review/wait/1": "event",
+    });
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [
+        planAnswer(
+          [
+            recoveryRow("findings", {
+              findings: [{ id: "F1", severity: "minor", file: "src/a.ts", line: 3, title: "off by one" }],
+            }),
+          ],
+          T0,
+          "person",
+        ),
+      ],
+      spawn: [spawned("run-f1"), spawned("run-r2", T0 + 10 * MIN)],
+      "read-record": [
+        record(
+          {
+            id: "run-f1",
+            finished: true,
+            status: "completed",
+            headSha: HEAD_2,
+            description: true,
+            dispositions: [{ findingId: "F1", disposition: "fixed", note: "corrected" }],
+          },
+          T0 + 10 * MIN,
+        ),
+        record(
+          {
+            id: "run-r2",
+            finished: true,
+            status: "completed",
+            verdict: { verdict: "approve", summary: "clean", findings: [] },
+            reviewPosted: true,
+            reviewHead: HEAD_2,
+          },
+          T0 + 20 * MIN,
+        ),
+      ],
+      "pr-check": [
+        ok(
+          { ok: true, state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_2, headBranchExists: true },
+          T0 + 10 * MIN,
+        ),
+      ],
+      round: [acked(), acked(), acked(), acked()],
+      "unit-end": [acked(T0 + 20 * MIN)],
+    });
+
+    const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+
+    expect(summary).toMatchObject({ instance: INSTANCE, units: { U10: "merge_ready" }, outcome: "completed" });
+    expect(b.of("recover-unit")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10", workflowId: WORKFLOW }]);
+    expect(b.of("unit-start")).toEqual([]);
+    expect(b.of("branch")).toEqual([]);
+    expect(b.of("round").every((body) => body.recoveryWorkflowId === WORKFLOW)).toBe(true);
+    expect(b.of("unit-end")).toEqual([
+      expect.objectContaining({ parentInstanceId: INSTANCE, unit: "U10", recoveryWorkflowId: WORKFLOW }),
+    ]);
+    expect(b.of("pr-check").filter((body) => "recover" in body)).toEqual([
+      { parentInstanceId: INSTANCE, unit: "U10", pr: 7, recover: { runId: "run-f1" } },
+    ]);
+    expect(b.of("spawn")).toEqual([
+      {
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        step: "U10/recovery/1/findings",
+        preset: "coding",
+        budget: 42,
+        brief: { kind: "findings", unit: "U10", pr: 7, headSha: HEAD, reviewRunId: "run-original-review" },
+      },
+      {
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        step: "U10/recovery/2/review",
+        preset: "review",
+        budget: 25,
+        brief: {
+          kind: "review",
+          unit: "U10",
+          pr: 7,
+          headSha: HEAD_2,
+          round: 2,
+          prior: { reviewRunId: "run-original-review", codingRunId: "run-f1" },
+        },
+      },
+    ]);
+  });
+
+  it("continues no_verdict with one read-only review in the original namespace", async () => {
+    const s = steps({ "U10/recovery/1/review/wait/1": "event" });
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([recoveryRow("review")], T0, "person")],
+      spawn: [spawned("run-r1")],
+      "read-record": [record({ id: "run-r1", finished: true, status: "completed" }, T0 + 10 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked(T0 + 10 * MIN)],
+    });
+
+    const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+
+    expect(summary).toMatchObject({ units: { U10: "no_verdict" }, outcome: "failed" });
+    expect(b.of("spawn")).toEqual([
+      {
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        step: "U10/recovery/1/review",
+        preset: "review",
+        budget: 24,
+        brief: { kind: "review", unit: "U10", pr: 7, headSha: HEAD, round: 1 },
+      },
+    ]);
+    expect(b.of("unit-start")).toEqual([]);
+    expect(b.of("branch")).toEqual([]);
+  });
+
+  it("continues a completed original findings checkpoint directly with its read-only re-review", async () => {
+    const HEAD_2 = "b".repeat(40);
+    const s = steps({ "U10/recovery/2/review/wait/1": "event" });
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [
+        planAnswer(
+          [
+            recoveryRow("review", {
+              round: 2,
+              expectedHeadSha: HEAD_2,
+              step: "U10/recovery/2/review",
+              findingsRunId: "run-original-findings",
+              findingsKey: `${INSTANCE}:U10/1/findings`,
+            }),
+          ],
+          T0,
+          "person",
+        ),
+      ],
+      spawn: [spawned("run-r2")],
+      "read-record": [record({ id: "run-r2", finished: true, status: "completed" }, T0 + 10 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked(T0 + 10 * MIN)],
+    });
+
+    await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+
+    expect(b.of("spawn")).toEqual([
+      {
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        step: "U10/recovery/2/review",
+        preset: "review",
+        budget: 25,
+        brief: {
+          kind: "review",
+          unit: "U10",
+          pr: 7,
+          headSha: HEAD_2,
+          round: 2,
+          prior: { reviewRunId: "run-original-review", codingRunId: "run-original-findings" },
+        },
+      },
+    ]);
+  });
+
+  it("does not report completion when durable recovery settlement is refused", async () => {
+    const s = steps({ "U10/recovery/1/review/wait/1": "event" });
+    const refused = ok({ ok: false, error: "recovery_claim_stale" }, T0 + 10 * MIN, 409);
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([recoveryRow("review")], T0, "person")],
+      spawn: [spawned("run-r1")],
+      "read-record": [record({ id: "run-r1", finished: true, status: "completed" }, T0 + 10 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": Array.from({ length: 2 * (STEP_RETRIES.limit + 1) }, () => refused),
+    });
+
+    await expect(
+      runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+        kind: "recover-original-unit",
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+      }),
+    ).rejects.toThrow("successful settlement");
+    expect(s.attempts["U10/recovery/end"]).toBe(STEP_RETRIES.limit + 1);
+  });
+});
 
 type Taken =
   | { kind: "do"; name: string; config: StepConfig }

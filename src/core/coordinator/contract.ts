@@ -313,6 +313,20 @@ export interface ExistingPrPublicationBinding {
 export interface CoordinatorTag {
   parentInstanceId: string;
   idempotencyKey: string;
+  /** Workflow transport for a recovered child. Identity and idempotency remain
+   * on `parentInstanceId`; only lifecycle wake-ups use this checkpoint id. */
+  transportWorkflowId?: string;
+  /** The immutable target and absolute lease of an original-unit recovery.
+   * Stored on the coordinator event so a resume or request-restart cannot turn
+   * the remaining lease into a fresh relative budget or adopt another head. */
+  recovery?: {
+    repo: string;
+    pr: number;
+    headRef: string;
+    baseRef: string;
+    expectedHeadSha: string;
+    deadlineAt: number;
+  };
   /** The branch the child's pull request targets: the plan's base
    *  (`CoordinatorInstance.base`), set by the spawn when the instance knows it.
    *  A coordinator's child is dispatched AT its unit branch so the resident
@@ -477,6 +491,45 @@ export interface RoundGate {
   findings: string[];
 }
 
+/** One admitted continuation of an ended original unit. The claim replaces
+ * the terminal interpretation before a child starts; its step remains under
+ * the original instance/unit idempotency namespace. */
+export interface OriginalUnitRecovery {
+  kind: "findings" | "review";
+  round: number;
+  expectedHeadSha: string;
+  remainingMs: number;
+  claimedAt: number;
+  step: string;
+  /** The original review record that authorizes this transition. */
+  reviewRunId: string;
+  /** A completed findings child that already advanced the original unit before
+   * recovery was claimed. Present only when recovery starts at re-review. */
+  findingsRunId?: string;
+  /** Exact durable key of that completed original findings child. */
+  findingsKey?: string;
+  /** The posted request-changes findings, retained so a Workflow restart can
+   * rebuild the exact findings state without trusting a later listing. */
+  findings?: import("../reviewVerdict.js").Finding[];
+  /** The exact terminal value replaced by the claim, for fail-closed rollback
+   * if the Workflow cannot be admitted. */
+  previousEnding: NonNullable<CoordinatorUnit["ending"]>;
+  /** The separate Workflow execution checkpoint. This is transport identity,
+   * not a replacement coordinator/unit identity. */
+  workflowId: string;
+  /** Absolute end of the original active lease. Delayed Workflow admission or
+   * replay cannot turn the claim's snapshot into fresh time. */
+  deadlineAt: number;
+  /** Exact durable child key of the review outcome that authorized recovery. */
+  reviewKey: string;
+}
+
+export interface OriginalUnitRecoveryReceipt {
+  reviewRunId: string;
+  workflowId: string;
+  at: number;
+}
+
 /** One unit of the plan an instance runs (a task string is a generated plan of
  *  one unit, `U1`): its branch, the units it waits on, and — as the runner
  *  reaches it — its thread, its pull request, the round boundaries the card
@@ -543,6 +596,15 @@ export interface CoordinatorUnit {
    *  item 9) — a mismatch to be seen, since the child's parser holds an approve
    *  to the same level. */
   rounds: Array<{ index: number; agent: string; outcome: string; at: number; gate?: RoundGate }>;
+  /** An explicit recovery claim for this same durable unit. It is mutually
+   * exclusive with both `idle` and `ending`; legacy readers otherwise keep
+   * their existing decoding rules. */
+  recovery?: OriginalUnitRecovery;
+  /** The authorizing review already consumed by a completed recovery. */
+  recoveryReceipt?: OriginalUnitRecoveryReceipt;
+  /** A recovered review that reached a person-only question. Recovery settles
+   * truthfully instead of opening an idle renewal or replacement pipeline. */
+  recoveryHold?: { cause: "human"; gate: HumanGatePending } | { cause: "draft"; pr: { number: number; url: string } };
   /** How the unit ended: the ending's kind and the thread's report, when it
    *  has. `cause` names the machine's reason behind a driver-posted kind;
    *  `step` and `round` locate that reason without parsing the report. For a
@@ -728,6 +790,64 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   )
     return false;
   if (
+    r.recovery !== undefined &&
+    !(
+      isObject(r.recovery) &&
+      (r.recovery.kind === "findings" || r.recovery.kind === "review") &&
+      typeof r.recovery.round === "number" &&
+      Number.isInteger(r.recovery.round) &&
+      r.recovery.round >= 1 &&
+      typeof r.recovery.expectedHeadSha === "string" &&
+      /^[0-9a-f]{40}$/i.test(r.recovery.expectedHeadSha) &&
+      isFinite(r.recovery.remainingMs) &&
+      r.recovery.remainingMs > 0 &&
+      isFinite(r.recovery.claimedAt) &&
+      typeof r.recovery.step === "string" &&
+      STEP_NAME_PATTERN.test(r.recovery.step) &&
+      isText(r.recovery.reviewRunId) &&
+      (r.recovery.findingsRunId === undefined || isText(r.recovery.findingsRunId)) &&
+      (r.recovery.findingsKey === undefined || isText(r.recovery.findingsKey)) &&
+      ((r.recovery.findingsRunId === undefined && r.recovery.findingsKey === undefined) ||
+        (r.recovery.kind === "review" &&
+          r.recovery.findingsRunId !== undefined &&
+          r.recovery.findingsKey !== undefined)) &&
+      (r.recovery.findings === undefined ||
+        (Array.isArray(r.recovery.findings) && r.recovery.findings.every(isFindingShape))) &&
+      isObject(r.recovery.previousEnding) &&
+      isText(r.recovery.previousEnding.kind) &&
+      typeof r.recovery.previousEnding.report === "string" &&
+      isFinite(r.recovery.previousEnding.at) &&
+      typeof r.recovery.workflowId === "string" &&
+      INSTANCE_ID_PATTERN.test(r.recovery.workflowId) &&
+      isFinite(r.recovery.deadlineAt) &&
+      isText(r.recovery.reviewKey)
+    )
+  )
+    return false;
+  if (
+    r.recoveryReceipt !== undefined &&
+    (!isObject(r.recoveryReceipt) ||
+      !isText(r.recoveryReceipt.reviewRunId) ||
+      typeof r.recoveryReceipt.workflowId !== "string" ||
+      !INSTANCE_ID_PATTERN.test(r.recoveryReceipt.workflowId) ||
+      !isFinite(r.recoveryReceipt.at))
+  )
+    return false;
+  if (
+    r.recoveryHold !== undefined &&
+    (!isObject(r.recoveryHold) ||
+      !(
+        (r.recoveryHold.cause === "human" && isHumanGatePending(r.recoveryHold.gate)) ||
+        (r.recoveryHold.cause === "draft" &&
+          isObject(r.recoveryHold.pr) &&
+          Number.isInteger(r.recoveryHold.pr.number) &&
+          (r.recoveryHold.pr.number as number) > 0 &&
+          isText(r.recoveryHold.pr.url))
+      ))
+  )
+    return false;
+  if (r.recovery !== undefined && (r.idle !== undefined || r.ending !== undefined)) return false;
+  if (
     r.ending !== undefined &&
     !(
       isObject(r.ending) &&
@@ -829,13 +949,20 @@ export async function sendPullMerged(
  *  send costs the wait a chunk, never the round. */
 export async function sendChildSignal(
   workflow: WorkflowSender | undefined,
-  signal: { runId: string; parentInstanceId: string; kind: "interrupted" | "resumed"; reason: string; at: number },
+  signal: {
+    runId: string;
+    parentInstanceId: string;
+    transportWorkflowId?: string;
+    kind: "interrupted" | "resumed";
+    reason: string;
+    at: number;
+  },
 ): Promise<RunFinishedSend> {
   const { runId, parentInstanceId: instance, kind, reason, at } = signal;
   if (!workflow) return { kind: "no-binding", instance };
   const type = kind === "interrupted" ? childInterruptedEventType(runId) : childResumedEventType(runId);
   try {
-    const handle = await workflow.get(instance);
+    const handle = await workflow.get(signal.transportWorkflowId ?? instance);
     await handle.sendEvent({ type, payload: { runId, kind, reason, at, parentInstanceId: instance } });
     return { kind: "sent", instance, type };
   } catch (err) {
@@ -846,7 +973,13 @@ export async function sendChildSignal(
 /** The one send per committed terminal record (run-history item 47). */
 export async function sendRunFinished(
   workflow: WorkflowSender | undefined,
-  record: { id: string; status: string; finishedAt: number; parentInstanceId?: string },
+  record: {
+    id: string;
+    status: string;
+    finishedAt: number;
+    parentInstanceId?: string;
+    transportWorkflowId?: string;
+  },
 ): Promise<RunFinishedSend> {
   const instance = record.parentInstanceId;
   if (instance === undefined) return { kind: "none" };
@@ -859,7 +992,7 @@ export async function sendRunFinished(
     parentInstanceId: instance,
   };
   try {
-    const handle = await workflow.get(instance);
+    const handle = await workflow.get(record.transportWorkflowId ?? instance);
     await handle.sendEvent({ type, payload });
     return { kind: "sent", instance, type };
   } catch (err) {

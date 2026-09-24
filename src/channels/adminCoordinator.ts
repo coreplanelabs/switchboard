@@ -85,6 +85,8 @@ import { foldThreadAttachments } from "../core/dispatch/admission.js";
 import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../core/coordinator/instancesRoute.js";
+import type { OriginalUnitRecoveryParams } from "../core/coordinator/driver.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { childRequestText, spawnTierRefusal } from "../core/dispatch/spawn.js";
@@ -116,6 +118,7 @@ import {
   type Brief,
   type InterruptionCause,
   type RoundChecks,
+  stepPrefixOf,
 } from "../core/ship/coordinator.js";
 import { renderRenewal, renewalDecision } from "../core/ship/renewal.js";
 import { BOT_SCOPES, checkPrTitle, TITLE_MAX_LENGTH } from "../core/prTitle.mjs";
@@ -206,6 +209,9 @@ export interface AdminCoordinatorDeps {
   grantsFor: GrantsLookup;
   /** The parent ship records (run-history item 49). */
   instances: CoordinatorInstanceStore;
+  /** Admit the separate durable checkpoint after the original row is claimed. */
+  startRecovery?: (id: string, params: OriginalUnitRecoveryParams) => Promise<CreateInstanceAnswer>;
+  recoveryStatus?: (id: string) => Promise<InstanceStatusAnswer>;
   /** The app config handed to the spawn tier gate. */
   appConfig?: () => unknown;
   /** The runs page base (`<PUBLIC_BASE_URL>/runs`), answered to the plan
@@ -221,6 +227,15 @@ export interface AdminCoordinatorDeps {
    *  remains authoritative; this fence only makes a simultaneous command defer. */
   runnerOwnership?: {
     claim(repo: string, prNumber: number, owner?: { instanceId: string; unit: string }): boolean;
+    reserve?(repo: string, prNumber: number, owner: { instanceId: string; unit: string }): symbol | undefined;
+    transferReservation?(
+      repo: string,
+      prNumber: number,
+      token: symbol,
+      currentOwner: { instanceId: string; unit: string },
+      nextOwner: { instanceId: string; unit: string },
+    ): boolean;
+    releaseReservation?(repo: string, prNumber: number, token: symbol): boolean;
     release(repo: string, prNumber: number, owner?: { instanceId: string; unit: string }): boolean;
     owner(repo: string, prNumber: number): { instanceId: string; unit: string } | undefined;
   };
@@ -502,6 +517,8 @@ function parseBrief(v: unknown): Parsed<Brief> {
       if (!review.ok) return review;
       const checks = checkRows();
       if (!checks.ok) return checks;
+      if (b.headSha !== undefined && (typeof b.headSha !== "string" || !/^[0-9a-f]{40}$/i.test(b.headSha)))
+        return invalid("brief.headSha must be a full commit sha");
       return {
         ok: true,
         value: {
@@ -509,6 +526,7 @@ function parseBrief(v: unknown): Parsed<Brief> {
           unit: b.unit,
           pr: n.value,
           reviewRunId: review.value,
+          ...(b.headSha !== undefined ? { headSha: b.headSha as string } : {}),
           ...(checks.value !== undefined ? { checks: checks.value } : {}),
         },
       };
@@ -851,6 +869,54 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   if (live) return answerForLive(live, key, threadKey, at);
   const done = await finishedWithKey(deps.runs, instance, threadKey, key);
   if (done) return json(200, { ok: true, runId: done.id, threadKey, alreadySpawned: true, at });
+  if (row?.recovery !== undefined) {
+    const expectedKind = req.preset === "coding" ? "findings" : "review";
+    const stepMatch = new RegExp(`^${row.unit}/recovery/[1-9][0-9]*/${expectedKind}(?:/a[1-9][0-9]*)?$`).test(req.step);
+    const briefHead =
+      req.brief !== undefined && "headSha" in req.brief && typeof req.brief.headSha === "string"
+        ? req.brief.headSha
+        : undefined;
+    if (
+      !stepMatch ||
+      row.publication === undefined ||
+      briefHead !== row.publication.expectedHeadSha ||
+      typeof req.budget !== "number" ||
+      req.budget > Math.floor((row.recovery.deadlineAt - at) / minutesToMs(1))
+    )
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+    let facts: PullRequestFacts | undefined;
+    try {
+      facts = await deps.fetchPrFacts({ repo: instance.repo, number: row.publication.pr });
+    } catch (err) {
+      return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
+    }
+    const verified = facts?.verifiedHead;
+    if (
+      facts?.state !== "open" ||
+      facts.sameRepoHead !== true ||
+      facts.headBranchExists !== true ||
+      facts.headRef !== row.publication.headRef ||
+      facts.baseRef !== row.publication.baseRef ||
+      facts.headSha !== row.publication.expectedHeadSha ||
+      verified?.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+      verified.ref !== row.publication.publicationRef ||
+      verified.sha !== row.publication.expectedHeadSha
+    )
+      return json(409, {
+        ok: false,
+        error:
+          fullHead(facts?.headSha) && facts.headSha !== row.publication.expectedHeadSha
+            ? "recovery_head_moved"
+            : "recovery_facts_mismatch",
+        at,
+      });
+    try {
+      if (deps.runnerOwnership?.claim(instance.repo, row.publication.pr, row.publication.owner) !== true)
+        return json(409, { ok: false, error: "publication_ownership_changed", at });
+    } catch (err) {
+      return json(409, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
+    }
+  }
   const io = deps.ioFor({ threadKey, userId: instance.userId });
   if (!io) return json(503, { ok: false, error: "no_channel", at });
   // The child's turn: the caller's prompt, or the brief composed from what the
@@ -906,6 +972,19 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
         at,
       });
     try {
+      // A recovery Workflow can outlive the bot process that admitted it. Its
+      // durable claim is sufficient to rebuild only this exact owner before
+      // every write-child admission; a rival process-local owner still wins.
+      if (
+        row.recovery !== undefined &&
+        deps.runnerOwnership?.claim(instance.repo, row.publication.pr, row.publication.owner) !== true
+      )
+        return json(409, {
+          ok: false,
+          error: "publication_ownership_changed",
+          message: "the durable recovery claim no longer owns the pull request",
+          at,
+        });
       const owner = deps.runnerOwnership?.owner(instance.repo, row.publication.pr);
       if (
         owner === undefined ||
@@ -961,6 +1040,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   if (deps.childAdmission !== undefined && leaveAdmission === undefined) return queued();
   const releaseAdmission = leaveAdmission ?? (() => {});
   let startedId: string | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   let lastReply: string | undefined;
   let resolveStarted!: (id: string) => void;
   const started = new Promise<string>((resolve) => {
@@ -969,6 +1049,14 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const child = watched(io, {
     started: (id) => {
       startedId = id;
+      if (row?.recovery !== undefined) {
+        const stopAtDeadline = () => {
+          void deps.runs.stopRun(id, "hard", { kind: "access", id: "original-unit-recovery-deadline" });
+        };
+        const left = row.recovery.deadlineAt - (deps.clock ?? systemClock)();
+        if (left <= 0) stopAtDeadline();
+        else deadlineTimer = setTimeout(stopAtDeadline, left);
+      }
       releaseAdmission();
       resolveStarted(id);
     },
@@ -995,6 +1083,19 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const tag: CoordinatorTag = {
     parentInstanceId: instance.id,
     idempotencyKey: key,
+    ...(row?.recovery !== undefined ? { transportWorkflowId: row.recovery.workflowId } : {}),
+    ...(row?.recovery !== undefined && row.publication !== undefined
+      ? {
+          recovery: {
+            repo: row.publication.repo,
+            pr: row.publication.pr,
+            headRef: row.publication.headRef,
+            baseRef: row.publication.baseRef,
+            expectedHeadSha: row.recovery.expectedHeadSha,
+            deadlineAt: row.recovery.deadlineAt,
+          },
+        }
+      : {}),
     ...(instance.base !== undefined ? { base: instance.base } : {}),
     ...(publication !== undefined ? { publication } : {}),
   };
@@ -1002,6 +1103,18 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   try {
     dispatching = deps.dispatch(msg, child, {
       coordinator: tag,
+      ...(row?.recovery !== undefined && row.publication !== undefined
+        ? {
+            recovery: {
+              repo: row.publication.repo,
+              pr: row.publication.pr,
+              headRef: row.publication.headRef,
+              baseRef: row.publication.baseRef,
+              expectedHeadSha: row.publication.expectedHeadSha,
+              deadlineAt: row.recovery.deadlineAt,
+            },
+          }
+        : {}),
       ...(turn.contract !== undefined ? { contract: turn.contract } : {}),
     });
   } catch (err) {
@@ -1012,6 +1125,9 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     (outcome) => ({ kind: "ended" as const, outcome }),
     (err: unknown) => ({ kind: "threw" as const, err }),
   );
+  void settled.finally(() => {
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+  });
   // The dispatch runs on in the process (counted in flight like any run); the
   // route answers at registration, and a throw after that is a log line.
   void settled.then((end) => {
@@ -1772,6 +1888,74 @@ const samePublicationOwner = (
   right: { instanceId: string; unit: string },
 ) => left?.instanceId === right.instanceId && left.unit === right.unit;
 
+/** Advance a recovery claim only to the exact head recorded by its completed
+ * findings child. An unrelated force-push can never rewrite the durable
+ * publication binding merely because the branch currently points there. */
+async function advanceRecoveryPublication(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  facts: PullRequestFacts,
+  runId: string,
+): Promise<CoordinatorUnit> {
+  if (row.recovery === undefined || row.publication === undefined || facts.headSha === row.publication.expectedHeadSha)
+    return row;
+  const child = await deps.runs.getRun(runId);
+  const expectedPrefix = `${instance.id}:${row.unit}/recovery/`;
+  const owner = { instanceId: instance.id, unit: row.unit };
+  if (
+    !child.ok ||
+    child.value.finished !== true ||
+    child.value.status !== "completed" ||
+    child.value.agent !== "coding" ||
+    child.value.parentInstanceId !== instance.id ||
+    child.value.userId !== instance.userId ||
+    child.value.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+    child.value.threadKey !== (row.threadKey ?? instance.threadKey) ||
+    child.value.idempotencyKey?.startsWith(expectedPrefix) !== true ||
+    !/\/findings(?:\/a[1-9][0-9]*)?$/.test(child.value.idempotencyKey) ||
+    !fullHead(facts.headSha) ||
+    child.value.headSha !== facts.headSha ||
+    child.value.pushed?.some((push) => push.ref === row.branch && push.sha === facts.headSha) !== true ||
+    facts.state !== "open" ||
+    facts.sameRepoHead !== true ||
+    facts.headBranchExists !== true ||
+    facts.headRef !== row.publication.headRef ||
+    facts.baseRef !== row.publication.baseRef ||
+    facts.verifiedHead?.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    facts.verifiedHead.ref !== row.publication.publicationRef ||
+    facts.verifiedHead.sha !== facts.headSha ||
+    !samePublicationOwner(row.publication.owner, owner)
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  try {
+    if (deps.runnerOwnership?.claim(instance.repo, row.publication.pr, owner) !== true)
+      throw new PublicationBindingRefusal("publication_ownership_changed");
+  } catch (err) {
+    if (err instanceof PublicationBindingRefusal) throw err;
+    throw new PublicationBindingRefusal("publication_ownership_unknown");
+  }
+  const updated: CoordinatorUnit = {
+    ...row,
+    lastPush: facts.headSha,
+    publication: { ...row.publication, expectedHeadSha: facts.headSha },
+    recovery: { ...row.recovery, expectedHeadSha: facts.headSha },
+  };
+  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
+  try {
+    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
+  } catch {
+    const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
+    const current = reread?.filter((candidate) => candidate.unit === row.unit);
+    if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(updated)) replaced = { ok: true };
+  }
+  if (replaced?.ok !== true)
+    throw new PublicationBindingRefusal(
+      replaced?.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
+    );
+  return updated;
+}
+
 /** One fail-closed transition from a freshly read open pull request to the
  * exact durable authority later coding rounds require. The ownership claim is
  * synchronous and precedes the full-row CAS; only a claim acquired by this
@@ -1834,8 +2018,13 @@ async function bindOpenPullRequest(
   }
   if (priorOwner !== undefined && !samePublicationOwner(priorOwner, owner))
     throw new PublicationBindingRefusal("publication_ownership_changed");
-  if (!fence.claim(instance.repo, pr.number, owner))
-    throw new PublicationBindingRefusal("publication_ownership_changed");
+  try {
+    if (!fence.claim(instance.repo, pr.number, owner))
+      throw new PublicationBindingRefusal("publication_ownership_changed");
+  } catch (err) {
+    if (err instanceof PublicationBindingRefusal) throw err;
+    throw new PublicationBindingRefusal("publication_ownership_unknown");
+  }
   let claimedHere = priorOwner === undefined;
   const releaseClaim = () => {
     if (!claimedHere) return;
@@ -1868,6 +2057,450 @@ async function bindOpenPullRequest(
       replaced.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
     );
   }
+}
+
+const fullHead = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{40}$/i.test(value);
+
+/** Recover one ended original unit without passing through generated-plan
+ * hand-off. Every authoritative fact comes from the original durable rows,
+ * their owned review record and one fresh GitHub read. */
+export interface OriginalUnitRecoveryCaller {
+  userId: string;
+  threadKey: string;
+}
+
+export async function recoverOriginalUnit(
+  body: Record<string, unknown>,
+  deps: AdminCoordinatorDeps,
+  caller?: OriginalUnitRecoveryCaller,
+): Promise<IngressResponse> {
+  const id = parseInstanceId(body.parentInstanceId);
+  if (!id.ok) return json(400, { ok: false, error: id.error });
+  if (typeof body.unit !== "string" || !UNIT_ID.test(body.unit))
+    return json(400, { ok: false, error: "unit must be a unit id" });
+  const at = (deps.clock ?? systemClock)();
+  const instance = await deps.instances.get(id.value);
+  if (instance === null) return json(404, { ok: false, error: "unknown_instance", at });
+  const requestedWorkflowId = typeof body.workflowId === "string" ? body.workflowId : undefined;
+  if (caller === undefined && requestedWorkflowId === undefined)
+    return json(403, { ok: false, error: "recovery_caller_required", at });
+  if (caller !== undefined && caller.userId !== instance.userId)
+    return json(403, { ok: false, error: "recovery_requester_mismatch", at });
+  const rows = await deps.instances.listUnits(instance.id);
+  const matches = rows.filter((candidate) => candidate.unit === body.unit);
+  if (matches.length !== 1) return json(409, { ok: false, error: "unit_evidence_ambiguous", at });
+  const row = matches[0]!;
+  if (caller !== undefined && caller.threadKey !== (row.threadKey ?? instance.threadKey))
+    return json(403, { ok: false, error: "recovery_requester_mismatch", at });
+  if (row.idle !== undefined && row.ending !== undefined)
+    return json(409, { ok: false, error: "unit_lifecycle_ambiguous", at });
+
+  const originalOwner = { instanceId: instance.id, unit: row.unit };
+  const publication = row.publication;
+  const pr = row.pr;
+  const base = instance.base;
+  let expectedHead = row.lastPush;
+  if (
+    pr === undefined ||
+    base === undefined ||
+    !fullHead(expectedHead) ||
+    publication === undefined ||
+    publication.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    publication.pr !== pr.number ||
+    publication.headRef !== row.branch ||
+    publication.baseRef !== base ||
+    publication.publicationRef !== row.branch ||
+    !fullHead(publication.expectedHeadSha) ||
+    !samePublicationOwner(publication.owner, originalOwner)
+  )
+    return json(409, { ok: false, error: "recovery_binding_mismatch", at });
+
+  const existingClaim = row.recovery;
+  let kind: "findings" | "review";
+  let round: number;
+  let remainingMs: number;
+  let reviewRunId: string;
+  let stepName: string;
+  let workflowId: string;
+  let reviewKey: string;
+  let deadlineAt: number;
+  let findings: Finding[] | undefined;
+  let findingsRunId: string | undefined;
+  let findingsKey: string | undefined;
+  let claimRow = row;
+  let facts: PullRequestFacts | undefined;
+  let originalRow: CoordinatorUnit | undefined;
+  if (existingClaim !== undefined) {
+    ({
+      kind,
+      round,
+      remainingMs,
+      reviewRunId,
+      step: stepName,
+      workflowId,
+      reviewKey,
+      deadlineAt,
+      findings,
+      findingsRunId,
+      findingsKey,
+    } = existingClaim);
+    if (existingClaim.expectedHeadSha !== expectedHead || publication.expectedHeadSha !== expectedHead)
+      return json(409, { ok: false, error: "recovery_binding_mismatch", at });
+    const { recovery: _recovery, ...withoutRecovery } = row;
+    originalRow = { ...withoutRecovery, ending: existingClaim.previousEnding };
+  } else {
+    if (row.idle !== undefined || row.ending === undefined)
+      return json(409, { ok: false, error: "unit_not_terminal", at });
+    let boundaryPosition = -1;
+    for (let index = row.rounds.length - 1; index >= 0; index -= 1)
+      if (row.rounds[index]!.agent === "review" && row.rounds[index]!.outcome !== "started") {
+        boundaryPosition = index;
+        break;
+      }
+    const boundary = boundaryPosition >= 0 ? row.rounds[boundaryPosition] : undefined;
+    if (boundary === undefined || (boundary.outcome !== "request_changes" && boundary.outcome !== "no_verdict"))
+      return json(409, { ok: false, error: "recovery_ending_unsupported", at });
+    if (row.rounds.slice(boundaryPosition + 1).some((candidate) => candidate.agent === "review"))
+      return json(409, { ok: false, error: "recovery_stage_ambiguous", at });
+    kind = boundary.outcome === "request_changes" ? "findings" : "review";
+    if (kind === "review" && row.ending.kind !== "no_verdict")
+      return json(409, { ok: false, error: "recovery_ending_mismatch", at });
+    round = boundary.index;
+    const caps = instance.caps;
+    if (caps === undefined || row.startedAt === undefined || !Number.isFinite(row.ending.at))
+      return json(409, { ok: false, error: "recovery_budget_unknown", at });
+    // Prior spend is not yet durable on a terminal row. A cost-capped unit
+    // cannot safely recover by resetting that total, so it stays parked.
+    if (instance.grant?.costCapUsd !== undefined) return json(409, { ok: false, error: "recovery_budget_unknown", at });
+    if (round >= caps.maxRounds) return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
+    // Recovery resumes the active segment's original wall-clock lease. A
+    // renewal starts a full lease at its durable segment time; a stopped
+    // segment can carry the smaller unspent lease on its durable wake answer.
+    const latestSegmentIndex = row.segments?.reduce((latest, candidate) => Math.max(latest, candidate.index), 1) ?? 1;
+    const latestSegments = row.segments?.filter((candidate) => candidate.index === latestSegmentIndex) ?? [];
+    if (latestSegments.length > 1) return json(409, { ok: false, error: "recovery_budget_unknown", at });
+    const segment = latestSegments[0];
+    const leaseStartedAt = segment?.at ?? row.startedAt;
+    const resumedLeases = Object.values(row.wakes ?? {}).filter(
+      (answer) => answer.kind === "segment" && answer.index === latestSegmentIndex && answer.leaseMs !== undefined,
+    );
+    // A stopped-segment wake stores the remaining lease but not when that
+    // smaller lease began. Subtracting from the original segment time would
+    // invent a budget, so this legacy shape is unrecoverable.
+    if (resumedLeases.length > 0) return json(409, { ok: false, error: "recovery_budget_unknown", at });
+    remainingMs = minutesToMs(caps.maxMinutes) - (at - leaseStartedAt);
+    const reviewThreadKey = row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey;
+    const unitThreadKey = row.threadKey ?? instance.threadKey;
+    const listing = await deps.runs.listRuns({
+      status: "finished",
+      visibleTo: EVERY_RUN,
+      threadKey: reviewThreadKey,
+      limit: RUN_LIST_MAX_LIMIT,
+    });
+    const unitListing =
+      unitThreadKey === reviewThreadKey
+        ? listing
+        : await deps.runs.listRuns({
+            status: "finished",
+            visibleTo: EVERY_RUN,
+            threadKey: unitThreadKey,
+            limit: RUN_LIST_MAX_LIMIT,
+          });
+    const segmentPrefix = stepPrefixOf(
+      row.unit,
+      latestSegmentIndex > 1 ? { segment: latestSegmentIndex, renewalsSpent: 0, spendUsd: null } : undefined,
+    );
+    const reviewedHead = publication.expectedHeadSha;
+    const reviewKeyPrefix = `${instance.id}:${segmentPrefix}/${round}/review`;
+    const candidates = listing.runs.filter((run) => {
+      if (
+        !run.finished ||
+        run.agent !== "review" ||
+        run.parentInstanceId !== instance.id ||
+        (run.idempotencyKey !== reviewKeyPrefix && run.idempotencyKey?.startsWith(`${reviewKeyPrefix}/a`) !== true) ||
+        run.userId !== instance.userId ||
+        run.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+        run.threadKey !== reviewThreadKey
+      )
+        return false;
+      if (run.reviewHead !== reviewedHead) return false;
+      if (kind === "review") return run.verdict === undefined && run.reviewPost === undefined;
+      return (
+        run.verdict?.verdict === "request_changes" &&
+        run.reviewHead === reviewedHead &&
+        run.reviewPost?.posted === true &&
+        run.reviewPost.head === reviewedHead &&
+        run.reviewPost.verdict === "request_changes" &&
+        run.reviewPost.target.repo.toLowerCase() === instance.repo.toLowerCase() &&
+        run.reviewPost.target.number === pr.number
+      );
+    });
+    if (candidates.length !== 1) return json(409, { ok: false, error: "recovery_review_evidence_ambiguous", at });
+    reviewRunId = candidates[0]!.id;
+    reviewKey = candidates[0]!.idempotencyKey!;
+    try {
+      facts = await deps.fetchPrFacts({ repo: instance.repo, number: pr.number });
+    } catch (err) {
+      return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
+    }
+    if (facts === undefined) return json(502, { ok: false, error: "github_unavailable", at });
+    const verified = facts.verifiedHead;
+    if (
+      facts.state !== "open" ||
+      facts.sameRepoHead !== true ||
+      facts.headBranchExists !== true ||
+      facts.headRef !== row.branch ||
+      facts.baseRef !== base ||
+      !fullHead(facts.headSha) ||
+      verified === undefined ||
+      verified.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+      verified.ref !== row.branch ||
+      verified.sha !== facts.headSha
+    )
+      return json(409, { ok: false, error: "recovery_facts_mismatch", at });
+
+    const findingsStep = `${segmentPrefix}/${boundary.index}/findings/pr-check`;
+    const findingsPrefix = `${instance.id}:${segmentPrefix}/${boundary.index}/findings`;
+    const headMoved = facts.headSha !== reviewedHead || expectedHead !== reviewedHead;
+    const completedFindings = unitListing.runs.filter(
+      (run) =>
+        boundary.outcome === "request_changes" &&
+        row.ending?.cause === "step_threw" &&
+        row.ending.step === findingsStep &&
+        row.ending.round === boundary.index &&
+        (expectedHead === reviewedHead || expectedHead === facts!.headSha) &&
+        run.finished &&
+        run.status === "completed" &&
+        run.agent === "coding" &&
+        run.parentInstanceId === instance.id &&
+        run.userId === instance.userId &&
+        run.repo?.toLowerCase() === instance.repo.toLowerCase() &&
+        run.threadKey === unitThreadKey &&
+        (run.idempotencyKey === findingsPrefix || run.idempotencyKey?.startsWith(`${findingsPrefix}/a`) === true) &&
+        run.headSha === facts!.headSha &&
+        (!headMoved || run.pushed?.some((push) => push.ref === row.branch && push.sha === facts!.headSha) === true) &&
+        run.startedAt >= (candidates[0]!.finishedAt ?? candidates[0]!.startedAt) &&
+        (run.finishedAt === undefined || run.finishedAt <= row.ending.at),
+    );
+    if (completedFindings.length > 1 || (headMoved && completedFindings.length !== 1))
+      return json(409, { ok: false, error: "recovery_head_moved", at });
+    if (completedFindings.length === 1) {
+      findingsRunId = completedFindings[0]!.id;
+      findingsKey = completedFindings[0]!.idempotencyKey!;
+      expectedHead = facts.headSha;
+      kind = "review";
+      round = boundary.index + 1;
+      claimRow = {
+        ...row,
+        lastPush: expectedHead,
+        publication: { ...publication, expectedHeadSha: expectedHead },
+      };
+    } else expectedHead = reviewedHead;
+    const floor = minutesToMs(leaseMinimum(kind === "findings" ? "fix" : "review"));
+    if (!Number.isFinite(remainingMs) || remainingMs < floor)
+      return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
+    stepName = `${row.unit}/recovery/${round}/${kind}`;
+    workflowId = `recovery-${findingsRunId ?? reviewRunId}`;
+    deadlineAt = at + remainingMs;
+    findings = kind === "findings" ? candidates[0]!.verdict?.findings : undefined;
+    if (row.recoveryReceipt?.reviewRunId === reviewRunId)
+      return json(409, { ok: false, error: "recovery_already_completed", at });
+    originalRow = row;
+  }
+
+  const expiredExistingClaim = existingClaim !== undefined && at >= deadlineAt;
+  if (requestedWorkflowId !== undefined) {
+    if (existingClaim === undefined || requestedWorkflowId !== workflowId)
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  }
+
+  const fence = deps.runnerOwnership;
+  if (
+    fence === undefined ||
+    fence.reserve === undefined ||
+    fence.transferReservation === undefined ||
+    fence.releaseReservation === undefined
+  )
+    return json(503, { ok: false, error: "publication_ownership_unknown", at });
+  const releaseReservation = fence.releaseReservation.bind(fence);
+  if (existingClaim !== undefined) {
+    try {
+      // The claim is durable while the ownership fence is process-local. A
+      // Workflow can outlive a bot process, so reconstruct this exact owner's
+      // fence from the claim before revalidating it; a rival claim still wins.
+      if (!fence.claim(instance.repo, pr.number, originalOwner))
+        return json(409, { ok: false, error: "publication_ownership_changed", at });
+    } catch (err) {
+      return json(503, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
+    }
+  }
+
+  let claimedRow = row;
+  let token: symbol | undefined;
+  let transferred = existingClaim !== undefined;
+  const rollback = async (error: string, consumed = false): Promise<IngressResponse> => {
+    if (originalRow !== undefined) {
+      const replacement = consumed
+        ? {
+            ...originalRow,
+            recoveryReceipt: { reviewRunId, workflowId, at },
+          }
+        : originalRow;
+      const restored = await deps.instances.compareAndReplaceUnit(claimedRow, replacement).catch(() => undefined);
+      if (restored?.ok !== true)
+        return json(500, {
+          ok: false,
+          error: "recovery_rollback_failed",
+          cause: error,
+          reason: restored?.reason ?? "unavailable",
+          at,
+        });
+    }
+    const released = transferred
+      ? fence.release(instance.repo, pr.number, originalOwner)
+      : token !== undefined
+        ? releaseReservation(instance.repo, pr.number, token)
+        : true;
+    if (!released) return json(500, { ok: false, error: "recovery_cleanup_failed", cause: error, at });
+    return json(409, { ok: false, error, at });
+  };
+
+  if (requestedWorkflowId === undefined && expiredExistingClaim) {
+    const status = await deps.recoveryStatus?.(workflowId).catch((err) => ({
+      kind: "unanswered" as const,
+      reason: describe(err),
+    }));
+    if (status === undefined || status.kind === "unanswered")
+      return json(503, {
+        ok: false,
+        error: "recovery_status_unanswered",
+        ...(status?.kind === "unanswered" ? { message: status.reason } : {}),
+        workflowId,
+        at,
+      });
+    if (status.kind === "status" && !["complete", "errored", "terminated"].includes(status.status))
+      return json(409, { ok: false, error: "recovery_wall_clock_exhausted", workflowId, at });
+    return rollback("recovery_wall_clock_exhausted", status.kind !== "absent");
+  }
+
+  if (facts === undefined)
+    try {
+      facts = await deps.fetchPrFacts({ repo: instance.repo, number: pr.number });
+    } catch (err) {
+      return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
+    }
+  if (facts === undefined) return json(502, { ok: false, error: "github_unavailable", at });
+  const verified = facts.verifiedHead;
+  if (
+    facts.state !== "open" ||
+    facts.sameRepoHead !== true ||
+    facts.headBranchExists !== true ||
+    facts.headRef !== row.branch ||
+    facts.baseRef !== base ||
+    !fullHead(facts.headSha) ||
+    facts.headSha !== expectedHead ||
+    verified === undefined ||
+    verified.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    verified.ref !== row.branch ||
+    verified.sha !== expectedHead
+  ) {
+    const error =
+      fullHead(facts.headSha) && facts.headSha !== expectedHead ? "recovery_head_moved" : "recovery_facts_mismatch";
+    return requestedWorkflowId === undefined ? json(409, { ok: false, error, at }) : rollback(error);
+  }
+
+  if (existingClaim === undefined) {
+    try {
+      token = fence.reserve(instance.repo, pr.number, originalOwner);
+    } catch (err) {
+      return json(503, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
+    }
+    if (token === undefined) return json(409, { ok: false, error: "publication_ownership_changed", at });
+    const { ending: _ending, ...withoutEnding } = claimRow;
+    claimedRow = {
+      ...withoutEnding,
+      recovery: {
+        kind,
+        round,
+        expectedHeadSha: expectedHead,
+        remainingMs,
+        claimedAt: at,
+        step: stepName,
+        reviewRunId,
+        ...(findingsRunId !== undefined ? { findingsRunId } : {}),
+        ...(findingsKey !== undefined ? { findingsKey } : {}),
+        ...(findings !== undefined ? { findings } : {}),
+        previousEnding: row.ending!,
+        workflowId,
+        deadlineAt,
+        reviewKey,
+      },
+    };
+    let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
+    try {
+      replaced = await deps.instances.compareAndReplaceUnit(row, claimedRow);
+    } catch (err) {
+      // A lost CAS response is not a definite failure. Re-read the exact row:
+      // committed means continue under the still-held reservation; unchanged
+      // means release; unreadable or another value stays fenced for restart
+      // reconciliation rather than exposing a claimed row as unowned.
+      const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
+      const current = reread?.filter((candidate) => candidate.unit === row.unit);
+      if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(claimedRow)) replaced = { ok: true };
+      else if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(row)) {
+        const released = releaseReservation(instance.repo, pr.number, token);
+        if (!released)
+          return json(500, { ok: false, error: "recovery_cleanup_failed", cause: "recovery_store_unavailable", at });
+        return json(503, { ok: false, error: "recovery_store_unavailable", message: describe(err), at });
+      } else return json(503, { ok: false, error: "recovery_claim_unanswered", message: describe(err), at });
+    }
+    if (replaced.ok !== true) {
+      const error = replaced.reason === "stale" ? "recovery_claim_stale" : "recovery_store_unavailable";
+      const released = releaseReservation(instance.repo, pr.number, token);
+      if (!released) return json(500, { ok: false, error: "recovery_cleanup_failed", cause: error, at });
+      return json(409, { ok: false, error, at });
+    }
+    if (!fence.transferReservation(instance.repo, pr.number, token, originalOwner, originalOwner))
+      return rollback("publication_ownership_changed");
+    token = undefined;
+    transferred = true;
+  }
+  if (requestedWorkflowId !== undefined)
+    return json(200, { ok: true, parentInstanceId: instance.id, unit: row.unit, workflowId, at });
+
+  const startRecovery = deps.startRecovery;
+  if (startRecovery === undefined) return rollback("recovery_workflow_unavailable");
+  const started = await startRecovery(workflowId, {
+    kind: "recover-original-unit",
+    parentInstanceId: instance.id,
+    unit: row.unit,
+  }).catch((err) => ({ kind: "unanswered" as const, reason: describe(err) }));
+  if (started.kind !== "created" && started.kind !== "duplicate") {
+    if (started.kind === "failed") return rollback("recovery_workflow_failed");
+    return json(200, {
+      ok: true,
+      outcome: "indeterminate",
+      workflowId,
+      parentInstanceId: instance.id,
+      unit: row.unit,
+      message: started.reason,
+      at,
+    });
+  }
+  if (
+    started.kind === "duplicate" &&
+    started.status !== undefined &&
+    ["complete", "errored", "terminated"].includes(started.status)
+  )
+    return rollback("recovery_workflow_terminal", true);
+  return json(200, {
+    ok: true,
+    outcome: started.kind === "duplicate" ? "already_started" : "started",
+    workflowId,
+    parentInstanceId: instance.id,
+    unit: row.unit,
+    at,
+  });
 }
 
 async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
@@ -1922,7 +2555,11 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         await rememberTerminal(followedPr);
         return json(200, { ok: true, ...state, at });
       }
-      await bindOpenPullRequest(deps, instance, unit.row, followedPr, facts);
+      const bindingRow =
+        unit.row !== undefined && unit.row.recovery !== undefined && recover !== undefined
+          ? await advanceRecoveryPublication(deps, instance, unit.row, facts, recover.runId)
+          : unit.row;
+      await bindOpenPullRequest(deps, instance, bindingRow, followedPr, facts);
       const prRef = { repo: instance.repo, number: follow };
       const headSha = facts.headSha;
       const approved =
@@ -2509,19 +3146,52 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
   if (namesForeignRun(instance, body)) return json(404, { ok: false, error: "not_found" });
-  const host = await hostRunOf(deps, instance);
-  if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  const recoveryWorkflowId =
+    typeof body.recoveryWorkflowId === "string" && INSTANCE_ID_PATTERN.test(body.recoveryWorkflowId)
+      ? body.recoveryWorkflowId
+      : undefined;
+  if (body.recoveryWorkflowId !== undefined && recoveryWorkflowId === undefined)
+    return json(400, { ok: false, error: "recoveryWorkflowId must be a Workflow instance id", at });
+  if (row.recovery !== undefined && recoveryWorkflowId !== row.recovery.workflowId)
+    return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  const host = row.recovery !== undefined ? ({ kind: "not_host" } as const) : await hostRunOf(deps, instance);
+  if (host.kind === "not_host" && row.recovery === undefined) return json(409, { ok: false, error: "not_host", at });
+  const note = { index: body.index, agent: body.agent, outcome: body.outcome as string, at, ...(gate ? { gate } : {}) };
+  const previous = row.rounds.at(-1);
+  if (
+    row.recovery !== undefined &&
+    previous?.index === note.index &&
+    previous.agent === note.agent &&
+    previous.outcome === note.outcome &&
+    JSON.stringify(previous.gate) === JSON.stringify(note.gate)
+  )
+    return json(200, { ok: true, at: previous.at });
   const updated: CoordinatorUnit = {
     ...row,
-    rounds: [
-      ...row.rounds,
-      { index: body.index, agent: body.agent, outcome: body.outcome as string, at, ...(gate ? { gate } : {}) },
-    ],
+    rounds: [...row.rounds, note],
   };
-  await deps.instances.putUnits([updated]);
+  if (row.recovery !== undefined) {
+    let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
+    try {
+      replaced = await deps.instances.compareAndReplaceUnit(row, updated);
+    } catch {
+      const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
+      const current = reread?.filter((candidate) => candidate.unit === row.unit);
+      if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(updated)) replaced = { ok: true };
+      else if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(row))
+        return json(503, { ok: false, error: "recovery_store_unavailable", at });
+      else return json(409, { ok: false, error: "recovery_claim_stale", at });
+    }
+    if (replaced?.ok !== true)
+      return json(409, {
+        ok: false,
+        error: replaced?.reason === "stale" ? "recovery_claim_stale" : "recovery_store_unavailable",
+        at,
+      });
+  } else await deps.instances.putUnits([updated]);
   if (host.kind === "host") {
     const thread = unitThread(instance, updated, units.length);
     await hostPublish(
@@ -2613,11 +3283,11 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
   if (namesForeignRun(instance, body)) return json(404, { ok: false, error: "not_found" });
-  const host = await hostRunOf(deps, instance);
-  if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  const host = await hostRunOf(deps, instance);
+  if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
   const stored = row.wakes?.[body.waitId];
   if (stored !== undefined) return json(200, { ok: true, answer: stored, at });
   if (!row.idle) {
@@ -2801,11 +3471,28 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
   if (namesForeignRun(instance, body)) return json(404, { ok: false, error: "not_found" });
-  const host = await hostRunOf(deps, instance);
-  if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  const recoveryWorkflowId =
+    typeof body.recoveryWorkflowId === "string" && INSTANCE_ID_PATTERN.test(body.recoveryWorkflowId)
+      ? body.recoveryWorkflowId
+      : undefined;
+  if (body.recoveryWorkflowId !== undefined && recoveryWorkflowId === undefined)
+    return json(400, { ok: false, error: "recoveryWorkflowId must be a Workflow instance id", at });
+  if (recoveryWorkflowId !== undefined && row.recoveryReceipt?.workflowId === recoveryWorkflowId) {
+    if (row.pr !== undefined) {
+      const owner = { instanceId: instance.id, unit: row.unit };
+      const current = deps.runnerOwnership?.owner(instance.repo, row.pr.number);
+      if (current?.instanceId === owner.instanceId && current.unit === owner.unit)
+        deps.runnerOwnership?.release(instance.repo, row.pr.number, owner);
+    }
+    return json(200, { ok: true, alreadySettled: true, at: row.recoveryReceipt.at });
+  }
+  if (row.recovery !== undefined && recoveryWorkflowId !== row.recovery.workflowId)
+    return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  const host = row.recovery !== undefined ? ({ kind: "not_host" } as const) : await hostRunOf(deps, instance);
+  if (host.kind === "not_host" && row.recovery === undefined) return json(409, { ok: false, error: "not_host", at });
   const pr = body.pr as { number?: unknown; url?: unknown } | undefined;
   // The driver's `headSha` is the exact continuation boundary: the coding
   // child's last push for review_pending, or the final approved head for
@@ -2825,11 +3512,46 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   if (ending.kind === "idle" && idle === undefined)
     return json(400, { ok: false, error: "an idle ending must carry its why and the renewals left" });
   const segments = row.segments ?? [];
+  const recoveryHold =
+    row.recovery !== undefined && ending.kind === "held" && isHumanGatePending(ending.humanGate)
+      ? ({ cause: "human", gate: ending.humanGate } as const)
+      : row.recovery !== undefined &&
+          ending.kind === "held" &&
+          ending.holdCause === "draft" &&
+          pr !== undefined &&
+          typeof pr.number === "number" &&
+          typeof pr.url === "string"
+        ? ({ cause: "draft", pr: { number: pr.number, url: pr.url } } as const)
+        : undefined;
+  if (row.recovery !== undefined && ending.kind === "held" && recoveryHold === undefined)
+    return json(400, { ok: false, error: "a recovered held ending must carry a typed hold cause", at });
+  if (row.recovery !== undefined && (idle !== undefined || segment !== undefined))
+    return json(409, { ok: false, error: "recovery_continuation_unsupported", at });
+  if (row.recovery !== undefined && row.pr !== undefined) {
+    try {
+      if (
+        deps.runnerOwnership?.claim(instance.repo, row.pr.number, { instanceId: instance.id, unit: row.unit }) !== true
+      )
+        return json(409, { ok: false, error: "publication_ownership_changed", at });
+    } catch (err) {
+      return json(409, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
+    }
+  }
   // A real ending is the unit's end: an idle the row carried from an earlier
   // stop is dropped with it, so the row says one thing about how the unit stands.
-  const { idle: _idle, ...rowWithoutIdle } = row;
+  const { idle: _idle, recovery: _recovery, ...rowWithoutLifecycle } = row;
   const updated: CoordinatorUnit = {
-    ...(idle !== undefined || segment !== undefined ? row : rowWithoutIdle),
+    ...(idle !== undefined || segment !== undefined ? row : rowWithoutLifecycle),
+    ...(row.recovery !== undefined
+      ? {
+          recoveryReceipt: {
+            reviewRunId: row.recovery.reviewRunId,
+            workflowId: row.recovery.workflowId,
+            at,
+          },
+        }
+      : {}),
+    ...(recoveryHold !== undefined ? { recoveryHold } : {}),
     ...(pr && typeof pr.number === "number" && typeof pr.url === "string"
       ? { pr: { number: pr.number, url: pr.url } }
       : {}),
@@ -2851,9 +3573,38 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
             },
           }),
   };
-  await deps.instances.putUnits([updated]);
+  if (row.recovery !== undefined) {
+    let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
+    try {
+      replaced = await deps.instances.compareAndReplaceUnit(row, updated);
+    } catch {
+      const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
+      const current = reread?.filter((candidate) => candidate.unit === row.unit);
+      if (
+        current?.length === 1 &&
+        (JSON.stringify(current[0]) === JSON.stringify(updated) ||
+          (current[0]!.recovery === undefined &&
+            current[0]!.recoveryReceipt?.workflowId === row.recovery.workflowId &&
+            current[0]!.recoveryReceipt?.reviewRunId === row.recovery.reviewRunId))
+      )
+        replaced = { ok: true };
+      else if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(row))
+        return json(503, { ok: false, error: "recovery_store_unavailable", at });
+      else return json(409, { ok: false, error: "recovery_claim_stale", at });
+    }
+    if (replaced?.ok !== true)
+      return json(409, {
+        ok: false,
+        error: replaced?.reason === "stale" ? "recovery_claim_stale" : "recovery_store_unavailable",
+        at,
+      });
+  } else await deps.instances.putUnits([updated]);
   if (segment === undefined && idle === undefined && updated.pr !== undefined)
-    deps.runnerOwnership?.release(instance.repo, updated.pr.number);
+    deps.runnerOwnership?.release(
+      instance.repo,
+      updated.pr.number,
+      row.recovery !== undefined ? { instanceId: instance.id, unit: row.unit } : undefined,
+    );
   const thread = unitThread(instance, updated, units.length);
   if (host.kind === "host")
     await hostPublish(
@@ -2886,7 +3637,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // the log says so by count — a loss the operator can read, never a silent one.
   // An idle unit has not ended: its events wait for the fold or the wake
   // (record 0051; the wait lands with this plan's fifth unit).
-  if (segment === undefined && idle === undefined) {
+  if (segment === undefined && idle === undefined && row.recovery === undefined) {
     const leftovers = await deps.instances
       .listEvents({ instanceId: instance.id, unit: row.unit }, true)
       .catch(() => [] as ThreadEvent[]);
@@ -2931,6 +3682,15 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         `[coordinator] ${instance.id} ${row.unit}: ${leftovers.length} leftover thread event(s) run as one fresh turn`,
       );
     }
+  }
+  if (segment === undefined && idle === undefined && row.recovery !== undefined) {
+    const leftovers = await deps.instances
+      .listEvents({ instanceId: instance.id, unit: row.unit }, true)
+      .catch(() => [] as ThreadEvent[]);
+    if (leftovers.length > 0)
+      (deps.log ?? console.warn)(
+        `[coordinator] ${instance.id} ${row.unit}: ${leftovers.length} recovery event(s) stay unconsumed — terminal recovery never redispatches a replacement pipeline`,
+      );
   }
   let told = false;
   if (io && threadReport.length === 0)
@@ -3045,10 +3805,17 @@ async function rebaseStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   if (!row) return json(404, { ok: false, error: "unknown_unit", at });
   if (row.pr?.number !== undefined && row.pr.number !== body.prNumber)
     return json(409, { ok: false, error: "pull_request_moved", at });
-  deps.runnerOwnership?.claim(instance.repo, body.prNumber, {
-    instanceId: instance.id,
-    unit: row.unit,
-  });
+  try {
+    if (
+      deps.runnerOwnership?.claim(instance.repo, body.prNumber, {
+        instanceId: instance.id,
+        unit: row.unit,
+      }) !== true
+    )
+      return json(409, { ok: false, error: "publication_ownership_changed", at });
+  } catch (err) {
+    return json(503, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
+  }
   if (deps.runnerRebase === undefined)
     return json(200, { ok: true, outcome: "refused", reason: "the runner's rebase resolver is unavailable", at });
   try {
@@ -3243,7 +4010,7 @@ async function merge(
   // (checksIntake.ts) reads this registry to know whom the checks-settled
   // event at this head wakes (http-ingress.md item 12).
   if (checks.total === 0) {
-    deps.noteMergeWait?.(headSha, id.value, at);
+    deps.noteMergeWait?.(headSha, unit.row?.recovery?.workflowId ?? id.value, at);
     return json(200, {
       ok: true,
       outcome: "pending",
@@ -3252,7 +4019,7 @@ async function merge(
     });
   }
   if (checks.pending.length > 0) {
-    deps.noteMergeWait?.(headSha, id.value, at);
+    deps.noteMergeWait?.(headSha, row.recovery?.workflowId ?? id.value, at);
     return json(200, {
       ok: true,
       outcome: "pending",
@@ -3406,7 +4173,7 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
     checks.total === 0 ||
     facts?.draft === true
   )
-    deps.noteMergeWait?.(headSha, id.value, at);
+    deps.noteMergeWait?.(headSha, unit.row?.recovery?.workflowId ?? id.value, at);
   if (checks !== undefined && checks.failed.length > 0)
     log(
       `[coordinator] ${instance.id} ${body.unit}: CI red at ${headSha.slice(0, 7)} — ${checks.failed
@@ -3625,6 +4392,7 @@ type Step =
   | "read-record"
   | "steer"
   | "pr-check"
+  | "recover-unit"
   | "round"
   | "unit-end"
   | "unit-wake"
@@ -3641,6 +4409,7 @@ const STEPS: readonly Step[] = [
   "read-record",
   "steer",
   "pr-check",
+  "recover-unit",
   "round",
   "unit-end",
   "unit-wake",
@@ -3701,6 +4470,8 @@ export async function answerCoordinatorStep(
       return steerChild(parsed.value, deps);
     case "pr-check":
       return prCheck(parsed.value, deps);
+    case "recover-unit":
+      return recoverOriginalUnit(parsed.value, deps);
     case "round":
       return round(parsed.value, deps);
     case "unit-end":

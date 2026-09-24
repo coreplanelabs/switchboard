@@ -135,6 +135,8 @@ import {
   createAdminCoordinatorHandler,
   createCoordinatorChildAdmission,
   isCoordinatorAdminPath,
+  recoverOriginalUnit,
+  type AdminCoordinatorDeps,
 } from "./channels/adminCoordinator.js";
 import { resolveGrant } from "./core/shipPipeline.js";
 import { createGithubWebhookHandler, GITHUB_WEBHOOK_PATH } from "./channels/githubWebhook.js";
@@ -143,6 +145,7 @@ import { sendPullMerged } from "./core/coordinator/contract.js";
 import { createMergeReadyBook, createMergeWatch } from "./core/mergeWatch.js";
 import type { PullsCommandDeps } from "./core/commands/pulls.js";
 import {
+  createInstanceViaShim,
   fetchInstanceStatusViaShim,
   processShimOptions,
   shimWorkflowSender,
@@ -1149,7 +1152,7 @@ export async function runBot(): Promise<void> {
       workflow: checksWorkflow,
       now: systemClock,
     });
-    const coordinatorAdmin = createAdminCoordinatorHandler({
+    const coordinatorDeps: AdminCoordinatorDeps = {
       tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
       childAdmission: coordinatorChildAdmission,
       grantsFor: (id) => config.grantsFor(id),
@@ -1266,7 +1269,22 @@ export async function runBot(): Promise<void> {
       },
       rerunFailedChecks: rerunFailedJobs,
       refirePullRequest: refirePullRequestEvent,
-    });
+      startRecovery: (id, params) => createInstanceViaShim(processShimOptions(), id, params),
+      recoveryStatus: (id) => fetchInstanceStatusViaShim(processShimOptions(), id),
+    };
+    const coordinatorAdmin = createAdminCoordinatorHandler(coordinatorDeps);
+    deps.recoverOriginalUnit = async (key, caller) => {
+      const answer = await recoverOriginalUnit(
+        { parentInstanceId: key.instanceId, unit: key.unit },
+        coordinatorDeps,
+        caller,
+      );
+      const body =
+        typeof answer.body === "object" && answer.body !== null && !Array.isArray(answer.body)
+          ? (answer.body as Record<string, unknown>)
+          : { error: "original-unit recovery returned an unreadable answer" };
+      return { status: answer.status, body };
+    };
     // Scheduled jobs arrive through /ingress like any other caller: the
     // Worker shim (deploy/cloudflare/worker.ts) POSTs each `run` schedule's
     // command as the `cron` identity — the `cron` entry of the same token map —

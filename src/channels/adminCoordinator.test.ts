@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { InMemoryArtifactStore } from "../artifacts/store.js";
 import { Secret } from "../secrets.js";
@@ -6,7 +6,13 @@ import { AGENTS } from "../agents/registry.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { CoordinatorInstance, CoordinatorTag, CoordinatorUnit } from "../core/coordinator/contract.js";
-import { runPlan, type BotReply, type CoordinatorBot, type StepRunner } from "../core/coordinator/driver.js";
+import {
+  runPlan,
+  type BotReply,
+  type CoordinatorBot,
+  type OriginalUnitRecoveryParams,
+  type StepRunner,
+} from "../core/coordinator/driver.js";
 import type { ChildContract } from "../core/ship/contract.js";
 import {
   applyReturn,
@@ -60,6 +66,7 @@ import {
   handleCoordinatorRequest,
   isCoordinatorAdminPath,
   planSummary,
+  recoverOriginalUnit,
   recoveredFallbackTitle,
   type AdminCoordinatorDeps,
 } from "./adminCoordinator.js";
@@ -198,6 +205,9 @@ function harness(
     backlogLimit?: number;
     /** The process drain flag: once true, no new child may be admitted. */
     draining?: boolean;
+    /** The recovery Workflow admission answer. */
+    startRecovery?: AdminCoordinatorDeps["startRecovery"];
+    recoveryStatus?: AdminCoordinatorDeps["recoveryStatus"];
   } = {},
 ) {
   let n = 0;
@@ -250,6 +260,7 @@ function harness(
   const refires: Array<{ repo: string; prNumber: number }> = [];
   const mergeWaitNotes: Array<{ headSha: string; instanceId: string; at: number }> = [];
   const enqueues: Array<{ pr: { repo: string; number: number }; opts: { sha: string } }> = [];
+  const recoveries: Array<{ id: string; params: OriginalUnitRecoveryParams }> = [];
   let reviewFetches = 0;
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
   const deps: AdminCoordinatorDeps = {
@@ -258,6 +269,11 @@ function harness(
     runnerOwnership: new RunnerOwnershipFence(false),
     grantsFor: (id) => GRANTS[id] ?? NO_GRANTS,
     instances,
+    startRecovery: async (id, params) => {
+      recoveries.push({ id, params });
+      return over.startRecovery?.(id, params) ?? { kind: "created", id };
+    },
+    recoveryStatus: over.recoveryStatus ?? (async () => ({ kind: "status", status: "running" })),
     ...(over.runPageBase !== undefined ? { runPageBase: over.runPageBase } : {}),
     ...(over.runnerRebase !== undefined ? { runnerRebase: over.runnerRebase } : {}),
     ...(over.grantFact !== undefined ? { shipGrantFor: () => over.grantFact! } : {}),
@@ -435,6 +451,7 @@ function harness(
     writeThrough,
     sunk,
     instances,
+    recoveries,
     dispatched,
     replies,
     logs,
@@ -5597,6 +5614,39 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     });
   });
 
+  it("the runner's rebase returns the named transient while periodic ownership recovery is in flight", async () => {
+    const runnerRebase = vi.fn();
+    const h = await mergeHarness({ runnerRebase });
+    const fence = new RunnerOwnershipFence(false);
+    let finishRecovery!: (rows: CoordinatorUnit[]) => void;
+    const activeRecoveries = new Promise<CoordinatorUnit[]>((resolve) => {
+      finishRecovery = resolve;
+    });
+    const recovery = fence.recover(
+      { liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] },
+      {
+        get: h.instances.get.bind(h.instances),
+        listUnits: h.instances.listUnits.bind(h.instances),
+        listActiveRecoveries: () => activeRecoveries,
+      },
+    );
+    h.deps.runnerOwnership = fence;
+
+    expect(await call(h, "rebase", body)).toEqual({
+      status: 503,
+      body: {
+        ok: false,
+        error: "publication_ownership_unknown",
+        message: "runner ownership recovery is still in progress",
+        at: NOW,
+      },
+    });
+    expect(runnerRebase).not.toHaveBeenCalled();
+
+    finishRecovery([]);
+    await recovery;
+  });
+
   it("every guard green: the bot squashes the pull request at exactly the approved head with the title as the commit, and answers merged with the squash's sha", async () => {
     const h = await mergeHarness();
     expect(await merge(h)).toEqual({ status: 200, body: { ok: true, outcome: "merged", sha: MERGED, at: NOW } });
@@ -6418,4 +6468,1340 @@ describe("the runner's routes read the hard stop's mark (record 0060; issue 1924
       status: "completed",
     });
   });
+});
+
+// Feature: docs/reference/specs/agent-ship.md item 10 — an explicit original-unit
+// recovery reads only durable instance, unit and child evidence. It claims the
+// exact row and pull-request owner before admitting one durable checkpoint.
+describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit recovery", () => {
+  const HEAD = "7".repeat(40);
+  const PR = { number: 77, url: "https://github.com/acme/api/pull/77" };
+  const exactRecoveryFacts = (headSha: string): PullRequestFacts => ({
+    state: "open",
+    sameRepoHead: true,
+    headBranchExists: true,
+    headRef: INSTANCE.branch,
+    baseRef: "main",
+    headSha,
+    verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: headSha },
+    htmlUrl: PR.url,
+  });
+  const owner = { instanceId: INSTANCE.id, unit: "U12" };
+  const publication = {
+    repo: INSTANCE.repo,
+    pr: PR.number,
+    headRef: INSTANCE.branch,
+    baseRef: "main",
+    expectedHeadSha: HEAD,
+    publicationRef: INSTANCE.branch,
+    owner,
+  };
+  const requestChangesRow = (): CoordinatorUnit => ({
+    instanceId: INSTANCE.id,
+    unit: "U12",
+    slug: "u12",
+    branch: INSTANCE.branch,
+    dependsOn: [],
+    threadKey: INSTANCE.threadKey,
+    sourceUrl: INSTANCE.sourceUrl,
+    pr: PR,
+    publication,
+    lastPush: HEAD,
+    startedAt: NOW - minutesToMs(60),
+    rounds: [
+      { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(40) },
+      { index: 1, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(30) },
+    ],
+    ending: { kind: "aborted", report: "the posted findings remain", at: NOW - minutesToMs(30) },
+  });
+  const recoveryInstance = (): CoordinatorInstance => ({
+    ...INSTANCE,
+    plan: { id: "orchestration" },
+    merge: "person",
+    caps: { maxRounds: 3, maxMinutes: 120 },
+  });
+  const reviewRecord = (over: Partial<RunRecord> = {}): RunRecord =>
+    record("run-original-review", {
+      parentInstanceId: INSTANCE.id,
+      idempotencyKey: `${INSTANCE.id}:U12/1/review`,
+      agent: "review",
+      repo: INSTANCE.repo,
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      verdict: {
+        verdict: "request_changes",
+        summary: "one fix remains",
+        findings: [{ id: "F1", severity: "minor", file: "src/a.ts", title: "keep the fence" }],
+      },
+      reviewHead: HEAD,
+      reviewPost: {
+        posted: true,
+        target: { repo: INSTANCE.repo, number: PR.number },
+        head: HEAD,
+        verdict: "request_changes",
+      },
+      ...over,
+    });
+  const completedOriginalFindings = (headSha: string, over: Partial<RunRecord> = {}): RunRecord =>
+    record("run-original-findings", {
+      parentInstanceId: INSTANCE.id,
+      idempotencyKey: `${INSTANCE.id}:U12/1/findings`,
+      agent: "coding",
+      repo: INSTANCE.repo,
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      startedAt: NOW - minutesToMs(15),
+      finishedAt: NOW - minutesToMs(10),
+      headSha,
+      pushed: [{ ref: INSTANCE.branch, sha: headSha, by: "push" }],
+      ...over,
+    });
+  const callRecovery = (h: ReturnType<typeof harness>) =>
+    recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+    });
+
+  it("unchanged-head request_changes CAS-claims the original row and owner, then admits a Workflow carrying only the original unit identity", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(30), finishedAt: NOW - minutesToMs(20) }));
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({
+      status: 200,
+      body: { ok: true, outcome: "started", workflowId: "recovery-run-original-review" },
+    });
+    expect(h.dispatched).toHaveLength(0);
+    expect(h.recoveries).toEqual([
+      {
+        id: "recovery-run-original-review",
+        params: { kind: "recover-original-unit", parentInstanceId: INSTANCE.id, unit: "U12" },
+      },
+    ]);
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed).toMatchObject({
+      recovery: { kind: "findings", round: 1, expectedHeadSha: HEAD, remainingMs: minutesToMs(60) },
+      publication,
+    });
+    expect(claimed).not.toHaveProperty("ending");
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+  });
+
+  it("reconstructs a failed original findings pr-check from its completed owned push and resumes at read-only re-review", async () => {
+    const fixed = "b".repeat(40);
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: fixed,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: fixed },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([
+      {
+        ...requestChangesRow(),
+        ending: {
+          kind: "failed",
+          cause: "step_threw",
+          step: "U12/1/findings/pr-check",
+          round: 1,
+          report: "the publication facts did not yet carry the completed push",
+          at: NOW - minutesToMs(5),
+        },
+      },
+    ]);
+    await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(30), finishedAt: NOW - minutesToMs(20) }));
+    await h.store.put(completedOriginalFindings(fixed));
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({
+      status: 200,
+      body: { workflowId: "recovery-run-original-findings" },
+    });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed).toMatchObject({
+      lastPush: fixed,
+      publication: { expectedHeadSha: fixed },
+      recovery: {
+        kind: "review",
+        round: 2,
+        expectedHeadSha: fixed,
+        reviewRunId: "run-original-review",
+        findingsRunId: "run-original-findings",
+        findingsKey: `${INSTANCE.id}:U12/1/findings`,
+      },
+    });
+    expect(claimed).not.toHaveProperty("ending");
+  });
+
+  it("treats completed same-head findings as consumed and resumes at read-only re-review", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([
+      {
+        ...requestChangesRow(),
+        ending: {
+          kind: "failed",
+          cause: "step_threw",
+          step: "U12/1/findings/pr-check",
+          round: 1,
+          report: "the post-findings pull request read failed",
+          at: NOW - minutesToMs(5),
+        },
+      },
+    ]);
+    await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(30), finishedAt: NOW - minutesToMs(20) }));
+    await h.store.put(completedOriginalFindings(HEAD, { pushed: undefined }));
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-findings" } });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed!.recovery).toMatchObject({ kind: "review", round: 2, findingsRunId: "run-original-findings" });
+  });
+
+  it("refuses an older completed boundary when a later review already started", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([
+      {
+        ...requestChangesRow(),
+        rounds: [
+          ...requestChangesRow().rounds,
+          { index: 2, agent: "review", outcome: "started", at: NOW - minutesToMs(10) },
+        ],
+      },
+    ]);
+    await h.store.put(reviewRecord());
+
+    expect(await callRecovery(h)).toMatchObject({
+      status: 409,
+      body: { error: "recovery_stage_ambiguous" },
+    });
+  });
+
+  it("carries a full renewed segment's remaining lease from its durable start instead of restarting the instance budget", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([
+      {
+        ...requestChangesRow(),
+        segments: [{ index: 2, at: NOW - minutesToMs(10) }],
+      },
+    ]);
+    await h.store.put(reviewRecord({ idempotencyKey: `${INSTANCE.id}:U12/s2/1/review` }));
+
+    expect((await callRecovery(h)).status).toBe(200);
+
+    expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.remainingMs).toBe(minutesToMs(110));
+  });
+
+  it("refuses a stopped-segment lease whose durable wake lacks the resume timestamp", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([
+      {
+        ...requestChangesRow(),
+        segments: [{ index: 2, at: NOW - minutesToMs(40) }],
+        wakes: {
+          "U12/idle/1": {
+            kind: "segment",
+            index: 2,
+            spendUsd: 0,
+            texts: ["continue"],
+            senders: [INSTANCE.userId],
+            leaseMs: minutesToMs(30),
+          },
+        },
+      },
+    ]);
+    await h.store.put(reviewRecord());
+    const before = await h.instances.listUnits(INSTANCE.id);
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+  });
+
+  it("refuses a first-segment stopped lease whose durable wake lacks the resume timestamp", async () => {
+    const h = harness();
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([
+      {
+        ...requestChangesRow(),
+        wakes: {
+          "U12/idle/1": {
+            kind: "segment",
+            index: 1,
+            spendUsd: 0,
+            texts: ["continue"],
+            senders: [INSTANCE.userId],
+            leaseMs: minutesToMs(30),
+          },
+        },
+      },
+    ]);
+    await h.store.put(reviewRecord());
+
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown" } });
+  });
+
+  it("unchanged-head no_verdict admits one named Workflow and replay reuses its durable claim without charging or dispatching", async () => {
+    let starts = 0;
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+      startRecovery: async (id) => (++starts === 1 ? { kind: "created", id } : { kind: "duplicate", id }),
+    });
+    await h.instances.put(recoveryInstance());
+    const row = requestChangesRow();
+    row.rounds[1] = { index: 1, agent: "review", outcome: "no_verdict", at: NOW - minutesToMs(30) };
+    row.ending = { kind: "no_verdict", report: "review ended without a verdict", at: NOW - minutesToMs(30) };
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord({ verdict: undefined, reviewPost: undefined }));
+
+    const first = await callRecovery(h);
+    const replay = await callRecovery(h);
+
+    expect(first).toMatchObject({
+      status: 200,
+      body: { outcome: "started", workflowId: "recovery-run-original-review" },
+    });
+    expect(replay).toMatchObject({
+      status: 200,
+      body: { outcome: "already_started", workflowId: "recovery-run-original-review" },
+    });
+    expect(h.dispatched).toHaveLength(0);
+    expect(h.recoveries).toHaveLength(2);
+    expect(new Set(h.recoveries.map((entry) => entry.id))).toEqual(new Set(["recovery-run-original-review"]));
+  });
+
+  it("refuses a requester replay after the original absolute lease expires without minting another Workflow", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    h.deps.clock = () => NOW + minutesToMs(61);
+
+    expect(await callRecovery(h)).toMatchObject({
+      status: 409,
+      body: { error: "recovery_wall_clock_exhausted" },
+    });
+    expect(h.recoveries).toHaveLength(1);
+  });
+
+  it("rolls back an expired indeterminate claim only after its named Workflow is proven absent", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), recoveryStatus: async () => ({ kind: "absent" }) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    h.deps.clock = () => NOW + minutesToMs(61);
+
+    expect(await callRecovery(h)).toMatchObject({
+      status: 409,
+      body: { error: "recovery_wall_clock_exhausted" },
+    });
+    const [restored] = await h.instances.listUnits(INSTANCE.id);
+    expect(restored!.recovery).toBeUndefined();
+    expect(restored!.ending).toBeDefined();
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  it("refuses a different requester or thread before reading evidence or claiming ownership", async () => {
+    const h = harness();
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    const before = await h.instances.listUnits(INSTANCE.id);
+
+    const response = await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
+      userId: "slack:UOTHER",
+      threadKey: INSTANCE.threadKey,
+    });
+
+    expect(response).toMatchObject({ status: 403, body: { error: "recovery_requester_mismatch" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it("authorizes a multi-unit recovery from the unit's own thread, not the parent plan thread", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([{ ...requestChangesRow(), threadKey: "slack:C1:unit-12" }]);
+    await h.store.put(reviewRecord({ threadKey: "slack:C1:unit-12" }));
+
+    const parentThread = await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+    });
+    const unitThread = await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
+      userId: INSTANCE.userId,
+      threadKey: "slack:C1:unit-12",
+    });
+
+    expect(parentThread).toMatchObject({ status: 403, body: { error: "recovery_requester_mismatch" } });
+    expect(unitThread.status).toBe(200);
+  });
+
+  it("refuses an older request_changes boundary after a later review outcome", async () => {
+    const h = harness();
+    await h.instances.put(recoveryInstance());
+    const row = requestChangesRow();
+    row.rounds.push({ index: 2, agent: "review", outcome: "started", at: NOW - minutesToMs(20) });
+    row.rounds.push({ index: 2, agent: "review", outcome: "approve", at: NOW - minutesToMs(10) });
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({ status: 409, body: { error: "recovery_ending_unsupported" } });
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it("refuses a no_verdict record that does not prove the reviewed head", async () => {
+    const h = harness();
+    await h.instances.put(recoveryInstance());
+    const row = requestChangesRow();
+    row.rounds[1] = { index: 1, agent: "review", outcome: "no_verdict", at: NOW - minutesToMs(30) };
+    row.ending = { kind: "no_verdict", report: "review ended without a verdict", at: NOW - minutesToMs(30) };
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord({ verdict: undefined, reviewPost: undefined, reviewHead: undefined }));
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({ status: 409, body: { error: "recovery_review_evidence_ambiguous" } });
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it("refuses a cost-capped terminal row because cumulative spend is not durable enough to preserve the cap", async () => {
+    const h = harness();
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 2, costCapUsd: 50 } });
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown" } });
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it("selects only the current round's exact original review key when older review evidence exists", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    await h.store.put(reviewRecord({ id: "run-old-review", idempotencyKey: `${INSTANCE.id}:U12/0/review` }));
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({ status: 200, body: { ok: true } });
+    expect(h.recoveries).toHaveLength(1);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.reviewRunId).toBe("run-original-review");
+  });
+
+  it("reconstructs the exact process-local publication owner from a durable claim after restart", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}recover-unit`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        workflowId: "recovery-run-original-review",
+      }),
+      h.deps,
+    );
+
+    expect(response.status).toBe(200);
+    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+  });
+
+  it("reconstructs the durable recovery owner at a later findings spawn after the bot process restarts", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        step: "U12/recovery/1/findings",
+        preset: "coding",
+        budget: 20,
+        brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: HEAD, reviewRunId: "run-original-review" },
+      }),
+      h.deps,
+    );
+
+    expect(response.status).toBe(200);
+    expect(h.dispatched).toHaveLength(1);
+    expect(h.dispatched[0]!.opts).toMatchObject({
+      coordinator: {
+        parentInstanceId: INSTANCE.id,
+        transportWorkflowId: "recovery-run-original-review",
+      },
+      recovery: {
+        repo: INSTANCE.repo,
+        pr: PR.number,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        expectedHeadSha: HEAD,
+        deadlineAt: NOW + minutesToMs(60),
+      },
+    });
+    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+  });
+
+  it("revalidates the fixed head and absolute deadline at actual recovery child admission", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    h.deps.clock = () => NOW + minutesToMs(121);
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        step: "U12/recovery/1/findings",
+        preset: "coding",
+        budget: 20,
+        brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: HEAD, reviewRunId: "run-original-review" },
+      }),
+      h.deps,
+    );
+
+    expect(response).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(h.dispatched).toHaveLength(0);
+  });
+
+  it("refuses an actual recovery child after cached Workflow steps when the pull-request head moved", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const moved = "c".repeat(40);
+    h.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: INSTANCE.branch,
+      baseRef: "main",
+      headSha: moved,
+      verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: moved },
+      htmlUrl: PR.url,
+    });
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        step: "U12/recovery/1/findings",
+        preset: "coding",
+        budget: 20,
+        brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: HEAD, reviewRunId: "run-original-review" },
+      }),
+      h.deps,
+    );
+
+    expect(response).toMatchObject({ status: 409, body: { error: "recovery_head_moved" } });
+    expect(h.dispatched).toHaveLength(0);
+  });
+
+  it("advances the recovery publication only to its completed findings child's exact head before re-review", async () => {
+    const fixed = "b".repeat(40);
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    await h.store.put(
+      reviewRecord({
+        id: "run-recovery-fix",
+        agent: "coding",
+        idempotencyKey: `${INSTANCE.id}:U12/recovery/1/findings`,
+        verdict: undefined,
+        reviewPost: undefined,
+        reviewHead: undefined,
+        headSha: fixed,
+        pushed: [{ ref: INSTANCE.branch, sha: fixed, by: "push" }],
+      }),
+    );
+    h.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: INSTANCE.branch,
+      baseRef: "main",
+      headSha: fixed,
+      verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: fixed },
+      htmlUrl: PR.url,
+    });
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        pr: PR.number,
+        recover: { runId: "run-recovery-fix" },
+      }),
+      h.deps,
+    );
+
+    expect(response).toMatchObject({ status: 200, body: { state: "open", headSha: fixed } });
+    const [advanced] = await h.instances.listUnits(INSTANCE.id);
+    expect(advanced!.lastPush).toBe(fixed);
+    expect(advanced!.publication?.expectedHeadSha).toBe(fixed);
+    expect(advanced!.recovery?.expectedHeadSha).toBe(fixed);
+  });
+
+  it("a stale claim CAS releases its reservation without trying to restore a claim that never landed", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const before = await h.instances.listUnits(INSTANCE.id);
+    const replace = vi
+      .spyOn(h.instances, "compareAndReplaceUnit")
+      .mockResolvedValueOnce({ ok: false, reason: "stale" });
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({ status: 409, body: { error: "recovery_claim_stale" } });
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  it("reconciles a claim CAS whose committed response was lost and keeps ownership through Workflow admission", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+    let loseResponse = true;
+    h.instances.compareAndReplaceUnit = async (expected, replacement) => {
+      const result = await replace(expected, replacement);
+      if (loseResponse) {
+        loseResponse = false;
+        throw new Error("response lost after commit");
+      }
+      return result;
+    };
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({ status: 200, body: { outcome: "started" } });
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.workflowId).toBe("recovery-run-original-review");
+  });
+
+  it("rolls the exact row and owner back when Workflow admission fails definitively", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+      startRecovery: async (id) => ({ kind: "failed", id, reason: "engine refused" }),
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const before = await h.instances.listUnits(INSTANCE.id);
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  it("surfaces rollback CAS loss and leaves the durable claim fenced", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+      startRecovery: async (id) => ({ kind: "failed", id, reason: "engine refused" }),
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const realReplace = h.instances.compareAndReplaceUnit.bind(h.instances);
+    let replaces = 0;
+    vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (expected, replacement) => {
+      replaces++;
+      return replaces === 2 ? { ok: false, reason: "stale" } : realReplace(expected, replacement);
+    });
+
+    const response = await callRecovery(h);
+
+    expect(response).toMatchObject({
+      status: 500,
+      body: { error: "recovery_rollback_failed", cause: "recovery_workflow_failed", reason: "stale" },
+    });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery).toBeDefined();
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+  });
+
+  it("keeps an ambiguous Workflow admission claimed so retry can meet the same Workflow id without a second budget charge", async () => {
+    let starts = 0;
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+      startRecovery: async (id) =>
+        ++starts === 1 ? { kind: "unanswered", reason: "timeout" } : { kind: "duplicate", id },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+
+    const first = await callRecovery(h);
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    const replay = await callRecovery(h);
+
+    expect(first).toMatchObject({
+      status: 200,
+      body: { outcome: "indeterminate", workflowId: "recovery-run-original-review" },
+    });
+    expect(replay).toMatchObject({ status: 200, body: { outcome: "already_started" } });
+    expect(h.recoveries.map((entry) => entry.id)).toEqual([
+      "recovery-run-original-review",
+      "recovery-run-original-review",
+    ]);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery).toEqual(claimed!.recovery);
+  });
+
+  it("the Workflow's first revalidation rolls back the claim when the head moved after admission", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const before = await h.instances.listUnits(INSTANCE.id);
+    expect((await callRecovery(h)).status).toBe(200);
+    const moved = "8".repeat(40);
+    h.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: INSTANCE.branch,
+      baseRef: "main",
+      headSha: moved,
+      verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: moved },
+      htmlUrl: PR.url,
+    });
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}recover-unit`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        workflowId: "recovery-run-original-review",
+      }),
+      h.deps,
+    );
+
+    expect(response).toMatchObject({ status: 409, body: { error: "recovery_head_moved" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  it("terminal settlement clears the durable claim by CAS and releases the original publication owner", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryWorkflowId: "recovery-run-original-review",
+        ending: { kind: "merge_ready", report: "ready at the recovered head" },
+        pr: PR,
+        headSha: HEAD,
+      }),
+      h.deps,
+    );
+
+    expect(response.status).toBe(200);
+    const [settled] = await h.instances.listUnits(INSTANCE.id);
+    expect(settled!.recovery).toBeUndefined();
+    expect(settled!.recoveryReceipt).toMatchObject({
+      reviewRunId: "run-original-review",
+      workflowId: "recovery-run-original-review",
+    });
+    expect(settled!.ending?.kind).toBe("merge_ready");
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  it("rejects a stale original Workflow settlement that omits the active recovery identity", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const before = await h.instances.listUnits(INSTANCE.id);
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        ending: { kind: "merge_ready", report: "stale original Workflow" },
+        pr: PR,
+      }),
+      h.deps,
+    );
+
+    expect(response).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+  });
+
+  it("reconciles a committed terminal CAS with a lost response and releases only the original owner", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+    vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementationOnce(async (expected, replacement) => {
+      expect(await replace(expected, replacement)).toEqual({ ok: true });
+      throw new Error("response lost after commit");
+    });
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryWorkflowId: "recovery-run-original-review",
+        ending: { kind: "merge_ready", report: "settled" },
+        pr: PR,
+      }),
+      h.deps,
+    );
+
+    expect(response).toMatchObject({ status: 200, body: { ok: true } });
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  it("acknowledges a lost settlement response without rewriting the row or releasing a successor owner", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      unit: "U12",
+      recoveryWorkflowId: "recovery-run-original-review",
+      ending: { kind: "merge_ready", report: "ready at the recovered head" },
+      pr: PR,
+      headSha: HEAD,
+    };
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).status).toBe(
+      200,
+    );
+    const successor = { instanceId: "runner-successor", unit: "U10" };
+    expect(h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, successor)).toBe(true);
+
+    const replay = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps);
+
+    expect(replay).toMatchObject({ status: 200, body: { alreadySettled: true } });
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(successor);
+  });
+
+  it("settles a recovered human-only verdict as a typed hold without opening idle or renewal", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const humanGate = {
+      pr: PR,
+      round: 2,
+      verdict: "request_changes" as const,
+      findings: [
+        { id: "F2", severity: "minor" as const, file: "src/a.ts", title: "choose behavior", humanGated: true },
+      ],
+      askedAt: NOW,
+    };
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryWorkflowId: "recovery-run-original-review",
+        ending: { kind: "held", report: "a person must choose", humanGate },
+        pr: PR,
+      }),
+      h.deps,
+    );
+
+    expect(response.status).toBe(200);
+    const [settled] = await h.instances.listUnits(INSTANCE.id);
+    expect(settled).toMatchObject({ ending: { kind: "held" }, recoveryHold: { cause: "human", gate: humanGate } });
+    expect(settled!.idle).toBeUndefined();
+    expect(settled!.recovery).toBeUndefined();
+  });
+
+  it("settles a recovered draft as a typed terminal hold", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryWorkflowId: "recovery-run-original-review",
+        ending: { kind: "held", holdCause: "draft", report: "mark ready" },
+        pr: PR,
+      }),
+      h.deps,
+    );
+
+    expect(response.status).toBe(200);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]!.recoveryHold).toEqual({ cause: "draft", pr: PR });
+  });
+
+  it("a terminal duplicate Workflow restores the prior ending, records the consumed evidence, and cannot be admitted again", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+      startRecovery: async (id) => ({ kind: "duplicate", id, status: "complete" }),
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+
+    const first = await callRecovery(h);
+    const second = await callRecovery(h);
+
+    expect(first).toMatchObject({ status: 409, body: { error: "recovery_workflow_terminal" } });
+    expect(second).toMatchObject({ status: 409, body: { error: "recovery_already_completed" } });
+    const [settled] = await h.instances.listUnits(INSTANCE.id);
+    expect(settled!.recovery).toBeUndefined();
+    expect(settled!.recoveryReceipt?.reviewRunId).toBe("run-original-review");
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  it("refuses recovered idle or renewal settlement and keeps the claim valid", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const before = await h.instances.listUnits(INSTANCE.id);
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryWorkflowId: "recovery-run-original-review",
+        ending: { kind: "continued", report: "renew", segment: 2 },
+        segment: { index: 2 },
+      }),
+      h.deps,
+    );
+
+    expect(response).toMatchObject({ status: 409, body: { error: "recovery_continuation_unsupported" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+  });
+
+  it("a rival owner after restart cannot settle or release the durable recovery claim", async () => {
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: INSTANCE.branch,
+        baseRef: "main",
+        headSha: HEAD,
+        verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: HEAD },
+        htmlUrl: PR.url,
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const before = await h.instances.listUnits(INSTANCE.id);
+    const restarted = new RunnerOwnershipFence(false);
+    restarted.claim(INSTANCE.repo, PR.number, { instanceId: "runner-rival", unit: "U10" });
+    h.deps.runnerOwnership = restarted;
+
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryWorkflowId: "recovery-run-original-review",
+        ending: { kind: "merge_ready", report: "must not settle" },
+        pr: PR,
+        headSha: HEAD,
+      }),
+      h.deps,
+    );
+
+    expect(response).toMatchObject({ status: 409, body: { error: "publication_ownership_changed" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(restarted.owner(INSTANCE.repo, PR.number)).toEqual({ instanceId: "runner-rival", unit: "U10" });
+  });
+
+  it.each([
+    ["missing unit", async (h: ReturnType<typeof harness>) => void (await h.instances.put(recoveryInstance()))],
+    [
+      "ambiguous idle and ending",
+      async (h: ReturnType<typeof harness>) => {
+        await h.instances.put(recoveryInstance());
+        await h.instances.putUnits([
+          { ...requestChangesRow(), idle: { why: "aborted", at: NOW, renewalsLeft: 0, spendUsd: null, wakes: 0 } },
+        ]);
+        await h.store.put(reviewRecord());
+      },
+    ],
+    [
+      "moved head",
+      async (h: ReturnType<typeof harness>) => {
+        await h.instances.put(recoveryInstance());
+        await h.instances.putUnits([requestChangesRow()]);
+        await h.store.put(reviewRecord());
+      },
+    ],
+    [
+      "unposted review",
+      async (h: ReturnType<typeof harness>) => {
+        await h.instances.put(recoveryInstance());
+        await h.instances.putUnits([requestChangesRow()]);
+        await h.store.put(reviewRecord({ reviewPost: { posted: false, reason: "post failed" } }));
+      },
+    ],
+    [
+      "foreign child requester",
+      async (h: ReturnType<typeof harness>) => {
+        await h.instances.put(recoveryInstance());
+        await h.instances.putUnits([requestChangesRow()]);
+        await h.store.put(reviewRecord({ userId: "slack:UOTHER" }));
+      },
+    ],
+    [
+      "exhausted rounds",
+      async (h: ReturnType<typeof harness>) => {
+        await h.instances.put({ ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
+        await h.instances.putUnits([requestChangesRow()]);
+        await h.store.put(reviewRecord());
+      },
+    ],
+    [
+      "exhausted wall clock",
+      async (h: ReturnType<typeof harness>) => {
+        await h.instances.put({ ...recoveryInstance(), caps: { maxRounds: 3, maxMinutes: 30 } });
+        await h.instances.putUnits([requestChangesRow()]);
+        await h.store.put(reviewRecord());
+      },
+    ],
+  ])(
+    "refuses %s before reviewer or writer admission and preserves the exact row and binding",
+    async (name, arrange) => {
+      const moved = name === "moved head";
+      const h = harness({
+        prFacts: {
+          state: "open",
+          sameRepoHead: true,
+          headBranchExists: true,
+          headRef: INSTANCE.branch,
+          baseRef: "main",
+          headSha: moved ? "8".repeat(40) : HEAD,
+          verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: moved ? "8".repeat(40) : HEAD },
+          htmlUrl: PR.url,
+        },
+      });
+      await arrange(h);
+      const before = await h.instances.listUnits(INSTANCE.id);
+
+      const response = await callRecovery(h);
+
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(h.dispatched).toHaveLength(0);
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    },
+  );
 });

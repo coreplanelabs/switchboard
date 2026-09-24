@@ -320,6 +320,32 @@ describe("isCoordinatorUnit — one unit's row", () => {
     ).toBe(false);
   });
 
+  it("an original-unit recovery claim retains its exact lease, evidence, previous ending and Workflow id, mutually exclusive with idle or ending", () => {
+    const recovery = {
+      kind: "findings" as const,
+      round: 1,
+      expectedHeadSha: "a".repeat(40),
+      remainingMs: 3_600_000,
+      claimedAt: 3_000,
+      step: "U12/recovery/1/findings",
+      reviewRunId: "run-r1",
+      findings: [{ id: "F1", severity: "minor" as const, file: "src/a.ts", title: "keep the fence" }],
+      previousEnding: unit.ending!,
+      workflowId: "recovery-run-r1",
+      deadlineAt: 3_603_000,
+      reviewKey: "plan-old:U12/1/review",
+    };
+    const claimed = { ...unit, ending: undefined, recovery };
+    expect(isCoordinatorUnit(claimed)).toBe(true);
+    expect(isCoordinatorUnit(JSON.parse(JSON.stringify(claimed)))).toBe(true);
+    expect(isCoordinatorUnit({ ...claimed, ending: unit.ending })).toBe(false);
+    expect(isCoordinatorUnit({ ...claimed, idle: { why: "aborted", at: 3_000, renewalsLeft: 0, wakes: 0 } })).toBe(
+      false,
+    );
+    expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, remainingMs: 0 } })).toBe(false);
+    expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, workflowId: "bad:id" } })).toBe(false);
+  });
+
   it("the review thread is a thread key with an optional link, beside the unit's own thread; a review thread without its key, with a malformed link, or as a bare string is refused", () => {
     expect(isCoordinatorUnit({ ...unit, reviewThread: { threadKey: "slack:C1:3.0" } })).toBe(true);
     expect(isCoordinatorUnit({ ...unit, reviewThread: undefined })).toBe(true);
@@ -380,6 +406,18 @@ describe("sendRunFinished — the event a terminal record sends", () => {
     const { parentInstanceId: _p, ...plain } = finished;
     expect(await sendRunFinished(w.sender, plain)).toEqual({ kind: "none" });
     expect(w.sent).toEqual([]);
+  });
+
+  it("uses a recovery checkpoint only as transport while the payload retains the original instance", async () => {
+    const w = workflow();
+    await sendRunFinished(w.sender, { ...finished, transportWorkflowId: "recovery-run-1" });
+    expect(w.sent).toEqual([
+      {
+        instance: "recovery-run-1",
+        type: "run-finished-run-1",
+        payload: { runId: "run-1", status: "completed", finishedAt: 5_000, parentInstanceId: "inst_1" },
+      },
+    ]);
   });
 
   it("no binding → nothing sent, said by name; the caller's commit is unaffected", async () => {
@@ -460,6 +498,15 @@ describe("sendChildSignal — the deploy-roll signal a child sends its parent", 
       instance: "inst_1",
       type: "child-interrupted-run-1",
       reason: "instance is not running",
+    });
+  });
+
+  it("uses a recovery checkpoint only as transport while the child signal retains original identity", async () => {
+    const w = workflow();
+    await sendChildSignal(w.sender, { ...signal, transportWorkflowId: "recovery-run-1" });
+    expect(w.sent[0]).toMatchObject({
+      instance: "recovery-run-1",
+      payload: { parentInstanceId: "inst_1" },
     });
   });
 });
