@@ -27,6 +27,7 @@ import {
  *  idempotent); `unavailable`: no durable store in this process. */
 export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "unavailable" };
 export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" };
+export type ClaimLegacyContinuationResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
 export type AppendEventResult = { ok: true; seq: number } | { ok: false; reason: "unavailable" };
 export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type AnswerWakeResult = { ok: true } | { ok: false; reason: "unavailable" };
@@ -55,6 +56,13 @@ export interface CoordinatorInstanceStore {
    *  written at the instance's creation and rewritten as the runner reaches the
    *  unit — its thread, its pull request, its rounds, its ending. */
   putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult>;
+  /** Reserve one legacy continuation by replacing the exact row the caller
+   * verified. A missing or changed row is stale, so concurrent or delayed
+   * callers cannot overwrite newer unit state or reissue beside the winner. */
+  claimLegacyContinuation(
+    expected: CoordinatorUnit,
+    recovered: CoordinatorUnit,
+  ): Promise<ClaimLegacyContinuationResult>;
   /** An instance's unit rows in the order they were first written — the plan's. */
   listUnits(instanceId: string): Promise<CoordinatorUnit[]>;
   /** Atomically reserve a decision-record number. The durable implementation
@@ -121,6 +129,16 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   }
   async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
     for (const u of units) this.units.set(unitKey(u), JSON.stringify(u));
+    return { ok: true };
+  }
+  async claimLegacyContinuation(
+    expected: CoordinatorUnit,
+    recovered: CoordinatorUnit,
+  ): Promise<ClaimLegacyContinuationResult> {
+    const key = unitKey(expected);
+    if (unitKey(recovered) !== key || this.units.get(key) !== JSON.stringify(expected))
+      return { ok: false, reason: "stale" };
+    this.units.set(key, JSON.stringify(recovered));
     return { ok: true };
   }
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
@@ -208,6 +226,12 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
     return null;
   }
   async putUnits(_units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
+    return { ok: false, reason: "unavailable" };
+  }
+  async claimLegacyContinuation(
+    _expected: CoordinatorUnit,
+    _recovered: CoordinatorUnit,
+  ): Promise<ClaimLegacyContinuationResult> {
     return { ok: false, reason: "unavailable" };
   }
   async listUnits(_instanceId: string): Promise<CoordinatorUnit[]> {
@@ -312,6 +336,19 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     const d = r.data as { ok?: unknown };
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/units/put: unexpected answer (HTTP ${r.status})`);
+  }
+
+  async claimLegacyContinuation(
+    expected: CoordinatorUnit,
+    recovered: CoordinatorUnit,
+  ): Promise<ClaimLegacyContinuationResult> {
+    const r = await this.post("/runs/coordinator/units/claim-legacy-continuation", { expected, recovered });
+    const d = r.data as { ok?: unknown; reason?: unknown };
+    if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
+    if (d.ok === true) return { ok: true };
+    throw new Error(
+      `coordinator store /runs/coordinator/units/claim-legacy-continuation: unexpected answer (HTTP ${r.status})`,
+    );
   }
 
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {

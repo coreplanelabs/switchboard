@@ -1137,14 +1137,16 @@ async function runUnit(
                 : {}),
             },
             ...(state.pr !== undefined ? { pr: state.pr } : {}),
-            // A review_pending ending names the child's own last push so the next
-            // attempt's pre-check can start at the review round (the row's lastPush)
-            // — an idled one the same, off the idle's `from` (record 0051).
-            ...(ending.kind === "review_pending" && ending.headSha !== undefined
-              ? { headSha: ending.headSha }
-              : ending.kind === "idle" && ending.why === "review_pending" && ending.from !== undefined
-                ? { headSha: ending.from }
-                : {}),
+            // A merge_ready ending retains the exact head its final approval
+            // reviewed. Review-pending endings retain the coding child's push;
+            // both become the row's durable lastPush for a later attempt.
+            ...(ending.kind === "merge_ready" && state.lastReviewHead !== undefined
+              ? { headSha: state.lastReviewHead }
+              : ending.kind === "review_pending" && ending.headSha !== undefined
+                ? { headSha: ending.headSha }
+                : ending.kind === "idle" && ending.why === "review_pending" && ending.from !== undefined
+                  ? { headSha: ending.from }
+                  : {}),
             ...(state.lastCodingRunId !== undefined ? { codingRunId: state.lastCodingRunId } : {}),
             // A continued ending is a segment's end, not the unit's: the bot
             // writes the renewal as a row keyed by the next segment's index

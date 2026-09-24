@@ -2732,6 +2732,38 @@ export class RunHistoryDO extends DurableObject<Env> {
     return { ok: true };
   }
 
+  /** One compare-and-replace transaction reserves a legacy continuation for
+   * exactly one caller. The whole expected JSON is the fence: any intervening
+   * unit write, including another recovery, makes this caller stale. */
+  async claimLegacyContinuation(
+    expected: CoordinatorUnit,
+    recovered: CoordinatorUnit,
+    now: number,
+  ): Promise<{ ok: true } | { ok: false; reason: "stale" }> {
+    let out: { ok: true } | { ok: false; reason: "stale" } = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      const row = this.sql
+        .exec<{ json: string }>(
+          `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+          expected.instanceId,
+          expected.unit,
+        )
+        .toArray()[0];
+      if (row?.json !== JSON.stringify(expected)) {
+        out = { ok: false, reason: "stale" };
+        return;
+      }
+      this.sql.exec(
+        `UPDATE coordinator_units SET json = ?, updated_at = ? WHERE instance_id = ? AND unit = ?`,
+        JSON.stringify(recovered),
+        now,
+        expected.instanceId,
+        expected.unit,
+      );
+    });
+    return out;
+  }
+
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
     return this.sql
       .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ? ORDER BY rowid`, instanceId)
@@ -5187,6 +5219,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/get",
   "/runs/coordinator/stop",
   "/runs/coordinator/units/put",
+  "/runs/coordinator/units/claim-legacy-continuation",
   "/runs/coordinator/units/list",
   "/runs/coordinator/events/append",
   "/runs/coordinator/events/list",
@@ -5885,6 +5918,17 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     const r = await stub.putUnits(units, now);
     console.log(`[runs/coordinator/units/put] ${key.value} ${units[0]!.instanceId} ${units.length} row(s)`);
     return json(r);
+  }
+  if (pathname === "/runs/coordinator/units/claim-legacy-continuation") {
+    if (!isCoordinatorUnit(b.expected) || !isCoordinatorUnit(b.recovered))
+      return json({ error: "expected and recovered must be coordinator unit rows" }, 400);
+    if (b.expected.instanceId !== b.recovered.instanceId || b.expected.unit !== b.recovered.unit)
+      return json({ error: "expected and recovered must name the same unit" }, 400);
+    const r = await stub.claimLegacyContinuation(b.expected, b.recovered, now);
+    console.log(
+      `[runs/coordinator/units/claim-legacy-continuation] ${key.value} ${b.expected.instanceId}:${b.expected.unit} → ${r.ok ? "claimed" : r.reason}`,
+    );
+    return r.ok ? json(r) : json(r, 409);
   }
   if (pathname === "/runs/coordinator/units/list") {
     if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))

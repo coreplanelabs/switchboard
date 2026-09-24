@@ -28,7 +28,7 @@ import {
   fetchRepoShipInfo,
   type PullRequestFacts,
 } from "../../execution/githubPulls.js";
-import { handOffToCoordinator, type HandOffOutcome } from "../coordinator/handOff.js";
+import { handOffToCoordinator, type BeforeCoordinatorStart, type HandOffOutcome } from "../coordinator/handOff.js";
 import { ALLOWANCES, ASKS, fit, HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "../budgets.js";
 import {
   createInstanceViaShim,
@@ -155,6 +155,9 @@ export interface ShipContext {
   directives: RequestDirectives;
   /** The stable generated plan this ended thread is re-issuing. */
   reissuePlanId?: string;
+  /** Deferred legacy repair and ownership reservation, after every hand-off
+   * refusal gate and immediately before the new attempt's records. */
+  beforeCoordinatorStart?: BeforeCoordinatorStart;
   /** The prior attempt's durable remaining caps. They are upper bounds: the
    *  current deployment may tighten them, but a re-issue never restores time
    *  or review rounds the earlier attempt spent. */
@@ -581,6 +584,7 @@ export async function runShipBranch(
               entry,
               requestText: directives.text,
               ...(ctx.reissuePlanId !== undefined ? { reissuePlanId: ctx.reissuePlanId } : {}),
+              ...(ctx.beforeCoordinatorStart !== undefined ? { beforeStart: ctx.beforeCoordinatorStart } : {}),
               msg,
               agentSource: ctx.agentSource,
               runId: run.id,

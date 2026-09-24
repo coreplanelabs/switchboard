@@ -110,10 +110,59 @@ describe("RunnerOwnershipFence", () => {
     const fence = new RunnerOwnershipFence(false);
     expect(fence.owns("acme/api", 77)).toBe(false);
 
-    fence.claim("acme/api", 77, { instanceId: "runner_live", unit: "unit" });
+    expect(fence.claim("acme/api", 77, { instanceId: "runner_live", unit: "unit" })).toBe(true);
     expect(fence.owns("acme/api", 77)).toBe(true);
     expect(fence.owner("acme/api", 77)).toEqual({ instanceId: "runner_live", unit: "unit" });
-    fence.release("acme/api", 77);
+    expect(fence.release("acme/api", 77)).toBe(true);
+    expect(fence.owns("acme/api", 77)).toBe(false);
+  });
+
+  it("an exclusive reservation transfers only from its exact token and current owner to the new runner", () => {
+    const fence = new RunnerOwnershipFence(false);
+    const continuation = { instanceId: "runner_continuation", unit: "unit" };
+    const reissued = { instanceId: "runner_reissued", unit: "unit" };
+    const intervening = { instanceId: "runner_intervening", unit: "other" };
+
+    const token = fence.reserve("acme/api", 77, continuation);
+    expect(token).toBeTypeOf("symbol");
+    expect(fence.reserve("acme/api", 77, continuation)).toBeUndefined();
+    expect(fence.claim("acme/api", 77, intervening)).toBe(false);
+    expect(fence.owner("acme/api", 77)).toEqual(continuation);
+    expect(fence.transferReservation("acme/api", 77, Symbol("stale"), continuation, reissued)).toBe(false);
+    expect(fence.transferReservation("acme/api", 77, token!, intervening, reissued)).toBe(false);
+    expect(fence.owner("acme/api", 77)).toEqual(continuation);
+    expect(fence.transferReservation("acme/api", 77, token!, continuation, reissued)).toBe(true);
+    expect(fence.owner("acme/api", 77)).toEqual(reissued);
+    expect(fence.claim("acme/api", 77, intervening)).toBe(false);
+    expect(fence.releaseReservation("acme/api", 77, token!)).toBe(false);
+  });
+
+  it("a failed reissued start releases only the transferred owner and never a successor", () => {
+    const fence = new RunnerOwnershipFence(false);
+    const continuation = { instanceId: "runner_continuation", unit: "unit" };
+    const reissued = { instanceId: "runner_reissued", unit: "unit" };
+    const successor = { instanceId: "runner_successor", unit: "unit" };
+    const token = fence.reserve("acme/api", 77, continuation)!;
+
+    expect(fence.transferReservation("acme/api", 77, token, continuation, reissued)).toBe(true);
+    expect(fence.release("acme/api", 77, continuation)).toBe(false);
+    expect(fence.release("acme/api", 77, reissued)).toBe(true);
+    expect(fence.claim("acme/api", 77, successor)).toBe(true);
+    expect(fence.release("acme/api", 77, reissued)).toBe(false);
+    expect(fence.owner("acme/api", 77)).toEqual(successor);
+  });
+
+  it("an intervening runner cannot displace an existing owner, and a stale release cannot erase it", () => {
+    const fence = new RunnerOwnershipFence(false);
+    const continuation = { instanceId: "runner_continuation", unit: "unit" };
+    const intervening = { instanceId: "runner_intervening", unit: "other" };
+
+    expect(fence.claim("acme/api", 77, continuation)).toBe(true);
+    expect(fence.claim("acme/api", 77, intervening)).toBe(false);
+    expect(fence.owner("acme/api", 77)).toEqual(continuation);
+    expect(fence.release("acme/api", 77, intervening)).toBe(false);
+    expect(fence.owner("acme/api", 77)).toEqual(continuation);
+    expect(fence.release("acme/api", 77, continuation)).toBe(true);
     expect(fence.owns("acme/api", 77)).toBe(false);
   });
 });

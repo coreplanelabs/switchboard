@@ -2711,9 +2711,9 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
   const pr = body.pr as { number?: unknown; url?: unknown } | undefined;
-  // A review_pending ending names the coding child's own last push (the
-  // driver's `headSha`): persisted on the row as `lastPush`, so the next
-  // attempt's rows carry it and its pre-check starts at the review round.
+  // The driver's `headSha` is the exact continuation boundary: the coding
+  // child's last push for review_pending, or the final approved head for
+  // merge_ready. Persist it as `lastPush` for the next attempt's pre-check.
   const lastPush = normalizeHead(body.headSha);
   // A continued ending is a segment's end, not the unit's (decision 0046):
   // the renewal is written as a row keyed by the segment it opens — once; a

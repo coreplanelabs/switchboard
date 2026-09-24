@@ -45,6 +45,20 @@ import type { CoordinatorInstance, CoordinatorUnit, ThreadEventAttachment } from
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
 
+export type BeforeCoordinatorStart = () => Promise<
+  | {
+      ok: true;
+      /** Transfer the reserved pull request to the durable attempt immediately
+       * before its Workflow create. A refusal here starts no work. */
+      commit: (owner: { instanceId: string; unit: string }) => Promise<void>;
+      /** Mark the accepted Workflow as the owner so dispatch cleanup retains it. */
+      complete: () => void;
+      /** Restore the exact legacy row and release only this transition's owner. */
+      abort: () => Promise<void>;
+    }
+  | { ok: false; refusal: Refusal }
+>;
+
 export interface HandOffInput {
   entry: ShipEntry;
   /** The request's directive-stripped text (the preflight's input). */
@@ -53,6 +67,10 @@ export interface HandOffInput {
    *  the dispatcher read it from the coordinator row, so formatting in the
    *  stored request can never mint a nearby but different plan id. */
   reissuePlanId?: string;
+  /** A legacy continuation's last atomic gate. It runs only after planning,
+   * attempt selection and every refusal gate succeeded, immediately before
+   * records are written. Any later refusal aborts its provisional transition. */
+  beforeStart?: BeforeCoordinatorStart;
   msg: {
     channelId: string;
     channelName?: string;
@@ -566,86 +584,118 @@ async function start(
   write: "put" | "replace",
 ): Promise<HandOffOutcome> {
   const log = deps.log ?? console.log;
-  const put = write === "replace" ? await deps.instances.replace(instance) : await deps.instances.put(instance);
-  if (!put.ok) {
-    if (put.reason === "unavailable")
-      return refused(
-        "plan_history_unavailable",
-        "⚠️ The plan runner needs run history on the state Worker (`runHistory.worker`): the instance record could not be written, so nothing ran.",
-      );
-    // Another record took the id between the read and the write: a race two
-    // requesters lose together — neither touches what is there.
-    return refused(
-      "plan_runner_conflict",
-      `🚫 A runner for \`${instance.id}\` was just recorded by another request, so this request started nothing; the recorded runner owns the pipeline.`,
-    );
-  }
-  const rows = await deps.instances.putUnits(units);
-  if (!rows.ok)
-    return refused(
-      "plan_history_unavailable",
-      "⚠️ The plan runner needs run history on the state Worker: the unit rows could not be written, so nothing ran.",
-    );
-  // A generated task's accepted inline media enters the same durable event
-  // list as a later thread reply. The unit row exists first, and the Workflow
-  // starts only after the append, so its first coding spawn can fold the bytes.
-  // `appendEvent` deduplicates the stable id: a re-issue after create failed
-  // cannot make the retry stage the same file twice. Seeded plans do not copy
-  // one request's media onto several independent units.
-  const accepted = [...(input.msg.images ?? []), ...(input.msg.documents ?? [])];
-  if (instance.plan?.path === undefined && accepted.length > 0) {
-    const unit = units[0]!;
-    const seeded = await deps.instances.appendEvent(
-      { instanceId: instance.id, unit: unit.unit },
-      {
-        id: `${instance.id}:${unit.unit}:ship-request`,
-        sender: input.msg.userId,
-        ...(input.msg.userName !== undefined ? { senderName: input.msg.userName } : {}),
-        text: "Attachments from the ship request.",
-        attachments: accepted,
-        mode: "steer",
-        at: input.now,
-      },
-    );
-    if (!seeded.ok)
-      return refused(
-        "plan_history_unavailable",
-        "⚠️ The plan runner needs run history on the state Worker: the ship request's attachments could not be written, so nothing ran.",
-      );
-  }
-  let answer: CreateInstanceAnswer;
+  const reservation = await input.beforeStart?.();
+  if (reservation?.ok === false)
+    return { status: "aborted", reply: reservation.refusal.text, refusal: reservation.refusal };
+  let started = false;
   try {
-    answer = await deps.create(instance.id);
-  } catch (err) {
-    answer = { kind: "unanswered", reason: describe(err) };
-  }
-  switch (answer.kind) {
-    case "created": {
-      log(`[ship] ${input.msg.threadKey}: handed to the plan runner ${instance.id} (${units.length} unit(s))`);
-      const replaced =
-        write === "replace" ? ["the records of an earlier attempt that never started were replaced"] : [];
-      return {
-        status: "completed",
-        reply: handedOff([...where, ...replaced]),
-        instanceId: instance.id,
-      };
-    }
-    case "duplicate": {
-      // The platform holds an instance the state Worker has no record of — a
-      // store wiped or restored — so neither side can be trusted to resume.
-      const status = answer.status !== undefined ? `, status: ${answer.status}` : "";
+    const put = write === "replace" ? await deps.instances.replace(instance) : await deps.instances.put(instance);
+    if (!put.ok) {
+      if (put.reason === "unavailable")
+        return refused(
+          "plan_history_unavailable",
+          "⚠️ The plan runner needs run history on the state Worker (`runHistory.worker`): the instance record could not be written, so nothing ran.",
+        );
+      // Another record took the id between the read and the write: a race two
+      // requesters lose together — neither touches what is there.
       return refused(
-        "plan_instance_orphaned",
-        `🚫 A Workflow instance \`${instance.id}\` already exists on the platform${status} but the state Worker knew nothing of it — a person decides; re-issuing will not resume it.`,
+        "plan_runner_conflict",
+        `🚫 A runner for \`${instance.id}\` was just recorded by another request, so this request started nothing; the recorded runner owns the pipeline.`,
       );
     }
-    case "failed":
-    case "unanswered":
-      log(`[ship] ${input.msg.threadKey}: the plan runner ${instance.id} could not be started — ${answer.reason}`);
+    const rows = await deps.instances.putUnits(units);
+    if (!rows.ok)
       return refused(
-        "plan_start_failed",
-        `⚠️ This is a bug: the plan runner could not be started (${answer.reason}), nothing ran, and no automatic start retry was scheduled.`,
+        "plan_history_unavailable",
+        "⚠️ The plan runner needs run history on the state Worker: the unit rows could not be written, so nothing ran.",
       );
+    // A generated task's accepted inline media enters the same durable event
+    // list as a later thread reply. The unit row exists first, and the Workflow
+    // starts only after the append, so its first coding spawn can fold the bytes.
+    // `appendEvent` deduplicates the stable id: a re-issue after create failed
+    // cannot make the retry stage the same file twice. Seeded plans do not copy
+    // one request's media onto several independent units.
+    const accepted = [...(input.msg.images ?? []), ...(input.msg.documents ?? [])];
+    if (instance.plan?.path === undefined && accepted.length > 0) {
+      const unit = units[0]!;
+      const seeded = await deps.instances.appendEvent(
+        { instanceId: instance.id, unit: unit.unit },
+        {
+          id: `${instance.id}:${unit.unit}:ship-request`,
+          sender: input.msg.userId,
+          ...(input.msg.userName !== undefined ? { senderName: input.msg.userName } : {}),
+          text: "Attachments from the ship request.",
+          attachments: accepted,
+          mode: "steer",
+          at: input.now,
+        },
+      );
+      if (!seeded.ok)
+        return refused(
+          "plan_history_unavailable",
+          "⚠️ The plan runner needs run history on the state Worker: the ship request's attachments could not be written, so nothing ran.",
+        );
+    }
+    if (reservation?.ok === true) {
+      const unit = units[0];
+      if (unit === undefined)
+        return refused(
+          "setup_failed",
+          "⚠️ The plan runner had no durable unit to own at its final start gate, so nothing ran.",
+        );
+      try {
+        // Commit process-local ownership only after every durable row and
+        // attachment gate passed, but before Workflow create can start work.
+        await reservation.commit({ instanceId: instance.id, unit: unit.unit });
+      } catch (err) {
+        return refused(
+          "setup_failed",
+          `⚠️ The plan runner could not transfer existing-pull-request ownership to its new attempt (${describe(err)}), so nothing ran.`,
+        );
+      }
+    }
+    let answer: CreateInstanceAnswer;
+    try {
+      answer = await deps.create(instance.id);
+    } catch (err) {
+      answer = { kind: "unanswered", reason: describe(err) };
+    }
+    switch (answer.kind) {
+      case "created": {
+        // The Workflow and its durable attempt now agree on the same owner.
+        // Cleanup must retain that owner across any later reply/card failure.
+        if (reservation?.ok === true) reservation.complete();
+        started = true;
+        log(`[ship] ${input.msg.threadKey}: handed to the plan runner ${instance.id} (${units.length} unit(s))`);
+        const replaced =
+          write === "replace" ? ["the records of an earlier attempt that never started were replaced"] : [];
+        return {
+          status: "completed",
+          reply: handedOff([...where, ...replaced]),
+          instanceId: instance.id,
+        };
+      }
+      case "duplicate": {
+        // The platform holds an instance the state Worker has no record of — a
+        // store wiped or restored — so neither side can be trusted to resume.
+        const status = answer.status !== undefined ? `, status: ${answer.status}` : "";
+        return refused(
+          "plan_instance_orphaned",
+          `🚫 A Workflow instance \`${instance.id}\` already exists on the platform${status} but the state Worker knew nothing of it — a person decides; re-issuing will not resume it.`,
+        );
+      }
+      case "failed":
+      case "unanswered":
+        log(`[ship] ${input.msg.threadKey}: the plan runner ${instance.id} could not be started — ${answer.reason}`);
+        return refused(
+          "plan_start_failed",
+          `⚠️ This is a bug: the plan runner could not be started (${answer.reason}), nothing ran, and no automatic start retry was scheduled.`,
+        );
+    }
+    const unreachable: never = answer;
+    return unreachable;
+  } finally {
+    if (!started && reservation?.ok === true) await reservation.abort();
   }
 }
 
