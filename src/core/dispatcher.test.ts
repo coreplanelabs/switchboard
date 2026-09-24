@@ -17013,7 +17013,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
   it("a real reissue transfers the recovered pull request to the new attempt, whose coding spawn passes the publication-owner gate", async () => {
     const s = await legacyMergeReadySetup();
-    const claimLegacy = vi.spyOn(s.instances, "claimLegacyContinuation");
+    const claimLegacy = vi.spyOn(s.instances, "compareAndReplaceUnit");
     const fence = new RunnerOwnershipFence(false);
     const reserve = vi.spyOn(fence, "reserve");
     const transfer = vi.spyOn(fence, "transferReservation");
@@ -17195,9 +17195,9 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
   it("an ownership claim that lands during the durable compare makes the legacy continuation lose without overwriting ownership or starting work", async () => {
     const s = await legacyMergeReadySetup();
     const foreign = { instanceId: "runner-other", unit: "other" };
-    const compare = s.instances.claimLegacyContinuation.bind(s.instances);
+    const compare = s.instances.compareAndReplaceUnit.bind(s.instances);
     let compares = 0;
-    vi.spyOn(s.instances, "claimLegacyContinuation").mockImplementation(async (expected, recovered) => {
+    vi.spyOn(s.instances, "compareAndReplaceUnit").mockImplementation(async (expected, recovered) => {
       const result = await compare(expected, recovered);
       compares += 1;
       if (compares === 1) s.setOwnershipOwner(foreign);
@@ -17222,10 +17222,10 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
   it("an ownership change whose exact rollback loses a CAS race surfaces the failure without clobbering newer state or starting work", async () => {
     const s = await legacyMergeReadySetup();
     const foreign = { instanceId: "runner-other", unit: "other" };
-    const compare = s.instances.claimLegacyContinuation.bind(s.instances);
+    const compare = s.instances.compareAndReplaceUnit.bind(s.instances);
     let newer: CoordinatorUnit | undefined;
     let compares = 0;
-    vi.spyOn(s.instances, "claimLegacyContinuation").mockImplementation(async (expected, recovered) => {
+    vi.spyOn(s.instances, "compareAndReplaceUnit").mockImplementation(async (expected, recovered) => {
       compares += 1;
       if (compares !== 1) return compare(expected, recovered);
       const result = await compare(expected, recovered);

@@ -220,8 +220,8 @@ export interface AdminCoordinatorDeps {
   /** Process-local ownership fence shared with the sweep. The durable runner
    *  remains authoritative; this fence only makes a simultaneous command defer. */
   runnerOwnership?: {
-    claim(repo: string, prNumber: number, owner?: { instanceId: string; unit: string }): void;
-    release(repo: string, prNumber: number): void;
+    claim(repo: string, prNumber: number, owner?: { instanceId: string; unit: string }): boolean;
+    release(repo: string, prNumber: number, owner?: { instanceId: string; unit: string }): boolean;
     owner(repo: string, prNumber: number): { instanceId: string; unit: string } | undefined;
   };
   /** The ship grant as the requester's channel and user scopes say now. Idle
@@ -1754,6 +1754,122 @@ async function steerChild(body: Record<string, unknown>, deps: AdminCoordinatorD
   return json(200, { ok: true, outcome: steered ? "steered" : "not_live", at });
 }
 
+type PublicationBindingRefusalReason =
+  | "publication_facts_mismatch"
+  | "publication_ownership_changed"
+  | "publication_ownership_unknown"
+  | "publication_binding_stale"
+  | "publication_store_unavailable";
+
+class PublicationBindingRefusal extends Error {
+  constructor(readonly reason: PublicationBindingRefusalReason) {
+    super(reason);
+  }
+}
+
+const samePublicationOwner = (
+  left: { instanceId: string; unit: string } | undefined,
+  right: { instanceId: string; unit: string },
+) => left?.instanceId === right.instanceId && left.unit === right.unit;
+
+/** One fail-closed transition from a freshly read open pull request to the
+ * exact durable authority later coding rounds require. The ownership claim is
+ * synchronous and precedes the full-row CAS; only a claim acquired by this
+ * call is conditionally released after a failed durable transition. */
+async function bindOpenPullRequest(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit | undefined,
+  pr: { number: number; url: string },
+  facts: PullRequestFacts,
+): Promise<void> {
+  if (row === undefined) return;
+  const verified = facts.verifiedHead;
+  if (
+    instance.base === undefined ||
+    facts.state !== "open" ||
+    facts.sameRepoHead !== true ||
+    facts.headBranchExists !== true ||
+    facts.headRef !== row.branch ||
+    facts.baseRef !== instance.base ||
+    verified === undefined ||
+    verified.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    verified.ref !== row.branch ||
+    !/^[0-9a-f]{40}$/i.test(verified.sha) ||
+    facts.headSha !== verified.sha ||
+    (row.pr !== undefined && row.pr.number !== pr.number)
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+
+  const owner = { instanceId: instance.id, unit: row.unit };
+  const publication: ExistingPrPublicationBinding = {
+    repo: instance.repo,
+    pr: pr.number,
+    headRef: row.branch,
+    baseRef: instance.base,
+    expectedHeadSha: verified.sha,
+    publicationRef: row.branch,
+    owner,
+  };
+  const existing = row.publication;
+  if (
+    existing !== undefined &&
+    (existing.repo !== publication.repo ||
+      existing.pr !== publication.pr ||
+      existing.headRef !== publication.headRef ||
+      existing.baseRef !== publication.baseRef ||
+      existing.expectedHeadSha !== publication.expectedHeadSha ||
+      existing.publicationRef !== publication.publicationRef ||
+      !samePublicationOwner(existing.owner, owner))
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+
+  const fence = deps.runnerOwnership;
+  if (fence === undefined) throw new PublicationBindingRefusal("publication_ownership_unknown");
+  let priorOwner: { instanceId: string; unit: string } | undefined;
+  try {
+    priorOwner = fence.owner(instance.repo, pr.number);
+  } catch {
+    throw new PublicationBindingRefusal("publication_ownership_unknown");
+  }
+  if (priorOwner !== undefined && !samePublicationOwner(priorOwner, owner))
+    throw new PublicationBindingRefusal("publication_ownership_changed");
+  if (!fence.claim(instance.repo, pr.number, owner))
+    throw new PublicationBindingRefusal("publication_ownership_changed");
+  let claimedHere = priorOwner === undefined;
+  const releaseClaim = () => {
+    if (!claimedHere) return;
+    fence.release(instance.repo, pr.number, owner);
+    claimedHere = false;
+  };
+  try {
+    if (!samePublicationOwner(fence.owner(instance.repo, pr.number), owner)) {
+      releaseClaim();
+      throw new PublicationBindingRefusal("publication_ownership_unknown");
+    }
+  } catch (err) {
+    releaseClaim();
+    if (err instanceof PublicationBindingRefusal) throw err;
+    throw new PublicationBindingRefusal("publication_ownership_unknown");
+  }
+
+  const replacement = { ...row, pr, publication };
+  if (JSON.stringify(replacement) === JSON.stringify(row)) return;
+  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>>;
+  try {
+    replaced = await deps.instances.compareAndReplaceUnit(row, replacement);
+  } catch {
+    releaseClaim();
+    throw new PublicationBindingRefusal("publication_store_unavailable");
+  }
+  if (!replaced.ok) {
+    releaseClaim();
+    throw new PublicationBindingRefusal(
+      replaced.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
+    );
+  }
+}
+
 async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -1783,36 +1899,12 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const unit = await unitRowOf(deps, instance, body.unit as string | undefined);
   if (!unit.ok) return unit.response;
   const branch = unit.row?.branch ?? instance.branch;
-  // The unit's row remembers its pull request, so a person reads it there. On
-  // first discovery it also records the complete publication authority future
-  // coding rounds require; a partial/foreign read never creates one.
-  const remember = async (pr: { number: number; url: string }, facts?: PullRequestFacts) => {
-    if (!unit.row) return;
-    const publication: ExistingPrPublicationBinding | undefined =
-      unit.row.publication ??
-      (facts?.state === "open" &&
-      facts.sameRepoHead === true &&
-      facts.headBranchExists === true &&
-      typeof facts.headRef === "string" &&
-      typeof facts.baseRef === "string" &&
-      typeof facts.headSha === "string" &&
-      /^[0-9a-f]{40}$/i.test(facts.headSha)
-        ? {
-            repo: instance.repo,
-            pr: pr.number,
-            headRef: facts.headRef,
-            baseRef: facts.baseRef,
-            expectedHeadSha: facts.headSha,
-            publicationRef: facts.headRef,
-            owner: { instanceId: instance.id, unit: unit.row.unit },
-          }
-        : undefined);
-    if (
-      unit.row.pr?.number !== pr.number ||
-      unit.row.pr.url !== pr.url ||
-      (unit.row.publication === undefined && publication !== undefined)
-    )
-      await deps.instances.putUnits([{ ...unit.row, pr, ...(publication !== undefined ? { publication } : {}) }]);
+  // Terminal pull requests remain readable on the unit row. Open pull
+  // requests never use this ordinary whole-row write: bindOpenPullRequest owns
+  // their one atomic {pr, publication} transition.
+  const rememberTerminal = async (pr: { number: number; url: string }) => {
+    if (!unit.row || (unit.row.pr?.number === pr.number && unit.row.pr.url === pr.url)) return;
+    await deps.instances.putUnits([{ ...unit.row, pr }]);
   };
   try {
     // Once the machine has adopted a pull request, its number is the authority:
@@ -1825,13 +1917,12 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       const fallbackUrl = unit.row?.pr?.url ?? `https://github.com/${instance.repo}/pull/${follow}`;
       const state = pullRequestState(follow, fallbackUrl, facts);
       if (state === undefined) throw new Error(headBranchStateError(instance.repo, follow));
-      await remember({ number: follow, url: String(state.url) }, facts);
-      if (state.state !== "open") return json(200, { ok: true, ...state, at });
-
-      deps.runnerOwnership?.claim(instance.repo, follow, {
-        instanceId: instance.id,
-        unit: unit.row?.unit ?? (body.unit as string),
-      });
+      const followedPr = { number: follow, url: String(state.url) };
+      if (state.state !== "open") {
+        await rememberTerminal(followedPr);
+        return json(200, { ok: true, ...state, at });
+      }
+      await bindOpenPullRequest(deps, instance, unit.row, followedPr, facts);
       const prRef = { repo: instance.repo, number: follow };
       const headSha = facts.headSha;
       const approved =
@@ -1874,19 +1965,19 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     }
     const open = await deps.findOpenPrByHead(instance.repo, branch);
     if (open) {
-      deps.runnerOwnership?.claim(instance.repo, open.number, {
-        instanceId: instance.id,
-        unit: unit.row?.unit ?? (body.unit as string),
-      });
       // The branch listing is discovery only. Re-read the pull request whole
       // before this transition acts: the listing can lag a merge/close, and
       // only the facts read proves the head ref still exists.
       const liveFacts = await deps.fetchPrFacts({ repo: instance.repo, number: open.number });
       if (liveFacts === undefined) throw new Error(`could not read ${instance.repo}#${open.number}`);
-      await remember({ number: open.number, url: open.htmlUrl }, liveFacts);
       const current = pullRequestState(open.number, open.htmlUrl, liveFacts);
       if (current === undefined) throw new Error(headBranchStateError(instance.repo, open.number));
-      if (current.state !== "open") return json(200, { ok: true, ...current, at });
+      const discoveredPr = { number: open.number, url: open.htmlUrl };
+      if (current.state !== "open") {
+        await rememberTerminal(discoveredPr);
+        return json(200, { ok: true, ...current, at });
+      }
+      await bindOpenPullRequest(deps, instance, unit.row, discoveredPr, liveFacts);
       // The entry facts (issue 1689). The branch's tip comes from the pull
       // request's own facts read, which prefers the head ref's tip over the
       // possibly-stale listing sha; the approval and the checks are read at
@@ -1981,7 +2072,6 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       }
       const recovered = await recoverPushedBranch(deps, instance, unit.row, branch, recover.runId);
       if (recovered.kind === "opened") {
-        await remember({ number: recovered.pr.number, url: recovered.pr.htmlUrl });
         // Open-or-edit is not a transition fact: the request can merge, close
         // or lose its head ref before this route returns. Re-read the pull
         // request whole and let an unknown branch state throw into the step's
@@ -1990,17 +2080,23 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         if (recoveredFacts === undefined) throw new Error(`could not read ${instance.repo}#${recovered.pr.number}`);
         const recoveredState = pullRequestState(recovered.pr.number, recovered.pr.htmlUrl, recoveredFacts);
         if (recoveredState === undefined) throw new Error(headBranchStateError(instance.repo, recovered.pr.number));
+        const recoveredPr = { number: recovered.pr.number, url: recovered.pr.htmlUrl };
+        if (recoveredState.state === "open")
+          await bindOpenPullRequest(deps, instance, unit.row, recoveredPr, recoveredFacts);
+        else await rememberTerminal(recoveredPr);
         return json(200, { ok: true, ...recoveredState, at });
       }
       return json(200, { ok: true, state: "none", unrecovered: recovered.why, at });
     }
-    await remember({ number: merged.number, url: merged.htmlUrl });
     const mergedFacts = await deps.fetchPrFacts({ repo: instance.repo, number: merged.number });
     if (mergedFacts === undefined) throw new Error(`could not read ${instance.repo}#${merged.number}`);
     const state = pullRequestState(merged.number, merged.htmlUrl, mergedFacts);
     if (state?.state !== "merged") throw new Error(`${instance.repo}#${merged.number} no longer reads merged`);
+    await rememberTerminal({ number: merged.number, url: merged.htmlUrl });
     return json(200, { ok: true, ...state, at });
   } catch (err) {
+    if (err instanceof PublicationBindingRefusal)
+      return json(409, { ok: false, error: err.reason, message: "the open pull request was not durably bound", at });
     return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
   }
 }

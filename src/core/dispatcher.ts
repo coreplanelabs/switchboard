@@ -1399,7 +1399,7 @@ export async function dispatch(
                 ),
               };
             const persisted = await coordinatorInstances
-              .claimLegacyContinuation(legacyUnit, recoveredUnit)
+              .compareAndReplaceUnit(legacyUnit, recoveredUnit)
               .catch(() => undefined);
             if (persisted?.ok !== true) {
               const released = releaseLegacyOwnership?.() ?? true;
@@ -1418,7 +1418,7 @@ export async function dispatch(
               reservedOwner.unit !== reservationOwner.unit
             ) {
               const restored = await coordinatorInstances
-                .claimLegacyContinuation(recoveredUnit, legacyUnit)
+                .compareAndReplaceUnit(recoveredUnit, legacyUnit)
                 .catch(() => undefined);
               const released = releaseLegacyOwnership?.() ?? true;
               const rollbackFailure = restored?.ok === true ? undefined : (restored?.reason ?? "unavailable");
@@ -1451,7 +1451,7 @@ export async function dispatch(
               },
               abort: async () => {
                 const restored = await coordinatorInstances
-                  .claimLegacyContinuation(recoveredUnit, legacyUnit)
+                  .compareAndReplaceUnit(recoveredUnit, legacyUnit)
                   .catch(() => undefined);
                 const released = releaseLegacyOwnership?.() ?? true;
                 owner.unit = legacyUnit;

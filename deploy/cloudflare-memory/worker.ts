@@ -2732,12 +2732,12 @@ export class RunHistoryDO extends DurableObject<Env> {
     return { ok: true };
   }
 
-  /** One compare-and-replace transaction reserves a legacy continuation for
-   * exactly one caller. The whole expected JSON is the fence: any intervening
-   * unit write, including another recovery, makes this caller stale. */
-  async claimLegacyContinuation(
+  /** One compare-and-replace transaction updates a unit for exactly one
+   * caller. The whole expected JSON is the fence: any intervening unit write
+   * makes this caller stale. */
+  async compareAndReplaceUnit(
     expected: CoordinatorUnit,
-    recovered: CoordinatorUnit,
+    replacement: CoordinatorUnit,
     now: number,
   ): Promise<{ ok: true } | { ok: false; reason: "stale" }> {
     let out: { ok: true } | { ok: false; reason: "stale" } = { ok: true };
@@ -2755,7 +2755,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
       this.sql.exec(
         `UPDATE coordinator_units SET json = ?, updated_at = ? WHERE instance_id = ? AND unit = ?`,
-        JSON.stringify(recovered),
+        JSON.stringify(replacement),
         now,
         expected.instanceId,
         expected.unit,
@@ -5924,9 +5924,9 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       return json({ error: "expected and recovered must be coordinator unit rows" }, 400);
     if (b.expected.instanceId !== b.recovered.instanceId || b.expected.unit !== b.recovered.unit)
       return json({ error: "expected and recovered must name the same unit" }, 400);
-    const r = await stub.claimLegacyContinuation(b.expected, b.recovered, now);
+    const r = await stub.compareAndReplaceUnit(b.expected, b.recovered, now);
     console.log(
-      `[runs/coordinator/units/claim-legacy-continuation] ${key.value} ${b.expected.instanceId}:${b.expected.unit} → ${r.ok ? "claimed" : r.reason}`,
+      `[runs/coordinator/units/claim-legacy-continuation] ${key.value} ${b.expected.instanceId}:${b.expected.unit} → ${r.ok ? "replaced" : r.reason}`,
     );
     return r.ok ? json(r) : json(r, 409);
   }

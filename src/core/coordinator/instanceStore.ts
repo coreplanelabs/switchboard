@@ -27,7 +27,7 @@ import {
  *  idempotent); `unavailable`: no durable store in this process. */
 export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "unavailable" };
 export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" };
-export type ClaimLegacyContinuationResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
+export type CompareAndReplaceUnitResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
 export type AppendEventResult = { ok: true; seq: number } | { ok: false; reason: "unavailable" };
 export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type AnswerWakeResult = { ok: true } | { ok: false; reason: "unavailable" };
@@ -56,13 +56,10 @@ export interface CoordinatorInstanceStore {
    *  written at the instance's creation and rewritten as the runner reaches the
    *  unit — its thread, its pull request, its rounds, its ending. */
   putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult>;
-  /** Reserve one legacy continuation by replacing the exact row the caller
-   * verified. A missing or changed row is stale, so concurrent or delayed
-   * callers cannot overwrite newer unit state or reissue beside the winner. */
-  claimLegacyContinuation(
-    expected: CoordinatorUnit,
-    recovered: CoordinatorUnit,
-  ): Promise<ClaimLegacyContinuationResult>;
+  /** Replace one unit only while its complete durable row still equals the
+   * caller's expected row. A missing or changed row is stale, so concurrent
+   * or delayed writers cannot overwrite newer unit state. */
+  compareAndReplaceUnit(expected: CoordinatorUnit, replacement: CoordinatorUnit): Promise<CompareAndReplaceUnitResult>;
   /** An instance's unit rows in the order they were first written — the plan's. */
   listUnits(instanceId: string): Promise<CoordinatorUnit[]>;
   /** Atomically reserve a decision-record number. The durable implementation
@@ -131,14 +128,14 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     for (const u of units) this.units.set(unitKey(u), JSON.stringify(u));
     return { ok: true };
   }
-  async claimLegacyContinuation(
+  async compareAndReplaceUnit(
     expected: CoordinatorUnit,
-    recovered: CoordinatorUnit,
-  ): Promise<ClaimLegacyContinuationResult> {
+    replacement: CoordinatorUnit,
+  ): Promise<CompareAndReplaceUnitResult> {
     const key = unitKey(expected);
-    if (unitKey(recovered) !== key || this.units.get(key) !== JSON.stringify(expected))
+    if (unitKey(replacement) !== key || this.units.get(key) !== JSON.stringify(expected))
       return { ok: false, reason: "stale" };
-    this.units.set(key, JSON.stringify(recovered));
+    this.units.set(key, JSON.stringify(replacement));
     return { ok: true };
   }
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
@@ -228,10 +225,10 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
   async putUnits(_units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
     return { ok: false, reason: "unavailable" };
   }
-  async claimLegacyContinuation(
+  async compareAndReplaceUnit(
     _expected: CoordinatorUnit,
-    _recovered: CoordinatorUnit,
-  ): Promise<ClaimLegacyContinuationResult> {
+    _replacement: CoordinatorUnit,
+  ): Promise<CompareAndReplaceUnitResult> {
     return { ok: false, reason: "unavailable" };
   }
   async listUnits(_instanceId: string): Promise<CoordinatorUnit[]> {
@@ -338,11 +335,16 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     throw new Error(`coordinator store /runs/coordinator/units/put: unexpected answer (HTTP ${r.status})`);
   }
 
-  async claimLegacyContinuation(
+  async compareAndReplaceUnit(
     expected: CoordinatorUnit,
-    recovered: CoordinatorUnit,
-  ): Promise<ClaimLegacyContinuationResult> {
-    const r = await this.post("/runs/coordinator/units/claim-legacy-continuation", { expected, recovered });
+    replacement: CoordinatorUnit,
+  ): Promise<CompareAndReplaceUnitResult> {
+    // Keep the deployed wire spelling during the generic CAS transition: bot
+    // and state Worker roll independently, while the seam above is truthful.
+    const r = await this.post("/runs/coordinator/units/claim-legacy-continuation", {
+      expected,
+      recovered: replacement,
+    });
     const d = r.data as { ok?: unknown; reason?: unknown };
     if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
     if (d.ok === true) return { ok: true };
