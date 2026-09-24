@@ -4814,7 +4814,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(
       "abcdef1234abcdef1234abcdef1234abcdef1234",
     );
-    // Restore the merge_ready ending for the finish assertions below.
+    // A merge_ready ending persists the exact final reviewed head too: this is
+    // the durable expected head an ended generated pipeline continues from.
+    const reviewedHead = "FEDCBA9876fedcba9876fedcba9876fedcba9876";
     await call(h, "unit-end", {
       parentInstanceId: PLAN_INSTANCE.id,
       unit: "U10",
@@ -4823,7 +4825,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         report: "✅ Merge-ready after 1 review round: https://github.com/acme/api/pull/7",
       },
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      headSha: reviewedHead,
     });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(reviewedHead.toLowerCase());
 
     // The hosted parent (record 0060): finish publishes the answer,
     // finishes the registry row and seals the ONE record — the run's own
