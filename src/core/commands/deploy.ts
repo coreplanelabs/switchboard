@@ -4,6 +4,7 @@ import {
   planImageCopies,
   publishedImagesFrom,
   registryHas,
+  RESIDENT_IMAGE_TAG_FILE,
   type ImageCopy,
   type ImagesPlan,
   type ImageStatus,
@@ -244,7 +245,11 @@ async function loadProfile(deps: DeployCommandDeps): Promise<LoadedProfile> {
  *  CLI's own version (the only one the rendered configs can reference) — or `unavailable` naming the
  *  facts file. */
 async function publishedImages(deps: DeployCommandDeps): Promise<PublishedImages> {
-  const published = publishedImagesFrom(await deps.deploy.files.read(PROJECT_FACTS_FILE), deps.deploy.cliVersion());
+  const published = publishedImagesFrom(
+    await deps.deploy.files.read(PROJECT_FACTS_FILE),
+    deps.deploy.cliVersion(),
+    await deps.deploy.files.read(RESIDENT_IMAGE_TAG_FILE),
+  );
   if (!published.ok) throw new CommandError("unavailable", published.problem);
   return published.images;
 }
@@ -465,7 +470,11 @@ export const deployInit = defineCommand({
     // the docs site its name and host — the site is the project's, not a Worker of the installation,
     // so only the account comes from the profile.
     const facts = await deps.deploy.files.read(PROJECT_FACTS_FILE);
-    const published = publishedImagesFrom(facts, deps.deploy.cliVersion());
+    const published = publishedImagesFrom(
+      facts,
+      deps.deploy.cliVersion(),
+      await deps.deploy.files.read(RESIDENT_IMAGE_TAG_FILE),
+    );
     const rendered = published.ok
       ? renderWorkerConfigs(loaded.profile, (path) => templates.get(path), published.images)
       : { ok: false as const, problems: [published.problem] };

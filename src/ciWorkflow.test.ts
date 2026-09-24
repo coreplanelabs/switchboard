@@ -415,16 +415,17 @@ describe("the release publishes the bot image", () => {
     expect(names.length).toBeGreaterThan(0);
     for (const name of names) expect(name).toBe("${GITHUB_REPOSITORY,,}${SUFFIX}");
     const build = step("docker/build-push-action@")!;
-    const tags = String(build.with?.tags)
-      .split("\n")
-      .filter((t) => t.trim());
-    expect(tags).toEqual([
-      "${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}",
-      "${{ steps.image.outputs.name }}:latest",
-    ]);
-    // The version tag is the release tag without its `v`, from release-please's output; the suffix is the leg's.
+    expect(build.with?.tags).toBe("${{ steps.image.outputs.tags }}");
+    // Every image keeps its release and latest tags. The resident additionally
+    // publishes the generated Docker-input content tag so Worker-only releases
+    // resolve the same immutable bytes instead of manufacturing a new version.
     const name = job.steps.find((s) => (s as Step & { id?: string }).id === "image")!;
-    expect(name.run).toContain("version=${TAG#v}");
+    expect(name.run).toContain('echo "$name:$version"');
+    expect(name.run).toContain('echo "$name:latest"');
+    expect(name.run).toContain('if [ "${{ matrix.image.name }}" = resident ]; then');
+    expect(name.run).toContain('echo "$name:$(cat deploy/cloudflare-resident/image-tag.txt)"');
+    // The version tag is the release tag without its `v`, from release-please's output; the suffix is the leg's.
+    expect(name.run).toContain('version="${TAG#v}"');
     expect((name as Step & { env?: Record<string, string> }).env).toEqual({
       TAG: "${{ needs.release-please.outputs.tag_name }}",
       SUFFIX: "${{ matrix.image.suffix }}",

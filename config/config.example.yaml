@@ -274,6 +274,13 @@ defaults:
 #     actions: [friction:write]         # declares its grants; an entry here REPLACES them)
 #     channels: all                     # analyzes the whole fleet, not one channel
 
+# A resident image-changing deploy closes the fleet while runs finish. Admit at
+# most the first N new runs during that drain to seed a per-thread sandbox from
+# the resident snapshot; 0 is wait-only. Admission is persisted by the registry
+# Durable Object, so retries and isolate resets cannot renew this total cap.
+deploy:
+  seedDuringDrain: 0
+
 # Where agent tools execute. "local" runs them on the bot host (dev/CLI);
 # "e2b" runs each thread's tools in its own E2B micro-VM — the repo checkout
 # and GH_TOKEN live in the sandbox, never on the bot host. Recommended for

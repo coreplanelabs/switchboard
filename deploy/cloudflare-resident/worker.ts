@@ -5521,13 +5521,14 @@ export class ResidentDO extends Sandbox<Env> {
     record?: ResidentRecord,
     traceparent?: string,
     reason: RefHintReason = NO_REF_HINT_REASON,
+    admissionKey: string = threadKey,
   ): Promise<AttachOk | ThreadErr> {
     // One step trace per attach (docs/reference/specs/tracing.md item 19): every command
     // the attach runs lands on it, and the answer carries it.
     const t0 = systemClock();
     const trace = createStepTrace(t0);
     const res = await this.stepTrace.run(trace, () =>
-      this.attachThreadTraced(threadKey, refHint, readonly, wantSha, reuse, record, t0, reason),
+      this.attachThreadTraced(threadKey, refHint, readonly, wantSha, reuse, record, t0, reason, admissionKey),
     );
     // The same steps as the resident's own `resident.attach` root (item 22).
     emitStepRoot("resident.attach", t0, trace.steps(), traceparent, "error" in res ? refusalOutcome(res) : "ok");
@@ -5544,6 +5545,7 @@ export class ResidentDO extends Sandbox<Env> {
     record: ResidentRecord | undefined,
     t0: number,
     reason: RefHintReason,
+    admissionKey: string,
   ): Promise<AttachOk | ThreadErr> {
     try {
       await this.ensureHydrated();
@@ -5558,7 +5560,7 @@ export class ResidentDO extends Sandbox<Env> {
       // a refused attach never restarts a container.
       const registered = (await this.ctx.storage.get(runRegKey(threadKey))) !== undefined;
       if (!registered) {
-        const admission = await this.registry().admitDrainSeed(threadKey);
+        const admission = await this.registry().admitDrainSeed(admissionKey);
         if (admission.draining) {
           const refusal: ThreadErr & { draining: DrainRecord; seedAdmitted: boolean } = drainRefusal(
             admission.draining,
@@ -9655,6 +9657,12 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
   }
   const refByDefault = parseRefByDefault(body.refByDefault);
   if ("error" in refByDefault) return json({ error: refByDefault.error }, 400);
+  let admissionKey = ctx.threadKey;
+  if (body.admissionKey !== undefined) {
+    if (typeof body.admissionKey !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(body.admissionKey))
+      return json({ error: "admissionKey must be a run id" }, 400);
+    admissionKey = body.admissionKey;
+  }
   const reason: RefHintReason = { ownPr: parsedOwnPr.ownPr, refByDefault: refByDefault.refByDefault };
   // Post-validation, the answer streams like /exec (item 59): heartbeat
   // whitespace then ONE JSON document over HTTP 200, so an attach that waits
@@ -9673,6 +9681,7 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
         ctx.record,
         traceparent,
         reason,
+        admissionKey,
       ),
     ),
     ({ result, levels }) => ({ ...(result as object), ...(levels ? { levels } : {}) }),

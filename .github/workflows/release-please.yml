@@ -232,8 +232,19 @@ jobs:
           TAG: ${{ needs.release-please.outputs.tag_name }}
           SUFFIX: ${{ matrix.image.suffix }}
         run: |
-          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}${SUFFIX}" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          name="ghcr.io/${GITHUB_REPOSITORY,,}${SUFFIX}"
+          version="${TAG#v}"
+          {
+            echo "name=$name"
+            echo "version=$version"
+            echo "tags<<EOF"
+            echo "$name:$version"
+            echo "$name:latest"
+            if [ "${{ matrix.image.name }}" = resident ]; then
+              echo "$name:$(cat deploy/cloudflare-resident/image-tag.txt)"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -260,9 +271,7 @@ jobs:
           # same build `check:image -w deploy/<worker>` proves on every PR.
           context: ${{ matrix.image.context }}
           push: true
-          tags: |
-            ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}
-            ${{ steps.image.outputs.name }}:latest
+          tags: ${{ steps.image.outputs.tags }}
           # SLSA provenance and an SPDX SBOM, attached to the image index in the
           # registry (`docker buildx imagetools inspect <image> --format '{{ json .Provenance }}'`).
           provenance: mode=max

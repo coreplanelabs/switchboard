@@ -529,6 +529,9 @@ export interface ResidentExecutorOptions {
   /** Resource id, e.g. "repo:jshttp/vary". */
   resource: string;
   threadKey: string;
+  /** Stable identity of this run for persisted drain-seed admission. A caller
+   *  without a run (load tools and legacy clients) falls back to threadKey. */
+  admissionKey?: string;
   /** Ref for an attach. A ref the request names is authoritative and replaces
    *  an older sticky binding; the sticky binding is only a fallback when the
    *  request names none (`refByDefault` is true, `ownPr` derived the hint, or
@@ -1155,20 +1158,21 @@ export class ResidentExecutor implements Executor {
    *  the command. */
   async attach(
     span?: Span,
-    opts: { signal?: AbortSignal; budgetMs?: number; drainBoundMs?: number } = {},
+    opts: {
+      signal?: AbortSignal;
+      budgetMs?: number;
+      drainBoundMs?: number;
+      /** `offer` exposes one persisted drain-seed admission to the factory;
+       *  `wait` is used after that admitted seed could not be restored. */
+      drainSeedMode?: "offer" | "wait";
+    } = {},
   ): Promise<ResidentBinding> {
     this.attachAttempt++;
     const answer = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
     if (answer.ok) return answer.binding;
     if (isDrainingRefusal(answer)) {
-      if (answer.data.seedAdmitted === true)
-        throw new ResidentDrainingError(
-          this.opts.resource,
-          0,
-          drainingUntil(answer),
-          refusalWords(answer),
-          true,
-        );
+      if (answer.data.seedAdmitted === true && opts.drainSeedMode !== "wait")
+        throw new ResidentDrainingError(this.opts.resource, 0, drainingUntil(answer), refusalWords(answer), true);
       const reopened = await this.awaitDrainEnd(answer, opts, span);
       return { ...reopened.binding, wokeAfterMs: reopened.waitedMs, drainWaitMs: reopened.waitedMs };
     }
@@ -1297,6 +1301,7 @@ export class ResidentExecutor implements Executor {
    *  request at once, and the failure is `aborted`, never the transport lost. */
   private async attachOnce(span?: Span, timeoutMs?: number, signal?: AbortSignal): Promise<AttachAnswer> {
     const body: Record<string, unknown> = {};
+    if (this.opts.admissionKey) body.admissionKey = this.opts.admissionKey;
     if (this.opts.refHint) body.refHint = this.opts.refHint;
     if (this.opts.readonly) body.readonly = true;
     if (this.opts.sha && this.shaPending) body.sha = this.opts.sha;

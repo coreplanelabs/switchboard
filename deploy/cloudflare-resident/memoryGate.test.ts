@@ -78,20 +78,20 @@ describe("the two route gates refuse NEW work as the mirror-busy 503 shape and t
     expect(body).toMatch(/const memory = await this\.memoryGate\("exec"\);\s*\n\s*if \(memory\) return memory;/);
   });
 
-  it("attachThreadTraced asks the attach gate after the drain (storage only) and before the image reconcile — a refused attach never restarts a container, and a registered run's re-attach passes as it passes the drain", () => {
+  it("attachThreadTraced asks Registry DO drain admission before the attach gate and image reconcile — a refused attach never restarts a container, and a registered run's re-attach passes both gates", () => {
     const body = method("attachThreadTraced");
-    const drain = body.indexOf("await this.fleetDrain()");
+    const admission = body.indexOf("await this.registry().admitDrainSeed(admissionKey)");
     const gate = body.indexOf('await this.memoryGate("attach"');
     const reconcile = body.indexOf('this.reconcileImage("attach")');
-    expect(drain).toBeGreaterThan(-1);
-    expect(gate).toBeGreaterThan(drain);
+    expect(admission).toBeGreaterThan(-1);
+    expect(gate).toBeGreaterThan(admission);
     expect(reconcile).toBeGreaterThan(gate);
     // ONE registration read decides both gates: the drain's exemption and the
     // memory gate's are the same fact (item 44's row), so they cannot drift.
     expect(body).toMatch(
       /const registered = \(await this\.ctx\.storage\.get\(runRegKey\(threadKey\)\)\) !== undefined;/,
     );
-    expect(body).toMatch(/if \(drain && !registered\)/);
+    expect(body).toMatch(/if \(!registered\) \{[\s\S]*?admitDrainSeed\(admissionKey\)[\s\S]*?drainRefusal/);
     expect(body).toMatch(
       /const memory = await this\.memoryGate\("attach", registered\);\s*\n\s*if \(memory\) return memory;/,
     );

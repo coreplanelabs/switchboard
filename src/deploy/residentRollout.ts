@@ -27,9 +27,7 @@ export function configurationFingerprint(configuration: Record<string, unknown>)
   return `sha256:${createHash("sha256").update(canonical(configuration)).digest("hex")}`;
 }
 
-export type ResidentRolloutDecision =
-  | { rollout: "none"; reason: string }
-  | { rollout: "drain"; reason: string };
+export type ResidentRolloutDecision = { rollout: "none"; reason: string } | { rollout: "drain"; reason: string };
 
 /**
  * The only door to `--containers-rollout=none`. Any missing or inconsistent
@@ -45,7 +43,8 @@ export function residentRolloutDecision(input: {
   current: Record<string, unknown> | undefined;
 }): ResidentRolloutDecision {
   if (input.force) return { rollout: "drain", reason: "a forced deploy always applies the container configuration" };
-  if (input.mode !== "registry") return { rollout: "drain", reason: "build mode has no immutable registry manifest receipt" };
+  if (input.mode !== "registry")
+    return { rollout: "drain", reason: "build mode has no immutable registry manifest receipt" };
   const receipt = input.receipt;
   if (!receipt) return { rollout: "drain", reason: "the profile has no resident rollout receipt" };
   if (!DIGEST.test(receipt.manifestDigest))

@@ -903,11 +903,11 @@ describe("makeExecutor resident selection", () => {
   // /status probe and /attach (503 mirror-busy, 429 pool-exhausted). Any attach
   // failure that is NOT needs-ref must fall back to the per-thread backend with
   // a NAMED note — never a silent stall or a raw ⚠️.
-  // Issue 2101: the first attach has the sandbox fallback below to fall to, so
-  // a drained fleet is waited for under the FALLBACK's own cost — never the
-  // deploy's — and the drain's wait rides the selection so the run's
-  // `drain_wait` note still publishes (the incident's run counted zero).
-  it("a drained fleet's first attach falls to the sandbox after the fallback's own bound, the wait riding the selection as drainWaitMs (issue 2101)", async () => {
+  // Issue 2101: the first attach has a seeded sandbox below to fall to, so a
+  // drain seed OFFER is bounded by that fallback's cost. When the persisted
+  // cap denies the seed, however, fresh-cloning would bypass the drain: the
+  // run keeps the typed resident wait and its full duration instead.
+  it("a drain seed denial stays in the typed resident wait and never fresh-clones around the drain", async () => {
     vi.useFakeTimers();
     try {
       stubEnvs();
@@ -917,23 +917,60 @@ describe("makeExecutor resident selection", () => {
           error: "draining: the resident fleet is closed to new runs for deploy 62e4e9a — the run waits at its attach",
           status: 503,
           draining: { since: "2026-09-18T05:00:00.000Z", until: "2026-09-18T06:00:00.000Z", by: "deploy all" },
+          seedAdmitted: false,
         },
       };
       const polls = DRAIN_FALLBACK_WAIT_MS / DRAIN_POLL_MS;
       const { calls } = stubFetch(
         { body: { state: "warm", reason: "" } },
         ...Array.from({ length: polls + 1 }, () => draining),
+        draining,
+        draining,
+        { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" } },
       );
       const p = makeExecutor(residentOpts(), repoCtx());
-      await vi.advanceTimersByTimeAsync(DRAIN_FALLBACK_WAIT_MS + 1_000);
-      const { executor, resident, note, drainWaitMs } = await p;
-      expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
-      expect(resident).toBeFalsy();
-      expect(drainWaitMs).toBe(DRAIN_FALLBACK_WAIT_MS);
-      expect(note).toMatch(
-        /^resident attach failed \(.*did not reopen within the 180s this run could wait.*\) — using fresh sandbox$/,
-      );
-      expect(calls).toEqual(["/status", ...Array.from({ length: polls + 1 }, () => "/attach")]);
+      await vi.advanceTimersByTimeAsync(DRAIN_FALLBACK_WAIT_MS + 2 * DRAIN_POLL_MS);
+      const { executor, resident, note, binding, drainWaitMs } = await p;
+      expect(executor).toBeInstanceOf(ResidentExecutor);
+      expect(resident).toBe(true);
+      expect(drainWaitMs).toBeUndefined();
+      expect(binding?.drainWaitMs).toBe(DRAIN_FALLBACK_WAIT_MS + 2 * DRAIN_POLL_MS);
+      expect(note).toContain(`after waiting ${(DRAIN_FALLBACK_WAIT_MS + 2 * DRAIN_POLL_MS) / 1_000}s for the resident`);
+      expect(calls).toEqual([
+        "/status",
+        ...Array.from({ length: polls + 1 }, () => "/attach"),
+        "/attach",
+        "/attach",
+        "/attach",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an admitted drain run with no usable snapshot re-enters the typed wait instead of fresh-cloning", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const admitted = {
+        status: 503,
+        body: {
+          error: "draining: the resident fleet is closed to new runs for deploy 62e4e9a — the run waits at its attach",
+          status: 503,
+          draining: { since: "2026-09-18T05:00:00.000Z", until: "2026-09-18T06:00:00.000Z", by: "deploy all" },
+          seedAdmitted: true,
+        },
+      };
+      const { calls } = stubFetch({ body: { state: "warm", reason: "" } }, admitted, admitted, {
+        body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" },
+      });
+      const p = makeExecutor(residentOpts(), repoCtx());
+      await vi.advanceTimersByTimeAsync(DRAIN_POLL_MS);
+      const { executor, resident, binding } = await p;
+      expect(executor).toBeInstanceOf(ResidentExecutor);
+      expect(resident).toBe(true);
+      expect(binding?.drainWaitMs).toBe(DRAIN_POLL_MS);
+      expect(calls).toEqual(["/status", "/attach", "/attach", "/attach"]);
     } finally {
       vi.useRealTimers();
     }

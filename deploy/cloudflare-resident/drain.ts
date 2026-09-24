@@ -228,7 +228,10 @@ export function reportImageCurrent(
 /** The `/attach` answer while the fleet is drained: a 503 whose body carries
  *  the record, so the bot waits for `until` at most and the card says why the
  *  run has not started. The `error` word `draining:` is the client's key. */
-export function drainRefusal(drain: DrainRecord, seedAdmitted = false): {
+export function drainRefusal(
+  drain: DrainRecord,
+  seedAdmitted = false,
+): {
   error: string;
   status: 503;
   draining: DrainRecord;

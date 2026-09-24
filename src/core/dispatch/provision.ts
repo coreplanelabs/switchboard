@@ -802,6 +802,8 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
  *  steps to it. */
 export interface AttachContext {
   threadKey: string;
+  /** Stable run identity for persisted first-N drain seed admission. */
+  admissionKey?: string;
   agent: AgentDef;
   profile: RunProfile;
   repoCtx: RepoContext;
@@ -861,7 +863,19 @@ async function attachRound(
   deps: Pick<ProvisionDeps, "config" | "dataDir" | "githubCredentials">,
   ctx: AttachContext,
 ): Promise<RoundWorkspace> {
-  const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal, remainingMs, requester } = ctx;
+  const {
+    threadKey,
+    admissionKey,
+    agent,
+    profile,
+    repoCtx,
+    root,
+    clock,
+    reattach,
+    stopSignal,
+    remainingMs,
+    requester,
+  } = ctx;
   const { onLiveStateObservation } = ctx;
   // A review target's PR-derived ref is authoritative. Passing `ownPr` asks
   // the resident to preserve or conditionally move a sticky thread binding;
@@ -894,6 +908,7 @@ async function attachRound(
         },
         round: {
           threadKey,
+          ...(admissionKey !== undefined ? { admissionKey } : {}),
           agent,
           profile,
           repo: repoCtx.repo,
@@ -969,7 +984,7 @@ export async function attachWorkspace(
   ctx: GateContext & GateCard & Omit<AttachContext, "threadKey">,
 ): Promise<WorkspaceAttach> {
   const { msg, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach, stopSignal } = ctx;
-  const { remainingMs } = ctx;
+  const { admissionKey, remainingMs } = ctx;
   // A local backend is deliberate for the one-shot CLI, but in the hosted bot
   // it means a workspace preset would execute inside the bot container. Refuse
   // from the process capability before the factory can silently create one.
@@ -995,6 +1010,7 @@ export async function attachWorkspace(
   try {
     round = await attachRound(deps, {
       threadKey: msg.threadKey,
+      ...(admissionKey !== undefined ? { admissionKey } : {}),
       agent,
       profile,
       repoCtx,

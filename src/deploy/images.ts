@@ -37,12 +37,17 @@ export const DOCKERFILES: Readonly<Record<ImageKind, string>> = {
 
 /** A release version as the tags carry it: `1.2.3`, or a pre-release `1.2.3-rc.1`. */
 export const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+/** The generated tag over every Docker input the resident image consumes. */
+export const RESIDENT_IMAGE_TAG_FILE = "deploy/cloudflare-resident/image-tag.txt";
+export const RESIDENT_IMAGE_TAG = /^sha256-[0-9a-f]{64}$/;
 
-/** The images a release published: the version and each image's registry name
- *  (project.json `images`, `ghcr.io/<owner>/<repo>[-resident|-sandbox]`). */
+/** The images a release published: the version, each registry name, and the
+ *  tag that identifies its content. The resident tag stays stable across a
+ *  Worker-only release; the other images retain the release version tag. */
 export interface PublishedImages {
   version: string;
   names: Readonly<Record<ImageKind, string>>;
+  tags: Readonly<Record<ImageKind, string>>;
 }
 
 /** Pure: the three published names from project.json (parsed), or the problem with the facts. */
@@ -69,6 +74,7 @@ export const PROJECT_FACTS_FILE = "project.json";
 export function publishedImagesFrom(
   factsText: string | undefined,
   version: string,
+  residentTagText: string | undefined,
 ): { ok: true; images: PublishedImages } | { ok: false; problem: string } {
   if (factsText === undefined) return { ok: false, problem: `${PROJECT_FACTS_FILE}: no such file` };
   let facts: unknown;
@@ -79,7 +85,17 @@ export function publishedImagesFrom(
   }
   const names = imagesFromFacts(facts);
   if (!names.ok) return { ok: false, problem: `${PROJECT_FACTS_FILE}: ${names.problem}` };
-  return { ok: true, images: { version, names: names.names } };
+  const residentTag = residentTagText?.trim();
+  if (!residentTag || !RESIDENT_IMAGE_TAG.test(residentTag))
+    return { ok: false, problem: `${RESIDENT_IMAGE_TAG_FILE}: missing or invalid resident Docker-input tag` };
+  return {
+    ok: true,
+    images: {
+      version,
+      names: names.names,
+      tags: { bot: version, resident: residentTag, sandbox: version },
+    },
+  };
 }
 
 /** `ghcr.io/owner/switchboard-resident` → `switchboard-resident`: the image's
@@ -101,7 +117,7 @@ export function containerImage(
 ): string {
   return profile.images === "build"
     ? DOCKERFILES[kind]
-    : accountRegistryImage(profile.account, registryName(published.names[kind]), published.version);
+    : accountRegistryImage(profile.account, registryName(published.names[kind]), published.tags[kind]);
 }
 
 /** One image to copy: read `source` where the release published it, write it into the account
@@ -131,12 +147,14 @@ export function planImageCopies(
 ): ImagesPlan {
   const images = IMAGE_KINDS.map((kind) => {
     const name = registryName(published.names[kind]);
+    const tag = published.tags[kind];
     return {
       kind,
       name,
-      source: `${published.names[kind]}:${published.version}`,
-      target: accountRegistryImage(account, name, published.version),
-      present: registryHas(listing, name, published.version),
+      source: `${published.names[kind]}:${tag}`,
+      target: accountRegistryImage(account, name, tag),
+      present: registryHas(listing, name, tag),
+      tag,
     };
   });
   return {
@@ -145,7 +163,7 @@ export function planImageCopies(
     images: images.map(({ kind, source, target, present }) => ({ kind, source, target, present })),
     copy: images
       .filter((i) => !i.present)
-      .map(({ kind, source, target, name }) => ({ kind, source, target, name, version: published.version })),
+      .map(({ kind, source, target, name, tag }) => ({ kind, source, target, name, version: tag })),
   };
 }
 

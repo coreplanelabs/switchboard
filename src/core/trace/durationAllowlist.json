@@ -59,7 +59,7 @@
   "src/deploy/plan.ts": 3,
   "src/deploy/registryTransferHost.ts": 2,
   "src/deploy/restart.ts": 3,
-  "src/deploy/run.ts": 12,
+  "src/deploy/run.ts": 13,
   "src/deploy/sandboxLiveGate.ts": 3,
   "src/execution/bashTimeout.ts": 4,
   "src/execution/e2b.ts": 1,

@@ -63,7 +63,7 @@ import { assetPath, installationPath, workPath, type OperatorRoot } from "./oper
 import { checkoutInstallHolds, imageBuiltOutsideDir, readWorkAreaState, type WorkAreaOutcome } from "./workArea.js";
 import { RENDERED_FILE } from "./wranglerTemplate.js";
 import { parseConfigSource, readConfigSource, type ConfigSourceIO } from "./configSource.js";
-import { publishedImagesFrom, type PublishedImages } from "./images.js";
+import { publishedImagesFrom, RESIDENT_IMAGE_TAG_FILE, type PublishedImages } from "./images.js";
 import {
   isExampleProfile,
   parseProfile,
@@ -423,7 +423,7 @@ function readShipped(path: string): string | undefined {
  * is a problem naming it, not a guess.
  */
 export function publishedImagesOnHost(): { ok: true; images: PublishedImages } | { ok: false; problem: string } {
-  return publishedImagesFrom(readShipped(PROJECT_FACTS_FILE), cliVersionOnHost());
+  return publishedImagesFrom(readShipped(PROJECT_FACTS_FILE), cliVersionOnHost(), readShipped(RESIDENT_IMAGE_TAG_FILE));
 }
 
 /**
@@ -951,26 +951,35 @@ async function deployStepTraced(
 ): Promise<StepOutcome> {
   const started = deps.now();
   // A registry-mode resident Worker-only release may leave the Containers
-  // application alone, but only after the fresh exact receipt gate. Every
-  // unknown or mismatch keeps the ordinary drain and rollout path.
+  // application alone, but only after the receipt matches twice: once to choose
+  // the no-drain candidate, then again AFTER its preflight, immediately before
+  // the upload. Drift at either read takes the ordinary draining path, whose
+  // embedded preflight runs again inside the drain window.
   let effectiveStep = step;
   if (step.residentRollout) {
-    const currentRead = deps.readAppConfiguration
-      ? await deps.readAppConfiguration(step.dir, step.residentRollout.containerApp)
-      : { error: "the configuration reader is unavailable" };
-    const current = "value" in currentRead ? currentRead.value : undefined;
-    const decision = residentRolloutDecision({
-      account: step.residentRollout.account,
-      mode: "registry",
-      force: step.forcedBy !== undefined,
-      receipt: step.residentRollout.receipt,
-      current,
-    });
+    const decide = async () => {
+      const currentRead = deps.readAppConfiguration
+        ? await deps.readAppConfiguration(step.dir, step.residentRollout!.containerApp)
+        : { error: "the configuration reader is unavailable" };
+      return residentRolloutDecision({
+        account: step.residentRollout!.account,
+        mode: "registry",
+        force: step.forcedBy !== undefined,
+        receipt: step.residentRollout!.receipt,
+        current: "value" in currentRead ? currentRead.value : undefined,
+      });
+    };
+    let decision = await decide();
+    if (decision.rollout === "none") {
+      const preflight = await waitForResidentPreflight(step, plan, io, deps, exec, started);
+      if (!preflight.ok) return preflight;
+      decision = await decide();
+    }
     io.log(`[deploy:all] ${step.name}: resident container rollout ${decision.rollout} — ${decision.reason}`);
     if (decision.rollout === "none") {
       effectiveStep = {
         ...step,
-        command: [...step.command, "--", "--containers-rollout=none"],
+        command: ["node", "../bin/build-stamp.mjs", "--containers-rollout=none"],
         drain: undefined,
       };
     }
@@ -1008,6 +1017,42 @@ async function deployStepTraced(
     // record would otherwise close the fleet for the record's whole life.
     // `/undrain` is idempotent, and a rejected bearer answers 401 to both alike.
     if (drain.attempted) await endDrain(effectiveStep, drain, io, deps);
+  }
+}
+
+/** Wait out the resident's preflight before a no-rollout upload. A second
+ *  configuration read follows this function, so the read is adjacent to the
+ *  upload rather than preceding an arbitrarily long refusal wait. */
+async function waitForResidentPreflight(
+  step: DeployStep,
+  plan: Pick<DeployPlan, "waitMaxMs" | "pollMs">,
+  io: DeployRunnerIO,
+  deps: SandboxGateDeps,
+  exec: StepExec,
+  started: number,
+): Promise<{ ok: true } | StepOutcome> {
+  const waitMaxMs = step.waitMaxMs ?? plan.waitMaxMs;
+  const deadline = started + waitMaxMs;
+  const preflightStep = { ...step, command: ["npm", "run", "preflight"], drain: undefined };
+  for (;;) {
+    const result = await exec(preflightStep, io);
+    if (result.code === 0) return { ok: true };
+    const outcome = classifyDeployOutput(result.code, result.output);
+    if (outcome.kind === "deployed") return { ok: true };
+    if (outcome.kind !== "preflight-refused" || !step.retryOnPreflightRefusal)
+      return { ok: false, live: "not deployed", reason: outcome.reason };
+    const left = deadline - deps.now();
+    if (left <= 0) return { ok: false, live: "not deployed", reason: preflightGaveUpLine(waitMaxMs, outcome.reason) };
+    const body = step.healthUrl ? await fetchHealthz(step.healthUrl) : undefined;
+    io.log(
+      step.healthUrl
+        ? heartbeatLine(step.name, body, deps.now() - started, waitMaxMs)
+        : `[deploy:all] ${step.name}: still waiting — ${outcome.reason}`,
+    );
+    io.log(
+      `[deploy:all] ${step.name}: retrying preflight in ${plan.pollMs / 1000}s (${Math.ceil(left / 60_000)} min left)`,
+    );
+    await deps.sleep(plan.pollMs);
   }
 }
 
@@ -1218,7 +1263,9 @@ export async function runDeployPlan(
     const read = configToPush ?? (await readConfigForPush(plan.config.source));
     if (!read.ok) return { kind: "refused", problems: [read.problem] };
     seedDuringDrain = parseAppConfigText(read.text).deploy?.seedDuringDrain ?? 0;
-    io.log(`[deploy:all] resident drain: deploy.seedDuringDrain=${seedDuringDrain}${seedDuringDrain === 0 ? " (wait-only)" : " (first-N total snapshot seeds)"}`);
+    io.log(
+      `[deploy:all] resident drain: deploy.seedDuringDrain=${seedDuringDrain}${seedDuringDrain === 0 ? " (wait-only)" : " (first-N total snapshot seeds)"}`,
+    );
   }
   for (const w of plan.warnings) io.warn(`[deploy:all] WARNING ${w}`);
 
@@ -1301,9 +1348,7 @@ export async function runDeployPlan(
         break;
       }
       const effectiveStep =
-        step.name === "resident" && step.drain
-          ? { ...step, drain: { ...step.drain, seedDuringDrain } }
-          : step;
+        step.name === "resident" && step.drain ? { ...step, drain: { ...step.drain, seedDuringDrain } } : step;
       const r = await deployStep(effectiveStep, plan, expectedCommit, io, deps);
       // wrangler always prints `Current Version ID`; a deploy that exits 0 without one is odd enough to say so.
       results.push({

@@ -9,6 +9,7 @@ import {
   publishedImagesFrom,
   registryHas,
   registryName,
+  RESIDENT_IMAGE_TAG_FILE,
   VERSION,
 } from "./images.js";
 import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "./testing/profile.js";
@@ -36,14 +37,32 @@ describe("the published images", () => {
     });
   });
 
-  it("from the facts file's text at a version: a missing or non-JSON file is a problem naming project.json", () => {
-    expect(publishedImagesFrom(JSON.stringify({ images: TEST_PUBLISHED_IMAGES.names }), "2.0.0")).toEqual({
+  it("reads the resident Docker-input tag beside the facts and fails closed when either file is unusable", () => {
+    const residentTag = `sha256-${"b".repeat(64)}`;
+    expect(publishedImagesFrom(JSON.stringify({ images: TEST_PUBLISHED_IMAGES.names }), "2.0.0", residentTag)).toEqual({
       ok: true,
-      images: { version: "2.0.0", names: TEST_PUBLISHED_IMAGES.names },
+      images: {
+        version: "2.0.0",
+        names: TEST_PUBLISHED_IMAGES.names,
+        tags: { bot: "2.0.0", resident: residentTag, sandbox: "2.0.0" },
+      },
     });
-    expect(publishedImagesFrom(undefined, "2.0.0")).toEqual({ ok: false, problem: "project.json: no such file" });
-    expect(publishedImagesFrom("{ not json", "2.0.0")).toEqual({ ok: false, problem: "project.json: not JSON" });
-    expect(publishedImagesFrom("{}", "2.0.0")).toEqual({ ok: false, problem: "project.json: `images` is missing" });
+    expect(publishedImagesFrom(undefined, "2.0.0", residentTag)).toEqual({
+      ok: false,
+      problem: "project.json: no such file",
+    });
+    expect(publishedImagesFrom("{ not json", "2.0.0", residentTag)).toEqual({
+      ok: false,
+      problem: "project.json: not JSON",
+    });
+    expect(publishedImagesFrom("{}", "2.0.0", residentTag)).toEqual({
+      ok: false,
+      problem: "project.json: `images` is missing",
+    });
+    expect(publishedImagesFrom(JSON.stringify({ images: TEST_PUBLISHED_IMAGES.names }), "2.0.0", undefined)).toEqual({
+      ok: false,
+      problem: `${RESIDENT_IMAGE_TAG_FILE}: missing or invalid resident Docker-input tag`,
+    });
   });
 
   it("a release version is three numbers, with an optional pre-release; a tag with a `v`, `latest` or a sha is not one", () => {
@@ -60,7 +79,7 @@ describe("the reference a Worker deploys", () => {
       expect(containerImage(kind, TEST_PROFILE, TEST_PUBLISHED_IMAGES)).toBe(DOCKERFILES[kind]);
   });
 
-  it("in `registry` mode the account registry's copy: `registry.cloudflare.com/<account>/<name>:<version>`, the name the published image's last segment", () => {
+  it("in `registry` mode uses release tags except for the resident's Docker-input content tag", () => {
     expect(registryName("ghcr.io/example/switchboard-resident")).toBe("switchboard-resident");
     expect(registryName("switchboard")).toBe("switchboard");
     expect(accountRegistryImage(ACCOUNT, "switchboard", "1.2.3")).toBe(
@@ -68,7 +87,7 @@ describe("the reference a Worker deploys", () => {
     );
     expect(IMAGE_KINDS.map((kind) => containerImage(kind, TEST_REGISTRY_PROFILE, TEST_PUBLISHED_IMAGES))).toEqual([
       `registry.cloudflare.com/${ACCOUNT}/switchboard:1.2.3`,
-      `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3`,
+      `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:${TEST_PUBLISHED_IMAGES.tags.resident}`,
       `registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:1.2.3`,
     ]);
     // Another owner's fork publishes under its own name; the account registry copy keeps only the image's name.
@@ -109,8 +128,8 @@ describe("the account registry listing", () => {
       },
       {
         kind: "resident",
-        source: "ghcr.io/example/switchboard-resident:1.2.3",
-        target: `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3`,
+        source: `ghcr.io/example/switchboard-resident:${TEST_PUBLISHED_IMAGES.tags.resident}`,
+        target: `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:${TEST_PUBLISHED_IMAGES.tags.resident}`,
         present: false,
       },
       {
@@ -124,10 +143,10 @@ describe("the account registry listing", () => {
     expect(plan.copy).toEqual([
       {
         kind: "resident",
-        source: "ghcr.io/example/switchboard-resident:1.2.3",
-        target: `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3`,
+        source: `ghcr.io/example/switchboard-resident:${TEST_PUBLISHED_IMAGES.tags.resident}`,
+        target: `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:${TEST_PUBLISHED_IMAGES.tags.resident}`,
         name: "switchboard-resident",
-        version: "1.2.3",
+        version: TEST_PUBLISHED_IMAGES.tags.resident,
       },
       {
         kind: "sandbox",
@@ -138,7 +157,10 @@ describe("the account registry listing", () => {
       },
     ]);
     // Everything present: nothing to copy. Nothing present: all three.
-    const all = [...IMAGE_KINDS].map((k) => ({ name: registryName(TEST_PUBLISHED_IMAGES.names[k]), tags: ["1.2.3"] }));
+    const all = [...IMAGE_KINDS].map((k) => ({
+      name: registryName(TEST_PUBLISHED_IMAGES.names[k]),
+      tags: [TEST_PUBLISHED_IMAGES.tags[k]],
+    }));
     expect(planImageCopies(TEST_PUBLISHED_IMAGES, ACCOUNT, all).copy).toEqual([]);
     expect(planImageCopies(TEST_PUBLISHED_IMAGES, ACCOUNT, []).copy.map((c) => c.kind)).toEqual([...IMAGE_KINDS]);
   });

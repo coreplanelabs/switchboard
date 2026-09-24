@@ -2386,6 +2386,7 @@ export async function dispatch(
     const control = registered?.control;
     const attach = await attachWorkspace(deps, {
       msg,
+      admissionKey: run.id,
       io,
       refuse,
       card,

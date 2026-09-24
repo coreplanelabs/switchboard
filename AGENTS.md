@@ -48,8 +48,9 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run fix` | Regenerates every generated artifact and repairs lint and formatting. | Before committing; whenever `check:consistency` reports drift. |
 | `npm run deploy:gen` | Renders each Worker's gitignored `wrangler.jsonc` from its template and the profile in force. | `test`, each Worker's `verify` and `deploy all` run it; by hand before `wrangler dev`. |
 | `npm run deploy:check` | The rendered `wrangler.jsonc` files match `deploy:gen`. | When one looks hand-edited; change the template. |
-| `npm run check:lockfile` | Native packages carry Linux x64 and macOS arm64 variants; records mirror their `package.json`. | After a manifest edit or `npm install`; failures name the fix. |
-| `npm run check:sandbox-pair` | Each Worker on the `cloudflare/sandbox` image pins `@cloudflare/sandbox` to exactly its Dockerfile tag. | After bumping either half of a pair. |
+| `npm run check:lockfile` | Checks native package variants and records. | After a manifest edit or `npm install`. |
+| `npm run check:sandbox-pair` | Checks that sandbox package and image pins match. | After bumping either pin. |
+| `npm run resident-image-tag` | Checks or writes the resident Docker-input content tag. | After resident Docker inputs change. |
 | `npm run check:pr-title` | Judges one PR title as the changelog line: grammar, type, scope, `!`. | `-- "feat(scope): …"` before opening a PR; CI's `title` check. |
 | `npm run pr-title:gen` | Writes the title gate's types and scopes from the release config and the code map. | Part of `fix`. |
 | `npm run pr-title:check` | The committed title vocabulary equals its two sources. | Part of `check:consistency`. |

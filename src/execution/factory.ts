@@ -120,6 +120,8 @@ export interface ExecutorFactoryOptions {
  *  probe). */
 export interface ExecutorContext {
   threadKey: string;
+  /** Stable run identity for persisted first-N drain seed admission. */
+  admissionKey?: string;
   /** the resolved agent (never mutated here) — named in the null executor's error */
   agent: AgentDef;
   /** The run's EFFECTIVE profile (docs/decisions/0026-capability-profiles-and-request-routing.md):
@@ -502,6 +504,7 @@ export async function makeExecutor(
             token: token.reveal(),
             resource,
             threadKey: ctx.threadKey,
+            ...(ctx.admissionKey !== undefined ? { admissionKey: ctx.admissionKey } : {}),
             refHint: ctx.ref,
             readonly,
             sha: ctx.headSha,
@@ -573,12 +576,44 @@ export async function makeExecutor(
         (near ? ` (did you mean \`${near}\`?)` : "");
     }
     if (reason !== undefined) {
-      const drainFailure = failedAttachError !== undefined && (drainWaitMs !== undefined || drainSeedAdmittedOf(failedAttachError));
+      const drainFailure =
+        failedAttachError !== undefined && (drainWaitMs !== undefined || drainSeedAdmittedOf(failedAttachError));
       const drainSeedAdmitted = failedAttachError !== undefined && drainSeedAdmittedOf(failedAttachError);
+      const waitForDrain = async (): Promise<ExecutorSelection> => {
+        const readonly = ctx.profile.identity === "read" ? true : undefined;
+        const selection = await openResident(
+          {
+            baseUrl: resident.baseUrl,
+            token: token.reveal(),
+            resource,
+            threadKey: ctx.threadKey,
+            ...(ctx.admissionKey !== undefined ? { admissionKey: ctx.admissionKey } : {}),
+            refHint: ctx.ref,
+            readonly,
+            sha: ctx.headSha,
+            resolveEnvs: () => gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
+            ...(ctx.ownPr !== undefined ? { ownPr: ctx.ownPr } : {}),
+            ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
+            ...(ctx.onLiveStateObservation !== undefined ? { onLiveStateObservation: ctx.onLiveStateObservation } : {}),
+          },
+          undefined,
+          span,
+          {
+            signal: ctx.stopSignal,
+            budgetMs: FIRST_ATTACH_WAIT_MS,
+            waitedMs: drainWaitMs,
+            drainSeedMode: "wait",
+          },
+        );
+        const totalDrainWaitMs = (drainWaitMs ?? 0) + (selection.binding?.drainWaitMs ?? 0);
+        return totalDrainWaitMs > 0 && selection.binding
+          ? { ...selection, binding: { ...selection.binding, drainWaitMs: totalDrainWaitMs } }
+          : selection;
+      };
       // A drain's zero/denied path is wait-only. Only an atomically admitted
       // run may use the snapshot; every failed, stale or missing admitted seed
-      // keeps the typed drain refusal instead of fresh-cloning around it.
-      if (drainFailure && !drainSeedAdmitted) throw failedAttachError;
+      // keeps the typed drain wait instead of fresh-cloning around it.
+      if (drainFailure && !drainSeedAdmitted) return waitForDrain();
       // The seed (docs/reference/specs/execution.md item 26): the resident could
       // not take the run, but its probe carried the snapshot handle — the
       // sandbox restores it before the run's first command instead of cloning
@@ -602,7 +637,12 @@ export async function makeExecutor(
           ...(drainWaitMs !== undefined ? { drainWaitMs } : {}),
         };
       }
-      if (drainFailure) throw failedAttachError;
+      if (drainFailure) {
+        // The run spent its one admitted seed attempt. A missing/stale/failed
+        // snapshot does not authorize a fresh clone around the drain; re-enter
+        // the typed drain wait and attach to the resident after the lift.
+        return waitForDrain();
+      }
       return {
         executor,
         note: `${reason} — using fresh sandbox${outcome ? ` (${outcome.why})` : ""}`,
@@ -779,6 +819,7 @@ async function reattachWorkspace(
     token: token.reveal(),
     resource,
     threadKey: ctx.threadKey,
+    ...(ctx.admissionKey !== undefined ? { admissionKey: ctx.admissionKey } : {}),
     refHint: ctx.ref,
     readonly: ctx.profile.identity === "read" ? true : undefined,
     sha: ctx.headSha,
@@ -867,7 +908,13 @@ async function openResident(
    *  spent before this attach (the selection probe's), added to the total the
    *  card names; `drainBoundMs` bounds a drained fleet's wait by the caller's
    *  fallback cost (issue 2101). */
-  wait: { signal?: AbortSignal; budgetMs?: number; waitedMs?: number; drainBoundMs?: number } = {},
+  wait: {
+    signal?: AbortSignal;
+    budgetMs?: number;
+    waitedMs?: number;
+    drainBoundMs?: number;
+    drainSeedMode?: "offer" | "wait";
+  } = {},
 ): Promise<ExecutorSelection> {
   let executor = new ResidentExecutor(opts);
   let binding: ResidentBinding;

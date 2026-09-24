@@ -28,4 +28,9 @@ export const TEST_PUBLISHED_IMAGES: PublishedImages = {
     resident: "ghcr.io/example/switchboard-resident",
     sandbox: "ghcr.io/example/switchboard-sandbox",
   },
+  tags: {
+    bot: "1.2.3",
+    resident: `sha256-${"a".repeat(64)}`,
+    sandbox: "1.2.3",
+  },
 };

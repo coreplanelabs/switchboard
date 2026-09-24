@@ -346,7 +346,7 @@ describe("the Worker's wiring (by scan)", () => {
     const start = source.indexOf("private async attachThreadTraced(");
     const attach = source.slice(start, start + 4000);
     const hydrate = attach.indexOf("await this.ensureHydrated();");
-    const gate = attach.indexOf("const drain = await this.fleetDrain();");
+    const gate = attach.indexOf("await this.registry().admitDrainSeed(admissionKey)");
     const reconcile = attach.indexOf('this.reconcileImage("attach")');
     expect(hydrate).toBeGreaterThan(-1);
     expect(gate).toBeGreaterThan(hydrate);
@@ -355,17 +355,18 @@ describe("the Worker's wiring (by scan)", () => {
     expect(attach).toMatch(
       /const registered = \(await this\.ctx\.storage\.get\(runRegKey\(threadKey\)\)\) !== undefined;/,
     );
-    expect(attach).toMatch(/if \(drain && !registered\) \{/);
-    expect(attach).toMatch(/drainRefusal\(drain\)/);
+    expect(attach).toMatch(/if \(!registered\) \{/);
+    expect(attach).toMatch(/drainRefusal\([\s\S]*?admission\.draining,[\s\S]*?admission\.admitted/);
     const handler = source.slice(
       source.indexOf("async function handleAttach("),
       source.indexOf("async function handleDetach("),
     );
     expect(handler).not.toContain("liveDrain(");
-    // A registry that cannot be read is no drain: the run never fails on a flag it could not read.
-    const helper = source.slice(source.indexOf("private async fleetDrain("), source.indexOf("async getInFlightCount("));
-    expect(helper).toMatch(/return liveDrain\(await this\.registry\(\)\.getDrain\(\), systemClock\(\)\);/);
-    expect(helper).toMatch(/catch \(err\) \{[\s\S]*return null;/);
+    // Admission is store-owned: the singleton Registry DO reads, decides and
+    // persists the first-N cap before the resident answers the run.
+    const admission = source.slice(source.indexOf("async admitDrainSeed("), source.indexOf("async clearDrain("));
+    expect(admission).toMatch(/const decision = admitDrainSeed\(record, runKey\);/);
+    expect(admission).toMatch(/await this\.ctx\.storage\.put\(DRAIN_KEY, decision\.record\)/);
     const residents = source.slice(
       source.indexOf("async function handleResidents("),
       source.indexOf("async function handleStatus("),

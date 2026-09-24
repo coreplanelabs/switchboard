@@ -92,12 +92,16 @@
       "when": "CI only — the `bot` and `workers` gate jobs."
     },
     "check:lockfile": {
-      "does": "Native packages carry Linux x64 and macOS arm64 variants; records mirror their `package.json`.",
-      "when": "After a manifest edit or `npm install`; failures name the fix."
+      "does": "Checks native package variants and records.",
+      "when": "After a manifest edit or `npm install`."
     },
     "check:sandbox-pair": {
-      "does": "Each Worker on the `cloudflare/sandbox` image pins `@cloudflare/sandbox` to exactly its Dockerfile tag.",
-      "when": "After bumping either half of a pair."
+      "does": "Checks that sandbox package and image pins match.",
+      "when": "After bumping either pin."
+    },
+    "resident-image-tag": {
+      "does": "Checks or writes the resident Docker-input content tag.",
+      "when": "After resident Docker inputs change."
     },
     "check:pr-title": {
       "does": "Judges one PR title as the changelog line: grammar, type, scope, `!`.",

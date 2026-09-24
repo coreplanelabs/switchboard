@@ -16,7 +16,10 @@ describe("drainReceiptSummary", () => {
           { type: "run_note", kind: "drain_wait", summary: "waited", durationMs: 12_000 },
           { type: "run_note", kind: "cold_sandbox", summary: "seeded", sandboxOutcome: "seeded" },
         ]),
-        { ...finished([{ type: "run_note", kind: "cold_sandbox", summary: "fresh", sandboxOutcome: "fresh" }]), id: "run-2" },
+        {
+          ...finished([{ type: "run_note", kind: "cold_sandbox", summary: "fresh", sandboxOutcome: "fresh" }]),
+          id: "run-2",
+        },
       ]),
     ).toEqual({ runs: 2, waits: 1, waitDurationMs: 12_000, seeded: 1, fresh: 1 });
   });

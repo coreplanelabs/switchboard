@@ -88,8 +88,12 @@ const devGranted = (entry: string) =>
 
 describe("deploy.seedDuringDrain", () => {
   it("accepts a non-negative integer including zero and refuses legacy/unsafe shapes", () => {
-    expect(parseAppConfigText(`${YAML_FIXTURE}\ndeploy:\n  seedDuringDrain: 0\n`).deploy).toEqual({ seedDuringDrain: 0 });
-    expect(parseAppConfigText(`${YAML_FIXTURE}\ndeploy:\n  seedDuringDrain: 3\n`).deploy).toEqual({ seedDuringDrain: 3 });
+    expect(parseAppConfigText(`${YAML_FIXTURE}\ndeploy:\n  seedDuringDrain: 0\n`).deploy).toEqual({
+      seedDuringDrain: 0,
+    });
+    expect(parseAppConfigText(`${YAML_FIXTURE}\ndeploy:\n  seedDuringDrain: 3\n`).deploy).toEqual({
+      seedDuringDrain: 3,
+    });
     for (const value of ["-1", "1.5", '"2"'])
       expect(() => parseAppConfigText(`${YAML_FIXTURE}\ndeploy:\n  seedDuringDrain: ${value}\n`)).toThrow(
         /deploy.seedDuringDrain must be a non-negative integer/,

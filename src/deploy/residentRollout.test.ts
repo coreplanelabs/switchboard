@@ -17,7 +17,9 @@ const receipt = {
 
 describe("residentRolloutDecision", () => {
   it("allows worker-only upload only for the immutable account image and an exact full configuration receipt", () => {
-    expect(residentRolloutDecision({ account, mode: "registry", force: false, receipt, current: configuration })).toEqual({
+    expect(
+      residentRolloutDecision({ account, mode: "registry", force: false, receipt, current: configuration }),
+    ).toEqual({
       rollout: "none",
       reason: "the immutable resident image and full effective container configuration match the verified receipt",
     });
@@ -27,13 +29,23 @@ describe("residentRolloutDecision", () => {
     ["build mode", { mode: "build" as const }],
     ["forced", { force: true }],
     ["missing receipt", { receipt: undefined }],
-    ["moved image", { current: { ...configuration, image: configuration.image.replace(digest, `sha256:${"c".repeat(64)}`) } }],
+    [
+      "moved image",
+      { current: { ...configuration, image: configuration.image.replace(digest, `sha256:${"c".repeat(64)}`) } },
+    ],
     ["configuration drift", { current: { ...configuration, max_instances: 9 } }],
     ["stale fingerprint", { receipt: { ...receipt, configurationFingerprint: `sha256:${"0".repeat(64)}` } }],
     ["missing control-reset/pi receipt", { receipt: { ...receipt, controlResetPiReceipt: "" } }],
   ])("drains and rolls for %s", (_name, override) => {
     expect(
-      residentRolloutDecision({ account, mode: "registry", force: false, receipt, current: configuration, ...override }),
+      residentRolloutDecision({
+        account,
+        mode: "registry",
+        force: false,
+        receipt,
+        current: configuration,
+        ...override,
+      }),
     ).toMatchObject({ rollout: "drain" });
   });
 

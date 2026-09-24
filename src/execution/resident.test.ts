@@ -758,6 +758,14 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[1])).not.toHaveProperty("reuse");
   });
 
+  it("sends the stable run identity for drain admission only when set", async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: ATTACH_OK });
+    await ResidentExecutor.open({ ...OPTS, admissionKey: "run-123" });
+    expect(sentBody(calls[0])).toMatchObject({ admissionKey: "run-123" });
+    await ResidentExecutor.open(OPTS);
+    expect(sentBody(calls[1])).not.toHaveProperty("admissionKey");
+  });
+
   // docs/reference/specs/resident-repos.md item 16: the reason for the hint rides
   // the body only when there is one — the thread's own pull request and its head
   // branch, and the bound-by-default flag — so an older resident, and every
@@ -2625,6 +2633,20 @@ describe("ResidentExecutor.attach during a fleet drain (item 69)", () => {
       // The drain's share of the wait, for the run's `drain_wait` note (issue 2044).
       drainWaitMs: 2 * DRAIN_POLL_MS,
     });
+    expect(calls.map(route)).toEqual(["/attach", "/attach", "/attach"]);
+  });
+
+  it("exposes one persisted seed admission, then waits on that same admission after a failed seed", async () => {
+    const admitted = { ...draining, body: { ...draining.body, seedAdmitted: true } };
+    stubFetch(admitted);
+    const offered = await new ResidentExecutor(OPTS).attach().catch((error: unknown) => error);
+    expect(offered).toBeInstanceOf(ResidentDrainingError);
+    expect((offered as ResidentDrainingError).seedAdmitted).toBe(true);
+
+    const { calls } = stubFetch(admitted, admitted, { raw: "\n" + JSON.stringify(ATTACH_OK) });
+    const waiting = new ResidentExecutor(OPTS).attach(undefined, { drainSeedMode: "wait" });
+    await vi.advanceTimersByTimeAsync(2 * DRAIN_POLL_MS);
+    await expect(waiting).resolves.toMatchObject({ drainWaitMs: 2 * DRAIN_POLL_MS });
     expect(calls.map(route)).toEqual(["/attach", "/attach", "/attach"]);
   });
 

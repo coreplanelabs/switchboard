@@ -227,14 +227,71 @@ describe("deployStep (resident) drains the fleet", () => {
     };
     const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [], configuration);
     const seen: string[][] = [];
+    const order: string[] = [];
+    h.deps.readAppConfiguration = async () => {
+      order.push("configuration");
+      return { value: configuration };
+    };
+    const r = await deployStep(step, plan, HEAD, h.io, h.deps, async (given) => {
+      seen.push(given.command);
+      order.push(given.command.join(" "));
+      return { code: 0, output: DEPLOYED };
+    });
+    expect(r.ok).toBe(true);
+    expect(seen).toEqual([
+      ["npm", "run", "preflight"],
+      ["node", "../bin/build-stamp.mjs", "--containers-rollout=none"],
+    ]);
+    expect(order).toEqual([
+      "configuration",
+      "npm run preflight",
+      "configuration",
+      "node ../bin/build-stamp.mjs --containers-rollout=none",
+    ]);
+    expect(h.calls).toEqual([]);
+    expect(h.plain()[0]).toContain("resident container rollout none");
+  });
+
+  it("configuration drift after the standalone preflight falls back to drain, ordinary deploy, reconcile, then lift", async () => {
+    const account = "a".repeat(32);
+    const digest = `sha256:${"b".repeat(64)}`;
+    const configuration = {
+      image: `registry.cloudflare.com/${account}/switchboard-resident@${digest}`,
+      instance_type: { vcpu: 4, memory_mib: 12288, disk_mb: 20000 },
+      max_instances: 10,
+    };
+    const step: DeployStep = {
+      ...residentStep,
+      residentRollout: {
+        account,
+        containerApp: "switchboard-resident-residentdo",
+        receipt: {
+          manifestDigest: digest,
+          controlResetPiReceipt: "run:verified",
+          configuration,
+          configurationFingerprint: configurationFingerprint(configuration),
+        },
+      },
+    };
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    const reads = [configuration, { ...configuration, max_instances: 9 }];
+    h.deps.readAppConfiguration = async () => ({ value: reads.shift()! });
+    const seen: string[][] = [];
     const r = await deployStep(step, plan, HEAD, h.io, h.deps, async (given) => {
       seen.push(given.command);
       return { code: 0, output: DEPLOYED };
     });
     expect(r.ok).toBe(true);
-    expect(seen).toEqual([["npm", "run", "deploy", "--", "--containers-rollout=none"]]);
-    expect(h.calls).toEqual([]);
-    expect(h.plain()[0]).toContain("resident container rollout none");
+    expect(seen).toEqual([
+      ["npm", "run", "preflight"],
+      ["npm", "run", "deploy"],
+    ]);
+    expect(h.calls.map((call) => call.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+      "https://switchboard-resident.example.test/reconcile",
+      "https://switchboard-resident.example.test/undrain",
+    ]);
+    expect(h.plain()[0]).toContain("resident container rollout drain");
   });
 
   it("without the bearer: no POST at all, the line says the step waits without a drain, and the budget is the step's own", async () => {
