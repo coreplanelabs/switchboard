@@ -11,7 +11,7 @@ import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import { TEST_GITHUB_CREDENTIALS } from "../../execution/testing/githubCredentials.js";
-import { renderProviderFailure, type Provider } from "../provider.js";
+import type { Provider } from "../provider.js";
 import { ExecSandboxRestartedError, type Executor } from "../../execution/executor.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
@@ -66,8 +66,10 @@ import { spawnCapabilityFor, type SpawnCapability, type SpawnDeps } from "./spaw
 import type { SessionCapability } from "../../tools/session.js";
 import {
   ModelPolicyRefusedError,
+  ModelStreamIncompleteError,
   ModelTransientFailureError,
   PiContainerReplacedError,
+  UNKNOWN_MODEL_TERMINAL_MESSAGE,
 } from "../harness/pi/harness.js";
 import { PiHarness } from "../harness/pi/piHarness.js";
 import { OpenCodeHarness } from "../harness/opencode/harness.js";
@@ -630,7 +632,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   it("a failed run: the error propagates, the registry is finished `failed`, the workspace is released first and the card closes with ❌; the drain writes the failed record", async () => {
     const s = setup(new Error("provider down"));
-    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(renderProviderFailure("permanent"));
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
     expect(s.releases).toEqual(["paired"]);
     expect(s.closes).toHaveLength(1);
@@ -1013,13 +1015,13 @@ describe("runLoop — the model turn and everything that rides on it", () => {
   // on the record itself, even when the reply is never delivered.
   it("a failed run leaves its reason on the record: the loop's throw is published as a `run_failed` run_note before the finish, so the run page says why", async () => {
     const s = setup(new Error("harness container: read failed — runtime-replaced"));
-    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(renderProviderFailure("permanent"));
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
     s.ending.drain(undefined);
     await s.writer.settled();
     const rec = (await s.store.get("run-l"))!;
     expect(rec.status).toBe("failed");
     expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "run_failed")).toEqual([
-      expect.objectContaining({ summary: expect.stringContaining(renderProviderFailure("permanent")) }),
+      expect.objectContaining({ summary: expect.stringContaining(UNKNOWN_MODEL_TERMINAL_MESSAGE) }),
     ]);
   });
 
@@ -1051,7 +1053,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     ]);
 
     const down = setup(new Error("provider down"));
-    await expect(runLoop(down.deps, down.ctx)).rejects.toThrow(renderProviderFailure("permanent"));
+    await expect(runLoop(down.deps, down.ctx)).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
     down.ending.drain(undefined);
     await down.writer.settled();
     expect("failure" in (await down.store.get("run-l"))!).toBe(false);
@@ -1082,6 +1084,31 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     s.ending.drain(undefined);
     await s.writer.settled();
     expect((await s.store.get("run-l"))!).toMatchObject({ status: "failed", failure: { kind: "provider_transient" } });
+  });
+
+  it("an exhausted local stream records model_stream_incomplete without claiming a provider failure", async () => {
+    const s = setup("", {
+      agent: "coding",
+      harness: {
+        harnesses: roster({
+          ...watched(piHarness).harness,
+          open: async () => {
+            throw new ModelStreamIncompleteError();
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      bearer: "sbr_run-l.s3cret",
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("stream ended before a complete answer");
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect((await s.store.get("run-l"))!).toMatchObject({
+      status: "failed",
+      failure: { kind: "model_stream_incomplete" },
+    });
   });
 
   it("a coding child whose transport retry budget is exhausted commits and pushes its interrupted workspace before teardown", async () => {
@@ -2071,7 +2098,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(clean.pushed).toEqual([]);
     // The context no longer fits: the round ends with the push already made.
     const overflowed = await compacted({ dirty: true, thenOverflow: true });
-    expect(overflowed.out.failed).toContain(renderProviderFailure("permanent"));
+    expect(overflowed.out.failed).toContain(UNKNOWN_MODEL_TERMINAL_MESSAGE);
     expect(overflowed.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
     // The compaction checkpoint preserves the dirty tree; the abnormal ending
     // then adds its own WIP marker so the durable last push cannot look final.
@@ -3261,7 +3288,7 @@ describe("the pi harness — the container replaced under a living bot: the rela
 
     // Generation B, gone: its pending model call fails and its pi is ended where it ran.
     botDies();
-    await expect(bOpen).rejects.toThrow(renderProviderFailure("permanent"));
+    await expect(bOpen).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
     expect(b.killed).toEqual([5151]);
     await ledgerRun.close();
   });

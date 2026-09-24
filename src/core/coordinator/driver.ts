@@ -423,7 +423,8 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
       ...(typeof costUsd === "number" || costUsd === null ? { costUsd } : {}),
       ...(handoffLists !== undefined ? { handoffLists } : {}),
       // The failure by name (run-history item 57), shape-checked: a
-      // `provider_transient` drives the round-0 re-run (agent-ship item 9).
+      // A provider transient or incomplete local model stream drives the
+      // round-0 re-run (agent-ship item 9).
       ...(isRecord(failure) && typeof failure.kind === "string" ? { failure: { kind: failure.kind } } : {}),
       // What ended an interrupted child (issue 1876): the ending's sentence
       // names the cause instead of claiming a bot restart for every one.

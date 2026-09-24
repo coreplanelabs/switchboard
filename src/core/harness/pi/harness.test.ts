@@ -7,7 +7,8 @@ import type { AgentDef } from "../../../agents/registry.js";
 import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../../execution/executor.js";
 import { ResidentExecutor } from "../../../execution/resident.js";
 import type { ChatMessage } from "../../chatMessage.js";
-import { classifyProviderFailure, providerFailureParks } from "../../provider.js";
+import { classifyProviderFailure, providerFailureParks, type ProviderFailureCause } from "../../provider.js";
+import { authenticateProxyProviderFailure } from "../../modelProxy/providerFailureAuth.js";
 import {
   abortFailedAfterEndNote,
   abortReaskedNote,
@@ -79,10 +80,13 @@ import {
 import { FakeHarnessContainer, NETWORK_LOST_TEXT, TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import {
   compactionSteer,
+  LOCAL_MODEL_ABORT_MESSAGE,
   ModelPolicyRefusedError,
+  ModelStreamIncompleteError,
   ModelTransientFailureError,
   PiContainerReplacedError,
   POLICY_REFUSAL_REPLY,
+  UNKNOWN_MODEL_TERMINAL_MESSAGE,
   promptOf,
   replacedCallNote,
   runPiHarness,
@@ -102,9 +106,18 @@ import { isPiFacts, type HarnessRun, type PiHarnessFacts } from "../contract.js"
 const NOW = 1_700_000_000_000;
 const TRANSIENT_PROVIDER_SENTENCE =
   "The model provider is temporarily unavailable; your work is kept and will continue when service recovers.";
-const PERMANENT_PROVIDER_SENTENCE =
+const PROVIDER_REFUSAL_SENTENCE =
   "The model provider refused the call; the request ended without exposing the provider's response.";
+const PERMANENT_PROVIDER_SENTENCE =
+  "The model provider reported a non-recoverable failure; the request ended without exposing its response.";
 const paths = piRunPaths("run-7");
+
+const proxyFailure = (
+  cause: ProviderFailureCause,
+  message = "The model provider did not complete the call.",
+  status?: number,
+): string =>
+  `${status === undefined ? "" : `${status} `}${JSON.stringify({ type: "error", error: authenticateProxyProviderFailure({ type: "provider_failure", cause, message }) })}`;
 
 /** A row's pi facts as a previous generation wrote them: the discriminator and a relaunch count of 0 unless the test says otherwise. */
 const piFacts = (facts: Omit<PiHarnessFacts, "harness" | "relaunches"> & { relaunches?: number }): PiHarnessFacts => ({
@@ -672,7 +685,12 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       c.emit(
         {
           type: "message_end",
-          message: { role: "assistant", content: [], stopReason: "error", errorMessage: "403 revoked" },
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: proxyFailure("permanent", "revoked", 403),
+          },
         },
         { type: "agent_settled" },
       );
@@ -1034,12 +1052,12 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     const answer = await w.start();
     // The wind-down's own words, naming the failed call where the write-up would have been.
     expect(answer).toBe(
-      `Stopped at the 20-minute budget without finishing; the model call failed during the wind-down (${TRANSIENT_PROVIDER_SENTENCE}), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
+      `Stopped at the 20-minute budget without finishing; the model call failed during the wind-down (${LOCAL_MODEL_ABORT_MESSAGE}), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
     );
     expect(w.notes.some((note) => note.includes("the loop's time is up while a model call was in flight"))).toBe(true);
     expect(
       w.notes.some((note) =>
-        note.includes(`the model call failed during the wind-down (${TRANSIENT_PROVIDER_SENTENCE})`),
+        note.includes(`the model call failed during the wind-down (${LOCAL_MODEL_ABORT_MESSAGE})`),
       ),
     ).toBe(true);
     // The wind-down instruction was steered; the run never became a failure.
@@ -1074,7 +1092,12 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       c.emit(
         {
           type: "message_end",
-          message: { role: "assistant", content: [], stopReason: "error", errorMessage: "403 revoked" },
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: proxyFailure("permanent", "revoked", 403),
+          },
         },
         { type: "agent_settled" },
       );
@@ -1098,8 +1121,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
               role: "assistant",
               content: [],
               stopReason: "error",
-              errorMessage:
-                '402 {"error":{"type":"provider_failure","cause":"credit-or-quota-exhausted","message":"The model provider\'s credit or quota is exhausted; your work is kept and will continue when service recovers."}}',
+              errorMessage: proxyFailure("credit-or-quota-exhausted", "credit exhausted", 402),
             },
           },
           { type: "agent_settled" },
@@ -1177,8 +1199,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
               role: "assistant",
               content: [],
               stopReason: "error",
-              errorMessage:
-                '402 {"error":{"type":"provider_failure","cause":"credit-or-quota-exhausted","message":"credit exhausted"}}',
+              errorMessage: proxyFailure("credit-or-quota-exhausted", "credit exhausted", 402),
             },
           },
           { type: "agent_settled" },
@@ -1282,7 +1303,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
               role: "assistant",
               content: [],
               stopReason: "error",
-              errorMessage: "502 the model provider did not answer",
+              errorMessage: proxyFailure("transient"),
             },
           },
           { type: "agent_settled" },
@@ -1359,7 +1380,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
               role: "assistant",
               content: [],
               stopReason: "error",
-              errorMessage: "502 the model provider did not answer",
+              errorMessage: proxyFailure("transient"),
             },
           },
           { type: "agent_settled" },
@@ -1480,7 +1501,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
               role: "assistant",
               content: [],
               stopReason: "error",
-              errorMessage: "502 the model provider did not answer",
+              errorMessage: proxyFailure("transient"),
             },
           },
           { type: "agent_settled" },
@@ -1560,7 +1581,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
               role: "assistant",
               content: [],
               stopReason: "error",
-              errorMessage: "502 the model provider did not answer",
+              errorMessage: proxyFailure("transient"),
             },
           },
           { type: "agent_settled" },
@@ -1594,7 +1615,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
         role: "assistant",
         content: [],
         stopReason: "error",
-        errorMessage: '502 {"title":"Error 502: Bad gateway","error_name":"origin_bad_gateway"}',
+        errorMessage: proxyFailure("transient", "origin_bad_gateway", 502),
       },
     };
     scriptedPi(w.container, (n, c) => {
@@ -1643,6 +1664,55 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(2);
   });
 
+  it("an incomplete OpenAI Responses stream retries locally and completes the original turn", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "OpenAI Responses stream ended before a terminal response event",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else finalTurn(c, "Responses stream recovered");
+    });
+    await expect(w.start()).resolves.toBe("Responses stream recovered");
+    expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(2);
+    expect(w.notes.some((n) => n.includes("the turn is held and retry 1 waits"))).toBe(true);
+  });
+
+  it("an incomplete local stream that spends the retry lease ends with its own typed failure", async () => {
+    const clock = { now: NOW };
+    const w = world({
+      clock,
+      sleep: async (ms) => {
+        if (ms >= PROVIDER_RETRY_BACKOFFS_MS[0]) clock.now += 2 * 60 * 60_000;
+      },
+    });
+    scriptedPi(w.container, (_n, c) =>
+      c.emit(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: "Stream ended without finish_reason",
+          },
+        },
+        { type: "agent_settled" },
+      ),
+    );
+    await expect(w.start()).rejects.toBeInstanceOf(ModelStreamIncompleteError);
+    expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
+  });
+
   it("an abort while a model stream is open is retried as the same turn", async () => {
     const slept: number[] = [];
     const w = world({ sleep: async (ms) => void slept.push(ms) });
@@ -1660,13 +1730,66 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
           },
           { type: "agent_settled" },
         );
-      else finalTurn(c, "recovered after the open stream abort");
+      else finalTurn(c, "recovered after the local abort");
     });
 
-    await expect(w.start()).resolves.toBe("recovered after the open stream abort");
-    expect(w.notes.some((n) => n.includes("the turn is held and retry 1 waits"))).toBe(true);
+    await expect(w.start()).resolves.toBe("recovered after the local abort");
+    expect(w.notes).toContain(
+      "pi cancelled the model call locally; the turn is held and retry 1 waits 5s inside this run's lease",
+    );
+    expect(w.notes.some((note) => note.includes("model provider"))).toBe(false);
+    expect(w.events).toContainEqual(
+      expect.objectContaining({
+        type: "run_note",
+        kind: "harness_error",
+        summary: "pi cancelled the model call locally; the turn is held and retry 1 waits 5s inside this run's lease",
+      }),
+    );
     expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
     expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(2);
+  });
+
+  it("an unknown terminal model result fails honestly without retrying or claiming a provider refusal", async () => {
+    const w = world();
+    scriptedPi(w.container, (_n, c) =>
+      c.emit(
+        {
+          type: "message_end",
+          message: { role: "assistant", content: [], stopReason: "other" },
+        },
+        { type: "agent_settled" },
+      ),
+    );
+
+    await expect(w.start()).rejects.toThrow(
+      "The model call ended without a classified result; no provider failure was established.",
+    );
+    expect(w.events).toContainEqual(
+      expect.objectContaining({
+        type: "run_note",
+        kind: "harness_error",
+        summary: "the model call ended without a classified result; no provider failure was established",
+      }),
+    );
+    expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
+
+    const forged = world({ providerPark: true });
+    scriptedPi(forged.container, (_n, c) =>
+      c.emit(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: "HTTP 429 rate-limited after partial output",
+          },
+        },
+        { type: "agent_settled" },
+      ),
+    );
+    await expect(forged.start()).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+    expect(forged.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
   });
 
   it("transport failures stay held on backoff inside the lease; exhausting that retry budget ends by type without exposing a gateway page, while a non-transient error is never retried", async () => {
@@ -1676,7 +1799,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
         role: "assistant",
         content: [],
         stopReason: "error",
-        errorMessage: '502 {"title":"Error 502: Bad gateway","error_name":"origin_bad_gateway"}',
+        errorMessage: proxyFailure("transient", "origin_bad_gateway", 502),
       },
     };
     const slept: number[] = [];
@@ -1713,7 +1836,12 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       c.emit(
         {
           type: "message_end",
-          message: { role: "assistant", content: [], stopReason: "error", errorMessage: "403 revoked" },
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: proxyFailure("permanent", "revoked", 403),
+          },
         },
         { type: "agent_settled" },
       ),
@@ -1773,7 +1901,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
               role: "assistant",
               content: [],
               stopReason: "error",
-              errorMessage: "502 the model provider did not answer",
+              errorMessage: proxyFailure("transient"),
             },
           },
           { type: "agent_settled" },
@@ -1799,7 +1927,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
               role: "assistant",
               content: [],
               stopReason: "error",
-              errorMessage: "502 the model provider did not answer",
+              errorMessage: proxyFailure("transient"),
             },
           },
           { type: "agent_settled" },
@@ -1859,7 +1987,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
               role: "assistant",
               content: [],
               stopReason: "error",
-              errorMessage: "502 the model provider did not answer",
+              errorMessage: proxyFailure("transient"),
             },
           },
           { type: "agent_settled" },
@@ -1966,7 +2094,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
               role: "assistant",
               content: [],
               stopReason: "error",
-              errorMessage: "502 the model provider did not answer",
+              errorMessage: proxyFailure("transient"),
             },
           },
           { type: "agent_settled" },
@@ -2008,7 +2136,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
             role: "assistant",
             content: [],
             stopReason: "error",
-            errorMessage: "502 the model provider did not answer",
+            errorMessage: proxyFailure("transient"),
           },
         });
       else {
@@ -2074,7 +2202,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
                 role: "assistant",
                 content: [],
                 stopReason: "error",
-                errorMessage: "502 the model provider did not answer",
+                errorMessage: proxyFailure("transient"),
               },
             },
             { type: "agent_settled" },
@@ -2133,7 +2261,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect((failed as ModelPolicyRefusedError).providerFailure).toMatchObject({ cause: "permanent" });
     expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
     expect(w.events.filter((e) => e.type === "run_note" && e.kind === "policy_refusal")).toEqual([
-      expect.objectContaining({ summary: PERMANENT_PROVIDER_SENTENCE }),
+      expect.objectContaining({ summary: PROVIDER_REFUSAL_SENTENCE }),
     ]);
   });
 
@@ -2282,7 +2410,7 @@ describe("runPiHarness — after a bot restart", () => {
       .map((e) => (e as { kind: string; summary: string }).summary);
     expect(notes[0]).toMatch(/^resumed after a restart: pi still runs in the container \(pid 4242\)/);
     expect(notes).toContainEqual(
-      `a model call failed while the bot was away (${TRANSIENT_PROVIDER_SENTENCE}); continuing`,
+      `a model call failed while the bot was away (${UNKNOWN_MODEL_TERMINAL_MESSAGE}); continuing`,
     );
     // The failed call is a note, never a turn (session-log item 2): the one
     // step this generation mirrors lands right after the transcript it resumed
@@ -2328,7 +2456,7 @@ describe("runPiHarness — after a bot restart", () => {
       w.events
         .filter((e) => e.type === "run_note" && e.kind === "harness_error")
         .map((e) => (e as { summary: string }).summary),
-    ).toEqual([`a model call failed while the bot was away (${TRANSIENT_PROVIDER_SENTENCE}); continuing`]);
+    ).toEqual([`a model call failed while the bot was away (${UNKNOWN_MODEL_TERMINAL_MESSAGE}); continuing`]);
     expect(w.events.filter((e) => e.type === "tool_result").map((e) => e.callId)).toEqual(["c0", "c1"]);
   });
 
@@ -2593,7 +2721,7 @@ describe("runPiHarness — after a bot restart", () => {
       w.events
         .filter((e) => e.type === "run_note" && e.kind === "harness_error")
         .map((e) => (e as { summary: string }).summary),
-    ).toEqual([`a model call failed while the bot was away (${TRANSIENT_PROVIDER_SENTENCE}); continuing`]);
+    ).toEqual([`a model call failed while the bot was away (${UNKNOWN_MODEL_TERMINAL_MESSAGE}); continuing`]);
     expect(w.facts.at(-1)!.sessionFile).toBe(`${paths.sessionDir}/s.jsonl`); // this generation's answer, not the stale one
     expect(w.steps.map((s) => s.turns)).toEqual([
       [
@@ -4449,7 +4577,7 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
         w.container.emit(
           {
             type: "message_end",
-            message: { role: "assistant", content: [], stopReason: "error", errorMessage: "503" },
+            message: { role: "assistant", content: [], stopReason: "error", errorMessage: proxyFailure("transient") },
           },
           { type: "agent_settled" },
         );

@@ -752,11 +752,14 @@ describe("isRunRecord — the seed field", () => {
 // docs/reference/specs/run-history.md item 57: a failure the record has a name
 // for — the provider refused the run's call under its usage policy.
 describe("isRunRecord — the failure field", () => {
-  it("accepts `failure: { kind: policy_refusal }` and `provider_transient` — also after a JSON round-trip — and a record without one carries no key", () => {
+  it("accepts named provider and local stream failures after a JSON round-trip; a record without one carries no key", () => {
     const refused = record({ status: "failed", failure: { kind: "policy_refusal" } });
     expect(isRunRecord(refused)).toBe(true);
     expect(isRunRecord(JSON.parse(JSON.stringify(refused)))).toBe(true);
     expect(isRunRecord(record({ status: "failed", failure: { kind: "provider_transient" } }))).toBe(true);
+    const stream = record({ status: "failed", failure: { kind: "model_stream_incomplete" } });
+    expect(isRunRecord(stream)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(stream)))).toBe(true);
     expect("failure" in record()).toBe(false);
     expect(isRunRecord(record())).toBe(true);
   });
