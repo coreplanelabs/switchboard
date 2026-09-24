@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.262.0](https://github.com/coreplanelabs/switchboard/compare/v1.261.4...v1.262.0) (2026-09-24)
+
+
+### Features
+
+* **ship:** recover original units without replacement work ([#2351](https://github.com/coreplanelabs/switchboard/issues/2351)) ([76a2980](https://github.com/coreplanelabs/switchboard/commit/76a2980e8cdba0211df192b243d45891f7ca7801))
+
 ## [1.261.4](https://github.com/coreplanelabs/switchboard/compare/v1.261.3...v1.261.4) (2026-09-24)
 
 
