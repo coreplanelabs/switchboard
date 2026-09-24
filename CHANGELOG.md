@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.261.3](https://github.com/coreplanelabs/switchboard/compare/v1.261.2...v1.261.3) (2026-09-24)
+
+
+### Bug fixes
+
+* **dispatcher:** recover legacy merge-ready continuations ([#2336](https://github.com/coreplanelabs/switchboard/issues/2336)) ([1e54554](https://github.com/coreplanelabs/switchboard/commit/1e545546334462bba334bda55f60bcbb412475f1))
+
 ## [1.261.2](https://github.com/coreplanelabs/switchboard/compare/v1.261.1...v1.261.2) (2026-09-24)
 
 
