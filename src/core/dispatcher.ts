@@ -501,12 +501,13 @@ function continuationBudgetOf(
 const FULL_SHA = /^[0-9a-f]{40}$/i;
 
 /** The one exact head jointly attested by this unit's own coding and approving
- * review records. The unit key on every child is the authority boundary: runs
- * merely sharing the thread, repository or pull request never enter the set. */
+ * review records. Coding evidence is its final head or a durable push of the
+ * exact unit branch. The unit key on every child is the authority boundary:
+ * runs merely sharing the thread, repository or pull request never enter the set. */
 async function legacyReviewedHeadOf(
   runs: Pick<RunsService, "listUnitRuns">,
   instance: Pick<CoordinatorInstance, "id" | "repo" | "userId">,
-  unit: Pick<CoordinatorUnit, "unit">,
+  unit: Pick<CoordinatorUnit, "unit" | "branch">,
   prNumber: number,
 ): Promise<string | undefined> {
   const listed = await runs
@@ -518,6 +519,8 @@ async function legacyReviewedHeadOf(
     listed.value.unit !== unitKeyOf({ instanceId: instance.id, unit: unit.unit }) ||
     listed.value.instanceId !== instance.id ||
     listed.value.id !== unit.unit ||
+    listed.value.branch !== unit.branch ||
+    listed.value.pr?.number !== prNumber ||
     listed.value.instance.id !== instance.id ||
     listed.value.instance.repo.toLowerCase() !== instance.repo.toLowerCase()
   )
@@ -533,14 +536,15 @@ async function legacyReviewedHeadOf(
       run.repo?.toLowerCase() === instance.repo.toLowerCase(),
   );
   const coding = new Set(
-    owned.flatMap((run) =>
-      run.agent === "coding" &&
-      run.pr?.number === prNumber &&
-      typeof run.headSha === "string" &&
-      FULL_SHA.test(run.headSha)
-        ? [run.headSha.toLowerCase()]
-        : [],
-    ),
+    owned.flatMap((run) => {
+      if (run.agent !== "coding" || run.pr?.number !== prNumber) return [];
+      return [
+        ...(typeof run.headSha === "string" && FULL_SHA.test(run.headSha) ? [run.headSha.toLowerCase()] : []),
+        ...(run.pushed ?? []).flatMap((pushed) =>
+          pushed.ref === unit.branch && FULL_SHA.test(pushed.sha) ? [pushed.sha.toLowerCase()] : [],
+        ),
+      ];
+    }),
   );
   const approved = new Set(
     owned.flatMap((run) => {
