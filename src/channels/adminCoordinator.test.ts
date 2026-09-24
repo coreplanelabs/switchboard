@@ -597,6 +597,72 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     expect("base" in noBase.dispatched[0].opts!.coordinator).toBe(false);
   });
 
+  it("an existing-PR coding spawn carries the durable publication binding only for its sole owner and fails closed after ownership changes", async () => {
+    const head = "a".repeat(40);
+    const publication = {
+      repo: INSTANCE.repo,
+      pr: 7,
+      headRef: "fix/existing",
+      baseRef: "main",
+      expectedHeadSha: head,
+      publicationRef: "fix/existing",
+      owner: { instanceId: INSTANCE.id, unit: "u12" },
+    };
+    const row: CoordinatorUnit = {
+      instanceId: INSTANCE.id,
+      unit: "u12",
+      slug: "u12",
+      branch: "fix/existing",
+      dependsOn: [],
+      threadKey: INSTANCE.threadKey,
+      rounds: [],
+      publication,
+    };
+    const ownership = (owner: { instanceId: string; unit: string } | undefined) => ({
+      claim: () => {},
+      release: () => {},
+      owner: () => owner,
+    });
+    const allowed = harness();
+    await allowed.instances.put(INSTANCE);
+    await allowed.instances.putUnits([row]);
+    allowed.deps.runnerOwnership = ownership(publication.owner);
+    const accepted = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, unit: "u12" }),
+      allowed.deps,
+    );
+    expect(accepted.status).toBe(200);
+    expect(allowed.dispatched[0].opts?.coordinator.publication).toEqual(publication);
+
+    const changed = harness();
+    await changed.instances.put(INSTANCE);
+    await changed.instances.putUnits([row]);
+    changed.deps.runnerOwnership = ownership({ instanceId: "ship_other", unit: "u12" });
+    const blocked = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, unit: "u12" }),
+      changed.deps,
+    );
+    expect(blocked).toMatchObject({
+      status: 409,
+      body: { ok: false, error: "publication_ownership_changed" },
+    });
+    expect(changed.dispatched).toEqual([]);
+
+    const missing = harness();
+    await missing.instances.put(INSTANCE);
+    const { publication: _publication, ...unbound } = row;
+    await missing.instances.putUnits([{ ...unbound, pr: { number: 7, url: "https://github.com/acme/api/pull/7" } }]);
+    const noBinding = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, unit: "u12" }),
+      missing.deps,
+    );
+    expect(noBinding).toMatchObject({
+      status: 409,
+      body: { ok: false, error: "publication_binding_missing" },
+    });
+    expect(missing.dispatched).toEqual([]);
+  });
+
   it("SIGTERM closes child admission immediately: a spawn is held for the next generation and dispatch is never entered", async () => {
     const h = harness({ draining: true });
     await h.instances.put(INSTANCE);
@@ -1999,6 +2065,47 @@ describe("pr-check keeps the machine's adopted pull request authoritative before
     });
     // An adopted pull request is read directly by number; no stale branch listing can mask its state.
     expect(h.prLookups).toEqual([]);
+  });
+
+  it("persists the first complete same-repository PR read as future coding rounds' exact publication authority", async () => {
+    const row: CoordinatorUnit = {
+      instanceId: INSTANCE.id,
+      unit: "u12",
+      slug: "u12",
+      branch: "plan/p/u12",
+      dependsOn: [],
+      threadKey: INSTANCE.threadKey,
+      rounds: [],
+    };
+    const h = harness({
+      prFacts: {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: row.branch,
+        baseRef: "main",
+        headSha: SHA,
+        htmlUrl: "https://github.com/acme/api/pull/7",
+      },
+    });
+    await h.instances.put(INSTANCE);
+    await h.instances.putUnits([row]);
+    expect((await followCheck(h.deps, { unit: row.unit })).status).toBe(200);
+    await expect(h.instances.listUnits(INSTANCE.id)).resolves.toEqual([
+      {
+        ...row,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        publication: {
+          repo: INSTANCE.repo,
+          pr: 7,
+          headRef: row.branch,
+          baseRef: "main",
+          expectedHeadSha: SHA,
+          publicationRef: row.branch,
+          owner: { instanceId: INSTANCE.id, unit: row.unit },
+        },
+      },
+    ]);
   });
 
   it("a followed pull request that merged answers merged with the merge receipt; one closed unmerged answers the terminal closed state with its closer", async () => {

@@ -14,7 +14,7 @@ import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import { predicateFor } from "../authz/predicate.js";
-import type { CoordinatorTag } from "../coordinator/contract.js";
+import { unitOfIdempotencyKey, type CoordinatorTag } from "../coordinator/contract.js";
 import { DECISION_RECORD_ENV } from "../decisionRecordReservation.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
@@ -37,6 +37,7 @@ import { workspaceBindingFor } from "../../execution/factory.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
 import { isContainerGone } from "../harness/container.js";
 import { ModelPolicyRefusedError, ModelTransientFailureError } from "../harness/pi/harness.js";
+import type { ExistingPrPublicationAuthority, ExistingPrPublicationFence } from "../harness/pi/toolRules.js";
 import {
   HARD_STOP_MESSAGE,
   windDownAnswer,
@@ -57,6 +58,7 @@ import {
 import type { ChatMessage } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
 import { currentPrHeadSha, prCommitsSince, recordPrOf, type RepoContext } from "../repoContext.js";
+import { verifyExistingPrPublication } from "../existingPrPublication.js";
 import { PrDescriptionSchema, redactPrDescription, type PrDescription } from "../prDescription.js";
 import { parseHandoff, type Handoff } from "../ship/handoff.js";
 import {
@@ -340,6 +342,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       return undefined;
     }
   })();
+  /** The existing-PR receipt resolved immediately before the harness opens.
+   * Mechanical salvage shares it, so no ending path can bypass the atomic
+   * lease or redirect committed work to another ref. */
+  let existingPrPublication: ExistingPrPublicationAuthority | undefined;
+  /** The harness receives this wrapper by reference. If any mechanical push
+   * loses its atomic lease, replacing `authority` revokes the already-open
+   * harness's model-issued pushes as well as every later salvage path. */
+  let existingPrPublicationFence: ExistingPrPublicationFence | undefined;
+  const blockExistingPrPublication = (reason: string): void => {
+    existingPrPublication = { blocked: reason };
+    if (existingPrPublicationFence !== undefined) existingPrPublicationFence.authority = existingPrPublication;
+  };
   // The start state of the run's branch (record 0062; identityRewrite.ts):
   // fired HERE, at the attach, so the identity rewrite in the post-step
   // judges only the run's own commits. The read runs concurrently with the
@@ -859,8 +873,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       "skipped" in target
         ? { pushed: false, summary: target.skipped }
         : await root.span(cue === "budget" ? "run.budget_salvage" : "run.work_salvage", (span) =>
-            salvageBudgetPush(executor, { branch: target.branch, cue }, span),
+            salvageBudgetPush(
+              executor,
+              {
+                branch: target.branch,
+                cue,
+                ...(existingPrPublication !== undefined ? { publication: existingPrPublication } : {}),
+              },
+              span,
+            ),
           );
+    if ("publicationBlocked" in salvaged && salvaged.publicationBlocked !== undefined)
+      blockExistingPrPublication(salvaged.publicationBlocked);
     const cleanCompletion =
       cue === "completion" &&
       !salvaged.pushed &&
@@ -879,7 +903,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       salvagedTo = { branch: target.branch, head: salvaged.head };
     } else if (salvaged.pushed && !("skipped" in target)) salvagedTo = { branch: target.branch };
     if (salvaged.pushed) await observeWorkspaceNow();
-    else if ("skipped" in target || /failed|not attempted/i.test(salvaged.summary))
+    else if (existingPrPublication !== undefined && "blocked" in existingPrPublication) {
+      // The checkpoint commit is still local. Re-read it so the record/card can
+      // name what is retained, and keep this workspace attached at release.
+      await observeWorkspaceNow();
+      shell.note("quiet", salvaged.summary);
+    } else if ("skipped" in target || /failed|not attempted/i.test(salvaged.summary))
       shell.note("quiet", salvaged.summary);
   };
   /** The relaunch's re-attach ended the run — a stop, or the lease spent — so
@@ -958,7 +987,20 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // (the same read the finish makes) at CALL time so the post-step's event is
   // in — so a resident thread remembers its own branches once the clean tree
   // is gone and a follow-up can rebind onto them.
+  const keepBlockedPublicationWorkspace = (): boolean =>
+    existingPrPublication !== undefined &&
+    "blocked" in existingPrPublication &&
+    run.control.requested !== "hard" &&
+    !commandInFlight &&
+    !gateBypassed &&
+    ((observedUncommitted ?? 0) > 0 || (observedUnpushed ?? 0) > 0);
   const releaseWorkspace = (span?: Span) => {
+    // A denied existing-PR publication may leave the only copy of a tested
+    // commit in this checkout. Do not detach and prove its deletion; keep the
+    // workspace available to the resident/sandbox retention policy and report
+    // that retention beyond this run is not guaranteed. Hard stops, live
+    // commands and gate bypasses retain their mandatory teardown.
+    if (keepBlockedPublicationWorkspace()) return Promise.resolve();
     const events = recordEvents();
     const pushed = pushedBranchesOf(events);
     return round.release({
@@ -1211,7 +1253,43 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // child resumed from a row written before the tag carried a base still
       // has its base protected, not its own unit branch.
       const prBase = repoCtx.baseRef ?? (await coordinatorBase);
-      const ownBranch = prBase !== undefined ? (binding?.ref ?? repoCtx.ref) : undefined;
+      if (coordinator?.publication !== undefined) {
+        const publication = coordinator.publication;
+        const fresh = await (deps.fetchPrFacts ?? fetchPullRequestFacts)({
+          repo: publication.repo,
+          number: publication.pr,
+        }).catch(() => undefined);
+        const verified = verifyExistingPrPublication(
+          publication,
+          {
+            repo: repoCtx.repo,
+            pr: repoCtx.pr,
+            ref: repoCtx.ref,
+            baseRef: prBase,
+            requestHeadSha: repoCtx.headSha,
+            workspaceRef: binding?.ref,
+            workspaceHeadSha: binding?.sha,
+            owner: {
+              instanceId: coordinator.parentInstanceId,
+              unit: unitOfIdempotencyKey(coordinator.idempotencyKey) ?? "",
+            },
+          },
+          fresh,
+        );
+        existingPrPublication = verified.ok ? verified.publication : { blocked: verified.reason };
+        existingPrPublicationFence = { authority: existingPrPublication };
+        if (!verified.ok)
+          shell.note(
+            "quiet",
+            `Existing-PR publication is blocked: ${verified.reason}. Work stays on the bound checkout; no alternate branch or pull request will be published.`,
+          );
+      }
+      const ownBranch =
+        coordinator?.publication !== undefined
+          ? coordinator.publication.publicationRef
+          : prBase !== undefined
+            ? (binding?.ref ?? repoCtx.ref)
+            : undefined;
       const protectedBranches = [
         ...new Set(
           (prBase !== undefined ? [prBase] : [binding?.ref, repoCtx.ref]).filter(
@@ -1284,8 +1362,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                   onCompactionFailed: async (why: string) => {
                     const branch = ownBranch;
                     const salvaged = await root.span("run.compaction_salvage", (span) =>
-                      salvageBudgetPush(executor, { branch, cue: "compaction" }, span),
+                      salvageBudgetPush(
+                        executor,
+                        {
+                          branch,
+                          cue: "compaction",
+                          ...(existingPrPublication !== undefined ? { publication: existingPrPublication } : {}),
+                        },
+                        span,
+                      ),
                     );
+                    if (salvaged.publicationBlocked !== undefined)
+                      blockExistingPrPublication(salvaged.publicationBlocked);
                     onEvent({
                       type: "run_note",
                       kind: "compaction_salvage",
@@ -1301,6 +1389,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               checkout: binding?.workspace ?? "/workspace",
               ...(ownBranch !== undefined ? { branch: ownBranch } : {}),
               protectedBranches,
+              ...(existingPrPublicationFence !== undefined ? { publication: existingPrPublicationFence } : {}),
             },
             ...(round.selection.backend ? { backend: round.selection.backend } : {}),
             span: root,
@@ -1666,24 +1755,40 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // ending left running is read off the record once it has — here, once,
     // whatever the post-step does next.
     await endHarness();
-    // What the run leaves uncommitted or unpushed does not outlive it: a run
-    // starts from a clean tree (resident-repos item 17), and the release that
-    // follows the reply discards the tree. Said HERE — on the record, before
-    // the finally below finish()es the stream to content, and on the card's
-    // label before it closes — because the release runs after the record is
-    // sealed and could not say it anywhere a person reads. Read off the last
-    // observation above (after the description turn, in case it pushed); a
-    // hard stop observed nothing and has its own ⛔.
+    // Ordinarily, what the run leaves uncommitted or unpushed does not outlive
+    // it: a run starts from a clean tree (resident-repos item 17), and release
+    // discards a resident tree. The one bounded exception is a publication
+    // fence that denied the existing PR: the run keeps that checkout attached
+    // and says its later retention is unverified. Said HERE — on the record
+    // before finish() seals it, and on the card before it closes — because the
+    // release happens afterward. Read off the last observation above (after
+    // the description turn, in case it pushed); a hard stop observed nothing
+    // and has its own ⛔.
     const leftBehind =
       isCodingPrRun && !tailSkipped() && !workSalvageAttempted
         ? workLeftBehindOf({ uncommittedChanges: observedUncommitted, unpushedCommits: observedUnpushed })
         : undefined;
+    const blockedCheckpoint =
+      keepBlockedPublicationWorkspace() &&
+      existingPrPublication !== undefined &&
+      "blocked" in existingPrPublication &&
+      observedUncommitted !== undefined &&
+      observedUnpushed !== undefined &&
+      (observedUncommitted > 0 || observedUnpushed > 0)
+        ? {
+            reason: existingPrPublication.blocked,
+            uncommitted: observedUncommitted,
+            unpushed: observedUnpushed,
+            ...(observedHead !== undefined ? { head: observedHead } : {}),
+          }
+        : undefined;
     /** What the tail established, for the wind-down's answer (harness-pi item
      *  6): the tree as the salvage or the last observation left it, its fate
      *  under the release the record decides (`releaseModeFor`: torn down when
-     *  a command may still run in it; else a cold workspace is kept for the
-     *  thread by its `if-idle` release and a resident's tree is discarded, a
-     *  run starting from a clean tree), and whether a description was
+     *  a command may still run in it; a publication-blocked checkpoint stays
+     *  attached; else a cold workspace is kept for the thread by `if-idle`
+     *  and a resident's tree is discarded, a run starting from a clean tree),
+     *  and whether a description was
      *  submitted. A run with no workspace, or whose tail was skipped or
      *  observes no tree, establishes only that. */
     const endingFacts = (): EndingFacts => {
@@ -1704,11 +1809,26 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           kind: "left",
           uncommitted: observedUncommitted,
           unpushed: observedUnpushed,
-          fate: commandInFlight ? "torn_down" : profile.machine === "repo-resident" ? "discarded" : "kept",
+          fate:
+            blockedCheckpoint !== undefined
+              ? "retained_unverified"
+              : commandInFlight
+                ? "torn_down"
+                : profile.machine === "repo-resident"
+                  ? "discarded"
+                  : "kept",
         };
       return { workspace, description: prDescription !== undefined ? "submitted" : "not_submitted" };
     };
-    if (leftBehind) {
+    if (blockedCheckpoint !== undefined) {
+      const checkpoint = blockedCheckpoint.head ? ` at ${blockedCheckpoint.head.slice(0, 7)}` : "";
+      const summary =
+        `the existing-PR push is blocked (${blockedCheckpoint.reason}); kept the local checkpoint${checkpoint} with ` +
+        `${blockedCheckpoint.uncommitted} uncommitted change(s) and ${blockedCheckpoint.unpushed} unpushed commit(s) in the run workspace; ` +
+        "no alternate ref or pull request was created, and retention beyond this run is unverified";
+      events.publish({ type: "run_note", kind: "publication_blocked", summary: oneLine(summary), at: clock() });
+      shell.note("quiet", `⚠️ ${summary}`);
+    } else if (leftBehind) {
       events.publish({
         type: "run_note",
         kind: "work_left_behind",
@@ -1741,8 +1861,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // the dispatch's resolved ref — binding is only ever set on the resident
     // path (factory.ts), so no resident check is needed. The note rides on
     // the final reply below. A hard stop observed nothing above and posts
-    // nothing; a relaunch that ended the run likewise (`tailSkipped`).
-    if (isCodingPrRun && !tailSkipped() && !endingSalvageAttempted) {
+    // nothing; a relaunch that ended the run likewise (`tailSkipped`). An
+    // existing-PR publication denial skips the whole post-step: no lookup,
+    // edit or open may reuse stale intent or create a replacement pull request.
+    if (
+      isCodingPrRun &&
+      !tailSkipped() &&
+      !endingSalvageAttempted &&
+      !(existingPrPublication !== undefined && "blocked" in existingPrPublication)
+    ) {
       // A child may run in its own unit thread: link the request that started
       // the pipeline, with the copied message as fallback for older records.
       const instance =

@@ -63,6 +63,16 @@ describe("windDownAnswer — the finale answer reads what the ending established
     );
   });
 
+  it("a publication-blocked workspace names the local checkpoint without promising retention or continuation", () => {
+    expect(
+      windDownAnswer(time, 45, {
+        workspace: { kind: "left", uncommitted: 0, unpushed: 1, fate: "retained_unverified" },
+      }),
+    ).toBe(
+      "Stopped at the 45-minute budget without finishing. This is a bug: the task outlived its run budget and no automatic continuation was scheduled. 0 uncommitted change(s) and 1 unpushed commit(s) remain in the attached workspace after the existing-PR push was blocked; retention beyond this run is unverified, so no continuation is promised.",
+    );
+  });
+
   it("work left in a discarded or torn-down tree closes on the counts and fate after naming the gap", () => {
     expect(
       windDownAnswer(time, 45, { workspace: { kind: "left", uncommitted: 2, unpushed: 0, fate: "discarded" } }),

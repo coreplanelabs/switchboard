@@ -231,10 +231,16 @@ export type WorkspaceAtEnd =
   /** The budget salvage pushed what the tree held to `branch`, at `head`. */
   | { kind: "salvaged"; branch: string; head?: string }
   /** Work measured in the tree that nothing pushed, and its fate: `kept` for
-   *  the thread by a cold workspace's if-idle release, `discarded` at the
-   *  run's end by a resident's (a run starts from a clean tree), `torn_down`
-   *  when the ending may have left a command running in it. */
-  | { kind: "left"; uncommitted: number; unpushed: number; fate: "kept" | "discarded" | "torn_down" };
+   *  the thread by a cold workspace's if-idle release; `retained_unverified`
+   *  when an existing-PR publication denial keeps the checkout attached but
+   *  cannot promise later recovery; `discarded` at a resident run's end (a run
+   *  starts from a clean tree); `torn_down` when a command may still run. */
+  | {
+      kind: "left";
+      uncommitted: number;
+      unpushed: number;
+      fate: "kept" | "retained_unverified" | "discarded" | "torn_down";
+    };
 
 /** The facts the run loop hands the composer once the post-steps have run, in
  *  the answer's precedence: the tree, then the description. Absent fields are
@@ -320,9 +326,11 @@ function established(facts: EndingFacts | undefined): string {
     tree =
       w.fate === "kept"
         ? `${counted(w)} sit in the workspace, kept for this thread until it idles out — a follow-up here reuses them.`
-        : w.fate === "discarded"
-          ? `${counted(w)} were left in the tree and discarded at the run's end.`
-          : `${counted(w)} were left in the tree, which is torn down since a command may still be running in it.`;
+        : w.fate === "retained_unverified"
+          ? `${counted(w)} remain in the attached workspace after the existing-PR push was blocked; retention beyond this run is unverified, so no continuation is promised.`
+          : w.fate === "discarded"
+            ? `${counted(w)} were left in the tree and discarded at the run's end.`
+            : `${counted(w)} were left in the tree, which is torn down since a command may still be running in it.`;
   const description =
     facts?.description === "submitted"
       ? "The PR description was submitted."

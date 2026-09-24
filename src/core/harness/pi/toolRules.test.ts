@@ -311,6 +311,51 @@ describe("judgeToolCall — bash", () => {
   });
 });
 
+describe("judgeToolCall — an existing-PR publication fence", () => {
+  const expected = "a".repeat(40);
+  const own = {
+    identity: "write" as const,
+    checkout: "/work/repo",
+    branch: "fix/existing",
+    protectedBranches: ["main"],
+    publication: { authority: { ref: "fix/existing", expectedHeadSha: expected } },
+  };
+
+  it("allows only the owned ref with an explicit atomic lease at the durable expected head", () => {
+    expect(
+      judgeToolCall(
+        "bash",
+        {
+          command: `git push --force-with-lease=refs/heads/fix/existing:${expected} origin HEAD:refs/heads/fix/existing`,
+        },
+        own,
+      ),
+    ).toEqual({ verdict: "allowed" });
+    for (const command of [
+      "git push origin fix/existing",
+      "git push --force-with-lease origin fix/existing",
+      `git push --force-with-lease=refs/heads/fix/existing:${"b".repeat(40)} origin fix/existing`,
+      `git push --force-with-lease=refs/heads/fix/existing:${expected} origin fix/alternate`,
+      `git push --force-with-lease=refs/heads/fix/existing:${expected} origin HEAD:refs/heads/fix/existing HEAD:refs/heads/fix/alternate`,
+      "git push",
+    ])
+      expect(judgeToolCall("bash", { command }, own)).toMatchObject({ verdict: "refused" });
+  });
+
+  it("refuses every publication when the fresh binding check was blocked", () => {
+    expect(
+      judgeToolCall(
+        "bash",
+        { command: "git push origin fix/existing" },
+        {
+          ...own,
+          publication: { authority: { blocked: "the remote head moved" } },
+        },
+      ),
+    ).toEqual({ verdict: "refused", reason: "repo:use — existing-PR publication blocked: the remote head moved" });
+  });
+});
+
 describe("judgeToolCall — a run that names its own branch", () => {
   const own = { identity: "write" as const, checkout: "/work/repo", protectedBranches: ["main", "release/1.2"] };
   it("may push any branch to origin but the protected ones — the base its pull request targets", () => {

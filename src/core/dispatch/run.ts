@@ -453,6 +453,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
       parentInstanceId: coordinator.parentInstanceId,
       ...(unit !== undefined ? { unit } : {}),
       ...(coordinator.base !== undefined ? { base: coordinator.base } : {}),
+      ...(coordinator.publication !== undefined ? { publication: coordinator.publication } : {}),
       at: clock(),
     });
   }

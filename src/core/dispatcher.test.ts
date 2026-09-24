@@ -9176,6 +9176,7 @@ workspaceDir: __WORKDIR__
     author: { ...SHIP_BOT },
     headRef: SHIP_BRANCH,
     headSha: HEAD_A,
+    baseRef: "main",
     sameRepoHead: true,
     htmlUrl: PR_URL,
     ...over,

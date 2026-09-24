@@ -502,6 +502,8 @@ export type Brief =
       kind: "findings";
       unit: string;
       pr: number;
+      /** The exact reviewed head the fix round may replace. */
+      headSha?: string;
       /** The review run normally supplies the findings. An adopted attempt
        *  can recover them from the last posted verdict marker instead. */
       reviewRunId?: string;
@@ -1466,6 +1468,7 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
       kind: "findings",
       unit,
       pr,
+      ...(s.lastReviewHead !== undefined ? { headSha: s.lastReviewHead } : {}),
       ...(reviewRunId !== undefined ? { reviewRunId } : {}),
       ...(reviewRunId === undefined || (answers !== undefined && answers.length > 0) ? { findings: issued } : {}),
       ...(answers !== undefined && answers.length > 0 ? { answers } : {}),

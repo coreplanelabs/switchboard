@@ -208,6 +208,11 @@ export type RunNoteKind =
    *  after the model's last turn — the release itself runs after the record
    *  is sealed — and set on the card's label too, so the loss is never silent. */
   | "work_left_behind"
+  /** An existing pull request's exact publication fence denied the push while
+   *  the workspace held a local checkpoint. The workspace stays attached
+   *  instead of being discarded or redirected; the summary names the head,
+   *  counts, denial and that retention beyond the run remains unverified. */
+  | "publication_blocked"
   /** The run's ending may have left a command running in its workspace — a
    *  call cut by the ending's abort or interrupt, or open when the run failed —
    *  so the release tears the workspace down rather than pair it for the
@@ -356,6 +361,7 @@ export const RUN_NOTE_KINDS = [
   "ledger_untracked",
   "rebind_refused",
   "work_left_behind",
+  "publication_blocked",
   "workspace_torn_down",
   "pr_not_opened",
   "pr_head_unverified",
@@ -953,7 +959,15 @@ export type RunEvent =
    *  instead of letting the binding ref — the unit branch itself — stand in.
    *  `base` is absent when the spawn knew none; the post-step then falls to
    *  the coordinator store's `instance.base`. Additive: unknown → ignored. */
-  | { type: "coordinator_tag"; parentInstanceId: string; unit?: string; base?: string; seq?: number; at?: number }
+  | {
+      type: "coordinator_tag";
+      parentInstanceId: string;
+      unit?: string;
+      base?: string;
+      publication?: import("./coordinator/contract.js").ExistingPrPublicationBinding;
+      seq?: number;
+      at?: number;
+    }
   /** The plan runner instance a ship run's hand-off created (record 0051 R2;
    *  docs/reference/specs/run-history.md item 2): published by the ship branch
    *  after `handOffToCoordinator` succeeds, straight to the registry like

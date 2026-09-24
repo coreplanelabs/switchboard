@@ -76,6 +76,7 @@ import {
   type CoordinatorInstance,
   type CoordinatorTag,
   type CoordinatorUnit,
+  type ExistingPrPublicationBinding,
   type ThreadEvent,
   type UnitIdle,
   type UnitWakeAnswer,
@@ -221,6 +222,7 @@ export interface AdminCoordinatorDeps {
   runnerOwnership?: {
     claim(repo: string, prNumber: number, owner?: { instanceId: string; unit: string }): void;
     release(repo: string, prNumber: number): void;
+    owner(repo: string, prNumber: number): { instanceId: string; unit: string } | undefined;
   };
   /** The ship grant as the requester's channel and user scopes say now. Idle
    * waits can outlive a config change, so a wake never relies on the grant
@@ -885,6 +887,46 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // and documents (`foldThreadAttachments`): what the append kept under the cap
   // has a reader, as the ack promised.
   const carried = foldThreadAttachments(folded);
+  // An existing-PR coding child is admitted only with a complete durable
+  // publication binding and while this exact unit still owns the pull request.
+  // A missing binding/recovery view or a rival owner blocks before the model.
+  const existingPrCodingTarget =
+    req.preset === "coding" &&
+    row !== undefined &&
+    (row.publication !== undefined ||
+      row.pr !== undefined ||
+      row.resume !== undefined ||
+      parsePlanBranch(row.branch) === undefined);
+  if (existingPrCodingTarget) {
+    if (row.publication === undefined)
+      return json(409, {
+        ok: false,
+        error: "publication_binding_missing",
+        message: "the existing pull request has no durable publication binding",
+        at,
+      });
+    try {
+      const owner = deps.runnerOwnership?.owner(instance.repo, row.publication.pr);
+      if (
+        owner === undefined ||
+        owner.instanceId !== row.publication.owner.instanceId ||
+        owner.unit !== row.publication.owner.unit
+      )
+        return json(409, {
+          ok: false,
+          error: "publication_ownership_changed",
+          message: "the durable existing-PR publication owner is no longer the runner's sole owner",
+          at,
+        });
+    } catch (err) {
+      return json(409, {
+        ok: false,
+        error: "publication_ownership_unknown",
+        message: describe(err),
+        at,
+      });
+    }
+  }
   // The child's message is the one the requester would have typed, in the
   // child's thread, as the requester the parent record names. The directive is
   // the message's own (`childRequestText`), so the findings step's `agent:coding`
@@ -937,10 +979,24 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // The child is dispatched at its unit branch (the resident attaches there),
   // so the thread cannot tell the post-step which branch the pull request
   // targets: the tag says it — the plan's base — when the instance knows one.
+  const roundExpectedHead =
+    req.brief?.kind === "findings" || req.brief?.kind === "rebase"
+      ? req.brief.headSha
+      : req.brief?.kind === "contract"
+        ? req.brief.continue?.from
+        : undefined;
+  const publication =
+    req.preset === "coding" && row?.publication !== undefined
+      ? {
+          ...row.publication,
+          ...(roundExpectedHead !== undefined ? { expectedHeadSha: roundExpectedHead } : {}),
+        }
+      : undefined;
   const tag: CoordinatorTag = {
     parentInstanceId: instance.id,
     idempotencyKey: key,
     ...(instance.base !== undefined ? { base: instance.base } : {}),
+    ...(publication !== undefined ? { publication } : {}),
   };
   let dispatching: Promise<DispatchOutcome>;
   try {
@@ -1727,10 +1783,36 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const unit = await unitRowOf(deps, instance, body.unit as string | undefined);
   if (!unit.ok) return unit.response;
   const branch = unit.row?.branch ?? instance.branch;
-  // The unit's row remembers its pull request, so a person reads it there.
-  const remember = async (pr: { number: number; url: string }) => {
-    if (unit.row && (unit.row.pr?.number !== pr.number || unit.row.pr.url !== pr.url))
-      await deps.instances.putUnits([{ ...unit.row, pr }]);
+  // The unit's row remembers its pull request, so a person reads it there. On
+  // first discovery it also records the complete publication authority future
+  // coding rounds require; a partial/foreign read never creates one.
+  const remember = async (pr: { number: number; url: string }, facts?: PullRequestFacts) => {
+    if (!unit.row) return;
+    const publication: ExistingPrPublicationBinding | undefined =
+      unit.row.publication ??
+      (facts?.state === "open" &&
+      facts.sameRepoHead === true &&
+      facts.headBranchExists === true &&
+      typeof facts.headRef === "string" &&
+      typeof facts.baseRef === "string" &&
+      typeof facts.headSha === "string" &&
+      /^[0-9a-f]{40}$/i.test(facts.headSha)
+        ? {
+            repo: instance.repo,
+            pr: pr.number,
+            headRef: facts.headRef,
+            baseRef: facts.baseRef,
+            expectedHeadSha: facts.headSha,
+            publicationRef: facts.headRef,
+            owner: { instanceId: instance.id, unit: unit.row.unit },
+          }
+        : undefined);
+    if (
+      unit.row.pr?.number !== pr.number ||
+      unit.row.pr.url !== pr.url ||
+      (unit.row.publication === undefined && publication !== undefined)
+    )
+      await deps.instances.putUnits([{ ...unit.row, pr, ...(publication !== undefined ? { publication } : {}) }]);
   };
   try {
     // Once the machine has adopted a pull request, its number is the authority:
@@ -1743,9 +1825,13 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       const fallbackUrl = unit.row?.pr?.url ?? `https://github.com/${instance.repo}/pull/${follow}`;
       const state = pullRequestState(follow, fallbackUrl, facts);
       if (state === undefined) throw new Error(headBranchStateError(instance.repo, follow));
-      await remember({ number: follow, url: String(state.url) });
+      await remember({ number: follow, url: String(state.url) }, facts);
       if (state.state !== "open") return json(200, { ok: true, ...state, at });
 
+      deps.runnerOwnership?.claim(instance.repo, follow, {
+        instanceId: instance.id,
+        unit: unit.row?.unit ?? (body.unit as string),
+      });
       const prRef = { repo: instance.repo, number: follow };
       const headSha = facts.headSha;
       const approved =
@@ -1788,7 +1874,6 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     }
     const open = await deps.findOpenPrByHead(instance.repo, branch);
     if (open) {
-      await remember({ number: open.number, url: open.htmlUrl });
       deps.runnerOwnership?.claim(instance.repo, open.number, {
         instanceId: instance.id,
         unit: unit.row?.unit ?? (body.unit as string),
@@ -1798,6 +1883,7 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       // only the facts read proves the head ref still exists.
       const liveFacts = await deps.fetchPrFacts({ repo: instance.repo, number: open.number });
       if (liveFacts === undefined) throw new Error(`could not read ${instance.repo}#${open.number}`);
+      await remember({ number: open.number, url: open.htmlUrl }, liveFacts);
       const current = pullRequestState(open.number, open.htmlUrl, liveFacts);
       if (current === undefined) throw new Error(headBranchStateError(instance.repo, open.number));
       if (current.state !== "open") return json(200, { ok: true, ...current, at });

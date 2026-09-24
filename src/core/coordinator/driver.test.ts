@@ -1656,7 +1656,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       step: "U10/1/findings",
       preset: "coding",
       budget: 90,
-      brief: { kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-r1" },
+      brief: { kind: "findings", unit: "U10", pr: 7, headSha: HEAD, reviewRunId: "run-r1" },
     });
     expect(b.of("spawn")[3]).toEqual({
       parentInstanceId: INSTANCE,

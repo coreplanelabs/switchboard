@@ -148,10 +148,10 @@ type Planned = {
   /** Who merges: `runner` for a seeded plan, `person` for a generated one. */
   merge: "runner" | "person";
   /** A resume at review rides the generated unit's row, on the pull request's own head branch. */
-  resume?: { pr: number; headSha?: string; url?: string };
+  resume?: { pr: number; headSha: string; url?: string };
   /** The thread's open pull request a generated task adopts: round 0 runs on
    *  its head branch and the pre-check finds it (agent-ship item 10). */
-  adopt?: { pr: number; url?: string };
+  adopt?: { pr: number; headSha: string; url?: string };
   /** The entry's branch (an adopted or resumed pull request's head) overrides the graph's on the one generated unit. */
   entryBranch?: string;
   /** An ambiguously bound base ref the preflight found missing on the
@@ -341,15 +341,30 @@ async function rowsFor(
         const taskKey = p.recordTasks?.[u.id];
         const record =
           taskKey !== undefined ? await reserve(p.identity.repo, taskKey, previous?.record) : previous?.record;
+        const branch = p.entryBranch ?? u.branch;
+        const existing = p.adopt ?? p.resume;
+        const publication =
+          existing !== undefined && p.entryBranch !== undefined
+            ? {
+                repo: p.identity.repo,
+                pr: existing.pr,
+                headRef: p.entryBranch,
+                baseRef: p.base,
+                expectedHeadSha: existing.headSha,
+                publicationRef: p.entryBranch,
+                owner: { instanceId, unit: u.id },
+              }
+            : undefined;
         return {
           instanceId,
           unit: u.id,
           slug: u.slug,
           title: u.title,
-          branch: p.entryBranch ?? u.branch,
+          branch,
           dependsOn: u.dependsOn,
           rounds: [],
           ...(p.resume !== undefined ? { resume: p.resume } : {}),
+          ...(publication !== undefined ? { publication } : {}),
           ...(previous?.lastPush !== undefined ? { lastPush: previous.lastPush } : {}),
           ...(record !== undefined ? { record } : {}),
         };

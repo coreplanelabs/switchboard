@@ -164,6 +164,7 @@ const openBotPr = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
   author: { ...SHIP_BOT },
   headRef: "ship/fix-the-login-redirect-abc123",
   headSha: HEAD_A,
+  baseRef: "main",
   sameRepoHead: true,
   htmlUrl: PR_URL,
   ...over,
@@ -359,16 +360,26 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
       branch: "ship/fix-the-login-redirect-abc123",
       base: "main",
     });
+    const unit = "U1";
     expect(await s.instances.listUnits("plan-implement-the-task-this-ab4360")).toEqual([
       {
         instanceId: "plan-implement-the-task-this-ab4360",
-        unit: "U1",
+        unit,
         slug: "u1",
         title: "Implement the task this thread's ship request describes.",
         branch: "ship/fix-the-login-redirect-abc123",
         dependsOn: [],
         rounds: [],
         resume: { pr: 7, headSha: HEAD_A, url: PR_URL },
+        publication: {
+          repo: "acme/api",
+          pr: 7,
+          headRef: "ship/fix-the-login-redirect-abc123",
+          baseRef: "main",
+          expectedHeadSha: HEAD_A,
+          publicationRef: "ship/fix-the-login-redirect-abc123",
+          owner: { instanceId: s.created[0]!, unit },
+        },
       },
     ]);
     expect(s.replies[0]).toContain(`the review loop of ${PR_URL} resumes at its next review round`);
