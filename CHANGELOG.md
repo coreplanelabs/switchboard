@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.261.2](https://github.com/coreplanelabs/switchboard/compare/v1.261.1...v1.261.2) (2026-09-24)
+
+
+### Bug fixes
+
+* **core:** fence existing PR publication ([#2332](https://github.com/coreplanelabs/switchboard/issues/2332)) ([337a55a](https://github.com/coreplanelabs/switchboard/commit/337a55acf896ab675c187eddbcb1d084425703e6))
+* **dispatcher:** keep quiet output focused ([#2330](https://github.com/coreplanelabs/switchboard/issues/2330)) ([f9cba54](https://github.com/coreplanelabs/switchboard/commit/f9cba549572d5f98ddc31fabf3edac31592a245e))
+
 ## [1.261.1](https://github.com/coreplanelabs/switchboard/compare/v1.261.0...v1.261.1) (2026-09-23)
 
 
