@@ -87,6 +87,18 @@ export interface PiAssistantMessage {
  *  `sensitive` (its safety filter), the Chat Completions `content_filter`. A
  *  closed set of wire words — the explanation's text is never read. */
 export const POLICY_REFUSAL_STOP_REASONS: ReadonlySet<string> = new Set(["refusal", "sensitive", "content_filter"]);
+const SUCCESSFUL_STOP_REASONS: ReadonlySet<string> = new Set(["stop", "toolUse", "length"]);
+
+/** A model turn pi ended without an assistant answer. The bridge keeps the
+ * source of that ending separate from provider failures: pi's own abort is
+ * recoverable local cancellation, missing evidence is unknown, the wire's
+ * typed policy word is a refusal, and only an evidenced provider failure
+ * carries a `ProviderFailure`. */
+export type PiTerminalFailure =
+  | { kind: "local_abort"; detail: string }
+  | { kind: "unknown"; detail: string }
+  | { kind: "provider_refusal"; detail: string; failure: ProviderFailure }
+  | { kind: "provider_failure"; detail: string; failure: ProviderFailure };
 
 /** What the harness does with one observed event. */
 export interface BridgeObservation {
@@ -98,9 +110,11 @@ export interface BridgeObservation {
   response?: PiEvent;
   /** A finished message, in order, for the transcript mirror. */
   message?: Record<string, unknown>;
-  /** An assistant turn that ended in a provider error, classified once at the
-   * provider seam. `providerError` is retained only as bounded operator detail;
-   * the harness decides from this typed value. */
+  /** An assistant turn that ended without an answer, classified at the pi
+   * boundary before the harness decides whether to retry or fail. */
+  terminalFailure?: PiTerminalFailure;
+  /** Compatibility projections for the harness while it consumes the typed
+   * terminal value. Local and unknown endings never populate providerFailure. */
   providerFailure?: ProviderFailure;
   providerError?: string;
   /** Beside `providerError`: the provider's stop reason says it refused the
@@ -336,18 +350,48 @@ export class PiBridge {
       this.deps.onProgress?.(`💭 thought for ${formatDuration(at - this.assistantStartedAt, "precise")}`);
       this.assistantStartedAt = undefined;
     }
-    if (message.stopReason === "error") {
-      const raw = message.errorMessage ?? "the model call failed";
+    if (message.stopReason === "error" || message.stopReason === "aborted") {
+      const raw = message.errorMessage;
+      const detail = redactAndCap(raw ?? "the model call ended without a classified result", 400);
+      out.providerError = detail;
+      const policyRefusal =
+        typeof message.rawStopReason === "string" && POLICY_REFUSAL_STOP_REASONS.has(message.rawStopReason);
+      if (policyRefusal) {
+        const failure = classifyProviderFailure({ error: raw ?? "provider policy refusal" });
+        out.terminalFailure = { kind: "provider_refusal", detail, failure };
+        out.providerFailure = failure;
+        out.policyRefusal = true;
+        return;
+      }
+      if (
+        message.stopReason === "aborted" ||
+        (raw !== undefined && /^(?:(?:AbortError:\s*)?(?:This|The) operation was aborted)\.?$/i.test(raw.trim()))
+      ) {
+        out.terminalFailure = { kind: "local_abort", detail };
+        return;
+      }
+      if (raw === undefined) {
+        out.terminalFailure = { kind: "unknown", detail };
+        return;
+      }
       // Passing through the bearer-authenticated proxy does not authenticate a
       // provider's successful stream content. Only the proxy's HMAC marker can
-      // vouch for the typed envelope and let its cause decide disposition.
-      out.providerFailure = classifyProviderFailure({
-        error: raw,
-        trustedEnvelope: proxyProviderFailureIsAuthenticated(raw),
-      });
-      out.providerError = redactAndCap(raw, 400);
-      if (typeof message.rawStopReason === "string" && POLICY_REFUSAL_STOP_REASONS.has(message.rawStopReason))
-        out.policyRefusal = true;
+      // vouch for a declared cause. A concrete status or transport shape is
+      // still evidence of a provider failure; an unclassified fallback is not.
+      const trustedEnvelope = proxyProviderFailureIsAuthenticated(raw);
+      const failure = classifyProviderFailure({ error: raw, trustedEnvelope });
+      if (failure.cause === "permanent" && (failure.status === undefined || failure.status < 400) && !trustedEnvelope) {
+        out.terminalFailure = { kind: "unknown", detail };
+        return;
+      }
+      out.terminalFailure = { kind: "provider_failure", detail, failure };
+      out.providerFailure = failure;
+      return;
+    }
+    if (!SUCCESSFUL_STOP_REASONS.has(message.stopReason ?? "")) {
+      const detail = `pi ended the model call with unclassified stop reason ${JSON.stringify(message.stopReason ?? "missing")}`;
+      out.providerError = detail;
+      out.terminalFailure = { kind: "unknown", detail };
       return;
     }
     const content = Array.isArray(message.content) ? message.content : [];
