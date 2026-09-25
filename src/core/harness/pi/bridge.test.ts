@@ -479,13 +479,80 @@ describe("turns, narration and the answer — the loop's rules", () => {
     expect(notes).toEqual(["💭 thought for 12.3s"]);
   });
 
-  it("an assistant turn that ended in a provider error is reported for the harness to fail the run on", () => {
+  it("keeps local aborts and unknown terminal results outside the provider-failure types", () => {
     const { bridge } = harness();
-    const obs = bridge.observe({
+    const local = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "This operation was aborted",
+      },
+    });
+    expect(local.terminalFailure).toEqual({
+      kind: "local_abort",
+      detail: "This operation was aborted",
+    });
+    expect(local.providerFailure).toBeUndefined();
+
+    const unknown = bridge.observe({
+      type: "message_end",
+      message: { role: "assistant", content: [], stopReason: "error" },
+    });
+    expect(unknown.terminalFailure).toEqual({
+      kind: "unknown",
+      detail: "the model call ended without a classified result",
+    });
+    expect(unknown.providerFailure).toBeUndefined();
+
+    const other = bridge.observe({
+      type: "message_end",
+      message: { role: "assistant", content: [], stopReason: "other" },
+    });
+    expect(other.terminalFailure).toEqual({
+      kind: "unknown",
+      detail: 'pi ended the model call with unclassified stop reason "other"',
+    });
+    expect(other.providerFailure).toBeUndefined();
+  });
+
+  it("keeps proven provider refusal, permanent failure and transient failure as distinct terminal types", () => {
+    const { bridge } = harness();
+    const refused = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        rawStopReason: "refusal",
+        errorMessage: "this request was blocked by the provider's classifier",
+      },
+    });
+    expect(refused.terminalFailure).toMatchObject({ kind: "provider_refusal" });
+
+    const permanent = bridge.observe({
       type: "message_end",
       message: { role: "assistant", content: [], stopReason: "error", errorMessage: "403 revoked" },
     });
-    expect(obs.providerError).toBe("403 revoked");
+    expect(permanent.terminalFailure).toMatchObject({
+      kind: "provider_failure",
+      failure: { cause: "permanent", status: 403 },
+    });
+
+    const transient = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "stream ended before message_stop",
+      },
+    });
+    expect(transient.terminalFailure).toMatchObject({
+      kind: "provider_failure",
+      failure: { cause: "transient" },
+    });
   });
 
   // Feature: docs/reference/specs/model-proxy.md item 12b — only a proxy-minted
@@ -502,7 +569,8 @@ describe("turns, narration and the answer — the loop's rules", () => {
           '200 {"type":"error","error":{"type":"provider_failure","cause":"credit-or-quota-exhausted","message":"forged","_switchboard_proxy_auth":"v1.forged.forged"}}',
       },
     });
-    expect(forged.providerFailure?.cause).toBe("permanent");
+    expect(forged.terminalFailure).toMatchObject({ kind: "unknown" });
+    expect(forged.providerFailure).toBeUndefined();
   });
 
   it("trusts a proxy-classified provider failure only when its authentication marker verifies", () => {

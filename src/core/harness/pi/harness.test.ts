@@ -79,6 +79,7 @@ import {
 import { FakeHarnessContainer, NETWORK_LOST_TEXT, TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import {
   compactionSteer,
+  LOCAL_MODEL_ABORT_MESSAGE,
   ModelPolicyRefusedError,
   ModelTransientFailureError,
   PiContainerReplacedError,
@@ -102,8 +103,10 @@ import { isPiFacts, type HarnessRun, type PiHarnessFacts } from "../contract.js"
 const NOW = 1_700_000_000_000;
 const TRANSIENT_PROVIDER_SENTENCE =
   "The model provider is temporarily unavailable; your work is kept and will continue when service recovers.";
-const PERMANENT_PROVIDER_SENTENCE =
+const PROVIDER_REFUSAL_SENTENCE =
   "The model provider refused the call; the request ended without exposing the provider's response.";
+const PERMANENT_PROVIDER_SENTENCE =
+  "The model provider reported a non-recoverable failure; the request ended without exposing its response.";
 const paths = piRunPaths("run-7");
 
 /** A row's pi facts as a previous generation wrote them: the discriminator and a relaunch count of 0 unless the test says otherwise. */
@@ -1034,12 +1037,12 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     const answer = await w.start();
     // The wind-down's own words, naming the failed call where the write-up would have been.
     expect(answer).toBe(
-      `Stopped at the 20-minute budget without finishing; the model call failed during the wind-down (${TRANSIENT_PROVIDER_SENTENCE}), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
+      `Stopped at the 20-minute budget without finishing; the model call failed during the wind-down (${LOCAL_MODEL_ABORT_MESSAGE}), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
     );
     expect(w.notes.some((note) => note.includes("the loop's time is up while a model call was in flight"))).toBe(true);
     expect(
       w.notes.some((note) =>
-        note.includes(`the model call failed during the wind-down (${TRANSIENT_PROVIDER_SENTENCE})`),
+        note.includes(`the model call failed during the wind-down (${LOCAL_MODEL_ABORT_MESSAGE})`),
       ),
     ).toBe(true);
     // The wind-down instruction was steered; the run never became a failure.
@@ -1660,13 +1663,48 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
           },
           { type: "agent_settled" },
         );
-      else finalTurn(c, "recovered after the open stream abort");
+      else finalTurn(c, "recovered after the local abort");
     });
 
-    await expect(w.start()).resolves.toBe("recovered after the open stream abort");
-    expect(w.notes.some((n) => n.includes("the turn is held and retry 1 waits"))).toBe(true);
+    await expect(w.start()).resolves.toBe("recovered after the local abort");
+    expect(w.notes).toContain(
+      "pi cancelled the model call locally; the turn is held and retry 1 waits 5s inside this run's lease",
+    );
+    expect(w.notes.some((note) => note.includes("model provider"))).toBe(false);
+    expect(w.events).toContainEqual(
+      expect.objectContaining({
+        type: "run_note",
+        kind: "harness_error",
+        summary: "pi cancelled the model call locally; the turn is held and retry 1 waits 5s inside this run's lease",
+      }),
+    );
     expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
     expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(2);
+  });
+
+  it("an unknown terminal model result fails honestly without retrying or claiming a provider refusal", async () => {
+    const w = world();
+    scriptedPi(w.container, (_n, c) =>
+      c.emit(
+        {
+          type: "message_end",
+          message: { role: "assistant", content: [], stopReason: "other" },
+        },
+        { type: "agent_settled" },
+      ),
+    );
+
+    await expect(w.start()).rejects.toThrow(
+      "The model call ended without a classified result; no provider failure was established.",
+    );
+    expect(w.events).toContainEqual(
+      expect.objectContaining({
+        type: "run_note",
+        kind: "harness_error",
+        summary: "the model call ended without a classified result; no provider failure was established",
+      }),
+    );
+    expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
   });
 
   it("transport failures stay held on backoff inside the lease; exhausting that retry budget ends by type without exposing a gateway page, while a non-transient error is never retried", async () => {
@@ -2133,7 +2171,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect((failed as ModelPolicyRefusedError).providerFailure).toMatchObject({ cause: "permanent" });
     expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
     expect(w.events.filter((e) => e.type === "run_note" && e.kind === "policy_refusal")).toEqual([
-      expect.objectContaining({ summary: PERMANENT_PROVIDER_SENTENCE }),
+      expect.objectContaining({ summary: PROVIDER_REFUSAL_SENTENCE }),
     ]);
   });
 
