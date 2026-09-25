@@ -33,6 +33,19 @@ describe("parseRunEventLines", () => {
     expect(out.skipped).toBe(1);
   });
 
+  it("keeps legacy refusal text exact and rejects missing or non-string refusal fields", () => {
+    const legacy = { type: "refusal", code: "setup_failed", cause: "system", text: "" };
+    const current = { ...legacy, text: "fallback live state could not be committed" };
+    const malformed = [
+      { type: "refusal", code: legacy.code, cause: legacy.cause },
+      { ...legacy, text: null },
+      { ...legacy, cause: 1 },
+      { ...legacy, code: {} },
+    ];
+    const parsed = parseRunEventLines([legacy, current, ...malformed].map((e) => JSON.stringify(e)).join("\n"));
+    expect(parsed).toEqual({ events: [legacy, current], skipped: malformed.length });
+  });
+
   it("parses a raw SSE capture: data: frames, ignoring retry/event/comment lines and the end frame", () => {
     const text = [
       "retry: 3000",

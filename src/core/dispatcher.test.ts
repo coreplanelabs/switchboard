@@ -286,6 +286,16 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
   return deps;
 }
 
+/** Coordinator fixtures must cross the real durable reservation boundary. */
+function wireChildLedger(deps: CoreDeps): void {
+  deps.runLedger = createLedgerWriteThrough({
+    ledger: new InMemoryRunLedger(),
+    gen: "gen-child",
+    fallback: new InMemoryRunStore(),
+    warn: () => {},
+  });
+}
+
 const YAML_FIXTURE = `
 organization: acme
 providers:
@@ -4728,6 +4738,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // opens against it.
   it("a coordinator's child dispatched at the unit branch (the resident binding ref IS the branch) with a tag carrying the plan's base → the PR opens against that base from the unit branch, pr_opened in the record", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    wireChildLedger(deps);
     codingExecutor({ head: HEAD, branch: "plan/p/u1", bindingRef: "plan/p/u1" });
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
@@ -4757,6 +4768,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // the PR. The PR's facts stay context.
   it("a coordinator's contract child whose request text cites a PR attaches on the contract branch — the PR-derived ref never rebinds the attach, so the push guard allows the unit branch (issue 1860)", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    wireChildLedger(deps);
     // What the resolver yields when the child's request text cites an open
     // pull request: its head branch bound as the ref, pinned at its head sha.
     // (A merged PR yields no ref hint at the resolver — repoContext.test.ts —
@@ -4809,6 +4821,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // coat. A cited PR that did not bind the ref contributes no attach sha.
   it("a coordinator's contract child whose request text cites a MERGED PR attaches on the contract branch with NO expected commit — the merged PR's frozen headSha never rides the attach (issue 1860)", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    wireChildLedger(deps);
     // What the resolver yields for a merged cited PR beside `on branch
     // plan/p/u1`: the phrase's ref stands, refFromPr unset, and the merged
     // PR's facts — its number and frozen head sha — ride as context
@@ -8898,6 +8911,7 @@ describe("run history write path", () => {
         "context",
         "run_state",
         "run_state",
+        "run_state", // working: durable promotion precedes the loop's tombstone
       ]);
       expect(tomb).toMatchObject({
         agent: "general",
@@ -10378,6 +10392,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
     const { provider, requests, firstStarted, settle } = gatedProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
+    wireChildLedger(deps);
     const instances = new InMemoryCoordinatorInstanceStore();
     deps.runRegistry = registry;
     deps.admission = new ThreadAdmission();
@@ -10415,6 +10430,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
     const { provider, requests, firstStarted, settle } = gatedProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
+    wireChildLedger(deps);
     const instances = new InMemoryCoordinatorInstanceStore();
     deps.runRegistry = registry;
     deps.admission = new ThreadAdmission();
@@ -11010,6 +11026,384 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(second.replies).toEqual([]);
     expect(ledger.live.size).toBe(0);
     expect(warnings).toEqual([]);
+  });
+
+  describe("coordinator producer identity", () => {
+    async function setup(preset: "coding" | "review" = "coding") {
+      vi.mocked(runPiHarnessOpen).mockClear();
+      const provider = capturingProvider("must not run");
+      const h = wired(provider, { yaml: REMOTE_YAML_FIXTURE });
+      h.deps.admission = new ThreadAdmission<DispatchFollowUp>();
+      h.deps.runStore = h.store;
+      const ref = "plan/producer/u1";
+      const repoCtx: RepoContext = {
+        repo: "acme/api",
+        ref,
+        ...(preset === "review" ? { pr: 7, headSha: "a".repeat(40), refFromPr: true, baseRef: "main" } : {}),
+      };
+      h.deps.resolveRepoContext = () => repoCtx;
+      const finish = h.ledger.finish.bind(h.ledger);
+      vi.spyOn(h.ledger, "finish").mockImplementation(async (...args) => {
+        const result = await finish(...args);
+        if (result.ok) await h.store.put(args[2]);
+        return result;
+      });
+      const instances = new InMemoryCoordinatorInstanceStore();
+      const instance: CoordinatorInstance = {
+        id: "ship_producer",
+        kind: "ship",
+        userId: "slack:UADMIN",
+        channelId: "slack:CX",
+        threadKey: "slack:CX:1.0",
+        repo: "acme/api",
+        branch: ref,
+        base: "main",
+        createdAt: Date.now() - 1_000,
+      };
+      await instances.put(instance);
+      const { io } = ioWithCard();
+      const started = vi.fn();
+      io.runStarted = started;
+      const finished = vi.fn();
+      io.runFinished = finished;
+      const dispatched: Promise<DispatchOutcome>[] = [];
+      const admin = {
+        tokens: new Secret(JSON.stringify({ "tok-coord": { subject: "coordinator" } }), "TEST_COORDINATOR_TOKENS"),
+        grantsFor: () => ({
+          actions: new Set(["coordinator:step"]),
+          channels: new Set<string>(),
+          repos: new Set<string>(),
+        }),
+        instances,
+        registry: h.registry,
+        runs: createRunsService({ registry: h.registry, store: h.store, ledger: h.ledger }),
+        ledgerRuns: () => h.deps.runLedger.liveRuns(),
+        dispatch: (
+          request: IncomingMessage,
+          channel: ChannelIO,
+          opts: Parameters<AdminCoordinatorDeps["dispatch"]>[2],
+        ) => {
+          const running = dispatch(h.deps, request, channel, opts);
+          dispatched.push(running);
+          return running;
+        },
+        ioFor: () => io,
+      } as unknown as AdminCoordinatorDeps;
+      const call = (route: string, body: Record<string, unknown>) =>
+        handleCoordinatorRequest(
+          {
+            method: "POST",
+            path: `${COORDINATOR_ADMIN_PREFIX}${route}`,
+            headers: { authorization: "Bearer tok-coord" },
+            body: JSON.stringify(body),
+          },
+          admin,
+        );
+      const spawnBody = {
+        parentInstanceId: instance.id,
+        step: `U12/0/${preset}`,
+        preset,
+        budget: 10,
+        prompt: `work on ref ${ref}${preset === "review" ? " https://github.com/acme/api/pull/7" : ""}`,
+      };
+      return { ...h, provider, repoCtx, instance, admin, call, spawnBody, io, started, finished, dispatched };
+    }
+
+    it.each(["coding", "review"] as const)(
+      "keeps the advertised %s id and original binding on a pre-model setup failure and replay",
+      async (preset) => {
+        const h = await setup(preset);
+        vi.mocked(makeExecutor).mockRejectedValueOnce(new Error("workspace setup unavailable"));
+        const response = await h.call("spawn", h.spawnBody);
+        expect(response).toMatchObject({ status: 200, body: { ok: true, runId: "run-l" } });
+        await Promise.all(h.dispatched);
+        await h.writer.settled();
+        const record = await h.store.get("run-l");
+        expect(record).toMatchObject({
+          id: "run-l",
+          agent: preset,
+          status: "failed",
+          parentInstanceId: h.instance.id,
+          idempotencyKey: `${h.instance.id}:U12/0/${preset}`,
+          threadKey: h.instance.threadKey,
+          repo: h.instance.repo,
+        });
+        expect(isRunRecord(record)).toBe(true);
+        expect(record!.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "run_meta",
+              ref: h.repoCtx.ref,
+              ...(preset === "review" ? { pr: 7 } : {}),
+            }),
+            expect.objectContaining({
+              type: "refusal",
+              code: "setup_failed",
+              cause: "system",
+              text: "workspace setup unavailable",
+            }),
+          ]),
+        );
+        expect(
+          record!.events.some((e) => e.type === "tool_call" || (e.type === "span_start" && e.name === "model.turn")),
+        ).toBe(false);
+        expect(h.provider.requests).toEqual([]);
+        expect(vi.mocked(runPiHarnessOpen)).not.toHaveBeenCalled();
+        expect(h.finished).toHaveBeenCalledExactlyOnceWith({ id: "run-l", status: "failed" });
+        expect(h.ledger.live.size).toBe(0);
+        expect(h.ledger.finished.size).toBe(1);
+        expect((await h.store.list({})).map((r) => r.id)).toEqual(["run-l"]);
+        const budget = record!.profile;
+        // A fresh process reads the durable record alone, never the disappearing registry row.
+        h.admin.runs = createRunsService({ registry: new RunRegistry(), store: h.store, ledger: h.ledger });
+        const read = await h.call("read-record", { parentInstanceId: h.instance.id, runId: "run-l" });
+        expect(read).toMatchObject({ status: 200, body: { run: { id: "run-l", finished: true, status: "failed" } } });
+        expect(await h.call("spawn", h.spawnBody)).toMatchObject({
+          status: 200,
+          body: { runId: "run-l", alreadySpawned: true },
+        });
+        expect(h.dispatched).toHaveLength(1);
+        expect((await h.store.get("run-l"))!.profile).toEqual(budget);
+        const missing = await h.call("read-record", { parentInstanceId: h.instance.id, runId: "run-missing" });
+        const foreign = await h.call("read-record", { parentInstanceId: "ship_foreign", runId: "run-l" });
+        expect(foreign).toEqual(missing);
+        expect(missing).toEqual({ status: 404, body: { ok: false, error: "not_found" } });
+      },
+    );
+
+    it.each(["claim", "open", "seed", "working-state"] as const)(
+      "keeps the same-id finalizer through a %s failure at durable promotion without running the model",
+      async (failure) => {
+        const h = await setup();
+        vi.mocked(makeExecutor).mockResolvedValueOnce({
+          executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" },
+        });
+        const abandon = vi.spyOn(h.ledger, "abandon");
+        const claim = h.ledger.claim.bind(h.ledger);
+        vi.spyOn(h.ledger, "claim").mockImplementation(async (request) => {
+          if (request.phase !== "attaching" && failure === "claim")
+            throw new PermanentStoreError("promotion unavailable");
+          return claim(request);
+        });
+        if (failure === "seed") vi.spyOn(h.ledger, "seed").mockRejectedValueOnce(new Error("seed unavailable"));
+        const open = h.deps.runLedger.open.bind(h.deps.runLedger);
+        let rowAfterOpen: ReturnType<typeof h.ledger.live.get>;
+        vi.spyOn(h.deps.runLedger, "open").mockImplementationOnce(async (request) => {
+          if (failure === "open") throw new Error("promotion unavailable");
+          const result = await open(request);
+          rowAfterOpen = structuredClone(h.ledger.live.get("run-l"));
+          if (failure === "working-state") h.ledger.liveStateFailure.beforeCommit = true;
+          return result;
+        });
+        expect(await h.call("spawn", h.spawnBody)).toMatchObject({ status: 200, body: { runId: "run-l" } });
+        await Promise.all(h.dispatched);
+        await h.writer.settled();
+        expect(h.deps.runLedger.open).toHaveBeenCalledOnce();
+        const record = await h.store.get("run-l");
+        expect(record).toMatchObject({
+          id: "run-l",
+          status: "failed",
+          parentInstanceId: h.instance.id,
+          idempotencyKey: `${h.instance.id}:U12/0/coding`,
+          threadKey: h.instance.threadKey,
+          repo: h.repoCtx.repo,
+          profile: { minutes: 10 },
+        });
+        expect(record!.events).toContainEqual(expect.objectContaining({ type: "run_meta", ref: h.repoCtx.ref }));
+        expect(record!.events).toContainEqual(
+          expect.objectContaining({
+            type: "refusal",
+            code: "setup_failed",
+            cause: "system",
+            text: expect.stringMatching(/\S/),
+          }),
+        );
+        expect(h.provider.requests).toEqual([]);
+        expect(vi.mocked(runPiHarnessOpen)).not.toHaveBeenCalled();
+        expect(abandon).not.toHaveBeenCalled();
+        if (failure !== "open")
+          expect(rowAfterOpen).toMatchObject({ runId: "run-l", meta: { parentInstanceId: h.instance.id } });
+        expect(h.finished).toHaveBeenCalledExactlyOnceWith({ id: "run-l", status: "failed" });
+        expect(h.ledger.live.size).toBe(0);
+        expect((await h.store.list({})).map((r) => r.id)).toEqual(["run-l"]);
+        h.admin.runs = createRunsService({ registry: new RunRegistry(), store: h.store, ledger: h.ledger });
+        expect(await h.call("read-record", { parentInstanceId: h.instance.id, runId: "run-l" })).toMatchObject({
+          status: 200,
+          body: { run: { id: "run-l", finished: true, status: "failed" } },
+        });
+        expect(await h.call("spawn", h.spawnBody)).toMatchObject({
+          status: 200,
+          body: { runId: "run-l", alreadySpawned: true },
+        });
+        expect(h.dispatched).toHaveLength(1);
+        expect((await h.store.get("run-l"))!.profile).toEqual(record!.profile);
+      },
+    );
+
+    it("a promotion fenced by another generation never runs or finalizes that generation's child", async () => {
+      const h = await setup();
+      vi.mocked(makeExecutor).mockResolvedValueOnce({
+        executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" },
+      });
+      const claim = h.ledger.claim.bind(h.ledger);
+      vi.spyOn(h.ledger, "claim").mockImplementation(async (request) => {
+        if (request.phase !== "attaching") h.ledger.live.get("run-l")!.ownerGen = "gen-next";
+        return claim(request);
+      });
+      expect(await h.call("spawn", h.spawnBody)).toMatchObject({ status: 200, body: { runId: "run-l" } });
+      await Promise.all(h.dispatched);
+      await h.writer.settled();
+      expect(h.provider.requests).toEqual([]);
+      expect(vi.mocked(runPiHarnessOpen)).not.toHaveBeenCalled();
+      expect(h.ledger.live.get("run-l")).toMatchObject({
+        ownerGen: "gen-next",
+        meta: { parentInstanceId: h.instance.id },
+      });
+      expect(h.ledger.finish).not.toHaveBeenCalled();
+      expect(h.finished).not.toHaveBeenCalled();
+      expect(await h.store.get("run-l")).toBeNull();
+    });
+
+    it("persists the fallback live-state failure under the advertised id with zero model or tool calls", async () => {
+      const h = await setup("review");
+      const exec = vi.fn(async () => "");
+      vi.mocked(makeExecutor).mockImplementationOnce(async (_config, context) => {
+        await context.onLiveStateObservation?.({
+          state: "waiting_repository",
+          reason: "repository_container",
+          bound: Date.now() + 60_000,
+          attempt: 1,
+        });
+        h.ledger.liveStateFailure.beforeCommit = true;
+        return { executor: { exec, readFile: async () => "", writeFile: async () => "" }, backend: "sandbox" };
+      });
+      expect(await h.call("spawn", h.spawnBody)).toMatchObject({ status: 200, body: { runId: "run-l" } });
+      await Promise.all(h.dispatched);
+      await h.writer.settled();
+      const record = await h.store.get("run-l");
+      expect(record).toMatchObject({ id: "run-l", status: "failed", parentInstanceId: h.instance.id });
+      expect(record!.events).toContainEqual(
+        expect.objectContaining({
+          type: "refusal",
+          code: "setup_failed",
+          cause: "system",
+          text: "fallback live state could not be committed",
+        }),
+      );
+      expect(h.provider.requests).toEqual([]);
+      expect(exec).not.toHaveBeenCalled();
+      expect(h.ledger.live.size).toBe(0);
+    });
+
+    it.each(["untracked", "fenced", "throw"] as const)(
+      "refuses a %s pre-ack reservation without advertising a child id",
+      async (failure) => {
+        const h = await setup();
+        if (failure === "throw")
+          vi.spyOn(h.deps.runLedger, "reserve").mockRejectedValueOnce(new Error("store unavailable"));
+        else
+          vi.spyOn(h.deps.runLedger, "reserve").mockResolvedValueOnce(
+            failure === "fenced" ? { kind: "fenced" } : { kind: "untracked", why: "store unavailable" },
+          );
+        const response = await h.call("spawn", h.spawnBody);
+        await Promise.all(h.dispatched);
+        await h.writer.settled();
+        expect(response.status).not.toBe(200);
+        expect(response.body).toMatchObject({ ok: false, error: "child_reservation_failed" });
+        expect(response.body).not.toHaveProperty("runId");
+        expect(h.started).not.toHaveBeenCalled();
+        expect(h.registry.getById("run-l")).toBeNull();
+        expect(h.provider.requests).toEqual([]);
+        expect(makeExecutor).not.toHaveBeenCalled();
+      },
+    );
+
+    it("an empty setup exception still leaves a nonempty typed reason on the advertised child", async () => {
+      const h = await setup();
+      vi.mocked(makeExecutor).mockRejectedValueOnce(new Error());
+      expect(await h.call("spawn", h.spawnBody)).toMatchObject({ status: 200, body: { runId: "run-l" } });
+      await Promise.all(h.dispatched);
+      await h.writer.settled();
+      const record = await h.store.get("run-l");
+      const refusal = record!.events.find((e) => e.type === "refusal");
+      expect(refusal).toMatchObject({ code: "setup_failed", cause: "system", text: expect.stringMatching(/\S/) });
+      expect(h.provider.requests).toEqual([]);
+    });
+
+    it("a live replay and failed channel cleanup cannot replace or orphan the reserved child", async () => {
+      const h = await setup();
+      let failAttach!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        failAttach = resolve;
+      });
+      vi.mocked(makeExecutor).mockImplementationOnce(async () => {
+        await gate;
+        throw new Error("workspace setup unavailable");
+      });
+      h.io.reply = async () => {
+        throw new Error("reply unavailable");
+      };
+      h.io.status = async () => ({
+        update: () => {},
+        done: async () => {
+          throw new Error("card unavailable");
+        },
+      });
+      h.finished.mockImplementation(() => {
+        throw new Error("notification unavailable");
+      });
+      const first = await h.call("spawn", h.spawnBody);
+      const reservation = structuredClone(h.ledger.live.get("run-l"));
+      const replay = await h.call("spawn", h.spawnBody);
+      failAttach();
+      await Promise.all(h.dispatched);
+      await h.writer.settled();
+      expect(first).toMatchObject({ status: 200, body: { runId: "run-l" } });
+      expect(reservation).toMatchObject({
+        runId: "run-l",
+        meta: {
+          parentInstanceId: h.instance.id,
+          idempotencyKey: `${h.instance.id}:U12/0/coding`,
+          repo: h.repoCtx.repo,
+          ref: h.repoCtx.ref,
+          profile: { minutes: 10 },
+        },
+      });
+      expect(replay).toMatchObject({ status: 200, body: { runId: "run-l", alreadySpawned: true } });
+      expect(h.dispatched).toHaveLength(1);
+      expect(h.ledger.live.size).toBe(0);
+      expect((await h.store.list({})).map((r) => r.id)).toEqual(["run-l"]);
+      expect(await h.store.get("run-l")).toMatchObject({ status: "failed", replyOk: false });
+      expect(h.provider.requests).toEqual([]);
+    });
+
+    it("exposes no registry id or acknowledgement while durable reservation is pending", async () => {
+      const h = await setup();
+      const reserve = h.deps.runLedger.reserve.bind(h.deps.runLedger);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const entering = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      vi.spyOn(h.deps.runLedger, "reserve").mockImplementationOnce(async (request) => {
+        entered();
+        await gate;
+        return reserve(request);
+      });
+      vi.mocked(makeExecutor).mockRejectedValueOnce(new Error("setup failed after reservation"));
+      const spawning = h.call("spawn", h.spawnBody);
+      await entering;
+      const before = { started: h.started.mock.calls.length, row: h.registry.getById("run-l") };
+      release();
+      await spawning;
+      await Promise.all(h.dispatched);
+      await h.writer.settled();
+      expect(before).toEqual({ started: 0, row: null });
+      expect(h.started).toHaveBeenCalledExactlyOnceWith({ id: "run-l" });
+    });
   });
 
   it("a dispatch that ends before its prompt exists — here the attach's ask-once branch refusal — abandons its reservation and discards its registry row (item 42): both go with no record and no warning, the index feed sees the row come and go, so nothing restarts or lists a run that never started", async () => {
@@ -15550,6 +15944,7 @@ describe("inbound staging (record 0033)", () => {
     vi.stubEnv("GITHUB_APP_ID", "");
     const provider = capturingProvider();
     const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    wireChildLedger(deps);
     const store = new InMemoryArtifactStore({
       bucket: "test",
       fetch: (async () =>

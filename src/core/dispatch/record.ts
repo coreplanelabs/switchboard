@@ -4,6 +4,8 @@
 // `runHistoryWriter.write` — an agent run at its finish, an inline command run,
 // a run the drain deadline abandons, a run a booting generation reclaims.
 import type { IncomingMessage } from "../types.js";
+import { refusalLine, type Refusal } from "../refusal.js";
+import { redactAndCap } from "../runEvents.js";
 import type { ChannelDirectory, ChannelVisibility } from "../authz/types.js";
 import { STATIC_CHANNEL_DIRECTORY } from "../authz/channelDirectory.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
@@ -559,6 +561,61 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
       );
     }
   }
+}
+
+/** A durably reserved child that never reached its model loop still owns its
+ *  identity. Finish through that reservation, not a newly minted door record;
+ *  the ordinary writer retains retries and the ledger's atomic finish. */
+export function finishChildSetup(
+  deps: RecordDeps,
+  ctx: Omit<TombstoneContext, "run" | "resume"> & {
+    runId: string;
+    ledgerRun: LedgerRun;
+    ending: RunEnding;
+    root: Span;
+    finishedAt: number;
+    refusal: Refusal;
+    status: RunStatus;
+  },
+): void {
+  const { registry, runId, finishedAt, refusal, status, ending } = ctx;
+  const reason = refusalLine(refusal);
+  registry.publish(runId, {
+    type: "refusal",
+    code: refusal.code,
+    cause: refusal.cause,
+    text: redactAndCap(reason.trim() ? reason : "The child ended before its model started.", 600),
+    at: finishedAt,
+  });
+  registry.finish(runId, status);
+  ending.finished(runId);
+  const snap = registry.snapshotById(runId);
+  const label = registry.getById(runId)?.label;
+  ending.register({
+    runId,
+    flipOnPostFinishFailure: false,
+    write: (seal) =>
+      deps.runHistoryWriter.write(
+        assembleRunRecord({
+          run: { id: runId, ...(label !== undefined ? { label } : {}) },
+          snap,
+          agent: ctx.agent.name,
+          model: ctx.resolved.modelRef,
+          msg: ctx.msg,
+          channelVisibility: ctx.channelVisibility,
+          repo: ctx.repoCtx.repo,
+          profile: profileRecordOf(ctx.agent, ctx.profile),
+          coordinator: ctx.coordinator,
+          parentRunId: ctx.parentRunId,
+          seed: ctx.seed,
+          finishedAt,
+          status,
+          seal,
+          diagnosis: analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false }),
+        }),
+        { via: ctx.ledgerRun.sink, span: ctx.root },
+      ),
+  });
 }
 
 /** What `registerFinishRecord` reads off the dispatch. */
