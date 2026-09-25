@@ -6601,7 +6601,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
   });
 
-  it("reconstructs a failed original findings pr-check from its completed owned push and resumes at read-only re-review", async () => {
+  it("reconstructs a production-shaped failed findings pr-check with no unit-end head from its completed owned push and resumes at read-only re-review", async () => {
     const fixed = "b".repeat(40);
     const h = harness({
       prFacts: {
@@ -6616,19 +6616,30 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       },
     });
     await h.instances.put(recoveryInstance());
-    await h.instances.putUnits([
-      {
-        ...requestChangesRow(),
-        ending: {
-          kind: "failed",
-          cause: "step_threw",
-          step: "U12/1/findings/pr-check",
-          round: 1,
-          report: "the publication facts did not yet carry the completed push",
-          at: NOW - minutesToMs(5),
-        },
-      },
-    ]);
+    const { ending: _ending, lastPush: _lastPush, ...activeRow } = requestChangesRow();
+    await h.instances.putUnits([activeRow]);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          ending: {
+            kind: "failed",
+            cause: "step_threw",
+            step: "U12/1/findings/pr-check",
+            round: 1,
+            report: "the publication facts did not yet carry the completed push",
+          },
+          pr: PR,
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200, body: { ok: true } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      publication: { expectedHeadSha: HEAD },
+      ending: { cause: "step_threw", step: "U12/1/findings/pr-check" },
+    });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).not.toHaveProperty("lastPush");
     await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(30), finishedAt: NOW - minutesToMs(20) }));
     await h.store.put(completedOriginalFindings(fixed));
 
@@ -6966,6 +6977,16 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const response = await callRecovery(h);
 
     expect(response).toMatchObject({ status: 409, body: { error: "recovery_review_evidence_ambiguous" } });
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it("refuses a malformed persisted last-push hint instead of replacing it with publication authority", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([{ ...requestChangesRow(), lastPush: "not-a-full-head" }]);
+    await h.store.put(reviewRecord());
+
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_binding_mismatch" } });
     expect(h.recoveries).toEqual([]);
   });
 
@@ -7763,6 +7784,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       },
     ],
     [
+      "unreadable pull request",
+      async (h: ReturnType<typeof harness>) => {
+        await h.instances.put(recoveryInstance());
+        await h.instances.putUnits([requestChangesRow()]);
+        await h.store.put(reviewRecord());
+      },
+    ],
+    [
       "exhausted rounds",
       async (h: ReturnType<typeof harness>) => {
         await h.instances.put({ ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
@@ -7782,17 +7811,20 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     "refuses %s before reviewer or writer admission and preserves the exact row and binding",
     async (name, arrange) => {
       const moved = name === "moved head";
+      const unreadable = name === "unreadable pull request";
       const h = harness({
-        prFacts: {
-          state: "open",
-          sameRepoHead: true,
-          headBranchExists: true,
-          headRef: INSTANCE.branch,
-          baseRef: "main",
-          headSha: moved ? "8".repeat(40) : HEAD,
-          verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: moved ? "8".repeat(40) : HEAD },
-          htmlUrl: PR.url,
-        },
+        prFacts: unreadable
+          ? new Error("GitHub unavailable")
+          : {
+              state: "open",
+              sameRepoHead: true,
+              headBranchExists: true,
+              headRef: INSTANCE.branch,
+              baseRef: "main",
+              headSha: moved ? "8".repeat(40) : HEAD,
+              verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch, sha: moved ? "8".repeat(40) : HEAD },
+              htmlUrl: PR.url,
+            },
       });
       await arrange(h);
       const before = await h.instances.listUnits(INSTANCE.id);
