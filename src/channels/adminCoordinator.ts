@@ -1875,6 +1875,7 @@ type PublicationBindingRefusalReason =
   | "publication_ownership_changed"
   | "publication_ownership_unknown"
   | "publication_binding_stale"
+  | "publication_rollback_failed"
   | "publication_store_unavailable";
 
 class PublicationBindingRefusal extends Error {
@@ -1888,21 +1889,58 @@ const samePublicationOwner = (
   right: { instanceId: string; unit: string },
 ) => left?.instanceId === right.instanceId && left.unit === right.unit;
 
-/** Advance a recovery claim only to the exact head recorded by its completed
- * findings child. An unrelated force-push can never rewrite the durable
+/** Advance a publication binding only to the exact head recorded by its completed
+ * authorized findings child. An unrelated force-push can never rewrite the durable
  * publication binding merely because the branch currently points there. */
-async function advanceRecoveryPublication(
+async function advanceFindingsPublication(
   deps: AdminCoordinatorDeps,
   instance: CoordinatorInstance,
   row: CoordinatorUnit,
   facts: PullRequestFacts,
   runId: string,
 ): Promise<CoordinatorUnit> {
-  if (row.recovery === undefined || row.publication === undefined || facts.headSha === row.publication.expectedHeadSha)
-    return row;
-  const child = await deps.runs.getRun(runId);
-  const expectedPrefix = `${instance.id}:${row.unit}/recovery/`;
+  if (row.publication === undefined || facts.headSha === row.publication.expectedHeadSha) return row;
+  const child = await deps.runs.getRun(runId, { include: "messages" });
   const owner = { instanceId: instance.id, unit: row.unit };
+  const latestReview = [...row.rounds].reverse().find((round) => round.agent === "review");
+  const segment = row.segments?.reduce((latest, entry) => Math.max(latest, entry.index), 1) ?? 1;
+  const prefix =
+    row.recovery !== undefined
+      ? `${row.unit}/recovery`
+      : stepPrefixOf(row.unit, segment > 1 ? { segment, renewalsSpent: 0, spendUsd: null } : undefined);
+  const findingsPrefix = `${instance.id}:${prefix}/${latestReview?.index}/findings`;
+  // Ordinary findings must carry the exact authority used at dispatch, not
+  // merely a receipt for whatever head happens to be on the remote now.
+  if (row.recovery === undefined) {
+    const tags = child.ok ? (child.value.events?.filter((event) => event.type === "coordinator_tag") ?? []) : [];
+    const tag = tags.length === 1 ? tags[0] : undefined;
+    if (
+      row.ending !== undefined ||
+      row.idle !== undefined ||
+      latestReview?.outcome !== "request_changes" ||
+      !child.ok ||
+      child.value.startedAt < latestReview.at ||
+      tag?.parentInstanceId !== instance.id ||
+      tag.unit !== row.unit ||
+      tag.base !== instance.base ||
+      JSON.stringify(tag.publication) !== JSON.stringify(row.publication)
+    )
+      throw new PublicationBindingRefusal("publication_facts_mismatch");
+    const listing = await deps.runs.listRuns({
+      status: "finished",
+      visibleTo: EVERY_RUN,
+      threadKey: row.threadKey ?? instance.threadKey,
+      limit: RUN_LIST_MAX_LIMIT,
+    });
+    if (
+      listing.storeUnavailable ||
+      listing.nextBefore !== undefined ||
+      listing.runs.filter(
+        (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, findingsPrefix),
+      ).length !== 1
+    )
+      throw new PublicationBindingRefusal("publication_facts_mismatch");
+  }
   if (
     !child.ok ||
     child.value.finished !== true ||
@@ -1912,8 +1950,10 @@ async function advanceRecoveryPublication(
     child.value.userId !== instance.userId ||
     child.value.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
     child.value.threadKey !== (row.threadKey ?? instance.threadKey) ||
-    child.value.idempotencyKey?.startsWith(expectedPrefix) !== true ||
-    !/\/findings(?:\/a[1-9][0-9]*)?$/.test(child.value.idempotencyKey) ||
+    (row.recovery !== undefined
+      ? child.value.idempotencyKey?.startsWith(`${instance.id}:${row.unit}/recovery/`) !== true ||
+        !/\/findings(?:\/a[1-9][0-9]*)?$/.test(child.value.idempotencyKey ?? "")
+      : !isStepAttempt(child.value.idempotencyKey, findingsPrefix)) ||
     !fullHead(facts.headSha) ||
     child.value.headSha !== facts.headSha ||
     child.value.pushed?.some((push) => push.ref === row.branch && push.sha === facts.headSha) !== true ||
@@ -1925,11 +1965,18 @@ async function advanceRecoveryPublication(
     facts.verifiedHead?.repo.toLowerCase() !== instance.repo.toLowerCase() ||
     facts.verifiedHead.ref !== row.publication.publicationRef ||
     facts.verifiedHead.sha !== facts.headSha ||
+    row.publication.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    row.publication.pr !== row.pr?.number ||
+    row.publication.baseRef !== instance.base ||
+    row.publication.headRef !== row.branch ||
+    row.publication.publicationRef !== row.branch ||
     !samePublicationOwner(row.publication.owner, owner)
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
   try {
-    if (deps.runnerOwnership?.claim(instance.repo, row.publication.pr, owner) !== true)
+    if (row.recovery !== undefined && deps.runnerOwnership?.claim(instance.repo, row.publication.pr, owner) !== true)
+      throw new PublicationBindingRefusal("publication_ownership_changed");
+    if (!samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, row.publication.pr), owner))
       throw new PublicationBindingRefusal("publication_ownership_changed");
   } catch (err) {
     if (err instanceof PublicationBindingRefusal) throw err;
@@ -1939,7 +1986,9 @@ async function advanceRecoveryPublication(
     ...row,
     lastPush: facts.headSha,
     publication: { ...row.publication, expectedHeadSha: facts.headSha },
-    recovery: { ...row.recovery, expectedHeadSha: facts.headSha },
+    ...(row.recovery !== undefined
+      ? { recovery: { ...row.recovery, previousBinding: undefined, expectedHeadSha: facts.headSha } }
+      : {}),
   };
   let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
   try {
@@ -1953,6 +2002,17 @@ async function advanceRecoveryPublication(
     throw new PublicationBindingRefusal(
       replaced?.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
     );
+  let stillOwned = false;
+  try {
+    stillOwned = samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, row.publication.pr), owner);
+  } catch {
+    /* Unknown ownership also requires rollback. */
+  }
+  if (!stillOwned) {
+    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
+    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
+    throw new PublicationBindingRefusal("publication_ownership_changed");
+  }
   return updated;
 }
 
@@ -2061,6 +2121,10 @@ async function bindOpenPullRequest(
 
 const fullHead = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{40}$/i.test(value);
 
+/** Only the driver's numeric attempt suffix is part of the original step. */
+const isStepAttempt = (key: string | undefined, step: string): boolean =>
+  key === step || (key?.startsWith(`${step}/a`) === true && /^[1-9][0-9]*$/.test(key.slice(step.length + 2)));
+
 /** Recover one ended original unit without passing through generated-plan
  * hand-off. Every authoritative fact comes from the original durable rows,
  * their owned review record and one fresh GitHub read. */
@@ -2096,7 +2160,7 @@ export async function recoverOriginalUnit(
     return json(409, { ok: false, error: "unit_lifecycle_ambiguous", at });
 
   const originalOwner = { instanceId: instance.id, unit: row.unit };
-  const publication = row.publication;
+  let publication = row.publication;
   const pr = row.pr;
   const base = instance.base;
   // A step-threw ending after findings/pr-check carries no `headSha`, so
@@ -2108,15 +2172,15 @@ export async function recoverOriginalUnit(
   if (
     pr === undefined ||
     base === undefined ||
-    !fullHead(expectedHead) ||
-    publication === undefined ||
-    publication.repo.toLowerCase() !== instance.repo.toLowerCase() ||
-    publication.pr !== pr.number ||
-    publication.headRef !== row.branch ||
-    publication.baseRef !== base ||
-    publication.publicationRef !== row.branch ||
-    !fullHead(publication.expectedHeadSha) ||
-    !samePublicationOwner(publication.owner, originalOwner)
+    (expectedHead !== undefined && !fullHead(expectedHead)) ||
+    (publication !== undefined &&
+      (publication.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+        publication.pr !== pr.number ||
+        publication.headRef !== row.branch ||
+        publication.baseRef !== base ||
+        publication.publicationRef !== row.branch ||
+        !fullHead(publication.expectedHeadSha) ||
+        !samePublicationOwner(publication.owner, originalOwner)))
   )
     return json(409, { ok: false, error: "recovery_binding_mismatch", at });
 
@@ -2149,10 +2213,18 @@ export async function recoverOriginalUnit(
       findingsRunId,
       findingsKey,
     } = existingClaim);
-    if (existingClaim.expectedHeadSha !== expectedHead || publication.expectedHeadSha !== expectedHead)
+    if (
+      publication === undefined ||
+      existingClaim.expectedHeadSha !== expectedHead ||
+      publication.expectedHeadSha !== expectedHead
+    )
       return json(409, { ok: false, error: "recovery_binding_mismatch", at });
     const { recovery: _recovery, ...withoutRecovery } = row;
     originalRow = { ...withoutRecovery, ending: existingClaim.previousEnding };
+    if (existingClaim.previousBinding !== undefined) {
+      const { publication: _publication, lastPush: _lastPush, ...prior } = originalRow;
+      originalRow = { ...prior, ...existingClaim.previousBinding };
+    }
   } else {
     if (row.idle !== undefined || row.ending === undefined)
       return json(409, { ok: false, error: "unit_not_terminal", at });
@@ -2172,18 +2244,28 @@ export async function recoverOriginalUnit(
       return json(409, { ok: false, error: "recovery_ending_mismatch", at });
     round = boundary.index;
     const caps = instance.caps;
-    if (caps === undefined || row.startedAt === undefined || !Number.isFinite(row.ending.at))
-      return json(409, { ok: false, error: "recovery_budget_unknown", at });
+    const unknownBudget = (reason: string) => json(409, { ok: false, error: "recovery_budget_unknown", reason, at });
+    if (caps === undefined) return unknownBudget("caps_missing");
+    if (
+      !Number.isSafeInteger(caps.maxRounds) ||
+      caps.maxRounds < 1 ||
+      !Number.isFinite(caps.maxMinutes) ||
+      caps.maxMinutes <= 0
+    )
+      return unknownBudget("caps_invalid");
+    if (row.startedAt === undefined) return unknownBudget("started_at_missing");
+    if (!Number.isFinite(row.startedAt)) return unknownBudget("started_at_invalid");
+    if (!Number.isFinite(row.ending.at)) return unknownBudget("ending_at_invalid");
     // Prior spend is not yet durable on a terminal row. A cost-capped unit
     // cannot safely recover by resetting that total, so it stays parked.
-    if (instance.grant?.costCapUsd !== undefined) return json(409, { ok: false, error: "recovery_budget_unknown", at });
+    if (instance.grant?.costCapUsd !== undefined) return unknownBudget("cost_cap_spend_unknown");
     if (round >= caps.maxRounds) return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
     // Recovery resumes the active segment's original wall-clock lease. A
     // renewal starts a full lease at its durable segment time; a stopped
     // segment can carry the smaller unspent lease on its durable wake answer.
     const latestSegmentIndex = row.segments?.reduce((latest, candidate) => Math.max(latest, candidate.index), 1) ?? 1;
     const latestSegments = row.segments?.filter((candidate) => candidate.index === latestSegmentIndex) ?? [];
-    if (latestSegments.length > 1) return json(409, { ok: false, error: "recovery_budget_unknown", at });
+    if (latestSegments.length > 1) return unknownBudget("latest_segment_ambiguous");
     const segment = latestSegments[0];
     const leaseStartedAt = segment?.at ?? row.startedAt;
     const resumedLeases = Object.values(row.wakes ?? {}).filter(
@@ -2192,12 +2274,12 @@ export async function recoverOriginalUnit(
     // A stopped-segment wake stores the remaining lease but not when that
     // smaller lease began. Subtracting from the original segment time would
     // invent a budget, so this legacy shape is unrecoverable.
-    if (resumedLeases.length > 0) return json(409, { ok: false, error: "recovery_budget_unknown", at });
+    if (resumedLeases.length > 0) return unknownBudget("resume_time_missing");
     remainingMs = minutesToMs(caps.maxMinutes) - (at - leaseStartedAt);
     const reviewThreadKey = row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey;
     const unitThreadKey = row.threadKey ?? instance.threadKey;
     const listing = await deps.runs.listRuns({
-      status: "finished",
+      status: publication === undefined ? "all" : "finished",
       visibleTo: EVERY_RUN,
       threadKey: reviewThreadKey,
       limit: RUN_LIST_MAX_LIMIT,
@@ -2206,7 +2288,7 @@ export async function recoverOriginalUnit(
       unitThreadKey === reviewThreadKey
         ? listing
         : await deps.runs.listRuns({
-            status: "finished",
+            status: publication === undefined ? "all" : "finished",
             visibleTo: EVERY_RUN,
             threadKey: unitThreadKey,
             limit: RUN_LIST_MAX_LIMIT,
@@ -2215,20 +2297,28 @@ export async function recoverOriginalUnit(
       row.unit,
       latestSegmentIndex > 1 ? { segment: latestSegmentIndex, renewalsSpent: 0, spendUsd: null } : undefined,
     );
-    const reviewedHead = publication.expectedHeadSha;
+    if (
+      listing.storeUnavailable ||
+      unitListing.storeUnavailable ||
+      listing.nextBefore !== undefined ||
+      unitListing.nextBefore !== undefined
+    )
+      return json(409, { ok: false, error: "recovery_evidence_incomplete", at });
     const reviewKeyPrefix = `${instance.id}:${segmentPrefix}/${round}/review`;
     const candidates = listing.runs.filter((run) => {
       if (
         !run.finished ||
         run.agent !== "review" ||
         run.parentInstanceId !== instance.id ||
-        (run.idempotencyKey !== reviewKeyPrefix && run.idempotencyKey?.startsWith(`${reviewKeyPrefix}/a`) !== true) ||
+        !isStepAttempt(run.idempotencyKey, reviewKeyPrefix) ||
         run.userId !== instance.userId ||
         run.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
         run.threadKey !== reviewThreadKey
       )
         return false;
-      if (run.reviewHead !== reviewedHead) return false;
+      if (!fullHead(run.reviewHead) || (publication !== undefined && run.reviewHead !== publication.expectedHeadSha))
+        return false;
+      const reviewedHead = run.reviewHead;
       if (kind === "review") return run.verdict === undefined && run.reviewPost === undefined;
       return (
         run.verdict?.verdict === "request_changes" &&
@@ -2241,8 +2331,62 @@ export async function recoverOriginalUnit(
       );
     });
     if (candidates.length !== 1) return json(409, { ok: false, error: "recovery_review_evidence_ambiguous", at });
-    reviewRunId = candidates[0]!.id;
-    reviewKey = candidates[0]!.idempotencyKey!;
+    const review = candidates[0]!;
+    const reviewedHead = review.reviewHead!;
+    if (publication === undefined) {
+      if (
+        listing.runs.filter(
+          (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, reviewKeyPrefix),
+        ).length !== 1
+      )
+        return json(409, { ok: false, error: "recovery_review_evidence_ambiguous", at });
+      if (
+        [...listing.runs, ...unitListing.runs].some(
+          (run) => !run.finished && (run.agent === "coding" || run.agent === "review"),
+        )
+      )
+        return json(409, { ok: false, error: "recovery_child_active", at });
+      // The PR may have been opened by the runner after coding ended, so a
+      // missing pr_opened event is not a missing push. Require the exact ref
+      // receipt plus observed final head before the uniquely owned review.
+      const codingKey = `${instance.id}:${segmentPrefix}/${round === 1 ? "0/coding" : `${round - 1}/findings`}`;
+      const coding = unitListing.runs.filter(
+        (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, codingKey),
+      );
+      const child = coding.length === 1 ? coding[0] : undefined;
+      if (
+        child?.finished !== true ||
+        child.status !== "completed" ||
+        child.agent !== "coding" ||
+        child.userId !== instance.userId ||
+        child.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+        child.threadKey !== unitThreadKey ||
+        child.headSha !== reviewedHead ||
+        child.pushed?.some((push) => push.ref === row.branch && push.sha === reviewedHead) !== true ||
+        (child.pr !== undefined &&
+          (child.pr.number !== pr.number || (child.pr.head !== undefined && child.pr.head !== row.branch))) ||
+        child.finishedAt === undefined ||
+        child.startedAt < leaseStartedAt ||
+        child.finishedAt > review.startedAt ||
+        review.finishedAt === undefined ||
+        review.finishedAt > row.ending.at ||
+        (expectedHead !== undefined && expectedHead !== reviewedHead)
+      )
+        return json(409, { ok: false, error: "recovery_binding_evidence_ambiguous", at });
+      publication = {
+        repo: instance.repo,
+        pr: pr.number,
+        headRef: row.branch,
+        baseRef: base,
+        expectedHeadSha: reviewedHead,
+        publicationRef: row.branch,
+        owner: originalOwner,
+      };
+      expectedHead = reviewedHead;
+      claimRow = { ...row, lastPush: reviewedHead, publication };
+    }
+    reviewRunId = review.id;
+    reviewKey = review.idempotencyKey!;
     try {
       facts = await deps.fetchPrFacts({ repo: instance.repo, number: pr.number });
     } catch (err) {
@@ -2281,7 +2425,7 @@ export async function recoverOriginalUnit(
         run.userId === instance.userId &&
         run.repo?.toLowerCase() === instance.repo.toLowerCase() &&
         run.threadKey === unitThreadKey &&
-        (run.idempotencyKey === findingsPrefix || run.idempotencyKey?.startsWith(`${findingsPrefix}/a`) === true) &&
+        isStepAttempt(run.idempotencyKey, findingsPrefix) &&
         run.headSha === facts!.headSha &&
         (!headMoved || run.pushed?.some((push) => push.ref === row.branch && push.sha === facts!.headSha) === true) &&
         run.startedAt >= (candidates[0]!.finishedAt ?? candidates[0]!.startedAt) &&
@@ -2296,7 +2440,7 @@ export async function recoverOriginalUnit(
       kind = "review";
       round = boundary.index + 1;
       claimRow = {
-        ...row,
+        ...claimRow,
         lastPush: expectedHead,
         publication: { ...publication, expectedHeadSha: expectedHead },
       };
@@ -2436,6 +2580,14 @@ export async function recoverOriginalUnit(
         ...(findingsKey !== undefined ? { findingsKey } : {}),
         ...(findings !== undefined ? { findings } : {}),
         previousEnding: row.ending!,
+        ...(claimRow !== row
+          ? {
+              previousBinding: {
+                ...(row.publication !== undefined ? { publication: row.publication } : {}),
+                ...(row.lastPush !== undefined ? { lastPush: row.lastPush } : {}),
+              },
+            }
+          : {}),
         workflowId,
         deadlineAt,
         reviewKey,
@@ -2550,6 +2702,8 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     // another pull request, but entry, transition and ending reads all stay on
     // the adopted one through a merge, close or force-push.
     if (follow !== undefined) {
+      if (unit.row?.pr !== undefined && unit.row.pr.number !== follow)
+        throw new PublicationBindingRefusal("publication_facts_mismatch");
       const facts = await deps.fetchPrFacts({ repo: instance.repo, number: follow });
       if (facts === undefined) throw new Error(`could not read ${instance.repo}#${follow}`);
       const fallbackUrl = unit.row?.pr?.url ?? `https://github.com/${instance.repo}/pull/${follow}`;
@@ -2561,8 +2715,8 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         return json(200, { ok: true, ...state, at });
       }
       const bindingRow =
-        unit.row !== undefined && unit.row.recovery !== undefined && recover !== undefined
-          ? await advanceRecoveryPublication(deps, instance, unit.row, facts, recover.runId)
+        unit.row !== undefined && recover !== undefined
+          ? await advanceFindingsPublication(deps, instance, unit.row, facts, recover.runId)
           : unit.row;
       await bindOpenPullRequest(deps, instance, bindingRow, followedPr, facts);
       const prRef = { repo: instance.repo, number: follow };
@@ -3177,6 +3331,11 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const updated: CoordinatorUnit = {
     ...row,
     rounds: [...row.rounds, note],
+    // The transport has started doing work. Admission rollback must no longer
+    // remove publication authority already used by this recovery.
+    ...(row.recovery?.previousBinding !== undefined
+      ? { recovery: { ...row.recovery, previousBinding: undefined } }
+      : {}),
   };
   if (row.recovery !== undefined) {
     let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
