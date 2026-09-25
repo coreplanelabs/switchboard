@@ -2099,7 +2099,12 @@ export async function recoverOriginalUnit(
   const publication = row.publication;
   const pr = row.pr;
   const base = instance.base;
-  let expectedHead = row.lastPush;
+  // A step-threw ending after findings/pr-check carries no `headSha`, so
+  // unit-end cannot populate `lastPush`. The existing publication binding is
+  // still the durable reviewed-head authority; completed findings evidence
+  // below may advance it, but an absent optional continuation hint must not
+  // hide that authority.
+  let expectedHead = row.lastPush ?? publication?.expectedHeadSha;
   if (
     pr === undefined ||
     base === undefined ||
