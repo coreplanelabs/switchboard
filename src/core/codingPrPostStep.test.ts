@@ -2090,6 +2090,24 @@ describe("salvageWorkOf — whether the observation found work to salvage, and w
 });
 
 describe("salvageTargetOf — where the budget-end salvage may push, and when it may not", () => {
+  it("keeps a coordinator child on its bound branch after an auxiliary push", () => {
+    expect(
+      salvageTargetOf({
+        pushedBranch: "assets/screenshots",
+        checkedOut: "plan/p/u1",
+        ownedBranch: "plan/p/u1",
+        base: "main",
+      }),
+    ).toEqual({ branch: "plan/p/u1" });
+    expect(
+      salvageTargetOf({
+        pushedBranch: "assets/screenshots",
+        checkedOut: "assets/screenshots",
+        ownedBranch: "plan/p/u1",
+        base: "main",
+      }),
+    ).toEqual({ skipped: "the ending checkpoint kept work on `assets/screenshots`: the owned branch is `plan/p/u1`" });
+  });
   it("pushes to the branch the run's own push named, else to the checkout, when the plan's base is known and is another branch", () => {
     expect(salvageTargetOf({ pushedBranch: "plan/p/u1", checkedOut: "plan/p/u1", base: "feat/trunk" })).toEqual({
       branch: "plan/p/u1",

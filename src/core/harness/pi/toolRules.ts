@@ -258,9 +258,9 @@ function judgeBashTimeout(timeout: unknown, ctx: ToolRuleContext): ToolVerdict {
 
 /** `git push [flags] [remote [refspec]]`: the run's repository is `origin`
  *  and, when the run was given a branch, that is its one target — anything
- *  else is a `repo:use` the grant set does not carry; a destination of `HEAD`
- *  is the branch the driver checked out, the run's, so `git push origin HEAD`
- *  is the same push as naming it. A run naming its own branch may push any but
+ *  else is a `repo:use` the grant set does not carry. A bare push or `HEAD`
+ *  source is not proof of that target: the checkout may have moved
+ *  since the driver attached it. A run naming its own branch may push any but
  *  the protected ones: the base its pull request targets is never pushed to. */
 function judgePush(tail: string, ctx: ToolRuleContext): ToolVerdict {
   const [remote, refspec, ...additionalRefspecs] = pushArguments(tail);
@@ -274,10 +274,12 @@ function judgePush(tail: string, ctx: ToolRuleContext): ToolVerdict {
       return refused("repo:use — existing-PR publication requires the explicit owned destination");
     if (additionalRefspecs.length > 0)
       return refused("repo:use — existing-PR publication allows exactly one owned destination");
-    const destination = refspec.replace(/^\+/, "").split(":").pop() ?? refspec;
-    const branch = destination === "HEAD" ? ctx.branch : destination.replace(/^refs\/heads\//, "");
+    const [source, destination = source] = refspec.replace(/^\+/, "").split(":");
+    const branch = destination.replace(/^refs\/heads\//, "");
     if (branch !== publication.ref)
       return refused(`repo:use — push to \`${branch}\`, not the owned publication ref ${publication.ref}`);
+    if (source.replace(/^refs\/heads\//, "") !== publication.ref)
+      return refused(`repo:use — push from the owned publication ref ${publication.ref}; the checkout may have moved`);
     const lease = `--force-with-lease=refs/heads/${publication.ref}:${publication.expectedHeadSha}`;
     if (!tail.split(/\s+/).includes(lease))
       return refused(
@@ -285,16 +287,21 @@ function judgePush(tail: string, ctx: ToolRuleContext): ToolVerdict {
       );
     return allowed;
   }
-  // A push naming no refspec pushes the checked-out branch, which a rule over
-  // the call's text alone cannot know: `git switch main && git push` passes
-  // here. The accepted gap of text-only rules — the policy table's tool-level
-  // rows (the authorization spec's open item) are where a checkout-aware
-  // gate belongs.
+  if (ctx.branch !== undefined && refspec === undefined)
+    return refused(
+      `repo:use — name the run's branch ${ctx.branch} as the push source and destination; the checkout may have moved`,
+    );
+  if (ctx.branch !== undefined && additionalRefspecs.length > 0)
+    return refused("repo:use — a bound run may push exactly one branch");
+  // An unbound run may cut its own branch. A bare push still relies on the
+  // checkout; a checkout-aware gate is the policy table's open item.
   if (refspec === undefined) return allowed;
-  const destination = refspec.replace(/^\+/, "").split(":").pop() ?? refspec;
+  const [source, destination = source] = refspec.replace(/^\+/, "").split(":");
   if (ctx.branch !== undefined) {
-    const branch = destination === "HEAD" ? ctx.branch : destination.replace(/^refs\/heads\//, "");
+    const branch = destination.replace(/^refs\/heads\//, "");
     if (branch !== ctx.branch) return refused(`repo:use — push to \`${branch}\`, not the run's branch ${ctx.branch}`);
+    if (source.replace(/^refs\/heads\//, "") !== ctx.branch)
+      return refused(`repo:use — push from the run's branch ${ctx.branch}; the checkout may have moved`);
     return allowed;
   }
   const branch = destination.replace(/^refs\/heads\//, "");

@@ -205,7 +205,10 @@ export async function observeCodingWorkspace(
     }
     return {
       observation: {
-        head: pushed === undefined ? headSha : parseRevParseOutput(tipOut),
+        head:
+          pushed === undefined
+            ? headSha
+            : (parseRevParseOutput(tipOut) ?? (checkedOut === pushed ? headSha : undefined)),
         branch,
         checkedOut,
         remoteHead,
@@ -223,17 +226,23 @@ export async function observeCodingWorkspace(
 }
 
 /** Where a ship coding child's budget-end salvage may push (push-before-abort,
- *  docs/reference/specs/agent-ship.md item 8): the branch the run's own push
- *  named, else the checkout — and only when the plan's base is known and is
- *  another branch, since the base is the one branch a child never pushes to,
- *  and a branch that cannot be told from it may be it. Otherwise the salvage
- *  is skipped, and the word says why. */
+ *  docs/reference/specs/agent-ship.md item 8): its coordinator-owned branch
+ *  outranks an auxiliary push, and salvage skips a moved checkout. Without
+ *  an owned branch, the run's own push named branch outranks the checkout.
+ *  The plan's base must be known and different. Otherwise salvage skips and
+ *  says why. */
 export function salvageTargetOf(opts: {
   pushedBranch: string | undefined;
   checkedOut: string | undefined;
   base: string | undefined;
+  /** A coordinator's durable publication ref outranks an auxiliary push. */
+  ownedBranch?: string;
 }): { branch: string } | { skipped: string } {
-  const branch = opts.pushedBranch ?? opts.checkedOut;
+  if (opts.ownedBranch !== undefined && opts.checkedOut !== opts.ownedBranch)
+    return {
+      skipped: `the ending checkpoint kept work on \`${opts.checkedOut ?? "an unreadable checkout"}\`: the owned branch is \`${opts.ownedBranch}\``,
+    };
+  const branch = opts.ownedBranch ?? opts.pushedBranch ?? opts.checkedOut;
   if (branch === undefined)
     return {
       skipped:
