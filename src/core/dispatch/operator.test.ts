@@ -17,6 +17,7 @@ import {
   OPERATOR_READ_TOOLS,
   operatorEventOf,
   operatorProjection,
+  operatorSources,
   operatorThreadTail,
   operatorTools,
   parseOperatorTurn,
@@ -36,6 +37,7 @@ import {
   routablePresets,
   type RoutableCommand,
   type RouteModel,
+  type RoutePrompt,
   type RouteToolCall,
 } from "./route.js";
 import { ConfigStore } from "../../config.js";
@@ -250,6 +252,202 @@ describe("the operator is one loop with typed tools", () => {
       kind: "violation",
       violation: expect.stringContaining('"decide"') as unknown as string,
     });
+  });
+});
+
+describe("the operator's connected data sources", () => {
+  it("maps each arbitrary MCP server to its least-capable authorized preset without requiring a repository", () => {
+    const projection = projectionOf(["general", "research", "explore"]);
+    const sources = operatorSources(
+      [
+        {
+          server: "metrics-lake",
+          agents: ["general", "research"],
+          instructions: "Query service metrics and explain aggregate trends.",
+        },
+        { server: "research-only", agents: ["research"] },
+        { server: "off-path", agents: ["ship"] },
+      ],
+      projection.presets,
+    );
+
+    expect(sources).toEqual([
+      {
+        server: "metrics-lake",
+        preset: "general",
+        instructions: "Query service metrics and explain aggregate trends.",
+      },
+      { server: "research-only", preset: "research" },
+    ]);
+    const prompt = buildOperatorPrompt(
+      input({ text: "use the metrics service to explain this workspace", projection, sources }),
+    );
+    expect(prompt.system).toContain("Connected data sources");
+    expect(prompt.system).toContain("never a reason to require a repository");
+    expect(prompt.user).toContain(
+      "Connected data sources for this request:\n- metrics-lake → general: Query service metrics and explain aggregate trends.\n- research-only → research",
+    );
+    expect(prompt.user).not.toContain("off-path");
+    expect(prompt.user.indexOf("Connected data sources")).toBeLessThan(prompt.user.indexOf("<request>"));
+  });
+
+  it("binds a repo-less service request from the caller's MCP catalog onto the least-capable receiving preset", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-operator-source-bind-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+`,
+    );
+    const config = new ConfigStore(path, join(dir, "overrides.json"));
+    const prompts: RoutePrompt[] = [];
+    const result = await operatorStage(
+      {
+        config,
+        operatorModel: async (prompt) => {
+          prompts.push(prompt);
+          return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "configured data source" } };
+        },
+        mcp: {
+          catalogFor: async (caller) => {
+            expect(caller).toEqual({ userId: "slack:UX", channelId: "slack:CX" });
+            return [
+              {
+                server: "analytics-lake",
+                agents: ["general", "research"],
+                instructions: "Read aggregate workspace analytics.",
+              },
+            ];
+          },
+        },
+      },
+      {
+        msg: {
+          channelId: "slack:CX",
+          userId: "slack:UX",
+          userName: "UX",
+          text: "use the analytics lake to explain this workspace's merge rate",
+          threadKey: "slack:CX:1.0",
+        },
+        mode: "on",
+      },
+    );
+
+    expect(result).toMatchObject({
+      outcome: "binds",
+      binds: [{ line: "agent:general use the analytics lake to explain this workspace's merge rate" }],
+    });
+    expect(result?.binds?.[0]).not.toHaveProperty("repo");
+    expect(prompts[0].user).toContain("analytics-lake → general: Read aggregate workspace analytics.");
+  });
+
+  it("shows no source facts when MCP is not wired and names a catalog outage as MCP availability, not a provider refusal", async () => {
+    const bare = buildOperatorPrompt(input());
+    expect(bare.system).not.toContain("Connected data sources");
+    expect(bare.user).not.toContain("Connected data sources");
+
+    const dir = mkdtempSync(join(tmpdir(), "swb-operator-sources-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+`,
+    );
+    const config = new ConfigStore(path, join(dir, "overrides.json"));
+    const prompts: RoutePrompt[] = [];
+    const result = await operatorStage(
+      {
+        config,
+        operatorModel: async (prompt) => {
+          prompts.push(prompt);
+          return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "service investigation" } };
+        },
+        mcp: {
+          catalogFor: async () => {
+            throw new Error("registry HTTP 503");
+          },
+        },
+      },
+      {
+        msg: {
+          channelId: "slack:CX",
+          userId: "slack:UX",
+          userName: "UX",
+          text: "use the metrics service to explain this workspace",
+          threadKey: "slack:CX:1.0",
+        },
+        mode: "on",
+      },
+    );
+
+    expect(result).toMatchObject({ outcome: "binds", binds: [{ line: expect.stringContaining("agent:general") }] });
+    expect(prompts[0].user).toContain("Connected data sources for this request: unavailable (registry HTTP 503)");
+    expect(prompts[0].user).not.toContain("model provider");
+  });
+
+  it("filters the MCP catalog through the requester's preset authorization before the operator sees it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-operator-source-auth-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+restrict:
+  agents: [research]
+`,
+    );
+    const config = new ConfigStore(path, join(dir, "overrides.json"));
+    const prompts: RoutePrompt[] = [];
+    const result = await operatorStage(
+      {
+        config,
+        operatorModel: async (prompt) => {
+          prompts.push(prompt);
+          return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "fallback read" } };
+        },
+        mcp: {
+          catalogFor: async (caller) => {
+            expect(caller).toEqual({ userId: "slack:UX", channelId: "slack:CX" });
+            return [{ server: "restricted-service", agents: ["research"] }];
+          },
+        },
+      },
+      {
+        msg: {
+          channelId: "slack:CX",
+          userId: "slack:UX",
+          userName: "UX",
+          text: "use the restricted service",
+          threadKey: "slack:CX:1.0",
+        },
+        mode: "on",
+      },
+    );
+
+    expect(result).toMatchObject({ outcome: "binds", binds: [{ line: expect.stringContaining("agent:general") }] });
+    expect(prompts[0].system).not.toContain("| `research` |");
+    expect(prompts[0].user).toContain("Connected data sources for this request: none");
+    expect(prompts[0].user).not.toContain("restricted-service");
   });
 });
 
