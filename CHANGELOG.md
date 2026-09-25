@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.262.1](https://github.com/coreplanelabs/switchboard/compare/v1.262.0...v1.262.1) (2026-09-25)
+
+
+### Bug fixes
+
+* **ship:** recover findings without a persisted last push ([#2355](https://github.com/coreplanelabs/switchboard/issues/2355)) ([bd6f4c7](https://github.com/coreplanelabs/switchboard/commit/bd6f4c73c8c59f01e01bbb7efd394b3b4f65dfce))
+
 ## [1.262.0](https://github.com/coreplanelabs/switchboard/compare/v1.261.4...v1.262.0) (2026-09-24)
 
 
