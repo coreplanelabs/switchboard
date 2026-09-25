@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.262.4](https://github.com/coreplanelabs/switchboard/compare/v1.262.3...v1.262.4) (2026-09-25)
+
+
+### Bug fixes
+
+* **coding:** keep ship publication on its unit branch ([#2365](https://github.com/coreplanelabs/switchboard/issues/2365)) ([8b5d470](https://github.com/coreplanelabs/switchboard/commit/8b5d4701dfea256a489e36502a7c83013bd2cd62))
+* **dispatcher:** wake idle units on inferred read binds ([#2366](https://github.com/coreplanelabs/switchboard/issues/2366)) ([1d96da6](https://github.com/coreplanelabs/switchboard/commit/1d96da68ecc439d2fffb196aaf00aa973daeb6a5))
+* **providers:** load tiered model prices from config ([#2368](https://github.com/coreplanelabs/switchboard/issues/2368)) ([a452d3b](https://github.com/coreplanelabs/switchboard/commit/a452d3b90102c66cd80a8d51ce789e7e615010ce))
+
 ## [1.262.3](https://github.com/coreplanelabs/switchboard/compare/v1.262.2...v1.262.3) (2026-09-25)
 
 
