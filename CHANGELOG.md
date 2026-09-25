@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.262.2](https://github.com/coreplanelabs/switchboard/compare/v1.262.1...v1.262.2) (2026-09-25)
+
+
+### Bug fixes
+
+* **ship:** retain original-unit publication authority ([#2359](https://github.com/coreplanelabs/switchboard/issues/2359)) ([21696a7](https://github.com/coreplanelabs/switchboard/commit/21696a703d549c2655b5487ca0a738d408e306ac))
+
+
+### Documentation
+
+* append the proposed migration bridge amendment ([#2360](https://github.com/coreplanelabs/switchboard/issues/2360)) ([13fc13d](https://github.com/coreplanelabs/switchboard/commit/13fc13d4a9a79ee72363493fc8cadb33f2f5045b))
+
 ## [1.262.1](https://github.com/coreplanelabs/switchboard/compare/v1.262.0...v1.262.1) (2026-09-25)
 
 
