@@ -2355,7 +2355,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       judgeToolCall(
         "bash",
         {
-          command: `git push --force-with-lease=refs/heads/fix/existing:${expected} origin HEAD:refs/heads/fix/existing`,
+          command: `git push --force-with-lease=refs/heads/fix/existing:${expected} origin fix/existing:refs/heads/fix/existing`,
         },
         existing,
       ),
@@ -4331,6 +4331,56 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(opened).toHaveLength(1);
     expect(opened[0]).toMatchObject({ repo: "o/r", headBranch: BRANCH, base: "feat/trunk" });
     expect(out.prNote).toContain("PR opened");
+  });
+
+  it("opens the unit PR after an auxiliary branch push and a dirty auxiliary checkout", async () => {
+    const BRANCH = "plan/p/u1";
+    const AUX = "assets/screenshots";
+    const AUX_HEAD = "b".repeat(40);
+    const description: PrDescription = {
+      title: "Fix the email copy",
+      tldr: "Shortens the email while preserving the action.",
+      why: "The existing email repeats itself.",
+      pointers: [{ label: "The copy", text: "One paragraph.", anchor: { path: "src/a", from: 1, to: 2 } }],
+      feedbackWanted: "The wording.",
+      verified: "Focused test passed.",
+      decisions: [],
+      risk: "copy only",
+      validation: { criteria: [{ criterion: "email copy", proof: "focused test" }] },
+    };
+    const commands: string[] = [];
+    const s = setup("", {
+      agent: "coding",
+      provider: neverCalled(),
+      repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+      coding: true,
+      coordinator: { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/0/coding", base: "main" },
+      executor: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${AUX}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${AUX_HEAD}\n`;
+          if (/rev-parse 'refs\/heads\//.test(cmd)) return `${HEAD}\n`;
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+          if (/status --porcelain/.test(cmd)) return " M assets/screenshot.png\n";
+          if (/rev-list --count/.test(cmd)) return "1\n";
+          return "";
+        },
+      },
+    });
+    const opened: Array<Record<string, unknown>> = [];
+    s.deps.openPullRequest = async (target) => {
+      opened.push({ ...target });
+      return { number: 9, htmlUrl: "https://github.com/o/r/pull/9", created: true };
+    };
+    const resume = finishing("Done.", { agent: "coding", state: { prDescription: description, pushedBranch: AUX } });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ repo: "o/r", headBranch: BRANCH, base: "main" });
+    expect(String(opened[0].body)).toContain(`blob/${HEAD}/`);
+    expect(out.prNote).toContain("PR opened");
+    expect(commands.some((cmd) => cmd.startsWith("git push"))).toBe(false);
   });
 
   it("a coordinator child whose plan base survived nowhere — no tag base, no instance in the store — opens nothing and publishes pr_not_opened saying the plan's base was lost across a roll", async () => {

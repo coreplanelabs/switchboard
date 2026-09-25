@@ -167,24 +167,56 @@ describe("judgeToolCall — bash", () => {
   it("allows ordinary commands and a push of the run's own branch to origin", () => {
     expect(bash("npx vitest run src/load/reasons.test.ts")).toEqual({ verdict: "allowed" });
     expect(bash("git push -u origin load-pi/test-gap-1")).toEqual({ verdict: "allowed" });
-    expect(bash("git push --force-with-lease origin HEAD:load-pi/test-gap-1")).toEqual({ verdict: "allowed" });
-    expect(bash("git push")).toEqual({ verdict: "allowed" });
+    expect(bash("git push --force-with-lease origin load-pi/test-gap-1:load-pi/test-gap-1")).toEqual({
+      verdict: "allowed",
+    });
+    expect(bash("git push")).toEqual({
+      verdict: "refused",
+      reason:
+        "repo:use — name the run's branch load-pi/test-gap-1 as the push source and destination; the checkout may have moved",
+    });
   });
-  it("HEAD as the destination is the run's branch — the driver checked it out", () => {
-    expect(bash("git push origin HEAD")).toEqual({ verdict: "allowed" });
-    expect(bash("git push -u origin HEAD")).toEqual({ verdict: "allowed" });
-    expect(bash("git push origin +HEAD")).toEqual({ verdict: "allowed" });
+  it("refuses implicit HEAD destinations after the checkout may have moved", () => {
+    for (const command of ["git push origin HEAD", "git push -u origin HEAD", "git push origin +HEAD"]) {
+      expect(bash(command)).toEqual({
+        verdict: "refused",
+        reason: "repo:use — push to `HEAD`, not the run's branch load-pi/test-gap-1",
+      });
+    }
     expect(bash("git push origin HEAD:main")).toEqual({
       verdict: "refused",
       reason: "repo:use — push to `main`, not the run's branch load-pi/test-gap-1",
     });
+    for (const source of ["HEAD", "other", "+HEAD"]) {
+      expect(bash(`git push origin ${source}:load-pi/test-gap-1`)).toEqual({
+        verdict: "refused",
+        reason: "repo:use — push from the run's branch load-pi/test-gap-1; the checkout may have moved",
+      });
+    }
+    expect(bash("git push origin load-pi/test-gap-1 other:other")).toEqual({
+      verdict: "refused",
+      reason: "repo:use — a bound run may push exactly one branch",
+    });
   });
   it("reads a shell redirection as the shell's, never as the push's remote or refspec", () => {
-    expect(bash("git push --force-with-lease 2>&1 | tail -1")).toEqual({ verdict: "allowed" });
-    expect(bash("git push origin HEAD 2>/dev/null")).toEqual({ verdict: "allowed" });
-    expect(bash("git push origin HEAD:load-pi/test-gap-1 > push.log 2>&1")).toEqual({ verdict: "allowed" });
+    expect(bash("git push --force-with-lease 2>&1 | tail -1")).toEqual({
+      verdict: "refused",
+      reason:
+        "repo:use — name the run's branch load-pi/test-gap-1 as the push source and destination; the checkout may have moved",
+    });
+    expect(bash("git push origin HEAD 2>/dev/null")).toEqual({
+      verdict: "refused",
+      reason: "repo:use — push to `HEAD`, not the run's branch load-pi/test-gap-1",
+    });
+    expect(bash("git push origin load-pi/test-gap-1:load-pi/test-gap-1 > push.log 2>&1")).toEqual({
+      verdict: "allowed",
+    });
     // a bare operator's target is the next word, not a refspec
-    expect(bash("git push origin 2> push.log")).toEqual({ verdict: "allowed" });
+    expect(bash("git push origin 2> push.log")).toEqual({
+      verdict: "refused",
+      reason:
+        "repo:use — name the run's branch load-pi/test-gap-1 as the push source and destination; the checkout may have moved",
+    });
     // a redirection never hides the push's own arguments from the rule
     expect(bash("git push evil main | tail -1")).toEqual({
       verdict: "refused",
@@ -210,7 +242,7 @@ describe("judgeToolCall — bash", () => {
       });
     }
     // a control `&&` still ends the tail, and the push after it is judged too
-    expect(bash("git push origin HEAD 2>&1 && git push evil main")).toEqual({
+    expect(bash("git push origin load-pi/test-gap-1:load-pi/test-gap-1 2>&1 && git push evil main")).toEqual({
       verdict: "refused",
       reason: "repo:use — push to remote `evil`, not the run's repository (origin)",
     });
@@ -326,7 +358,7 @@ describe("judgeToolCall — an existing-PR publication fence", () => {
       judgeToolCall(
         "bash",
         {
-          command: `git push --force-with-lease=refs/heads/fix/existing:${expected} origin HEAD:refs/heads/fix/existing`,
+          command: `git push --force-with-lease=refs/heads/fix/existing:${expected} origin fix/existing:refs/heads/fix/existing`,
         },
         own,
       ),
@@ -336,6 +368,7 @@ describe("judgeToolCall — an existing-PR publication fence", () => {
       "git push --force-with-lease origin fix/existing",
       `git push --force-with-lease=refs/heads/fix/existing:${"b".repeat(40)} origin fix/existing`,
       `git push --force-with-lease=refs/heads/fix/existing:${expected} origin fix/alternate`,
+      `git push --force-with-lease=refs/heads/fix/existing:${expected} origin HEAD:refs/heads/fix/existing`,
       `git push --force-with-lease=refs/heads/fix/existing:${expected} origin HEAD:refs/heads/fix/existing HEAD:refs/heads/fix/alternate`,
       "git push",
     ])

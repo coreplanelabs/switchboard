@@ -473,9 +473,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let toolCalls = 0; // "did real work" signal for the memory reflection gate
   // The branch the run's own `git push` named, read off its bash calls and
   // results as they stream by (docs/reference/specs/pr-description.md item 5):
-  // the PR post-step opens from THIS branch, and from the checkout only
-  // when no push was observed — the checkout can move between the push and
-  // the post. The latest push wins.
+  // a standalone PR post-step opens from THIS branch, and from the checkout
+  // only when no push was observed. A coordinator child owns its bound ref
+  // instead: the checkout and the last push may be an auxiliary branch.
   const pushes = trackPushedBranch(typeof restored.pushedBranch === "string" ? restored.pushedBranch : undefined);
   // The loop ended at its time budget (the harness's wind-down note): a ship
   // coding child then salvages what its tree still holds (push-before-abort,
@@ -698,7 +698,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
   let observedHead: string | undefined;
   // The PR head branch (coding runs), read alongside it for the PR
-  // post-step: the branch the run's push named, else the checked-out branch.
+  // post-step: the coordinator's owned ref, or for standalone coding the
+  // branch the run's push named, else the checked-out branch.
   // Undefined when unreadable or detached ("HEAD" is not a branch — nothing
   // a PR could be opened from) with no push observed.
   let observedBranch: string | undefined;
@@ -833,8 +834,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let workspaceObserved = false;
   let workSalvageAttempted = false;
   let endingSalvageAttempted = false;
+  // A coordinator child publishes one owned ref. An auxiliary push must not
+  // redirect its observation, completion checkpoint, or PR post-step.
+  const coordinatorBranch =
+    coordinator?.publication?.publicationRef ?? (coordinator !== undefined ? (binding?.ref ?? repoCtx.ref) : undefined);
   const observeWorkspaceNow = async () => {
-    const pushedBranch = pushes.branch();
+    const pushedBranch = coordinator !== undefined ? coordinatorBranch : pushes.branch();
     const observed = await root.span("run.observe_workspace", (span) =>
       observeCodingWorkspace(
         executor,
@@ -861,11 +866,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const preserveCodingChildWork = async (cue: "budget" | "ending" | "completion"): Promise<void> => {
     if (workSalvageAttempted || !isCodingPrRun || coordinator === undefined) return;
     if (!workspaceObserved) await observeWorkspaceNow();
-    const target = salvageTargetOf({
-      pushedBranch: pushes.branch(),
-      checkedOut: observedCheckedOut,
-      base: repoCtx.baseRef ?? (await coordinatorBase),
-    });
+    const target =
+      coordinatorBranch === undefined
+        ? { skipped: "the ending checkpoint was skipped: the unit's branch is unavailable" }
+        : salvageTargetOf({
+            pushedBranch: pushes.branch(),
+            checkedOut: observedCheckedOut,
+            ownedBranch: coordinatorBranch,
+            base: repoCtx.baseRef ?? (await coordinatorBase),
+          });
     // The checkpoint measures for itself and includes untracked, non-ignored
     // files. The ordinary workspace observation deliberately counts tracked
     // dirt only and therefore cannot decide that a completed child is clean.
@@ -892,7 +901,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ("skipped" in target && (observedUncommitted ?? 0) === 0 && (observedUnpushed ?? 0) === 0));
     if (cleanCompletion) return;
     workSalvageAttempted = true;
-    if (cue === "ending" || cue === "completion") endingSalvageAttempted = true;
+    // A moved checkout was not checkpointed. The owned branch can still be
+    // independently proven at the remote and published as a pull request.
+    if (cue === "ending" || (cue === "completion" && !("skipped" in target))) endingSalvageAttempted = true;
     onEvent({
       type: "run_note",
       kind: cue === "budget" ? "budget_salvage" : "work_salvage",
