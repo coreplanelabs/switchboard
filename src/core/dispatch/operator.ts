@@ -303,6 +303,8 @@ export function ownerNote(owner: OperatorThreadOwner): string {
       : "";
   if (owner.kind === "pipeline")
     return `This thread is owned by ${who}: the request below is a continuation of that durable task. Read tools may ground the decision, but every action folds into the owner so the current pull request is re-read and the pipeline resumes; an informational command or question is not fulfillment.`;
+  if (owner.kind === "unit")
+    return `This thread is owned by ${who}: the request below is a follow-up for that unit. An inferred read command cannot answer it; fold the whole message into the unit unchanged. Ask a question only when a required detail is missing.`;
   return `This thread is owned by ${who}: the request below is a follow-up for that owner. To act on it,${steer} bind a read command, or ask a question. Any other decision — a refusal, a preset, a write — folds the whole message into the owner unchanged and posts no answer.`;
 }
 
@@ -1012,7 +1014,11 @@ function ownedDecisionRuns(event: OperatorEventFields, owner: OperatorThreadOwne
     // has no live steer target either: folding reaches the dispatcher's durable
     // task re-issue path instead of letting a transcript's stale run id answer.
     if (def.id === "steer.run") return !(owner.kind === "live" && owner.runId === undefined);
-    return boundBlastRadius(def as CommandDef<unknown>, parsed.input) === "read";
+    // An idle unit owns this thread even when the operator infers a read from
+    // an action request. A plain reply reaches the unit's durable event path;
+    // a person's explicitly typed command is still handled by the command
+    // fast path in dispatch, without relying on this model decision.
+    return owner.kind !== "unit" && boundBlastRadius(def as CommandDef<unknown>, parsed.input) === "read";
   });
 }
 

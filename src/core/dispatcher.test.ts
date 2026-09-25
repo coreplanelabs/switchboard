@@ -19507,6 +19507,55 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(registry.snapshotById("r2")).toBeNull();
   });
 
+  it("on: an inferred read bind cannot answer an action request in an idle unit's thread", async () => {
+    const instanceId = "plan-fix-the-login-6435ec";
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.putUnits([
+      {
+        instanceId,
+        unit: "U12",
+        slug: "u12",
+        branch: "plan/fix-the-login-6435ec/u12",
+        dependsOn: [],
+        rounds: [],
+        threadKey: "slack:CX:1.0",
+        idle: { why: "held", at: 1, renewalsLeft: 1, spendUsd: 1, wakes: 0 },
+      },
+    ]);
+    deps.coordinatorInstances = instances;
+    const sends: string[] = [];
+    deps.workflow = { get: async (id) => ({ sendEvent: async () => void sends.push(id) }) };
+    const thread = [
+      { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: instanceId },
+    ] as RunView[];
+    deps.operatorModel = decides({
+      reason: "inspect the unit before acting",
+      binds: [{ line: "plane show", reason: "inspect the plane first" }],
+    });
+    const request = "Address the current PR review comments in this unit and request another review";
+    const { io, replies } = fakeIO();
+
+    await dispatch(deps, msg(request, "slack:UADMIN"), io, { thread });
+
+    expect(deps.invoked).toEqual([]);
+    expect(await instances.listEvents({ instanceId, unit: "U12" })).toEqual([
+      expect.objectContaining({ sender: "slack:UADMIN", text: request, mode: "wake" }),
+    ]);
+    expect(sends).toEqual([instanceId]);
+    expect(replies.some((reply) => reply.includes("Noted for unit U12"))).toBe(true);
+    expect(provider.requests).toHaveLength(0);
+    expect(registry.snapshotById("r1")!.events.find((event) => event.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "binds",
+    });
+
+    await dispatch(deps, msg("plane show", "slack:UADMIN"), fakeIO().io, { thread });
+    expect(deps.invoked).toEqual(["plane.show"]);
+    expect(await instances.listEvents({ instanceId, unit: "U12" })).toHaveLength(1);
+  });
+
   it("on: a preset bind into a live pipeline's seed thread is refused by the owner rule — the decision still lands on a door record, under shadow too", async () => {
     const INSTANCE = "plan-fix-the-login-6435ec";
     const seedThread = () =>
