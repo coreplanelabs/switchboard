@@ -638,11 +638,41 @@ export function validateModelOverride(path: string, raw: unknown): void {
   if (m.price !== undefined) {
     if (typeof m.price !== "object" || m.price === null || Array.isArray(m.price))
       throw new Error(`${path}.price must be a mapping of kind → USD per million tokens`);
-    for (const [kind, v] of Object.entries(m.price as Record<string, unknown>)) {
+    const price = m.price as Record<string, unknown>;
+    for (const [kind, v] of Object.entries(price)) {
+      if (kind === "tiers") continue;
       if (!Object.hasOwn(PRICE_KINDS, kind))
         throw new Error(`${path}.price.${kind} is not a known kind (input, output, cacheRead, cacheWrite)`);
       if (typeof v !== "number" || !Number.isFinite(v) || v < 0)
         throw new Error(`${path}.price.${kind} must be a finite number of USD per million tokens, 0 or more`);
+    }
+    if (price.tiers !== undefined) {
+      if (!Array.isArray(price.tiers) || price.tiers.length === 0)
+        throw new Error(`${path}.price.tiers must be a nonempty list of long-context rates`);
+      for (const kind of Object.keys(PRICE_KINDS)) {
+        if (price[kind] === undefined) throw new Error(`${path}.price.${kind} is required with tiers`);
+      }
+      const thresholds = new Set<number>();
+      for (const [index, rawTier] of price.tiers.entries()) {
+        const tierPath = `${path}.price.tiers[${index}]`;
+        if (typeof rawTier !== "object" || rawTier === null || Array.isArray(rawTier))
+          throw new Error(`${tierPath} must be a mapping of threshold and rates`);
+        const tier = rawTier as Record<string, unknown>;
+        for (const key of Object.keys(tier)) {
+          if (key !== "inputTokensAbove" && !Object.hasOwn(PRICE_KINDS, key))
+            throw new Error(`${tierPath}.${key} is not a known tier field`);
+        }
+        if (!Number.isInteger(tier.inputTokensAbove) || (tier.inputTokensAbove as number) <= 0)
+          throw new Error(`${tierPath}.inputTokensAbove must be a positive integer of tokens`);
+        const threshold = tier.inputTokensAbove as number;
+        if (thresholds.has(threshold)) throw new Error(`${tierPath}.inputTokensAbove duplicates a previous threshold`);
+        thresholds.add(threshold);
+        for (const kind of Object.keys(PRICE_KINDS)) {
+          const rate = tier[kind];
+          if (typeof rate !== "number" || !Number.isFinite(rate) || rate < 0)
+            throw new Error(`${tierPath}.${kind} must be a finite number of USD per million tokens, 0 or more`);
+        }
+      }
     }
   }
 }

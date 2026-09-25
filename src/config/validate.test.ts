@@ -8,7 +8,7 @@ import {
   validateScopeBlocks,
   validateSlack,
 } from "./validate.js";
-import { wireOf, type ProviderConfig } from "../core/provider.js";
+import { wireOf, type ProviderConfig, type ProviderModelOverride } from "../core/provider.js";
 
 const providers = (blocks: Record<string, unknown>): AppConfig => ({ providers: blocks }) as unknown as AppConfig;
 
@@ -133,6 +133,35 @@ describe("validateProviders — the block's declaration", () => {
       },
     });
     expect(() => validateProviders(cfg, "config.yaml")).not.toThrow();
+  });
+
+  it("accepts a complete long-context price tier and refuses malformed tiers by name", () => {
+    const price = {
+      input: 2,
+      output: 10,
+      cacheRead: 0.2,
+      cacheWrite: 2.5,
+      tiers: [{ inputTokensAbove: 272_000, input: 4, output: 15, cacheRead: 0.4, cacheWrite: 5 }],
+    } satisfies NonNullable<ProviderModelOverride["price"]>;
+    const validatePrice = (value: unknown) =>
+      validateProviders(
+        providers({ a: { wire: "openai-responses", models: { "gpt-6-sol": { price: value } } } }),
+        "config.yaml",
+      );
+
+    expect(() => validatePrice(price)).not.toThrow();
+    expect(() => validatePrice({ ...price, tiers: [{ ...price.tiers[0], output: undefined }] })).toThrow(
+      /price\.tiers\[0\]\.output must be a finite number/,
+    );
+    expect(() => validatePrice({ ...price, tiers: [{ ...price.tiers[0], inputTokensAbove: 0 }] })).toThrow(
+      /price\.tiers\[0\]\.inputTokensAbove must be a positive integer/,
+    );
+    expect(() => validatePrice({ ...price, tiers: [{ ...price.tiers[0], cacheRead: -1 }] })).toThrow(
+      /price\.tiers\[0\]\.cacheRead must be a finite number/,
+    );
+    expect(() => validatePrice({ ...price, tiers: [price.tiers[0], price.tiers[0]] })).toThrow(
+      /price\.tiers\[1\]\.inputTokensAbove duplicates/,
+    );
   });
 });
 

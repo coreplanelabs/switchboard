@@ -505,8 +505,20 @@ export interface ProviderModelOverride {
   inputs?: { image?: boolean; document?: boolean };
   /** The model's cache rule. */
   cache?: "automatic" | "markers" | "none" | "unknown";
-  /** USD per million tokens, by kind. */
-  price?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  /** USD per million tokens, by kind, with whole-request long-context rates. */
+  price?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    tiers?: Array<{
+      inputTokensAbove: number;
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+    }>;
+  };
   /** The answer shapes the model can produce for a forced one-call turn (the
    *  router's, intake's): `tool` — a forced tool call — and `text` — the
    *  one-JSON-object text contract. Absent, both are assumed; an empty list
