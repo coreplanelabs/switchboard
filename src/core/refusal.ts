@@ -49,6 +49,7 @@ const CAUSE_OF = {
   pr_head_unknown: "system",
   workspace_head_mismatch: "system",
   coordinator_thread_live: "system",
+  child_reservation_failed: "system",
   live_agent_allowlist: "policy",
   follow_up_refused: "request",
   // the seed thread of a live pipeline runner (record 0051's owner rule):

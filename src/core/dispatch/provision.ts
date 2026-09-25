@@ -69,7 +69,7 @@ import {
   liveViewLink,
   REFUSAL_SENTENCES,
 } from "./reply.js";
-import { refusalOf } from "../refusal.js";
+import { RefusalError, refusalOf } from "../refusal.js";
 import { contextMessageTexts, type TextTurn } from "./messages.js";
 import { routeReasonLabel, routedPartLines, type RouteDecided } from "./route.js";
 import type { OperatorEventFields } from "./commandRun.js";
@@ -313,6 +313,8 @@ export interface RegisteredRun {
 
 /** What `registerRun` reads off the dispatch. */
 export interface RegisterRunContext {
+  /** A child must be durably reserved before any surface can discover its id. */
+  beforeRegister?: (identity: { runId: string; channelVisibility: ChannelVisibility }) => Promise<void>;
   msg: IncomingMessage;
   io: ChannelIO;
   agent: AgentDef;
@@ -439,7 +441,9 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   const channelVisibility = await root.span("dispatch.channel_visibility", () =>
     channelVisibilityOf(deps, msg.channelId),
   );
-  // The registry row, created NOW — before the reservation and the attach —
+  if (ctx.beforeRegister) await ctx.beforeRegister({ runId, channelVisibility });
+  // The registry row, created NOW — after a child's strict reservation,
+  // before an ordinary request's reservation and before either attach —
   // so the run is one row on every surface from the moment it is admitted:
   // the runs index lists it with its label and its capability link, the run
   // page serves it, a stop during the attach latches in its control. Before
@@ -512,7 +516,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   const liveUrl = liveViewLink(run.id, run.token);
   shell.setLink(liveUrl ? { url: liveUrl, label: "Live run" } : undefined);
   if (liveUrl) admitted.runLink = liveUrl;
-  io.runStarted?.({ id: run.id });
+  // A coordinator child is announced by dispatch after it owns the finalizer.
+  if (!coordinator) io.runStarted?.({ id: run.id });
   // The run's stream is live from here (docs/reference/specs/tracing.md item 6): the
   // spans so far — the root, the ack card, the repo resolution — are
   // backfilled, and the attach and the resident's grafted steps stream as
@@ -742,42 +747,54 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
   } = ctx;
   if (!resume && !restart) {
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
-    const reserved = await root.span("dispatch.ledger_reserve", () =>
-      deps.runLedger.reserve({
-        runId,
-        threadKey: msg.threadKey,
-        startedAt,
-        meta: {
-          agent: agent.name,
-          model: resolved.modelRef,
-          channelId: msg.channelId,
-          userId: msg.userId,
+    const reserved = await root
+      .span("dispatch.ledger_reserve", () =>
+        deps.runLedger.reserve({
+          runId,
           threadKey: msg.threadKey,
-          channelVisibility,
-          ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-          ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-          ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-          ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
-          ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
-          ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
-          ...(decisionRecord !== undefined ? { record: decisionRecord } : {}),
-          ...(decisionRecordTask !== undefined ? { recordTaskKey: decisionRecordTask } : {}),
-          ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
-          ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
-          ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
-          readonly: profile.identity === "read",
-          profile,
-          ...(parentRunId !== undefined ? { parentRunId } : {}),
-          ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
-          ...coordinatorFields(coordinator),
-          ...(seed !== undefined ? { seed } : {}),
-          ...(route !== undefined ? { route } : {}),
-          request: requestRow,
-        },
-        card: card.handle ?? null,
-        ...hooks,
-      }),
-    );
+          startedAt,
+          meta: {
+            agent: agent.name,
+            model: resolved.modelRef,
+            channelId: msg.channelId,
+            userId: msg.userId,
+            threadKey: msg.threadKey,
+            channelVisibility,
+            ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+            ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+            ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+            ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+            ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+            ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+            ...(decisionRecord !== undefined ? { record: decisionRecord } : {}),
+            ...(decisionRecordTask !== undefined ? { recordTaskKey: decisionRecordTask } : {}),
+            ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
+            ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
+            ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
+            readonly: profile.identity === "read",
+            profile,
+            ...(parentRunId !== undefined ? { parentRunId } : {}),
+            ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
+            ...coordinatorFields(coordinator),
+            ...(seed !== undefined ? { seed } : {}),
+            ...(route !== undefined ? { route } : {}),
+            request: requestRow,
+          },
+          card: card.handle ?? null,
+          ...hooks,
+        }),
+      )
+      .catch((err: unknown) => {
+        if (!coordinator) throw err;
+        throw new RefusalError(refusalOf("child_reservation_failed", "The child could not be durably reserved."));
+      });
+    if (coordinator && reserved.kind !== "tracked")
+      throw new RefusalError(
+        refusalOf(
+          "child_reservation_failed",
+          `The child could not be durably reserved: ${reserved.kind === "untracked" ? reserved.why : "ownership was fenced"}.`,
+        ),
+      );
     // Named on the slot from here (the row exists now): a steer's durable
     // copy lands under it, and the boot-gap hand-off finds it. Deliberately
     // AFTER the reserve resolves, not before: a steer that lands during the

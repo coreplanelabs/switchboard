@@ -40,7 +40,7 @@ import {
 } from "./dispatch/commandRun.js";
 import { COMMAND_RUN_AGENT } from "./runOwner.js";
 import { redactedInput } from "./dispatch/route.js";
-import type { Actor } from "./authz/types.js";
+import type { Actor, ChannelVisibility } from "./authz/types.js";
 import {
   NO_REFERENCES,
   readReferences,
@@ -111,7 +111,7 @@ import type { FrictionDiagnosis } from "./runFriction.js";
 import { claimRun, type RunDeps } from "./dispatch/run.js";
 import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
-import { writeTombstone } from "./dispatch/record.js";
+import { finishChildSetup, writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipContext, type ShipDeps } from "./dispatch/ship.js";
 import { fetchInstanceStatusViaShim, processShimOptions } from "./coordinator/instancesClient.js";
 import { shipPresetFor } from "./shipPipeline.js";
@@ -678,9 +678,16 @@ export async function dispatch(
   // span, and never twice when the catch-all follows a gate that already
   // recorded (a setup failure's silent close, then its error reply).
   let refusalRecorded = false;
+  let childSetupFinalizer: (() => void) | undefined;
+  let childSetupRefusal: Refusal | undefined;
+  let childSetupFinished = false;
   const recordRefusalOnce = async (refusal: Refusal) => {
     if (refusalRecorded) return;
     refusalRecorded = true;
+    if (childSetupFinalizer && !runLoopStarted) {
+      childSetupRefusal ??= refusal;
+      return;
+    }
     await recordRefusal(deps, msg, io, refusal, ending, trace);
   };
   // A gate refusal is the site's `Refusal` — its own sentence, the cause from
@@ -2103,9 +2110,110 @@ export async function dispatch(
     // `coordinator_tag` event the spawning dispatch published.
     // `coordinator` was reconstructed before profile resolution so its
     // recovery deadline constrains every resumed/restarted phase.
+    const reserveIdentity = async (runId: string, channelVisibility: ChannelVisibility) => {
+      const reservation = await reserveRun(deps, {
+        msg,
+        agent,
+        profile,
+        resolved,
+        repoCtx,
+        channelVisibility,
+        runId,
+        startedAt,
+        receivedAt,
+        resume,
+        restart,
+        card,
+        hooks: reservationHooks,
+        route,
+        admitted: admitted!,
+        root,
+        parentRunId,
+        coordinator,
+        seed,
+        ...(decisionRecord !== undefined ? { decisionRecord } : {}),
+        ...(decisionRecordTask !== undefined ? { decisionRecordTask } : {}),
+        ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
+      });
+      if (reservation) {
+        reserved = reservation.reserved;
+        requestRow = reservation.requestRow;
+        // A run the ledger would not track — whichever way its reservation ended
+        // untracked (run-history item 54) — says so on its own stream and on its
+        // card, not in the bot log alone: no handoff, resume or reclaim reaches
+        // this run, and a reader of its record should see why. Head material,
+        // like the cold-sandbox note below: a setup fact ahead of the loop.
+        if (reservation.untrackedWhy !== undefined) {
+          registry.publish(runId, {
+            type: "run_note",
+            kind: "ledger_untracked",
+            summary: redactAndCap(
+              oneLine(
+                `not tracked by the run ledger: ${reservation.untrackedWhy} — no handoff, resume or reclaim reaches this run; its record still reaches the store`,
+              ),
+              500,
+            ),
+            at: clock(),
+          });
+          shell.note("debug", "untracked by the ledger");
+        }
+      }
+    };
+
     const registration = await registerRun(deps, {
       msg,
       io,
+      ...(coordinator && !resume && !restart
+        ? {
+            beforeRegister: async ({
+              runId,
+              channelVisibility,
+            }: {
+              runId: string;
+              channelVisibility: ChannelVisibility;
+            }) => {
+              await reserveIdentity(runId, channelVisibility);
+              const childReservation = reserved!;
+              // Installed before the registry can expose the id, not at model start.
+              childSetupFinalizer = () => {
+                if (childSetupFinished || runLoopStarted || fencedWhileAttaching) return;
+                childSetupFinished = true;
+                const status =
+                  stoppedWhileAttaching === "hard"
+                    ? "stopped_hard"
+                    : stoppedWhileAttaching === "soft"
+                      ? "stopped_soft"
+                      : "failed";
+                finishChildSetup(deps, {
+                  runId,
+                  registry,
+                  ledgerRun: childReservation,
+                  ending,
+                  root,
+                  msg,
+                  agent,
+                  profile,
+                  resolved,
+                  repoCtx,
+                  channelVisibility,
+                  coordinator,
+                  parentRunId,
+                  seed,
+                  finishedAt: clock(),
+                  status,
+                  refusal: childSetupRefusal ?? refusalOf("setup_failed", "The child ended before its model started."),
+                });
+                // Channel notification cannot prevent the same-id writer or
+                // thread cleanup when a transport fails during setup.
+                try {
+                  io.runFinished?.({ id: runId, status });
+                } catch {
+                  console.warn(`[dispatch] run ${runId}: setup finish notification failed`);
+                }
+              };
+            },
+          }
+        : {}),
       agent,
       resolved,
       directives,
@@ -2137,6 +2245,7 @@ export async function dispatch(
     });
     const { run, runId, channelVisibility, liveUrl, events, publishText, publishMeta } = registration;
     registered = run;
+    if (coordinator) io.runStarted?.({ id: runId });
     // What the session seed could not do (session-log item 9), on the record
     // before the first turn — the run is not changed by it.
     for (const summary of seedNotes)
@@ -2211,53 +2320,7 @@ export async function dispatch(
             ),
           )
         : undefined;
-    const reservation = await reserveRun(deps, {
-      msg,
-      agent,
-      profile,
-      resolved,
-      repoCtx,
-      channelVisibility,
-      runId,
-      startedAt,
-      receivedAt,
-      resume,
-      restart,
-      card,
-      hooks: reservationHooks,
-      route,
-      admitted,
-      root,
-      parentRunId,
-      coordinator,
-      seed,
-      ...(decisionRecord !== undefined ? { decisionRecord } : {}),
-      ...(decisionRecordTask !== undefined ? { decisionRecordTask } : {}),
-      ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
-    });
-    if (reservation) {
-      reserved = reservation.reserved;
-      requestRow = reservation.requestRow;
-      // A run the ledger would not track — whichever way its reservation ended
-      // untracked (run-history item 54) — says so on its own stream and on its
-      // card, not in the bot log alone: no handoff, resume or reclaim reaches
-      // this run, and a reader of its record should see why. Head material,
-      // like the cold-sandbox note below: a setup fact ahead of the loop.
-      if (reservation.untrackedWhy !== undefined) {
-        events.publish({
-          type: "run_note",
-          kind: "ledger_untracked",
-          summary: redactAndCap(
-            oneLine(
-              `not tracked by the run ledger: ${reservation.untrackedWhy} — no handoff, resume or reclaim reaches this run; its record still reaches the store`,
-            ),
-            500,
-          ),
-          at: clock(),
-        });
-        shell.note("debug", "untracked by the ledger");
-      }
-    }
+    if (!childSetupFinalizer) await reserveIdentity(runId, channelVisibility);
 
     // Admission owns the first live condition. Its absolute bound is the
     // effective run budget already admitted for this profile, and the durable
@@ -2703,14 +2766,6 @@ export async function dispatch(
       registry.publish(run.id, { type: "run_note", kind: "rebind_refused", summary: oneLine(summary), at: clock() });
     }
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
-    setupCard = undefined; // from here the run loop owns the card's close
-    clearInterval(setupHeartbeat);
-    card.update(shell.live()); // the ack card becomes the run card
-    const loopStartedAt = clock();
-    // The run loop owns the run from here: its finally finishes it (the outer
-    // finally discards a run that never got this far). Events are fed to the
-    // registry in onEvent below; the stream has been live since the reservation.
-    runLoopStarted = true;
     if (resume) {
       console.log(
         resume.plan.kind === "finish"
@@ -2718,23 +2773,6 @@ export async function dispatch(
           : `[resume] ${msg.threadKey} run ${run.id} continues under ${deps.runLedger.gen}: from step ${resume.plan.step}, ${resume.plan.settlements.length} call(s) to settle, ${resume.events.length} event(s) replayed`,
       );
     }
-    // Tombstone-first (dispatch/record.ts): a provisional interrupted record
-    // the moment the run loop owns the run; the finish write replaces it.
-    writeTombstone(deps, {
-      msg,
-      agent,
-      profile,
-      resolved,
-      repoCtx,
-      channelVisibility,
-      run,
-      registry,
-      resume,
-      ...(route !== undefined ? { route } : {}),
-      parentRunId,
-      coordinator,
-      seed,
-    });
     // The ledger claim (dispatch/run.ts), once the prompt exists: the reserved
     // row promoted, or a resume's adopted row re-subscribed.
     ledgerRun = await claimRun(deps, {
@@ -2818,6 +2856,30 @@ export async function dispatch(
       user: scopes.user.review?.addressSeverity,
       run: directives.severity,
     });
+    card.update(shell.live()); // a failed update still belongs to setup
+    // Tombstone-first (dispatch/record.ts): a provisional interrupted record
+    // the moment the run loop owns the run; the finish write replaces it.
+    writeTombstone(deps, {
+      msg,
+      agent,
+      profile,
+      resolved,
+      repoCtx,
+      channelVisibility,
+      run,
+      registry,
+      resume,
+      ...(route !== undefined ? { route } : {}),
+      parentRunId,
+      coordinator,
+      seed,
+    });
+    setupCard = undefined;
+    clearInterval(setupHeartbeat);
+    const loopStartedAt = clock();
+    // Only the loop's own finally may replace the setup finalizer: promotion,
+    // its seed and the working-state commit have all succeeded before here.
+    runLoopStarted = true;
     // The agent loop (dispatch/runLoop.ts): the model turn, the follow-up inbox,
     // the settle and the post-steps, the finish. A throw propagates to the
     // outer catch after the workspace is released.
@@ -2948,6 +3010,9 @@ export async function dispatch(
     });
     return ended;
   } catch (err) {
+    // Promotion can discover a fence after the attach's ownership check. The
+    // new generation owns the same child: no model, reply or finish from here.
+    if (fencedWhileAttaching) return ended;
     caught = true;
     // The catch-all is the last line (record 0054): an uncaught throw is a
     // `system`/`uncaught` refusal on the trace, counted like any other —
@@ -2961,6 +3026,10 @@ export async function dispatch(
     // already-stamped code: the root and the outcome tell the same story.
     if (!refused) root.setAttrs({ refusal: thrown?.code ?? "uncaught", cause: thrown?.cause ?? "system" });
     const errMsg = err instanceof Error ? err.message : String(err);
+    if (childSetupFinalizer && !runLoopStarted) {
+      childSetupRefusal ??= thrown ?? refusalOf("setup_failed", errMsg);
+      childSetupFinalizer();
+    }
     // A run the full sandbox fleet ended is one queryable line in the bot's
     // own log (docs/reference/specs/execution.md item 14) — the card and the
     // record still carry the ending as before; this line is what a log sweep
@@ -3029,6 +3098,9 @@ export async function dispatch(
   } finally {
     clearInterval(setupHeartbeat); // a refusal or a setup failure ended the request before the run loop took the card
     releaseLegacyOwnership?.();
+    // Every acknowledged child has a terminal same-id path, including a
+    // refusal or card failure that returned without entering the model loop.
+    childSetupFinalizer?.();
     // The backstop: a finished run no reply attempt reached (a fenced run, a
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
@@ -3075,7 +3147,8 @@ export async function dispatch(
     // meet this row still live — a finish nobody is landing, so nothing to wait
     // for — and run untracked for its whole life (item 54). A fenced
     // reservation is another generation's to restart: `abandon` is a no-op on it.
-    if (reserved && !ledgerRun) await root.span("post.ledger_abandon", () => reserved!.abandon());
+    if (reserved && !ledgerRun && !childSetupFinished)
+      await root.span("post.ledger_abandon", () => reserved!.abandon());
     // The predecessor's identity a restart keeps (run-history item 54), read
     // BEFORE the discard below takes the row: its events, its token, its
     // start — so the restart runs under the same run id and every posted link,
@@ -3086,7 +3159,7 @@ export async function dispatch(
         : undefined;
     // …and the registry row created with it goes the same way: no finished
     // frame, no record — a run that never started is not listed as one that did.
-    if (registered && !runLoopStarted) registry.discard(registered.id);
+    if (registered && !runLoopStarted && !childSetupFinished) registry.discard(registered.id);
     // The second net under that discard (run-history item 42): a branch that
     // opens its own registry row — `runShipBranch` does — and throws or returns
     // before finishing it would leave the row `running` with no runner behind

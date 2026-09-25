@@ -449,6 +449,39 @@ describe("reserve — the row before the prompt (item 42)", () => {
     expect(failing.fallbackPuts).toEqual([]);
   });
 
+  it.each(["retries", "missing routes"] as const)(
+    "a coordinator promotion failing from %s retains its reservation and heartbeat until the same-id finish",
+    async (failure) => {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      const tag = { parentInstanceId: "ship_parent", idempotencyKey: "ship_parent:U12/0/coding" };
+      const h = harness({
+        ledger: overriding(inner, {
+          claim: async (req) => {
+            if (req.phase === "attaching") return inner.claim(req);
+            if (failure === "missing routes") throw new RouteMissingError("promotion route unavailable");
+            throw new TransientStoreError("promotion unavailable");
+          },
+        }),
+      });
+      const request = reserveReq();
+      const reserved = runOf(await h.wt.reserve({ ...request, meta: { ...request.meta, ...tag } }))!;
+      const promoting = openReq({ reservation: reserved });
+      const opened = await h.wt.open({ ...promoting, meta: { ...promoting.meta, ...tag } });
+      expect(opened).toMatchObject({ kind: "untracked", why: expect.stringMatching(/\S/) });
+      expect(inner.live.get("r1")).toMatchObject({ phase: "attaching", meta: tag });
+      expect(reserved.tracked()).toBe(true);
+      expect(reserved.resumable).toBe(false);
+      expect(h.wt.liveRuns()).toEqual([reserved]);
+      expect(h.t.heartbeats()).toBe(1);
+      const failed = { ...record("r1"), ...tag, status: "failed" as const };
+      await reserved.sink.put(failed);
+      expect(inner.live.size).toBe(0);
+      expect(inner.finished.get("r1")).toMatchObject(failed);
+      expect(h.t.heartbeats()).toBe(0);
+      expect(h.fallbackPuts).toEqual([]);
+    },
+  );
+
   it("a promotion gone untracked whose abandon itself fails leaves the run known as this generation's dead reservation: the thread's next claim abandons the row again and is tracked — the safety net of item 54 holds on the promotion path too", async () => {
     const inner = new InMemoryRunLedger(() => 10_000);
     let reservationDone = false;

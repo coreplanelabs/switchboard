@@ -66,6 +66,9 @@ function configStore(): ConfigStore {
 
 /** A ledger row handle that remembers the events mirrored onto it. */
 class RecordingRun extends NullLedgerRun {
+  override tracked(): boolean {
+    return true;
+  }
   readonly events: Array<{ event: RunEvent; seq: number }> = [];
   override event(event: RunEvent, seq: number): void {
     this.events.push({ event, seq });
@@ -220,6 +223,31 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     expect(note).toMatchObject({ type: "run_note", kind: "ledger_untracked" });
     expect((note as { summary: string }).summary).toContain("the claim failed after 3 attempts");
   });
+
+  it.each(["off", "fenced", "untracked", "detached"] as const)(
+    "a coordinator promotion ending %s refuses setup instead of handing the child to the model",
+    async (failure) => {
+      const { deps, ledger, base } = setup();
+      const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
+      ledger.open = async () =>
+        failure === "detached"
+          ? { kind: "tracked", run: reserved }
+          : failure === "untracked"
+            ? { kind: "untracked", why: "promotion unavailable" }
+            : { kind: failure };
+      await expect(
+        claimRun(deps, {
+          ...base,
+          reserved,
+          resume: undefined,
+          ledgerRun: undefined,
+          coordinator: { parentInstanceId: "ship_parent", idempotencyKey: "ship_parent:U12/0/coding" },
+        }),
+      ).rejects.toMatchObject({
+        refusal: { code: "setup_failed", cause: "system", text: expect.stringMatching(/\S/) },
+      });
+    },
+  );
 
   it("a run the ledger refused to reserve is untracked: no claim is asked, the handle stays undefined", async () => {
     const { deps, ledger, base } = setup();

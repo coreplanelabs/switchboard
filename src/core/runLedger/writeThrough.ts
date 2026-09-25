@@ -190,7 +190,9 @@ export interface OpenRunRequest {
   /** The promotion's claim went untracked (failing retries or RouteMissingError)
    *  while a reservation stood: the row has been abandoned, the heartbeat
    *  stopped, and the run will run untracked — why, in the words the run's
-   *  record gets (item 54). Called once, only when a `reservation` was given. */
+   *  record gets (item 54). Called once, only when a `reservation` was given.
+   *  A coordinator child's reservation is retained instead: the caller must
+   *  fail setup through its same-id finalizer, never run it untracked. */
   onUntracked?: (why: string) => void;
   /** The run's reservation from admission (item 42), when it has one: the open
    *  promotes that row in place — same tracked run, same heartbeat — instead
@@ -323,7 +325,9 @@ export interface LedgerWriteThrough {
    *  row was taken by another generation (the reservation is told through
    *  `onFenced`; this process must not run it). When a reservation is given and
    *  the promotion's claim goes untracked, `onUntracked` is called with why (in
-   *  the record's words) before returning, and the reserved row is abandoned. */
+   *  the record's words) before returning, and the reserved row is abandoned.
+   *  A coordinator child keeps its reservation for the setup finalizer instead;
+   *  its caller must not start the model without a tracked promotion. */
   open(req: OpenRunRequest): Promise<OpenOutcome>;
   /** Take up a reclaimed run: heartbeat, steps, events and state continue
    *  under this generation with no claim and no seed. Synchronous — the row is
@@ -1316,9 +1320,9 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // The promotion (item 42): the claim the dispatcher always made, now
         // landing on the row reserved at admission — same tracked run, its
         // heartbeat already running. A row another generation took meanwhile
-        // fences this run (it is theirs to restart); an untracked answer means
-        // the thread's row is someone else's (a stale reservation) — the run
-        // goes on untracked, as an open without a reservation would.
+        // fences this run (it is theirs to restart). An ordinary run may
+        // continue untracked after a failed claim; a coordinator child must
+        // keep its acknowledged identity and fail setup instead.
         if (!reserved.tracked()) return { kind: "untracked", why: "the run's reservation is already untracked" };
         const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
         if (claimed.outcome === "fenced") {
@@ -1327,14 +1331,17 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           return { kind: "fenced" };
         }
         if (claimed.outcome !== "ok") {
-          // Abandon the row — not close (close only stops the heartbeat,
+          // For an ordinary run, abandon — not close (close only stops the heartbeat,
           // leaving the attaching row on the ledger where the reclaim sweep
           // would see it as an expired reservation and restart the run, while
           // the untracked original is still running). Abandon removes the row
           // and owns the `unpromoted` bookkeeping: an abandon that fails keeps
           // the run there, so the thread's next claim abandons the row again
           // (item 54) — the safety net the pre-delete would have defeated.
-          await reserved.abandon();
+          // A coordinator's acknowledged id must have no durable gap between
+          // reservation and failure. Keep its row and heartbeat for the setup
+          // finalizer (or reclaim if this process dies before it can finish).
+          if (req.meta.parentInstanceId === undefined) await reserved.abandon();
           req.onUntracked?.(claimed.why);
           return untracked(claimed);
         }

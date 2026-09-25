@@ -51,6 +51,7 @@ import type { ProvisionDeps } from "./provision.js";
 import type { RecordDeps } from "./record.js";
 import { processSecrets } from "../../secrets.js";
 import { oneLine, redactAndCap } from "../redact.js";
+import { RefusalError, refusalOf } from "../refusal.js";
 import type { HarnessRoster } from "../harness/roster.js";
 import type { HarnessContainer } from "../harness/container.js";
 import type { HarnessRegistry } from "../harness/pi/relay.js";
@@ -410,6 +411,9 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         // says why, and mark the card as the reserve-time path does — the same
         // one place as the reservation's own note (D9).
         onUntracked: (why) => {
+          // Children fail setup below; they never continue without the row
+          // their parent was promised, so do not label them as running untracked.
+          if (coordinator) return;
           registry.publish(run.id, {
             type: "run_note",
             kind: "ledger_untracked",
@@ -425,9 +429,16 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         },
       }),
     );
-    // Anything but `tracked` — untracked (the note went through `onUntracked`),
-    // fenced, or a process without a ledger — and the run goes on exactly as it
-    // did before the ledger existed.
+    // An acknowledged child's finalizer still owns the reservation here.
+    // Promotion (including the seed) must succeed before the model can own it.
+    if (coordinator && (opened.kind !== "tracked" || !opened.run.tracked()))
+      throw new RefusalError(
+        refusalOf(
+          "setup_failed",
+          `The child's durable reservation could not be promoted: ${opened.kind === "untracked" ? opened.why : opened.kind === "tracked" ? "the promoted row lost tracking during setup" : opened.kind}.`,
+        ),
+      );
+    // Ordinary runs retain the existing untracked fallback.
     if (opened.kind === "tracked") {
       const tracked = opened.run;
       ledgerRun = tracked;
