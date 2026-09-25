@@ -157,6 +157,46 @@ export const OPERATOR_QUESTION_MARKER = "Did you mean:";
  *  answer binds — a cut here cuts the ask itself. */
 export const OPERATOR_REQUEST_CAP = 600;
 
+/** A model override needs a named model beside selection words in the
+ * request, and that name must end the proposed model id, not its vendor.
+ * This keeps incidental text such as "open the PR" from matching OpenRouter.
+ * Scanning words here is only an authorization hold on the model's claimed
+ * quote; the operator still interprets the request and resolves its model. */
+function requestedModelWord(request: string, modelWord: string, ref: string): boolean {
+  const word = modelWord.trim().toLowerCase();
+  if (!word) return false;
+  const words: string[] = [];
+  let current = "";
+  for (const char of request.toLowerCase()) {
+    const code = char.charCodeAt(0);
+    if ((code >= 97 && code <= 122) || (code >= 48 && code <= 57) || char === "-" || char === ".") {
+      current += char;
+    } else if (current) {
+      words.push(current);
+      current = "";
+    }
+  }
+  if (current) words.push(current);
+  const cues = new Set(["with", "using", "use", "on", "via", "model"]);
+  let selected = false;
+  for (let i = 0; i < words.length; i++) {
+    if (words[i] !== word) continue;
+    const previous = words[i - 1];
+    if (previous !== undefined && cues.has(previous)) selected = true;
+    if ((previous === "the" || previous === "a") && i >= 2 && cues.has(words[i - 2]!)) selected = true;
+  }
+  if (!selected) return false;
+  let modelId: string;
+  try {
+    modelId = parseModelRef(ref).model.toLowerCase();
+  } catch {
+    // Let the bind parser report the malformed ref through its normal repair.
+    return true;
+  }
+  const modelName = modelId.split("/").pop();
+  return modelName === word || modelName?.endsWith(`-${word}`) === true;
+}
+
 /** What the operator's turn decided for one admitted chat event. One typed
  *  act per turn (record 0069, as amended): `binds` carries exactly one bind —
  *  a `bind_preset` call rendered as the preset on the person's own words, or
@@ -401,8 +441,8 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
       : []),
     "A write ask in a named or inherited repository binds the write preset even when a detail inside it is unresolved — the run it starts resolves the detail with the repository in front of it. Ask a question only for a fork the run itself could not resolve, and a question's proposal must be a line that would do the asked work: a write line for a write ask, never a read (an exploration, a listing, a summary) standing in for the work.",
     "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a proposal that would do the write built from them — the person's yes runs it, and their next words refine it.",
-    "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run and pass that ref as `bind_preset`'s `model`: the run then uses it, exactly as a typed `model:` directive would. The request still rides verbatim — never strip the model word from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model passes no `model`.",
-    "`bind_preset` runs the preset on the request as the author asked it — the author's own words ride by reference, so the call names only the preset, the optional model, and the reason: never re-type the request, never a flag form and never a paraphrase.",
+    "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run. Pass that ref as `bind_preset`'s `model` and one exact model-name word from the person's request as `modelWord` (such as 'astra', 'o3', or 'gpt-6'): the run then uses it, exactly as a typed `model:` directive would. The request still rides verbatim — never strip the model word from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model omits both `model` and `modelWord`.",
+    "`bind_preset` runs the preset on the request as the author asked it — the author's own words ride by reference, so the call names only the preset, optional model and modelWord, and the reason: never re-type the request, never a flag form and never a paraphrase.",
     "",
     // 2. Projection: the presets and commands THIS author may run.
     "Presets this author may run:",
@@ -491,6 +531,11 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
                   type: "string",
                   description:
                     "the model ref the run uses, ONLY when the request names a model in plain words: a `<provider>/<model>` ref `provider_models` lists, resolved from the person's word — omit when no model is named, and ask instead of guessing when the word matches several refs or none",
+                },
+                modelWord: {
+                  type: "string",
+                  description:
+                    "one exact model-name word in the person's request that `model` resolves, such as astra, o3, or gpt-6; omit with `model` when no model is named",
                 },
                 repo: {
                   type: "string",
@@ -845,7 +890,7 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
       ...(typeof input.filter === "string" && input.filter.trim().length > 0 ? { filter: input.filter } : {}),
     };
   if (answer.tool === OPERATOR_BIND_TOOL) {
-    const { preset, reason, model, repo } = input;
+    const { preset, reason, model, modelWord, repo } = input;
     if (typeof preset !== "string" || !ctx.presets.includes(preset))
       return {
         kind: "violation",
@@ -858,8 +903,16 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     // gets its retries to read `provider_models` and pass a listed ref, or ask
     // naming the candidates — never a guess and never a silent default.
     let ref: string | undefined;
-    if (model !== undefined) {
-      const trimmed = typeof model === "string" ? model.trim() : "";
+    // The operator may send an empty optional field. It is absence, not a
+    // request to pick a model. An unsubstantiated model leaves the configured
+    // resolution ladder in charge without a repair that could invent a ref.
+    if (
+      typeof model === "string" &&
+      model.trim() !== "" &&
+      typeof modelWord === "string" &&
+      requestedModelWord(ctx.requestText, modelWord, model)
+    ) {
+      const trimmed = model.trim();
       const parsed = /^([A-Za-z0-9_.-]+)\/\S+$/.exec(trimmed);
       if (parsed === null)
         return {

@@ -802,6 +802,7 @@ describe("long asks and multi-call answers (issue 2099)", () => {
   it("the exhausted multi-call fallback holds its sole action against the model catalogue before accepting it", async () => {
     const answer = await runOperator(
       input({
+        text: "use not-real for this",
         providers: ["openrouter"],
         providerModels: {
           read: async () => "Model refs this deployment can run:\n- `openrouter/openai/gpt-5.6`",
@@ -811,7 +812,7 @@ describe("long asks and multi-call answers (issue 2099)", () => {
         throw new MultiToolCallError([
           {
             tool: OPERATOR_BIND_TOOL,
-            input: { preset: "general", model: "openrouter/openai/not-real", reason: "r" },
+            input: { preset: "general", model: "openrouter/openai/not-real", modelWord: "not-real", reason: "r" },
           },
           { tool: OPERATOR_READ_TOOLS.threadState, input: {} },
         ]);
@@ -1150,7 +1151,13 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", request: "with astra, list the runs", reason: "r", model: ASTRA },
+        input: {
+          preset: "general",
+          request: "with astra, list the runs",
+          reason: "r",
+          model: ASTRA,
+          modelWord: "astra",
+        },
       },
       ctxOf({ requestText: "with astra, list the runs", providers: ["anthropic", "openrouter"] }),
     );
@@ -1160,8 +1167,11 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
 
   it("a model naming no declared provider is a violation the seam re-asks — never a guess and never a silent default", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "x", reason: "r", model: "openai/gpt-6" } },
-      modelCtx(),
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "general", request: "with gpt-6", reason: "r", model: "openai/gpt-6", modelWord: "gpt-6" },
+      },
+      ctxOf({ requestText: "with gpt-6", providers: ["anthropic", "openrouter"] }),
     );
     if (turn.kind !== "violation") throw new Error("not a violation");
     expect(turn.violation).toContain("names no model provider this deployment has");
@@ -1170,8 +1180,11 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
 
   it("a model that is not a <provider>/<model> ref — the bare word — is a violation naming the shape", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "x", reason: "r", model: "astra" } },
-      modelCtx(),
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "general", request: "with astra", reason: "r", model: "astra", modelWord: "astra" },
+      },
+      ctxOf({ requestText: "with astra", providers: ["anthropic", "openrouter"] }),
     );
     if (turn.kind !== "violation") throw new Error("not a violation");
     expect(turn.violation).toContain("is not a `<provider>/<model>` ref");
@@ -1186,16 +1199,134 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     expect(turn.decision.binds[0].model).toBeUndefined();
   });
 
+  it("an empty optional model is omitted without a repair turn", async () => {
+    const model = vi.fn(async () => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: { preset: "review", reason: "Review the pull request", model: "" },
+    }));
+    const answer = await runOperator(
+      input({ text: "review: https://github.com/example/repo/pull/1", projection: projectionOf(["review"]) }),
+      model,
+    );
+    expect(model).toHaveBeenCalledTimes(1);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ line: expect.stringContaining("agent:review") }],
+    });
+    if (answer.decision.kind !== "binds") throw new Error("not a bind");
+    expect(answer.decision.binds[0].model).toBeUndefined();
+    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
+  });
+
+  it("an unrequested nonempty model cannot override the configured default", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "review", reason: "Review the pull request", model: ASTRA },
+      },
+      ctxOf({
+        requestText: "review: https://github.com/example/repo/pull/1",
+        presets: ["review"],
+        providers: ["openrouter"],
+      }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].model).toBeUndefined();
+  });
+
+  it("a model word absent from the request cannot authorize an override", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "review", reason: "Review the pull request", model: ASTRA, modelWord: "astra" },
+      },
+      ctxOf({
+        requestText: "review: https://github.com/example/repo/pull/1",
+        presets: ["review"],
+        providers: ["openrouter"],
+      }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].model).toBeUndefined();
+  });
+
+  it("an incidental word in the request cannot select a model", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "review", reason: "Review the pull request", model: ASTRA, modelWord: "open" },
+      },
+      ctxOf({ requestText: "open the PR for review", presets: ["review"], providers: ["openrouter"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].model).toBeUndefined();
+  });
+
+  it("a requested two-character model name can override the default", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "review", reason: "Review the pull request", model: "openai/o3", modelWord: "o3" },
+      },
+      ctxOf({ requestText: "use o3 to review the PR", presets: ["review"], providers: ["openai"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].model).toBe("openai/o3");
+  });
+
+  it("a requested short model cannot select a longer model in the same family", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "review", reason: "Review the pull request", model: "openai/o3-pro", modelWord: "o3" },
+      },
+      ctxOf({ requestText: "use o3 to review the PR", presets: ["review"], providers: ["openai"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].model).toBeUndefined();
+  });
+
+  it("a vendor word cannot select an arbitrary model under that vendor", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "review", reason: "Review the pull request", model: ASTRA, modelWord: "openai" },
+      },
+      ctxOf({ requestText: "use openai to review the PR", presets: ["review"], providers: ["openrouter"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].model).toBeUndefined();
+  });
+
   it("a ref the provider catalogue does not list is re-asked, and the corrected listed ref binds — the ref is held against the catalogue, not the schema alone", async () => {
     const answers = [
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", request: "list the runs", reason: "r", model: "openrouter/openai/gpt-7" },
+        input: {
+          preset: "general",
+          request: "with astra, list the runs",
+          reason: "r",
+          model: "openrouter/openai/gpt-7-astra",
+          modelWord: "astra",
+        },
       },
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "list the runs", reason: "r", model: ASTRA } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "general",
+          request: "with astra, list the runs",
+          reason: "r",
+          model: ASTRA,
+          modelWord: "astra",
+        },
+      },
     ];
     const answer = await runOperator(
-      input({ providers: ["anthropic", "openrouter"], providerModels: reader([ASTRA]) }),
+      input({
+        text: "with astra, list the runs",
+        providers: ["anthropic", "openrouter"],
+        providerModels: reader([ASTRA]),
+      }),
       async () => answers.shift()!,
     );
     if (answer.decision.kind !== "binds") throw new Error("not a bind");
@@ -1212,6 +1343,7 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
   it("a catalogue that cannot be read costs the check, never the bind: the declared provider's ref stands", async () => {
     const answer = await runOperator(
       input({
+        text: "with astra, list the runs",
         providers: ["anthropic", "openrouter"],
         providerModels: {
           read: async () => {
@@ -1221,7 +1353,13 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
       }),
       async () => ({
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", request: "list the runs", reason: "r", model: ASTRA },
+        input: {
+          preset: "general",
+          request: "with astra, list the runs",
+          reason: "r",
+          model: ASTRA,
+          modelWord: "astra",
+        },
       }),
     );
     if (answer.decision.kind !== "binds") throw new Error("not a bind");
