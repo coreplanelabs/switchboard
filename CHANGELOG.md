@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.262.3](https://github.com/coreplanelabs/switchboard/compare/v1.262.2...v1.262.3) (2026-09-25)
+
+
+### Bug fixes
+
+* **dispatcher:** preserve child identity through setup failures ([#2363](https://github.com/coreplanelabs/switchboard/issues/2363)) ([2cc67f2](https://github.com/coreplanelabs/switchboard/commit/2cc67f2401687a8b66ce77152a85e4bdee5c903e))
+* **dispatcher:** route configured MCP requests without repos ([#2338](https://github.com/coreplanelabs/switchboard/issues/2338)) ([eecb0eb](https://github.com/coreplanelabs/switchboard/commit/eecb0eb5778540c624e2dd7136fdbe1f0358c741))
+
 ## [1.262.2](https://github.com/coreplanelabs/switchboard/compare/v1.262.1...v1.262.2) (2026-09-25)
 
 
