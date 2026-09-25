@@ -47,7 +47,7 @@ import type { TurnEffortRequest } from "./turnEffort.js";
 const REASONING_COUNTING_CAP_FIELDS = new Set(["max_tokens", "max_completion_tokens", "max_output_tokens"]);
 /** The measured operator answer is small, but medium reasoning routinely
  * crosses the old 374-token ceiling before any tool call. Four thousand tokens
- * is the turn's reasoning allowance; the twenty-second door timeout remains
+ * is the turn's reasoning allowance; the one-minute door timeout remains
  * the harder runaway bound. */
 export const REASONING_OUTPUT_TOKEN_ALLOWANCE = 4_096;
 

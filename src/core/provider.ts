@@ -446,7 +446,7 @@ export function classifyProviderFailure(input: ProviderFailureAnswer): ProviderF
   });
 }
 
-function typedProviderFailureOf(error: unknown, seen = new Set<object>()): ProviderFailure | undefined {
+export function typedProviderFailureOf(error: unknown, seen = new Set<object>()): ProviderFailure | undefined {
   if (error instanceof ProviderFailure) return error;
   const row = providerFailureRecord(error);
   if (!row || seen.has(row)) return undefined;

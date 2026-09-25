@@ -452,6 +452,70 @@ restrict:
 });
 
 describe("runOperator — the loop over a scripted model", () => {
+  it("a local deadline is a timeout refusal when the adapter loses the abort reason", async () => {
+    const answer = await runOperator(
+      input(),
+      async (_prompt, { signal }) => {
+        await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+        throw new Error("the model call failed");
+      },
+      { timeoutMs: 5 },
+    );
+    expect(answer.decision).toMatchObject({ kind: "refusal", cause: "timeout", reason: "operator_timeout" });
+  });
+
+  it("a deadline race preserves a typed provider failure", async () => {
+    const answer = await runOperator(
+      input(),
+      async (_prompt, { signal }) => {
+        await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+        throw new ProviderFailure("credit-or-quota-exhausted", { status: 402 });
+      },
+      { timeoutMs: 5 },
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "refusal",
+      cause: "provider",
+      providerFailure: "credit-or-quota-exhausted",
+    });
+  });
+
+  it("a deadline race preserves a wrapped typed provider failure", async () => {
+    const answer = await runOperator(
+      input(),
+      async (_prompt, { signal }) => {
+        await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+        throw new Error("model call failed", { cause: new ProviderFailure("permanent") });
+      },
+      { timeoutMs: 5 },
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "refusal",
+      cause: "provider",
+      providerFailure: "permanent",
+    });
+  });
+
+  it("a deadline race preserves a typed provider failure inside an AbortError", async () => {
+    const answer = await runOperator(
+      input(),
+      async (_prompt, { signal }) => {
+        await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+        const err = new Error("model call aborted", {
+          cause: new ProviderFailure("credit-or-quota-exhausted", { status: 402 }),
+        });
+        err.name = "AbortError";
+        throw err;
+      },
+      { timeoutMs: 5 },
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "refusal",
+      cause: "provider",
+      providerFailure: "credit-or-quota-exhausted",
+    });
+  });
+
   it("a bare re-review reads the newest finished run and binds that pull request's repository", async () => {
     const answers: RouteToolCall[] = [
       { tool: OPERATOR_READ_TOOLS.threadState, input: {} },

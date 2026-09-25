@@ -452,7 +452,7 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
     const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
     const pending = table.get("anthropic").complete({ ...routeRequest(), signal: controller.signal });
     controller.abort();
-    await expect(pending).rejects.toMatchObject({ name: "ProviderFailure", cause: "transient" });
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   });
 });
 
@@ -789,10 +789,19 @@ describe("fromPiMessage — pi's assistant message as the completion result", ()
     ).toThrow("The model provider is rate-limited; this request did not start.");
     expect(() =>
       fromPiMessage(message({ stopReason: "aborted", errorMessage: "This operation was aborted" }), "anthropic"),
-    ).toThrow("The model provider is temporarily unavailable; this request did not start.");
+    ).toThrow(expect.objectContaining({ name: "AbortError" }));
     expect(() => fromPiMessage(message({ stopReason: "error" }), "anthropic")).toThrow(
       "The model provider refused the call; the request ended without exposing the provider's response.",
     );
+  });
+
+  it("an aborted stream without provider error text remains local cancellation", () => {
+    try {
+      fromPiMessage(message({ stopReason: "aborted" }), "openai");
+      throw new Error("expected an abort failure");
+    } catch (error) {
+      expect(error).toMatchObject({ name: "AbortError" });
+    }
   });
 });
 
