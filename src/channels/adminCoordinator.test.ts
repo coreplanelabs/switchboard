@@ -8,6 +8,7 @@ import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceSt
 import type { CoordinatorInstance, CoordinatorTag, CoordinatorUnit } from "../core/coordinator/contract.js";
 import {
   runPlan,
+  runOriginalUnitRecovery,
   type BotReply,
   type CoordinatorBot,
   type OriginalUnitRecoveryParams,
@@ -55,6 +56,7 @@ import { InMemoryGithubApi, type IssueSummary } from "../execution/githubApi.js"
 import type { GithubIdentity } from "../execution/githubApp.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
 import { pipelineOfEvents } from "../core/pipelineStanding.js";
+import { verifyExistingPrPublication } from "../core/existingPrPublication.js";
 import { RunnerOwnershipFence } from "../core/runnerOwnership.js";
 import { parseModelPrices, type ModelPriceTable } from "../core/modelPricing.js";
 import {
@@ -6561,6 +6563,507 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       userId: INSTANCE.userId,
       threadKey: INSTANCE.threadKey,
     });
+
+  const legacyRow = (): CoordinatorUnit => {
+    const { publication: _publication, lastPush: _lastPush, ...row } = requestChangesRow();
+    return {
+      ...row,
+      ending: {
+        kind: "failed",
+        cause: "step_threw",
+        step: "U12/1/findings",
+        round: 1,
+        report: "binding absent",
+        at: NOW - minutesToMs(10),
+      },
+    };
+  };
+  const originalCoding = (over: Partial<RunRecord> = {}) =>
+    record("run-original-coding", {
+      parentInstanceId: INSTANCE.id,
+      idempotencyKey: `${INSTANCE.id}:U12/0/coding`,
+      repo: INSTANCE.repo,
+      pr: { ...PR, head: INSTANCE.branch },
+      headSha: HEAD,
+      pushed: [{ ref: INSTANCE.branch, sha: HEAD, by: "push" }],
+      startedAt: NOW - minutesToMs(55),
+      finishedAt: NOW - minutesToMs(45),
+      ...over,
+    });
+  const legacyHarness = async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([legacyRow()]);
+    await h.store.put(originalCoding());
+    await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(40), finishedAt: NOW - minutesToMs(30) }));
+    return h;
+  };
+
+  it("legacy binding repair claims a binding-less findings failure from owned coding and posted review evidence only", async () => {
+    const h = await legacyHarness();
+    const result = await recoverOriginalUnit(
+      {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        repo: "foreign/repo",
+        pr: 999,
+        base: "wrong",
+        expectedHeadSha: "f".repeat(40),
+        publication: { owner: { instanceId: "rival" } },
+      },
+      h.deps,
+      { userId: INSTANCE.userId, threadKey: INSTANCE.threadKey },
+    );
+    expect(result).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      publication,
+      lastPush: HEAD,
+      recovery: { kind: "findings", round: 1 },
+    });
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+  });
+
+  it("legacy binding repair admits a retained initial coding checkpoint and no-verdict review without requiring a PR-created event", async () => {
+    const h = await legacyHarness();
+    const row = legacyRow();
+    row.rounds[1] = { index: 1, agent: "review", outcome: "no_verdict", at: NOW - minutesToMs(30) };
+    row.ending = { kind: "no_verdict", report: "review ended", at: NOW - minutesToMs(10) };
+    await h.instances.putUnits([row]);
+    await h.store.put(originalCoding({ pr: undefined, pushed: [{ ref: INSTANCE.branch, sha: HEAD, by: "salvage" }] }));
+    await h.store.put(
+      reviewRecord({
+        verdict: undefined,
+        reviewPost: undefined,
+        startedAt: NOW - minutesToMs(40),
+        finishedAt: NOW - minutesToMs(30),
+      }),
+    );
+    expect(await callRecovery(h)).toMatchObject({ status: 200 });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      publication,
+      recovery: { kind: "review", round: 1 },
+    });
+  });
+
+  it.each([
+    ["foreign unit", { idempotencyKey: `${INSTANCE.id}:U120/0/coding` }],
+    ["invalid attempt suffix", { idempotencyKey: `${INSTANCE.id}:U12/0/coding/alternate` }],
+    ["foreign parent", { parentInstanceId: "other-instance" }],
+    ["foreign requester", { userId: "slack:UOTHER" }],
+    ["foreign thread", { threadKey: "slack:C1:other" }],
+    ["foreign repo", { repo: "other/repo" }],
+    ["contradictory head", { headSha: "b".repeat(40) }],
+    ["foreign push", { pushed: [{ ref: "another", sha: HEAD, by: "push" as const }] }],
+    ["unfinished coding", { status: "failed" as const }],
+    ["missing finish", { finishedAt: undefined }],
+    ["coding after review", { finishedAt: NOW - minutesToMs(20) }],
+    ["different PR", { pr: { number: 999, url: "https://github.com/acme/api/pull/999" } }],
+  ])("legacy binding repair refuses %s evidence without changing the original row", async (_name, over) => {
+    const h = await legacyHarness();
+    await h.store.put(originalCoding(over));
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it.each([
+    "duplicate coding",
+    "duplicate review",
+    "incomplete listing",
+    "unavailable listing",
+    "moved head",
+    "wrong base",
+    "foreign remote",
+    "rival owner",
+    "active owner",
+    "CAS loss",
+    "contradictory hint",
+    "partial binding",
+  ])("legacy binding repair refuses %s without minting authority", async (scenario) => {
+    const h = await legacyHarness();
+    if (scenario === "duplicate coding") await h.store.put(originalCoding({ id: "run-duplicate-coding" }));
+    if (scenario === "duplicate review") await h.store.put(reviewRecord({ id: "run-duplicate-review" }));
+    if (scenario === "incomplete listing") {
+      const list = h.deps.runs.listRuns.bind(h.deps.runs);
+      vi.spyOn(h.deps.runs, "listRuns").mockImplementation(async (opts) => ({
+        ...(await list(opts)),
+        nextBefore: { finishedAt: 1, id: "older" },
+      }));
+    }
+    if (scenario === "unavailable listing")
+      vi.spyOn(h.deps.runs, "listRuns").mockResolvedValue({ runs: [], storeUnavailable: true });
+    if (scenario === "moved head") h.deps.fetchPrFacts = async () => exactRecoveryFacts("b".repeat(40));
+    if (scenario === "wrong base")
+      h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(HEAD), baseRef: "other" });
+    if (scenario === "foreign remote")
+      h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(HEAD), sameRepoHead: false });
+    if (scenario === "rival owner")
+      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    if (scenario === "active owner") h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner);
+    if (scenario === "CAS loss")
+      vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValueOnce({ ok: false, reason: "stale" });
+    if (scenario === "contradictory hint") await h.instances.putUnits([{ ...legacyRow(), lastPush: "b".repeat(40) }]);
+    if (scenario === "partial binding")
+      await h.instances.putUnits([{ ...legacyRow(), publication: { ...publication, baseRef: "wrong" } }]);
+    const before = await h.instances.listUnits(INSTANCE.id);
+    expect((await callRecovery(h)).status).not.toBe(200);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it.each(["invalid review suffix", "contradictory review boundary"])(
+    "legacy binding repair refuses %s rather than selecting convenient evidence",
+    async (scenario) => {
+      const h = await legacyHarness();
+      const reviewed = reviewRecord({ startedAt: NOW - minutesToMs(40), finishedAt: NOW - minutesToMs(30) });
+      await h.store.put(
+        scenario === "invalid review suffix"
+          ? { ...reviewed, idempotencyKey: `${INSTANCE.id}:U12/1/review/alternate` }
+          : {
+              ...reviewed,
+              id: "run-contradictory-review",
+              verdict: undefined,
+              reviewHead: "b".repeat(40),
+              reviewPost: undefined,
+            },
+      );
+      expect((await callRecovery(h)).status).toBe(409);
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+    },
+  );
+
+  it("legacy binding repair restores the byte-identical missing binding after definite Workflow admission failure", async () => {
+    const h = await legacyHarness();
+    h.deps.startRecovery = async (id) => ({ kind: "failed", id, reason: "not created" });
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  it("legacy binding repair restores absent authority after an indeterminate start and process restart", async () => {
+    const h = await legacyHarness();
+    h.deps.startRecovery = async () => ({ kind: "unanswered", reason: "response lost" });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate" } });
+    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
+    h.deps.startRecovery = async (id) => ({ kind: "failed", id, reason: "confirmed absent" });
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  it("legacy binding repair keeps proven authority once the recovery transport has recorded progress", async () => {
+    const h = await legacyHarness();
+    expect((await callRecovery(h)).status).toBe(200);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}round`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryWorkflowId: "recovery-run-original-review",
+          index: 1,
+          agent: "coding",
+          outcome: "started",
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200 });
+    h.deps.startRecovery = async (id) => ({ kind: "duplicate", id, status: "errored" });
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_terminal" } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      publication,
+      lastPush: HEAD,
+      recoveryReceipt: { reviewRunId: "run-original-review" },
+    });
+  });
+
+  it("legacy binding repair drives the real recovery transport through authorized findings and exact-head re-review", async () => {
+    const h = await legacyHarness();
+    const fixed = "b".repeat(40);
+    let head = HEAD;
+    const children: CoordinatorTag[] = [];
+    h.deps.fetchPrFacts = async () => exactRecoveryFacts(head);
+    h.deps.fetchCommitChecks = async () => ({ total: 1, pending: [], failed: [] });
+    h.deps.fixupCommitSubjects = async () => [];
+    h.deps.dispatch = async (msg, io, opts) => {
+      const tag = opts!.coordinator;
+      children.push(tag);
+      expect(msg.userId).toBe(INSTANCE.userId);
+      expect(msg.threadKey).toBe(INSTANCE.threadKey);
+      expect(tag.parentInstanceId).toBe(INSTANCE.id);
+      expect(tag.transportWorkflowId).toBe("recovery-run-original-review");
+      if (tag.idempotencyKey.endsWith("/findings")) {
+        const [row] = await h.instances.listUnits(INSTANCE.id);
+        expect(
+          verifyExistingPrPublication(
+            row!.publication,
+            {
+              repo: INSTANCE.repo,
+              pr: PR.number,
+              ref: INSTANCE.branch,
+              baseRef: "main",
+              requestHeadSha: HEAD,
+              workspaceRef: INSTANCE.branch,
+              workspaceHeadSha: HEAD,
+              owner: h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number),
+            },
+            exactRecoveryFacts(HEAD),
+          ),
+        ).toEqual({ ok: true, publication: { ref: INSTANCE.branch, expectedHeadSha: HEAD } });
+        expect(tag.publication).toEqual(publication);
+        head = fixed;
+        await h.store.put(
+          completedOriginalFindings(fixed, {
+            id: "run-recovered-fix",
+            idempotencyKey: tag.idempotencyKey,
+            startedAt: NOW,
+            finishedAt: NOW,
+            dispositions: [{ findingId: "F1", disposition: "fixed", note: "kept the fence" }],
+            events: [
+              {
+                type: "pr_description",
+                description: { title: "fix(ship): retain the binding", tldr: "Fixed." },
+              } as unknown as RunEvent,
+            ],
+          }),
+        );
+        io.runStarted?.({ id: "run-recovered-fix" });
+      } else {
+        expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/review`);
+        expect(tag.recovery?.expectedHeadSha).toBe(fixed);
+        expect(msg.text).toContain(fixed);
+        await h.store.put(
+          reviewRecord({
+            id: "run-recovered-review",
+            idempotencyKey: tag.idempotencyKey,
+            startedAt: NOW,
+            finishedAt: NOW,
+            reviewHead: fixed,
+            verdict: { verdict: "approve", summary: "clean", findings: [] },
+            reviewPost: {
+              posted: true,
+              target: { repo: INSTANCE.repo, number: PR.number },
+              head: fixed,
+              verdict: "approve",
+            },
+          }),
+        );
+        io.runStarted?.({ id: "run-recovered-review" });
+      }
+      return { status: "completed" };
+    };
+    expect((await callRecovery(h)).status).toBe(200);
+    const routes: string[] = [];
+    const bot: CoordinatorBot = {
+      step: async (route, body) => {
+        routes.push(route);
+        if (routes.length > 40) throw new Error("unbounded recovery");
+        const result = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${route}`, body), h.deps);
+        return { status: result.status, text: JSON.stringify(result.body) };
+      },
+    };
+    const steps: StepRunner = {
+      do: async (_name, _config, callback) => callback(),
+      sleep: async () => {
+        throw new Error("unexpected sleep");
+      },
+      waitForEvent: async () => ({ ok: true }),
+    };
+    expect(
+      await runOriginalUnitRecovery(steps, bot, "recovery-run-original-review", {
+        kind: "recover-original-unit",
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+      }),
+    ).toMatchObject({ instance: INSTANCE.id, units: { U12: "merge_ready" }, outcome: "completed" });
+    expect(children).toHaveLength(2);
+    expect(routes).not.toContain("unit-start");
+    expect(routes).not.toContain("branch");
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      publication: { ...publication, expectedHeadSha: fixed },
+      lastPush: fixed,
+      ending: { kind: "merge_ready" },
+      recoveryReceipt: { reviewRunId: "run-original-review" },
+    });
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  const ordinaryFindingsHarness = async () => {
+    const fixed = "b".repeat(40);
+    const h = harness({ prFacts: exactRecoveryFacts(fixed) });
+    await h.instances.put(recoveryInstance());
+    const { ending: _ending, ...row } = requestChangesRow();
+    await h.instances.putUnits([row]);
+    h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner);
+    await h.store.put(
+      completedOriginalFindings(fixed, {
+        events: [{ type: "coordinator_tag", parentInstanceId: INSTANCE.id, unit: "U12", base: "main", publication }],
+      }),
+    );
+    return h;
+  };
+  const ordinaryPrCheck = (h: ReturnType<typeof harness>) =>
+    handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        pr: PR.number,
+        recover: { runId: "run-original-findings" },
+      }),
+      h.deps,
+    );
+
+  it("ordinary findings publication advances the exact authorized binding by CAS before re-review", async () => {
+    const h = await ordinaryFindingsHarness();
+    expect(await ordinaryPrCheck(h)).toMatchObject({ status: 200, body: { headSha: "b".repeat(40) } });
+    const [row] = await h.instances.listUnits(INSTANCE.id);
+    expect(row).toMatchObject({
+      lastPush: "b".repeat(40),
+      publication: { ...publication, expectedHeadSha: "b".repeat(40) },
+    });
+    expect(row).not.toHaveProperty("recovery");
+    expect(await ordinaryPrCheck(h)).toMatchObject({ status: 200 });
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+  });
+
+  it.each([
+    "missing authorization",
+    "foreign authorization",
+    "foreign child",
+    "wrong round",
+    "invalid attempt",
+    "later review",
+    "unrecorded push",
+    "moved head",
+    "rival owner",
+    "CAS loss",
+    "ambiguous child",
+  ])("ordinary findings publication refuses %s and retains its prior binding", async (scenario) => {
+    const h = await ordinaryFindingsHarness();
+    const run = (await h.store.get("run-original-findings"))!;
+    if (scenario === "missing authorization") await h.store.put({ ...run, events: [] });
+    if (scenario === "foreign authorization")
+      await h.store.put({
+        ...run,
+        events: [
+          {
+            type: "coordinator_tag",
+            parentInstanceId: INSTANCE.id,
+            unit: "U12",
+            base: "main",
+            publication: { ...publication, expectedHeadSha: "c".repeat(40) },
+          },
+        ],
+      });
+    if (scenario === "foreign child") await h.store.put({ ...run, parentInstanceId: "other" });
+    if (scenario === "wrong round") await h.store.put({ ...run, idempotencyKey: `${INSTANCE.id}:U12/2/findings` });
+    if (scenario === "invalid attempt")
+      await h.store.put({ ...run, idempotencyKey: `${INSTANCE.id}:U12/1/findings/alternate` });
+    if (scenario === "later review") {
+      const [row] = await h.instances.listUnits(INSTANCE.id);
+      await h.instances.putUnits([
+        { ...row!, rounds: [...row!.rounds, { index: 2, agent: "review", outcome: "started", at: NOW }] },
+      ]);
+    }
+    if (scenario === "unrecorded push") await h.store.put({ ...run, pushed: undefined });
+    if (scenario === "moved head") h.deps.fetchPrFacts = async () => exactRecoveryFacts("c".repeat(40));
+    if (scenario === "rival owner") {
+      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
+      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    }
+    if (scenario === "CAS loss")
+      vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValueOnce({ ok: false, reason: "stale" });
+    if (scenario === "ambiguous child") await h.store.put({ ...run, id: "run-duplicate-findings" });
+    const before = await h.instances.listUnits(INSTANCE.id);
+    expect((await ordinaryPrCheck(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+  });
+
+  it("ordinary findings publication refuses a caller's different PR before any binding change", async () => {
+    const h = await ordinaryFindingsHarness();
+    const before = await h.instances.listUnits(INSTANCE.id);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          pr: 999,
+          recover: { runId: "run-original-findings" },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409 });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+  });
+
+  it("legacy binding repair refuses an active original child even when publication ownership is absent", async () => {
+    const h = await legacyHarness();
+    h.registry.create("coding child", {
+      agent: "coding",
+      channelId: INSTANCE.channelId,
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      parentInstanceId: INSTANCE.id,
+      idempotencyKey: `${INSTANCE.id}:U12/1/findings`,
+    });
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it("ordinary findings publication restores its prior binding when ownership changes during the CAS", async () => {
+    const h = await ordinaryFindingsHarness();
+    const before = await h.instances.listUnits(INSTANCE.id);
+    const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+    h.instances.compareAndReplaceUnit = async (expected, replacement) => {
+      const result = await replace(expected, replacement);
+      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
+      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      return result;
+    };
+    expect(await ordinaryPrCheck(h)).toMatchObject({ status: 409, body: { error: "publication_ownership_changed" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)?.instanceId).toBe("rival");
+  });
+
+  it.each([
+    ["caps_missing", { caps: undefined }, {}],
+    ["caps_invalid", { caps: { maxRounds: 0, maxMinutes: 120 } }, {}],
+    ["started_at_missing", {}, { startedAt: undefined }],
+    ["ending_at_invalid", {}, { ending: { ...requestChangesRow().ending!, at: Number.NaN } }],
+    ["cost_cap_spend_unknown", { grant: { renewals: 0, costCapUsd: 5 } }, {}],
+    [
+      "latest_segment_ambiguous",
+      {},
+      {
+        segments: [
+          { index: 2, at: NOW },
+          { index: 2, at: NOW },
+        ],
+      },
+    ],
+    [
+      "resume_time_missing",
+      {},
+      {
+        wakes: {
+          stopped: {
+            kind: "segment" as const,
+            index: 1,
+            spendUsd: 0,
+            texts: [],
+            senders: [],
+            leaseMs: minutesToMs(20),
+          },
+        },
+      },
+    ],
+  ])("attributes an unknown recovery budget to %s without guessing", async (reason, instanceOver, rowOver) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put({ ...recoveryInstance(), ...instanceOver });
+    await h.instances.putUnits([{ ...requestChangesRow(), ...rowOver }]);
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown", reason } });
+    expect(h.recoveries).toEqual([]);
+  });
 
   it("unchanged-head request_changes CAS-claims the original row and owner, then admits a Workflow carrying only the original unit identity", async () => {
     const h = harness({

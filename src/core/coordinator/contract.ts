@@ -514,6 +514,10 @@ export interface OriginalUnitRecovery {
   /** The exact terminal value replaced by the claim, for fail-closed rollback
    * if the Workflow cannot be admitted. */
   previousEnding: NonNullable<CoordinatorUnit["ending"]>;
+  /** Original binding fields before an evidence-backed repair. The empty object
+   * means both were absent; retained across restart for admission rollback,
+   * then retired when the recovery records progress. */
+  previousBinding?: { publication?: ExistingPrPublicationBinding; lastPush?: string };
   /** The separate Workflow execution checkpoint. This is transport identity,
    * not a replacement coordinator/unit identity. */
   workflowId: string;
@@ -813,6 +817,13 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
           r.recovery.findingsKey !== undefined)) &&
       (r.recovery.findings === undefined ||
         (Array.isArray(r.recovery.findings) && r.recovery.findings.every(isFindingShape))) &&
+      (r.recovery.previousBinding === undefined ||
+        (isObject(r.recovery.previousBinding) &&
+          (r.recovery.previousBinding.publication === undefined ||
+            isPublication(r.recovery.previousBinding.publication)) &&
+          (r.recovery.previousBinding.lastPush === undefined ||
+            (typeof r.recovery.previousBinding.lastPush === "string" &&
+              /^[0-9a-f]{40}$/i.test(r.recovery.previousBinding.lastPush))))) &&
       isObject(r.recovery.previousEnding) &&
       isText(r.recovery.previousEnding.kind) &&
       typeof r.recovery.previousEnding.report === "string" &&

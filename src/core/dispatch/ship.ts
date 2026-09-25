@@ -249,7 +249,11 @@ export async function runShipBranch(
         : deps.recoverOriginalUnit(recovery, { userId: msg.userId, threadKey: msg.threadKey }),
     );
     if (answer.status !== 200) {
-      const reason = typeof answer.body.error === "string" ? answer.body.error : "original-unit recovery was refused";
+      const error = typeof answer.body.error === "string" ? answer.body.error : "original-unit recovery was refused";
+      const reason =
+        error === "recovery_budget_unknown" && typeof answer.body.reason === "string"
+          ? `${error}: ${answer.body.reason}`
+          : error;
       await refuse(refusalOf("setup_failed", reason), () =>
         card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
       );

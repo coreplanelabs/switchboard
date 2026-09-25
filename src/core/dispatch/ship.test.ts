@@ -232,6 +232,17 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect(s.replies[0]).toContain("recovery-run-r1");
   });
 
+  it("preserves the exact budget refusal reason without starting a replacement plan", async () => {
+    const s = setup("slack:UADMIN", { text: "agent:ship recover unit plan-old:U12" });
+    s.deps.recoverOriginalUnit = async () => ({
+      status: 409,
+      body: { error: "recovery_budget_unknown", reason: "caps_missing" },
+    });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.replies.join(" ")).toContain("recovery_budget_unknown: caps_missing");
+    expect(s.created).toEqual([]);
+  });
+
   it("surfaces a deterministic recovery refusal and never falls through to generated-plan hand-off", async () => {
     const s = setup("slack:UADMIN", { text: "agent:ship recover unit plan-old:U12" });
     s.deps.recoverOriginalUnit = async () => ({

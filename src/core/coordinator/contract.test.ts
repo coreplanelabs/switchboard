@@ -344,6 +344,16 @@ describe("isCoordinatorUnit — one unit's row", () => {
     );
     expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, remainingMs: 0 } })).toBe(false);
     expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, workflowId: "bad:id" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, previousBinding: {} } })).toBe(true);
+    expect(
+      isCoordinatorUnit({ ...claimed, recovery: { ...recovery, previousBinding: { lastPush: "a".repeat(40) } } }),
+    ).toBe(true);
+    expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, previousBinding: { publication: {} } } })).toBe(
+      false,
+    );
+    expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, previousBinding: { lastPush: "short" } } })).toBe(
+      false,
+    );
   });
 
   it("the review thread is a thread key with an optional link, beside the unit's own thread; a review thread without its key, with a malformed link, or as a bare string is refused", () => {
