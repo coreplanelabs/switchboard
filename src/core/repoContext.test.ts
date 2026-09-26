@@ -164,6 +164,64 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     });
   });
 
+  it("a direct PR #N follow-up overrides the older thread PR in the bound repo", async () => {
+    const sha = "8".repeat(40);
+    const { calls } = stubFetch({
+      body: { state: "open", head: { ref: "plan/new/u1", sha, repo: { full_name: "acme/api" } } },
+    });
+    const history = [{ role: "user" as const, text: "review https://github.com/acme/api/pull/7" }];
+    const records = { pr: { repo: "acme/api", number: 7, at: 2_000 } };
+    await expect(
+      resolveRepoContext(
+        msg("Please fix PR #8’s title so it passes the title check"),
+        history,
+        undefined,
+        undefined,
+        records,
+      ),
+    ).resolves.toMatchObject({
+      repo: "acme/api",
+      pr: 8,
+      prFromMessage: true,
+      prTargeted: true,
+      ref: "plan/new/u1",
+      refFromPr: true,
+    });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/8");
+
+    const { calls: contextCalls } = stubFetch({
+      body: { state: "open", head: { ref: "plan/old/u1", sha: "7".repeat(40), repo: { full_name: "acme/api" } } },
+    });
+    const context = await resolveRepoContext(
+      msg("Investigate the bug seen on PR #8"),
+      history,
+      undefined,
+      undefined,
+      records,
+    );
+    expect(context).toMatchObject({ repo: "acme/api", pr: 7 });
+    expect(context.prFromMessage).toBeUndefined();
+    expect(contextCalls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
+
+    stubFetch({ body: { state: "open", head: { ref: "plan/new/u1", sha, repo: { full_name: "acme/api" } } } });
+    const bare = await resolveRepoContext(msg("agent:ship PR #8"), history, undefined, undefined, records);
+    expect(bare).toMatchObject({ repo: "acme/api", pr: 8, prFromMessage: true });
+    expect(bare.prTargeted).toBeUndefined();
+
+    stubFetch({ body: { state: "open", head: { ref: "plan/new/u1", sha, repo: { full_name: "acme/api" } } } });
+    const next = await resolveRepoContext(
+      msg("and recheck the title"),
+      [
+        { role: "user", text: "review https://github.com/acme/api/pull/7", at: 1_000 },
+        { role: "user", text: "Please fix PR #8’s title so it passes the title check", at: 3_000 },
+      ],
+      undefined,
+      undefined,
+      records,
+    );
+    expect(next.pr).toBe(8);
+  });
+
   it("uses the token from resolveGithubToken when one is configured", async () => {
     vi.stubEnv("GH_TOKEN", "ghtok");
     const { calls } = stubFetch({ body: { head: { ref: "p", repo: { full_name: "acme/api" } } } });

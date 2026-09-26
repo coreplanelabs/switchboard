@@ -560,6 +560,43 @@ describe("shipPreflight — the entry table over (task text, PR source, thread's
     });
   });
 
+  it("a direct PR #N task adopts its named PR while a cited one stays context", async () => {
+    const prFacts = vi.fn(async () => openPr({ htmlUrl: "https://github.com/acme/api/pull/8" }));
+    const direct = await shipPreflight(
+      input({
+        requestText: "Please fix PR #8’s title so it passes the title check",
+        repoCtx: { repo: "acme/api", pr: 8, prFromMessage: true, prTargeted: true },
+        prFacts,
+      }),
+    );
+    expect(direct).toMatchObject({ ok: true, entry: { adopt: { pr: 8 }, branch: "feat/rate-limit" } });
+    expect(prFacts).toHaveBeenCalledWith({ repo: "acme/api", number: 8 });
+
+    const context = await shipPreflight(
+      input({
+        requestText: "Investigate the bug seen on PR #8",
+        repoCtx: { repo: "acme/api", pr: 8, prFromMessage: true },
+        prFacts,
+      }),
+    );
+    expect(context).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
+    expect(shipTaskText("PR #8", "acme/api")).toBe("");
+
+    const bare = await shipPreflight(
+      input({ requestText: "PR #8", repoCtx: { repo: "acme/api", pr: 8, prFromMessage: true }, prFacts }),
+    );
+    expect(bare).toMatchObject({ ok: true, entry: { resume: { pr: 8 } } });
+
+    const unavailable = await shipPreflight(
+      input({
+        requestText: "Please fix PR #8's title",
+        repoCtx: { repo: "acme/api", pr: 8, prFromMessage: true, prTargeted: true },
+        prFacts: async () => undefined,
+      }),
+    );
+    expect(unavailable).toMatchObject({ ok: false, where: "PR facts unavailable" });
+  });
+
   it("row 4 — task · PR from message · thread's own · unfetchable → refused ship_preflight_pr_facts (fail-closed like every adopt)", async () => {
     const res = await shipPreflight(input({ requestText: OWN_TASK, repoCtx: ownCtx, prFacts: async () => undefined }));
     expect(res).toMatchObject({ ok: false, where: "PR facts unavailable" });

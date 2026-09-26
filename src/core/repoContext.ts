@@ -123,6 +123,10 @@ export interface RepoContext {
    *  through to a fresh round 0) from the thread's own in-flight PR
    *  (inherited → still fail-closed when the PR's facts cannot be fetched). */
   prFromMessage?: boolean;
+  /** A direct request on repository-local `PR #N` (for example "fix PR #8's
+   * title"). Ship adopts that named PR even if another PR was opened by the
+   * thread's last recorded run; a background mention leaves this unset. */
+  prTargeted?: boolean;
   /** True when `pr` is the pull request the thread's own run opened or edited
    *  (`RunRecordSignals.pr`, same repo and number) — independent of where the
    *  reference came from: set for an in-message URL or `owner/name#N` naming it
@@ -270,8 +274,12 @@ interface Signals {
   repoStrong?: boolean;
   /** definite ref: head routing clause, branch token, /tree/<ref> */
   ref?: string;
-  /** PR reference; the head ref needs one REST call */
+  /** Qualified PR reference; the head ref needs one REST call. */
   pr?: { repo: string; number: number };
+  /** A direct action or bare `PR #N` in a message whose repository is resolved
+   * from its address, operator binding or thread. Narrative mentions are
+   * ignored so they cannot displace the thread's current PR. */
+  localPr?: { number: number; targeted: boolean };
   /** ambiguous "on <owner/name-shaped>" token (slug or slashy branch) —
    *  original case kept; resolved against repo presence by the caller */
   onSlug?: string;
@@ -304,6 +312,22 @@ function extractSignals(rawText: string): Signals {
   if (prUrl) {
     const slug = slugOf(`${stripPunct(prUrl[1])}/${stripPunct(prUrl[2])}`);
     if (slug) out.pr = { repo: slug, number: Number(prUrl[3]) };
+  }
+
+  // A repository-local PR number is a current-message signal only when a
+  // direct action names it or it stands alone. Narrative mentions such as
+  // "the bug seen on PR #N" do not change the thread's target.
+  const localPr = /\b(?:pr|pull request)\s*#([1-9]\d*)\b/i.exec(text);
+  if (localPr && !out.pr) {
+    const lead = text.slice(0, localPr.index);
+    const taskLead = lead.replace(/^\s*(?:(?:<@[^>\s]+>|[a-z]+:[^\s]+)\s+)*/i, "");
+    const targeted = /\b(?:fix|update|change|edit|rename|review|re-review|adopt|resume|ship)\s+(?:the\s+)?$/i.test(
+      taskLead,
+    );
+    const bare =
+      /^\s*(?:(?:<@[^>\s]+>|[a-z]+:[^\s]+)\s+)*(?:in\s+[^\s:]+\s*:\s*)?$/i.test(lead) &&
+      /^\s*[.!?]*\s*$/.test(text.slice(localPr.index + localPr[0].length));
+    if (targeted || bare) out.localPr = { number: Number(localPr[1]), targeted };
   }
 
   // Typed branch forms only: the head-of-ask routing clause or a branch token.
@@ -474,8 +498,13 @@ function threadSignals(
       const weak = s.repo ?? (s.onSlug ? slugOf(s.onSlug) : undefined);
       if (weak && (!isResident || safePredicate(isResident, weak))) out.repo = weak;
     }
-    if (s.pr) {
-      out.pr = s.pr;
+    // Once this thread has a repository, an unqualified PR number a person
+    // named becomes its PR binding for later replies. An addressed repository
+    // still awaiting the async vet cannot borrow the preceding repo here.
+    const turnPr =
+      s.pr ?? (s.localPr && !s.addressed && out.repo ? { repo: out.repo, number: s.localPr.number } : undefined);
+    if (turnPr) {
+      out.pr = turnPr;
       if (h.at !== undefined) out.prAt = h.at;
       else delete out.prAt;
     }
@@ -630,6 +659,12 @@ export async function resolveRepoContext(
     unverified = undefined;
   }
 
+  let localPrBound = false;
+  if (repo !== undefined && s.pr === undefined && s.localPr !== undefined) {
+    s.pr = { repo, number: s.localPr.number };
+    localPrBound = true;
+  }
+
   // PR head — one REST call whenever the CURRENT message names a PR of the
   // resolved repo, regardless of any ref phrasing beside it. The PR is the
   // explicit target: its head branch is the ref, and its head SHA pins the
@@ -690,6 +725,7 @@ export async function resolveRepoContext(
   if (repo && s.pr && repo === s.pr.repo) {
     out.pr = s.pr.number;
     out.prFromMessage = true;
+    if (localPrBound && s.localPr?.targeted) out.prTargeted = true;
     // The message names the pull request the thread's own run opened or edited
     // (the run record's `pr`): the reference is the thread's own work, not a
     // stranger's PR cited as evidence, and ship's entry checks must not treat

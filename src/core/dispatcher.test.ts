@@ -9563,6 +9563,20 @@ workspaceDir: __WORKDIR__
     expect(replies[replies.length - 1]).toContain("no new branch");
   });
 
+  it("a direct PR #N follow-up hands off the named PR rather than the thread's older PR", async () => {
+    const { deps, instances } = shipDeps();
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 8, prFromMessage: true, prTargeted: true });
+    deps.fetchPrFacts = vi.fn(async () => openBotPr({ htmlUrl: "https://github.com/acme/api/pull/8" }));
+    deps.runRegistry = new RunRegistry({ genId: () => "run-shipnumber", genToken: () => "tok" });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:ship Please fix PR #8's title so it passes the title check", "slack:UADMIN"), io);
+    const { instance, unit } = await handed(instances, "run-shipnumber");
+    expect(instance?.branch).toBe(SHIP_BRANCH);
+    expect(unit?.publication).toMatchObject({ pr: 8 });
+    expect(unit?.resume).toBeUndefined();
+    expect(unit?.lastPush).toBeUndefined();
+  });
+
   it("a seeded plan request in the same pull-request thread stays seeded: the rows keep the graph plan branches, the PR is context", async () => {
     const { deps, instances } = shipDeps();
     deps.githubApi = new InMemoryGithubApi({

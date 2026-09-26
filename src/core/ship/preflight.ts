@@ -40,6 +40,7 @@ export function shipTaskText(requestText: string, repo: string): string {
   t = t.replace(new RegExp(`\\bin\\s+${slug}\\s*:?`, "gi"), " ");
   t = t.replace(new RegExp(`\\b${slug}(#\\d+)?\\b`, "gi"), " ");
   t = t.replace(/\b[a-z0-9][\w.-]*\/[\w.-]+#\d+\b/gi, " ");
+  t = t.replace(/\b(?:pr|pull request)\s*#\d+(?:['’]s)?\b/gi, " ");
   return t
     .replace(/\s+/g, " ")
     .trim()
@@ -117,7 +118,16 @@ export interface ShipPreflightInput {
   requestText: string;
   repoCtx: Pick<
     RepoContext,
-    "repo" | "pr" | "prFromMessage" | "prIsThreadOwn" | "ref" | "refFromPr" | "baseRef" | "headSha" | "prUnpostable"
+    | "repo"
+    | "pr"
+    | "prFromMessage"
+    | "prIsThreadOwn"
+    | "prTargeted"
+    | "ref"
+    | "refFromPr"
+    | "baseRef"
+    | "headSha"
+    | "prUnpostable"
   >;
   gates: { canRunAgent: (agent: string) => boolean; adminsHint: () => string };
   /** Repo facts: the default branch, the PR base of last resort. Undefined =
@@ -264,12 +274,13 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
     // be fetched or its head is a fork — so execution falls through to round 0
     // below, which drops the PR-derived ref (repoCtx.refFromPr) and starts a
     // fresh deterministic plan branch off the default branch; the reference
-    // stays in the task text for the coding child. The one exception is the
-    // thread's OWN pull request (repoCtx.prIsThreadOwn: the run record's `pr`
-    // names it too): a re-issue that cites it by URL is addressing that pull
-    // request, so it adopts (with task text) or resumes (without) like an
-    // inherited thread PR — issue 1799's "CI is red on <own PR URL>" shape.
-    const contextCase = task !== "" && repoCtx.prFromMessage === true && repoCtx.prIsThreadOwn !== true;
+    // stays in the task text for the coding child. A direct action on `PR #N`
+    // targets that PR. The thread's OWN pull request (repoCtx.prIsThreadOwn:
+    // the run record's `pr` names it too) is also a target when cited by URL,
+    // so it adopts (with task text) or resumes (without) like an inherited
+    // thread PR — issue 1799's "CI is red on <own PR URL>" shape.
+    const contextCase =
+      task !== "" && repoCtx.prFromMessage === true && repoCtx.prIsThreadOwn !== true && repoCtx.prTargeted !== true;
     if (!contextCase) {
       const facts = await input.prFacts({ repo, number: repoCtx.pr }).catch(() => undefined);
       // The adopt and resume cases must verify the PR first: an unfetchable
