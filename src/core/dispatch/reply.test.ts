@@ -520,6 +520,9 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       // dispatcher.test.ts's coordinator producer identity cases prove the
       // pre-ack failure sentence and typed response, without a child id.
       "child_reservation_failed",
+      // dispatcher.test.ts quotes the typed budget outcome and its reply at
+      // every expired setup boundary; this refusal is not silent.
+      "run_budget_exhausted",
     ];
     const silent: RefusalCode[] = ["coordinator_thread_live", "workspace_lost", "setup_failed", "uncaught"];
     const covered = new Set<RefusalCode>([...table.map((r) => r.code), ...provenElsewhere, ...silent]);
