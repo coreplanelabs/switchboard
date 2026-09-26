@@ -12,6 +12,8 @@ import {
   type PersonDirectory,
   type ReceiptsResult,
 } from "./contract.js";
+import type { LinkAudit, LinkCommand, LinkIntent, LinkResult } from "./linkContract.js";
+import { executeLink } from "./linkEngine.js";
 import { decideChange, identityKey, mintPerson, readBinding, readReceipts, resolution } from "./engine.js";
 
 /** Test/dev implementation. Every mutation is synchronous before its promise
@@ -21,6 +23,8 @@ export class InMemoryPersonDirectory implements PersonDirectory {
     people: new Map<string, Person>(),
     bindings: new Map<string, PersonBinding>(),
     history: new Map<string, BindingReceipt[]>(),
+    intents: new Map<string, LinkIntent>(),
+    audits: new Map<string, LinkAudit>(),
   };
   constructor(private readonly now: () => number) {}
 
@@ -57,6 +61,51 @@ export class InMemoryPersonDirectory implements PersonDirectory {
         this.state.history.set(key, [...(this.state.history.get(key) ?? []), receipt]);
       }
       return result;
+    } catch {
+      return { status: "unavailable" };
+    }
+  }
+  async link(command: LinkCommand): Promise<LinkResult> {
+    try {
+      // Copy-on-write: even a failure on the last audit write publishes nothing.
+      // Existing map values are never mutated by the shared engine.
+      const next = {
+        people: new Map(this.state.people),
+        bindings: new Map(this.state.bindings),
+        history: new Map(this.state.history),
+        intents: new Map(this.state.intents),
+        audits: new Map(this.state.audits),
+      };
+      const result = executeLink(
+        {
+          intent: (id) => next.intents.get(id),
+          audit: (id) => next.audits.get(id),
+          current: (identity) =>
+            readBinding(next.bindings.get(identityKey(identity)), identity, (id) => next.people.has(id)),
+          putIntent: (intent, create) => {
+            if (create && next.intents.has(intent.id)) throw new Error("duplicate intent");
+            next.intents.set(intent.id, intent);
+          },
+          putPerson: (person) => {
+            if (next.people.has(person.id)) throw new Error("duplicate person");
+            next.people.set(person.id, person);
+          },
+          putBinding: (receipt) => {
+            const key = identityKey(receipt.binding.identity);
+            next.bindings.set(key, receipt.binding);
+            next.history.set(key, [...(next.history.get(key) ?? []), receipt]);
+          },
+          putAudit: (audit) => {
+            if (next.audits.has(audit.id)) throw new Error("duplicate outcome");
+            next.audits.set(audit.id, audit);
+          },
+        },
+        command,
+        this.now(),
+      );
+      const detached = structuredClone(result);
+      this.state = next;
+      return detached;
     } catch {
       return { status: "unavailable" };
     }

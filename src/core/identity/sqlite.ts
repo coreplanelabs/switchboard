@@ -9,6 +9,8 @@ import {
   type PersonDirectory,
   type ReceiptsResult,
 } from "./contract.js";
+import type { LinkCommand, LinkResult } from "./linkContract.js";
+import { executeLink } from "./linkEngine.js";
 import { decideChange, identityKey, mintPerson, readBinding, readReceipts, resolution } from "./engine.js";
 
 /** Structural subset of Durable Object storage. The owner supplies one
@@ -50,6 +52,8 @@ export class SqlitePersonDirectory implements PersonDirectory {
         storage.sql.exec(
           "CREATE TABLE IF NOT EXISTS person_binding_receipts (identity_key TEXT NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (identity_key, revision))",
         );
+        storage.sql.exec("CREATE TABLE IF NOT EXISTS person_link_intents (id TEXT PRIMARY KEY, body TEXT NOT NULL)");
+        storage.sql.exec("CREATE TABLE IF NOT EXISTS person_link_outcomes (id TEXT PRIMARY KEY, body TEXT NOT NULL)");
       });
     } catch {
       throw new Error("person directory unavailable");
@@ -119,6 +123,64 @@ export class SqlitePersonDirectory implements PersonDirectory {
     } catch {
       return { status: "unavailable" };
     }
+  }
+  async link(command: LinkCommand): Promise<LinkResult> {
+    try {
+      return this.storage.transactionSync(() =>
+        executeLink(
+          {
+            intent: (id) => this.linkRow("person_link_intents", id),
+            audit: (id) => this.linkRow("person_link_outcomes", id),
+            current: (identity) => this.current(identity),
+            putIntent: (intent, create) => {
+              this.storage.sql.exec(
+                create
+                  ? "INSERT INTO person_link_intents (id, body) VALUES (?, ?)"
+                  : "UPDATE person_link_intents SET body = ?2 WHERE id = ?1",
+                intent.id,
+                JSON.stringify(intent),
+              );
+            },
+            putPerson: (person) => {
+              this.storage.sql.exec(
+                "INSERT INTO directory_people (id, created_at) VALUES (?, ?)",
+                person.id,
+                person.createdAt,
+              );
+            },
+            putBinding: (receipt) => {
+              const key = identityKey(receipt.binding.identity);
+              this.storage.sql.exec(
+                "INSERT INTO person_bindings (identity_key, body) VALUES (?, ?)",
+                key,
+                JSON.stringify(receipt.binding),
+              );
+              this.storage.sql.exec(
+                "INSERT INTO person_binding_receipts (identity_key, revision, body) VALUES (?, ?, ?)",
+                key,
+                receipt.binding.revision,
+                JSON.stringify(receipt),
+              );
+            },
+            putAudit: (audit) => {
+              this.storage.sql.exec(
+                "INSERT INTO person_link_outcomes (id, body) VALUES (?, ?)",
+                audit.id,
+                JSON.stringify(audit),
+              );
+            },
+          },
+          command,
+          this.now(),
+        ),
+      );
+    } catch {
+      return { status: "unavailable" };
+    }
+  }
+  private linkRow(table: "person_link_intents" | "person_link_outcomes", id: string): unknown {
+    const rows = [...this.storage.sql.exec<{ body: string }>(`SELECT body FROM ${table} WHERE id = ?`, id)];
+    return rows.length ? decode(rows[0].body) : undefined;
   }
   async receipts(identity: ExternalIdentity): Promise<ReceiptsResult> {
     const parsed = identitySchema.safeParse(identity);
