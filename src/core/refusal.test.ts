@@ -21,6 +21,7 @@ describe("the refusal seam — one cause per code, in one table", () => {
       which_branch: "request",
       workspace_lost: "system",
       setup_failed: "system",
+      run_budget_exhausted: "system",
       uncaught: "system",
       confirmation_used: "request",
       confirmation_expired: "request",

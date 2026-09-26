@@ -367,6 +367,7 @@ function setup(
     root: trace.root,
     startedAt: NOW,
     loopStartedAt: NOW,
+    assertAdmissionBudget: () => {},
     channelVisibility: "unknown" as const,
     addressSeverity: { level: "minor" as const, source: "org" as const },
     publishText: (type: "input" | "context" | "answer", text: string) => {
