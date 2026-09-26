@@ -32,6 +32,7 @@ export function buildArtifactStore(
   return new R2ArtifactStore({
     accountId: cfg.r2.accountId,
     bucket: cfg.r2.bucket,
+    retentionDays: cfg.retentionDays,
     accessKeyId: secrets.get("ARTIFACTS_R2_ACCESS_KEY_ID")!,
     secretAccessKey: secrets.get("ARTIFACTS_R2_SECRET_ACCESS_KEY")!,
     copy: {

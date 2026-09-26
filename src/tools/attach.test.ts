@@ -475,3 +475,152 @@ describe("attach_file through the artifact store", () => {
     expect(all).not.toContain(COPY);
   });
 });
+
+describe("attach_file PR publication", () => {
+  const bytes = Uint8Array.from(
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS6kAAAAASUVORK5CYII=",
+      "base64",
+    ),
+  );
+  function harness(allowed = true) {
+    const store = new InMemoryArtifactStore();
+    const order: string[] = [];
+    const original = store.publishPrImage.bind(store);
+    store.publishPrImage = async (key) => {
+      order.push(`publish:${key}`);
+      return original(key);
+    };
+    const ctx: ToolContext = {
+      repo: "acme/web",
+      github: {
+        canWrite: (repo) => allowed && repo === "acme/web",
+        api: {} as NonNullable<ToolContext["github"]>["api"],
+      },
+      callId: "attach-1",
+      executor: {
+        readFile: async () => "",
+        writeFile: async () => "",
+        exec: async (command) => {
+          if (command.startsWith("stat ")) return String(bytes.length);
+          if (command.startsWith("curl -fsS -T ")) {
+            const url = new URL(/'([^']+)'$/.exec(command)![1]);
+            store.put(decodeURIComponent(url.pathname.slice(1)), bytes, "image/png");
+          }
+          return "";
+        },
+      },
+      artifacts: {
+        store,
+        runId: "own-run",
+        nextSeq: () => 1,
+        reply: async () => {
+          order.push("reply");
+        },
+      },
+      uploadTicket: async () => ({
+        url: "https://upload.example",
+        complete: async () => {
+          order.push("attached");
+        },
+      }),
+    };
+    return { ctx, store, order };
+  }
+
+  it("explicit publication delivers to the thread first and returns an embeddable URL for only this call's outbound key", async () => {
+    const h = harness();
+    const result = await attachFileTool.run(
+      { path: "shots/page.png", publishForPr: true, key: "runs/foreign/out/1-secret.png" },
+      h.ctx,
+    );
+    expect(result).toMatch(/attached page.png.*conversation and the run page/);
+    expect(result).toMatch(/!\[page.png\]\(https:\/\/artifacts.example\/pr-images\/[a-f0-9-]+\.png\)/);
+    expect(h.order).toEqual(["attached", "publish:runs/own-run/out/1-page.png"]);
+  });
+
+  it("ordinary attachments remain private and thread-only requests need no repo permission", async () => {
+    const h = harness(false);
+    expect(await attachFileTool.run({ path: "page.png" }, h.ctx)).toBe(
+      `attached page.png (${bytes.length} bytes) to the conversation and the run page`,
+    );
+    expect(h.order).toEqual(["attached"]);
+    expect([...h.store.objects.keys()]).toEqual(["runs/own-run/out/1-page.png"]);
+  });
+
+  it("refuses unauthorized, unbound, storeless, non-PNG and malformed publication requests without publishing", async () => {
+    const h = harness(false);
+    h.ctx.executor.exec = async () => {
+      throw new Error("unauthorized file read");
+    };
+    expect(await attachFileTool.run({ path: "page.png", publishForPr: true }, h.ctx)).toMatch(/error:.*permission/);
+    const unbound = harness();
+    delete unbound.ctx.repo;
+    expect(await attachFileTool.run({ path: "page.png", publishForPr: true }, unbound.ctx)).toMatch(
+      /error:.*repository/,
+    );
+    const noStore = harness();
+    delete noStore.ctx.artifacts;
+    expect(await attachFileTool.run({ path: "page.png", publishForPr: true }, noStore.ctx)).toMatch(
+      /error:.*artifact store/,
+    );
+    const valid = harness();
+    expect(await attachFileTool.run({ path: "page.svg", publishForPr: true }, valid.ctx)).toMatch(/error:.*PNG/);
+    expect(await attachFileTool.run({ path: "page.png", publishForPr: "true" }, valid.ctx)).toMatch(/error:.*boolean/);
+    expect([...h.order, ...unbound.order, ...noStore.order, ...valid.order]).toEqual([]);
+  });
+
+  it("refuses an over-cap publication before uploading, and an attachment failure publishes nothing", async () => {
+    const large = harness();
+    large.ctx.executor.exec = async () => "10485761";
+    expect(await attachFileTool.run({ path: "page.png", publishForPr: true }, large.ctx)).toMatch(/error:.*10485760/);
+    expect(large.order).toEqual([]);
+    const h = harness();
+    h.ctx.uploadTicket = async () => ({
+      url: "https://upload.example",
+      complete: async () => {
+        throw new Error("refused");
+      },
+    });
+    expect(await attachFileTool.run({ path: "page.png", publishForPr: true }, h.ctx)).toMatch(
+      /error: the channel refused/,
+    );
+    expect(h.order).toEqual([]);
+  });
+
+  it("reports a publication failure after a successful attachment without claiming a public URL", async () => {
+    const h = harness();
+    h.store.publishPrImage = async () => {
+      throw new Error("service unavailable");
+    };
+    const result = await attachFileTool.run({ path: "page.png", publishForPr: true }, h.ctx);
+    expect(result).toMatch(/error: attached page.png.*PR publication failed: service unavailable/);
+    expect(result).not.toContain("https:");
+    expect(h.order).toEqual(["attached"]);
+  });
+
+  it("ticketless channels keep their private link fallback but refuse publication without a completed upload", async () => {
+    const h = harness();
+    delete h.ctx.uploadTicket;
+    const replies: string[] = [];
+    const events: RunEvent[] = [];
+    const privateUrl = "https://bot.example/runs/own-run/artifacts/runs/own-run/out/1-page.png";
+    h.ctx.artifacts!.artifactUrl = () => privateUrl;
+    h.ctx.artifacts!.reply = async (text) => {
+      replies.push(text);
+    };
+    h.ctx.publish = (event) => {
+      events.push(event);
+    };
+    const result = await attachFileTool.run({ path: "page.png", publishForPr: true }, h.ctx);
+    expect(result).toMatch(
+      /^error: .*file's link were posted instead.*PR publication requires a completed channel upload/,
+    );
+    expect(result).not.toContain("![");
+    expect(replies).toEqual([`page.png\n📎 page.png (${bytes.length} bytes) — ${privateUrl}`]);
+    expect(h.order).toEqual([]);
+    expect([...h.store.objects.keys()]).toEqual(["runs/own-run/out/1-page.png"]);
+    expect(events).toContainEqual(expect.objectContaining({ type: "artifact", key: "runs/own-run/out/1-page.png" }));
+    expect(attachFileTool.inputSchema.properties).toHaveProperty("publishForPr");
+  });
+});

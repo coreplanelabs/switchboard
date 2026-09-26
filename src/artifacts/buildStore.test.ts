@@ -26,6 +26,21 @@ describe("buildArtifactStore (item 20)", () => {
     expect(store!.bucket).toBe("switchboard-artifacts");
   });
 
+  it("publication receives configured retention or the artifact default", async () => {
+    for (const retentionDays of [undefined, 2]) {
+      const requests: Request[] = [];
+      const store = buildArtifactStore({ ...cfg, retentionDays }, secretsFrom(all), {
+        copyBaseUrl: "https://bot.example.com",
+        fetch: async (input, init) => {
+          requests.push(new Request(input, init));
+          return Response.json({ path: "/pr-images/12345678-1234-4123-8123-123456789abc.png" });
+        },
+      });
+      await store!.publishPrImage("runs/r1/out/1-shot.png");
+      expect(await requests[0]!.json()).toEqual({ key: "runs/r1/out/1-shot.png", retentionDays: retentionDays ?? 30 });
+    }
+  });
+
   it("a missing secret fails by name — one or all three — and so does a missing PUBLIC_BASE_URL", () => {
     expect(ARTIFACT_SECRETS).toEqual([
       "ARTIFACTS_R2_ACCESS_KEY_ID",

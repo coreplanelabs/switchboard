@@ -305,13 +305,16 @@ describe("the workspace prompts name the image toolchain", () => {
     for (const sys of [cold.review, resident.review]) expect(sys).not.toContain("attach_file");
   });
 
-  it("a screenshot request with no destination named means both the thread and the pull request, every capture — an assets branch, never the PR's diff", () => {
+  it("a screenshot request with no destination named means both the thread and the pull request, every capture — explicit PNG publication, never an assets push", () => {
     for (const [name, sys] of Object.entries({ coding: cold.coding, "coding resident": resident.coding })) {
       expect(sys, name).toMatch(/SCREENSHOTS GO TO BOTH PLACES, ALL OF THEM/);
       expect(sys, name).toMatch(/every capture is attached here with attach_file AND published on the pull request/);
       // Inbound staging (record 0033): the prompt says where a dropped file already is.
       expect(sys, name).toMatch(/already in \.\/attachments\/ in your workspace when the turn's text names them/);
-      expect(sys, name).toMatch(/assets branch \(never the PR's own diff\)/);
+      expect(sys, name).toContain("publishForPr: true");
+      expect(sys, name).toContain("returned public URL");
+      expect(sys, name).toContain("still attach privately with publishForPr omitted");
+      expect(sys, name).not.toContain("commit the images to an assets branch");
       expect(sys, name).toMatch(/unless the request names one destination/);
       expect(sys, name).toMatch(/Never attach a subset and link the rest/);
     }

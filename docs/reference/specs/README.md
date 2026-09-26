@@ -58,6 +58,7 @@ Rename a test and the build is red until the spec changes with it. Adopting the 
 | [public-hygiene.md](public-hygiene.md) | The public tree carries no company, person, tracker, plan-id, platform-id or incident-date imprint; a ratchet (`hygiene:check`) counts every hit per file and class and only shrinks, with lines allowed by name |
 | [agent-review.md](agent-review.md) | Code review agent |
 | [agent-coding.md](agent-coding.md) | Coding agent (ships PRs) |
+| [pr-images.md](pr-images.md) | Explicit PNG publication for inline PR display, thread delivery, private-bucket isolation, retention and revocation |
 | [agent-ship.md](agent-ship.md) | Ship [pipeline](../vocabulary.md#pipeline) (coding → review → fix to LGTM); the child contract and handoff; the plan runner's state machine over the coordinator's step returns; every request handed to the runner (a task, a plan, a resume at review) |
 | [pull-requests.md](pull-requests.md) | Rebase ownership between a live pipeline runner and the operator's `pulls rebase` sweep |
 | [orchestration-plane.md](orchestration-plane.md) | The orchestration plane's table: every live and recently ended run, every ship unit and every tracked pull request with its owner and health, as `plane show` on every surface and the Access-gated `/plane` panel; read-only over the stores that exist |

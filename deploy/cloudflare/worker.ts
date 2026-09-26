@@ -46,6 +46,8 @@ import { systemClock } from "../../src/core/trace/clock.ts";
 import { createTracer } from "../../src/core/trace/tracer.ts";
 import { shimRoute, stripTraceContext, withTraceContext, workerLogSink } from "../../src/core/trace/workerTrace.ts";
 import { COPY_PATH, handleArtifactsCopy } from "./artifactsCopy.ts";
+import { handlePrImage, publishPrImage } from "./prImages.ts";
+import { PR_IMAGE_PUBLISH_PATH } from "../../src/artifacts/prImages.ts";
 import { withKnownLength } from "./knownLength.ts";
 import type { ShipCoordinatorParams } from "./coordinator";
 import { INSTANCE, INTERNAL } from "./shared";
@@ -456,6 +458,11 @@ const withLength = (res: Response): Response => withKnownLength(res, (size) => n
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    // Only deliberately published copies are public. The existing run reader
+    // and the bucket stay private; the write endpoint checks its own bearer.
+    if (pathname.startsWith("/pr-images/")) return withLength(await handlePrImage(request, env.ARTIFACTS));
+    if (pathname === PR_IMAGE_PUBLISH_PATH)
+      return publishPrImage(request, { bucket: env.ARTIFACTS, token: env.ARTIFACTS_COPY_TOKEN });
     // The public edge (docs/reference/specs/tracing.md item 22): whatever trace context the
     // caller sent is stripped, and what the container sees carries this
     // Worker's own root. A static asset or the live view's SSE stream gets no
