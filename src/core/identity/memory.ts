@@ -17,16 +17,18 @@ import { decideChange, identityKey, mintPerson, readBinding, readReceipts, resol
 /** Test/dev implementation. Every mutation is synchronous before its promise
  * resolves; no caller gets a reference to the stored mutable objects. */
 export class InMemoryPersonDirectory implements PersonDirectory {
-  private readonly people = new Map<string, Person>();
-  private readonly bindings = new Map<string, PersonBinding>();
-  private readonly history = new Map<string, BindingReceipt[]>();
+  private state = {
+    people: new Map<string, Person>(),
+    bindings: new Map<string, PersonBinding>(),
+    history: new Map<string, BindingReceipt[]>(),
+  };
   constructor(private readonly now: () => number) {}
 
   async createPerson(): Promise<CreatePersonResult> {
     try {
       const person = mintPerson(this.now());
-      if (this.people.has(person.id)) return { status: "unavailable" };
-      this.people.set(person.id, { ...person });
+      if (this.state.people.has(person.id)) return { status: "unavailable" };
+      this.state.people.set(person.id, { ...person });
       return { status: "created", person };
     } catch {
       return { status: "unavailable" };
@@ -36,7 +38,7 @@ export class InMemoryPersonDirectory implements PersonDirectory {
     const parsed = identitySchema.safeParse(identity);
     if (!parsed.success) return { status: "invalid" };
     return resolution(
-      readBinding(this.bindings.get(identityKey(parsed.data)), parsed.data, (id) => this.people.has(id)),
+      readBinding(this.state.bindings.get(identityKey(parsed.data)), parsed.data, (id) => this.state.people.has(id)),
     );
   }
   async change(input: BindingChange): Promise<ChangeResult> {
@@ -45,14 +47,14 @@ export class InMemoryPersonDirectory implements PersonDirectory {
     const change = parsed.data;
     try {
       const key = identityKey(change.identity);
-      const current = readBinding(this.bindings.get(key), change.identity, (id) => this.people.has(id));
+      const current = readBinding(this.state.bindings.get(key), change.identity, (id) => this.state.people.has(id));
       if (current.status === "conflict") return current;
-      if (!this.people.has(change.personId)) return { status: "unknown_person" };
+      if (!this.state.people.has(change.personId)) return { status: "unknown_person" };
       const result = decideChange(current, change, this.now());
       if (result.status === "changed") {
         const receipt = structuredClone({ action: change.action, actor: change.actor, binding: result.binding });
-        this.bindings.set(key, receipt.binding);
-        this.history.set(key, [...(this.history.get(key) ?? []), receipt]);
+        this.state.bindings.set(key, receipt.binding);
+        this.state.history.set(key, [...(this.state.history.get(key) ?? []), receipt]);
       }
       return result;
     } catch {
@@ -62,6 +64,6 @@ export class InMemoryPersonDirectory implements PersonDirectory {
   async receipts(identity: ExternalIdentity): Promise<ReceiptsResult> {
     const parsed = identitySchema.safeParse(identity);
     if (!parsed.success) return { status: "invalid" };
-    return readReceipts(this.history.get(identityKey(parsed.data)) ?? [], parsed.data);
+    return readReceipts(this.state.history.get(identityKey(parsed.data)) ?? [], parsed.data);
   }
 }
