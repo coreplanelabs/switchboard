@@ -116,7 +116,8 @@ export const submitDispositionsTool: RunnableTool = {
   description:
     "Record one disposition per review finding after addressing them: `fixed` (the finding is addressed in your " +
     "pushed code) or `declined` (deliberately not doing it — the note says why). `findingId` is the finding's " +
-    "stable id from the review (F1, F2, …) — use exactly those ids; an id the review never issued answers nothing " +
+    "stable id printed in the findings. Copy it exactly, including check ids such as `check:CI / checks (test)`; " +
+    "do not replace a check id with `F1`. An id the review never issued answers nothing " +
     "and is dropped when the plan runner reads your record. Every finding gets exactly one entry, every severity " +
     "included (nits too). Call it once with the complete set after your last push; a later call replaces the " +
     "earlier one. The set rides this run's record, where the plan runner reads it for the re-review.",
@@ -129,7 +130,10 @@ export const submitDispositionsTool: RunnableTool = {
         items: {
           type: "object",
           properties: {
-            findingId: { type: "string", description: 'The finding\'s stable id from the review (e.g. "F1")' },
+            findingId: {
+              type: "string",
+              description: 'Copy the exact id in the findings (e.g. "F1" or "check:CI / checks (test)")',
+            },
             disposition: { type: "string", enum: ["fixed", "declined"], description: "fixed | declined" },
             note: { type: "string", description: "One line: what was done, or why it was declined" },
           },
@@ -147,7 +151,7 @@ export const submitDispositionsTool: RunnableTool = {
     if (!ctx.onDispositions) return "no run is recording dispositions here";
     ctx.onDispositions(parsed.dispositions);
     const drops = parsed.dropped.length ? ` (dropped: ${parsed.dropped.join("; ")})` : "";
-    return `dispositions recorded: ${parsed.dispositions.length}${drops}; a later call replaces this one`;
+    return `dispositions recorded: ${parsed.dispositions.length}${drops}; IDs are checked against the findings by the plan runner; a later call replaces this one`;
   },
 };
 

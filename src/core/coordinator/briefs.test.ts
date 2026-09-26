@@ -405,6 +405,7 @@ describe("composeChild — the child a brief names", () => {
     expect(findings.prompt).toContain("The review of acme/api#7 requested changes.");
     expect(findings.prompt).toContain("[minor] F1 src/a.ts:3 — off by one");
     expect(findings.prompt).toContain("submit_dispositions");
+    expect(findings.prompt).toContain("Copy each finding ID exactly");
     expect(findings.prompt).toContain("submit_pr_description");
     expect(findings.prompt).toContain("Never merge and never approve.");
     expect(findings.prompt.endsWith("Review:\nChanges requested: one nit.")).toBe(true);
