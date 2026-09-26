@@ -1,42 +1,32 @@
-// The dashboard screenshots (docs/reference/specs/docs-site.md item 20).
+// The dashboard screenshots (docs/reference/specs/screenshot-capture.md).
 //
-//   npm run screenshots:gen     build the dashboard, serve the fixture preview,
-//                               render each surface whose inputs changed (both
-//                               themes) to docs/public/screenshots/<surface>-<theme>.png,
-//                               and record that surface's inputs' hashes in
-//                               manifest/<surface>.json — untouched surfaces'
-//                               pictures and manifests never move (--force
-//                               re-renders everything)
-//   npm run screenshots:check   what CI runs — no browser: exit 1 naming each
-//                               surface whose inputs changed since it was
-//                               rendered, and each picture missing
+//   npm run screenshots:gen     render stale surfaces and record their inputs
+//                               (--force re-renders all; --no-build reuses the bundle)
+//   npm run screenshots:check   drift and missing/stray output checks, no browser
 //
-// Deterministic by construction: the preview and the browser are held at one
-// fixed clock, the viewport, density, locale and timezone are pinned, motion
-// is off, and the fixture carries only made-up names. The decisions live in
-// src/docs/screenshotManifest.ts and are unit-tested there; this file reads and
-// writes the tree, drives the browser, and nothing else.
-//
-// `gen` needs the browser `playwright-core` pins: `npx playwright-core install chromium`.
+// The resolver in screenshotManifest.ts owns profiles, output names and hashes.
+// This file owns the filesystem and browser. The fixture and browser clocks,
+// density, locale, timezone and motion are pinned; no real workspace is read.
+// `gen` needs the browser pinned by playwright-core.
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  captureBatches,
+  currentSurfaceInputs,
   expectedFiles,
   FIXED_NOW,
-  hashInputs,
   listInputs,
   MANIFEST_DIR,
   manifestPath,
   manifestProblems,
   renderManifest,
+  samePngPixels,
   SCREENSHOTS_DIR,
   strayFiles,
   SURFACES,
-  surfaceInputs,
-  THEMES,
-  VIEWPORT,
   type Manifest,
+  type Surface,
 } from "../src/docs/screenshotManifest.js";
 
 const PORT = 8791;
@@ -48,15 +38,11 @@ const dir = join(root, SCREENSHOTS_DIR);
 const check = process.argv.includes("--check");
 const tag = check ? "screenshots:check" : "screenshots:gen";
 
-/** Every input's source text, read once; surfaceInputs slices it per page. */
-function inputSources(): { path: string; text: string }[] {
-  return listInputs(root).map((path) => ({ path, text: readFileSync(join(root, path), "utf8") }));
-}
-
-/** One surface's inputs in this tree, hashed. */
-function currentSurfaceInputs(page: string, sources: { path: string; text: string }[]): Record<string, string> {
-  const paths = new Set(surfaceInputs(page, sources));
-  return hashInputs(sources.filter((f) => paths.has(f.path)));
+function inputSources(): { path: string; text: string; bytes: Buffer }[] {
+  return listInputs(root).map((path) => {
+    const bytes = readFileSync(join(root, path));
+    return { path, text: bytes.toString("utf8"), bytes };
+  });
 }
 
 function recordedManifest(surface: string): Manifest | undefined {
@@ -78,7 +64,7 @@ function runCheck(): number {
   const present = presentPictures();
   const problems = [
     ...SURFACES.flatMap((s) =>
-      manifestProblems(s.name, currentSurfaceInputs(s.page, sources), recordedManifest(s.name), present),
+      manifestProblems(s, currentSurfaceInputs(s, sources), recordedManifest(s.name), present),
     ),
     ...strayFiles(present, presentManifests()),
   ];
@@ -91,35 +77,42 @@ function runCheck(): number {
   return 0;
 }
 
-/** The preview server on a fixed clock; resolves once it answers. */
-async function startPreview(): Promise<() => void> {
-  const server = spawn(join(root, "node_modules", ".bin", "tsx"), ["scripts/web-preview.ts"], {
+/** Each server implements the same local PORT/fixed-clock fixture interface. */
+async function startPreview(surface: Surface): Promise<() => Promise<void>> {
+  const server = spawn(join(root, "node_modules", ".bin", "tsx"), [surface.fixture.server], {
     cwd: root,
-    env: { ...process.env, PORT: String(PORT), SWITCHBOARD_PREVIEW_NOW: String(FIXED_NOW) },
+    env: {
+      ...process.env,
+      PORT: String(PORT),
+      SWITCHBOARD_PREVIEW_NOW: String(FIXED_NOW),
+      SWITCHBOARD_PREVIEW_CAPABILITIES: "full",
+      SWITCHBOARD_WEB_DIST: join(root, "web", "dist"),
+    },
     stdio: ["ignore", "ignore", "inherit"],
   });
-  const stop = () => server.kill();
+  const stopped = new Promise<void>((resolve) => server.once("exit", () => resolve()));
+  const stop = async () => {
+    server.kill();
+    await stopped;
+  };
   for (let attempt = 0; attempt < 150; attempt++) {
+    if (server.exitCode !== null) throw new Error(`Preview exited: ${surface.fixture.server}`);
     try {
-      const res = await fetch(`http://127.0.0.1:${PORT}/runs`);
+      const res = await fetch(`http://127.0.0.1:${PORT}${surface.path}`);
       if (res.ok) return stop;
     } catch {
       // not listening yet
     }
     await new Promise((r) => setTimeout(r, 200));
   }
-  stop();
+  await stop();
   throw new Error(`the preview did not answer on port ${PORT} within 30 s`);
 }
 
 async function runGen(): Promise<number> {
-  // A surface whose recorded inputs equal this tree's and whose pictures are
-  // present was rendered from exactly this code — re-rendering it could only
-  // introduce environment noise, so it is skipped (the issue this fixes:
-  // unrelated PNGs moving on every gen). `--force` re-renders everything.
+  // Resolving the whole registry and every input precedes any filesystem write.
   const sources = inputSources();
-  // A removed or renamed surface leaves its old picture and manifest behind;
-  // check reports them as stray, so gen sweeps them here.
+  const current = new Map(SURFACES.map((s) => [s.name, currentSurfaceInputs(s, sources)]));
   const expectedPngs = new Set(expectedFiles());
   const expectedManifests = new Set(SURFACES.map((s) => `${s.name}.json`));
   for (const png of presentPictures().filter((f) => !expectedPngs.has(f))) {
@@ -133,9 +126,7 @@ async function runGen(): Promise<number> {
   const present = presentPictures();
   const force = process.argv.includes("--force");
   const stale = SURFACES.filter(
-    (s) =>
-      force ||
-      manifestProblems(s.name, currentSurfaceInputs(s.page, sources), recordedManifest(s.name), present).length > 0,
+    (s) => force || manifestProblems(s, current.get(s.name)!, recordedManifest(s.name), present).length > 0,
   );
   if (stale.length === 0) {
     console.log(`${tag} nothing to render — every surface is current (use --force to re-render)`);
@@ -147,50 +138,66 @@ async function runGen(): Promise<number> {
     if (build.status !== 0) return build.status ?? 1;
   }
   const { chromium } = await import("playwright-core");
-  const stopPreview = await startPreview();
   const browser = await chromium.launch().catch((e: unknown) => {
-    stopPreview();
     throw new Error(`${tag} could not launch chromium — run \`npx playwright-core install chromium\`\n${String(e)}`);
   });
   mkdirSync(dir, { recursive: true });
   try {
-    for (const theme of THEMES) {
-      const context = await browser.newContext({
-        viewport: { width: VIEWPORT.width, height: VIEWPORT.height },
-        deviceScaleFactor: VIEWPORT.deviceScaleFactor,
-        colorScheme: theme,
-        reducedMotion: "reduce",
-        timezoneId: "UTC",
-        locale: "en-US",
-      });
-      // The header's theme switch (web/src/components/ThemeToggle.vue) reads
-      // this key on mount and stamps the class the token set keys on.
-      await context.addInitScript((t: string) => localStorage.setItem("vueuse-color-scheme", t), theme);
-      for (const surface of stale) {
-        const page = await context.newPage();
-        await page.clock.setFixedTime(FIXED_NOW);
-        await page.goto(`http://127.0.0.1:${PORT}${surface.path}`, { waitUntil: "load" });
-        await page.waitForSelector("#app header");
-        await page.evaluate(() => document.fonts.ready);
-        // Icons are bundled but painted a frame after mount; a fixed settle
-        // is what makes two renders of one tree agree.
-        await page.waitForTimeout(500);
-        const file = join(dir, `${surface.name}-${theme}.png`);
-        await page.screenshot({ path: file, animations: "disabled", caret: "hide" });
-        await page.close();
-        const kib = Math.round(statSync(file).size / 1024);
-        const over = statSync(file).size > SIZE_BUDGET_BYTES ? " — over the 400 KiB budget" : "";
-        console.log(`${tag} ${surface.name}-${theme}.png ${kib} KiB (${surface.what})${over}`);
+    for (const server of new Set(stale.map((s) => s.fixture.server))) {
+      const surfaces = stale.filter((s) => s.fixture.server === server);
+      const stopPreview = await startPreview(surfaces[0]);
+      try {
+        for (const batch of captureBatches(surfaces)) {
+          const context = await browser.newContext(batch.context);
+          try {
+            await context.addInitScript(
+              (t: string) => localStorage.setItem("vueuse-color-scheme", t),
+              batch.context.colorScheme,
+            );
+            for (const { surface, capture } of batch.tasks) {
+              const origin = `http://127.0.0.1:${PORT}`;
+              const page = await context.newPage();
+              await page.clock.setFixedTime(FIXED_NOW);
+              const response = await page.goto(`${origin}${surface.path}`, { waitUntil: "load" });
+              if (!response?.ok()) throw new Error(`Preview failed: ${surface.name}`);
+              await page.waitForSelector("#app header");
+              await page.evaluate(() => document.fonts.ready);
+              // Icons paint a frame after mount; retain the fixed settle.
+              await page.waitForTimeout(500);
+              const file = join(dir, capture.file);
+              const next = await page.screenshot(capture.screenshot);
+              const previous = existsSync(file) ? readFileSync(file) : undefined;
+              // Compression can change PNG bytes without changing a pixel. Decode
+              // in the browser we already own rather than adding a PNG dependency.
+              const unchanged =
+                previous &&
+                (previous.equals(next) ||
+                  (await page.evaluate(samePngPixels, [previous.toString("base64"), next.toString("base64")] as [
+                    string,
+                    string,
+                  ])));
+              if (!unchanged) writeFileSync(file, next);
+              const kib = Math.round(statSync(file).size / 1024);
+              const over = statSync(file).size > SIZE_BUDGET_BYTES ? " — over the 400 KiB budget" : "";
+              console.log(
+                `${tag} ${capture.file} ${kib} KiB — ${unchanged ? "pixels unchanged; bytes retained" : "new or changed pixels"} (${surface.what})${over}`,
+              );
+              await page.close();
+            }
+          } finally {
+            await context.close();
+          }
+        }
+      } finally {
+        await stopPreview();
       }
-      await context.close();
     }
   } finally {
     await browser.close();
-    stopPreview();
   }
   mkdirSync(join(root, MANIFEST_DIR), { recursive: true });
   for (const surface of stale) {
-    const manifest = renderManifest(currentSurfaceInputs(surface.page, sources));
+    const manifest = renderManifest(current.get(surface.name)!, surface);
     writeFileSync(join(root, manifestPath(surface.name)), `${JSON.stringify(manifest, null, 2)}\n`);
     console.log(`${tag} wrote ${manifestPath(surface.name)} — ${Object.keys(manifest.inputs).length} input(s) hashed`);
   }
