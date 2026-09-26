@@ -7,6 +7,7 @@ import {
   ownerOf,
   previousRunOf,
   readThread,
+  releasedPrOf,
   refusedRequestsOf,
   requesterOf,
   runsSince,
@@ -301,6 +302,43 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
     rounds: [],
     threadKey: THREAD,
     ...over,
+  });
+
+  it("finds an older completed publication when a newer stopped pipeline shadows its thread", async () => {
+    const stopped = run({ id: "stopped", agent: "ship", instanceId: "ship-stopped", finishedAt: 3_000 });
+    const completed = run({ id: "completed", agent: "ship", instanceId: "ship-published", finishedAt: 2_000 });
+    const unitsOf = vi.fn(async (id: string) =>
+      id === "ship-stopped"
+        ? [
+            unit({
+              instanceId: id,
+              pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+              ending: { kind: "stopped", report: "stopped", at: 3_000 },
+            }),
+          ]
+        : [
+            unit({
+              instanceId: id,
+              pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
+              publication: {
+                repo: "acme/api",
+                pr: 8,
+                headRef: "plan/orchestration/u12",
+                baseRef: "main",
+                expectedHeadSha: "a".repeat(40),
+                publicationRef: "plan/orchestration/u12",
+                owner: { instanceId: id, unit: "U12" },
+              },
+              ending: { kind: "merge_ready", report: "ready", at: 2_000 },
+            }),
+          ],
+    );
+    expect(await releasedPrOf([stopped, completed], unitsOf, THREAD, 8)).toEqual({
+      repo: "acme/api",
+      number: 8,
+      at: 2_000,
+    });
+    expect(await releasedPrOf([stopped, completed], unitsOf, THREAD, 7)).toBeUndefined();
   });
 
   it("owner is the live run when one is live — before any unit or session", async () => {

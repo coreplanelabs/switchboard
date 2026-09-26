@@ -9,7 +9,7 @@ import { assignRunLiveState, type ResidentLiveStateObservation } from "./runLive
 import { liveStateWords } from "./plane/decide.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
 import { cardShapeLineOf, queuedCaption } from "./runShape.js";
-import type { RepoContext } from "./repoContext.js";
+import { barePrNumberOf, explicitPrOf, type RepoContext } from "./repoContext.js";
 import { redactSecrets, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import type { LiveThread } from "./threadAdmission.js";
@@ -140,6 +140,7 @@ import {
   newestFinishedRunOf,
   ownerOf,
   readThread,
+  releasedPrOf,
   shipRequestOf,
   stickyAgentOf,
   threadPrOf,
@@ -1145,6 +1146,19 @@ export async function dispatch(
     const laterPr = (runPr: ThreadPullRequest | undefined, releasedPr: ThreadPullRequest | undefined) =>
       releasedPr !== undefined && (runPr === undefined || releasedPr.at > runPr.at) ? releasedPr : runPr;
     let threadPr = laterPr(thread ? threadPrOf(thread) : undefined, pageOwner?.releasedPr);
+    const barePrNumber = barePrNumberOf(msg.text);
+    const explicitPr = explicitPrOf(msg.text);
+    const currentPrNumber = explicitPr?.number ?? barePrNumber;
+    let namedReleasedPr: ThreadPullRequest | undefined;
+    if (thread && barePrNumber !== undefined && deps.coordinatorInstances !== undefined) {
+      namedReleasedPr = await releasedPrOf(
+        thread,
+        (id) => deps.coordinatorInstances!.listUnits(id),
+        msg.threadKey,
+        barePrNumber,
+      );
+      if (namedReleasedPr !== undefined) threadPr = namedReleasedPr;
+    }
     const inheritedRepo =
       operatorRepo ??
       (thread ? newestFinishedRunOf(thread)?.repo : undefined) ??
@@ -1192,7 +1206,7 @@ export async function dispatch(
     if (thread && !threadLive && deps.coordinatorInstances !== undefined) {
       const owner =
         pageOwner ?? (await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey));
-      threadPr = laterPr(threadPr, owner.releasedPr);
+      threadPr = namedReleasedPr ?? laterPr(threadPr, owner.releasedPr);
       if (owner.kind === "live" && owner.run.hosted === true) {
         // The seed thread of a live pipeline runner (issue 2010; record 0051's
         // owner rule, thread-admission item 9): a hosted runner occupies no
@@ -1228,6 +1242,18 @@ export async function dispatch(
         return ended;
       }
       if (owner.kind === "pipeline" && directives.agent === undefined) {
+        if (
+          currentPrNumber !== undefined &&
+          (owner.unit.pr?.number !== currentPrNumber ||
+            (explicitPr !== undefined && explicitPr.repo !== owner.run.repo?.toLowerCase()))
+        ) {
+          const named = explicitPr ? `${explicitPr.repo}#${explicitPr.number}` : `PR #${currentPrNumber}`;
+          await io.reply(
+            `This reply names ${named}, but the ended pipeline owns PR #${owner.unit.pr?.number ?? "unknown"}. Nothing started. Name the target with \`agent:ship\` and its full PR URL to start separate work.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
         if (owner.unit.recoveryReceipt !== undefined || owner.unit.recoveryHold !== undefined) {
           await io.reply(
             `The original-unit recovery for \`${owner.instanceId}:${owner.unit.unit}\` is terminal and its evidence is consumed. This reply was not turned into replacement work.`,
