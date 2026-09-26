@@ -2538,6 +2538,116 @@ export async function recoverOriginalUnit(
         lastPush: expectedHead,
         publication: { ...publication, expectedHeadSha: expectedHead },
       };
+    } else if (
+      kind === "findings" &&
+      row.ending.kind === "aborted" &&
+      (headMoved || row.rounds.slice(boundaryPosition + 1).some((candidate) => candidate.agent === "coding"))
+    ) {
+      // Normal aborted endings carry no typed cause or step. Prove the
+      // incomplete contract from the child, never from the report's prose.
+      const codingBoundary = row.rounds.at(-1)!;
+      const codingStart = row.rounds
+        .slice(boundaryPosition + 1)
+        .reverse()
+        .find((candidate) => candidate.agent === "coding" && candidate.outcome === "started");
+      const attempts = unitListing.runs.filter(
+        (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, findingsPrefix),
+      );
+      const completed = attempts.filter((run) => run.finished && run.status === "completed");
+      const selected = completed.length === 1 ? completed[0] : undefined;
+      const full = selected === undefined ? undefined : await deps.runs.getRun(selected.id, { include: "messages" });
+      const child = full?.ok === true ? full.value : undefined;
+      const tags = child?.events?.filter((event) => event.type === "coordinator_tag") ?? [];
+      const tag = tags.length === 1 ? tags[0] : undefined;
+      const reviewFinishedAt = review.finishedAt;
+      const missingOutputs =
+        child !== undefined &&
+        (child.events?.some((event) => event.type === "pr_description") !== true ||
+          (review.verdict?.findings ?? []).some(
+            (finding) => !child.dispositions?.some((disposition) => disposition.findingId === finding.id),
+          ));
+      if (
+        row.publication === undefined ||
+        (row.ending.cause !== undefined && row.ending.cause !== "incomplete_outputs") ||
+        (row.ending.step !== undefined && !isStepAttempt(row.ending.step, findingsStep)) ||
+        (row.ending.round !== undefined && row.ending.round !== boundary.index) ||
+        codingBoundary.agent !== "coding" ||
+        codingBoundary.index !== boundary.index ||
+        codingBoundary.outcome !== "aborted" ||
+        row.rounds.slice(boundaryPosition + 1).some((candidate) => candidate.index !== boundary.index) ||
+        review.status !== "completed" ||
+        reviewFinishedAt === undefined ||
+        !Number.isFinite(reviewFinishedAt) ||
+        child === undefined ||
+        child.finished !== true ||
+        child.status !== "completed" ||
+        child.agent !== "coding" ||
+        child.parentInstanceId !== instance.id ||
+        child.idempotencyKey !== selected!.idempotencyKey ||
+        child.userId !== instance.userId ||
+        child.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+        child.threadKey !== unitThreadKey ||
+        child.truncated === true ||
+        child.events === undefined ||
+        tag?.parentInstanceId !== instance.id ||
+        tag.unit !== row.unit ||
+        tag.base !== base ||
+        !samePublicationBinding(tag.publication, row.publication) ||
+        !missingOutputs ||
+        (child.pr !== undefined &&
+          (child.pr.number !== pr.number || (child.pr.head !== undefined && child.pr.head !== row.branch))) ||
+        child.headSha !== facts.headSha ||
+        (expectedHead !== reviewedHead && expectedHead !== facts.headSha) ||
+        child.pushed?.some((push) => push.ref !== row.branch) === true ||
+        child.pushed?.some(
+          (push) => push.ref === row.branch && push.sha === facts!.headSha && push.by === "salvage",
+        ) !== true ||
+        codingStart === undefined ||
+        !Number.isFinite(codingStart.at) ||
+        !Number.isFinite(codingBoundary.at) ||
+        codingStart.at < reviewFinishedAt ||
+        !Number.isFinite(child.startedAt) ||
+        child.startedAt < codingStart.at ||
+        child.finishedAt === undefined ||
+        !Number.isFinite(child.finishedAt) ||
+        child.finishedAt < child.startedAt ||
+        child.finishedAt > codingBoundary.at ||
+        codingBoundary.at > row.ending.at ||
+        attempts.some(
+          (run) =>
+            run.id !== child.id &&
+            !(
+              run.finished &&
+              (run.status === "failed" || run.status === "interrupted") &&
+              run.agent === "coding" &&
+              run.userId === instance.userId &&
+              run.repo?.toLowerCase() === instance.repo.toLowerCase() &&
+              run.threadKey === unitThreadKey &&
+              run.startedAt >= reviewFinishedAt &&
+              run.finishedAt !== undefined &&
+              run.finishedAt >= run.startedAt &&
+              run.finishedAt <= child.startedAt &&
+              (run.pushed?.length ?? 0) === 0
+            ),
+        ) ||
+        // A foreign key does not hide a competing writer in the unit's thread.
+        unitListing.runs.some(
+          (run) =>
+            run.id !== child.id &&
+            ((!run.finished && (run.agent === "coding" || run.agent === "review")) ||
+              ((run.finishedAt === undefined || run.finishedAt >= reviewFinishedAt) &&
+                run.pushed?.some((push) => push.ref === row.branch))),
+        )
+      )
+        return json(409, { ok: false, error: "recovery_head_moved", at });
+      expectedHead = facts.headSha;
+      // This push grants a findings completion, not re-review. Leave the
+      // findingsRunId unset so no missing disposition or description is consumed.
+      claimRow = {
+        ...claimRow,
+        lastPush: expectedHead,
+        publication: { ...publication, expectedHeadSha: expectedHead },
+      };
     } else {
       if (headMoved) return json(409, { ok: false, error: "recovery_head_moved", at });
       expectedHead = reviewedHead;
