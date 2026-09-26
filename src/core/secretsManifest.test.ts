@@ -54,7 +54,7 @@ describe("deploy/secrets.manifest.json", () => {
     }
   });
 
-  it("every bot secret reaches the container: the shim forwards each manifest `bot` entry (a secret on the Worker the container never sees is a silent misconfiguration — MCP_CREDENTIAL_KEY once was)", () => {
+  it("every bot secret reaches the container except the explicitly edge-only Depot organization token", () => {
     const src = readFileSync(resolve(ROOT, "deploy/cloudflare/worker.ts"), "utf8");
     const fn = /function containerEnv\(env: Env\)[\s\S]*?\n\}/.exec(src);
     if (!fn) throw new Error("deploy/cloudflare/worker.ts: no containerEnv()");
@@ -63,11 +63,21 @@ describe("deploy/secrets.manifest.json", () => {
     const forwarded = new Set([...list[1].matchAll(/"([A-Z][A-Z0-9_]*)"/g)].map((m) => m[1]));
     for (const m of fn[0].matchAll(/^\s*([A-Z][A-Z0-9_]*): env\.\1,/gm)) forwarded.add(m[1]);
     for (const s of manifest.secrets) {
-      if (s.workers.includes("bot"))
+      if (s.workers.includes("bot") && s.name !== "DEPOT_API_TOKEN")
         expect(forwarded, `${s.name} is put on the bot Worker but never forwarded into the container`).toContain(
           s.name,
         );
     }
+  });
+
+  it("Depot credentials stay at the edge and only the bridge bearer reaches the bot", () => {
+    for (const name of ["DEPOT_API_TOKEN", "DEPOT_CI_BRIDGE_TOKEN"])
+      expect(manifest.secrets.find((s) => s.name === name)).toMatchObject({ workers: ["bot"], optional: true });
+    const source = readFileSync(resolve(ROOT, "deploy/cloudflare/worker.ts"), "utf8");
+    const forwarding = /const FORWARDED_OPTIONAL = \[([\s\S]*?)\]/.exec(source)![1];
+    const containerEnv = /function containerEnv\(env: Env\)[\s\S]*?\n\}/.exec(source)![0];
+    expect(forwarding).toContain('"DEPOT_CI_BRIDGE_TOKEN"');
+    expect(forwarding + containerEnv).not.toContain("DEPOT_API_TOKEN");
   });
 
   it("no Worker directory still carries a secrets.txt (the manifest replaced them)", () => {
