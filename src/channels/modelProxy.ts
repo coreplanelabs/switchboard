@@ -1091,6 +1091,37 @@ export function bodyKindOf(contentType: string | undefined): BodyKind {
   return "text";
 }
 
+type ObservedBoolean = boolean | "unknown";
+
+const observedBoolean = (value: unknown): ObservedBoolean => (typeof value === "boolean" ? value : "unknown");
+
+/** Codes the Node/undici transport may place on its own error object. Free text,
+ *  getters and arbitrary code-shaped strings never cross into diagnostics. */
+const SAFE_TRANSPORT_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EPIPE",
+  "ETIMEDOUT",
+  "ERR_STREAM_DESTROYED",
+  "ERR_STREAM_PREMATURE_CLOSE",
+  "UND_ERR_ABORTED",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+function safeTransportErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string") return undefined;
+    return SAFE_TRANSPORT_ERROR_CODES.has(descriptor.value) ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The node:http adapter: the door from the headers (a refused call never
  *  buffers a body), then the call; a streamed answer is written chunk by chunk
  *  as it arrives, and a caller that goes away aborts the upstream call. Every
@@ -1099,6 +1130,7 @@ export function bodyKindOf(contentType: string | undefined): BodyKind {
  *  error page — is ever rendered by a browser as a document. */
 export function createModelProxyHandler(deps: ModelProxyDeps): (req: HttpRequest, res: ServerResponse) => void {
   const log = deps.log ?? ((line: string) => console.log(line));
+  let requestSequence = 0;
   // The level dedupe (record 0064): a provider's side is posted to the
   // plane on change, so a healthy provider is not re-reported every turn — the
   // first success after a `down` is what flips `provider_up` and re-issues the
@@ -1144,8 +1176,41 @@ export function createModelProxyHandler(deps: ModelProxyDeps): (req: HttpRequest
           return;
         }
         const controller = new AbortController();
+        const requestId = `model-proxy-${++requestSequence}`;
+        const requestStartedAt = deps.clock();
+        let closeObserved = false;
         res.on("close", () => {
-          if (!res.writableFinished) controller.abort();
+          if (closeObserved) return;
+          closeObserved = true;
+          if (res.writableFinished) return;
+          // Abort first, as before diagnostics existed; observing the close must
+          // not delay or replace the cancellation it is recording.
+          controller.abort();
+          const closeAt = deps.clock();
+          const socket = res.socket ?? req.socket;
+          const transportErrorCode = safeTransportErrorCode(
+            (res as ServerResponse & { errored?: unknown }).errored ??
+              (req as HttpRequest & { errored?: unknown }).errored,
+          );
+          log(
+            `[model-proxy] unexpected_response_close ${JSON.stringify({
+              event: "model_proxy_unexpected_response_close",
+              runId: door.grant.runId,
+              requestId,
+              closeAt,
+              elapsedMs: Math.max(0, closeAt - requestStartedAt),
+              writableFinished: observedBoolean(res.writableFinished),
+              headersSent: observedBoolean(res.headersSent),
+              requestAborted: observedBoolean(req.aborted),
+              requestDestroyed: observedBoolean(req.destroyed),
+              responseDestroyed: observedBoolean(res.destroyed),
+              socketDestroyed: observedBoolean(socket?.destroyed),
+              socketReadable: observedBoolean(socket?.readable),
+              socketWritable: observedBoolean(socket?.writable),
+              abortSource: "response_close",
+              ...(transportErrorCode !== undefined ? { transportErrorCode } : {}),
+            })}`,
+          );
         });
         const result = await handleAdmitted(
           door,

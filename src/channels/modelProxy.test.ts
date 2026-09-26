@@ -1662,12 +1662,10 @@ describe("createModelProxyHandler — the node adapter", () => {
         return res;
       },
       destroy: vi.fn(),
-      get writableFinished() {
-        return ended;
-      },
-      get headersSent() {
-        return statusCode !== 0;
-      },
+    });
+    Object.defineProperties(res, {
+      writableFinished: { get: () => ended },
+      headersSent: { get: () => statusCode !== 0 },
     });
     return {
       req: req as unknown as HttpRequest,
@@ -1681,6 +1679,13 @@ describe("createModelProxyHandler — the node adapter", () => {
       ended: () => ended,
     };
   }
+
+  const unexpectedCloseObservations = (logs: string[]): Record<string, unknown>[] => {
+    const prefix = "[model-proxy] unexpected_response_close ";
+    return logs
+      .filter((line) => line.startsWith(prefix))
+      .map((line) => JSON.parse(line.slice(prefix.length)) as Record<string, unknown>);
+  };
 
   it("answers a refused request from the headers alone — the body never read, the request destroyed", async () => {
     const h = harness();
@@ -1738,6 +1743,21 @@ describe("createModelProxyHandler — the node adapter", () => {
     expect(bodyKindOf(undefined)).toBe("text");
   });
 
+  describe("unexpected response-close diagnostics", () => {
+    it("a clean finish emits no unexpected-close observation", async () => {
+      const h = harness();
+      const token = h.bearers.mint(h.grant("run-clean"));
+      const handler = createModelProxyHandler(h.deps);
+      const t = fakeReqRes("POST", ANTHROPIC_MESSAGES_PATH, bearer(token), JSON.stringify(anthropicRequest()));
+
+      handler(t.req, t.res);
+      await vi.waitFor(() => expect(t.ended()).toBe(true));
+      t.resRaw.emit("close");
+
+      expect(unexpectedCloseObservations(h.logs)).toEqual([]);
+    });
+  });
+
   it("a client that goes away mid-stream aborts the upstream call", async () => {
     let upstreamSignal: AbortSignal | undefined;
     const h = harness({
@@ -1749,14 +1769,185 @@ describe("createModelProxyHandler — the node adapter", () => {
         });
       },
     });
-    const token = h.bearers.mint(h.grant("run-1"));
+    const token = h.bearers.mint(h.grant("run-close"));
     const handler = createModelProxyHandler(h.deps);
     const t = fakeReqRes("POST", ANTHROPIC_MESSAGES_PATH, bearer(token), JSON.stringify(anthropicRequest()));
+    Object.assign(t.reqRaw, {
+      aborted: false,
+      destroyed: false,
+      socket: { destroyed: false, readable: true, writable: true },
+    });
+    Object.assign(t.resRaw, { destroyed: false });
+
     handler(t.req, t.res);
-    await vi.waitFor(() => expect(upstreamSignal).toBeDefined());
-    expect(upstreamSignal!.aborted).toBe(false);
+    await vi.waitFor(() => expect(t.resRaw.flushHeaders).toHaveBeenCalled());
+    let aborts = 0;
+    upstreamSignal!.addEventListener("abort", () => aborts++);
+    h.clock.now += 125;
     t.resRaw.emit("close");
+    t.resRaw.emit("close");
+
     expect(upstreamSignal!.aborted).toBe(true);
+    expect(aborts).toBe(1);
+    expect(unexpectedCloseObservations(h.logs)).toEqual([
+      {
+        event: "model_proxy_unexpected_response_close",
+        runId: "run-close",
+        requestId: "model-proxy-1",
+        closeAt: START + 125,
+        elapsedMs: 125,
+        writableFinished: false,
+        headersSent: true,
+        requestAborted: false,
+        requestDestroyed: false,
+        responseDestroyed: false,
+        socketDestroyed: false,
+        socketReadable: true,
+        socketWritable: true,
+        abortSource: "response_close",
+      },
+    ]);
+  });
+
+  describe("unexpected response-close diagnostics", () => {
+    it("does not infer a timeout or explicit stop from timing, req.aborted, or transport text", async () => {
+      let upstreamSignal: AbortSignal | undefined;
+      const h = harness({
+        answer: (call) => {
+          upstreamSignal = call.init.signal ?? undefined;
+          return new Response(new ReadableStream<Uint8Array>({ pull: () => new Promise(() => {}) }), {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        },
+      });
+      const token = h.bearers.mint(h.grant("run-unknown-source"));
+      const handler = createModelProxyHandler(h.deps);
+      const t = fakeReqRes("POST", ANTHROPIC_MESSAGES_PATH, bearer(token), JSON.stringify(anthropicRequest()));
+      Object.assign(t.reqRaw, { aborted: true });
+      Object.assign(t.resRaw, {
+        errored: Object.assign(new Error("explicit stop after 45 minute timeout"), { code: "ETIMEDOUT" }),
+      });
+
+      handler(t.req, t.res);
+      await vi.waitFor(() => expect(upstreamSignal).toBeDefined());
+      h.clock.now += 45 * 60_000;
+      t.resRaw.emit("close");
+
+      const [observation] = unexpectedCloseObservations(h.logs);
+      expect(observation).toMatchObject({
+        runId: "run-unknown-source",
+        requestAborted: true,
+        abortSource: "response_close",
+        transportErrorCode: "ETIMEDOUT",
+      });
+      expect(JSON.stringify(observation)).not.toMatch(/explicit.stop|abortSource":"(?:timeout|explicit_stop)/i);
+    });
+
+    it("emits once for duplicate close events and records missing request, response and socket state as unknown", async () => {
+      let upstreamSignal: AbortSignal | undefined;
+      const h = harness({
+        answer: (call) => {
+          upstreamSignal = call.init.signal ?? undefined;
+          return new Response(new ReadableStream<Uint8Array>({ pull: () => new Promise(() => {}) }), {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        },
+      });
+      const token = h.bearers.mint(h.grant("run-missing-context"));
+      const handler = createModelProxyHandler(h.deps);
+      const t = fakeReqRes("POST", ANTHROPIC_MESSAGES_PATH, bearer(token), JSON.stringify(anthropicRequest()));
+
+      handler(t.req, t.res);
+      await vi.waitFor(() => expect(upstreamSignal).toBeDefined());
+      t.resRaw.emit("close");
+      t.resRaw.emit("close");
+
+      expect(unexpectedCloseObservations(h.logs)).toEqual([
+        expect.objectContaining({
+          runId: "run-missing-context",
+          requestAborted: "unknown",
+          requestDestroyed: "unknown",
+          responseDestroyed: "unknown",
+          socketDestroyed: "unknown",
+          socketReadable: "unknown",
+          socketWritable: "unknown",
+        }),
+      ]);
+    });
+
+    it("keeps credentials, headers, bodies, prompts, raw errors and unbounded codes out of the observation", async () => {
+      const secret = "sk-secret-never-observed";
+      const h = harness({
+        answer: () =>
+          new Response(new ReadableStream<Uint8Array>({ pull: () => new Promise(() => {}) }), {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          }),
+      });
+      const handler = createModelProxyHandler(h.deps);
+      const firstToken = h.bearers.mint(h.grant("run-safe-code"));
+      const first = fakeReqRes(
+        "POST",
+        ANTHROPIC_MESSAGES_PATH,
+        {
+          ...bearer(firstToken),
+          cookie: `session=${secret}`,
+          "cf-ray": `ray-${secret}`,
+          "x-request-id": `request-${secret}`,
+        },
+        JSON.stringify({ prompt: secret, authorization: `Bearer ${secret}` }),
+      );
+      Object.assign(first.resRaw, {
+        errored: Object.assign(new Error(`raw payload, prompt and cookie: ${secret}`), { code: "EPIPE" }),
+      });
+      handler(first.req, first.res);
+      await vi.waitFor(() => expect(first.resRaw.flushHeaders).toHaveBeenCalled());
+      first.resRaw.emit("close");
+
+      const secondToken = h.bearers.mint(h.grant("run-unbounded-code"));
+      const second = fakeReqRes(
+        "POST",
+        ANTHROPIC_MESSAGES_PATH,
+        bearer(secondToken),
+        JSON.stringify(anthropicRequest()),
+      );
+      Object.assign(second.resRaw, {
+        errored: Object.assign(new Error(secret), { code: `ECONNRESET_${secret}_${"x".repeat(100)}` }),
+      });
+      handler(second.req, second.res);
+      await vi.waitFor(() => expect(second.resRaw.flushHeaders).toHaveBeenCalled());
+      second.resRaw.emit("close");
+
+      const observations = unexpectedCloseObservations(h.logs);
+      expect(observations).toHaveLength(2);
+      expect(observations[0].transportErrorCode).toBe("EPIPE");
+      expect(observations[1].transportErrorCode).toBeUndefined();
+      expect(Object.keys(observations[0]).sort()).toEqual(
+        [
+          "abortSource",
+          "closeAt",
+          "elapsedMs",
+          "event",
+          "headersSent",
+          "requestAborted",
+          "requestDestroyed",
+          "requestId",
+          "responseDestroyed",
+          "runId",
+          "socketDestroyed",
+          "socketReadable",
+          "socketWritable",
+          "transportErrorCode",
+          "writableFinished",
+        ].sort(),
+      );
+      expect(JSON.stringify(observations)).not.toContain(secret);
+      expect(JSON.stringify(observations)).not.toMatch(
+        /authorization|bearer|cookie|body|prompt|cf-ray|x-request-id|message/i,
+      );
+    });
   });
 });
 
