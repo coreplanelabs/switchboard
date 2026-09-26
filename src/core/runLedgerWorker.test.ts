@@ -321,6 +321,14 @@ describe("WorkerRunLedger", () => {
     await expect(w.ledger.searchSession("has space", "x", 1)).rejects.toBeInstanceOf(PermanentStoreError);
   });
 
+  it("listLive refuses malformed or paginated responses instead of proving an empty ledger", async () => {
+    for (const data of [{}, { runs: null }, { runs: [{}] }, { runs: [], nextBefore: { id: "older" } }])
+      await expect(stubWorker(() => ({ status: 200, data })).ledger.listLive()).rejects.toBeInstanceOf(
+        PermanentStoreError,
+      );
+    expect(await stubWorker(() => ({ status: 200, data: { runs: [] } })).ledger.listLive()).toEqual([]);
+  });
+
   it("errors: 404 is RouteMissingError, 5xx/429 TransientStoreError, other 4xx PermanentStoreError, a malformed run id never leaves the process", async () => {
     await expect(
       stubWorker(() => ({ status: 404, data: { error: "not found" } })).ledger.listLive(),

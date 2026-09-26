@@ -6619,6 +6619,198 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   };
 
   describe("historical admission", () => {
+    const fillUnrelatedHistory = async (h: ReturnType<typeof harness>) => {
+      for (let i = 0; i < 205; i++)
+        await h.store.put(
+          record(`unrelated-${i}`, {
+            threadKey: `slack:COTHER:${i}`,
+            finishedAt: NOW - i,
+          }),
+        );
+    };
+
+    it("reaches original recovery gates beyond 200 unrelated persisted runs", async () => {
+      const h = await legacyHarness();
+      await fillUnrelatedHistory(h);
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+        publication,
+        recovery: { kind: "findings", deadlineAt: legacyRow().startedAt! + minutesToMs(120) },
+      });
+      expect(h.recoveries).toHaveLength(1);
+    });
+
+    it.each([
+      ["foreign thread", "child_identity_mismatch"],
+      ["contradictory parent", "child_identity_mismatch"],
+      ["contradictory key", "child_identity_mismatch"],
+      ["competing success", "child_history_overlapping"],
+      ["competing push", "child_history_overlapping"],
+      ["unpriced child", "child_price_unknown"],
+    ])("finds a hidden %s beyond unrelated global history", async (scenario, reason) => {
+      const h = await legacyHarness();
+      await fillUnrelatedHistory(h);
+      await h.store.put(
+        originalCoding({
+          id: scenario === "unpriced child" ? "run-original-coding" : "hidden-child",
+          ...(scenario === "foreign thread" ? { threadKey: "slack:COTHER:hidden" } : {}),
+          ...(scenario === "contradictory parent" ? { parentInstanceId: "other-instance" } : {}),
+          ...(scenario === "contradictory key" ? { idempotencyKey: "other-instance:U12/0/coding" } : {}),
+          ...(scenario === "competing push"
+            ? { status: "failed", pushed: [{ ref: INSTANCE.branch, sha: "b".repeat(40), by: "push" }] }
+            : {}),
+          ...(scenario === "unpriced child" ? { usage: undefined } : {}),
+        }),
+      );
+      const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
+      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown", reason } });
+      expect(reserve).not.toHaveBeenCalled();
+      expect(cas).not.toHaveBeenCalled();
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it.each(["original", "contradictory"])(
+      "refuses a same-unit key without a step even with the %s parent in a foreign thread",
+      async (parent) => {
+        const h = await legacyHarness();
+        await fillUnrelatedHistory(h);
+        await h.store.put(
+          originalCoding({
+            id: "hidden-bare-key",
+            parentInstanceId: parent === "original" ? INSTANCE.id : "other-instance",
+            idempotencyKey: `${INSTANCE.id}:U12`,
+            threadKey: "slack:COTHER:hidden",
+          }),
+        );
+        const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
+        const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+        expect(await callRecovery(h)).toMatchObject({
+          status: 409,
+          body: { error: "recovery_budget_unknown", reason: "child_identity_mismatch" },
+        });
+        expect(reserve).not.toHaveBeenCalled();
+        expect(cas).not.toHaveBeenCalled();
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+        expect(h.recoveries).toEqual([]);
+      },
+    );
+
+    it.each([
+      "cost cap",
+      "spend carry",
+      "expired lease",
+      "moved head",
+      "foreign ref",
+      "lost ownership",
+      "missing review",
+    ])("complete saturated history still refuses at the existing %s gate", async (scenario) => {
+      const h = await legacyHarness();
+      await fillUnrelatedHistory(h);
+      let error = "recovery_budget_unknown";
+      if (scenario === "cost cap" || scenario === "spend carry") {
+        await h.instances.replace({
+          ...recoveryInstance(),
+          grant: { renewals: 0, costCapUsd: scenario === "cost cap" ? 0.5 : 5 },
+        });
+        await h.instances.putUnits([legacyRow()]);
+        error = scenario === "cost cap" ? "recovery_cost_cap_exhausted" : "recovery_budget_unknown";
+      }
+      if (scenario === "expired lease") {
+        h.deps.clock = () => NOW + minutesToMs(121);
+        error = "recovery_wall_clock_exhausted";
+      }
+      if (scenario === "moved head") {
+        h.deps.fetchPrFacts = async () => exactRecoveryFacts("b".repeat(40));
+        error = "recovery_head_moved";
+      }
+      if (scenario === "foreign ref") {
+        h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(HEAD), headRef: "other" });
+        error = "recovery_facts_mismatch";
+      }
+      if (scenario === "lost ownership") {
+        h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+        error = "publication_ownership_changed";
+      }
+      if (scenario === "missing review") {
+        await h.store.put(reviewRecord({ reviewPost: undefined }));
+        error = "recovery_review_evidence_ambiguous";
+      }
+      const before = await h.instances.listUnits(INSTANCE.id);
+      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error } });
+      expect(cas).not.toHaveBeenCalled();
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it("reads uncached foreign live evidence beyond a full unrelated live and persisted page", async () => {
+      const h = await legacyHarness();
+      await fillUnrelatedHistory(h);
+      for (let i = 0; i < 205; i++)
+        h.registry.create("unrelated", {
+          channelId: "slack:COTHER",
+          userId: INSTANCE.userId,
+          threadKey: `slack:COTHER:${i}`,
+        });
+      // Warm the ordinary UI cache before another generation starts a competitor.
+      await h.deps.runs.listRuns({ status: "all", visibleTo: { kind: "all" } });
+      await h.ledger.claim({
+        runId: "hidden-live",
+        threadKey: "slack:COTHER:hidden",
+        gen: "other-gen",
+        leaseMs: minutesToMs(30),
+        startedAt: NOW - minutesToMs(5),
+        meta: {
+          agent: "coding",
+          channelId: "slack:COTHER",
+          userId: INSTANCE.userId,
+          threadKey: "slack:COTHER:hidden",
+          repo: INSTANCE.repo,
+          parentInstanceId: "contradiction",
+          idempotencyKey: `${INSTANCE.id}:U12/1/findings`,
+        },
+        card: null,
+        system: "sys",
+        tools: [],
+      });
+      const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
+      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { reason: "child_active" } });
+      expect(reserve).not.toHaveBeenCalled();
+      expect(cas).not.toHaveBeenCalled();
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it.each(["store unavailable", "ambiguous duplicate", "full relevant set"])(
+      "refuses %s at the evidence boundary before reservation or row CAS",
+      async (scenario) => {
+        const h = await legacyHarness();
+        await fillUnrelatedHistory(h);
+        const list = h.store.list.bind(h.store);
+        vi.spyOn(h.store, "list").mockImplementation(async (opts) => {
+          if (scenario === "store unavailable") throw new Error("HTTP 503");
+          const rows = await list(opts);
+          return scenario === "full relevant set"
+            ? Array.from({ length: 200 }, () => rows[0]!)
+            : [...rows, { ...rows[0]!, userId: "slack:UOTHER" }];
+        });
+        const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
+        const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+        expect(await callRecovery(h)).toMatchObject({
+          status: 409,
+          body:
+            scenario === "ambiguous duplicate"
+              ? { error: "recovery_budget_unknown", reason: "child_history_ambiguous" }
+              : { error: "recovery_evidence_incomplete" },
+        });
+        expect(reserve).not.toHaveBeenCalled();
+        expect(cas).not.toHaveBeenCalled();
+        expect(h.recoveries).toEqual([]);
+      },
+    );
+
     it.each([
       ["child_price_unknown", { usage: undefined }],
       [

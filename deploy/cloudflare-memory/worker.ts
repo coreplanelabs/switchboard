@@ -23,6 +23,7 @@ import {
   applyRetention,
   clampRetentionPolicy,
   isRunRecord,
+  isRecoveryEvidenceScope,
   isRunSession,
   isRunVisibilityFilter,
   normalizeStored,
@@ -4163,6 +4164,12 @@ export class RunHistoryDO extends DurableObject<Env> {
    * walked until the page fills; the kept set is the newest prefix of the
    * in-cutoff order, so the walk stops at the first row outside it.
    *
+   * Recovery evidence additionally streams every retained summary through the
+   * record parser before trusting identity filters: valid JSON can still be
+   * unreadable evidence whose missing identity would hide a competing child.
+   * This does not load the retained summaries into memory together or change
+   * the relevant-row cap; ordinary list queries keep the fast path above.
+   *
    * `visibleTo` — the caller's authorization predicate (authorization.md item
    * 6) — is compiled into the same WHERE clause (`visibilitySql`): its leaves
    * become `channel_id IN (…)`, `channel_visibility IN (…)`, `user_id = ?`,
@@ -4170,7 +4177,9 @@ export class RunHistoryDO extends DurableObject<Env> {
    * indexed filter on the page query, never a post-filter. `none` answers an
    * empty page without a query.
    */
-  async list(q: RunListOptions): Promise<{ items: RunListItem[]; nextBefore?: { finishedAt: number; id: string } }> {
+  async list(
+    q: RunListOptions,
+  ): Promise<{ items: RunListItem[]; nextBefore?: { finishedAt: number; id: string }; evidenceComplete?: boolean }> {
     const now = systemClock();
     const limit = clampListLimit(q.limit);
     if (q.visibleTo?.kind === "none") return { items: [] };
@@ -4204,6 +4213,29 @@ export class RunHistoryDO extends DurableObject<Env> {
       where.push(`parent_run_id = ?`);
       params.push(q.parentRunId);
     }
+    if (q.recoveryEvidence !== undefined) {
+      // Identity comparisons cannot prove an unreadable record is unrelated.
+      // Use the same parser as the result loop, not a weaker SQL shape check.
+      for (const row of this.sql.exec<Pick<RunRow, "run_id" | "summary_json">>(
+        `SELECT run_id, summary_json FROM runs WHERE finished_at >= ? ORDER BY finished_at DESC, run_id DESC`,
+        cutoff,
+      )) {
+        if (kept !== null && !kept.has(row.run_id)) break; // only the retained newest-first prefix
+        if (!parseSummary(row)) return { items: [], evidenceComplete: false };
+      }
+      const scope = q.recoveryEvidence;
+      const unitKey = `${scope.instanceId}:${scope.unit}`;
+      const prefix = `${unitKey}/`;
+      // Literal prefix, not LIKE: instance ids can contain SQL wildcard chars.
+      // Bare unit keys remain candidates, never proof of absence.
+      where.push(`(CASE WHEN json_valid(summary_json) THEN (
+        json_extract(summary_json, '$.parentInstanceId') = ? OR
+        json_extract(summary_json, '$.idempotencyKey') = ? OR
+        substr(json_extract(summary_json, '$.idempotencyKey'), 1, ?) = ? OR
+        thread_key IN (${scope.threadKeys.map(() => "?").join(",")})
+      ) ELSE 1 END)`);
+      params.push(scope.instanceId, unitKey, prefix.length, prefix, ...scope.threadKeys);
+    }
     if (q.pr !== undefined) {
       // `namesPullRequest` in SQL: the row's repository and the number it names.
       where.push(`repo = ?`, `pr_number = ?`);
@@ -4216,13 +4248,18 @@ export class RunHistoryDO extends DurableObject<Env> {
     // the walk stops early at the first evicted row) — never a full table load.
     const rows = this.sql.exec<RunRow>(`${select} LIMIT ?`, ...params, limit).toArray();
     const items: RunListItem[] = [];
+    let malformed = false;
     for (const row of rows) {
       if (items.length >= limit) break;
       if (kept !== null && !kept.has(row.run_id)) break; // kept is a newest-first prefix: nothing older is kept either
       const summary = parseSummary(row);
       if (summary) items.push({ ...summary, bytes: row.bytes });
+      else malformed = true;
     }
-    const out: { items: RunListItem[]; nextBefore?: { finishedAt: number; id: string } } = { items };
+    const out: { items: RunListItem[]; nextBefore?: { finishedAt: number; id: string }; evidenceComplete?: boolean } = {
+      items,
+    };
+    if (q.recoveryEvidence !== undefined) out.evidenceComplete = !malformed && rows.length < limit;
     if (items.length === limit) {
       const last = items[items.length - 1];
       out.nextBefore = { finishedAt: last.finishedAt, id: last.id };
@@ -4322,7 +4359,7 @@ function identityOfSummary(raw: string): { userName?: string; parentRunId?: stri
   }
 }
 
-function parseSummary(row: RunRow): Omit<RunRecord, "events"> | null {
+function parseSummary(row: Pick<RunRow, "summary_json">): Omit<RunRecord, "events"> | null {
   try {
     const parsed: unknown = JSON.parse(row.summary_json);
     return isRunRecord({ ...(parsed as object), events: [] })
@@ -4491,6 +4528,14 @@ function parseRunList(body: unknown): Validated<{ storeKey: string; query: RunLi
     )
       return invalid("pr must be { repo: owner/name, number: a positive integer }");
     query.pr = { repo: pr.repo, number: pr.number };
+  }
+  if (b.recoveryEvidence !== undefined) {
+    if (!isRecoveryEvidenceScope(b.recoveryEvidence))
+      return invalid("recoveryEvidence must name an instance, unit and original threads");
+    // No paged or narrowed response can attest complete recovery evidence.
+    if (Object.keys(query).some((field) => field !== "limit") || b.visibleTo !== undefined)
+      return invalid("recoveryEvidence cannot be combined with list filters or cursors");
+    query.recoveryEvidence = b.recoveryEvidence;
   }
   if (b.visibleTo !== undefined) {
     // A malformed filter is a 400, never "all": the bot degrades to live rows

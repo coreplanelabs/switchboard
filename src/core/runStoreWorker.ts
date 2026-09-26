@@ -3,6 +3,8 @@ import { tracedFetch } from "./trace/tracedFetch.js";
 import type { Span, TraceOptions } from "./trace/types.js";
 import {
   isRunListItem,
+  clampListLimit,
+  matchesRecoveryEvidence,
   isRunRecord,
   normalizeStored,
   RUN_ID_PATTERN,
@@ -176,6 +178,15 @@ export class WorkerRunStore implements RunStore {
   async list(opts: RunListOptions): Promise<RunListItem[]> {
     const data = await this.post("/runs/list", { storeKey: this.opts.storeKey, ...compact(opts) });
     if (!Array.isArray(data.items)) throw new PermanentStoreError("run store /runs/list returned no items array");
+    if (
+      opts.recoveryEvidence !== undefined &&
+      (data.evidenceComplete !== true ||
+        data.nextBefore !== undefined ||
+        data.items.length >= clampListLimit(opts.limit) ||
+        data.items.some((item) => !isRunListItem(item) || !matchesRecoveryEvidence(item, opts.recoveryEvidence!)) ||
+        new Set(data.items.map((item) => (item as RunListItem).id)).size !== data.items.length)
+    )
+      throw new PermanentStoreError("run store /runs/list recovery evidence incomplete");
     return data.items.filter(isRunListItem).map(normalizeStored);
   }
 

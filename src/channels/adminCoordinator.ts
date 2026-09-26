@@ -2312,9 +2312,17 @@ function historicalRecoverySpend(
   row: CoordinatorUnit,
   runs: RunView[],
 ): { usd: number } | { reason: string } {
-  const unitPrefix = `${instance.id}:${row.unit}/`;
-  const children = runs.filter((run) => run.idempotencyKey?.startsWith(unitPrefix) === true);
-  if (runs.some((run) => run.parentInstanceId === instance.id && run.idempotencyKey === undefined))
+  const unitKey = `${instance.id}:${row.unit}`;
+  const unitPrefix = `${unitKey}/`;
+  // A bare unit key claims this unit but has no auditable step identity.
+  const children = runs.filter(
+    (run) => run.idempotencyKey === unitKey || run.idempotencyKey?.startsWith(unitPrefix) === true,
+  );
+  if (
+    runs.some(
+      (run) => run.parentInstanceId === instance.id && run.idempotencyKey?.startsWith(`${instance.id}:`) !== true,
+    )
+  )
     return { reason: "child_identity_mismatch" };
   let usd = 0;
   for (const run of children) {
@@ -2641,13 +2649,13 @@ export async function recoverOriginalUnit(
     remainingMs = minutesToMs(caps.maxMinutes) - (at - leaseStartedAt);
     const reviewThreadKey = row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey;
     const unitThreadKey = row.threadKey ?? instance.threadKey;
-    // Thread-scoped reads cannot reveal a tagged original child in a foreign
-    // thread. The list seam has no instance filter, so require one complete
-    // bounded unfiltered snapshot before selecting either expected thread.
+    // Query both identity claims across threads before selecting review/coding
+    // evidence. Unrelated global history must not consume the evidence bound.
     const listing = await deps.runs.listRuns({
       status: "all",
       visibleTo: EVERY_RUN,
       limit: RUN_LIST_MAX_LIMIT,
+      recoveryEvidence: { instanceId: instance.id, unit: row.unit, threadKeys: [unitThreadKey, reviewThreadKey] },
     });
     const segmentPrefix = stepPrefixOf(
       row.unit,
