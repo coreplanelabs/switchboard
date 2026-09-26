@@ -168,10 +168,11 @@ export function instanceOf(runs: readonly RunView[]): string | undefined {
   return undefined;
 }
 
-/** The thread's owner for its life (record 0051's owner rule), in this order: the live
- *  run while one is in flight; the unfinished unit of the page's instance
+/** The thread's owner for its life (record 0051's owner rule), in this order: a live
+ *  non-hosted run while one is in flight; the unfinished unit of the page's instance
  *  whose row names this thread (however the page names the instance — the
- *  ship run's own `ship_handoff`, or a child's `parentInstanceId`); the
+ *  ship run's own `ship_handoff`, or a child's `parentInstanceId`); a hosted
+ *  ship parent guarding its seed thread when no unit claims it; the
  *  ended generated pipeline whose same-thread unit still needs continuation;
  *  the newest continuable session a person addressed (`stickyAgentOf` — a
  *  coordinator's child is never the owner); none. `unitsOf` is the caller's one extra read,
@@ -195,13 +196,17 @@ export async function ownerOf(
   unitsOf: (instanceId: string) => Promise<CoordinatorUnit[]>,
   threadKey: string,
 ): Promise<ThreadOwner> {
-  const live = runs.find((r) => !r.finished);
+  const live = runs.find((r) => !r.finished && r.hosted !== true);
   if (live !== undefined) return { kind: "live", run: live };
+  const hosted = runs.find((r) => !r.finished && r.hosted === true);
   const instanceId = instanceOf(runs);
   if (instanceId !== undefined) {
     const units = await unitsOf(instanceId).catch(() => [] as CoordinatorUnit[]);
     const unit = units.find((u) => u.threadKey === threadKey && u.ending === undefined);
     if (unit !== undefined) return { kind: "unit", instanceId, unit };
+    // The hosted parent takes no thread slot. It still guards the seed thread
+    // when none of its units claim this thread, so no rival starts beside it.
+    if (hosted !== undefined) return { kind: "live", run: hosted };
     const ended = units.filter(
       (u) =>
         u.threadKey === threadKey &&
@@ -217,6 +222,7 @@ export async function ownerOf(
     if (ended.length > 1 && ship !== undefined)
       return { kind: "pipeline_ambiguous", instanceId, run: ship, units: ended };
   }
+  if (hosted !== undefined) return { kind: "live", run: hosted };
   const agent = stickyAgentOf(runs);
   if (agent !== undefined) return { kind: "session", agent };
   return { kind: "none" };

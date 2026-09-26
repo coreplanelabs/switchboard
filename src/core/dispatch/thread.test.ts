@@ -313,6 +313,46 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
     expect(unitsOf).not.toHaveBeenCalled();
   });
 
+  it("a hosted Ship parent yields to its live child, then the idle unit in their shared thread", async () => {
+    const hosted = run({
+      id: "ship-parent",
+      agent: "ship",
+      instanceId: "ship_acme_api_1",
+      hosted: true,
+      finished: false,
+    });
+    const child = run({
+      id: "coding-child",
+      agent: "coding",
+      parentInstanceId: "ship_acme_api_1",
+      finished: false,
+    });
+    const unitsOf = vi.fn(async () => [unit()]);
+
+    expect(await ownerOf([hosted, child], unitsOf, THREAD)).toEqual({ kind: "live", run: child });
+    expect(unitsOf).not.toHaveBeenCalled();
+    expect(await ownerOf([hosted], unitsOf, THREAD)).toEqual({
+      kind: "unit",
+      instanceId: "ship_acme_api_1",
+      unit: unit(),
+    });
+    expect(unitsOf).toHaveBeenCalledExactlyOnceWith("ship_acme_api_1");
+  });
+
+  it("a hosted Ship parent still guards its seed thread when no unit claims it", async () => {
+    const hosted = run({
+      id: "ship-parent",
+      agent: "ship",
+      instanceId: "ship_acme_api_1",
+      hosted: true,
+      finished: false,
+    });
+    expect(await ownerOf([hosted], async () => [unit({ threadKey: "slack:C1:9.9" })], THREAD)).toEqual({
+      kind: "live",
+      run: hosted,
+    });
+  });
+
   it("owner is the unfinished unit when the page's ship run names its instance and the row names this thread", async () => {
     const ship = run({ id: "r-ship", agent: "ship", instanceId: "ship_acme_api_1", session: closed });
     const unitsOf = vi.fn(async () => [unit()]);
