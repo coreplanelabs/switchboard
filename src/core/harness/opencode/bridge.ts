@@ -38,6 +38,7 @@ import {
   type StopMode,
 } from "../../runEvents.js";
 import type { ChatMessage, ContentPart } from "../../chatMessage.js";
+import { leasedPushCommand } from "../../publicationPush.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
@@ -75,6 +76,7 @@ import { PiMirror } from "../pi/mirror.js";
 import { PiRpcTransport } from "../pi/transport.js";
 import {
   judgeToolCall,
+  publicationAttributionRefusal,
   OPENCODE_ACTION_TO_TOOL_WORD,
   openCodeToolWord,
   type ToolRuleContext,
@@ -393,6 +395,7 @@ export function judgeOpenCodeAsk(
   resources: readonly string[],
   rules: ToolRuleContext,
   relayedToolNames: ReadonlySet<string>,
+  callId?: string,
 ): { reply: "once" | "reject"; message?: string; tool: string } {
   // OpenCode's repeat guard: the same call, made over and over with the same
   // input whatever it returned, and the server asks whether to go on. The gate
@@ -411,6 +414,8 @@ export function judgeOpenCodeAsk(
     };
   const word = openCodeToolWord(action);
   const tool = TOOL_NAME_WORD[action] ?? word;
+  const pending = publicationAttributionRefusal(rules, callId);
+  if (pending !== undefined) return { reply: "reject", message: pending, tool };
   if (relayedToolNames.has(action) || relayedToolNames.has(word)) return { reply: "once", tool: action };
   const refuse = (reason: string) => ({ reply: "reject" as const, message: reason, tool });
 
@@ -1566,12 +1571,27 @@ export class OpenCodeBridge {
       Array.isArray(request.resources) ? request.resources : [],
       this.deps.rules,
       this.deps.relayedToolNames,
+      callId,
     );
     // One decision per call, the strictest standing: a refusal is never lifted
     // by a later allowance (the tool's own ask after the repeat guard's), so a
     // success executed anyway is still the gate bypassed; a later refusal does
     // overwrite an allowance.
     if (this.answered.get(callId) !== "reject") this.answered.set(callId, verdict.reply);
+    const authority = this.deps.rules.publication?.authority;
+    const push =
+      openCodeToolWord(request.action) === "bash" && request.resources?.length === 1
+        ? leasedPushCommand(request.resources[0]!)
+        : undefined;
+    if (
+      this.answered.get(callId) === "once" &&
+      push !== undefined &&
+      authority !== undefined &&
+      !("blocked" in authority) &&
+      push.ref === authority.ref &&
+      push.expectedHeadSha === authority.expectedHeadSha
+    )
+      this.emit({ type: "publication_push_authorized", callId, ...push });
     this.decidedReplies.set(request.id, { reply: verdict.reply, callId, echoed: false });
     const stepID = typeof request.source?.messageID === "string" ? request.source.messageID : undefined;
     if (verdict.reply === "reject") {

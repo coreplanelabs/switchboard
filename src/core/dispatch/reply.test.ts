@@ -251,6 +251,14 @@ describe("cardActivity", () => {
       kind: "line",
       text: "⏱ note",
     });
+    expect(
+      cardActivity({
+        type: "publication_push_authorized",
+        callId: "push",
+        ref: "fix/a",
+        expectedHeadSha: "a".repeat(40),
+      }),
+    ).toEqual({ kind: "line", text: "push authorized" });
     expect(cardActivity({ type: "pushed_head", ref: "fix/a", sha: "a".repeat(40), by: "salvage" })).toEqual({
       kind: "line",
       text: "⬆ pushed fix/a @ aaaaaaa",

@@ -76,6 +76,18 @@ export type ExistingPrPublicationAuthority = { ref: string; expectedHeadSha: str
  * this fence observes the revocation before it judges the next tool call. */
 export interface ExistingPrPublicationFence {
   authority: ExistingPrPublicationAuthority;
+  /** Set synchronously at push authorization, cleared only after the result's
+   * attribution settles. A later tool must not move the source ref meanwhile. */
+  attributingCallId?: string;
+}
+
+/** Refuse rather than wait inside a harness feed: that same feed may still
+ * owe the push result which releases the fence. The push's own secondary
+ * permission asks remain allowed; unrelated calls can retry after it settles. */
+export function publicationAttributionRefusal(rules: ToolRuleContext, callId?: string): string | undefined {
+  const pending = rules.publication?.attributingCallId;
+  if (pending !== undefined && pending !== callId)
+    return "push attribution is still pending; no later tool may change the checkout until its result is recorded";
 }
 
 export interface ToolRuleContext {

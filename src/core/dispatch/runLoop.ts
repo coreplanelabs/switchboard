@@ -59,6 +59,7 @@ import type { ChatMessage } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
 import { currentPrHeadSha, prCommitsSince, recordPrOf, type RepoContext } from "../repoContext.js";
 import { verifyExistingPrPublication } from "../existingPrPublication.js";
+import { pairedPublicationPush, restoredPublicationHead, publicationReceiptsFromState } from "../publicationPush.js";
 import { PrDescriptionSchema, redactPrDescription, type PrDescription } from "../prDescription.js";
 import { parseHandoff, type Handoff } from "../ship/handoff.js";
 import {
@@ -405,6 +406,22 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the checklist the card shows, the verdict/description already submitted,
   // the branch already pushed.
   const restored = resume?.row.state ?? {};
+  // The bounded display backlog may trim a push during a long test run. Its
+  // small typed receipts also ride the durable state, atomically with results.
+  const restoredReceipts = publicationReceiptsFromState(restored.publicationReceipts);
+  const publicationReceipts =
+    coordinator?.publication !== undefined &&
+    restoredPublicationHead(restoredReceipts, coordinator.publication) !== undefined
+      ? restoredReceipts
+      : [];
+  const retainPublicationReceipts = () => {
+    const history = registry.snapshot(run.id, run.token)?.events ?? [];
+    const latest = publicationReceipts.at(-1);
+    // Rehydrate only the final projected head, never append an older receipt
+    // behind a newer mechanical salvage or identity-rewrite push.
+    if (latest !== undefined && !history.some((e) => e.type === "pushed_head" && e.ref === latest.ref))
+      registry.publish(run.id, latest);
+  };
   let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
   // Typed (`StatusActivity`): a bash call rides as its full command, which
   // the Slack card draws as a code block; everything else as its one line.
@@ -486,6 +503,42 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // via `registry.snapshot` — there is no second copy to drift from it.
   let recordedPushedBranch: string | undefined;
   let modelBudgetEndsAt: number | undefined;
+  // The successful result owns the receipt, not the later salvage/post-step.
+  // Its full source SHA must agree with Git's exact leased result. A later
+  // GitHub outage or competing push cannot erase a push that already happened;
+  // the coordinator independently rechecks live PR/ref ownership before use.
+  const receiptAtToolResult = async (e: RunEvent): Promise<Extract<RunEvent, { type: "pushed_head" }> | undefined> => {
+    const binding = coordinator?.publication;
+    const authority = existingPrPublicationFence?.authority;
+    if (
+      e.type !== "tool_result" ||
+      e.tool !== "bash" ||
+      !e.ok ||
+      e.exitCode !== 0 ||
+      e.cut ||
+      binding === undefined ||
+      authority === undefined ||
+      "blocked" in authority
+    )
+      return;
+    const history = registry.snapshot(run.id, run.token)?.events ?? [];
+    const gates = history.filter((event) => event.type === "publication_push_authorized" && event.callId === e.callId);
+    if (
+      gates.length !== 1 ||
+      gates[0]?.type !== "publication_push_authorized" ||
+      gates[0].ref !== authority.ref ||
+      gates[0].expectedHeadSha !== authority.expectedHeadSha
+    )
+      return;
+    try {
+      const head = (await executor.exec(`git rev-parse refs/heads/${authority.ref}`)).trim();
+      const current = { ...binding, expectedHeadSha: authority.expectedHeadSha };
+      return pairedPublicationPush([...history, e], current, head, e.callId);
+    } catch {
+      // An uncertain result is not permission to invent a push or retry one.
+      return;
+    }
+  };
   const publishEvent = (e: RunEvent, startsRunBudget: boolean) => {
     registry.publish(run.id, e); // feed the external live-view stream
     if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md): the card and its clock ignore it
@@ -511,6 +564,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     card.update(currentFrame());
   };
   const onEvent = (e: RunEvent) => {
+    // Authorization precedes execution, while streamed results and their local
+    // ref reads may lag behind it. Close both harness gates synchronously so
+    // no later tool can move/delete the source before attribution finishes.
+    if (e.type === "publication_push_authorized" && existingPrPublicationFence !== undefined)
+      existingPrPublicationFence.attributingCallId = e.callId;
     // A harness starts consuming the run budget in the same turn that emits
     // its boundary. Start the control synchronously; publication still goes
     // through the ordered lane below with every other event.
@@ -523,6 +581,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // ledger, so letting later events publish outside this lane would let them
     // consume the sequence the durable source event is about to commit.
     void events.write(async () => {
+      const receipt = await receiptAtToolResult(e);
+      // Losing ledger tracking is not a successful commit. Only the atomic
+      // write below can grant receipt authority, never the local projection.
+      let receiptCommitted = false;
       if ((e.type === "tool_call" || e.type === "tool_result") && typeof registry.commitLiveState === "function") {
         const summary = registry.getById(run.id);
         if (summary?.liveState?.state === "working") {
@@ -539,12 +601,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               state: "working" as const,
               bound,
               detail: e.type === "tool_call" ? "running a tool" : "model turn",
-              sourceEvents: [{ ...e, seq: sourceSeq }],
+              sourceEvents: [{ ...e, seq: sourceSeq }, ...(receipt ? [{ ...receipt, seq: sourceSeq + 1, at }] : [])],
+              ...(receipt ? { statePatch: { publicationReceipts: [...publicationReceipts, receipt] } } : {}),
             };
             try {
               if (ledgerRun?.tracked()) {
                 const committed = await ledgerRun.assignLiveState(assignment);
-                if (committed.ok) registry.commitLiveState(run.id, committed);
+                if (committed.ok) {
+                  registry.commitLiveState(run.id, committed);
+                  receiptCommitted = true;
+                }
               } else {
                 const local = assignRunLiveState(summary.liveState, summary.liveStateSeq ?? 0, assignment);
                 if (local.ok) registry.commitLiveState(run.id, { ...local, liveStateSeq: sourceSeq });
@@ -560,6 +626,23 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         }
       }
       publishEvent(e, startsRunBudget);
+      if (receipt !== undefined) {
+        if (receiptCommitted) {
+          // assignLiveState owns the receipt's only durable write, atomically
+          // with its result. A later state patch must never promote a failed
+          // commit into restart authority or the run's pushed projection.
+          publicationReceipts.push(receipt);
+          publishEvent(receipt, false);
+          existingPrPublication = { ref: receipt.ref, expectedHeadSha: receipt.sha };
+          if (existingPrPublicationFence !== undefined) existingPrPublicationFence.authority = existingPrPublication;
+        } else blockExistingPrPublication("the successful push receipt could not be committed durably");
+      }
+      if (
+        e.type === "tool_result" &&
+        existingPrPublicationFence !== undefined &&
+        existingPrPublicationFence.attributingCallId === e.callId
+      )
+        delete existingPrPublicationFence.attributingCallId;
     });
   };
   // A configured MCP server that did not answer discovery is a fact of the
@@ -865,6 +948,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  clean completed run can still use the description and PR post-steps. */
   const preserveCodingChildWork = async (cue: "budget" | "ending" | "completion"): Promise<void> => {
     if (workSalvageAttempted || !isCodingPrRun || coordinator === undefined) return;
+    await events.drain();
+    retainPublicationReceipts();
     if (!workspaceObserved) await observeWorkspaceNow();
     const target =
       coordinatorBranch === undefined
@@ -1155,6 +1240,40 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // then the one each relaunch re-attached — what the next relaunch re-attaches.
   let workspaceBinding = workspaceBindingFor(round.selection, profile.machine);
   try {
+    const prBase = repoCtx.baseRef ?? (await coordinatorBase);
+    if (coordinator?.publication !== undefined) {
+      const original = coordinator.publication;
+      const restoredHead = resume === undefined ? undefined : restoredPublicationHead(publicationReceipts, original);
+      const publication = restoredHead === undefined ? original : { ...original, expectedHeadSha: restoredHead };
+      const fresh = await (deps.fetchPrFacts ?? fetchPullRequestFacts)({
+        repo: publication.repo,
+        number: publication.pr,
+      }).catch(() => undefined);
+      const verified = verifyExistingPrPublication(
+        publication,
+        {
+          repo: repoCtx.repo,
+          pr: repoCtx.pr,
+          ref: repoCtx.ref,
+          baseRef: prBase,
+          requestHeadSha: restoredHead ?? repoCtx.headSha,
+          workspaceRef: binding?.ref,
+          workspaceHeadSha: binding?.sha,
+          owner: {
+            instanceId: coordinator.parentInstanceId,
+            unit: unitOfIdempotencyKey(coordinator.idempotencyKey) ?? "",
+          },
+        },
+        fresh,
+      );
+      existingPrPublication = verified.ok ? verified.publication : { blocked: verified.reason };
+      existingPrPublicationFence = { authority: existingPrPublication };
+      if (!verified.ok)
+        shell.note(
+          "quiet",
+          `Existing-PR publication is blocked: ${verified.reason}. Work stays on the bound checkout; no alternate branch or pull request will be published.`,
+        );
+    }
     if (finish) {
       onEvent({
         type: "run_note",
@@ -1263,38 +1382,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // the tag's, else the coordinator store's (run-history item 48a) — so a
       // child resumed from a row written before the tag carried a base still
       // has its base protected, not its own unit branch.
-      const prBase = repoCtx.baseRef ?? (await coordinatorBase);
-      if (coordinator?.publication !== undefined) {
-        const publication = coordinator.publication;
-        const fresh = await (deps.fetchPrFacts ?? fetchPullRequestFacts)({
-          repo: publication.repo,
-          number: publication.pr,
-        }).catch(() => undefined);
-        const verified = verifyExistingPrPublication(
-          publication,
-          {
-            repo: repoCtx.repo,
-            pr: repoCtx.pr,
-            ref: repoCtx.ref,
-            baseRef: prBase,
-            requestHeadSha: repoCtx.headSha,
-            workspaceRef: binding?.ref,
-            workspaceHeadSha: binding?.sha,
-            owner: {
-              instanceId: coordinator.parentInstanceId,
-              unit: unitOfIdempotencyKey(coordinator.idempotencyKey) ?? "",
-            },
-          },
-          fresh,
-        );
-        existingPrPublication = verified.ok ? verified.publication : { blocked: verified.reason };
-        existingPrPublicationFence = { authority: existingPrPublication };
-        if (!verified.ok)
-          shell.note(
-            "quiet",
-            `Existing-PR publication is blocked: ${verified.reason}. Work stays on the bound checkout; no alternate branch or pull request will be published.`,
-          );
-      }
       const ownBranch =
         coordinator?.publication !== undefined
           ? coordinator.publication.publicationRef
@@ -1702,6 +1789,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // A hard stop ends pi before git is touched; unlike the old skipped tail,
     // its workspace still gets the same WIP checkpoint before force teardown.
     if (endingNeedsPreservation && run.control.requested === "hard") await endHarness();
+    await events.drain(); // the successful push receipt must precede every completion/salvage observation
+    retainPublicationReceipts();
     if (isCodingPrRun && !tailSkipped()) await observeWorkspaceNow();
     if (endingNeedsPreservation) await preserveCodingChildWork(budgetEnded ? "budget" : "ending");
     else if (isCodingPrRun && coordinator !== undefined && !tailSkipped()) await preserveCodingChildWork("completion");
@@ -2082,6 +2171,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   } finally {
     clearInterval(heartbeat);
     await events.drain();
+    retainPublicationReceipts();
     const status = statusNow();
     // The two final boundaries land before the registry closes. A tracked run
     // commits each boundary durably before fan-out; an untracked run keeps the

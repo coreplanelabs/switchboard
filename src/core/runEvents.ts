@@ -944,9 +944,20 @@ export type RunEvent =
       ref: string;
       sha: string;
       by: "push" | "salvage";
+      /** Exact leased tool result, retained before any post-step can refuse. */
+      receipt?: import("./publicationPush.js").PublicationPushReceipt;
       /** No uncommitted or unpushed work at the push (record 0064): the fact
        *  the plane's soft stop reads. Absent where the measure was missing. */
       clean?: boolean;
+      seq?: number;
+      at?: number;
+    }
+  /** The server gate admitted this exact leased push, not a child's claim. */
+  | {
+      type: "publication_push_authorized";
+      callId: string;
+      ref: string;
+      expectedHeadSha: string;
       seq?: number;
       at?: number;
     }

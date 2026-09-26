@@ -6912,6 +6912,189 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       h.deps,
     );
 
+  const missingReceiptRecord = (): RunRecord =>
+    completedOriginalFindings("b".repeat(40), {
+      pushed: undefined,
+      eventCount: 4,
+      storedEventCount: 4,
+      usage: {
+        turns: 1,
+        byModel: {
+          "test/model": {
+            turns: 1,
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            usd: 0.1,
+          },
+        },
+      },
+      events: [
+        { type: "coordinator_tag", parentInstanceId: INSTANCE.id, unit: "U12", base: "main", publication },
+        {
+          type: "tool_call",
+          tool: "bash",
+          callId: "push-call",
+          summary: "push",
+          command: `git push --force-with-lease=refs/heads/${INSTANCE.branch}:${HEAD} origin ${INSTANCE.branch}:${INSTANCE.branch}`,
+        },
+        {
+          type: "tool_result",
+          tool: "bash",
+          callId: "push-call",
+          ok: true,
+          exitCode: 0,
+          summary: "pushed",
+          output: `To https://github.com/${INSTANCE.repo}\n + ${HEAD.slice(0, 8)}...bbbbbbbb ${INSTANCE.branch} -> ${INSTANCE.branch} (forced update)`,
+        },
+        {
+          type: "run_note",
+          kind: "publication_blocked",
+          summary: "post-step refused the already-moved durable expected head",
+        },
+      ],
+    });
+
+  it.each([1, 3])(
+    "missing push receipt reconciles a completed leased findings push despite later post-step refusal in round %s",
+    async (round) => {
+      const h = await ordinaryFindingsHarness();
+      const [original] = await h.instances.listUnits(INSTANCE.id);
+      await h.instances.putUnits([{ ...original!, rounds: original!.rounds.map((r) => ({ ...r, index: round })) }]);
+      await h.store.put({ ...missingReceiptRecord(), idempotencyKey: `${INSTANCE.id}:U12/${round}/findings` });
+      const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      expect(await ordinaryPrCheck(h)).toMatchObject({ status: 200 });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual({
+        ...before,
+        lastPush: "b".repeat(40),
+        publication: { ...publication, expectedHeadSha: "b".repeat(40) },
+      });
+    },
+  );
+
+  it("missing push receipt at a terminal pr-check resumes only the original read-only review within its original lease", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts("b".repeat(40)) });
+    const instance = recoveryInstance();
+    await h.instances.put(instance);
+    const row = {
+      ...requestChangesRow(),
+      ending: {
+        kind: "failed" as const,
+        cause: "step_threw" as const,
+        step: "U12/1/findings/pr-check",
+        round: 1,
+        report: "publication facts mismatch",
+        at: NOW - minutesToMs(5),
+      },
+    };
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(30), finishedAt: NOW - minutesToMs(20) }));
+    await h.store.put(missingReceiptRecord());
+    expect(await callRecovery(h)).toMatchObject({
+      status: 200,
+      body: { workflowId: "recovery-run-original-findings" },
+    });
+    expect(await h.instances.get(INSTANCE.id)).toEqual(instance);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      instanceId: row.instanceId,
+      unit: row.unit,
+      branch: row.branch,
+      pr: PR,
+      startedAt: row.startedAt,
+      publication: { ...publication, expectedHeadSha: "b".repeat(40) },
+      recovery: {
+        kind: "review",
+        round: 2,
+        deadlineAt: row.startedAt! + minutesToMs(120),
+        findingsRunId: "run-original-findings",
+      },
+    });
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it.each([
+    "missing result",
+    "truncated record",
+    "truncated output",
+    "duplicate pair",
+    "stale lease",
+    "foreign ref",
+    "foreign tag",
+    "foreign head",
+    "unpriced",
+    "rival owner",
+    "competing push",
+    "moved during evidence read",
+    "incomplete listing",
+    "hidden command tail",
+    "conflicting typed event",
+    "missing tag",
+  ])("missing push receipt refuses %s without changing the original binding", async (scenario) => {
+    const h = await ordinaryFindingsHarness();
+    const run = missingReceiptRecord();
+    if (scenario === "missing result") run.events.splice(2, 1);
+    if (scenario === "missing tag") run.events.shift();
+    if (scenario === "moved during evidence read")
+      h.deps.fetchPrFacts = vi
+        .fn()
+        .mockResolvedValueOnce(exactRecoveryFacts("b".repeat(40)))
+        .mockResolvedValue(exactRecoveryFacts("c".repeat(40)));
+    if (scenario === "incomplete listing") {
+      const list = h.deps.runs.listRuns.bind(h.deps.runs);
+      vi.spyOn(h.deps.runs, "listRuns").mockImplementation(async (opts) => ({
+        ...(await list(opts)),
+        nextBefore: { finishedAt: 1, id: "older" },
+      }));
+    }
+    if (scenario === "hidden command tail") {
+      run.events.push({
+        type: "tool_call",
+        tool: "bash",
+        callId: "hidden",
+        command: "echo " + "x".repeat(4000) + "…",
+        summary: "truncated command",
+      });
+      run.eventCount++;
+      run.storedEventCount++;
+    }
+    if (scenario === "conflicting typed event") {
+      run.events.push({ type: "pushed_head", ref: INSTANCE.branch, sha: "c".repeat(40), by: "push" });
+      run.eventCount++;
+      run.storedEventCount++;
+    }
+    if (scenario === "truncated record") run.truncated = true;
+    if (scenario === "truncated output")
+      (run.events[2] as Extract<RunEvent, { type: "tool_result" }>).output += "…[20 more chars]";
+    if (scenario === "duplicate pair") run.events.push(...run.events.slice(1, 3));
+    if (scenario === "stale lease")
+      (run.events[1] as Extract<RunEvent, { type: "tool_call" }>).command = (
+        run.events[1] as Extract<RunEvent, { type: "tool_call" }>
+      ).command!.replace(HEAD, "c".repeat(40));
+    if (scenario === "foreign ref")
+      (run.events[1] as Extract<RunEvent, { type: "tool_call" }>).command += " other:other";
+    if (scenario === "foreign tag") (run.events[0] as Extract<RunEvent, { type: "coordinator_tag" }>).unit = "U99";
+    if (scenario === "foreign head") run.headSha = "c".repeat(40);
+    if (scenario === "unpriced") run.usage = undefined;
+    if (scenario === "rival owner") {
+      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
+      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    }
+    if (scenario === "competing push")
+      await h.store.put({
+        ...missingReceiptRecord(),
+        id: "run-competing",
+        idempotencyKey: `${INSTANCE.id}:U12/1/findings/a2`,
+        status: "failed",
+        startedAt: NOW - minutesToMs(25),
+        finishedAt: NOW - minutesToMs(20),
+      });
+    await h.store.put(run);
+    const before = await h.instances.listUnits(INSTANCE.id);
+    expect((await ordinaryPrCheck(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+  });
+
   it("ordinary findings publication advances the exact authorized binding by CAS before re-review", async () => {
     const h = await ordinaryFindingsHarness();
     expect(await ordinaryPrCheck(h)).toMatchObject({ status: 200, body: { headSha: "b".repeat(40) } });
