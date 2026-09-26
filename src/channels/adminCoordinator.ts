@@ -45,6 +45,7 @@
 
 import {
   DEFAULT_GRANT,
+  GRANT_RENEWALS_MAX,
   HOSTED_DEADLINE_MARGIN_MINUTES,
   IDLE_DAYS_DEFAULT,
   IDLE_WAKES_MAX,
@@ -2084,6 +2085,7 @@ async function advanceFindingsPublication(
     // success, any push, overlap, or live child keeps the evidence ambiguous.
     if (
       listing.storeUnavailable ||
+      listing.ledgerUnavailable ||
       listing.nextBefore !== undefined ||
       attempts.filter((run) => run.id === runId).length !== 1 ||
       attempts.some(
@@ -2301,6 +2303,114 @@ const fullHead = (value: unknown): value is string => typeof value === "string" 
 const isStepAttempt = (key: string | undefined, step: string): boolean =>
   key === step || (key?.startsWith(`${step}/a`) === true && /^[1-9][0-9]*$/.test(key.slice(step.length + 2)));
 
+/** Audit the retained original children, not today's cost projection. A known
+ * per-turn meter total is historical price evidence; repricing old tokens with
+ * the current operator table is not. This total is a lower bound until every
+ * started round is accounted for, and is never used to mint a new budget. */
+function historicalRecoverySpend(
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  runs: RunView[],
+): { usd: number } | { reason: string } {
+  const unitPrefix = `${instance.id}:${row.unit}/`;
+  const children = runs.filter((run) => run.idempotencyKey?.startsWith(unitPrefix) === true);
+  if (runs.some((run) => run.parentInstanceId === instance.id && run.idempotencyKey === undefined))
+    return { reason: "child_identity_mismatch" };
+  let usd = 0;
+  for (const run of children) {
+    if (!run.finished) return { reason: "child_active" };
+    const suffix = run.idempotencyKey!.slice(unitPrefix.length);
+    // Resumed /rN histories cannot prove their lease start in this schema.
+    const match = /^(?:s([2-9]|[1-9][0-9]+)\/)?(0|[1-9][0-9]*)\/(coding|review|findings)(?:\/a[1-9][0-9]*)?$/.exec(
+      suffix,
+    );
+    if (
+      match === null ||
+      run.parentInstanceId !== instance.id ||
+      run.userId !== instance.userId ||
+      run.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+      run.agent !== (match[3] === "review" ? "review" : "coding") ||
+      run.threadKey !==
+        (run.agent === "review"
+          ? (row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey)
+          : (row.threadKey ?? instance.threadKey)) ||
+      (match[1] !== undefined && !row.segments?.some((segment) => segment.index === Number(match[1])))
+    )
+      return { reason: "child_identity_mismatch" };
+    if (
+      run.persisted !== true ||
+      run.provisional ||
+      run.restarting ||
+      run.truncated !== false ||
+      !Number.isSafeInteger(run.eventCount) ||
+      run.eventCount !== run.storedEventCount
+    )
+      return { reason: "child_history_incomplete" };
+    if (
+      !Number.isFinite(run.startedAt) ||
+      run.startedAt < row.startedAt! ||
+      run.finishedAt === undefined ||
+      !Number.isFinite(run.finishedAt) ||
+      run.finishedAt < run.startedAt ||
+      run.finishedAt > row.ending!.at
+    )
+      return { reason: "child_time_invalid" };
+    const segmentIndex = Number(match[1] ?? 1);
+    const segmentStart = row.segments?.find((segment) => segment.index === segmentIndex)?.at ?? row.startedAt!;
+    const segmentEnd = row.segments?.find((segment) => segment.index === segmentIndex + 1)?.at ?? row.ending!.at;
+    if (run.startedAt < segmentStart || run.finishedAt > segmentEnd) return { reason: "child_round_mismatch" };
+    if (run.agent === "review") {
+      const boundaries = row.rounds.filter(
+        (entry) =>
+          entry.agent === "review" &&
+          entry.index === Number(match[2]) &&
+          entry.at >= segmentStart &&
+          entry.at <= segmentEnd,
+      );
+      const start = boundaries.find((entry) => entry.outcome === "started");
+      const end = boundaries.find((entry) => entry.outcome !== "started");
+      if (start === undefined || end === undefined || run.startedAt < start.at || run.finishedAt > end.at)
+        return { reason: "child_round_mismatch" };
+    }
+    const models = Object.values(run.usage?.byModel ?? {});
+    if (
+      models.length === 0 ||
+      !Number.isSafeInteger(run.usage?.turns) ||
+      run.usage!.turns < 1 ||
+      models.reduce((total, model) => total + model.turns, 0) !== run.usage!.turns ||
+      models.some(
+        (model) =>
+          !Number.isSafeInteger(model.turns) ||
+          model.turns < 1 ||
+          typeof model.usd !== "number" ||
+          !Number.isFinite(model.usd) ||
+          model.usd < 0,
+      )
+    )
+      return { reason: "child_price_unknown" };
+    usd += models.reduce((total, model) => total + model.usd!, 0);
+  }
+  if (!Number.isFinite(usd)) return { reason: "child_price_unknown" };
+  const ordered = [...children].sort((left, right) => left.startedAt - right.startedAt);
+  if (ordered.some((run, index) => index > 0 && run.startedAt < ordered[index - 1]!.finishedAt!))
+    return { reason: "child_history_overlapping" };
+  for (const round of row.rounds.filter((entry) => entry.outcome === "started")) {
+    const action = round.agent === "review" ? "review" : round.index === 0 ? "coding" : "findings";
+    const segment = row.segments?.filter((entry) => entry.at <= round.at).at(-1)?.index ?? 1;
+    const prefix = stepPrefixOf(row.unit, segment > 1 ? { segment, renewalsSpent: 0, spendUsd: null } : undefined);
+    if (
+      !children.some(
+        (run) =>
+          run.agent === round.agent &&
+          isStepAttempt(run.idempotencyKey, `${instance.id}:${prefix}/${round.index}/${action}`) &&
+          run.startedAt >= round.at,
+      )
+    )
+      return { reason: "child_history_missing" };
+  }
+  return { usd };
+}
+
 /** Recover one ended original unit without passing through generated-plan
  * hand-off. Every authoritative fact comes from the original durable rows,
  * their owned review record and one fresh GitHub read. */
@@ -2330,6 +2440,7 @@ export async function recoverOriginalUnit(
   const matches = rows.filter((candidate) => candidate.unit === body.unit);
   if (matches.length !== 1) return json(409, { ok: false, error: "unit_evidence_ambiguous", at });
   const row = matches[0]!;
+  if (row.instanceId !== instance.id) return json(409, { ok: false, error: "recovery_identity_mismatch", at });
   if (caller !== undefined && caller.threadKey !== (row.threadKey ?? instance.threadKey))
     return json(403, { ok: false, error: "recovery_requester_mismatch", at });
   if (row.idle !== undefined && row.ending !== undefined)
@@ -2411,6 +2522,16 @@ export async function recoverOriginalUnit(
         break;
       }
     const boundary = boundaryPosition >= 0 ? row.rounds[boundaryPosition] : undefined;
+    // Check failures are synthesized findings, not the approving review's
+    // findings. The legacy row retained only the outcome word, so neither
+    // that approval nor a later push proves the check-disposition contract.
+    if (boundary?.outcome === "checks_failed")
+      return json(409, {
+        ok: false,
+        error: "recovery_checks_evidence_unavailable",
+        reason: "check_findings_not_retained",
+        at,
+      });
     if (boundary === undefined || (boundary.outcome !== "request_changes" && boundary.outcome !== "no_verdict"))
       return json(409, { ok: false, error: "recovery_ending_unsupported", at });
     if (row.rounds.slice(boundaryPosition + 1).some((candidate) => candidate.agent === "review"))
@@ -2426,15 +2547,25 @@ export async function recoverOriginalUnit(
       !Number.isSafeInteger(caps.maxRounds) ||
       caps.maxRounds < 1 ||
       !Number.isFinite(caps.maxMinutes) ||
-      caps.maxMinutes <= 0
+      caps.maxMinutes <= 0 ||
+      !Number.isSafeInteger(minutesToMs(caps.maxMinutes))
     )
       return unknownBudget("caps_invalid");
     if (row.startedAt === undefined) return unknownBudget("started_at_missing");
-    if (!Number.isFinite(row.startedAt)) return unknownBudget("started_at_invalid");
-    if (!Number.isFinite(row.ending.at)) return unknownBudget("ending_at_invalid");
-    // Prior spend is not yet durable on a terminal row. A cost-capped unit
-    // cannot safely recover by resetting that total, so it stays parked.
-    if (instance.grant?.costCapUsd !== undefined) return unknownBudget("cost_cap_spend_unknown");
+    if (!Number.isFinite(row.startedAt) || row.startedAt > at) return unknownBudget("started_at_invalid");
+    if (!Number.isFinite(row.ending.at) || row.ending.at < row.startedAt || row.ending.at > at)
+      return unknownBudget("ending_at_invalid");
+    // Absence is not an uncapped historical grant. In particular, today's
+    // configuration cannot prove the terms under which an old unit ran.
+    const grant = instance.grant;
+    if (grant === undefined) return unknownBudget("grant_missing");
+    if (
+      !Number.isSafeInteger(grant.renewals) ||
+      grant.renewals < 0 ||
+      grant.renewals > GRANT_RENEWALS_MAX ||
+      (grant.costCapUsd !== undefined && (!Number.isFinite(grant.costCapUsd) || grant.costCapUsd <= 0))
+    )
+      return unknownBudget("grant_invalid");
     if (round >= caps.maxRounds) return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
     // Recovery resumes the active segment's original wall-clock lease. A
     // renewal starts a full lease at its durable segment time; a stopped
@@ -2442,8 +2573,64 @@ export async function recoverOriginalUnit(
     const latestSegmentIndex = row.segments?.reduce((latest, candidate) => Math.max(latest, candidate.index), 1) ?? 1;
     const latestSegments = row.segments?.filter((candidate) => candidate.index === latestSegmentIndex) ?? [];
     if (latestSegments.length > 1) return unknownBudget("latest_segment_ambiguous");
+    const segments = row.segments ?? [];
+    if (segments.some((entry, index) => entry.index !== index + 2)) return unknownBudget("segment_history_invalid");
+    if (
+      segments.some(
+        (entry, index) =>
+          !Number.isFinite(entry.at) ||
+          entry.at < (segments[index - 1]?.at ?? row.startedAt!) ||
+          entry.at > row.ending!.at,
+      )
+    )
+      return unknownBudget("segment_time_invalid");
+    if (segments.length > grant.renewals) return unknownBudget("segment_grant_exhausted");
     const segment = latestSegments[0];
     const leaseStartedAt = segment?.at ?? row.startedAt;
+    for (const [key, answer] of Object.entries(row.wakes ?? {})) {
+      if (answer.kind !== "segment") continue;
+      // A wake belongs to the segment that was idle, not the next segment it
+      // grants. A same-segment wake instead carries a smaller resumed lease.
+      const origin = answer.leaseMs === undefined ? answer.index - 1 : answer.index;
+      const prefix = stepPrefixOf(
+        row.unit,
+        origin > 1 ? { segment: origin, renewalsSpent: 0, spendUsd: null } : undefined,
+      );
+      if (
+        !Number.isSafeInteger(answer.index) ||
+        answer.index < 1 ||
+        answer.index > latestSegmentIndex ||
+        origin < 1 ||
+        !key.startsWith(`${prefix}/`) ||
+        !/^(?:r[1-9][0-9]*\/)?idle\/[1-9][0-9]*$/.test(key.slice(prefix.length + 1))
+      )
+        return unknownBudget("wake_origin_invalid");
+    }
+    let previousRoundAt = row.startedAt;
+    const reviewCounts = new Map<number, number>();
+    for (const entry of row.rounds) {
+      if (
+        (entry.agent !== "review" && entry.agent !== "coding") ||
+        !Number.isSafeInteger(entry.index) ||
+        entry.index < (entry.agent === "review" ? 1 : 0) ||
+        !Number.isFinite(entry.at) ||
+        entry.at < previousRoundAt ||
+        entry.at > row.ending.at
+      )
+        return unknownBudget("round_history_invalid");
+      if (entry.agent === "review" && entry.outcome === "started") {
+        const segmentIndex = segments.filter((segment) => segment.at <= entry.at).at(-1)?.index ?? 1;
+        if (entry.index !== (reviewCounts.get(segmentIndex) ?? 0) + 1) return unknownBudget("round_history_invalid");
+        reviewCounts.set(segmentIndex, entry.index);
+      }
+      previousRoundAt = entry.at;
+    }
+    const started = row.rounds
+      .slice(0, boundaryPosition)
+      .filter((entry) => entry.agent === "review" && entry.outcome === "started" && entry.index === boundary.index)
+      .at(-1);
+    if (started === undefined) return unknownBudget("round_history_invalid");
+    if (started.at < leaseStartedAt) return unknownBudget("segment_round_mismatch");
     const resumedLeases = Object.values(row.wakes ?? {}).filter(
       (answer) => answer.kind === "segment" && answer.index === latestSegmentIndex && answer.leaseMs !== undefined,
     );
@@ -2454,34 +2641,47 @@ export async function recoverOriginalUnit(
     remainingMs = minutesToMs(caps.maxMinutes) - (at - leaseStartedAt);
     const reviewThreadKey = row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey;
     const unitThreadKey = row.threadKey ?? instance.threadKey;
+    // Thread-scoped reads cannot reveal a tagged original child in a foreign
+    // thread. The list seam has no instance filter, so require one complete
+    // bounded unfiltered snapshot before selecting either expected thread.
     const listing = await deps.runs.listRuns({
       status: "all",
       visibleTo: EVERY_RUN,
-      threadKey: reviewThreadKey,
       limit: RUN_LIST_MAX_LIMIT,
     });
-    const unitListing =
-      unitThreadKey === reviewThreadKey
-        ? listing
-        : await deps.runs.listRuns({
-            status: "all",
-            visibleTo: EVERY_RUN,
-            threadKey: unitThreadKey,
-            limit: RUN_LIST_MAX_LIMIT,
-          });
     const segmentPrefix = stepPrefixOf(
       row.unit,
       latestSegmentIndex > 1 ? { segment: latestSegmentIndex, renewalsSpent: 0, spendUsd: null } : undefined,
     );
     if (
       listing.storeUnavailable ||
-      unitListing.storeUnavailable ||
+      listing.ledgerUnavailable ||
       listing.nextBefore !== undefined ||
-      unitListing.nextBefore !== undefined
+      // A full live-only page carries no cursor but can still hide children.
+      listing.runs.length >= RUN_LIST_MAX_LIMIT
     )
       return json(409, { ok: false, error: "recovery_evidence_incomplete", at });
+    const histories = new Map<string, RunView>();
+    for (const run of listing.runs) {
+      const previous = histories.get(run.id);
+      if (previous !== undefined && JSON.stringify(previous) !== JSON.stringify(run))
+        return unknownBudget("child_history_ambiguous");
+      histories.set(run.id, run);
+    }
+    if (grant.costCapUsd !== undefined && histories.size === 0) return unknownBudget("cost_cap_spend_unknown");
+    const spend = historicalRecoverySpend(instance, row, [...histories.values()]);
+    if ("reason" in spend) return unknownBudget(spend.reason);
+    if (grant.costCapUsd !== undefined) {
+      if (spend.usd >= grant.costCapUsd) return json(409, { ok: false, error: "recovery_cost_cap_exhausted", at });
+      // The current recovery claim and driver cannot carry cumulative spend
+      // and an original cost cap. Proving retained prices is not permission
+      // to drop that cap; refuse until the durable carry seam exists.
+      return unknownBudget("cost_cap_carry_unavailable");
+    }
+    const reviewRuns = listing.runs.filter((run) => run.threadKey === reviewThreadKey);
+    const unitRuns = listing.runs.filter((run) => run.threadKey === unitThreadKey);
     const reviewKeyPrefix = `${instance.id}:${segmentPrefix}/${round}/review`;
-    const candidates = listing.runs.filter((run) => {
+    const candidates = reviewRuns.filter((run) => {
       if (
         !run.finished ||
         run.agent !== "review" ||
@@ -2511,22 +2711,20 @@ export async function recoverOriginalUnit(
     const reviewedHead = review.reviewHead!;
     if (publication === undefined) {
       if (
-        listing.runs.filter(
+        reviewRuns.filter(
           (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, reviewKeyPrefix),
         ).length !== 1
       )
         return json(409, { ok: false, error: "recovery_review_evidence_ambiguous", at });
       if (
-        [...listing.runs, ...unitListing.runs].some(
-          (run) => !run.finished && (run.agent === "coding" || run.agent === "review"),
-        )
+        [...reviewRuns, ...unitRuns].some((run) => !run.finished && (run.agent === "coding" || run.agent === "review"))
       )
         return json(409, { ok: false, error: "recovery_child_active", at });
       // The PR may have been opened by the runner after coding ended, so a
       // missing pr_opened event is not a missing push. Require the exact ref
       // receipt plus observed final head before the uniquely owned review.
       const codingKey = `${instance.id}:${segmentPrefix}/${round === 1 ? "0/coding" : `${round - 1}/findings`}`;
-      const coding = unitListing.runs.filter(
+      const coding = unitRuns.filter(
         (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, codingKey),
       );
       const child = coding.length === 1 ? coding[0] : undefined;
@@ -2601,7 +2799,7 @@ export async function recoverOriginalUnit(
         row.ending.round !== boundary.index
       )
         return json(409, { ok: false, error: "recovery_head_moved", at });
-      const attempts = unitListing.runs.filter(
+      const attempts = unitRuns.filter(
         (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, findingsPrefix),
       );
       const checkedAttempts = attempts.filter((run) => run.idempotencyKey === `${instance.id}:${checkedStep}`);
@@ -2618,7 +2816,7 @@ export async function recoverOriginalUnit(
           row,
           completed.id,
           facts.headSha,
-          unitListing.runs,
+          unitRuns,
           reviewFinishedAt,
         ));
       if (
@@ -2792,6 +2990,10 @@ export async function recoverOriginalUnit(
   }
 
   if (existingClaim === undefined) {
+    // Historical evidence and remote reads can outlive the remaining lease.
+    // Refuse before reserving ownership; the original deadline never moves.
+    if (deadlineAt - (deps.clock ?? systemClock)() < minutesToMs(leaseMinimum(kind === "findings" ? "fix" : "review")))
+      return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
     try {
       token = fence.reserve(instance.repo, pr.number, originalOwner);
     } catch (err) {

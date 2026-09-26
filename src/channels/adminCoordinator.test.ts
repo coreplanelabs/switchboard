@@ -6521,9 +6521,26 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     plan: { id: "orchestration" },
     merge: "person",
     caps: { maxRounds: 3, maxMinutes: 120 },
+    grant: { renewals: 0 },
   });
+  const historicalUsage = {
+    turns: 1,
+    byModel: {
+      "test/historical": {
+        turns: 1,
+        inputTokens: 10,
+        outputTokens: 10,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        usd: 0.25,
+      },
+    },
+  };
   const reviewRecord = (over: Partial<RunRecord> = {}): RunRecord =>
     record("run-original-review", {
+      usage: historicalUsage,
+      startedAt: NOW - minutesToMs(40),
+      finishedAt: NOW - minutesToMs(30),
       parentInstanceId: INSTANCE.id,
       idempotencyKey: `${INSTANCE.id}:U12/1/review`,
       agent: "review",
@@ -6546,6 +6563,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
   const completedOriginalFindings = (headSha: string, over: Partial<RunRecord> = {}): RunRecord =>
     record("run-original-findings", {
+      usage: historicalUsage,
       parentInstanceId: INSTANCE.id,
       idempotencyKey: `${INSTANCE.id}:U12/1/findings`,
       agent: "coding",
@@ -6580,6 +6598,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   };
   const originalCoding = (over: Partial<RunRecord> = {}) =>
     record("run-original-coding", {
+      usage: historicalUsage,
       parentInstanceId: INSTANCE.id,
       idempotencyKey: `${INSTANCE.id}:U12/0/coding`,
       repo: INSTANCE.repo,
@@ -6598,6 +6617,422 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(40), finishedAt: NOW - minutesToMs(30) }));
     return h;
   };
+
+  describe("historical admission", () => {
+    it.each([
+      ["child_price_unknown", { usage: undefined }],
+      [
+        "child_price_unknown",
+        {
+          usage: {
+            turns: 1,
+            byModel: { "test/historical": { ...historicalUsage.byModel["test/historical"], usd: null } },
+          },
+        },
+      ],
+      ["child_history_incomplete", { truncated: true }],
+      ["child_history_incomplete", { storedEventCount: 1 }],
+      ["child_identity_mismatch", { userId: "slack:UOTHER" }],
+      ["child_identity_mismatch", { idempotencyKey: `${INSTANCE.id}:U12/0/coding/unknown` }],
+      ["child_time_invalid", { finishedAt: NOW + 1 }],
+    ])("refuses historical %s before reconstructing missing authority", async (reason, over) => {
+      const h = await legacyHarness();
+      await h.store.put(originalCoding(over));
+      const before = await h.instances.listUnits(INSTANCE.id);
+      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown", reason } });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it("does not use today's price table to turn unpriced historical usage into spend", async () => {
+      const h = harness({
+        prices: parseModelPrices({ "test/historical": { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } }),
+        prFacts: exactRecoveryFacts(HEAD),
+      });
+      await h.instances.put(recoveryInstance());
+      await h.instances.putUnits([legacyRow()]);
+      await h.store.put(
+        originalCoding({
+          usage: {
+            turns: 1,
+            byModel: { "test/historical": { ...historicalUsage.byModel["test/historical"], usd: undefined } },
+          },
+        }),
+      );
+      await h.store.put(reviewRecord());
+      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { reason: "child_price_unknown" } });
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it.each([
+      [
+        "future review",
+        { startedAt: NOW - minutesToMs(20), finishedAt: NOW - minutesToMs(15) },
+        "child_round_mismatch",
+      ],
+      [
+        "duplicate review",
+        { id: "run-extra-review", startedAt: NOW - minutesToMs(25), finishedAt: NOW - minutesToMs(20) },
+        "child_round_mismatch",
+      ],
+      [
+        "unproved resume",
+        {
+          id: "run-resumed-review",
+          idempotencyKey: `${INSTANCE.id}:U12/r1/1/review`,
+          startedAt: NOW - minutesToMs(25),
+          finishedAt: NOW - minutesToMs(20),
+        },
+        "child_identity_mismatch",
+      ],
+    ])("refuses %s rather than selecting convenient historical evidence", async (_name, over, reason) => {
+      const h = await legacyHarness();
+      await h.store.put(reviewRecord(over));
+      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown", reason } });
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it.each(["coding", "review", "findings", "live"])(
+      "refuses a competing %s child outside the expected threads before claiming historical authority",
+      async (kind) => {
+        const h = await legacyHarness();
+        const foreignThread = "slack:COTHER:123.456";
+        if (kind === "live") {
+          h.registry.create("competing child", {
+            agent: "coding",
+            channelId: "slack:COTHER",
+            userId: INSTANCE.userId,
+            threadKey: foreignThread,
+            parentInstanceId: INSTANCE.id,
+            idempotencyKey: `${INSTANCE.id}:U12/1/findings`,
+          });
+        } else {
+          const child =
+            kind === "review"
+              ? reviewRecord()
+              : kind === "findings"
+                ? completedOriginalFindings(HEAD)
+                : originalCoding();
+          await h.store.put({ ...child, id: "run-competing-child", threadKey: foreignThread });
+        }
+        expect(await callRecovery(h)).toMatchObject({
+          status: 409,
+          body: {
+            error: "recovery_budget_unknown",
+            reason: kind === "live" ? "child_active" : "child_identity_mismatch",
+          },
+        });
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+        expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+        expect(h.recoveries).toEqual([]);
+      },
+    );
+
+    it.each(["foreign child", "empty ledger"])(
+      "refuses a failed live-ledger listing before any historical recovery claim (%s)",
+      async (scenario) => {
+        const h = await legacyHarness();
+        if (scenario === "foreign child") {
+          await h.ledger.claim({
+            runId: "run-foreign-live",
+            threadKey: "slack:COTHER:123.456",
+            gen: "gen-OTHER",
+            leaseMs: minutesToMs(30),
+            startedAt: NOW - minutesToMs(5),
+            meta: {
+              agent: "coding",
+              channelId: "slack:COTHER",
+              userId: INSTANCE.userId,
+              threadKey: "slack:COTHER:123.456",
+              repo: INSTANCE.repo,
+              parentInstanceId: INSTANCE.id,
+              idempotencyKey: `${INSTANCE.id}:U12/1/findings`,
+            },
+            card: null,
+            system: "sys",
+            tools: [],
+          });
+        }
+        const listLive = vi.spyOn(h.ledger, "listLive").mockRejectedValueOnce(new Error("HTTP 503"));
+        const claim = vi.spyOn(h.deps.runnerOwnership!, "claim");
+        const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+        expect(await callRecovery(h)).toMatchObject({
+          status: 409,
+          body: { error: "recovery_evidence_incomplete" },
+        });
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+        expect(claim).not.toHaveBeenCalled();
+        expect(cas).not.toHaveBeenCalled();
+        expect(h.recoveries).toEqual([]);
+        expect(h.dispatched).toEqual([]);
+
+        // A fresh complete read distinguishes a real competitor from an empty ledger.
+        expect(await callRecovery(h)).toMatchObject(
+          scenario === "foreign child"
+            ? { status: 409, body: { error: "recovery_budget_unknown", reason: "child_active" } }
+            : { status: 200 },
+        );
+        expect(listLive).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it.each(["unavailable", "paginated", "full live page"])(
+      "refuses cross-thread listing incompleteness (%s) even when the expected threads have complete evidence",
+      async (scenario) => {
+        const h = await legacyHarness();
+        const list = h.deps.runs.listRuns.bind(h.deps.runs);
+        vi.spyOn(h.deps.runs, "listRuns").mockImplementation(async (opts) => {
+          const result = await list(opts);
+          if (opts.threadKey !== undefined) return result;
+          if (scenario === "unavailable") return { ...result, storeUnavailable: true };
+          if (scenario === "paginated") return { ...result, nextBefore: { finishedAt: 1, id: "older" } };
+          return { runs: Array.from({ length: opts.limit! }, () => ({ ...result.runs[0]!, finished: false })) };
+        });
+        expect(await callRecovery(h)).toMatchObject({
+          status: 409,
+          body: { error: "recovery_evidence_incomplete" },
+        });
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+        expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+        expect(h.recoveries).toEqual([]);
+      },
+    );
+
+    it("admits complete cross-thread evidence with separate review threads and unrelated units or instances", async () => {
+      const h = await legacyHarness();
+      const reviewThread = { threadKey: "slack:C1:789.123", sourceUrl: "https://chat.example/review" };
+      await h.instances.putUnits([{ ...legacyRow(), reviewThread }]);
+      await h.store.put(reviewRecord({ threadKey: reviewThread.threadKey }));
+      await h.store.put(
+        originalCoding({
+          id: "run-other-unit",
+          idempotencyKey: `${INSTANCE.id}:U99/0/coding`,
+          threadKey: "slack:COTHER:123.456",
+        }),
+      );
+      await h.store.put(
+        originalCoding({
+          id: "run-other-instance",
+          parentInstanceId: "plan-other",
+          idempotencyKey: "plan-other:U12/0/coding",
+          threadKey: "slack:COTHER:456.789",
+        }),
+      );
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({ publication, reviewThread });
+      expect(h.recoveries).toHaveLength(1);
+    });
+
+    it("requires a retained child for every historical started round", async () => {
+      const h = await legacyHarness();
+      const row = legacyRow();
+      row.rounds.unshift({ index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(56) });
+      await h.instances.putUnits([row]);
+      const list = h.deps.runs.listRuns.bind(h.deps.runs);
+      vi.spyOn(h.deps.runs, "listRuns").mockImplementation(async (opts) => {
+        const result = await list(opts);
+        return { ...result, runs: result.runs.filter((run) => run.id !== "run-original-coding") };
+      });
+      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { reason: "child_history_missing" } });
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it("refuses a lease that expires during evidence reads before claiming the row", async () => {
+      const h = await legacyHarness();
+      h.deps.fetchPrFacts = async () => {
+        h.deps.clock = () => NOW + minutesToMs(61);
+        return exactRecoveryFacts(HEAD);
+      };
+      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_wall_clock_exhausted" } });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+      expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it("names the missing spend carry even when every retained child has a historical price", async () => {
+      const h = await legacyHarness();
+      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      await h.instances.putUnits([legacyRow()]);
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_budget_unknown", reason: "cost_cap_carry_unavailable" },
+      });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(legacyRow());
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it("refuses a proven spent cost cap without resetting the cumulative total", async () => {
+      const h = await legacyHarness();
+      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+      await h.instances.putUnits([legacyRow()]);
+      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_cost_cap_exhausted" } });
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it("admits the binding-less initial findings form only from priced original coding and review records", async () => {
+      const h = await legacyHarness();
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+        publication,
+        recovery: { kind: "findings", deadlineAt: legacyRow().startedAt! + minutesToMs(120) },
+      });
+    });
+
+    it("admits the moved-head website form only to re-review the completed original findings", async () => {
+      const fixed = "b".repeat(40);
+      const h = await legacyHarness();
+      const row = {
+        ...legacyRow(),
+        publication,
+        ending: { ...legacyRow().ending!, step: "U12/1/findings/pr-check", at: NOW - minutesToMs(5) },
+      };
+      await h.instances.putUnits([row]);
+      await h.store.put(completedOriginalFindings(fixed));
+      h.deps.fetchPrFacts = async () => exactRecoveryFacts(fixed);
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+        branch: row.branch,
+        pr: PR,
+        recovery: {
+          kind: "review",
+          round: 2,
+          findingsRunId: "run-original-findings",
+          expectedHeadSha: fixed,
+          deadlineAt: row.startedAt! + minutesToMs(120),
+        },
+      });
+    });
+
+    it("refuses approve then checks-failed findings/pr-check when the historical check findings were not retained", async () => {
+      const h = await legacyHarness();
+      const row = {
+        ...legacyRow(),
+        publication,
+        rounds: [
+          requestChangesRow().rounds[0]!,
+          { index: 1, agent: "review", outcome: "approve", at: NOW - minutesToMs(30) },
+          { index: 1, agent: "review", outcome: "checks_failed", at: NOW - minutesToMs(25) },
+        ],
+        ending: { ...legacyRow().ending!, step: "U12/1/findings/pr-check", at: NOW - minutesToMs(5) },
+      };
+      await h.instances.putUnits([row]);
+      await h.store.put(
+        reviewRecord({
+          verdict: { verdict: "approve", summary: "approved" },
+          reviewPost: {
+            posted: true,
+            target: { repo: INSTANCE.repo, number: PR.number },
+            head: HEAD,
+            verdict: "approve",
+          },
+        }),
+      );
+      await h.store.put(completedOriginalFindings("b".repeat(40)));
+      h.deps.fetchPrFacts = async () => exactRecoveryFacts("b".repeat(40));
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_checks_evidence_unavailable", reason: "check_findings_not_retained" },
+      });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it.each([
+      ["grant_missing", { grant: undefined }, {}],
+      ["grant_invalid", { grant: { renewals: -1 } }, {}],
+      ["grant_invalid", { grant: { renewals: 13 } }, {}],
+      ["grant_invalid", { grant: { renewals: Number.MAX_SAFE_INTEGER } }, {}],
+      ["grant_invalid", { grant: { renewals: 0, costCapUsd: -1 } }, {}],
+      ["started_at_invalid", {}, { startedAt: NOW + 1 }],
+      ["ending_at_invalid", {}, { ending: { ...legacyRow().ending!, at: NOW + 1 } }],
+      ["segment_history_invalid", { grant: { renewals: 2 } }, { segments: [{ index: 3, at: NOW - minutesToMs(50) }] }],
+      ["segment_time_invalid", { grant: { renewals: 1 } }, { segments: [{ index: 2, at: NOW + 1 }] }],
+      ["segment_grant_exhausted", { grant: { renewals: 0 } }, { segments: [{ index: 2, at: NOW - minutesToMs(50) }] }],
+      [
+        "wake_origin_invalid",
+        {},
+        {
+          wakes: {
+            "U99/idle/1": {
+              kind: "segment" as const,
+              index: 1,
+              spendUsd: 0,
+              texts: [],
+              senders: [],
+              leaseMs: minutesToMs(20),
+            },
+          },
+        },
+      ],
+      [
+        "round_history_invalid",
+        {},
+        { rounds: [{ index: -1, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(30) }] },
+      ],
+      [
+        "round_history_invalid",
+        {},
+        {
+          rounds: [
+            { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(40) },
+            { index: 2, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(30) },
+          ],
+        },
+      ],
+    ])(
+      "refuses %s without borrowing present configuration or changing the original row",
+      async (reason, instanceOver, rowOver) => {
+        const h = await legacyHarness();
+        await h.instances.replace({ ...recoveryInstance(), ...instanceOver });
+        await h.instances.putUnits([{ ...legacyRow(), ...rowOver }]);
+        h.deps.shipGrantFor = () => {
+          throw new Error("current configuration is not historical authority");
+        };
+        const before = await h.instances.listUnits(INSTANCE.id);
+        expect(await callRecovery(h)).toMatchObject({
+          status: 409,
+          body: { error: "recovery_budget_unknown", reason },
+        });
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+        expect(h.recoveries).toEqual([]);
+        expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+      },
+    );
+
+    it("accepts a retained grant at the renewal maximum without consulting current configuration", async () => {
+      const h = await legacyHarness();
+      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 12 } });
+      await h.instances.putUnits([legacyRow()]);
+      h.deps.shipGrantFor = () => {
+        throw new Error("current configuration is not historical authority");
+      };
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      expect((await h.instances.get(INSTANCE.id))?.grant).toEqual({ renewals: 12 });
+      expect(h.recoveries).toHaveLength(1);
+    });
+
+    it("refuses a foreign original instance row even when all publication evidence agrees", async () => {
+      const h = await legacyHarness();
+      const row = { ...legacyRow(), instanceId: "foreign" };
+      h.instances.listUnits = async () => [row];
+      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_identity_mismatch" } });
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it("refuses an invented renewal lease when its review predates the segment", async () => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 1 } });
+      await h.instances.putUnits([
+        { ...legacyRow(), publication, lastPush: HEAD, segments: [{ index: 2, at: NOW - minutesToMs(20) }] },
+      ]);
+      await h.store.put(reviewRecord({ idempotencyKey: `${INSTANCE.id}:U12/s2/1/review` }));
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_budget_unknown", reason: "segment_round_mismatch" },
+      });
+      expect(h.recoveries).toEqual([]);
+    });
+  });
 
   it("legacy binding repair claims a binding-less findings failure from owned coding and posted review evidence only", async () => {
     const h = await legacyHarness();
@@ -6989,7 +7424,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       },
     };
     await h.instances.putUnits([row]);
-    await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(30), finishedAt: NOW - minutesToMs(20) }));
+    await h.store.put(reviewRecord());
     await h.store.put(missingReceiptRecord());
     expect(await callRecovery(h)).toMatchObject({
       status: 200,
@@ -7025,6 +7460,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     "unpriced",
     "rival owner",
     "competing push",
+    "unavailable live ledger",
     "moved during evidence read",
     "incomplete listing",
     "hidden command tail",
@@ -7033,6 +7469,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   ])("missing push receipt refuses %s without changing the original binding", async (scenario) => {
     const h = await ordinaryFindingsHarness();
     const run = missingReceiptRecord();
+    if (scenario === "unavailable live ledger") vi.spyOn(h.ledger, "listLive").mockRejectedValue(new Error("HTTP 503"));
     if (scenario === "missing result") run.events.splice(2, 1);
     if (scenario === "missing tag") run.events.shift();
     if (scenario === "moved during evidence read")
@@ -7454,7 +7891,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       {},
       {
         wakes: {
-          stopped: {
+          "U12/idle/1": {
             kind: "segment" as const,
             index: 1,
             spendUsd: 0,
@@ -7488,7 +7925,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
     await h.instances.put(recoveryInstance());
     await h.instances.putUnits([requestChangesRow()]);
-    await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(30), finishedAt: NOW - minutesToMs(20) }));
+    await h.store.put(reviewRecord());
 
     const response = await callRecovery(h);
 
@@ -7551,7 +7988,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       ending: { cause: "step_threw", step: "U12/1/findings/pr-check" },
     });
     expect((await h.instances.listUnits(INSTANCE.id))[0]).not.toHaveProperty("lastPush");
-    await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(30), finishedAt: NOW - minutesToMs(20) }));
+    await h.store.put(reviewRecord());
     await h.store.put(completedOriginalFindings(fixed));
 
     const response = await callRecovery(h);
@@ -7695,7 +8132,22 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       if (scenario === "duplicate checked attempt") await h.store.put({ ...findings, id: "run-duplicate-findings" });
       const admission = await callRecovery(h);
       if (!scenario.startsWith("authorized")) {
-        expect(admission).toMatchObject({ status: 409, body: { error: "recovery_head_moved" } });
+        const historyReasons: Record<string, string> = {
+          "foreign requester": "child_identity_mismatch",
+          "foreign earlier requester": "child_identity_mismatch",
+          "ambiguous push": "child_history_overlapping",
+          "duplicate checked attempt": "child_history_overlapping",
+          "overlapping failure": "child_history_overlapping",
+          "missing retry finish": "child_time_invalid",
+          "missing review finish": "child_time_invalid",
+          "missing earlier finish": "child_time_invalid",
+          "active attempt": "child_active",
+        };
+        const reason = historyReasons[scenario!];
+        expect(admission).toMatchObject({
+          status: 409,
+          body: reason === undefined ? { error: "recovery_head_moved" } : { error: "recovery_budget_unknown", reason },
+        });
         expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
         expect(h.recoveries).toEqual([]);
         expect(h.dispatched).toEqual([]);
@@ -7805,7 +8257,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         },
       },
     ]);
-    await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(30), finishedAt: NOW - minutesToMs(20) }));
+    await h.store.put(reviewRecord());
     await h.store.put(completedOriginalFindings(HEAD, { pushed: undefined }));
 
     const response = await callRecovery(h);
@@ -7859,14 +8311,25 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         htmlUrl: PR.url,
       },
     });
-    await h.instances.put(recoveryInstance());
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 1 } });
     await h.instances.putUnits([
       {
         ...requestChangesRow(),
         segments: [{ index: 2, at: NOW - minutesToMs(10) }],
+        rounds: [
+          { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(8) },
+          { index: 1, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(5) },
+        ],
+        ending: { kind: "aborted", report: "findings remain", at: NOW - minutesToMs(4) },
       },
     ]);
-    await h.store.put(reviewRecord({ idempotencyKey: `${INSTANCE.id}:U12/s2/1/review` }));
+    await h.store.put(
+      reviewRecord({
+        idempotencyKey: `${INSTANCE.id}:U12/s2/1/review`,
+        startedAt: NOW - minutesToMs(8),
+        finishedAt: NOW - minutesToMs(5),
+      }),
+    );
 
     expect((await callRecovery(h)).status).toBe(200);
 
@@ -7886,13 +8349,13 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         htmlUrl: PR.url,
       },
     });
-    await h.instances.put(recoveryInstance());
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 1 } });
     await h.instances.putUnits([
       {
         ...requestChangesRow(),
-        segments: [{ index: 2, at: NOW - minutesToMs(40) }],
+        segments: [{ index: 2, at: NOW - minutesToMs(50) }],
         wakes: {
-          "U12/idle/1": {
+          "U12/s2/idle/1": {
             kind: "segment",
             index: 2,
             spendUsd: 0,
@@ -7908,7 +8371,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     const response = await callRecovery(h);
 
-    expect(response).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown" } });
+    expect(response).toMatchObject({
+      status: 409,
+      body: { error: "recovery_budget_unknown", reason: "resume_time_missing" },
+    });
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
   });
 
@@ -8129,9 +8595,20 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       },
     });
     await h.instances.put(recoveryInstance());
-    await h.instances.putUnits([requestChangesRow()]);
-    await h.store.put(reviewRecord());
-    await h.store.put(reviewRecord({ id: "run-old-review", idempotencyKey: `${INSTANCE.id}:U12/0/review` }));
+    await h.instances.putUnits([
+      {
+        ...requestChangesRow(),
+        rounds: [
+          { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(55) },
+          { index: 1, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(50) },
+          ...requestChangesRow().rounds.map((entry) => ({ ...entry, index: 2 })),
+        ],
+      },
+    ]);
+    await h.store.put(reviewRecord({ idempotencyKey: `${INSTANCE.id}:U12/2/review` }));
+    await h.store.put(
+      reviewRecord({ id: "run-old-review", startedAt: NOW - minutesToMs(55), finishedAt: NOW - minutesToMs(50) }),
+    );
 
     const response = await callRecovery(h);
 

@@ -316,6 +316,9 @@ export interface ListRunsResult {
   nextBefore?: RunListCursor;
   /** Set when the store threw: `runs` holds live rows only. Never set for `active`. */
   storeUnavailable?: true;
+  /** Set when the live-ledger listing failed: foreign live runs and tombstone
+   *  suppression may be missing. A fallback page cannot prove completeness. */
+  ledgerUnavailable?: true;
 }
 
 export interface RunEventsPageView {
@@ -720,20 +723,21 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     return rows;
   };
   /** The ledger's live rows this process does not hold, as views (item 41). A
-   *  ledger that cannot be read is one warning and no rows — the registry and
-   *  the store still answer. The events are read in parallel, one call per row. */
-  const ledgerLive = async (): Promise<RunView[]> => {
-    const pending = liveRows();
-    if (!pending) return [];
+   *  failed listing is one warning and an explicit completeness gap — the
+   *  registry and store still answer, but cannot prove no foreign run exists.
+   *  The events are read in parallel, one call per row. */
+  const ledgerLive = async (): Promise<Pick<ListRunsResult, "runs" | "ledgerUnavailable">> => {
     let rows: LiveRunRow[];
     try {
+      const pending = liveRows();
+      if (!pending) return { runs: [] };
       rows = await pending;
     } catch (err) {
       warn(`[runs] run ledger list failed — showing this process's runs only: ${describe(err)}`);
-      return [];
+      return { runs: [], ledgerUnavailable: true };
     }
     const foreign = rows.filter((row) => !registry.getById(row.runId)); // ours: the registry row is the truth
-    return Promise.all(
+    const runs = await Promise.all(
       foreign.map(async (row) => {
         let events: RunEvent[] = [];
         try {
@@ -744,6 +748,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         return ledgerView(row, events);
       }),
     );
+    return { runs };
   };
   /** One ledger row by id, with its events; null when the ledger is off, the id
    *  is malformed, the row is not live, or the ledger cannot be read (a warning). */
@@ -993,10 +998,11 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // as live rows — never on a cursor page (live rows all sort ahead of any
       // cursor), never under `finished` — and, whatever was asked, the ids whose
       // store row (a tombstone) must not surface.
-      const ledgerRows = await ledgerLive();
+      const { runs: ledgerRows, ledgerUnavailable } = await ledgerLive();
       const elsewhere = paging || opts.status === "finished" ? [] : ledgerRows.filter(matches);
       const liveRows = [...live, ...elsewhere];
-      if (opts.status === "active") return { runs: liveRows.slice(0, limit) };
+      if (opts.status === "active")
+        return { runs: liveRows.slice(0, limit), ...(ledgerUnavailable ? { ledgerUnavailable } : {}) };
 
       const byId = new Map<string, RunView>();
       let storeUnavailable = false;
@@ -1071,12 +1077,13 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       if (runs.length === limit && last?.finishedAt !== undefined)
         out.nextBefore = { finishedAt: last.finishedAt, id: last.id };
       if (storeUnavailable) out.storeUnavailable = true;
+      if (ledgerUnavailable) out.ledgerUnavailable = true;
       return out;
     },
 
     async liveElsewhere(visibleTo) {
       if (visibleTo.kind === "none") return [];
-      return (await ledgerLive()).filter((r) => matchesPredicate(visibleTo, r));
+      return (await ledgerLive()).runs.filter((r) => matchesPredicate(visibleTo, r));
     },
 
     async getRun(id, opts = {}) {
