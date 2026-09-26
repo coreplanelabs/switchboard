@@ -491,11 +491,29 @@ export interface RoundGate {
   findings: string[];
 }
 
+/** A later human review is evidence to investigate, never typed findings. */
+export interface RecoveryReviewEvidence {
+  id: number;
+  reviewer: { login: string; id: number };
+  headSha: string;
+  submittedAt: number;
+  body: string;
+}
+
+export interface RecoveryAccounting {
+  spendUsd: number;
+  children: { runId: string; key: string; usd: number }[];
+  grant: Grant;
+  renewalsSpent: number;
+}
+
 /** One admitted continuation of an ended original unit. The claim replaces
  * the terminal interpretation before a child starts; its step remains under
  * the original instance/unit idempotency namespace. */
 export interface OriginalUnitRecovery {
   kind: "findings" | "review";
+  externalReview?: RecoveryReviewEvidence;
+  accounting?: RecoveryAccounting;
   round: number;
   expectedHeadSha: string;
   remainingMs: number;
@@ -529,6 +547,8 @@ export interface OriginalUnitRecovery {
 }
 
 export interface OriginalUnitRecoveryReceipt {
+  externalReview?: RecoveryReviewEvidence;
+  accounting?: RecoveryAccounting;
   reviewRunId: string;
   workflowId: string;
   at: number;
@@ -756,6 +776,35 @@ export const isUnitWakeAnswer = (v: unknown): v is UnitWakeAnswer => {
   );
 };
 
+const isPositiveId = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+const isDollars = (v: unknown): v is number => isFinite(v) && v >= 0;
+const isRecoveryReview = (v: unknown): v is RecoveryReviewEvidence =>
+  isObject(v) &&
+  isPositiveId(v.id) &&
+  isObject(v.reviewer) &&
+  isText(v.reviewer.login) &&
+  isPositiveId(v.reviewer.id) &&
+  typeof v.headSha === "string" &&
+  /^[0-9a-f]{40}$/i.test(v.headSha) &&
+  isFinite(v.submittedAt) &&
+  typeof v.body === "string";
+const isRecoveryAccounting = (v: unknown): v is RecoveryAccounting =>
+  isObject(v) &&
+  isDollars(v.spendUsd) &&
+  Array.isArray(v.children) &&
+  v.children.length > 0 &&
+  v.children.every((c) => isObject(c) && isText(c.runId) && isText(c.key) && isDollars(c.usd)) &&
+  new Set(v.children.map((c) => c.runId)).size === v.children.length &&
+  new Set(v.children.map((c) => c.key)).size === v.children.length &&
+  v.children.reduce((sum, c) => sum + c.usd, 0) === v.spendUsd &&
+  isObject(v.grant) &&
+  isDollars(v.grant.renewals) &&
+  Number.isSafeInteger(v.grant.renewals) &&
+  (v.grant.costCapUsd === undefined || (isDollars(v.grant.costCapUsd) && v.grant.costCapUsd > v.spendUsd)) &&
+  isDollars(v.renewalsSpent) &&
+  Number.isSafeInteger(v.renewalsSpent) &&
+  v.renewalsSpent <= v.grant.renewals;
+
 export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isObject(v)) return false;
   const r = v;
@@ -809,6 +858,13 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
       typeof r.recovery.step === "string" &&
       STEP_NAME_PATTERN.test(r.recovery.step) &&
       isText(r.recovery.reviewRunId) &&
+      (r.recovery.accounting === undefined || isRecoveryAccounting(r.recovery.accounting)) &&
+      (r.recovery.externalReview === undefined ||
+        (isRecoveryReview(r.recovery.externalReview) &&
+          r.recovery.kind === "review" &&
+          isRecoveryAccounting(r.recovery.accounting) &&
+          r.recovery.findings === undefined &&
+          r.recovery.findingsRunId === undefined)) &&
       (r.recovery.findingsRunId === undefined || isText(r.recovery.findingsRunId)) &&
       (r.recovery.findingsKey === undefined || isText(r.recovery.findingsKey)) &&
       ((r.recovery.findingsRunId === undefined && r.recovery.findingsKey === undefined) ||
@@ -839,6 +895,8 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
     r.recoveryReceipt !== undefined &&
     (!isObject(r.recoveryReceipt) ||
       !isText(r.recoveryReceipt.reviewRunId) ||
+      (r.recoveryReceipt.externalReview !== undefined && !isRecoveryReview(r.recoveryReceipt.externalReview)) ||
+      (r.recoveryReceipt.accounting !== undefined && !isRecoveryAccounting(r.recoveryReceipt.accounting)) ||
       typeof r.recoveryReceipt.workflowId !== "string" ||
       !INSTANCE_ID_PATTERN.test(r.recoveryReceipt.workflowId) ||
       !isFinite(r.recoveryReceipt.at))

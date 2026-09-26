@@ -1417,6 +1417,7 @@ export function openRecoveredUnitPipeline(
     pr: PrRef;
     expectedHeadSha: string;
     reviewRunId: string;
+    spendUsd?: number;
     findingsRunId?: string;
     findings?: Finding[];
   },
@@ -1435,12 +1436,10 @@ export function openRecoveredUnitPipeline(
     reviewRestarts: 0,
     pr: recovery.pr,
     lastReviewHead: recovery.expectedHeadSha,
-    // Legacy terminal rows do not carry a complete lifetime category split or
-    // cumulative dollars. Recovery therefore measures only this checkpoint;
-    // admission refuses a cost-capped row rather than resetting an enforced
-    // total, and reports label this split as checkpoint-local.
+    // Elapsed categories remain checkpoint-local. Enforced cumulative dollars
+    // come only from the admission claim's complete persisted child evidence.
     spentMs: { coding: 0, review: 0, waiting: 0 },
-    spendUsd: 0,
+    spendUsd: recovery.spendUsd ?? 0,
     findingsByRound: recovery.kind === "findings" ? { [recovery.round]: recovery.findings ?? [] } : {},
     humanAnswersByRound: {},
     dispositionsByRound: {},
@@ -1878,10 +1877,30 @@ function capEnding(s: UnitPipelineState, round?: RoundRef, refused?: Carve): Uni
   };
 }
 
+/** Recovery cannot buy another child (or claim readiness) after the original
+ * dollar cap is spent. Unknown cost is not zero and never resets that cap. */
+function recoveryCostEnding(s: UnitPipelineState): UnitEnding | undefined {
+  const cap = s.input.grant?.costCapUsd;
+  if (s.input.recovery === undefined || cap === undefined) return undefined;
+  if (s.spendUsd !== null && Number.isFinite(s.spendUsd) && s.spendUsd >= 0 && s.spendUsd < cap) return undefined;
+  return {
+    kind: "aborted",
+    reason:
+      s.spendUsd === null
+        ? `The original $${cap} cost cap cannot be proven: cumulative child spend is unknown.`
+        : `The original $${cap} cost cap is exhausted; cumulative child spend is $${s.spendUsd}.`,
+    reviewRounds: s.reviewRounds,
+  };
+}
+
 /** Start a round if its carve holds (agent-ship item 8): a round the
  *  remainder cannot carve above its floor is not dispatched, and the unit ends
  *  at the cap naming the round, what it would have got and the floor. */
 function enterRound(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNote[] = []): Transition {
+  if (s.input.recovery !== undefined && round.index > s.input.caps.maxRounds)
+    return end(s, { kind: "round_cap", maxRounds: s.input.caps.maxRounds, reviewRounds: s.reviewRounds }, notes);
+  const costEnding = recoveryCostEnding(s);
+  if (costEnding !== undefined) return end(s, costEnding, notes);
   const carved = roundCarve(s, round);
   if (carved.kind === "refused") return end(s, capEnding(s, round, carved), notes);
   const reviewRounds = round.kind === "review" ? round.index : s.reviewRounds;
@@ -1976,6 +1995,8 @@ function settleCoding(
         }
       : {}),
   };
+  const costEnding = recoveryCostEnding(next);
+  if (costEnding !== undefined) return end(next, costEnding, [roundNote(round, "aborted")]);
   const readySalvage = round.kind === "coding" && completedSameHeadSalvage(next, facts.pushed, facts);
   const checkpoint = interruptedCheckpoint(next, facts.pushed, round.kind === "findings" ? undefined : facts);
   const mode = stopMode(facts.status);
@@ -2150,6 +2171,8 @@ function settleReview(
     ...(verdict.summary !== undefined ? { lastVerdictSummary: verdict.summary } : {}),
   };
   const notes = [roundNote(round, verdict.verdict)];
+  const costEnding = recoveryCostEnding(next);
+  if (costEnding !== undefined) return end(next, costEnding, notes);
   if (verdict.verdict === "approve") {
     // Merge-ready stands on the POSTED approval: an approve whose post did
     // not land left no approving review on the pull request. The reason is
