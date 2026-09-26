@@ -241,6 +241,20 @@ function unwrapSlack(text: string): string {
   return text.replace(/<(https?:\/\/[^|>\s]+)(?:\|[^>]*)?>/g, " $1 ");
 }
 
+/** A current, unquoted `PR #N` reference. Its repository must still come from
+ * a durable thread PR; the number alone never establishes one. */
+export function barePrNumberOf(text: string): number | undefined {
+  const token = /\b(?:PR|pull request)\s*#(\d+)\b/i.exec(unwrapSlack(text).replace(CODE_SPAN, " "))?.[1];
+  const number = token === undefined ? undefined : Number(token);
+  return number !== undefined && Number.isSafeInteger(number) && number > 0 ? number : undefined;
+}
+
+/** A PR URL or `owner/name#N` in the current message, before any thread
+ * history or repository fallback is considered. */
+export function explicitPrOf(text: string): { repo: string; number: number } | undefined {
+  return extractSignals(text).pr;
+}
+
 /** Strip wrapping punctuation a token picks up in prose ("vary:", "(api)"). */
 function stripPunct(token: string): string {
   return token.replace(/^[("'`<[{*]+/, "").replace(/[)"'`>\]}.,;:!?*]+$/, "");
@@ -633,16 +647,8 @@ export async function resolveRepoContext(
   // A bare PR number has a repository only in a thread with a durable PR.
   // Resolve it against that repository so the current request can override
   // an older cited PR without treating arbitrary issue prose as a target.
-  const bareNumberText =
-    !s.pr && repo === records?.pr?.repo
-      ? /\b(?:PR|pull request)\s*#(\d+)\b/i.exec(unwrapSlack(msg.text).replace(CODE_SPAN, " "))?.[1]
-      : undefined;
-  const bareNumber = bareNumberText === undefined ? undefined : Number(bareNumberText);
-  const namedPr =
-    s.pr ??
-    (repo && bareNumber !== undefined && Number.isSafeInteger(bareNumber) && bareNumber > 0
-      ? { repo, number: bareNumber }
-      : undefined);
+  const bareNumber = !s.pr && repo === records?.pr?.repo ? barePrNumberOf(msg.text) : undefined;
+  const namedPr = s.pr ?? (repo && bareNumber !== undefined ? { repo, number: bareNumber } : undefined);
 
   // PR head — one REST call whenever the CURRENT message names a PR of the
   // resolved repo, regardless of any ref phrasing beside it. The PR is the

@@ -192,6 +192,51 @@ export type ThreadOwner = (
   | { kind: "none" }
 ) & { releasedPr?: ThreadPullRequest };
 
+function publishedPrOf(unit: CoordinatorUnit, instanceId: string, threadKey: string): ThreadPullRequest | undefined {
+  const binding = unit.publication;
+  if (
+    unit.threadKey !== threadKey ||
+    unit.instanceId !== instanceId ||
+    unit.ending?.kind !== "merge_ready" ||
+    binding === undefined ||
+    unit.pr?.number !== binding.pr ||
+    unit.branch !== binding.headRef ||
+    unit.branch !== binding.publicationRef ||
+    binding.owner.instanceId !== instanceId ||
+    binding.owner.unit !== unit.unit ||
+    (unit.lastPush !== undefined && unit.lastPush !== binding.expectedHeadSha)
+  )
+    return undefined;
+  return { repo: binding.repo, number: binding.pr, at: unit.ending.at };
+}
+
+/** A current PR number may name a completed publication hidden behind a newer
+ * stopped pipeline. Read each distinct instance on the thread and accept only
+ * its exact, completed publication binding for that number. */
+export async function releasedPrOf(
+  runs: readonly RunView[],
+  unitsOf: (instanceId: string) => Promise<CoordinatorUnit[]>,
+  threadKey: string,
+  number: number,
+): Promise<ThreadPullRequest | undefined> {
+  const ids = [
+    ...new Set(
+      runs.flatMap((run) => [run.instanceId, run.parentInstanceId].filter((id): id is string => id !== undefined)),
+    ),
+  ];
+  const reads = await Promise.all(
+    ids.map(async (id) => ({ id, units: await unitsOf(id).catch(() => [] as CoordinatorUnit[]) })),
+  );
+  const matches = reads.flatMap(({ id, units }) =>
+    units.flatMap((unit) => {
+      const pr = publishedPrOf(unit, id, threadKey);
+      return pr?.number === number ? [pr] : [];
+    }),
+  );
+  if (new Set(matches.map((pr) => pr.repo)).size !== 1) return undefined;
+  return matches.sort((a, b) => b.at - a.at)[0];
+}
+
 export async function ownerOf(
   runs: readonly RunView[],
   unitsOf: (instanceId: string) => Promise<CoordinatorUnit[]>,
@@ -223,24 +268,12 @@ export async function ownerOf(
     if (ended.length === 1 && ship !== undefined) return { kind: "pipeline", instanceId, run: ship, unit: ended[0]! };
     if (ended.length > 1 && ship !== undefined)
       return { kind: "pipeline_ambiguous", instanceId, run: ship, units: ended };
-    const released = units.filter((u) => {
-      const binding = u.publication;
-      return (
-        u.threadKey === threadKey &&
-        u.instanceId === instanceId &&
-        u.ending?.kind === "merge_ready" &&
-        binding !== undefined &&
-        u.pr?.number === binding.pr &&
-        u.branch === binding.headRef &&
-        u.branch === binding.publicationRef &&
-        binding.owner.instanceId === instanceId &&
-        binding.owner.unit === u.unit &&
-        (u.lastPush === undefined || u.lastPush === binding.expectedHeadSha)
-      );
+    const released = units.flatMap((unit) => {
+      const pr = publishedPrOf(unit, instanceId, threadKey);
+      return pr ? [pr] : [];
     });
     if (released.length === 1) {
-      const unit = released[0]!;
-      releasedPr = { repo: unit.publication!.repo, number: unit.publication!.pr, at: unit.ending!.at };
+      releasedPr = released[0]!;
     }
   }
   if (hosted !== undefined) return { kind: "live", run: hosted };

@@ -16918,6 +16918,135 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.deps.runs!.getRun).not.toHaveBeenCalled();
   });
 
+  it("an explicit PR number reaches target resolution through an older completed unit despite a newer stopped pipeline", async () => {
+    const s = await endedPrContinuationSetup();
+    const stoppedId = "ship-stopped";
+    await s.instances.putUnits([
+      unitRow({
+        pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
+        publication: {
+          repo: "acme/api",
+          pr: 8,
+          headRef: s.branch,
+          baseRef: "main",
+          expectedHeadSha: s.recordedHead,
+          publicationRef: s.branch,
+          owner: { instanceId: INSTANCE, unit: "U12" },
+        },
+        ending: { kind: "merge_ready", report: "ready", at: 2_000 },
+      }),
+      unitRow({
+        instanceId: stoppedId,
+        unit: "U12",
+        branch: "ship/stopped/u12",
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        ending: { kind: "stopped", report: "stopped", at: 3_000 },
+      }),
+    ]);
+    const stoppedParent = { ...s.shipParent, id: "stopped-parent", instanceId: stoppedId, finishedAt: 3_000 };
+    const publishedParent = { ...s.shipParent, status: "completed" as const, finishedAt: 2_000 };
+    const handedRecords: unknown[] = [];
+    s.deps.resolveRepoContext = vi.fn((_msg, _history, records) => {
+      handedRecords.push(records);
+      return { repo: "acme/api", pr: 8, ref: s.branch, headSha: s.recordedHead };
+    });
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: {
+        exec: async () => "",
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => ({ released: true }),
+      },
+    });
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("done"));
+    await dispatch(s.deps, msg("agent:explore PR #8. Read only.", "slack:UADMIN"), fakeIO().io, {
+      thread: [stoppedParent, publishedParent],
+    });
+    expect(handedRecords).toContainEqual({ pr: { repo: "acme/api", number: 8, at: 2_000 } });
+  });
+
+  it("an explicitly named older publication stays selected after a newer publication is resolved", async () => {
+    const s = await endedPrContinuationSetup();
+    const newerId = "ship-newer";
+    await s.instances.putUnits([
+      unitRow({
+        pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
+        publication: {
+          repo: "acme/api",
+          pr: 8,
+          headRef: s.branch,
+          baseRef: "main",
+          expectedHeadSha: s.recordedHead,
+          publicationRef: s.branch,
+          owner: { instanceId: INSTANCE, unit: "U12" },
+        },
+        ending: { kind: "merge_ready", report: "ready", at: 2_000 },
+      }),
+      unitRow({
+        instanceId: newerId,
+        unit: "U12",
+        branch: "ship/newer/u12",
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        publication: {
+          repo: "acme/api",
+          pr: 7,
+          headRef: "ship/newer/u12",
+          baseRef: "main",
+          expectedHeadSha: s.recordedHead,
+          publicationRef: "ship/newer/u12",
+          owner: { instanceId: newerId, unit: "U12" },
+        },
+        ending: { kind: "merge_ready", report: "ready", at: 3_000 },
+      }),
+    ]);
+    const newerParent = {
+      ...s.shipParent,
+      id: "newer-parent",
+      instanceId: newerId,
+      status: "completed" as const,
+      finishedAt: 3_000,
+    };
+    const olderParent = { ...s.shipParent, status: "completed" as const, finishedAt: 2_000 };
+    const handedRecords: unknown[] = [];
+    s.deps.resolveRepoContext = vi.fn((_msg, _history, records) => {
+      handedRecords.push(records);
+      return { repo: "acme/api", pr: 8, ref: s.branch, headSha: s.recordedHead };
+    });
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: {
+        exec: async () => "",
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => ({ released: true }),
+      },
+    });
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("done"));
+    await dispatch(s.deps, msg("agent:explore PR #8. Read only.", "slack:UADMIN"), fakeIO().io, {
+      thread: [newerParent, olderParent],
+    });
+    expect(handedRecords).toContainEqual({ pr: { repo: "acme/api", number: 8, at: 2_000 } });
+  });
+
+  it("a plain reply naming another PR cannot reissue an ended pipeline on its old PR", async () => {
+    const s = await endedPrContinuationSetup();
+    const { io, replies } = fakeIO();
+    await dispatch(s.deps, msg("Please fix PR #8's title.", "slack:UADMIN"), io, {
+      thread: [s.shipParent],
+    });
+    expect(replies.join("\n")).toContain("names PR #8, but the ended pipeline owns PR #7");
+    expect(s.shipBranch).not.toHaveBeenCalled();
+  });
+
+  it("a plain PR URL naming another PR cannot reissue an ended pipeline on its old PR", async () => {
+    const s = await endedPrContinuationSetup();
+    const { io, replies } = fakeIO();
+    await dispatch(s.deps, msg("Please fix https://github.com/acme/api/pull/8.", "slack:UADMIN"), io, {
+      thread: [s.shipParent],
+    });
+    expect(replies.join("\n")).toContain("names acme/api#8, but the ended pipeline owns PR #7");
+    expect(s.shipBranch).not.toHaveBeenCalled();
+  });
+
   it("a newer completed run's PR supersedes an older released unit PR", async () => {
     const s = await endedPrContinuationSetup();
     await s.instances.putUnits([
