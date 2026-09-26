@@ -389,6 +389,100 @@ describe("judgeToolCall — an existing-PR publication fence", () => {
   });
 });
 
+describe("judgeToolCall — multiline pushes", () => {
+  const expected = "a".repeat(40);
+  const branch = "fix/existing";
+  const lease = `--force-with-lease=refs/heads/${branch}:${expected}`;
+  const own = {
+    ...ctx,
+    branch,
+    publication: { authority: { ref: branch, expectedHeadSha: expected } },
+  };
+  const push = `git push ${lease} origin ${branch}:refs/heads/${branch}`;
+  const status = 'result=$?\ncat push.log\ngit rev-parse HEAD\nexit "$result"';
+  const judge = (command: string, rules: ToolRuleContext = own) => judgeToolCall("bash", { command }, rules);
+
+  it("allows one owned push followed by status and logging commands without inventing refspecs", () => {
+    for (const separator of ["\n", "; ", " && ", " || ", " | ", " & "]) {
+      expect(judge(`git status --short\n${push} > push.log 2>&1${separator}${status}`), separator).toEqual({
+        verdict: "allowed",
+      });
+    }
+  });
+
+  it("refuses HEAD with the source-specific reason even when status commands follow", () => {
+    expect(judge(`git push ${lease} origin HEAD:refs/heads/${branch}\n${status}`)).toEqual({
+      verdict: "refused",
+      reason: `repo:use — push from the owned publication ref ${branch}; the checkout may have moved`,
+    });
+  });
+
+  it("keeps the bound branch source check without an existing-PR fence", () => {
+    expect(judge(`${push}\n${status}`, { ...ctx, branch })).toEqual({ verdict: "allowed" });
+    expect(judge(`git push origin HEAD:${branch}\n${status}`, { ...ctx, branch })).toEqual({
+      verdict: "refused",
+      reason: `repo:use — push from the run's branch ${branch}; the checkout may have moved`,
+    });
+  });
+
+  it("folds escaped-newline continuations without splitting a command or a word", () => {
+    const command = `git \\\n  push \\\n  ${lease} \\\n  origin fix/ex\\\nisting:refs/heads/${branch} \\\n  2>&1\n${status}`;
+    expect(judge(command)).toEqual({ verdict: "allowed" });
+    expect(judge(command, { ...own, identity: "read" })).toEqual({
+      verdict: "refused",
+      reason: "read-only — a read-identity run never pushes",
+    });
+  });
+
+  it("preserves the remote, owned ref, source, single destination and explicit lease fences on continued pushes", () => {
+    for (const [args, reason] of [
+      [`${lease} upstream ${branch}`, "repo:use — push to remote `upstream`, not the run's repository (origin)"],
+      [`${lease} origin ${branch}:main`, `repo:use — push to \`main\`, not the owned publication ref ${branch}`],
+      [
+        `${lease} origin HEAD:${branch}`,
+        `repo:use — push from the owned publication ref ${branch}; the checkout may have moved`,
+      ],
+      [
+        `${lease} origin ${branch} \\\n other:other`,
+        "repo:use — existing-PR publication allows exactly one owned destination",
+      ],
+      ...["", "--force-with-lease", lease.replace(expected, "b".repeat(40))].map((flag) => [
+        `${flag} origin ${branch}`,
+        `repo:use — existing-PR publication requires \`${lease}\` so concurrent movement fails atomically`,
+      ]),
+    ]) {
+      expect(judge(`git push \\\n ${args}\n${status}`), args).toEqual({ verdict: "refused", reason });
+    }
+  });
+
+  it("never borrows the explicit lease from a later command", () => {
+    expect(judge(`git push origin ${branch}\nprintf '%s' ${lease}\n${status}`)).toEqual({
+      verdict: "refused",
+      reason: `repo:use — existing-PR publication requires \`${lease}\` so concurrent movement fails atomically`,
+    });
+  });
+
+  it("judges later pushes independently rather than swallowing them as the first push's arguments", () => {
+    expect(judge(`${push}\n${push}\n${status}`)).toEqual({ verdict: "allowed" });
+    expect(judge(`${push}\ngit push ${lease} origin HEAD:${branch}\n${status}`)).toEqual({
+      verdict: "refused",
+      reason: `repo:use — push from the owned publication ref ${branch}; the checkout may have moved`,
+    });
+  });
+
+  it("does not let a quoted newline hide a second destination", () => {
+    for (const quote of ["'", '"']) {
+      expect(judge(`${push} --push-option=${quote}one\ntwo${quote} other:other\n${status}`)).toMatchObject({
+        verdict: "refused",
+      });
+    }
+  });
+
+  it("does not mistake an escaped backslash before a newline for a continuation", () => {
+    expect(judge(`${push} --push-option=literal\\\\\n${status}`)).toEqual({ verdict: "allowed" });
+  });
+});
+
 describe("judgeToolCall — a run that names its own branch", () => {
   const own = { identity: "write" as const, checkout: "/work/repo", protectedBranches: ["main", "release/1.2"] };
   it("may push any branch to origin but the protected ones — the base its pull request targets", () => {
