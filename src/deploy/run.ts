@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { MINUTE_MS } from "../core/budgets.js";
 import {
   DRAINED_GAVE_UP_SUFFIX,
   drainBeganLine,
@@ -15,6 +16,12 @@ import {
   undrainUrl,
   type PostAnswer,
 } from "./residentDrain.js";
+import {
+  RESIDENT_READY_WAIT_MS,
+  residentWorkerProblem,
+  residentRegistryProblem,
+  reconciledResources,
+} from "./residentReadiness.js";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import { startProcessRoot } from "../core/requestTrace.js";
@@ -36,6 +43,7 @@ import {
   classifyDeployOutput,
   decideAccount,
   lastErrorLines,
+  RESIDENT_BEARER_ENVS,
   UNSET_ENV,
   WORKER_DIRS,
   workersFor,
@@ -308,16 +316,17 @@ export function hasNodeModules(dir: string): boolean {
  *  version when it is the package (`plan.root`), and the install probe (src/deploy/plan.ts `DeployHost`). */
 export function deployHostOnHost(): DeployHost {
   let version: string | undefined;
+  let commit: string | undefined;
   if (OPERATOR_ROOT.mode === "package") {
     // A package without its stamp still plans; the runner refuses it by name before anything deploys.
     try {
-      version = packageSourceOnHost().version;
+      ({ version, commit } = packageSourceOnHost());
     } catch {
       version = undefined;
     }
   }
   return {
-    root: { mode: OPERATOR_ROOT.mode, path: OPERATOR_ROOT.root, ...(version !== undefined ? { version } : {}) },
+    root: { mode: OPERATOR_ROOT.mode, path: OPERATOR_ROOT.root, ...(version !== undefined ? { version, commit } : {}) },
     hasNodeModules,
   };
 }
@@ -610,11 +619,11 @@ async function wake(name: string, url: string, io: DeployRunnerIO): Promise<void
 
 /** GET a `/healthz`, with a bearer when the Worker sits behind one (the sandbox):
  *  the status and the parsed body, or why the request failed. Never throws. */
-async function readHealthz(url: string, bearer?: string): Promise<HealthRead> {
+async function readHealthz(url: string, bearer?: string, timeoutMs = 20_000): Promise<HealthRead> {
   try {
     const res = await fetch(url, {
       headers: bearer ? { authorization: `Bearer ${bearer}` } : {},
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     return { status: res.status, body: parseHealthz(await res.text()) };
   } catch (err) {
@@ -643,7 +652,7 @@ type GateOutcome = { live: true; detail: string; waitedMs: number } | { live: fa
 /** The sandbox gate's I/O, injectable so the loop is unit-tested without a network, wrangler or a clock. */
 export interface SandboxGateDeps {
   env: Record<string, string | undefined>;
-  readHealth(url: string, bearer?: string): Promise<HealthRead>;
+  readHealth(url: string, bearer?: string, timeoutMs?: number): Promise<HealthRead>;
   /** `wrangler containers info <app> --json` → the application's version and image, run in `dir`. */
   readAppState(dir: string, containerApp: string): Promise<Read<AppState>>;
   /** `wrangler containers instances <app> --json`, every page, run in `dir`. */
@@ -690,7 +699,7 @@ const INSTANCES_PER_PAGE = 100;
 export const defaultSandboxGateDeps: SandboxGateDeps = {
   env: process.env,
   postJson,
-  readHealth: (url, bearer) => readHealthz(url, bearer),
+  readHealth: (url, bearer, timeoutMs) => readHealthz(url, bearer, timeoutMs),
   readAppState: async (dir, containerApp) => {
     const id = await resolveContainerAppId(dir, containerApp);
     if ("error" in id) return id;
@@ -942,24 +951,36 @@ async function deployStepTraced(
     ? Math.max(step.waitMaxMs ?? plan.waitMaxMs, RESIDENT_DRAINED_WAIT_MAX_MS)
     : (step.waitMaxMs ?? plan.waitMaxMs);
   const deadline = started + waitMaxMs;
+  let result: StepOutcome;
+  let readyDeadline = 0;
+  let resources: string[] = [];
   try {
-    const r = await deployStepLoop(step, plan, expectedCommit, io, deps, exec, root, {
+    result = await deployStepLoop(step, plan, expectedCommit, io, deps, exec, root, {
       started,
       waitMaxMs,
       deadline,
       drained: drain.drained,
     });
-    // The swap landed: reconcile every resident's container onto the new image
-    // INSIDE the drain window — before the `finally` below lifts it — so no
-    // run is admitted into a container the reconcile is about to restart
-    // (release-and-deploy item 31; resident-repos item 69's order). Only after
-    // a deployed step: a failed or refused one changed no image, and the drain
-    // must still lift promptly.
-    if (r.ok && drain.attempted) await reconcileFleet(step, io, deps);
-    return r;
+    if (result.ok && step.name === "resident") {
+      readyDeadline = deps.now() + RESIDENT_READY_WAIT_MS;
+      // Reconcile only against the new Worker; an old healthy build can stamp
+      // the old image current before the platform routes the uploaded version.
+      const healthProblem = await waitForResident(step, expectedCommit, readyDeadline, io, deps);
+      if (healthProblem) result = residentNotReady(result, healthProblem);
+      else if (drain.attempted) {
+        const answer = await reconcileFleet(step, io, deps);
+        const reconciled = answer && reconciledResources(answer);
+        if (!reconciled)
+          result = residentNotReady(
+            result,
+            "reconcile did not confirm the affected fleet; image reports cannot be trusted",
+          );
+        else resources = reconciled;
+      }
+    }
   } finally {
     // Whatever the step ended as — live, refused past the budget, failed — the
-    // fleet reopens; a drain nobody lifted would end by itself, but a run should
+    // lift is requested; a drain nobody lifted would end by itself, but a run should
     // not wait the margin out for a deploy that is over.
     // Lifted whenever a drain was ASKED for, not only when its answer said it
     // landed: a `/drain` whose answer was lost after the registry stored the
@@ -967,6 +988,58 @@ async function deployStepTraced(
     // `/undrain` is idempotent, and a rejected bearer answers 401 to both alike.
     if (drain.attempted) await endDrain(step, drain, io, deps);
   }
+  if (result.ok && step.name === "resident") {
+    const problem = await waitForResident(step, expectedCommit, readyDeadline, io, deps, resources);
+    if (problem) return residentNotReady(result, problem);
+    io.log("[deploy:all] resident: live — exact Worker commit, registry undrained, every image report current");
+    return { ...result, live: "live" };
+  }
+  return result;
+}
+
+function residentNotReady(result: StepOutcome, problem: string): StepOutcome {
+  return {
+    ...result,
+    ok: false,
+    live: `deployed, not live: ${problem}`,
+    reason: `partial deployment — resident Worker uploaded but NOT ready: ${problem}; no rollback performed`,
+  };
+}
+
+/** Reconcile and lift spend the same readiness budget as both read phases;
+ *  cleanup still attempts its independently bounded lift after expiry.
+ *  Undefined resources means the pre-reconcile health phase. A cleared lift
+ *  is not evidence, and --force only bypasses the preflight. */
+async function waitForResident(
+  step: DeployStep,
+  expectedCommit: string,
+  deadline: number,
+  io: DeployRunnerIO,
+  deps: SandboxGateDeps,
+  resources?: readonly string[],
+): Promise<string | undefined> {
+  const base = step.drain?.url ?? step.setEnv.RESIDENT_BASE_URL;
+  if (!base) return "resident base URL missing";
+  const bearer = RESIDENT_BEARER_ENVS.map((name) => deps.env[name]).find((value) => value?.trim());
+  if (resources && !bearer) return `registry unreadable: no ${RESIDENT_BEARER_ENVS.join(" / ")}`;
+  let problem = "readiness deadline expired before readback";
+  while (deps.now() < deadline) {
+    const timeoutMs = Math.min(LIVE_GATE_POLL_MS, deadline - deps.now());
+    const [health, registry] = await Promise.all([
+      deps.readHealth(new URL("/healthz", base).toString(), undefined, timeoutMs),
+      resources ? deps.readHealth(new URL("/residents", base).toString(), bearer, timeoutMs) : undefined,
+    ]);
+    const problems = [
+      residentWorkerProblem(health, expectedCommit),
+      registry && residentRegistryProblem(registry, resources),
+    ].filter(Boolean);
+    if (problems.length === 0 && deps.now() <= deadline) return undefined;
+    problem = problems.join("; ") || "readback arrived after the readiness deadline";
+    io.log(`[deploy:all] resident: waiting for readiness — ${problem}`);
+    const left = deadline - deps.now();
+    if (left > 0) await deps.sleep(Math.min(LIVE_GATE_POLL_MS, left));
+  }
+  return `${problem} — readiness not proven within ${RESIDENT_READY_WAIT_MS / MINUTE_MS} min`;
 }
 
 /** The fleet drain before the step's first attempt: with the step's drain and its drain bearer
@@ -998,13 +1071,17 @@ async function beginDrain(
 /** The reconcile inside the drain window: `POST /reconcile` walks every
  *  resident and restarts each container that predates the image just deployed
  *  while the fleet is still closed; the line says what each resident answered.
- *  Best-effort like the lift — a refused or lost answer never fails the deploy:
- *  a stale container then restarts on its own next quiet attach or refresh. */
-async function reconcileFleet(step: DeployStep, io: DeployRunnerIO, deps: SandboxGateDeps): Promise<void> {
+ *  Its affected resources must all appear in the readiness readback. */
+async function reconcileFleet(
+  step: DeployStep,
+  io: DeployRunnerIO,
+  deps: SandboxGateDeps,
+): Promise<PostAnswer | undefined> {
   const bearer = step.drain ? deps.env[step.drain.tokenEnv] : undefined;
   if (!step.drain || !bearer || !deps.postJson) return;
   const answer = await deps.postJson(reconcileUrl(step.drain.url), bearer, {});
   io.log(reconcileLine(step.name, answer));
+  return answer;
 }
 
 async function endDrain(
@@ -1039,7 +1116,7 @@ async function deployStepLoop(
     const outcome = classifyDeployOutput(r.code, r.output);
     if (outcome.kind === "deployed") {
       if (!step.liveGate) {
-        if (step.wakeUrl) await wake(step.name, step.wakeUrl, io);
+        if (step.wakeUrl && step.name !== "resident") await wake(step.name, step.wakeUrl, io);
         return { ok: true, versionId: outcome.versionId, live: "n/a" };
       }
       io.log(
