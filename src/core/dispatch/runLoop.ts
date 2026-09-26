@@ -98,6 +98,7 @@ import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import { assignRunLiveState } from "../runLiveState.js";
 import { causeOfClose } from "../plane/decide.js";
+import { RefusalError } from "../refusal.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
 import type { WaitCapability } from "./awaitChildren.js";
 import type { SpawnCapability } from "./spawn.js";
@@ -216,6 +217,9 @@ export interface RunLoopContext {
   startedAt: number;
   /** When the loop took the card, after the claim: the activity clock's start (the "quiet for …" suffix counts from here, not from `startedAt`). */
   loopStartedAt: number;
+  /** Recheck the fixed setup deadline after pre-harness awaits, before the
+   *  first open. Relaunches continue the harness's lease instead. */
+  assertAdmissionBudget: () => void;
   channelVisibility: ChannelVisibility;
   /** The severity to address in force for this run (agent-review.md item 5a),
    *  resolved by the dispatcher — directive > user > channel > org — for the
@@ -1536,6 +1540,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // standing for the relaunch is forgotten, the record says why, and the
       // catch below finishes the run `interrupted` for the dispatcher's
       // restart. Every other throw is the run's, as before.
+      ctx.assertAdmissionBudget();
       for (;;) {
         try {
           harnessSession = await openRun();
@@ -2121,6 +2126,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     else {
       runFailed = true;
       gateBypassed = err instanceof HarnessGateBypassedError;
+      if (err instanceof RefusalError) {
+        const { code, cause, text } = err.refusal;
+        events.publish({ type: "refusal", code, cause, text });
+      }
       if (err instanceof ModelPolicyRefusedError) failure = { kind: "policy_refusal" };
       else if (err instanceof ModelTransientFailureError) failure = { kind: "provider_transient" };
       // The record must say why a failed run failed even when the reply is
@@ -2154,11 +2163,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // A failed or interrupted coordinator coding child is the highest-risk
     // teardown: its model cannot make another push. Preserve the tree now,
     // before the release removes it, whatever raised the ending.
-    await preserveCodingChildWork("ending").catch((salvageErr: unknown) => {
-      const summary = `the interrupted-work checkpoint failed before teardown: ${salvageErr instanceof Error ? salvageErr.message : String(salvageErr)}`;
-      events.publish({ type: "run_note", kind: "work_salvage", summary, at: clock() });
-      shell.note("quiet", summary);
-    });
+    // A fresh run's admission expiry leaves no model work to checkpoint; do
+    // not turn it into a mechanical push. A resume may retain earlier work.
+    if (resume !== undefined || !(err instanceof RefusalError && err.refusal.code === "run_budget_exhausted"))
+      await preserveCodingChildWork("ending").catch((salvageErr: unknown) => {
+        const summary = `the interrupted-work checkpoint failed before teardown: ${salvageErr instanceof Error ? salvageErr.message : String(salvageErr)}`;
+        events.publish({ type: "run_note", kind: "work_salvage", summary, at: clock() });
+        shell.note("quiet", summary);
+      });
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
     if (!interrupted) throw err;
     // A coordinator's child says the interruption on its own record

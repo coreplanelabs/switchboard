@@ -11063,7 +11063,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         createdAt: Date.now() - 1_000,
       };
       await instances.put(instance);
-      const { io } = ioWithCard();
+      const { io, replies } = ioWithCard();
       const started = vi.fn();
       io.runStarted = started;
       const finished = vi.fn();
@@ -11108,7 +11108,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         budget: 10,
         prompt: `work on ref ${ref}${preset === "review" ? " https://github.com/acme/api/pull/7" : ""}`,
       };
-      return { ...h, provider, repoCtx, instance, admin, call, spawnBody, io, started, finished, dispatched };
+      return { ...h, provider, repoCtx, instance, admin, call, spawnBody, io, replies, started, finished, dispatched };
     }
 
     it.each(["coding", "review"] as const)(
@@ -11264,6 +11264,270 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       expect(h.ledger.finish).not.toHaveBeenCalled();
       expect(h.finished).not.toHaveBeenCalled();
       expect(await h.store.get("run-l")).toBeNull();
+    });
+
+    it.each(["waiting_deploy", "waiting_repository"] as const)(
+      "continues the advertised child after the %s bound expires within its admission budget",
+      async (state) => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const h = await setup();
+        const exec = vi.fn(async () => "");
+        const executor = { exec, readFile: async () => "", writeFile: async () => "" };
+        const projections: string[] = [];
+        let admissionBound = 0;
+        let runBound = 0;
+        let waitBound = 0;
+        const commit = h.registry.commitLiveState.bind(h.registry);
+        vi.spyOn(h.registry, "commitLiveState").mockImplementation((id, assignment) => {
+          const accepted = commit(id, assignment);
+          if (accepted) {
+            const row = h.ledger.live.get(id)!;
+            const summary = h.registry.getById(id)!;
+            expect(summary.liveState).toEqual(row.liveState);
+            expect(summary.liveStateSeq).toBe(row.liveStateSeq);
+            projections.push(summary.liveState!.state);
+          }
+          return accepted;
+        });
+        vi.mocked(makeExecutor).mockImplementationOnce(async (_config, context) => {
+          admissionBound = h.registry.getById("run-l")!.liveState!.bound!;
+          runBound = admissionBound;
+          if (state === "waiting_repository") {
+            // A lease already running is authoritative when it ends sooner.
+            runBound -= minutesToMs(1);
+            vi.spyOn(RunControl.prototype, "remainingMs").mockImplementation(() => runBound - Date.now());
+          }
+          waitBound = Date.now() + minutesToMs(3);
+          await context.onLiveStateObservation?.({
+            ...(state === "waiting_deploy" ? { state, reason: "deploy" } : { state, reason: "repository_container" }),
+            bound: waitBound,
+            attempt: 1,
+          });
+          vi.setSystemTime(waitBound + 1);
+          return { executor, backend: "sandbox" };
+        });
+        vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (_deps, run) => {
+          expect(run.runId).toBe("run-l");
+          expect(run.toolContext.executor).toBe(executor);
+          expect(h.ledger.live.get("run-l")).toMatchObject({
+            runId: "run-l",
+            phase: "live",
+            meta: { parentInstanceId: h.instance.id, ref: h.repoCtx.ref, selection: "sandbox" },
+            liveState: { state: "working", bound: runBound },
+          });
+          expect(await h.call("spawn", h.spawnBody)).toMatchObject({
+            status: 200,
+            body: { runId: "run-l", alreadySpawned: true },
+          });
+          return piAnswered("done");
+        });
+        try {
+          expect(await h.call("spawn", h.spawnBody)).toMatchObject({ status: 200, body: { runId: "run-l" } });
+          await Promise.all(h.dispatched);
+          await h.writer.settled();
+          expect(runPiHarnessOpen).toHaveBeenCalledOnce();
+          expect(projections).toEqual([
+            "admitted",
+            state,
+            "falling_back",
+            "preparing",
+            "working",
+            "wrapping_up",
+            "ended",
+          ]);
+          const record = await h.store.get("run-l");
+          expect(record).toMatchObject({ id: "run-l", status: "completed", profile: { minutes: 10 } });
+          const transitions = record!.events.filter((e) => e.type === "run_state");
+          for (const next of ["falling_back", "preparing", "working"]) {
+            expect(transitions).toContainEqual(
+              expect.objectContaining({
+                state: next,
+                since: waitBound + 1,
+                bound: runBound,
+              }),
+            );
+          }
+          expect(runBound).toBeGreaterThan(waitBound + 1);
+          expect(runBound).toBeLessThanOrEqual(admissionBound);
+          expect(h.started).toHaveBeenCalledExactlyOnceWith({ id: "run-l" });
+          expect(h.dispatched).toHaveLength(1);
+          expect(makeExecutor).toHaveBeenCalledOnce();
+          expect(h.ledger.finish).toHaveBeenCalledOnce();
+          expect(h.ledger.live.size).toBe(0);
+          expect(h.ledger.finished.size).toBe(1);
+          expect((await h.store.list({})).map((r) => r.id)).toEqual(["run-l"]);
+          expect(h.fallbackPuts).toEqual([]);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each([
+      ["falling_back", 0],
+      ["falling_back", 1],
+      ["preparing", 0],
+      ["preparing", 1],
+      ["working", 0],
+      ["working", 1],
+    ] as const)("ends the same child on its typed budget at %s with %s ms overrun", async (target, overrun) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const h = await setup();
+      const release = vi.fn(async () => ({ released: true }));
+      let admissionBound = 0;
+      const commit = h.registry.commitLiveState.bind(h.registry);
+      vi.spyOn(h.registry, "commitLiveState").mockImplementation((id, assignment) => {
+        const accepted = commit(id, assignment);
+        const state = h.registry.getById(id)?.liveState?.state;
+        if (
+          accepted &&
+          ((target === "preparing" && state === "falling_back") || (target === "working" && state === "preparing"))
+        )
+          vi.setSystemTime(admissionBound + overrun);
+        return accepted;
+      });
+      vi.mocked(makeExecutor).mockImplementationOnce(async (_config, context) => {
+        admissionBound = h.registry.getById("run-l")!.liveState!.bound!;
+        const waitBound = Date.now() + minutesToMs(3);
+        await context.onLiveStateObservation?.({
+          state: "waiting_deploy",
+          reason: "deploy",
+          bound: waitBound,
+          attempt: 1,
+        });
+        vi.setSystemTime(target === "falling_back" ? admissionBound + overrun : waitBound + 1);
+        return {
+          executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "", release },
+          backend: "sandbox",
+        };
+      });
+      try {
+        expect(await h.call("spawn", h.spawnBody)).toMatchObject({ status: 200, body: { runId: "run-l" } });
+        expect(await Promise.all(h.dispatched)).toEqual([
+          { status: "failed", refusal: "run_budget_exhausted", cause: "system" },
+        ]);
+        await h.writer.settled();
+        const record = await h.store.get("run-l");
+        expect(record).toMatchObject({ id: "run-l", status: "failed", profile: { minutes: 10 } });
+        expect(record!.events).toContainEqual(
+          expect.objectContaining({
+            type: "refusal",
+            code: "run_budget_exhausted",
+            cause: "system",
+            text: "The run's time budget ended before its model started.",
+          }),
+        );
+        expect(record!.events).toContainEqual(
+          expect.objectContaining({
+            type: "run_note",
+            kind: "time_budget_exhausted",
+          }),
+        );
+        expect(h.replies.at(-1)?.split("\n\n")[0]).toBe("⚠️ The run's time budget ended before its model started.");
+        expect(record!.events.some((e) => e.type === "run_state" && e.state === target)).toBe(false);
+        expect(runPiHarnessOpen).not.toHaveBeenCalled();
+        expect(h.provider.requests).toEqual([]);
+        expect(release).toHaveBeenCalledOnce();
+        expect(h.ledger.finish).toHaveBeenCalledOnce();
+        expect(h.ledger.live.size).toBe(0);
+        expect((await h.store.list({})).map((r) => r.id)).toEqual(["run-l"]);
+        expect(await h.call("spawn", h.spawnBody)).toMatchObject({
+          status: 200,
+          body: { runId: "run-l", alreadySpawned: true },
+        });
+        expect(h.dispatched).toHaveLength(1);
+        expect(h.started).toHaveBeenCalledExactlyOnceWith({ id: "run-l" });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([0, 1])("ends the same child when PR facts consume its admission budget by %s ms", async (overrun) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const h = await setup();
+        const owner = { instanceId: h.instance.id, unit: "U12" };
+        await h.admin.instances.putUnits([
+          {
+            ...owner,
+            slug: "u1",
+            branch: h.repoCtx.ref!,
+            dependsOn: [],
+            rounds: [],
+            threadKey: h.instance.threadKey,
+            publication: {
+              repo: h.instance.repo,
+              pr: 7,
+              headRef: h.repoCtx.ref!,
+              baseRef: "main",
+              expectedHeadSha: "a".repeat(40),
+              publicationRef: h.repoCtx.ref!,
+              owner,
+            },
+          },
+        ]);
+        h.admin.runnerOwnership = new RunnerOwnershipFence(false);
+        expect(h.admin.runnerOwnership.claim(h.instance.repo, 7, owner)).toBe(true);
+        const release = vi.fn(async () => ({ released: true }));
+        const exec = vi.fn(async () => "");
+        let commandsBeforeFacts = 0;
+        vi.mocked(makeExecutor).mockResolvedValueOnce({
+          executor: { exec, readFile: async () => "", writeFile: async () => "", release },
+          backend: "sandbox",
+        });
+        h.deps.fetchPrFacts = vi.fn(async () => {
+          const state = h.registry.getById("run-l")!.liveState!;
+          expect(state.state).toBe("working");
+          expect(h.ledger.live.get("run-l")!.liveState).toEqual(state);
+          expect(state.bound).toBeGreaterThan(Date.now());
+          commandsBeforeFacts = exec.mock.calls.length;
+          vi.setSystemTime(state.bound! + overrun);
+          return undefined;
+        });
+        const request = { ...h.spawnBody, unit: "U12" };
+        expect(await h.call("spawn", request)).toMatchObject({ status: 200, body: { runId: "run-l" } });
+        expect(await Promise.all(h.dispatched)).toEqual([
+          { status: "failed", refusal: "run_budget_exhausted", cause: "system" },
+        ]);
+        await h.writer.settled();
+        expect(h.deps.fetchPrFacts).toHaveBeenCalledExactlyOnceWith({ repo: h.instance.repo, number: 7 });
+        expect(runPiHarnessOpen).not.toHaveBeenCalled();
+        expect(h.provider.requests).toEqual([]);
+        const record = await h.store.get("run-l");
+        expect(record).toMatchObject({
+          id: "run-l",
+          status: "failed",
+          profile: { minutes: 10 },
+          parentInstanceId: h.instance.id,
+          idempotencyKey: `${h.instance.id}:U12/0/coding`,
+        });
+        expect(record!.events).toContainEqual(
+          expect.objectContaining({
+            type: "refusal",
+            code: "run_budget_exhausted",
+            cause: "system",
+            text: "The run's time budget ended before its model started.",
+          }),
+        );
+        expect(record!.events).toContainEqual(
+          expect.objectContaining({ type: "run_note", kind: "time_budget_exhausted" }),
+        );
+        expect(record!.events.some((e) => e.type === "lease" || e.type === "tool_call")).toBe(false);
+        expect(exec).toHaveBeenCalledTimes(commandsBeforeFacts);
+        expect(release).toHaveBeenCalledOnce();
+        expect(h.finished).toHaveBeenCalledExactlyOnceWith({ id: "run-l", status: "failed" });
+        expect(h.ledger.finish).toHaveBeenCalledOnce();
+        expect(h.ledger.live.size).toBe(0);
+        expect((await h.store.list({})).map((r) => r.id)).toEqual(["run-l"]);
+        expect(h.fallbackPuts).toEqual([]);
+        expect(await h.call("spawn", request)).toMatchObject({
+          status: 200,
+          body: { runId: "run-l", alreadySpawned: true },
+        });
+        expect(h.dispatched).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("persists the fallback live-state failure under the advertised id with zero model or tool calls", async () => {

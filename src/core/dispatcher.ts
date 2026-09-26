@@ -2358,6 +2358,10 @@ export async function dispatch(
     // assignment acknowledges before the registry exposes the boundary or
     // workspace attachment starts. Legacy resumed rows gain the same first
     // state before they continue; rows that already carry one keep it.
+    const admissionAt = clock();
+    const admissionBound = resume
+      ? admissionAt + resume.plan.remainingMs
+      : Math.max(startedAt, admissionAt) + minutesToMs(profile.minutes);
     if (typeof registry.commitLiveState === "function") {
       await events.write(async () => {
         const current = registry.getById(runId);
@@ -2369,9 +2373,7 @@ export async function dispatch(
             eventSeq,
             at,
             state: "admitted" as const,
-            bound: resume
-              ? at + resume.plan.remainingMs
-              : Math.max(startedAt + minutesToMs(profile.minutes), at + minutesToMs(profile.minutes)),
+            bound: admissionBound,
             detail: "waiting to attach the workspace",
             // A reservation is not subscribed to the registry until promotion.
             // Commit the setup stream that already exists with admission, or
@@ -2563,18 +2565,42 @@ export async function dispatch(
       return ended;
     }
     const { round } = attach;
+    // A resident wait owns only its short wait deadline, not the run's budget.
+    // Keep the admission deadline across setup transitions; if a running lease
+    // exists, it may narrow that deadline, never renew it. Recheck each boundary
+    // because committing fallback or preparing the prompt can consume the rest.
+    const assertAdmissionBudget = (at = clock()): number => {
+      const remaining = control?.remainingMs();
+      const bound = remaining === undefined ? admissionBound : Math.min(admissionBound, at + remaining);
+      if (bound <= at) {
+        const text = "The run's time budget ended before its model started.";
+        registry.publish(runId, { type: "run_note", kind: "time_budget_exhausted", summary: text, at });
+        throw new RefusalError(refusalOf("run_budget_exhausted", text));
+      }
+      return bound;
+    };
+    const assignSetupLive = async (state: "falling_back" | "preparing" | "working", detail: string) => {
+      const at = clock();
+      let bound: number;
+      try {
+        bound = assertAdmissionBudget(at);
+      } catch (err) {
+        await round.release({ hardStopped: false });
+        throw err;
+      }
+      return assignLive({ state, bound }, at, detail);
+    };
     if (typeof registry.commitLiveState === "function") {
       const summary = registry.getById(runId);
-      const bound = summary?.liveState?.bound ?? startedAt + minutesToMs(profile.minutes);
       if (
         summary?.liveState &&
         (summary.liveState.state === "waiting_deploy" || summary.liveState.state === "waiting_repository") &&
         round.selection.backend !== "resident"
       ) {
-        if (!(await assignLive({ state: "falling_back", bound }, clock(), "switching to a fallback workspace")))
+        if (!(await assignSetupLive("falling_back", "switching to a fallback workspace")))
           throw new Error("fallback live state could not be committed");
       }
-      if (!(await assignLive({ state: "preparing", bound }, clock(), "preparing the workspace")))
+      if (!(await assignSetupLive("preparing", "preparing the workspace")))
         throw new Error("preparation live state could not be committed");
       shell.setSetupLabel(`${liveStateWords("preparing")}…`);
     }
@@ -2838,9 +2864,7 @@ export async function dispatch(
       ...(seedActors !== undefined ? { seedActors } : {}),
     });
     if (typeof registry.commitLiveState === "function") {
-      const summary = registry.getById(runId);
-      const bound = summary?.liveState?.bound ?? startedAt + minutesToMs(profile.minutes);
-      if (!(await assignLive({ state: "working", bound }, clock(), "model turn")))
+      if (!(await assignSetupLive("working", "model turn")))
         throw new Error("working live state could not be committed");
     }
     // The run's reach into its own session log (session-log item 10): the
@@ -2946,6 +2970,7 @@ export async function dispatch(
       root,
       startedAt,
       loopStartedAt,
+      assertAdmissionBudget,
       channelVisibility,
       publishText,
       ending,
@@ -3077,7 +3102,7 @@ export async function dispatch(
     // body) — one redacted line on the card, a redacted reply in the thread.
     if (setupCard && setupShell) {
       const [failedCard, failedShell] = [setupCard, setupShell];
-      await refuseSilently("setup_failed", () =>
+      await refuseSilently(thrown?.code ?? "setup_failed", () =>
         failedCard.done(
           failedShell.close({
             kind: "setup_failed",
