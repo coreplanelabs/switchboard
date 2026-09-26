@@ -133,12 +133,17 @@ const MERGE_OR_APPROVE = /\bgh\s+pr\s+(merge|review)\b|\/pulls\/\d+\/(merge|revi
 /** `git push`, with git's own options between the two words allowed for —
  *  `-C <dir>`, `--git-dir=`, `--work-tree=`, `-c key=value`, `--no-pager` —
  *  so a push aimed from another directory is the same push. */
-const GIT_THEN_PUSH = String.raw`\bgit(?:\s+(?:-C\s+\S+|--git-dir=\S+|--work-tree=\S+|-c\s+\S+|--no-pager))*\s+push\b`;
-/** Each `git push` and what follows it up to the next shell operator. An
+const GIT_THEN_PUSH = String.raw`\bgit(?:[ \t]+(?:-C[ \t]+\S+|--git-dir=\S+|--work-tree=\S+|-c[ \t]+\S+|--no-pager))*[ \t]+push\b`;
+/** Each `git push` and what follows it up to the next unquoted shell
+ *  operator or newline. Continuations are folded before matching; quoted
+ *  newlines and escaped operators must not hide later push arguments. An
  *  `&` that belongs to a redirection (`2>&1`, `>&2`, `&>log`, `&>>log`) is
  *  the redirection's, not an operator: the tail runs past it, so the push's
  *  own arguments after one are still judged (`git push 2>&1 evil main`). */
-const GIT_PUSH = new RegExp(`${GIT_THEN_PUSH}((?:[^;&|]|(?<=[<>])&|&(?=>))*)`, "g");
+const GIT_PUSH = new RegExp(
+  GIT_THEN_PUSH + String.raw`((?:"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\\[^\n]|[^\n;&|'"\\]|(?<=[<>])&|&(?=>))*)`,
+  "g",
+);
 /** Any `git push` at all — a read run's one answer to every one of them. */
 const ANY_PUSH = new RegExp(GIT_THEN_PUSH);
 /** A GitHub write from the shell, for a run whose identity holds no write:
@@ -222,23 +227,45 @@ function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
   if (MERGE_OR_APPROVE.test(command)) {
     return refused("merge/approve — a coding run never merges or approves a pull request");
   }
+  const pushCommand = withoutShellContinuations(command);
   if (ctx.identity !== "write") {
     // The read-only rule (harness-pi item 10): the worktree the resident
     // attached for this run holds no write token and its origin is the
     // read-only mirror, so a push could not land — the rule says so before
     // the model learns it from a failure, and covers a GitHub write the
     // prompt already forbids (the bot posts the review, never the agent).
-    if (ANY_PUSH.test(command)) return refused("read-only — a read-identity run never pushes");
+    if (ANY_PUSH.test(pushCommand)) return refused("read-only — a read-identity run never pushes");
     if (GH_WRITE_VERB.test(command) || GH_API_WRITE.test(command) || CURL_GITHUB_WRITE.test(command)) {
       return refused("read-only — a read-identity run never writes to GitHub");
     }
     return allowed;
   }
-  for (const match of command.matchAll(GIT_PUSH)) {
+  for (const match of pushCommand.matchAll(GIT_PUSH)) {
     const verdict = judgePush(match[1], ctx);
     if (verdict.verdict !== "allowed") return verdict;
   }
   return allowed;
+}
+
+/** Bash removes a backslash-newline pair, not whitespace between words.
+ *  Keep single-quoted text and other escape pairs intact: an escaped
+ *  backslash before a newline does not continue the command. This is only
+ *  the push matcher's input, never a rewrite of what the shell executes. */
+function withoutShellContinuations(command: string): string {
+  let result = "";
+  let quote: string | undefined;
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    if (char === "\\" && quote !== "'" && i + 1 < command.length) {
+      const next = command[++i];
+      if (next !== "\n") result += char + next;
+      continue;
+    }
+    if (char === quote) quote = undefined;
+    else if (quote === undefined && (char === "'" || char === '"')) quote = char;
+    result += char;
+  }
+  return result;
 }
 
 /** pi's bash `timeout` is seconds, optional, and unbounded when absent (the
@@ -319,9 +346,9 @@ function judgePush(tail: string, ctx: ToolRuleContext): ToolVerdict {
 const REDIRECTION = /^(\d*|&)(>>|>&|>\|?|<<<?|<&|<>?)(.*)$/;
 
 /** The push's own arguments out of what follows `git push` (already cut at
- *  `|`, `;` and a control `&` by the match): flags dropped, each shell redirection and
- *  its target skipped — skipped, not stopped at, so an argument after one
- *  (`git push 2>/dev/null evil main`) is still judged. */
+ *  unquoted newlines, `|`, `;` and a control `&` by the match): flags dropped,
+ *  each shell redirection and its target skipped — skipped, not stopped at,
+ *  so an argument after one (`git push 2>/dev/null evil main`) is still judged. */
 function pushArguments(tail: string): string[] {
   const words: string[] = [];
   const raw = tail.split(/\s+/).filter((w) => w.length > 0);
