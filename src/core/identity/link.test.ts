@@ -340,6 +340,7 @@ describe("atomic link contract", () => {
         expect(h.counts()).toEqual([1, 2, 3, 1]);
         h.at(800);
         expect(await d.link({ action: "read", id, auth })).toEqual({ status: "expired" });
+        expect(await d.link({ action: "inspect", id, auth })).toEqual({ status: "already_claimed" });
       });
       it("requires the original revision and consent for committed retries", async () => {
         const h = harness(kind),
