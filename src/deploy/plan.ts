@@ -410,6 +410,8 @@ export interface DeployRoot {
   path: string;
   /** The published package's version — the tree being deployed; absent in a checkout, where the commit is. */
   version?: string;
+  /** The package's source commit, not the calling operator repository's HEAD. */
+  commit?: string;
 }
 
 /** What the plan reads from the host it is computed on. The plan stays free of
