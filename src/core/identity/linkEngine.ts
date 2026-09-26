@@ -174,6 +174,7 @@ export function executeLink(tx: LinkTransaction, input: LinkCommand, now: number
   }
   if (now >= i.expiresAt) return refuse(tx, i, now, "expired");
   if (c.action === "read") return { status: "ok", intent: view(i) };
+  if (c.action === "inspect") return { status: "context", intent: structuredClone(i) };
   if (c.expectedRevision !== i.revision) return { status: "stale" };
   if (c.action === "cancel") return refuse(tx, i, now, "cancelled");
   if (c.action === "interrupt")
