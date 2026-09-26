@@ -9507,6 +9507,8 @@ workspaceDir: __WORKDIR__
     expect(instance).toMatchObject({ branch: SHIP_BRANCH, base: "release/1.x" });
     expect(unit).toMatchObject({ branch: SHIP_BRANCH });
     expect("resume" in unit!).toBe(false);
+    expect(unit?.publication).toMatchObject({ pr: 7, headRef: SHIP_BRANCH });
+    expect(unit?.lastPush).toBeUndefined();
     expect(replies[replies.length - 1]).toContain(`adopts ${PR_URL}`);
     expect(replies[replies.length - 1]).toContain("no new branch");
     expect(replies[replies.length - 1]).not.toContain("still open");
@@ -16854,10 +16856,66 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
         },
       })),
     } as unknown as NonNullable<CoreDeps["runs"]>;
-    const shipBranch = vi.fn(async () => ({ hostedLive: false }));
+    const shipBranch = vi.fn<NonNullable<CoreDeps["shipBranch"]>>(async () => ({ hostedLive: false }));
     s.deps.shipBranch = shipBranch;
     return { ...s, branch, recordedHead, operator, shipBranch, shipParent };
   }
+
+  it("a task after a completed merge-ready pipeline routes through the operator as fresh ship work on its PR", async () => {
+    const s = await endedPrContinuationSetup();
+    const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
+    await s.instances.putUnits([
+      unitRow({
+        branch: s.branch,
+        pr,
+        lastPush: s.recordedHead,
+        publication: {
+          repo: "acme/api",
+          pr: 7,
+          headRef: s.branch,
+          baseRef: "main",
+          expectedHeadSha: s.recordedHead,
+          publicationRef: s.branch,
+          owner: { instanceId: INSTANCE, unit: "U12" },
+        },
+        ending: { kind: "merge_ready", report: "merge-ready", at: 1_000 },
+      }),
+    ]);
+    const task = 'change the title to "We are focusing on high and critical severity fixes"';
+    const operator = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "ship", request: task, reason: "new work on the existing pull request" },
+    }));
+    s.deps.operatorModel = operator;
+    const parent = { ...s.shipParent, status: "completed" as const, pr };
+    s.deps.resolveRepoContext = vi.fn((_msg, _history, records) => {
+      expect(records).toMatchObject({ pr: { repo: "acme/api", number: 7 } });
+      return {
+        repo: "acme/api",
+        pr: 7,
+        ref: s.branch,
+        headSha: s.recordedHead,
+        baseRef: "main",
+        prFromRecord: true,
+        refFromPr: true,
+        prIsThreadOwn: true,
+      };
+    });
+    const { io } = fakeIO();
+
+    await dispatch(s.deps, msg(task, "slack:UADMIN"), io, { thread: [parent] });
+
+    expect(operator).toHaveBeenCalledOnce();
+    expect(s.shipBranch).toHaveBeenCalledOnce();
+    expect(s.shipBranch.mock.calls[0]?.[3]).toMatchObject({
+      directives: { text: task },
+      agent: { name: "ship" },
+      repoCtx: { repo: "acme/api", pr: 7 },
+    });
+    expect(s.shipBranch.mock.calls[0]?.[3]).not.toHaveProperty("reissueCaps");
+    expect(s.shipBranch.mock.calls[0]?.[3]).not.toHaveProperty("reissuePlanId");
+    expect(s.deps.runs!.getRun).not.toHaveBeenCalled();
+  });
 
   async function legacyMergeReadySetup(
     over: {

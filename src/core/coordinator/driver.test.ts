@@ -2376,10 +2376,20 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
 });
 
 describe("the plan runner's driver — the entry checks resume a re-issued plan's unit (agent-ship item 10, issue 1689)", () => {
+  const adoptedPublication = {
+    repo: "acme/api",
+    pr: 7,
+    headRef: "plan/fixture/u10",
+    baseRef: "main",
+    expectedHeadSha: HEAD,
+    publicationRef: "plan/fixture/u10",
+    owner: { instanceId: INSTANCE, unit: "U10" },
+  };
+
   it("a pre-check that finds the unit's open pull request at the branch's own head resumes the attempt at the review round: the call carries entry: true, no branch and no coding child run, and the review is briefed with the pull request at that head", async () => {
     const s = steps({ "U10/1/review/wait/1": "event" });
     const b = bot({
-      plan: [planAnswer([row("U10")], T0, "person")],
+      plan: [planAnswer([row("U10", { publication: adoptedPublication, lastPush: HEAD })], T0, "person")],
       "unit-start": [started("U10")],
       spawn: [spawned("run-r1")],
       "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
@@ -2409,7 +2419,7 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
   it("a pre-check that finds the pull request approved with green checks at the branch head resumes straight at the merge-ready check: no child at all, the unit ends merge_ready and the ending's facts are still read fresh at the head", async () => {
     const s = steps();
     const b = bot({
-      plan: [planAnswer([row("U10")], T0, "person")],
+      plan: [planAnswer([row("U10", { publication: adoptedPublication, lastPush: HEAD })], T0, "person")],
       "unit-start": [started("U10")],
       "pr-check": [
         prOpen(T0, { branchHead: HEAD, approved: true, checks: { total: 2, pending: [], failed: [] } }),
@@ -2429,6 +2439,45 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string }; headSha?: string }>;
     expect(end.ending.kind).toBe("merge_ready");
     expect(end.headSha).toBe(HEAD);
+  });
+
+  it("a fresh task adopting an approved green pull request spawns coding before any review", async () => {
+    const s = steps();
+    const adopted = row("U10", { publication: adoptedPublication });
+    const b = bot({
+      plan: [planAnswer([adopted], T0, "person")],
+      "unit-start": [started("U10")],
+      "pr-check": [
+        prOpen(T0, { branchHead: HEAD, approved: true, checks: { total: 2, pending: [], failed: [] } }),
+        prOpen(T0 + MIN),
+      ],
+      spawn: [ok({ ok: false, error: "agent_allowlist", message: "coding unavailable" }, T0 + MIN, 403)],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+
+    await runPlan(s.runner, b.client, INSTANCE);
+
+    expect(b.of("branch")).toEqual([]);
+    expect(b.of("spawn")).toMatchObject([{ step: "U10/0/coding", preset: "coding" }]);
+    expect(b.of("pr-check")[0]).toEqual({ parentInstanceId: INSTANCE, unit: "U10", entry: true });
+  });
+
+  it("a fresh adopted task stops if the pull request disappears before coding", async () => {
+    const s = steps();
+    const b = bot({
+      plan: [planAnswer([row("U10", { publication: adoptedPublication })], T0, "person")],
+      "unit-start": [started("U10")],
+      "pr-check": [prNone()],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+
+    expect(summary.units).toEqual({ U10: "aborted" });
+    expect(b.of("branch")).toEqual([]);
+    expect(b.of("spawn")).toEqual([]);
   });
 
   it("an empty required-check launch carries the one pull_request refire through the Workflow step and records checks restarted on the round before the re-read", async () => {

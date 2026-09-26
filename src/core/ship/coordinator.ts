@@ -1167,6 +1167,9 @@ export interface UnitPipelineInput {
   idleDays?: number;
   /** Resume at review: an open pull request of ship's own the requester named. */
   resume?: { pr: number; headSha?: string; url?: string };
+  /** A task adopted an existing PR without a prior coding push. Its old
+   * approval and checks cannot answer this task, so pre-check starts coding. */
+  freshAdopt?: boolean;
   /** The head the previous attempt's coding child last pushed (a
    *  `review_pending` ending's `headSha`, carried on the unit's row): when the
    *  pre-check finds the open pull request still at exactly this head, there is
@@ -3083,6 +3086,8 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           };
           return nextReview(adopted);
         }
+        if (s.input.freshAdopt === true)
+          return enterRound({ ...clocked, pr: { number: r.pr.prNumber, url: r.pr.url } }, { index: 0, kind: "coding" });
         const branchHead = normalizeHead(r.pr.branchHead);
         const lastPush = normalizeHead(s.input.lastPush);
         const atBranchHead = head !== undefined && branchHead !== undefined && sameCommit(head, branchHead);
@@ -3121,6 +3126,12 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           return nextReview(adopted);
         }
       }
+      if (s.input.freshAdopt === true)
+        return end(clocked, {
+          kind: "aborted",
+          reason: `⚠️ The adopted pull request on ${s.input.repo} is no longer open, so coding did not start.`,
+          reviewRounds: s.reviewRounds,
+        });
       return { state: { ...clocked, phase: { at: "branch" } }, notes: [] };
     }
     case "branch": {

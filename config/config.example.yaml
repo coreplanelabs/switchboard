@@ -435,8 +435,10 @@ workspaceDir: ./workspaces
 # integer >= 14 (the loop's reserve plus one round). `maxMinutes` is the ship
 # preset's declared budget: a channel or user `boundary.maxMinutes` and a
 # per-message `budget:` directive clip it like any preset's, and the card says
-# so. Defaults shown; `maxRounds` must be an integer >= 1; any other key under
-# `ship` fails the load by name.
+# so. An unfinished pipeline keeps only its remaining rounds and minutes on
+# continuation. A new task after merge-ready starts with fresh caps, even when
+# it adopts that pull request. Defaults shown; `maxRounds` must be an integer
+# >= 1; any other key under `ship` fails the load by name.
 # ship:
 #   maxRounds: 3      # review rounds per unit
 #   maxMinutes: 240   # the ship preset's wall-clock budget in minutes (the registry's default)

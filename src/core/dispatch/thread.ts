@@ -172,17 +172,17 @@ export function instanceOf(runs: readonly RunView[]): string | undefined {
  *  run while one is in flight; the unfinished unit of the page's instance
  *  whose row names this thread (however the page names the instance — the
  *  ship run's own `ship_handoff`, or a child's `parentInstanceId`); the
- *  ended generated pipeline whose same-thread unit has not merged; the newest
- *  continuable session a person addressed (`stickyAgentOf` — a coordinator's
- *  child is never the owner); none. `unitsOf` is the caller's one extra read,
+ *  ended generated pipeline whose same-thread unit still needs continuation;
+ *  the newest continuable session a person addressed (`stickyAgentOf` — a
+ *  coordinator's child is never the owner); none. `unitsOf` is the caller's one extra read,
  *  asked only when the page names an instance; a read that fails leaves the
  *  unit out rather than guessing. */
 export type ThreadOwner =
   | { kind: "live"; run: RunView }
   | { kind: "unit"; instanceId: string; unit: CoordinatorUnit }
-  /** A generated unit whose runner ended without merging it: the thread still
-   *  owns that pipeline's task, branch and pull request, so its next plain
-   *  reply re-issues the same plan instead of becoming a new task. */
+  /** A generated unit whose runner ended before completing its task: the
+   *  thread still owns that pipeline's task, branch and pull request, so its
+   *  next plain reply re-issues the same plan instead of becoming a new task. */
   | { kind: "pipeline"; instanceId: string; run: RunView; unit: CoordinatorUnit }
   /** More than one ended unit claims the same thread. No continuation may
    *  guess which durable task the person's words address. */
@@ -207,7 +207,10 @@ export async function ownerOf(
         u.threadKey === threadKey &&
         u.ending !== undefined &&
         u.ending.kind !== "merged" &&
-        u.ending.kind !== "already_landed",
+        u.ending.kind !== "already_landed" &&
+        // A completed, publication-bound PR is new work on the next reply.
+        // Keep older rows without that binding on the guarded recovery path.
+        (u.ending.kind !== "merge_ready" || u.publication === undefined),
     );
     const ship = runs.find((r) => r.instanceId === instanceId && r.finished);
     if (ended.length === 1 && ship !== undefined) return { kind: "pipeline", instanceId, run: ship, unit: ended[0]! };
