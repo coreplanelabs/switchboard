@@ -1050,6 +1050,7 @@ async function runUnit(
     generated: plan.generated,
     ...(plan.runPageBase !== undefined ? { runPageBase: plan.runPageBase } : {}),
     ...(resume !== undefined ? { resume } : {}),
+    ...(row?.publication !== undefined && resume === undefined && lastPush === undefined ? { freshAdopt: true } : {}),
     ...(lastPush !== undefined ? { lastPush } : {}),
     ...(session !== undefined ? { session } : {}),
     ...(row?.recovery !== undefined
