@@ -93,6 +93,27 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       expect(await store.getSummary("s1")).toBeNull();
     });
 
+    it("recovery evidence selects either identity claim and original threads before the cap", async () => {
+      const { store } = make();
+      const recoveryEvidence = { instanceId: "original_x", unit: "U12", threadKeys: ["slack:C1:original"] };
+      const rows = [
+        record("parent", NOW - 1000, { parentInstanceId: "original_x", idempotencyKey: "original_x:U99/0/coding" }),
+        record("key", NOW - 2000, { parentInstanceId: "other", idempotencyKey: "original_x:U12/0/coding" }),
+        record("thread", NOW - 3000, { threadKey: "slack:C1:original" }),
+        record("bare-key", NOW - 4000, { parentInstanceId: "other", idempotencyKey: "original_x:U12" }),
+        record("bare-neighbor", NOW, { parentInstanceId: "other", idempotencyKey: "original_x:U120" }),
+        record("prefix-neighbor", NOW, { parentInstanceId: "other", idempotencyKey: "original_x:U120/0/coding" }),
+        record("wildcard-neighbor", NOW, { parentInstanceId: "other", idempotencyKey: "originalax:U12/0/coding" }),
+      ];
+      for (const row of rows) await store.put(row);
+      expect((await store.list({ limit: 4, recoveryEvidence })).map((row) => row.id)).toEqual([
+        "parent",
+        "key",
+        "thread",
+        "bare-key",
+      ]);
+    });
+
     it("rejects ids failing RUN_ID_PATTERN without throwing", async () => {
       const { store } = make();
       expect(await store.get("../../etc/x")).toBeNull();

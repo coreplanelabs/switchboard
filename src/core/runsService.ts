@@ -7,11 +7,14 @@ import { analyzeRunFriction, type FrictionOptions, type FrictionDiagnosis } from
 import {
   clampListLimit,
   instanceIdOfEvents,
+  matchesRecoveryEvidence,
+  isRecoveryEvidenceScope,
   namesPullRequest,
   RUN_ID_PATTERN,
   RUN_LIST_MAX_LIMIT,
   toVisibilityFilter,
   utf8ByteLength,
+  type RecoveryEvidenceScope,
   type RunListItem,
   type RunRecord,
   type RunSession,
@@ -273,6 +276,8 @@ function instanceAdmits(instance: CoordinatorInstance, visibleTo: Predicate): bo
 export type RunListStatus = "active" | "finished" | "all";
 
 export interface ListRunsOptions {
+  /** Internal historical admission only: complete evidence, no UI merge or cached ledger. */
+  recoveryEvidence?: RecoveryEvidenceScope;
   status: RunListStatus;
   /** What the caller may see: `predicateFor(actor, "runs:read", "run")`. REQUIRED —
    *  a list never runs without a decision; `{ kind: "all" }` is an explicit choice
@@ -977,6 +982,60 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       const limit = clampListLimit(opts.limit);
       // `none` is decided here, once: no live row qualifies and the store is not asked.
       if (opts.visibleTo.kind === "none") return { runs: [] };
+      if (opts.recoveryEvidence !== undefined) {
+        const scope = opts.recoveryEvidence;
+        // Recovery must not accidentally narrow the audit with a UI predicate or
+        // cursor. Its caller has already authorized the original requester.
+        if (
+          !isRecoveryEvidenceScope(scope) ||
+          opts.status !== "all" ||
+          opts.visibleTo.kind !== "all" ||
+          opts.before !== undefined ||
+          opts.beforeId !== undefined ||
+          opts.agent !== undefined ||
+          opts.channel !== undefined ||
+          opts.threadKey !== undefined ||
+          opts.parentRunId !== undefined ||
+          opts.pr !== undefined ||
+          opts.sinceMs !== undefined ||
+          !store ||
+          !ledger
+        )
+          return { runs: [], storeUnavailable: true };
+        let live: RunView[];
+        try {
+          // Read the ledger before persisted history: a child that finishes in
+          // between still appears live, never vanishes in the read handoff.
+          // No TTL, no limit, and no registry-id suppression of contradictory tags.
+          live = (await ledger.listLive()).map((row) => ledgerView(row, []));
+        } catch {
+          return { runs: [], ledgerUnavailable: true };
+        }
+        live.push(...registry.listActive().map(liveView));
+        try {
+          const stored = (await store.list({ limit: RUN_LIST_MAX_LIMIT, recoveryEvidence: scope })).map((row) =>
+            persistedView(row, prices),
+          );
+          if (stored.length >= RUN_LIST_MAX_LIMIT || stored.some((row) => !matchesRecoveryEvidence(row, scope)))
+            return { runs: [], storeUnavailable: true };
+          const runs = [...stored];
+          const identity = (row: RunView) =>
+            JSON.stringify([row.agent, row.userId, row.repo, row.threadKey, row.parentInstanceId, row.idempotencyKey]);
+          for (const row of live.filter(
+            (run) => matchesRecoveryEvidence(run, scope) || stored.some((saved) => saved.id === run.id),
+          )) {
+            const saved = stored.find((run) => run.id === row.id);
+            // A finished registry projection lacks the persisted artifacts. Use
+            // the record only when its identity agrees; retain all contradictions.
+            if (row.finished && saved && identity(row) === identity(saved)) continue;
+            runs.push(row);
+          }
+          // Never truncate a relevant live set or collapse ambiguous duplicates.
+          return { runs };
+        } catch {
+          return { runs: [], storeUnavailable: true };
+        }
+      }
       const matches = (r: RunView): boolean =>
         matchesPredicate(opts.visibleTo, r) &&
         (opts.agent === undefined || r.agent === opts.agent) &&

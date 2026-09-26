@@ -158,6 +158,35 @@ describe("WorkerRunStore", () => {
     expect(calls[3].body).toEqual({ storeKey: "runs:default", id: "a" });
   });
 
+  it("recovery evidence requires an explicit complete bounded response without malformed or cursor rows", async () => {
+    const recoveryEvidence = { instanceId: "original", unit: "U12", threadKeys: ["slack:C1:original"] };
+    const { events: _events, ...item } = {
+      ...record("child"),
+      parentInstanceId: "original",
+      idempotencyKey: "original:U12/0/coding",
+    };
+    let reply: unknown = { items: [item], evidenceComplete: true };
+    const { fetch, calls } = fakeFetch(() => ({ status: 200, body: reply }));
+    const store = new WorkerRunStore({ ...OPTS, fetch });
+    expect(await store.list({ limit: 200, recoveryEvidence })).toEqual([item]);
+    expect(calls[0].body).toMatchObject({ recoveryEvidence });
+    for (const bad of [
+      { items: [item] },
+      { items: [item], evidenceComplete: false },
+      { items: [item, { id: "invalid" }], evidenceComplete: true },
+      { items: [item], evidenceComplete: true, nextBefore: { finishedAt: 1, id: "child" } },
+      { items: [item, item], evidenceComplete: true },
+      { items: Array.from({ length: 200 }, () => item), evidenceComplete: true },
+      {
+        items: [{ ...item, parentInstanceId: "foreign", idempotencyKey: "foreign:U12/0/coding" }],
+        evidenceComplete: true,
+      },
+    ]) {
+      reply = bad;
+      await expect(store.list({ limit: 200, recoveryEvidence })).rejects.toBeInstanceOf(PermanentStoreError);
+    }
+  });
+
   it("getSummary posts /runs/summary and re-validates; {summary: null} → null; a malformed summary is a PermanentStoreError; a bad id never leaves the process", async () => {
     const rec = record("a");
     const { events: _e, ...summary } = rec;

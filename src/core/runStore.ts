@@ -21,6 +21,7 @@ import {
   isRunListItem,
   isRunRecord,
   matchesVisibility,
+  matchesRecoveryEvidence,
   namesPullRequest,
   newestFirst,
   normalizeStored,
@@ -187,6 +188,7 @@ export function clampEventsLimit(limit: number | undefined): number {
  *  the in-memory and file stores; the Worker applies the same rules in SQL. */
 export function selectListItems<T extends RunListItem>(items: readonly T[], opts: RunListOptions): T[] {
   let out = [...items].sort(newestFirst);
+  if (opts.recoveryEvidence !== undefined) out = out.filter((r) => matchesRecoveryEvidence(r, opts.recoveryEvidence!));
   if (opts.before !== undefined) out = out.filter((r) => isAfterCursor(r, opts.before!, opts.beforeId));
   if (opts.sinceMs !== undefined) out = out.filter((r) => r.finishedAt >= opts.sinceMs!);
   if (opts.agent !== undefined) out = out.filter((r) => r.agent === opts.agent);

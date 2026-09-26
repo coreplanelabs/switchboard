@@ -424,6 +424,63 @@ describe("RunsService.getRun", () => {
   });
 });
 
+describe("RunsService recovery evidence", () => {
+  const recoveryEvidence = { instanceId: "original", unit: "U12", threadKeys: ["slack:C1:original"] };
+  const opts = { status: "all", visibleTo: ALL, limit: 200, recoveryEvidence } as const;
+
+  it("keeps contradictory identities instead of merging a persisted child with another live identity", async () => {
+    const { reg } = testRegistry({ genId: () => "child" });
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const ledger = new InMemoryRunLedger(() => NOW);
+    await store.put(
+      record("child", NOW - 1, { parentInstanceId: "original", idempotencyKey: "original:U12/0/coding" }),
+    );
+    reg.create("contradictory", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      parentInstanceId: "other",
+      idempotencyKey: "other:U12/0/coding",
+      threadKey: "slack:C1:foreign",
+    });
+    const svc = createRunsService({ registry: reg, store, ledger });
+    const result = await svc.listRuns(opts);
+    expect(result.runs).toHaveLength(2);
+    expect(result.runs.map((run) => run.parentInstanceId)).toEqual(["original", "other"]);
+    expectNoToken(result);
+  });
+
+  it("uses the persisted artifacts for a matching finished registry identity", async () => {
+    const { reg } = testRegistry({ genId: () => "child" });
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const child = record("child", NOW, { parentInstanceId: "original", idempotencyKey: "original:U12/0/coding" });
+    reg.create(child.label!, child);
+    reg.finish("child", "completed");
+    await store.put(child);
+    const svc = createRunsService({ registry: reg, store, ledger });
+    expect((await svc.listRuns(opts)).runs).toMatchObject([{ id: "child", persisted: true, storedEventCount: 4 }]);
+  });
+
+  it("cannot prove evidence with missing stores or a narrowed query", async () => {
+    const { reg, store } = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    for (const deps of [
+      { registry: reg, store },
+      { registry: reg, ledger, store: null },
+    ]) {
+      const svc = createRunsService(deps);
+      expect(await svc.listRuns(opts)).toMatchObject({ storeUnavailable: true });
+    }
+    const svc = createRunsService({ registry: reg, store, ledger });
+    for (const extra of [
+      { threadKey: "slack:C1:original" },
+      { before: NOW },
+      { visibleTo: { kind: "user-is", userId: "alice" } as const },
+    ])
+      expect(await svc.listRuns({ ...opts, ...extra })).toMatchObject({ storeUnavailable: true });
+  });
+});
+
 describe("RunsService.listRuns — read merge", () => {
   it("lists a run in both the registry and the store once, live stop state winning, same eventCount before and after eviction", async () => {
     const { reg, tick, svc, store } = setup();
