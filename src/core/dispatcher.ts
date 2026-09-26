@@ -145,6 +145,7 @@ import {
   threadPrOf,
   threadRouteOf,
   type ThreadOwner,
+  type ThreadPullRequest,
 } from "./dispatch/thread.js";
 import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
@@ -1139,10 +1140,11 @@ export async function dispatch(
     // user turns, then the scopes. A ledger resume is a fresh lease segment:
     // it keeps the preset but resolves model and effort from today's scopes.
     const stickyAgent = thread ? stickyAgentOf(thread) : undefined;
-    // The same page names the pull request the thread's work lives on
-    // (resident-repos item 29): the one its newest finished run opened, for
-    // the target resolution below.
-    const threadPr = thread ? threadPrOf(thread) : undefined;
+    // A completed unit's publication can name the PR when the hosted run
+    // record has none. A later completed run's PR supersedes that publication.
+    const laterPr = (runPr: ThreadPullRequest | undefined, releasedPr: ThreadPullRequest | undefined) =>
+      releasedPr !== undefined && (runPr === undefined || releasedPr.at > runPr.at) ? releasedPr : runPr;
+    let threadPr = laterPr(thread ? threadPrOf(thread) : undefined, pageOwner?.releasedPr);
     const inheritedRepo =
       operatorRepo ??
       (thread ? newestFinishedRunOf(thread)?.repo : undefined) ??
@@ -1190,6 +1192,7 @@ export async function dispatch(
     if (thread && !threadLive && deps.coordinatorInstances !== undefined) {
       const owner =
         pageOwner ?? (await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey));
+      threadPr = laterPr(threadPr, owner.releasedPr);
       if (owner.kind === "live" && owner.run.hosted === true) {
         // The seed thread of a live pipeline runner (issue 2010; record 0051's
         // owner rule, thread-admission item 9): a hosted runner occupies no

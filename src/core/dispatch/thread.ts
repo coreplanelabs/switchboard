@@ -178,7 +178,7 @@ export function instanceOf(runs: readonly RunView[]): string | undefined {
  *  coordinator's child is never the owner); none. `unitsOf` is the caller's one extra read,
  *  asked only when the page names an instance; a read that fails leaves the
  *  unit out rather than guessing. */
-export type ThreadOwner =
+export type ThreadOwner = (
   | { kind: "live"; run: RunView }
   | { kind: "unit"; instanceId: string; unit: CoordinatorUnit }
   /** A generated unit whose runner ended before completing its task: the
@@ -189,7 +189,8 @@ export type ThreadOwner =
    *  guess which durable task the person's words address. */
   | { kind: "pipeline_ambiguous"; instanceId: string; run: RunView; units: CoordinatorUnit[] }
   | { kind: "session"; agent: string }
-  | { kind: "none" };
+  | { kind: "none" }
+) & { releasedPr?: ThreadPullRequest };
 
 export async function ownerOf(
   runs: readonly RunView[],
@@ -200,6 +201,7 @@ export async function ownerOf(
   if (live !== undefined) return { kind: "live", run: live };
   const hosted = runs.find((r) => !r.finished && r.hosted === true);
   const instanceId = instanceOf(runs);
+  let releasedPr: ThreadPullRequest | undefined;
   if (instanceId !== undefined) {
     const units = await unitsOf(instanceId).catch(() => [] as CoordinatorUnit[]);
     const unit = units.find((u) => u.threadKey === threadKey && u.ending === undefined);
@@ -221,11 +223,30 @@ export async function ownerOf(
     if (ended.length === 1 && ship !== undefined) return { kind: "pipeline", instanceId, run: ship, unit: ended[0]! };
     if (ended.length > 1 && ship !== undefined)
       return { kind: "pipeline_ambiguous", instanceId, run: ship, units: ended };
+    const released = units.filter((u) => {
+      const binding = u.publication;
+      return (
+        u.threadKey === threadKey &&
+        u.instanceId === instanceId &&
+        u.ending?.kind === "merge_ready" &&
+        binding !== undefined &&
+        u.pr?.number === binding.pr &&
+        u.branch === binding.headRef &&
+        u.branch === binding.publicationRef &&
+        binding.owner.instanceId === instanceId &&
+        binding.owner.unit === u.unit &&
+        (u.lastPush === undefined || u.lastPush === binding.expectedHeadSha)
+      );
+    });
+    if (released.length === 1) {
+      const unit = released[0]!;
+      releasedPr = { repo: unit.publication!.repo, number: unit.publication!.pr, at: unit.ending!.at };
+    }
   }
   if (hosted !== undefined) return { kind: "live", run: hosted };
   const agent = stickyAgentOf(runs);
-  if (agent !== undefined) return { kind: "session", agent };
-  return { kind: "none" };
+  if (agent !== undefined) return { kind: "session", agent, ...(releasedPr ? { releasedPr } : {}) };
+  return { kind: "none", ...(releasedPr ? { releasedPr } : {}) };
 }
 
 /** The original task a generated ship parent recorded as its first input.

@@ -405,9 +405,17 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
       },
       ending: { kind: "merge_ready", report: "merge-ready", at: 2_000 },
     });
-    expect(await ownerOf([child], async () => [endedMergeReady], THREAD)).toEqual({ kind: "none" });
+    expect(await ownerOf([child], async () => [endedMergeReady], THREAD)).toEqual({
+      kind: "none",
+      releasedPr: { repo: "acme/api", number: 7, at: 2_000 },
+    });
     const ship = run({ id: "ship-parent", agent: "ship", instanceId: "ship_acme_api_1", finished: true });
-    expect(await ownerOf([ship], async () => [endedMergeReady], THREAD)).toEqual({ kind: "none" });
+    expect(await ownerOf([ship], async () => [endedMergeReady], THREAD)).toEqual({
+      kind: "none",
+      releasedPr: { repo: "acme/api", number: 7, at: 2_000 },
+    });
+    const inconsistent = { ...endedMergeReady, pr: { number: 8, url: "https://github.com/acme/api/pull/8" } };
+    expect(await ownerOf([ship], async () => [inconsistent], THREAD)).toEqual({ kind: "none" });
     const legacy = unit({
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
       ending: { kind: "merge_ready", report: "merge-ready", at: 2_000 },
