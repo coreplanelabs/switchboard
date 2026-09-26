@@ -630,6 +630,20 @@ export async function resolveRepoContext(
     unverified = undefined;
   }
 
+  // A bare PR number has a repository only in a thread with a durable PR.
+  // Resolve it against that repository so the current request can override
+  // an older cited PR without treating arbitrary issue prose as a target.
+  const bareNumberText =
+    !s.pr && repo === records?.pr?.repo
+      ? /\b(?:PR|pull request)\s*#(\d+)\b/i.exec(unwrapSlack(msg.text).replace(CODE_SPAN, " "))?.[1]
+      : undefined;
+  const bareNumber = bareNumberText === undefined ? undefined : Number(bareNumberText);
+  const namedPr =
+    s.pr ??
+    (repo && bareNumber !== undefined && Number.isSafeInteger(bareNumber) && bareNumber > 0
+      ? { repo, number: bareNumber }
+      : undefined);
+
   // PR head — one REST call whenever the CURRENT message names a PR of the
   // resolved repo, regardless of any ref phrasing beside it. The PR is the
   // explicit target: its head branch is the ref, and its head SHA pins the
@@ -643,8 +657,8 @@ export async function resolveRepoContext(
   let prSize: PrSize | undefined;
   let facts: PrFacts | undefined;
   let closedPr: RepoContext["closedPr"];
-  if (s.pr && repo === s.pr.repo) {
-    const head = await prHead(s.pr).catch(() => undefined);
+  if (namedPr && repo === namedPr.repo) {
+    const head = await prHead(namedPr).catch(() => undefined);
     // Only an OPEN pull request contributes the ref hint (issue 1860): a
     // merged or closed pull request cited as a receipt in a coding ask must
     // not bind the thread's branch to its dead head branch — a ship child
@@ -664,7 +678,7 @@ export async function resolveRepoContext(
     facts = head?.facts;
     if (head?.state === "closed")
       closedPr = {
-        number: s.pr.number,
+        number: namedPr.number,
         merged: head.merged,
         ...(head.mergedAt !== undefined ? { mergedAt: head.mergedAt } : {}),
       };
@@ -687,20 +701,20 @@ export async function resolveRepoContext(
   // ref is never rebound from a PR a person named in an earlier turn: a thread
   // redirected with "on <branch>" keeps that binding. The PR the thread's own
   // run opened does bind it (below): that branch is where the work lives.
-  if (repo && s.pr && repo === s.pr.repo) {
-    out.pr = s.pr.number;
+  if (repo && namedPr && repo === namedPr.repo) {
+    out.pr = namedPr.number;
     out.prFromMessage = true;
     // The message names the pull request the thread's own run opened or edited
     // (the run record's `pr`): the reference is the thread's own work, not a
     // stranger's PR cited as evidence, and ship's entry checks must not treat
     // it as context (issue 1799's four re-issues).
-    if (isThreadOwnPr(records, repo, s.pr.number)) out.prIsThreadOwn = true;
+    if (isThreadOwnPr(records, repo, namedPr.number)) out.prIsThreadOwn = true;
     if (headSha) out.headSha = headSha;
     if (baseRef) out.baseRef = baseRef;
     if (prSize) out.prSize = prSize;
     if (facts) out.prDescription = facts;
     if (closedPr) out.closedPr = closedPr;
-  } else if (repo && !s.pr) {
+  } else if (repo && !namedPr) {
     const inherited = inheritedPr(thread, records, repo);
     if (inherited) {
       const head = await openPrHeadSha(inherited);

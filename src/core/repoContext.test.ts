@@ -311,6 +311,31 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
 describe("resolveRepoContext: PR-source flags for ship", () => {
   const SHA = "e".repeat(40);
 
+  it("a bare PR number in a completed unit's thread selects its published PR over an older cited PR", async () => {
+    const records = { pr: { repo: "acme/api", number: 8, at: 2_000 } };
+    const history = [{ role: "user" as const, text: "adopt https://github.com/acme/api/pull/7", at: 1_000 }];
+    stubFetch({ body: { state: "open", head: { ref: "fix/new", sha: SHA, repo: { full_name: "acme/api" } } } });
+    const own = await resolveRepoContext(
+      msg("Please fix PR #8's title so it passes the repository's title check."),
+      history,
+      undefined,
+      undefined,
+      records,
+    );
+    expect(own).toMatchObject({
+      repo: "acme/api",
+      pr: 8,
+      prFromMessage: true,
+      prIsThreadOwn: true,
+      ref: "fix/new",
+      refFromPr: true,
+      headSha: SHA,
+    });
+    const other = await resolveRepoContext(msg("Please fix PR #9's title."), history, undefined, undefined, records);
+    expect(other).toMatchObject({ pr: 9, prFromMessage: true });
+    expect(other.prIsThreadOwn).toBeUndefined();
+  });
+
   it("a PR named in the current message sets prFromMessage, and its bound head ref sets refFromPr", async () => {
     stubFetch({ body: { state: "open", head: { ref: "feat/x", sha: SHA, repo: { full_name: "acme/api" } } } });
     const ctx = await resolveRepoContext(msg("look into https://github.com/acme/api/pull/508 for the regression"), []);

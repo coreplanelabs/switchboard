@@ -16881,13 +16881,14 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
         ending: { kind: "merge_ready", report: "merge-ready", at: 1_000 },
       }),
     ]);
-    const task = 'change the title to "We are focusing on high and critical severity fixes"';
+    const task = "Please fix PR #7's title so it passes the repository's title check.";
     const operator = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
       input: { preset: "ship", request: task, reason: "new work on the existing pull request" },
     }));
     s.deps.operatorModel = operator;
-    const parent = { ...s.shipParent, status: "completed" as const, pr };
+    // A hosted ship record carries no PR field: the completed unit does.
+    const parent = { ...s.shipParent, status: "completed" as const };
     s.deps.resolveRepoContext = vi.fn((_msg, _history, records) => {
       expect(records).toMatchObject({ pr: { repo: "acme/api", number: 7 } });
       return {
@@ -16901,7 +16902,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
         prIsThreadOwn: true,
       };
     });
-    const { io } = fakeIO();
+    const { io } = fakeIO([{ role: "user", text: "adopt https://github.com/acme/api/pull/6", at: 750 }]);
 
     await dispatch(s.deps, msg(task, "slack:UADMIN"), io, { thread: [parent] });
 
@@ -16915,6 +16916,56 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.shipBranch.mock.calls[0]?.[3]).not.toHaveProperty("reissueCaps");
     expect(s.shipBranch.mock.calls[0]?.[3]).not.toHaveProperty("reissuePlanId");
     expect(s.deps.runs!.getRun).not.toHaveBeenCalled();
+  });
+
+  it("a newer completed run's PR supersedes an older released unit PR", async () => {
+    const s = await endedPrContinuationSetup();
+    await s.instances.putUnits([
+      unitRow({
+        branch: s.branch,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        lastPush: s.recordedHead,
+        publication: {
+          repo: "acme/api",
+          pr: 7,
+          headRef: s.branch,
+          baseRef: "main",
+          expectedHeadSha: s.recordedHead,
+          publicationRef: s.branch,
+          owner: { instanceId: INSTANCE, unit: "U12" },
+        },
+        ending: { kind: "merge_ready", report: "merge-ready", at: 1_000 },
+      }),
+    ]);
+    const newer = {
+      id: "later-coding",
+      startedAt: 2_000,
+      finishedAt: 2_100,
+      finished: true,
+      status: "completed",
+      eventCount: 1,
+      agent: "coding",
+      repo: "acme/api",
+      threadKey: THREAD,
+      userId: "slack:UADMIN",
+      pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
+    } satisfies RunView;
+    const task = "Please fix this PR's title.";
+    s.deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "ship", request: task, reason: "new work on the latest pull request" },
+    }));
+    s.deps.resolveRepoContext = vi.fn((_msg, _history, records) => {
+      expect(records).toMatchObject({ pr: { repo: "acme/api", number: 8 } });
+      return { repo: "acme/api", pr: 8, ref: "fix/later", headSha: s.recordedHead, prIsThreadOwn: true };
+    });
+
+    await dispatch(s.deps, msg(task, "slack:UADMIN"), fakeIO().io, {
+      thread: [newer, { ...s.shipParent, status: "completed" }],
+    });
+
+    expect(s.shipBranch).toHaveBeenCalledOnce();
+    expect(s.shipBranch.mock.calls[0]?.[3]).toMatchObject({ repoCtx: { repo: "acme/api", pr: 8 } });
   });
 
   async function legacyMergeReadySetup(
