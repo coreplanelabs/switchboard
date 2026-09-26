@@ -157,7 +157,8 @@ export function executeLink(tx: LinkTransaction, input: LinkCommand, now: number
     return { status: "not_found" };
   if (i.owner.proofVersion !== c.auth.proofVersion) return { status: "stale" };
   if ("outcome" in i) {
-    if (now >= i.resultExpiresAt) return { status: "expired" };
+    if (now >= i.resultExpiresAt)
+      return { status: i.state === "committed" && c.action === "inspect" ? "already_claimed" : "expired" };
     const storedAudit = linkAuditSchema.safeParse(tx.audit(i.id));
     // Both schemas normalize object-key order before comparing the entire receipt.
     if (!storedAudit.success || JSON.stringify(storedAudit.data) !== JSON.stringify(i.receipt))

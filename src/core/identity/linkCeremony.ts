@@ -31,10 +31,10 @@ export interface LinkCallback {
 }
 const secret = () => randomBytes(32).toString("base64url");
 
-/** Disabled orchestration only: no HTTP registration, consent UI, authorization
- * consumer, event/log sink, or credential persistence. The future ingress must
- * protect initiation/consent against CSRF and transport the session in a secure
- * HttpOnly cookie; body/query-supplied session secrets must never substitute. */
+/** Offline orchestration: no production registration, authorization consumer,
+ * event/log sink, or credential persistence. The staged browser adapter protects
+ * POSTs and transports the session in a secure HttpOnly cookie; body/query
+ * session secrets must never substitute for that trusted transport. */
 export class LinkCeremony {
   private readonly policy: SlackPolicy;
   private readonly cleanLocation: string;
@@ -215,6 +215,16 @@ export class LinkCeremony {
     return auth
       ? this.link({ action: "commit", id: session.id, auth, expectedRevision, consent })
       : { status: "invalid" };
+  }
+  /** Internal consent context. The browser adapter must project an allowlist,
+   * never serialize this persisted validation context directly. */
+  async inspect(session: LinkBrowserSession, evidence: AccessEvidence): Promise<LinkResult> {
+    const auth = await this.auth(evidence, session.browser);
+    return auth ? this.link({ action: "inspect", id: session.id, auth }) : { status: "invalid" };
+  }
+  async cancel(session: LinkBrowserSession, evidence: AccessEvidence, expectedRevision: number): Promise<LinkResult> {
+    const auth = await this.auth(evidence, session.browser);
+    return auth ? this.link({ action: "cancel", id: session.id, auth, expectedRevision }) : { status: "invalid" };
   }
   async read(session: LinkBrowserSession, evidence: AccessEvidence): Promise<LinkResult> {
     const auth = await this.auth(evidence, session.browser);
