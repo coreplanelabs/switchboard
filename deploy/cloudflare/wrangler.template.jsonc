@@ -13,7 +13,10 @@
   // Cloudflare Access (SSO), and Access can only front a real zone domain —
   // leaving the workers.dev URL up would expose an un-SSO'd copy of /runs.
   "workers_dev": false,
-  "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
+  "routes": [
+    { "pattern": "{{hostname}}", "custom_domain": true },
+    { "pattern": "git.{{hostname}}", "custom_domain": true }
+  ],
   // Non-secret, deploy-constant config for the container. PUBLIC_BASE_URL: the
   // live-view link base — the dispatcher (in the container) reads
   // process.env.PUBLIC_BASE_URL to put the /runs/<id>?t=… link on the status
@@ -27,6 +30,7 @@
   // every dashboard request is denied.
   "vars": {
     "PUBLIC_BASE_URL": "{{urls.publicBaseUrl}}",
+    "PUBLIC_GIT_BASE_URL": "https://git.{{hostname}}",
     // {{#if access}}
     "ACCESS_TEAM_DOMAIN": "{{access.teamDomain}}",
     "ACCESS_AUD": "{{access.aud}}",

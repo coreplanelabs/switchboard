@@ -114,6 +114,7 @@ function context(over: Partial<Parameters<typeof prepareRelaunch>[1]> = {}) {
     agent,
     profile: declaredProfile(agent),
     repoCtx: { repo: "acme/api", ref: "main" } as RepoContext,
+    githubDoor: { baseUrl: "https://git.bot.test", bearer: "sbr_run-1.test" },
     root: trace.root,
     clock: () => NOW + 30_000,
     harness: { name: "pi", history: "authored-session" },

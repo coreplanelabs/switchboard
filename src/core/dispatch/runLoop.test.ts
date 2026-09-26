@@ -356,6 +356,9 @@ function setup(
     ledgerRun: undefined,
     resume: undefined,
     repoCtx: opts.repoCtx ?? {},
+    ...(opts.bearer === null
+      ? {}
+      : { githubDoor: { baseUrl: "https://git.bot.test", bearer: opts.bearer ?? "sbr_run-l.s3cret" } }),
     isPrReview: opts.review !== undefined,
     isCodingPrRun: opts.coding ?? false,
     reviewHead: opts.review?.head,
@@ -5607,7 +5610,15 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
     const profile = declaredProfile(agent);
     const repoCtx: RepoContext = { repo: "acme/api", ref: "main" };
     const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf("slack:CX"), receivedAt: NOW });
-    const attachCtx = { threadKey: THREAD, agent, profile, repoCtx, root: trace.root, clock: () => NOW };
+    const attachCtx = {
+      threadKey: THREAD,
+      agent,
+      profile,
+      repoCtx,
+      root: trace.root,
+      clock: () => NOW,
+      githubDoor: { baseUrl: "https://git.bot.test", bearer: "sbr_run-l.s3cret" },
+    };
 
     // The re-attach, mid-run, with nothing of the dispatch-time gate: the
     // recorded local backend answers the thread's own directory, made once.

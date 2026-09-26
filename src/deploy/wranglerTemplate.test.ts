@@ -144,6 +144,26 @@ describe("siteView / renderSiteConfig", () => {
 const VIEW = templateView(TEST_PROFILE, "bot", TEST_PUBLISHED_IMAGES)!;
 
 describe("renderTemplate", () => {
+  it("publishes the Git door on its own domain with a container URL", () => {
+    const rendered = renderWorkerConfig(
+      TEST_PROFILE,
+      "bot",
+      (path) => readFileSync(path, "utf8"),
+      TEST_PUBLISHED_IMAGES,
+    );
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    const config = JSON.parse(stripJsonc(rendered.text)) as {
+      routes: Array<{ pattern: string }>;
+      vars: Record<string, string>;
+    };
+    expect(config.routes.map((route) => route.pattern)).toEqual([
+      "switchboard.example.test",
+      "git.switchboard.example.test",
+    ]);
+    expect(config.vars.PUBLIC_GIT_BASE_URL).toBe("https://git.switchboard.example.test");
+  });
+
   it("substitutes every placeholder, keeps everything else byte for byte, and prefixes the generated header", () => {
     const template = [
       '{ "name": "{{script}}", "account_id": "{{account}}",',

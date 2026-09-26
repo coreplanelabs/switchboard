@@ -35,6 +35,9 @@ const SECRET_BYTES = 32;
  *  caps, metered as that run's turns on the span the mint hands over. */
 export interface RunBearerGrant {
   runId: string;
+  /** GitHub operations the trusted Git door may broker for this run. The
+   *  installation credential itself never belongs to the run. */
+  github?: { identity: "none" | "read" | "write"; repo?: string; ref?: string };
   /** `<provider>/<model>` as `run_meta` carries it — the `model.turn` span's `model` attr. */
   modelRef: string;
   /** The `providers:` entry the call is forwarded to, and its wire shape. */

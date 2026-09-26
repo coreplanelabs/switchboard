@@ -30,6 +30,7 @@ import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { memoryContextBlock, type MemoryStore } from "../memory/index.js";
 import { provisionalBearerExpiresAt } from "../budgets.js";
 import type { RunBearerStore } from "../modelProxy/runBearers.js";
+import type { GitBindings } from "../modelProxy/gitBindings.js";
 import { parseModelRef, wireOf } from "../provider.js";
 import { skillGuidanceBlock, type SkillStore } from "../../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource, type McpToolsForRun } from "../../mcp/source.js";
@@ -92,6 +93,8 @@ export interface ProvisionDeps
   /** Injectable credential boundary for hermetic dispatcher tests. Production
    *  leaves this absent and the factory reads the process's App/PAT state. */
   githubCredentials?: GithubCredentialProvider;
+  githubDoor?: { baseUrl: string; ghConfigDir?: string };
+  githubBindings?: GitBindings;
   /** The harnesses the process drives runs with (docs/reference/specs/harness.md
    *  items 8 and 10), for the name `run_meta` carries — the one the scopes'
    *  word for the preset picks; absent in a process that starts no run (a test
@@ -145,9 +148,9 @@ export interface ProvisionDeps
   statusUpdateMinMs?: number;
   /**
    * The run-scoped bearers the model proxy honours (docs/reference/specs/model-proxy.md):
-   * one is minted here the moment a run's executor is provisioned, and the
-   * dispatch revokes it when the run ends. Absent (the CLI, tests) → no bearer
-   * is minted and the run is byte-identical to before the proxy existed.
+   * one is minted before workspace attach so the door authenticates Git during
+   * provisioning. The dispatch revokes it when the run ends. Absent (the CLI,
+   * tests) → no bearer is minted and the run is byte-identical to before the proxy existed.
    */
   runBearers?: RunBearerStore;
 }
@@ -821,6 +824,7 @@ export interface AttachContext {
   threadKey: string;
   agent: AgentDef;
   profile: RunProfile;
+  githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };
   repoCtx: RepoContext;
   /** The span the `dispatch.workspace.attach` span opens under: the request
    *  root at dispatch; the run's own span for a re-attach mid-run. */
@@ -913,6 +917,7 @@ async function attachRound(
           threadKey,
           agent,
           profile,
+          ...(ctx.githubDoor ? { githubDoor: ctx.githubDoor } : {}),
           repo: repoCtx.repo,
           ref: repoCtx.ref,
           headSha: repoCtx.headSha,
@@ -1014,6 +1019,7 @@ export async function attachWorkspace(
       threadKey: msg.threadKey,
       agent,
       profile,
+      ...(ctx.githubDoor ? { githubDoor: ctx.githubDoor } : {}),
       repoCtx,
       root,
       clock,
@@ -1070,6 +1076,7 @@ export interface MintBearerContext {
   card?: ModelCard;
   /** The run's effective profile: its minutes are the lease the provisional expiry allows for. */
   profile: RunProfile;
+  github?: { identity: "none" | "read" | "write"; repo?: string; ref?: string };
   resolved: ResolvedRequest;
   registry: RunRegistry;
   /** The request root: the span the proxied `model.turn` spans hang under. */
@@ -1079,7 +1086,7 @@ export interface MintBearerContext {
 
 /**
  * The run's model-proxy bearer (docs/reference/specs/model-proxy.md), minted the
- * moment its executor is provisioned: bound to the run id, pinned to the
+ * moment before workspace attach: bound to the run id, pinned to the
  * preset's model and caps, expiring provisionally at the provisioning allowance
  * plus the run's lease plus the grace (`provisionalBearerExpiresAt`) — the harness
  * resets it to the lease's end plus the grace when the lease starts,
@@ -1097,6 +1104,7 @@ export function mintRunBearer(deps: ProvisionDeps, ctx: MintBearerContext): stri
   if (!providerCfg) return undefined;
   return store.mint({
     runId,
+    ...(ctx.github ? { github: ctx.github } : {}),
     modelRef: resolved.modelRef,
     providerName,
     providerWire: wireOf(providerCfg),

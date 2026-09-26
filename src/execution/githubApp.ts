@@ -8,18 +8,14 @@ import { processSecrets, type Secret } from "../secrets.js";
 
 // GitHub App authentication: the idiomatic org-owned bot identity.
 // No machine user, no seat, no long-lived PAT. The bot holds the app's
-// private key and mints 1-hour installation tokens on demand; the token is
-// injected into sandboxes as GH_TOKEN, where gh and git (via the credential
-// helper) accept it exactly like a PAT. PRs are authored as <app-name>[bot].
+// private key and mints 1-hour installation tokens on demand. Model workspaces
+// receive only revocable run bearers; the trusted Git door exchanges them for
+// repository-scoped tokens after checking the operation. PRs are authored as
+// <app-name>[bot].
 //
-// On the cold sandbox and E2B planes that token is what a run holds for its
-// whole run, scoped by permission and never by repository. The git door that
-// replaces it with the run bearer is docs/decisions/0048-the-git-door-a-cold-runs-only-github-credential-is-its-run-bearer.md.
-//
-// Freshness contract: a token is handed out only while it has at least
-// TOKEN_REUSE_MARGIN_MS to live, and the sandbox executors ask for it per
-// COMMAND (resolveEnvs), never once per run — so a command that starts on a
-// token always finishes on it, however long the run has been going.
+// Door tokens never enter resident, cold, E2B or local model commands. The
+// older generic resolver below remains for trusted bot operations; the door
+// uses its own repository-keyed cache and permission-restricted read mint.
 //
 // Secrets (all three required to activate; otherwise GH_TOKEN is used as-is),
 // each read through src/secrets.ts and revealed only into the JWT, the mint URL
@@ -76,6 +72,8 @@ const READ_ONLY_PERMISSIONS = {
 // One cache slot per scope: a write token must never be handed out where a read
 // token was requested (or vice-versa), so they can't share a slot.
 const cache = new Map<GithubTokenScope, CachedToken>();
+/** The door never shares a token slot across repositories or permissions. */
+const doorCache = new Map<string, CachedToken>();
 
 /** A cached token is reused only while it has at least this long to live: the
  *  longest single command a caller can run (BASH_TIMEOUT_MAX_MS) plus slack
@@ -101,23 +99,55 @@ export function githubAppConfigured(): boolean {
 }
 
 /**
- * Resolve the GitHub credential to inject into sandboxes:
+ * Resolve a GitHub credential for trusted bot-side callers:
  * a freshly-minted installation token when a GitHub App is configured,
  * else the static GH_TOKEN, else null (agents without GitHub needs).
  *
  * `scope` (default "write") selects the minted token's permissions — pass
- * "read" for a read-only agent's sandbox so it cannot write from inside.
- * NOTE: the static GH_TOKEN fallback cannot be scoped down (it's an opaque PAT),
- * so least-privilege for the review sandbox requires the GitHub App — the
- * production configuration.
+ * "read" where the caller needs only reads. The static GH_TOKEN fallback is
+ * opaque and must never be handed to a model command or the Git door.
  */
 export async function resolveGithubToken(scope: GithubTokenScope = "write", span?: Span): Promise<string | null> {
   if (githubAppConfigured()) return mintInstallationToken(scope, span);
-  // Revealed here: the caller's contract is the credential itself (a sandbox env, a header).
+  // Revealed here for trusted callers only, never the model workspace.
   return processSecrets.get("GH_TOKEN")?.reveal() ?? null;
 }
 
-/** The credential WITH its expiry, for the executor-side refresher
+/** A GitHub credential for the trusted Git/API door. The caller must never
+ * put this result in a model command's environment, file, helper, or output. */
+export async function resolveGithubDoorToken(scope: GithubTokenScope, repo?: string): Promise<string> {
+  if (scope === "write" && !repo) throw new Error("GitHub door write token requires a repository");
+  if (repo && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))
+    throw new Error("GitHub door repository must be owner/name");
+  const app = appCredentials();
+  if (!app) throw new Error("GitHub door requires the GitHub App; an opaque GH_TOKEN cannot enforce read scope");
+  const key = `${scope}:${repo ?? "*"}`;
+  const cached = doorCache.get(key);
+  if (cached && systemClock() < cached.expiresAtMs - TOKEN_REUSE_MARGIN_MS) return cached.token;
+  const payload = {
+    ...(repo ? { repositories: [repo.slice(repo.lastIndexOf("/") + 1)] } : {}),
+    ...(scope === "read" ? { permissions: READ_ONLY_PERMISSIONS } : {}),
+  };
+  const res = await fetch(`https://api.github.com/app/installations/${app.installationId.reveal()}/access_tokens`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${appJwt(app)}`,
+      accept: "application/vnd.github+json",
+      "content-type": "application/json",
+      "user-agent": "switchboard",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`GitHub door token mint failed: HTTP ${res.status} ${redactAndCap(body, 300)}`);
+  }
+  const data = (await res.json()) as { token: string; expires_at: string };
+  doorCache.set(key, { token: data.token, expiresAtMs: Date.parse(data.expires_at) });
+  return data.token;
+}
+
+/** Legacy credential with its expiry, for the standalone refresher utility
  *  (src/execution/sandboxCredentials.ts): a minted installation token and when
  *  it dies, or the static GH_TOKEN with no expiry (a PAT never needs the
  *  margin path), or null when the run holds no scope / no credential exists.

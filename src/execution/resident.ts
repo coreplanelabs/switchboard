@@ -524,6 +524,8 @@ export interface ResidentExecutorOptions {
   /** Resource id, e.g. "repo:jshttp/vary". */
   resource: string;
   threadKey: string;
+  /** The run's revocable GitHub door credential, never an App token. */
+  githubDoor?: { baseUrl: string; bearer: string };
   /** Ref for an attach. A ref the request names is authoritative and replaces
    *  an older sticky binding; the sticky binding is only a fallback when the
    *  request names none (`refByDefault` is true, `ownPr` derived the hint, or
@@ -1290,6 +1292,7 @@ export class ResidentExecutor implements Executor {
     if (this.opts.reuse) body.reuse = true;
     if (this.opts.ownPr) body.ownPr = this.opts.ownPr;
     if (this.opts.refByDefault) body.refByDefault = true;
+    if (this.opts.githubDoor) body.githubDoor = this.opts.githubDoor;
     const answered = await this.call("/attach", body, timeoutMs, signal, span);
     const data = answered.data;
     // Post-validation answers stream like /exec (heartbeat whitespace then one

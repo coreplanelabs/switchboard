@@ -37,6 +37,8 @@ import {
 } from "./sandboxCredentials.js";
 import { systemClock } from "../core/trace/clock.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
+import { SANDBOX_CREDENTIAL_FILE } from "./sandboxCredentials.js";
+import { legacySandboxCredentialScrub } from "./legacySandboxCredentials.js";
 import type { Span } from "../core/trace/types.js";
 
 // Remote execution in a Cloudflare Sandbox, via the authenticated proxy Worker
@@ -51,7 +53,9 @@ export interface CloudflareSandboxOptions {
   /** Bearer token shared with the Worker (SANDBOX_TOKEN secret). */
   token: string;
   threadKey: string;
-  /** Env vars forwarded into the sandbox (e.g. GH_TOKEN), resolved on EVERY
+  /** A reused thread sandbox may still contain a pre-door App token store. */
+  scrubLegacyCredentials?: boolean;
+  /** Env vars forwarded into the sandbox (including the run bearer), resolved on EVERY
    *  call and sent as `env` in the request body — the Worker applies them to
    *  that one command, so each command carries the credential current at its
    *  own start, never one captured when the run began (a run-start token
@@ -172,8 +176,27 @@ function waitForSlot(ms: number, waitedMs: number, signal?: AbortSignal): Promis
 export class CloudflareSandboxExecutor implements Executor {
   /** The one refresher for this executor's thread (null until first needed). */
   private refresher: SandboxCredentialRefresher | null = null;
+  private scrubbed: Promise<void> | undefined;
 
   constructor(private opts: CloudflareSandboxOptions) {}
+
+  /** The Worker reconnects by thread key, so scrub a reused sandbox before
+   * seed, checkout, or any model-visible command can touch its old store. */
+  async prepareCredentialBoundary(): Promise<void> {
+    const result = await this.call(
+      "/exec",
+      { command: legacySandboxCredentialScrub(SANDBOX_CREDENTIAL_FILE) },
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    if (Number(result.exitCode ?? -1) !== 0)
+      throw new ExecInfraError(
+        `sandbox legacy Git credential cleanup failed (exit ${String(result.exitCode)})`,
+        "refused",
+      );
+  }
 
   /** Land the credential file in the sandbox when the refresher says a write
    *  is due (before every exec; `fresh` on the 401-retry path). Answers whether
@@ -233,7 +256,12 @@ export class CloudflareSandboxExecutor implements Executor {
     signal?: AbortSignal,
     budgetMs: number = BASH_TIMEOUT_MS,
     span?: Span,
+    skipScrub = false,
   ): Promise<Record<string, unknown>> {
+    if (this.opts.scrubLegacyCredentials && !skipScrub) {
+      this.scrubbed ??= this.prepareCredentialBoundary();
+      await this.scrubbed;
+    }
     const envs = await this.opts.resolveEnvs();
     const headers: Record<string, string> = {
       "content-type": "application/json",

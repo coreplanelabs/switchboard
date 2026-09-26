@@ -155,14 +155,14 @@ describe("the `ownPr` and `refByDefault` body fields reach the binding decision"
     expect(handler).toMatch(/const refByDefault = parseRefByDefault\(body\.refByDefault\);/);
     expect(handler).toMatch(/if \("error" in refByDefault\) return json\(\{ error: refByDefault\.error \}, 400\);/);
     expect(handler).toMatch(
-      /attachThread\(\s*ctx\.threadKey,\s*refHint,\s*readonly\.readonly,\s*want\.sha,\s*reuse\.reuse,\s*ctx\.record,\s*traceparent,\s*reason,?\s*\)/,
+      /attachThread\(\s*ctx\.threadKey,\s*refHint,\s*readonly\.readonly,\s*want\.sha,\s*reuse\.reuse,\s*ctx\.record,\s*traceparent,\s*reason,\s*githubDoor,?\s*\)/,
     );
   });
 
   it("attachThread carries the reason through the traced body, decides named authority before the legacy own-PR plan, and records boundBy on a new binding", () => {
     expect(method("attachThread")).toMatch(/reason: RefHintReason = NO_REF_HINT_REASON,/);
     expect(method("attachThreadTraced")).toMatch(
-      /attachThreadBody\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*resourceId,\s*t0,\s*record,\s*reason,?\s*\)/,
+      /attachThreadBody\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*resourceId,\s*t0,\s*record,\s*reason,\s*githubDoor,?\s*\)/,
     );
     const body = method("attachThreadBody");
     const named = body.indexOf("const namedRef = refHint !== null && !reason.refByDefault && reason.ownPr === null;");
@@ -305,7 +305,7 @@ describe("the attach after a rebind provisions the tree at the moved ref as it p
     expect(source).toMatch(/\| \{ kind: "rebound"; moved: ThreadBinding; rebound: Rebound \};/);
     for (const m of [body, create, ensure]) expect(m).not.toMatch(/keepTree/);
     expect(create).toMatch(
-      /this\.ensureThreadWorktree\(binding, sha, mode\.originUrl, mode\.modeSwitch, \{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,?\s*\}\)/,
+      /this\.ensureThreadWorktree\(binding, sha, originUrl, mode\.modeSwitch, \{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,?\s*\}\)/,
     );
     expect(ensure).toMatch(/opts: \{ detached: boolean; reuse: boolean; refChanged: boolean \}/);
     expect(ensure).toMatch(

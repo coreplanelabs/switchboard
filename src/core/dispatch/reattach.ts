@@ -57,9 +57,11 @@ export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent
   const publication = tag?.type === "coordinator_tag" ? tag.publication : undefined;
   const transportWorkflowId = tag?.type === "coordinator_tag" ? tag.transportWorkflowId : undefined;
   const recovery = tag?.type === "coordinator_tag" ? tag.recovery : undefined;
+  const branch = (tag?.type === "coordinator_tag" ? tag.branch : undefined) ?? row.meta.ref;
   return {
     parentInstanceId,
     idempotencyKey,
+    ...(branch !== undefined ? { branch } : {}),
     ...(transportWorkflowId !== undefined ? { transportWorkflowId } : {}),
     ...(recovery !== undefined ? { recovery } : {}),
     ...(base !== undefined ? { base } : {}),

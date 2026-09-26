@@ -127,6 +127,7 @@ export async function attachRoundWorkspace(input: {
     agent: AgentDef;
     /** The round's effective profile — what is provisioned, and as whom. */
     profile: RunProfile;
+    githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };
     repo?: string;
     ref?: string;
     headSha?: string;
@@ -161,6 +162,7 @@ export async function attachRoundWorkspace(input: {
       threadKey: input.round.threadKey,
       agent,
       profile,
+      ...(input.round.githubDoor ? { githubDoor: input.round.githubDoor } : {}),
       repo: input.round.repo,
       ref: input.round.ref,
       headSha: input.round.headSha,

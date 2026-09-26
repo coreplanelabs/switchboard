@@ -184,10 +184,23 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
   it("a coordinator's child publishes its tag as a `coordinator_tag` event at the claim — instance, unit and base — mirrored onto the row; a resume republishes nothing", async () => {
     const { deps, ledger, base } = setup();
     const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
-    const coordinator = { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding", base: "feat/trunk" };
+    const coordinator = {
+      parentInstanceId: "plan-p-2",
+      idempotencyKey: "plan-p-2:U16/1/coding",
+      branch: "plan/p/u16",
+      base: "feat/trunk",
+    };
     await claimRun(deps, { ...base, reserved, resume: undefined, ledgerRun: undefined, coordinator });
     expect(ledger.handle!.events.map((e) => e.event)).toEqual([
-      { type: "coordinator_tag", parentInstanceId: "plan-p-2", unit: "U16", base: "feat/trunk", at: NOW, seq: 1 },
+      {
+        type: "coordinator_tag",
+        parentInstanceId: "plan-p-2",
+        unit: "U16",
+        branch: "plan/p/u16",
+        base: "feat/trunk",
+        at: NOW,
+        seq: 1,
+      },
     ]);
 
     const resumed = setup();

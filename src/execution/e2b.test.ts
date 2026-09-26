@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Sandbox } from "e2b";
 import { E2BExecutor, E2B_CREDENTIAL_FILE } from "./e2b.js";
+import { legacySandboxCredentialScrub } from "./legacySandboxCredentials.js";
 import {
   SANDBOX_CREDENTIAL_ENV,
   credentialLine,
@@ -33,6 +38,117 @@ function e2bWith(
 }
 
 const OK = { stdout: "ok", stderr: "", exitCode: 0 };
+
+describe("E2B reused sandbox credential boundary", () => {
+  it("scrubs before a reconnected sandbox is returned", async () => {
+    const home = mkdtempSync(join(tmpdir(), "swb-e2b-"));
+    const statePath = join(home, "sandboxes.json");
+    writeFileSync(
+      statePath,
+      JSON.stringify({ thread: { sandboxId: "sandbox-safe", credentialBoundary: "no-creation-env-v1" } }),
+    );
+    const run = vi.fn(async (_command: string) => OK);
+    const connect = vi.spyOn(Sandbox, "connect").mockResolvedValue({
+      setTimeout: vi.fn(async () => {}),
+      commands: { run },
+    } as unknown as Sandbox);
+    try {
+      const ex = await E2BExecutor.open({
+        threadKey: "thread",
+        statePath,
+        timeoutMs: 60_000,
+        resolveEnvs: async () => ({}),
+      });
+      expect(connect).toHaveBeenCalledWith("sandbox-safe", { apiKey: undefined });
+      expect(run.mock.calls[0][0]).toBe(legacySandboxCredentialScrub(E2B_CREDENTIAL_FILE));
+      await ex.exec("git status");
+      expect(run.mock.calls[1][0]).toBe("git status");
+    } finally {
+      connect.mockRestore();
+    }
+  });
+
+  it("does not use or replace a reconnected sandbox whose cleanup fails", async () => {
+    const home = mkdtempSync(join(tmpdir(), "swb-e2b-"));
+    const statePath = join(home, "sandboxes.json");
+    writeFileSync(
+      statePath,
+      JSON.stringify({ thread: { sandboxId: "sandbox-safe", credentialBoundary: "no-creation-env-v1" } }),
+    );
+    const run = vi.fn(async (_command: string) => ({ ...OK, exitCode: 1 }));
+    const connect = vi.spyOn(Sandbox, "connect").mockResolvedValue({
+      setTimeout: vi.fn(async () => {}),
+      commands: { run },
+    } as unknown as Sandbox);
+    const create = vi.spyOn(Sandbox, "create");
+    try {
+      await expect(
+        E2BExecutor.open({ threadKey: "thread", statePath, timeoutMs: 60_000, resolveEnvs: async () => ({}) }),
+      ).rejects.toThrow(/legacy Git credential cleanup failed/);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      connect.mockRestore();
+      create.mockRestore();
+    }
+  });
+
+  it("retires a legacy sandbox before creating one with no creation-time credential", async () => {
+    const home = mkdtempSync(join(tmpdir(), "swb-e2b-"));
+    const statePath = join(home, "sandboxes.json");
+    writeFileSync(statePath, JSON.stringify({ thread: "sandbox-legacy" }));
+    const events: string[] = [];
+    const kill = vi.spyOn(Sandbox, "kill").mockImplementation(async () => {
+      events.push("kill");
+      return true;
+    });
+    const run = vi.fn(async (_command: string, _options?: unknown) => OK);
+    const create = vi.spyOn(Sandbox, "create").mockImplementation(async () => {
+      events.push("create");
+      return { sandboxId: "sandbox-new", commands: { run } } as unknown as Sandbox;
+    });
+    const connect = vi.spyOn(Sandbox, "connect");
+    const resolveEnvs = vi.fn(async () => ({ GH_ENTERPRISE_TOKEN: "run-bearer" }));
+    try {
+      const ex = await E2BExecutor.open({ threadKey: "thread", statePath, timeoutMs: 60_000, resolveEnvs });
+      expect(events).toEqual(["kill", "create"]);
+      expect(kill).toHaveBeenCalledWith("sandbox-legacy", { apiKey: undefined });
+      expect(connect).not.toHaveBeenCalled();
+      expect(create.mock.calls[0][0]).not.toHaveProperty("envs");
+      expect(resolveEnvs).not.toHaveBeenCalled();
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual({
+        thread: { sandboxId: "sandbox-new", credentialBoundary: "no-creation-env-v1" },
+      });
+      await ex.exec("git status");
+      expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ envs: { GH_ENTERPRISE_TOKEN: "run-bearer" } });
+    } finally {
+      kill.mockRestore();
+      create.mockRestore();
+      connect.mockRestore();
+    }
+  });
+
+  it("refuses an unretired legacy sandbox without creating or exposing another workspace", async () => {
+    const home = mkdtempSync(join(tmpdir(), "swb-e2b-"));
+    const statePath = join(home, "sandboxes.json");
+    writeFileSync(statePath, JSON.stringify({ thread: "sandbox-legacy" }));
+    const kill = vi.spyOn(Sandbox, "kill").mockRejectedValue(new Error("control unavailable"));
+    const create = vi.spyOn(Sandbox, "create");
+    const connect = vi.spyOn(Sandbox, "connect");
+    try {
+      await expect(
+        E2BExecutor.open({ threadKey: "thread", statePath, timeoutMs: 60_000, resolveEnvs: async () => ({}) }),
+      ).rejects.toThrow(/legacy sandbox retirement failed/);
+      expect(create).not.toHaveBeenCalled();
+      expect(connect).not.toHaveBeenCalled();
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual({ thread: "sandbox-legacy" });
+    } finally {
+      kill.mockRestore();
+      create.mockRestore();
+      connect.mockRestore();
+    }
+  });
+});
 
 // Feature: docs/reference/specs/execution.md item 5 — the credential is resolved per
 // command on this path too: the micro-VM's creation-time env would otherwise
@@ -117,9 +233,14 @@ describe("E2BExecutor credential file refresh", () => {
     expect(run.mock.calls.filter(([c]) => String(c).includes("credential.helper")).length).toBe(2);
   });
 
-  it("an executor without a credential source refreshes nothing — the pre-refresher paths are unchanged", async () => {
-    const { ex, run } = e2bWith(async () => OK);
-    await ex.exec("git push origin HEAD");
+  it("a run-bearer push refusal is returned once without an App credential source", async () => {
+    const { ex, run } = e2bWith(async () => ({
+      stdout: "",
+      stderr: "remote: Invalid username or token",
+      exitCode: 128,
+    }));
+    const out = await ex.exec("git push origin HEAD");
+    expect(out).toContain("Invalid username or token");
     expect(run).toHaveBeenCalledTimes(1);
   });
 

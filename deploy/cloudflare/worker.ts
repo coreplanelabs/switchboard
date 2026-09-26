@@ -1,5 +1,6 @@
 import { depotCiAuthorization, handleDepotCi } from "./depotCi.ts";
 import { DEPOT_CI_AUTHORIZATION_PATH, DEPOT_CI_PATH } from "../../src/core/depotCi.ts";
+import { githubDoorEdgeRoute } from "../../src/channels/githubDoorPaths.ts";
 // Cloudflare Containers shim: runs the unchanged Switchboard image as a single
 // always-on container instance — the shape of any long-lived server on
 // Cloudflare Containers (singleton DO, cron keep-alive;
@@ -88,6 +89,7 @@ export interface Env {
   DEPOT_API_TOKEN?: string; // Worker-only organization credential: NEVER forwarded to any container
   DEPOT_CI_BRIDGE_TOKEN?: string; // bot → Worker, narrow repo-bound CI operations only
   PUBLIC_BASE_URL?: string; // live-view: base for /runs/<id>?t=… links on the status card
+  PUBLIC_GIT_BASE_URL?: string; // GitHub run-bearer door on a separate custom domain without dashboard Access
   ACCESS_TEAM_DOMAIN?: string; // live-view SSO gate: Cloudflare Access team domain (JWKS + iss)
   ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
   DASHBOARD_TOKEN?: string; // dashboard auth `token` strategy: the bearer (the default env name; config may name another)
@@ -130,6 +132,7 @@ const FORWARDED_OPTIONAL = [
   "GITHUB_APP_PRIVATE_KEY",
   "DEPOT_CI_BRIDGE_TOKEN",
   "PUBLIC_BASE_URL",
+  "PUBLIC_GIT_BASE_URL",
   "ACCESS_TEAM_DOMAIN",
   "ACCESS_AUD",
   "DASHBOARD_TOKEN",
@@ -462,7 +465,10 @@ const withLength = (res: Response): Response => withKnownLength(res, (size) => n
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const pathname = new URL(request.url).pathname;
+    const requestUrl = new URL(request.url);
+    const pathname = requestUrl.pathname;
+    if (githubDoorEdgeRoute(requestUrl, request.method, env.PUBLIC_GIT_BASE_URL) === "refuse")
+      return new Response("not found", { status: 404 });
     // Permits can only be consumed through the Worker's fixed container
     // binding. The public edge must never proxy this callback path.
     if (pathname === DEPOT_CI_AUTHORIZATION_PATH) return new Response("not found", { status: 404 });

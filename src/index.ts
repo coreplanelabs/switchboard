@@ -109,6 +109,10 @@ import {
   OPENAI_RESPONSES_PATH,
 } from "./channels/modelProxy.js";
 import { RunBearerStore } from "./core/modelProxy/runBearers.js";
+import { GitBindings } from "./core/modelProxy/gitBindings.js";
+import { createGithubDoorHandler, isGithubDoorPath } from "./channels/githubDoor.js";
+import { githubDoorEdgeRoute } from "./channels/githubDoorPaths.js";
+import { resolveGithubDoorToken } from "./execution/githubApp.js";
 import { createProviderLiveStateCoordinator } from "./core/providerLiveStateCoordinator.js";
 import { PiHarness } from "./core/harness/pi/piHarness.js";
 import { OpenCodeHarness } from "./core/harness/opencode/harness.js";
@@ -574,6 +578,7 @@ export async function runBot(): Promise<void> {
   // minted by the provision stage as a run's executor attaches, revoked as the
   // run ends; in-process, so a restart drops them with the runs that held them.
   const runBearers = new RunBearerStore({ clock: systemClock });
+  const githubBindings = new GitBindings();
   // The runs driving a harness process (docs/reference/specs/harness-pi.md):
   // the harness routes answer for exactly these; the bot's public URL is where
   // a run's container reaches the proxy and the routes, and this process's own
@@ -607,6 +612,8 @@ export async function runBot(): Promise<void> {
     }),
     spanLog,
     runBearers,
+    githubBindings,
+    ...(process.env.PUBLIC_GIT_BASE_URL ? { githubDoor: { baseUrl: process.env.PUBLIC_GIT_BASE_URL } } : {}),
     harness: {
       harnesses: roster,
       registry: harnesses,
@@ -1064,6 +1071,12 @@ export async function runBot(): Promise<void> {
         level: (provider, side, cause) => void providerLiveState.level(provider, side, cause),
         park: (runId, provider) => void providerLiveState.park(runId, provider),
       },
+    });
+    const githubDoor = createGithubDoorHandler({
+      bearers: runBearers,
+      bindings: githubBindings,
+      baseUrl: process.env.PUBLIC_GIT_BASE_URL,
+      token: resolveGithubDoorToken,
     });
     // The harness routes (docs/reference/specs/harness-pi.md item 7): what a
     // run's pi extension asks over the run's own bearer — its relayed tool
@@ -1527,6 +1540,22 @@ export async function runBot(): Promise<void> {
 
     createServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0];
+      const host = req.headers.host;
+      let doorRoute: "door" | "other" | "refuse" = "refuse";
+      try {
+        if (host && req.url?.startsWith("/"))
+          doorRoute = githubDoorEdgeRoute(
+            new URL(`https://${host}${req.url}`),
+            req.method ?? "GET",
+            process.env.PUBLIC_GIT_BASE_URL,
+          );
+      } catch {
+        /* malformed Host stays refused */
+      }
+      if (doorRoute === "refuse") {
+        res.writeHead(404).end();
+        return;
+      }
       if (path === "/ingress") {
         ingress(req, res);
         return;
@@ -1541,6 +1570,10 @@ export async function runBot(): Promise<void> {
       }
       if (isModelProxyPath(path)) {
         modelProxy(req, res);
+        return;
+      }
+      if (isGithubDoorPath(path)) {
+        void githubDoor(req, res);
         return;
       }
       if (isHarnessPath(path)) {

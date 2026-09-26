@@ -313,6 +313,8 @@ export interface ExistingPrPublicationBinding {
 export interface CoordinatorTag {
   parentInstanceId: string;
   idempotencyKey: string;
+  /** The unit's durable write branch, read from its row at child admission. */
+  branch?: string;
   /** Workflow transport for a recovered child. Identity and idempotency remain
    * on `parentInstanceId`; only lifecycle wake-ups use this checkpoint id. */
   transportWorkflowId?: string;

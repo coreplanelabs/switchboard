@@ -974,6 +974,7 @@ export type RunEvent =
       type: "coordinator_tag";
       parentInstanceId: string;
       unit?: string;
+      branch?: string;
       transportWorkflowId?: string;
       recovery?: import("./coordinator/contract.js").CoordinatorTag["recovery"];
       base?: string;

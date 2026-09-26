@@ -463,6 +463,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
       type: "coordinator_tag",
       parentInstanceId: coordinator.parentInstanceId,
       ...(unit !== undefined ? { unit } : {}),
+      ...(coordinator.branch !== undefined ? { branch: coordinator.branch } : {}),
       ...(coordinator.transportWorkflowId !== undefined
         ? { transportWorkflowId: coordinator.transportWorkflowId }
         : {}),

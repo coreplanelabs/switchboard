@@ -127,6 +127,7 @@ describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
         type: "coordinator_tag",
         parentInstanceId: "plan-p-2",
         unit: "U16",
+        branch: "plan/p/u16",
         transportWorkflowId: "recovery-review-1",
         recovery,
         base: "feat/trunk",
@@ -136,6 +137,7 @@ describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
     expect(tag).toEqual({
       parentInstanceId: "plan-p-2",
       idempotencyKey: "plan-p-2:U16/1/coding",
+      branch: "plan/p/u16",
       transportWorkflowId: "recovery-review-1",
       recovery,
       base: "feat/trunk",
