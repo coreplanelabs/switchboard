@@ -1179,6 +1179,42 @@ describe("RunsService with the run ledger — one registry across generations (r
     expect(await svc.getRun("far-1")).toEqual({ ok: false, error: "not_found" });
   });
 
+  it.each(["all", "active", "finished", "cursor"] as const)(
+    "marks a failed ledger listing incomplete under %s without dropping readable registry or history rows",
+    async (status) => {
+      const { svc, reg, store, ledger, warnings } = ledgerSetup();
+      const local = reg.create("coding · mine");
+      await store!.put(record("past-1", NOW - 1));
+      await farRun(ledger);
+      const listLive = vi.spyOn(ledger, "listLive").mockRejectedValueOnce(new Error("HTTP 503"));
+      const opts = {
+        visibleTo: ALL,
+        status: status === "cursor" ? ("all" as const) : status,
+        ...(status === "cursor" ? { before: NOW, beforeId: "past-2" } : {}),
+      };
+      const fallback = await svc.listRuns(opts);
+      expect(fallback).toMatchObject({ ledgerUnavailable: true });
+      expect(fallback.storeUnavailable).toBeUndefined();
+      expect(fallback.nextBefore).toBeUndefined();
+      expect(fallback.runs.map((r) => r.id)).toEqual(
+        status === "active" ? [local.id] : status === "all" ? [local.id, "past-1"] : ["past-1"],
+      );
+      expect(warnings).toEqual([expect.stringContaining("HTTP 503")]);
+      expectNoToken(fallback);
+
+      // A failed read is not cached or sticky; retry sees the foreign child.
+      const recovered = await svc.listRuns(opts);
+      expect(recovered).not.toHaveProperty("ledgerUnavailable");
+      expect(recovered.runs.some((r) => r.id === "far-1")).toBe(status === "all" || status === "active");
+      expect(listLive).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("does not mark an empty successful ledger listing unavailable", async () => {
+    const { svc } = ledgerSetup();
+    expect(await svc.listRuns({ visibleTo: ALL, status: "all" })).toEqual({ runs: [] });
+  });
+
   it("liveElsewhere is the ledger's live rows that are not in the registry, under the viewer's predicate — what the default index adds to the registry", async () => {
     const { svc, reg, ledger } = ledgerSetup();
     const mine = reg.create("mine");
