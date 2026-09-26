@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.264.0](https://github.com/coreplanelabs/switchboard/compare/v1.263.0...v1.264.0) (2026-09-26)
+
+
+### Features
+
+* **authz:** persist atomic dual-identity link intents ([#2389](https://github.com/coreplanelabs/switchboard/issues/2389)) ([caa2887](https://github.com/coreplanelabs/switchboard/commit/caa2887dec55c354334f44106d6a76c92644e407))
+
+
+### Bug fixes
+
+* **dispatcher:** start fresh ship work after merge-ready ([#2388](https://github.com/coreplanelabs/switchboard/issues/2388)) ([a054dc4](https://github.com/coreplanelabs/switchboard/commit/a054dc4e9c20728b0c7fb9bc1e7ed4db27332ba2))
+* **dispatcher:** wake idle units beside hosted Ship parents ([#2394](https://github.com/coreplanelabs/switchboard/issues/2394)) ([2b6d789](https://github.com/coreplanelabs/switchboard/commit/2b6d7891b24cb82f2ef3841433e04c441e735ba1))
+* **workers:** publish PNGs from R2 runtime objects ([#2400](https://github.com/coreplanelabs/switchboard/issues/2400)) ([358c21a](https://github.com/coreplanelabs/switchboard/commit/358c21a356769ff3308f53621f68c01df08d3dcc))
+
 ## [1.263.0](https://github.com/coreplanelabs/switchboard/compare/v1.262.4...v1.263.0) (2026-09-26)
 
 
