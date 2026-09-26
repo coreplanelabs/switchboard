@@ -396,6 +396,22 @@ describe("completed findings recovery — typed completion plus independently ve
     expect(report).not.toMatch(/interrupted work|ended because|next reply/i);
   });
 
+  it("names submitted IDs that missed check findings in the incomplete-output report", () => {
+    const check: Finding = { id: "check:CI / checks (test)", severity: "blocking", file: "CI", title: "Tests failed" };
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d, [check]);
+    runChild(
+      d,
+      "run-f1",
+      completeFindings(d, { dispositions: [{ findingId: "F1", disposition: "declined", note: "could not read CI" }] }),
+      T0 + 30 * MIN,
+    );
+
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("missing disposition for check:CI / checks (test)");
+    expect(report).toContain("submitted IDs with no matching finding: F1");
+  });
+
   it("reports a genuinely interrupted findings run as stopped before review without calling completed work interrupted or promising continuation", () => {
     const d = fresh(input({ merge: "person", generated: true }));
     throughFindingsRequest(d);

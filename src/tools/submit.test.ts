@@ -168,8 +168,7 @@ describe("submit_verdict tool", () => {
 });
 
 // Feature: docs/reference/specs/agent-ship.md item 6 — fix rounds record one disposition
-// per review finding through this tool; the ship orchestrator injects
-// the round's known finding ids and consumes the last valid call.
+// per review finding through this tool; the runner matches those IDs after the run.
 describe("submit_dispositions tool", () => {
   const ctxWith = (onDispositions: ToolContext["onDispositions"]): ToolContext =>
     ({ executor: {} as ToolContext["executor"], onDispositions }) as ToolContext;
@@ -197,6 +196,11 @@ describe("submit_dispositions tool", () => {
     expect(tool().failsInText).toBe(true);
   });
 
+  it("tells coding runs to copy exact finding IDs, including check IDs", () => {
+    expect(tool().description).toContain("check:CI / checks (test)");
+    expect(JSON.stringify(tool().inputSchema)).toContain("check:CI / checks (test)");
+  });
+
   it("forwards a valid set to the context and acknowledges the count", async () => {
     const got: unknown[] = [];
     const out = await tool().run(
@@ -211,6 +215,7 @@ describe("submit_dispositions tool", () => {
     ]);
     expect(String(out)).toContain("2");
     expect(String(out)).toContain("dispositions recorded"); // every run has the sink: its record
+    expect(String(out)).toContain("IDs are checked against the findings by the plan runner");
     expect(String(out)).not.toMatch(/^error:/);
   });
 
@@ -231,7 +236,9 @@ describe("submit_dispositions tool", () => {
         { findingId: "F9", disposition: "declined", note: "n" },
       ],
     ]);
-    expect(String(out)).toBe("dispositions recorded: 2; a later call replaces this one");
+    expect(String(out)).toBe(
+      "dispositions recorded: 2; IDs are checked against the findings by the plan runner; a later call replaces this one",
+    );
     expect(tool().description).not.toContain("no-op");
     expect(tool().description).not.toContain("fix round");
   });

@@ -185,7 +185,7 @@ function findingsRequest(input: { where: string; findings: Finding[]; review: st
       : "";
   return (
     `The review of ${input.where} requested changes. Load the \`address-review-findings\` skill and address every finding below, nits included: ` +
-    `record one disposition per finding with submit_dispositions (fixed or declined, with a note), squash to coherent commits, ` +
+    `record one disposition per finding with submit_dispositions (fixed or declined, with a note). Copy each finding ID exactly, including any \`check:…\` ID; never substitute an \`F1\` ID for a check. Squash to coherent commits, ` +
     `resubmit the pull request description with submit_pr_description, and push the branch. Never merge and never approve.\n\n` +
     `Findings:\n${findings}${answers}\n\nReview:\n${input.review}`
   );

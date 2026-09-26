@@ -1998,10 +1998,12 @@ function settleCoding(
   // final observed head. Only then may a fresh remote read decide readiness.
   if (round.kind === "findings" && facts.status === "completed") {
     const issued = next.findingsByRound[round.index] ?? [];
-    const matched = matchDispositions(issued, facts.dispositions ?? []).matched;
+    const { matched, dropped } = matchDispositions(issued, facts.dispositions ?? []);
     const missingOutputs = issued
       .filter((finding) => !matched.some((disposition) => disposition.findingId === finding.id))
       .map((finding) => `missing disposition for ${finding.id}`);
+    if (missingOutputs.length > 0 && dropped.length > 0)
+      missingOutputs.push(`submitted IDs with no matching finding: ${dropped.join(", ")}`);
     if (facts.description !== true) missingOutputs.push("missing updated pull request description");
     const observedHead = fullHead(facts.headSha);
     if (observedHead === undefined) missingOutputs.push("missing final observed commit");
