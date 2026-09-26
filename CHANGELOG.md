@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.263.0](https://github.com/coreplanelabs/switchboard/compare/v1.262.4...v1.263.0) (2026-09-26)
+
+
+### Features
+
+* **authz:** add a verified person directory contract ([#2382](https://github.com/coreplanelabs/switchboard/issues/2382)) ([4bf0452](https://github.com/coreplanelabs/switchboard/commit/4bf04521184b1f4b2a4c2858e7c8eeb9e0ced1fe))
+
+
+### Bug fixes
+
+* **coding:** publish screenshots for inline PR display ([#2384](https://github.com/coreplanelabs/switchboard/issues/2384)) ([df7a832](https://github.com/coreplanelabs/switchboard/commit/df7a832d2d7984c0133260e5643d76a45e490e87))
+* **dispatcher:** give operator a minute and classify timeouts ([#2378](https://github.com/coreplanelabs/switchboard/issues/2378)) ([455478d](https://github.com/coreplanelabs/switchboard/commit/455478de0ac46069c5dd1bd17a7d03caa1af86ed))
+* **dispatcher:** honor configured model when none is requested ([#2381](https://github.com/coreplanelabs/switchboard/issues/2381)) ([4d95b8a](https://github.com/coreplanelabs/switchboard/commit/4d95b8aa81edf31e4a57184e2ef96ca32d827352))
+* **ship:** preserve original-unit publication through retries ([#2380](https://github.com/coreplanelabs/switchboard/issues/2380)) ([5af4b30](https://github.com/coreplanelabs/switchboard/commit/5af4b30174e52daa0d2e1592849c9c3f270fc0f6))
+
+
+### Documentation
+
+* **authz:** propose verified account linking and revocation ([#2385](https://github.com/coreplanelabs/switchboard/issues/2385)) ([c45b622](https://github.com/coreplanelabs/switchboard/commit/c45b622fbe8c40b5af9119f46d403d1a29ab0d08))
+* **authz:** propose verified cross-surface identity ([#2377](https://github.com/coreplanelabs/switchboard/issues/2377)) ([1ac78cc](https://github.com/coreplanelabs/switchboard/commit/1ac78cc04279849632f4873f03749387ce0d1452))
+
 ## [1.262.4](https://github.com/coreplanelabs/switchboard/compare/v1.262.3...v1.262.4) (2026-09-25)
 
 
