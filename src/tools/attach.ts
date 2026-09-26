@@ -1,5 +1,6 @@
 import { contentTypeFor } from "../artifacts/contentType.js";
-import { outboundKey } from "../artifacts/keys.js";
+import { outboundKey, safeBasename } from "../artifacts/keys.js";
+import { MAX_PR_IMAGE_BYTES } from "../artifacts/prImages.js";
 import type { ArtifactStore } from "../artifacts/store.js";
 import { parseExitPrefix } from "../core/runEvents.js";
 import type { UploadTicket } from "../core/types.js";
@@ -110,6 +111,7 @@ async function attachThroughStore(
   lead: string,
   artifacts: ArtifactsCapability,
   ctx: ToolContext,
+  publishForPr: boolean,
 ): Promise<string> {
   const exec = (command: string, timeoutMs: number): Promise<string> => {
     const opts: ExecOptions = { timeoutMs, ...(ctx.signal ? { signal: ctx.signal } : {}) };
@@ -125,6 +127,7 @@ async function attachThroughStore(
   const size = parseByteSize(statOut);
   if (size === null) return `error: could not measure ${path}: ${statOut.trim()}`;
   if (size === 0) return `error: ${path} is empty — nothing to attach`;
+  if (publishForPr && size > MAX_PR_IMAGE_BYTES) return `error: PR images take at most ${MAX_PR_IMAGE_BYTES} bytes`;
   if (size > MAX_ARTIFACT_BYTES) {
     return `error: ${path} is ${size} bytes; attach_file takes files up to ${MAX_ARTIFACT_BYTES} bytes (1 GiB) — link to the file instead`;
   }
@@ -167,6 +170,17 @@ async function attachThroughStore(
   // Recorded under the call that posted it (live-view.md item 26): the page
   // puts the file on this call's card by that id, never by matching names.
   ctx.publish?.({ type: "artifact", direction: "out", key, name, size, contentType, callId });
+  // Publication is a separate copy, only after the requesting channel has
+  // received its attachment. A failure here must not erase that delivery fact.
+  const finish = async (attached: string): Promise<string> => {
+    if (!publishForPr) return attached;
+    try {
+      const url = await artifacts.store.publishPrImage(key);
+      return `${attached}; public PR image (retained by the artifact lifecycle): ![${safeBasename(name)}](${url})`;
+    } catch (err) {
+      return `error: ${attached}; PR publication failed: ${describe(err)} — no public PR image was returned`;
+    }
+  };
   // 4. Into the conversation. A channel with an upload ticket gets the same
   // file from the container; one without (the CLI harness, HTTP, MCP) gets the
   // lead and the file's own link — the run page's artifact proxy, tokened while
@@ -175,7 +189,10 @@ async function attachThroughStore(
     const link = artifacts.artifactUrl?.(key);
     const where = link ? ` — ${link}` : ` is on the run page as ${key}`;
     await artifacts.reply(`${lead}\n📎 ${name} (${size} bytes)${where}`);
-    return `attached ${name} (${size} bytes) to the run page as ${key}; this conversation's channel takes no file uploads, so the lead and the file's link were posted instead`;
+    const linked = `attached ${name} (${size} bytes) to the run page as ${key}; this conversation's channel takes no file uploads, so the lead and the file's link were posted instead`;
+    return publishForPr
+      ? `error: ${linked}; PR publication requires a completed channel upload — no public PR image was published`
+      : linked;
   }
   const kept = "the file is kept on the run page";
   let ticket: UploadTicket;
@@ -193,7 +210,7 @@ async function attachThroughStore(
   } catch (err) {
     return `error: the channel refused to complete the upload of ${name}: ${describe(err)}; ${kept}`;
   }
-  return `attached ${name} (${size} bytes) to the conversation and the run page`;
+  return finish(`attached ${name} (${size} bytes) to the conversation and the run page`);
 }
 
 export const attachFileTool: RunnableTool = {
@@ -203,11 +220,17 @@ export const attachFileTool: RunnableTool = {
     "Post a file from the workspace into the conversation so the person sees it inline — a screenshot " +
     "(e.g. from `playwright screenshot`), a rendered PDF, a recording, a log. Use it whenever you produce an " +
     `image worth showing: a link to a file is not a picture. Whole files only: up to ${MAX_ARTIFACT_BYTES} bytes ` +
-    `(1 GiB) where the artifact store is configured, ${MAX_READ_BYTES} bytes otherwise — the result says which.`,
+    `(1 GiB) where the artifact store is configured, ${MAX_READ_BYTES} bytes otherwise — the result says which. ` +
+    "For an inspected, non-sensitive PNG screenshot, publishForPr: true also deliberately publishes a public PR image URL after thread delivery (10 MiB max, artifact retention applies). Omit it to keep the file private.",
   inputSchema: {
     type: "object",
     properties: {
       path: { type: "string", description: "Relative path of the file in the workspace" },
+      publishForPr: {
+        type: "boolean",
+        description:
+          "Explicitly make this PNG public for embedding in a PR, after attaching it here. Default false; inspect/redact first. Requires a bound permitted repository and artifact store. The copy expires under the artifact lifecycle.",
+      },
       comment: {
         type: "string",
         description: "One line posted with the file saying what it shows (default: the file name)",
@@ -220,7 +243,16 @@ export const attachFileTool: RunnableTool = {
     if (!path) return "error: path is required";
     const name = fileNameOf(path);
     const lead = typeof input.comment === "string" && input.comment.trim() ? input.comment.trim() : name;
-    if (ctx.artifacts) return attachThroughStore(path, name, lead, ctx.artifacts, ctx);
+    if (input.publishForPr !== undefined && typeof input.publishForPr !== "boolean")
+      return "error: publishForPr must be a boolean";
+    const publishForPr = input.publishForPr === true;
+    if (publishForPr) {
+      if (!ctx.repo) return "error: PR publication requires a bound repository";
+      if (!ctx.github?.canWrite(ctx.repo)) return "error: PR publication requires permission to use this repository";
+      if (!ctx.artifacts) return "error: PR publication requires the artifact store; no public image was published";
+      if (contentTypeFor(name) !== "image/png") return "error: PR publication supports only PNG screenshots";
+    }
+    if (ctx.artifacts) return attachThroughStore(path, name, lead, ctx.artifacts, ctx, publishForPr);
     if (!ctx.attach) {
       return "attach_file is not available here: this conversation's channel takes no file uploads — link to the file instead";
     }

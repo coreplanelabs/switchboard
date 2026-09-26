@@ -386,3 +386,86 @@ describe("InMemoryArtifactStore.copyFromUrl (item 20)", () => {
     expect(store.copies).toHaveLength(2);
   });
 });
+
+describe("PR image publication", () => {
+  const bytes = Uint8Array.from(
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS6kAAAAASUVORK5CYII=",
+      "base64",
+    ),
+  );
+  const key = "runs/r1/out/1-shot.png";
+  it("R2 sends the internal bearer, source key and retention and returns a same-origin public URL", async () => {
+    const calls: Request[] = [];
+    const path = "/pr-images/12345678-1234-4123-8123-123456789abc.png";
+    const store = r2({
+      fetch: async (input, init) => {
+        calls.push(new Request(input, init));
+        return Response.json({ path });
+      },
+    });
+    expect(await store.publishPrImage(key)).toBe(`https://bot.example.com${path}`);
+    expect(calls[0]!.url).toBe("https://bot.example.com/artifacts/publish-pr-image");
+    expect(calls[0]!.headers.get("authorization")).toBe("Bearer copy-bearer");
+    expect(await calls[0]!.json()).toEqual({ key, retentionDays: 30 });
+  });
+
+  it("R2 refuses unsuccessful responses, foreign URLs, private paths and inbound sources", async () => {
+    for (const path of [
+      "https://foreign.example/x.png",
+      "/runs/r1/artifacts/private",
+      "/pr-images/x.png?token=secret",
+    ]) {
+      await expect(r2({ fetch: async () => Response.json({ path }) }).publishPrImage(key)).rejects.toThrow(
+        /publication/,
+      );
+    }
+    await expect(
+      r2({ fetch: async () => new Response("refused", { status: 401 }) }).publishPrImage(key),
+    ).rejects.toThrow(/401/);
+    let called = false;
+    await expect(
+      r2({
+        fetch: async () => {
+          called = true;
+          return new Response();
+        },
+      }).publishPrImage("threads/t/in/1/x.png"),
+    ).rejects.toThrow(/outbound/);
+    expect(called).toBe(false);
+  });
+
+  it("R2 refuses non-HTTPS or credential-bearing origins before sending a publication bearer", async () => {
+    for (const baseUrl of [
+      "http://bot.example.com",
+      "https://user:pass@bot.example.com",
+      "https://bot.example.com/?token=x",
+      "https://bot.example.com/prefix",
+    ]) {
+      let called = false;
+      const store = r2({
+        copy: { baseUrl, token: secret("ARTIFACTS_COPY_TOKEN", "copy-bearer") },
+        fetch: async () => {
+          called = true;
+          return new Response();
+        },
+      });
+      await expect(store.publishPrImage(key)).rejects.toThrow(/credential-free HTTPS origin/);
+      expect(called).toBe(false);
+    }
+  });
+
+  it("memory publication checks PNG bytes and keeps an independent immutable copy", async () => {
+    const store = new InMemoryArtifactStore();
+    store.put(key, bytes, "image/png");
+    const url = new URL(await store.publishPrImage(key));
+    expect(url.pathname).toMatch(/^\/pr-images\/[a-f0-9-]+\.png$/);
+    const publicKey = url.pathname.replace("/pr-images/", "published-pr/");
+    expect(store.objects.get(publicKey)?.bytes).toEqual(bytes);
+    store.put(key, new Uint8Array([1]), "image/png");
+    expect(store.objects.get(publicKey)?.bytes).toEqual(bytes);
+    await expect(store.publishPrImage(key)).rejects.toThrow(/PNG/);
+    await expect(store.publishPrImage("threads/t/in/1/x.png")).rejects.toThrow(/outbound/);
+    await expect(store.publishPrImage("runs/r1/out/2-gone.png")).rejects.toThrow(/not found/);
+  });
+});

@@ -2,6 +2,7 @@ import { AwsClient } from "aws4fetch";
 import { systemClock } from "../core/trace/clock.js";
 import type { Secret } from "../secrets.js";
 import { ARTIFACT_DEFAULTS } from "./config.js";
+import { PR_IMAGE_PUBLISH_PATH, prImageKey, readPrImage, validPrImagePath, validPrImageSource } from "./prImages.js";
 
 type Clock = () => number;
 
@@ -104,6 +105,9 @@ export interface ArtifactStore {
   get(key: string, opts?: ArtifactGetOptions): Promise<ArtifactObject | ArtifactUnsatisfiable | null>;
   /** Copy `size` bytes from `url` (a Slack `url_private`) into `key` without the bot holding them. */
   copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef>;
+  /** Deliberately copy one outbound PNG to the public PR-image route. The
+   *  caller must first authorize publication and complete thread delivery. */
+  publishPrImage(key: string): Promise<string>;
 }
 
 export const PRESIGN_TTL_SECONDS = ARTIFACT_DEFAULTS.presignTtlSeconds;
@@ -117,6 +121,8 @@ export interface R2ArtifactStoreOptions {
   secretAccessKey: Secret;
   /** The bot's own Worker, which holds the R2 binding and the Slack token the copy needs. */
   copy: { baseUrl: string; token: Secret; timeoutMs?: number };
+  /** Public copies stop serving after this configured artifact retention (default 30 days). */
+  retentionDays?: number;
   fetch?: Fetch;
   clock?: Clock;
 }
@@ -149,6 +155,7 @@ export class R2ArtifactStore implements ArtifactStore {
   private readonly endpoint: string;
   private readonly fetchImpl: Fetch;
   private readonly clock: Clock;
+  private readonly retentionDays: number;
   private readonly copy: { baseUrl: string; token: Secret; timeoutMs: number };
 
   constructor(opts: R2ArtifactStoreOptions) {
@@ -163,6 +170,7 @@ export class R2ArtifactStore implements ArtifactStore {
     });
     this.fetchImpl = opts.fetch ?? fetch;
     this.clock = opts.clock ?? systemClock;
+    this.retentionDays = opts.retentionDays ?? ARTIFACT_DEFAULTS.retentionDays;
     this.copy = { ...opts.copy, timeoutMs: opts.copy.timeoutMs ?? ARTIFACT_DEFAULTS.copyTimeoutMs };
   }
 
@@ -241,6 +249,34 @@ export class R2ArtifactStore implements ArtifactStore {
     return { size, contentType, body: res.body };
   }
 
+  async publishPrImage(key: string): Promise<string> {
+    if (!validPrImageSource(key)) throw new Error("PR publication requires an outbound artifact key");
+    const base = new URL(this.copy.baseUrl);
+    if (
+      base.protocol !== "https:" ||
+      base.username ||
+      base.password ||
+      base.search ||
+      base.hash ||
+      base.pathname !== "/"
+    ) {
+      throw new Error("PR publication requires a credential-free HTTPS origin");
+    }
+    const res = await this.fetchImpl(`${base.origin}${PR_IMAGE_PUBLISH_PATH}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${this.copy.token.reveal()}`, "content-type": "application/json" },
+      body: JSON.stringify({ key, retentionDays: this.retentionDays }),
+      redirect: "error",
+      signal: AbortSignal.timeout(this.copy.timeoutMs),
+    });
+    if (!res.ok) throw new Error(`PR publication answered HTTP ${res.status}`);
+    const answer = (await res.json()) as { path?: unknown };
+    if (typeof answer.path !== "string" || !validPrImagePath(answer.path)) {
+      throw new Error("PR publication returned an invalid public path");
+    }
+    return `${base.origin}${answer.path}`;
+  }
+
   async copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef> {
     const res = await this.fetchImpl(`${this.copy.baseUrl.replace(/\/$/, "")}/artifacts/copy`, {
       method: "POST",
@@ -308,6 +344,16 @@ export class InMemoryArtifactStore implements ArtifactStore {
       },
     });
     return { size, contentType: o.contentType, body, ...(part ? { part } : {}) };
+  }
+
+  async publishPrImage(key: string): Promise<string> {
+    if (!validPrImageSource(key)) throw new Error("PR publication requires an outbound artifact key");
+    const object = await this.get(key);
+    if (!object || "unsatisfiable" in object) throw new Error("PR publication artifact not found");
+    const bytes = await readPrImage(object);
+    const path = `/pr-images/${crypto.randomUUID()}.png`;
+    this.put(prImageKey(path)!, bytes, "image/png");
+    return `https://artifacts.example${path}`;
   }
 
   async copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef> {
