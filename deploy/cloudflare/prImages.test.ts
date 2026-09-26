@@ -93,6 +93,28 @@ describe("PR image routes", () => {
     expect((await h.read(path)).status).toBe(404);
   });
 
+  it("publishes an R2 host object whose fields are not enumerable", async () => {
+    const h = harness();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(png);
+        controller.close();
+      },
+    });
+    const object = Object.create(null) as Awaited<ReturnType<PrImageBucket["get"]>> & object;
+    Object.defineProperties(object, {
+      size: { value: png.length },
+      body: { value: body },
+      httpMetadata: { value: { contentType: "image/png" } },
+    });
+    vi.mocked(h.bucket.get).mockResolvedValueOnce(object);
+
+    const response = await h.publish();
+    expect(response.status).toBe(200);
+    const { path } = (await response.json()) as { path: string };
+    expect(h.objects.get(path.replace("/pr-images/", "published-pr/"))?.bytes).toEqual(png);
+  });
+
   it("GET and HEAD expire at the publication deadline even before lifecycle deletion", async () => {
     const h = harness();
     const retentionDays = 2;
