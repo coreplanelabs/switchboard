@@ -54,6 +54,8 @@ export const linkCommandSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("cancel"), ...mutation }).strict(),
   z.object({ action: z.literal("interrupt"), ...mutation }).strict(),
   z.object({ action: z.literal("read"), ...addressed }).strict(),
+  // Authenticated internal proof context, never exposed as a public response.
+  z.object({ action: z.literal("inspect"), ...addressed }).strict(),
 ]);
 export type LinkCommand = z.infer<typeof linkCommandSchema>;
 const failureSchema = z.enum(["conflict", "stale", "revoked", "failed", "cancelled", "expired"]);
@@ -160,6 +162,7 @@ export type LinkIntent = z.infer<typeof linkIntentSchema>;
 export type ActiveLinkIntent = z.infer<typeof activeSchema>;
 export type LinkView = Pick<LinkIntent, "id" | "state" | "revision" | "expiresAt">;
 export type LinkResult =
+  | { status: "context"; intent: ActiveLinkIntent }
   | { status: "ok" | "claimed"; intent: LinkView }
   | { status: "committed"; receipt: LinkAudit }
   | {
