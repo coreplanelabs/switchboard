@@ -76,6 +76,8 @@ import {
   type CoordinatorInstance,
   type CoordinatorTag,
   type CoordinatorUnit,
+  type RecoveryReviewEvidence,
+  type RecoveryAccounting,
   type ExistingPrPublicationBinding,
   type ThreadEvent,
   type UnitIdle,
@@ -884,6 +886,62 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       req.budget > Math.floor((row.recovery.deadlineAt - at) / minutesToMs(1))
     )
       return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+    if (row.recovery.externalReview !== undefined) {
+      const trigger = row.recovery.externalReview;
+      if (req.step === row.recovery.step) {
+        // Revalidate immediately before the first read-only child, not merely
+        // when the Workflow was queued. Human prose never authorizes coding.
+        const current = await laterRecoveryReview(
+          deps,
+          instance,
+          row.pr!,
+          trigger.headSha,
+          row.recovery.previousEnding.at,
+          at,
+        );
+        if (
+          req.preset !== "review" ||
+          req.brief?.kind !== "review" ||
+          req.brief.prior !== undefined ||
+          JSON.stringify(current) !== JSON.stringify(trigger)
+        )
+          return json(409, { ok: false, error: "recovery_later_review_invalid", at });
+      } else {
+        if (!(await claimedRecoveryReviewValid(deps, instance, row.pr!, trigger)))
+          return json(409, { ok: false, error: "recovery_later_review_invalid", at });
+        const reviewId =
+          req.brief?.kind === "findings"
+            ? req.brief.reviewRunId
+            : req.brief?.kind === "review"
+              ? req.brief.prior?.reviewRunId
+              : undefined;
+        const review = reviewId === undefined ? undefined : await deps.runs.getRun(reviewId);
+        const run = review?.ok ? review.value : undefined;
+        const round = Number(req.step.split("/")[2]);
+        const priorRound = req.preset === "review" ? round - 1 : round;
+        if (
+          run === undefined ||
+          !run.finished ||
+          run.persisted !== true ||
+          run.status !== "completed" ||
+          run.agent !== "review" ||
+          run.parentInstanceId !== instance.id ||
+          run.userId !== instance.userId ||
+          run.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+          run.threadKey !== (row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey) ||
+          priorRound < row.recovery.round ||
+          round > (instance.caps?.maxRounds ?? 0) ||
+          !isStepAttempt(run.idempotencyKey, `${instance.id}:${row.unit}/recovery/${priorRound}/review`) ||
+          run.verdict === undefined ||
+          run.reviewPost?.posted !== true ||
+          run.reviewPost.target.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+          run.reviewPost.target.number !== row.pr!.number ||
+          run.reviewPost.head !== run.reviewHead ||
+          (req.preset === "coding" && run.reviewHead !== briefHead)
+        )
+          return json(409, { ok: false, error: "recovery_review_evidence_ambiguous", at });
+      }
+    }
     let facts: PullRequestFacts | undefined;
     try {
       facts = await deps.fetchPrFacts({ repo: instance.repo, number: row.publication.pr });
@@ -2180,6 +2238,180 @@ const fullHead = (value: unknown): value is string => typeof value === "string" 
 const isStepAttempt = (key: string | undefined, step: string): boolean =>
   key === step || (key?.startsWith(`${step}/a`) === true && /^[1-9][0-9]*$/.test(key.slice(step.length + 2)));
 
+/** Select exactly one later review from the complete GitHub list. A later
+ * approval from any author makes the old trigger stale. */
+async function laterRecoveryReview(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  pr: { number: number },
+  head: string,
+  after: number,
+  at: number,
+): Promise<RecoveryReviewEvidence | undefined> {
+  const reviews = await deps.fetchPrReviews({ repo: instance.repo, number: pr.number }).catch(() => undefined);
+  if (reviews === undefined) return undefined;
+  const later = reviews.filter(
+    (r) =>
+      r.state !== "PENDING" &&
+      (!Number.isFinite(Date.parse(r.submittedAt ?? "")) || Date.parse(r.submittedAt!) > after),
+  );
+  const requests = later.filter((r) => r.state === "CHANGES_REQUESTED");
+  if (requests.length !== 1) return undefined;
+  const review = requests[0]!;
+  const submittedAt = Date.parse(review.submittedAt ?? "");
+  const id = review.id;
+  const reviewer = review.author;
+  if (
+    id === undefined ||
+    !Number.isSafeInteger(id) ||
+    id <= 0 ||
+    reviewer?.id === undefined ||
+    !Number.isSafeInteger(reviewer.id) ||
+    reviewer.id <= 0 ||
+    !reviewer.login ||
+    review.commitId !== head ||
+    !Number.isFinite(submittedAt) ||
+    submittedAt <= after ||
+    submittedAt > at ||
+    reviews.filter((r) => r.id === id).length !== 1 ||
+    later.some(
+      (r) =>
+        r !== review &&
+        (r.state === "APPROVED" || r.author?.id === reviewer.id || !Number.isFinite(Date.parse(r.submittedAt ?? ""))) &&
+        (!Number.isFinite(Date.parse(r.submittedAt ?? "")) || Date.parse(r.submittedAt!) >= submittedAt),
+    ) ||
+    !(await deps.commenterAuthorized(instance.userId, { login: reviewer.login, id: reviewer.id }).catch(() => false))
+  )
+    return undefined;
+  return { id, reviewer: { login: reviewer.login, id: reviewer.id }, headSha: head, submittedAt, body: review.body };
+}
+
+/** Once the independent review has posted, the list can legitimately contain
+ * more changes requests. Recheck the claimed id, not trigger selection: typed
+ * findings do not keep a dismissed or changed external trigger authorized. */
+async function claimedRecoveryReviewValid(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  pr: { number: number },
+  trigger: RecoveryReviewEvidence,
+): Promise<boolean> {
+  const reviews = await deps.fetchPrReviews({ repo: instance.repo, number: pr.number }).catch(() => undefined);
+  const matches = reviews?.filter((review) => review.id === trigger.id);
+  if (matches?.length !== 1) return false;
+  const review = matches[0]!;
+  return (
+    review.state === "CHANGES_REQUESTED" &&
+    review.author?.id === trigger.reviewer.id &&
+    review.author.login === trigger.reviewer.login &&
+    review.commitId === trigger.headSha &&
+    Date.parse(review.submittedAt ?? "") === trigger.submittedAt &&
+    review.body === trigger.body &&
+    (await deps.commenterAuthorized(instance.userId, trigger.reviewer).catch(() => false))
+  );
+}
+
+/** Only persisted, already-priced original children contribute dollars. The
+ * thread listings include failed attempts and must cover every durable round;
+ * no current price table, missing child or duplicate key can invent a total. */
+function recoveryAccounting(
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  runs: RunView[],
+  renewalsSpent: number,
+): RecoveryAccounting | undefined {
+  const grant = instance.grant;
+  if (
+    grant === undefined ||
+    !Number.isSafeInteger(grant.renewals) ||
+    grant.renewals < renewalsSpent ||
+    (grant.costCapUsd !== undefined && (!Number.isFinite(grant.costCapUsd) || grant.costCapUsd <= 0))
+  )
+    return undefined;
+  const prefix = `${instance.id}:${row.unit}/`;
+  const children = runs.filter((r) => r.idempotencyKey?.startsWith(prefix));
+  if (children.length === 0 || new Set(children.map((r) => r.idempotencyKey)).size !== children.length)
+    return undefined;
+  const costs: RecoveryAccounting["children"] = [];
+  for (const run of children) {
+    const models = Object.values(run.usage?.byModel ?? {});
+    const key = /^(?:s([1-9][0-9]*)\/)?(0|[1-9][0-9]*)\/(coding|findings|review|rebase)(?:\/a[1-9][0-9]*)?$/.exec(
+      run.idempotencyKey!.slice(prefix.length),
+    );
+    const segment = Number(key?.[1] ?? 1);
+    const segmentStart = segment === 1 ? row.startedAt : row.segments?.find((s) => s.index === segment)?.at;
+    const segmentEnd = row.segments?.find((s) => s.index === segment + 1)?.at ?? row.ending!.at;
+    if (
+      run.parentInstanceId !== instance.id ||
+      run.userId !== instance.userId ||
+      run.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+      run.threadKey !==
+        (run.agent === "review"
+          ? (row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey)
+          : (row.threadKey ?? instance.threadKey)) ||
+      !run.finished ||
+      run.persisted !== true ||
+      run.provisional ||
+      run.restarting ||
+      !Number.isFinite(run.startedAt) ||
+      run.startedAt < row.startedAt! ||
+      run.finishedAt === undefined ||
+      !Number.isFinite(run.finishedAt) ||
+      run.finishedAt < run.startedAt ||
+      run.finishedAt > row.ending!.at ||
+      models.length === 0 ||
+      models.some((m) => typeof m.usd !== "number" || !Number.isFinite(m.usd) || m.usd < 0) ||
+      key === null ||
+      segmentStart === undefined ||
+      run.startedAt < segmentStart ||
+      run.finishedAt > segmentEnd ||
+      (key[3] === "review" ? run.agent !== "review" : run.agent !== "coding") ||
+      (run.pr !== undefined &&
+        (run.pr.number !== row.pr!.number || (run.pr.head !== undefined && run.pr.head !== row.branch))) ||
+      run.pushed?.some((push) => push.ref !== row.branch)
+    )
+      return undefined;
+    costs.push({ runId: run.id, key: run.idempotencyKey!, usd: models.reduce((sum, m) => sum + m.usd!, 0) });
+  }
+  const ordered = [...children].sort((a, b) => a.startedAt - b.startedAt);
+  if (ordered.some((run, index) => index > 0 && ordered[index - 1]!.finishedAt! > run.startedAt)) return undefined;
+  const consumed = new Set<string>();
+  let previousFinish = row.startedAt!;
+  for (const round of row.rounds.filter((r) => r.outcome === "started")) {
+    // Spawn is acknowledged before the round note is stored. Match the actual
+    // child interval, never require startedAt >= the later note timestamp.
+    const segment = row.segments?.filter((s) => s.at <= round.at).at(-1)?.index ?? 1;
+    const step = `${prefix}${segment > 1 ? `s${segment}/` : ""}${round.index}/`;
+    const candidates = ordered.filter(
+      (run) =>
+        !consumed.has(run.id) &&
+        run.agent === round.agent &&
+        run.idempotencyKey!.startsWith(step) &&
+        run.startedAt >= previousFinish &&
+        run.startedAt <= round.at,
+    );
+    const child = candidates.at(-1);
+    if (child === undefined) return undefined;
+    consumed.add(child.id);
+    previousFinish = child.finishedAt!;
+  }
+  if (
+    children.some(
+      (run) =>
+        !consumed.has(run.id) &&
+        ((run.status !== "failed" && run.status !== "interrupted") || (run.pushed?.length ?? 0) > 0),
+    )
+  )
+    return undefined;
+  // A completed ordinary unit includes its initial coding and every review;
+  // a partial retained listing must not masquerade as lifetime accounting.
+  if (!children.some((r) => r.agent === "coding" && /\/0\/coding(?:\/a[1-9][0-9]*)?$/.test(r.idempotencyKey!)))
+    return undefined;
+  costs.sort((a, b) => a.key.localeCompare(b.key));
+  const spendUsd = costs.reduce((sum, c) => sum + c.usd, 0);
+  if (!Number.isFinite(spendUsd)) return undefined;
+  return { spendUsd, children: costs, grant: { ...grant }, renewalsSpent };
+}
+
 /** Recover one ended original unit without passing through generated-plan
  * hand-off. Every authoritative fact comes from the original durable rows,
  * their owned review record and one fresh GitHub read. */
@@ -2251,6 +2483,8 @@ export async function recoverOriginalUnit(
   let findings: Finding[] | undefined;
   let findingsRunId: string | undefined;
   let findingsKey: string | undefined;
+  let externalReview: RecoveryReviewEvidence | undefined;
+  let accounting: RecoveryAccounting | undefined;
   let claimRow = row;
   let facts: PullRequestFacts | undefined;
   let originalRow: CoordinatorUnit | undefined;
@@ -2267,7 +2501,11 @@ export async function recoverOriginalUnit(
       findings,
       findingsRunId,
       findingsKey,
+      externalReview,
+      accounting,
     } = existingClaim);
+    if (externalReview !== undefined && requestedWorkflowId === undefined)
+      return json(409, { ok: false, error: "recovery_already_claimed", workflowId, at });
     if (
       publication === undefined ||
       existingClaim.expectedHeadSha !== expectedHead ||
@@ -2290,12 +2528,16 @@ export async function recoverOriginalUnit(
         break;
       }
     const boundary = boundaryPosition >= 0 ? row.rounds[boundaryPosition] : undefined;
-    if (boundary === undefined || (boundary.outcome !== "request_changes" && boundary.outcome !== "no_verdict"))
+    const postApproval = boundary?.outcome === "approve" && row.ending.kind === "merge_ready";
+    if (
+      boundary === undefined ||
+      (!postApproval && boundary.outcome !== "request_changes" && boundary.outcome !== "no_verdict")
+    )
       return json(409, { ok: false, error: "recovery_ending_unsupported", at });
     if (row.rounds.slice(boundaryPosition + 1).some((candidate) => candidate.agent === "review"))
       return json(409, { ok: false, error: "recovery_stage_ambiguous", at });
     kind = boundary.outcome === "request_changes" ? "findings" : "review";
-    if (kind === "review" && row.ending.kind !== "no_verdict")
+    if (kind === "review" && !postApproval && row.ending.kind !== "no_verdict")
       return json(409, { ok: false, error: "recovery_ending_mismatch", at });
     round = boundary.index;
     const caps = instance.caps;
@@ -2313,7 +2555,7 @@ export async function recoverOriginalUnit(
     if (!Number.isFinite(row.ending.at)) return unknownBudget("ending_at_invalid");
     // Prior spend is not yet durable on a terminal row. A cost-capped unit
     // cannot safely recover by resetting that total, so it stays parked.
-    if (instance.grant?.costCapUsd !== undefined) return unknownBudget("cost_cap_spend_unknown");
+    if (!postApproval && instance.grant?.costCapUsd !== undefined) return unknownBudget("cost_cap_spend_unknown");
     if (round >= caps.maxRounds) return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
     // Recovery resumes the active segment's original wall-clock lease. A
     // renewal starts a full lease at its durable segment time; a stopped
@@ -2323,6 +2565,23 @@ export async function recoverOriginalUnit(
     if (latestSegments.length > 1) return unknownBudget("latest_segment_ambiguous");
     const segment = latestSegments[0];
     const leaseStartedAt = segment?.at ?? row.startedAt;
+    if (
+      postApproval &&
+      (!Number.isFinite(leaseStartedAt) ||
+        leaseStartedAt < row.startedAt ||
+        leaseStartedAt > at ||
+        row.startedAt > row.ending.at ||
+        row.ending.at > at ||
+        (row.segments ?? []).some(
+          (entry, index, segments) =>
+            !Number.isSafeInteger(entry.index) ||
+            entry.index !== index + 2 ||
+            !Number.isFinite(entry.at) ||
+            entry.at < (segments[index - 1]?.at ?? row.startedAt!) ||
+            entry.at > row.ending!.at,
+        ))
+    )
+      return unknownBudget("lease_history_invalid");
     const resumedLeases = Object.values(row.wakes ?? {}).filter(
       (answer) => answer.kind === "segment" && answer.index === latestSegmentIndex && answer.leaseMs !== undefined,
     );
@@ -2359,6 +2618,30 @@ export async function recoverOriginalUnit(
       unitListing.nextBefore !== undefined
     )
       return json(409, { ok: false, error: "recovery_evidence_incomplete", at });
+    if (postApproval) {
+      if (
+        publication === undefined ||
+        expectedHead !== publication.expectedHeadSha ||
+        row.rounds.slice(boundaryPosition + 1).length > 0
+      )
+        return json(409, { ok: false, error: "recovery_binding_mismatch", at });
+      const allRuns = [...new Map([...listing.runs, ...unitListing.runs].map((run) => [run.id, run])).values()];
+      if (
+        allRuns.some(
+          (run) =>
+            (!run.finished && (run.agent === "coding" || run.agent === "review")) ||
+            (run.pushed?.some((push) => push.ref === row.branch) &&
+              (run.finishedAt === undefined ||
+                run.finishedAt > boundary.at ||
+                (run.finishedAt >= row.startedAt! && !run.idempotencyKey?.startsWith(`${instance.id}:${row.unit}/`)))),
+        )
+      )
+        return json(409, { ok: false, error: "recovery_child_active", at });
+      accounting = recoveryAccounting(instance, row, allRuns, latestSegmentIndex - 1);
+      if (accounting === undefined) return unknownBudget("cost_cap_spend_unknown");
+      if (accounting.grant.costCapUsd !== undefined && accounting.spendUsd >= accounting.grant.costCapUsd)
+        return json(409, { ok: false, error: "recovery_cost_cap_exhausted", at });
+    }
     const reviewKeyPrefix = `${instance.id}:${segmentPrefix}/${round}/review`;
     const candidates = listing.runs.filter((run) => {
       if (
@@ -2374,6 +2657,19 @@ export async function recoverOriginalUnit(
       if (!fullHead(run.reviewHead) || (publication !== undefined && run.reviewHead !== publication.expectedHeadSha))
         return false;
       const reviewedHead = run.reviewHead;
+      if (postApproval)
+        return (
+          run.status === "completed" &&
+          run.verdict?.verdict === "approve" &&
+          run.reviewPost?.posted === true &&
+          run.reviewPost.verdict === "approve" &&
+          run.reviewPost.head === reviewedHead &&
+          run.reviewPost.target.repo.toLowerCase() === instance.repo.toLowerCase() &&
+          run.reviewPost.target.number === pr.number &&
+          run.finishedAt !== undefined &&
+          run.finishedAt <= boundary.at &&
+          boundary.at <= row.ending!.at
+        );
       if (kind === "review") return run.verdict === undefined && run.reviewPost === undefined;
       return (
         run.verdict?.verdict === "request_changes" &&
@@ -2442,6 +2738,13 @@ export async function recoverOriginalUnit(
     }
     reviewRunId = review.id;
     reviewKey = review.idempotencyKey!;
+    if (postApproval) {
+      externalReview = await laterRecoveryReview(deps, instance, pr, reviewedHead, row.ending.at, at);
+      if (externalReview === undefined) return json(409, { ok: false, error: "recovery_later_review_invalid", at });
+      round = boundary.index + 1;
+      // Leave room for the typed findings fix and its independent re-review.
+      if (round >= caps.maxRounds) return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
+    }
     try {
       facts = await deps.fetchPrFacts({ repo: instance.repo, number: pr.number });
     } catch (err) {
@@ -2546,10 +2849,16 @@ export async function recoverOriginalUnit(
     if (!Number.isFinite(remainingMs) || remainingMs < floor)
       return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
     stepName = `${row.unit}/recovery/${round}/${kind}`;
-    workflowId = `recovery-${findingsRunId ?? reviewRunId}`;
+    workflowId =
+      externalReview !== undefined
+        ? `recovery-review-${externalReview.id}`
+        : `recovery-${findingsRunId ?? reviewRunId}`;
     deadlineAt = at + remainingMs;
     findings = kind === "findings" ? candidates[0]!.verdict?.findings : undefined;
-    if (row.recoveryReceipt?.reviewRunId === reviewRunId)
+    if (
+      row.recoveryReceipt?.reviewRunId === reviewRunId ||
+      (externalReview !== undefined && row.recoveryReceipt?.externalReview?.id === externalReview.id)
+    )
       return json(409, { ok: false, error: "recovery_already_completed", at });
     originalRow = row;
   }
@@ -2589,7 +2898,13 @@ export async function recoverOriginalUnit(
       const replacement = consumed
         ? {
             ...originalRow,
-            recoveryReceipt: { reviewRunId, workflowId, at },
+            recoveryReceipt: {
+              reviewRunId,
+              workflowId,
+              at,
+              ...(externalReview !== undefined ? { externalReview } : {}),
+              ...(accounting !== undefined ? { accounting } : {}),
+            },
           }
         : originalRow;
       const restored = await deps.instances.compareAndReplaceUnit(claimedRow, replacement).catch(() => undefined);
@@ -2655,6 +2970,22 @@ export async function recoverOriginalUnit(
     return requestedWorkflowId === undefined ? json(409, { ok: false, error, at }) : rollback(error);
   }
 
+  if (externalReview !== undefined && existingClaim !== undefined) {
+    if (at >= deadlineAt) return rollback("recovery_wall_clock_exhausted", true);
+    const current = await laterRecoveryReview(
+      deps,
+      instance,
+      pr,
+      externalReview.headSha,
+      existingClaim.previousEnding.at,
+      at,
+    );
+    if (JSON.stringify(current) !== JSON.stringify(externalReview))
+      return rollback("recovery_later_review_invalid", true);
+    if (accounting === undefined || JSON.stringify(accounting.grant) !== JSON.stringify(instance.grant))
+      return rollback("recovery_budget_unknown", true);
+  }
+
   if (existingClaim === undefined) {
     try {
       token = fence.reserve(instance.repo, pr.number, originalOwner);
@@ -2673,6 +3004,8 @@ export async function recoverOriginalUnit(
         claimedAt: at,
         step: stepName,
         reviewRunId,
+        ...(externalReview !== undefined ? { externalReview } : {}),
+        ...(accounting !== undefined ? { accounting } : {}),
         ...(findingsRunId !== undefined ? { findingsRunId } : {}),
         ...(findingsKey !== undefined ? { findingsKey } : {}),
         ...(findings !== undefined ? { findings } : {}),
@@ -3807,6 +4140,8 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       ? {
           recoveryReceipt: {
             reviewRunId: row.recovery.reviewRunId,
+            ...(row.recovery.externalReview !== undefined ? { externalReview: row.recovery.externalReview } : {}),
+            ...(row.recovery.accounting !== undefined ? { accounting: row.recovery.accounting } : {}),
             workflowId: row.recovery.workflowId,
             at,
           },

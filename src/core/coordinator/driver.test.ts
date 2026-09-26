@@ -228,6 +228,116 @@ describe("runOriginalUnitRecovery", () => {
     ]);
   });
 
+  it.each([1, 35, null])(
+    "starts a full original-unit review before typed findings and exact-head re-review with carried spend (review cost %s)",
+    async (costUsd) => {
+      const externalReview = {
+        id: 5324414426,
+        reviewer: { login: "alice", id: 101 },
+        headSha: HEAD,
+        submittedAt: T0 - MIN,
+        body: "Inspect the timing boundary",
+      };
+      const accounting = {
+        spendUsd: 15,
+        children: [{ runId: "run-old", key: `${INSTANCE}:U10/0/coding`, usd: 15 }],
+        grant: { renewals: 2, costCapUsd: 50 },
+        renewalsSpent: 0,
+      };
+      const HEAD_2 = "b".repeat(40);
+      const s = steps({
+        "U10/recovery/2/review/wait/1": "event",
+        "U10/recovery/2/findings/wait/1": "event",
+        "U10/recovery/3/review/wait/1": "event",
+      });
+      const b = bot({
+        "recover-unit": [acked()],
+        plan: [
+          planAnswer(
+            [recoveryRow("review", { round: 2, step: "U10/recovery/2/review", externalReview, accounting })],
+            T0,
+            "person",
+            { caps: { maxRounds: 3, maxMinutes: 120 }, grant: accounting.grant },
+          ),
+        ],
+        spawn: [spawned("run-full-review"), spawned("run-fix", T0 + MIN), spawned("run-rereview", T0 + 2 * MIN)],
+        "read-record": [
+          record(
+            {
+              id: "run-full-review",
+              finished: true,
+              status: "completed",
+              costUsd,
+              reviewHead: HEAD,
+              reviewPosted: true,
+              verdict: {
+                verdict: "request_changes",
+                summary: "typed finding",
+                findings: [{ id: "F1", severity: "minor", file: "src/a.ts", title: "timing" }],
+              },
+            },
+            T0 + MIN,
+          ),
+          record(
+            {
+              id: "run-fix",
+              finished: true,
+              status: "completed",
+              costUsd: 1,
+              headSha: HEAD_2,
+              description: true,
+              dispositions: [{ findingId: "F1", disposition: "fixed", note: "corrected" }],
+            },
+            T0 + 2 * MIN,
+          ),
+          record(
+            {
+              id: "run-rereview",
+              finished: true,
+              status: "completed",
+              costUsd: 1,
+              reviewHead: HEAD_2,
+              reviewPosted: true,
+              verdict: { verdict: "approve", summary: "clean", findings: [] },
+            },
+            T0 + 3 * MIN,
+          ),
+        ],
+        "pr-check": [
+          ok(
+            { ok: true, state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_2, headBranchExists: true },
+            T0 + 2 * MIN,
+          ),
+        ],
+        round: Array.from({ length: 6 }, () => acked()),
+        "unit-end": [acked(T0 + 3 * MIN)],
+      });
+      const result = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+        kind: "recover-original-unit",
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+      });
+      if (costUsd !== 1) {
+        expect(result.units).toEqual({ U10: "aborted" });
+        expect(b.of("spawn")).toHaveLength(1);
+        expect(JSON.stringify(b.of("unit-end"))).toContain("cost cap");
+        return;
+      }
+      expect(result.units).toEqual({ U10: "merge_ready" });
+      const spawns = b.of("spawn");
+      expect(spawns.map((spawn) => spawn.preset)).toEqual(["review", "coding", "review"]);
+      expect(spawns[0]).toMatchObject({ step: "U10/recovery/2/review", brief: { kind: "review", headSha: HEAD } });
+      expect(spawns[0]!.brief).not.toHaveProperty("prior");
+      expect(spawns[1]).toMatchObject({ brief: { reviewRunId: "run-full-review" } });
+      expect(spawns[2]).toMatchObject({
+        brief: { headSha: HEAD_2, prior: { reviewRunId: "run-full-review", codingRunId: "run-fix" } },
+      });
+      expect(b.of("unit-start")).toEqual([]);
+      expect(b.of("branch")).toEqual([]);
+      expect(b.of("merge")).toEqual([]);
+    },
+  );
+
   it("continues no_verdict with one read-only review in the original namespace", async () => {
     const s = steps({ "U10/recovery/1/review/wait/1": "event" });
     const b = bot({

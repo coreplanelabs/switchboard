@@ -115,6 +115,63 @@ const FIXED: FindingDisposition = { findingId: "F1", disposition: "fixed", note:
 const DECLINED: FindingDisposition = { findingId: "F1", disposition: "declined", note: "the loop is exclusive" };
 
 describe("original-unit recovery accounting", () => {
+  it("carries admission spend and stops before a further child when the original cost cap is exhausted or unknown", () => {
+    for (const costUsd of [2, null]) {
+      const state = openRecoveredUnitPipeline(
+        input({
+          merge: "person",
+          grant: { renewals: 2, costCapUsd: 50 },
+          recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+        }),
+        T0,
+        {
+          kind: "review",
+          round: 2,
+          pr: { number: 7, url: PR_URL },
+          expectedHeadSha: HEAD_A,
+          reviewRunId: "run-original-approval",
+          spendUsd: 48,
+        },
+      );
+      expect(state.spendUsd).toBe(48);
+      const d = new Driver(state);
+      d.answer({ type: "spawn", outcome: "spawned", runId: "run-full-review", at: T0 });
+      d.answer({ type: "wait", outcome: "event" });
+      d.answer({
+        type: "read-record",
+        run: {
+          finished: true,
+          status: "completed",
+          costUsd,
+          reviewHead: HEAD_A,
+          reviewPosted: true,
+          verdict: { verdict: "request_changes", summary: "fix remains", findings: [FINDING] },
+        },
+        at: T0 + MIN,
+      });
+      expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+      expect(renderUnitReport(d.state)).toContain("cost cap");
+    }
+  });
+
+  it("never opens a recovery review beyond the original round cap", () => {
+    const state = openRecoveredUnitPipeline(
+      input({
+        recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+      }),
+      T0,
+      {
+        kind: "review",
+        round: 4,
+        pr: { number: 7, url: PR_URL },
+        expectedHeadSha: HEAD_A,
+        reviewRunId: "run-review-3",
+        spendUsd: 15,
+      },
+    );
+    expect(nextAction(state)).toMatchObject({ type: "end", ending: { kind: "round_cap", maxRounds: 3 } });
+  });
+
   it("labels elapsed categories as checkpoint-local instead of claiming the legacy unit's missing lifetime history", () => {
     const state = openRecoveredUnitPipeline(
       input({ recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" } }),

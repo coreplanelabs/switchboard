@@ -6564,6 +6564,602 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       threadKey: INSTANCE.threadKey,
     });
 
+  // Production-shaped post-approval evidence: exact immutable review id and head.
+  const POST_HEAD = "6c4228c08466a79fd839d01660de5b27812526ef";
+  const laterReview = (): PullRequestReview => ({
+    id: 5324414426,
+    author: { login: "alice", id: 101 },
+    state: "CHANGES_REQUESTED",
+    commitId: POST_HEAD,
+    submittedAt: new Date(NOW - minutesToMs(10)).toISOString(),
+    body: "The child can start 2686 ms before the coding-start event. Inspect the full patch.",
+  });
+  const pricedUsage = (usd: number): NonNullable<RunRecord["usage"]> => ({
+    turns: 1,
+    byModel: {
+      "fixture/model": { turns: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, usd },
+    },
+  });
+  const approvedHarness = async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(POST_HEAD) });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 2, costCapUsd: 50 } });
+    const row = requestChangesRow();
+    row.publication = { ...publication, expectedHeadSha: POST_HEAD };
+    row.lastPush = POST_HEAD;
+    row.rounds = [
+      { index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(55) + 2686 },
+      { index: 0, agent: "coding", outcome: "completed", at: NOW - minutesToMs(45) },
+      { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(40) },
+      { index: 1, agent: "review", outcome: "approve", at: NOW - minutesToMs(30) },
+    ];
+    row.ending = { kind: "merge_ready", report: "original approval", at: NOW - minutesToMs(20) };
+    await h.instances.putUnits([row]);
+    await h.store.put(
+      originalCoding({
+        headSha: POST_HEAD,
+        pushed: [{ ref: INSTANCE.branch, sha: POST_HEAD, by: "push" }],
+        usage: pricedUsage(12),
+      }),
+    );
+    await h.store.put(
+      reviewRecord({
+        startedAt: NOW - minutesToMs(40),
+        finishedAt: NOW - minutesToMs(30),
+        reviewHead: POST_HEAD,
+        verdict: { verdict: "approve", summary: "original approval", findings: [] },
+        reviewPost: {
+          posted: true,
+          target: { repo: INSTANCE.repo, number: PR.number },
+          head: POST_HEAD,
+          verdict: "approve",
+        },
+        usage: pricedUsage(3),
+      }),
+    );
+    h.deps.fetchPrReviews = async () => [laterReview()];
+    h.deps.commenterAuthorized = async (requester, author) => requester === INSTANCE.userId && author.id === 101;
+    return h;
+  };
+
+  it("post-approval recovery binds the later exact-head review and priced failed attempts to one original-unit CAS", async () => {
+    const h = await approvedHarness();
+    await h.store.put(
+      originalCoding({
+        id: "run-failed-attempt",
+        idempotencyKey: `${INSTANCE.id}:U12/0/coding/a2`,
+        status: "failed",
+        startedAt: NOW - minutesToMs(58),
+        finishedAt: NOW - minutesToMs(56),
+        pushed: [],
+        usage: pricedUsage(2),
+      }),
+    );
+    const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-review-5324414426" } });
+    const claimed = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(claimed).toMatchObject({
+      branch: before.branch,
+      pr: before.pr,
+      publication: before.publication,
+      startedAt: before.startedAt,
+      recovery: {
+        kind: "review",
+        round: 2,
+        expectedHeadSha: POST_HEAD,
+        reviewRunId: "run-original-review",
+        externalReview: {
+          id: 5324414426,
+          reviewer: { login: "alice", id: 101 },
+          headSha: POST_HEAD,
+          body: laterReview().body,
+        },
+        accounting: { spendUsd: 17, grant: { renewals: 2, costCapUsd: 50 }, renewalsSpent: 0 },
+        remainingMs: minutesToMs(60),
+        deadlineAt: NOW + minutesToMs(60),
+      },
+    });
+    expect(claimed.recovery?.accounting?.children).toHaveLength(3);
+    expect(claimed.recovery?.findings).toBeUndefined();
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(h.recoveries).toHaveLength(1);
+    expect(h.branches).toEqual([]);
+    expect(h.opens).toEqual([]);
+  });
+
+  it("post-approval recovery carries the latest original renewal lease and lifetime spend without granting another renewal", async () => {
+    const h = await approvedHarness();
+    const row = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    row.startedAt = NOW - minutesToMs(180);
+    row.segments = [{ index: 2, at: NOW - minutesToMs(60) }];
+    row.rounds.unshift(
+      { index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(175) + 2686 },
+      { index: 0, agent: "coding", outcome: "aborted", at: NOW - minutesToMs(165) },
+    );
+    await h.instances.putUnits([row]);
+    const coding = (await h.store.get("run-original-coding"))!;
+    const review = (await h.store.get("run-original-review"))!;
+    await h.store.put({ ...coding, idempotencyKey: `${INSTANCE.id}:U12/s2/0/coding` });
+    await h.store.put({ ...review, idempotencyKey: `${INSTANCE.id}:U12/s2/1/review` });
+    await h.store.put({
+      ...coding,
+      id: "run-earlier-segment",
+      status: "failed",
+      pushed: [],
+      startedAt: NOW - minutesToMs(175),
+      finishedAt: NOW - minutesToMs(165),
+      usage: pricedUsage(4),
+    });
+    expect((await callRecovery(h)).status).toBe(200);
+    const claimed = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(claimed.recovery).toMatchObject({
+      accounting: { spendUsd: 19, renewalsSpent: 1, grant: { renewals: 2, costCapUsd: 50 } },
+      remainingMs: minutesToMs(60),
+      deadlineAt: NOW + minutesToMs(60),
+    });
+    expect(claimed.segments).toEqual(row.segments);
+    expect(claimed.startedAt).toBe(row.startedAt);
+  });
+
+  it("post-approval recovery admits one concurrent claim and restores an unadmitted claim without consuming the review", async () => {
+    const h = await approvedHarness();
+    const before = await h.instances.listUnits(INSTANCE.id);
+    h.deps.startRecovery = async (id) => ({ kind: "failed", id, reason: "unavailable" });
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    const admitted: string[] = [];
+    h.deps.startRecovery = async (id) => {
+      admitted.push(id);
+      return { kind: "created", id };
+    };
+    const responses = await Promise.all([callRecovery(h), callRecovery(h)]);
+    expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(admitted).toEqual(["recovery-review-5324414426"]);
+  });
+
+  it.each([
+    "wrong head",
+    "dismissed",
+    "before approval",
+    "before ending",
+    "missing id",
+    "missing reviewer id",
+    "unauthorized reviewer",
+    "superseded",
+    "competing later approval",
+    "competing simultaneous approval",
+    "competing reviews",
+    "duplicate review",
+    "unreadable reviews",
+    "moved PR",
+    "foreign PR",
+    "foreign publication",
+    "unpriced",
+    "missing usage",
+    "recomputed price",
+    "missing child",
+    "missing later attempt",
+    "invalid child key",
+    "duplicate key",
+    "foreign child",
+    "active child",
+    "competing push",
+    "paginated",
+    "unavailable",
+    "unpersisted",
+    "unknown caps",
+    "unknown grant",
+    "invalid cost cap",
+    "cost exhausted",
+    "expired lease",
+    "future lease",
+    "missing start",
+    "unknown resume",
+    "invalid renewal",
+    "round cap",
+    "rival owner",
+    "CAS loss",
+  ])("post-approval recovery refuses %s without changing the row", async (scenario) => {
+    const h = await approvedHarness();
+    const review = laterReview();
+    let reviews: PullRequestReview[] | undefined = [review];
+    const row = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    const coding = (await h.store.get("run-original-coding"))!;
+    if (scenario === "wrong head") review.commitId = HEAD;
+    if (scenario === "dismissed") review.state = "DISMISSED";
+    if (scenario === "before approval") review.submittedAt = new Date(NOW - minutesToMs(35)).toISOString();
+    if (scenario === "before ending") review.submittedAt = new Date(NOW - minutesToMs(25)).toISOString();
+    if (scenario === "missing id") review.id = undefined;
+    if (scenario === "missing reviewer id") review.author!.id = undefined;
+    if (scenario === "unauthorized reviewer") h.deps.commenterAuthorized = async () => false;
+    if (scenario === "superseded")
+      reviews.push({
+        ...review,
+        id: 5324414427,
+        state: "APPROVED",
+        submittedAt: new Date(NOW - minutesToMs(5)).toISOString(),
+      });
+    if (scenario === "competing later approval" || scenario === "competing simultaneous approval")
+      reviews.push({
+        ...review,
+        id: 5324414427,
+        author: { login: "bob", id: 102 },
+        state: "APPROVED",
+        submittedAt:
+          scenario === "competing later approval" ? new Date(NOW - minutesToMs(5)).toISOString() : review.submittedAt,
+      });
+    if (scenario === "competing reviews")
+      reviews.push({ ...review, id: 5324414427, author: { login: "bob", id: 102 } });
+    if (scenario === "duplicate review") reviews.push({ ...review });
+    if (scenario === "unreadable reviews") reviews = undefined;
+    h.deps.fetchPrReviews = async () => reviews;
+    if (scenario === "moved PR") h.deps.fetchPrFacts = async () => exactRecoveryFacts(HEAD);
+    if (scenario === "foreign PR") row.pr = { ...PR, number: 99 };
+    if (scenario === "foreign publication") row.publication!.owner = { instanceId: "rival", unit: "U12" };
+    if (scenario === "unpriced") coding.usage!.byModel["fixture/model"]!.usd = null;
+    if (scenario === "missing usage") coding.usage = undefined;
+    if (scenario === "recomputed price") delete coding.usage!.byModel["fixture/model"]!.usd;
+    if (scenario === "missing later attempt")
+      row.rounds.splice(
+        2,
+        0,
+        { index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(44) },
+        { index: 0, agent: "coding", outcome: "aborted", at: NOW - minutesToMs(43) },
+      );
+    if (scenario === "invalid child key") coding.idempotencyKey = `${INSTANCE.id}:U12/foreign/0/coding`;
+    if (scenario === "missing child") coding.idempotencyKey = `${INSTANCE.id}:U13/0/coding`;
+    if (scenario === "foreign child") coding.userId = "slack:UOTHER";
+    if (scenario === "cost exhausted") coding.usage = pricedUsage(47);
+    await h.store.put(coding);
+    if (scenario === "duplicate key") await h.store.put({ ...coding, id: "run-duplicate" });
+    if (scenario === "competing push")
+      await h.store.put({
+        ...coding,
+        id: "run-foreign-push",
+        parentInstanceId: "rival",
+        startedAt: NOW - minutesToMs(5),
+        finishedAt: NOW,
+      });
+    if (scenario === "active child")
+      h.registry.create("active writer", {
+        agent: "coding",
+        threadKey: INSTANCE.threadKey,
+        channelId: INSTANCE.channelId,
+        userId: INSTANCE.userId,
+      });
+    if (["paginated", "unavailable", "unpersisted"].includes(scenario)) {
+      const list = h.deps.runs.listRuns.bind(h.deps.runs);
+      vi.spyOn(h.deps.runs, "listRuns").mockImplementation(async (opts) => {
+        const result = await list(opts);
+        return {
+          ...result,
+          ...(scenario === "paginated" ? { nextBefore: { finishedAt: 1, id: "older" } } : {}),
+          ...(scenario === "unavailable" ? { storeUnavailable: true as const } : {}),
+          ...(scenario === "unpersisted" ? { runs: result.runs.map((r) => ({ ...r, persisted: false })) } : {}),
+        };
+      });
+    }
+    const instance = (await h.instances.get(INSTANCE.id))!;
+    if (scenario === "unknown caps") instance.caps = undefined;
+    if (scenario === "unknown grant") instance.grant = undefined;
+    if (scenario === "invalid cost cap") instance.grant!.costCapUsd = Number.NaN;
+    if (scenario === "round cap") instance.caps!.maxRounds = 2;
+    if (scenario === "expired lease") row.startedAt = NOW - minutesToMs(121);
+    if (scenario === "future lease") row.startedAt = NOW + minutesToMs(1);
+    if (scenario === "missing start") row.startedAt = undefined;
+    if (scenario === "unknown resume")
+      row.wakes = {
+        stopped: { kind: "segment", index: 1, spendUsd: 15, texts: [], senders: [], leaseMs: minutesToMs(20) },
+      };
+    if (scenario === "invalid renewal") row.segments = [{ index: 5, at: NOW - minutesToMs(1) }];
+    if (scenario === "rival owner")
+      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    if (scenario === "CAS loss")
+      vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValueOnce({ ok: false, reason: "stale" });
+    await h.instances.replace(instance);
+    await h.instances.putUnits([row]);
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it("post-approval recovery allows an earlier approval and a later comment from another reviewer", async () => {
+    const h = await approvedHarness();
+    h.deps.fetchPrReviews = async () => [
+      laterReview(),
+      {
+        ...laterReview(),
+        id: 5324414427,
+        author: { login: "bob", id: 102 },
+        state: "APPROVED",
+        submittedAt: new Date(NOW - minutesToMs(15)).toISOString(),
+      },
+      {
+        ...laterReview(),
+        id: 5324414428,
+        author: { login: "bob", id: 102 },
+        state: "COMMENTED",
+        submittedAt: new Date(NOW - minutesToMs(5)).toISOString(),
+      },
+    ];
+    expect((await callRecovery(h)).status).toBe(200);
+    expect(h.recoveries).toHaveLength(1);
+  });
+
+  it.each(["green", "red"])(
+    "post-approval recovery runs full review, typed fix and exact-head re-review through the real driver with %s CI",
+    async (ci) => {
+      const h = await approvedHarness();
+      expect((await callRecovery(h)).status).toBe(200);
+      let head = POST_HEAD;
+      const fixed = "c".repeat(40);
+      h.deps.fetchPrFacts = async () => exactRecoveryFacts(head);
+      h.deps.fetchCommitChecks = async () => ({ total: 1, pending: [], failed: [] });
+      h.deps.fetchRoundChecks = async () => ({
+        total: 1,
+        pending: [],
+        failed: ci === "red" ? [{ name: "test", conclusion: "failure" }] : [],
+      });
+      h.deps.fixupCommitSubjects = async () => [];
+      const children: CoordinatorTag[] = [];
+      h.deps.dispatch = async (msg, io, opts) => {
+        const tag = opts!.coordinator;
+        children.push(tag);
+        expect(msg.userId).toBe(INSTANCE.userId);
+        expect(msg.threadKey).toBe(INSTANCE.threadKey);
+        expect(tag.transportWorkflowId).toBe("recovery-review-5324414426");
+        expect(tag.recovery?.deadlineAt).toBe(NOW + minutesToMs(60));
+        const n = children.length;
+        const id = `run-recovered-${n}`;
+        if (n === 1 || n === 3) {
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${n === 1 ? 2 : 3}/review`);
+          expect(msg.text).toContain(head);
+          if (n === 1) {
+            expect(msg.text).toContain("full read-only review");
+            expect(msg.text).toContain("5324414426");
+            expect(msg.text).not.toContain("re-review-delta");
+          } else expect(msg.text).toContain("re-review-delta");
+          const verdict = n === 1 ? "request_changes" : "approve";
+          await h.store.put(
+            reviewRecord({
+              id,
+              idempotencyKey: tag.idempotencyKey,
+              startedAt: NOW,
+              finishedAt: NOW,
+              usage: pricedUsage(1),
+              reviewHead: head,
+              verdict: {
+                verdict,
+                summary: "independent verdict",
+                findings: n === 1 ? [{ id: "F1", severity: "minor", file: "src/a.ts", title: "timing boundary" }] : [],
+              },
+              reviewPost: { posted: true, target: { repo: INSTANCE.repo, number: PR.number }, head, verdict },
+            }),
+          );
+        } else {
+          expect(n).toBe(2);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/findings`);
+          expect(tag.publication?.expectedHeadSha).toBe(POST_HEAD);
+          expect(msg.text).toContain("F1");
+          head = fixed;
+          await h.store.put(
+            completedOriginalFindings(fixed, {
+              id,
+              idempotencyKey: tag.idempotencyKey,
+              startedAt: NOW,
+              finishedAt: NOW,
+              usage: pricedUsage(1),
+              dispositions: [{ findingId: "F1", disposition: "fixed", note: "corrected" }],
+              events: [
+                {
+                  type: "pr_description",
+                  description: { title: "fix(ship): preserve the timing boundary", tldr: "Updated." },
+                } as unknown as RunEvent,
+              ],
+            }),
+          );
+        }
+        io.runStarted?.({ id });
+        return { status: "completed" };
+      };
+      const routes: string[] = [];
+      const bot: CoordinatorBot = {
+        step: async (route, body) => {
+          routes.push(route);
+          if (routes.length > 80) throw new Error("unbounded recovery");
+          const result = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${route}`, body), h.deps);
+          return { status: result.status, text: JSON.stringify(result.body) };
+        },
+      };
+      const steps: StepRunner = {
+        do: async (_name, _config, callback) => callback(),
+        sleep: async () => {
+          throw new Error("unexpected sleep");
+        },
+        waitForEvent: async () => ({ ok: true }),
+      };
+      const result = await runOriginalUnitRecovery(steps, bot, "recovery-review-5324414426", {
+        kind: "recover-original-unit",
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+      });
+      expect(result, h.logs.join("\n")).toMatchObject({
+        instance: INSTANCE.id,
+        units: { U12: ci === "green" ? "merge_ready" : "round_cap" },
+      });
+      expect(children).toHaveLength(3);
+      expect(routes).toContain("checks");
+      expect(routes).not.toContain("unit-start");
+      expect(routes).not.toContain("branch");
+      expect(h.opens).toEqual([]);
+      expect(h.merges).toEqual([]);
+      const settled = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      expect(settled.recovery).toBeUndefined();
+      expect(settled.recoveryReceipt).toMatchObject({
+        externalReview: { id: 5324414426, reviewer: { id: 101 }, headSha: POST_HEAD },
+        accounting: { spendUsd: 15 },
+      });
+      expect((await callRecovery(h)).status).toBe(409);
+    },
+  );
+
+  it.each(["dismissed", "reviewer changed", "expired", "wrong workflow"])(
+    "post-approval recovery revalidates %s before the Workflow resumes",
+    async (scenario) => {
+      const h = await approvedHarness();
+      expect((await callRecovery(h)).status).toBe(200);
+      if (scenario === "dismissed") h.deps.fetchPrReviews = async () => [{ ...laterReview(), state: "DISMISSED" }];
+      if (scenario === "reviewer changed")
+        h.deps.fetchPrReviews = async () => [{ ...laterReview(), author: { login: "alice", id: 102 } }];
+      if (scenario === "expired") h.deps.clock = () => NOW + minutesToMs(61);
+      const response = await recoverOriginalUnit(
+        {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          workflowId: scenario === "wrong workflow" ? "other-workflow" : "recovery-review-5324414426",
+        },
+        h.deps,
+      );
+      expect(response.status).toBe(409);
+      expect(h.dispatched).toEqual([]);
+      expect(h.recoveries).toHaveLength(1);
+    },
+  );
+
+  it.each(["findings", "re-review"] as const)(
+    "post-approval recovery revalidates the claimed trigger before %s admission",
+    async (child) => {
+      const h = await approvedHarness();
+      expect((await callRecovery(h)).status).toBe(200);
+      const recoveredReview = reviewRecord({
+        id: "run-recovered-review",
+        idempotencyKey: `${INSTANCE.id}:U12/recovery/2/review`,
+        startedAt: NOW,
+        finishedAt: NOW,
+        reviewHead: POST_HEAD,
+        reviewPost: {
+          posted: true,
+          target: { repo: INSTANCE.repo, number: PR.number },
+          head: POST_HEAD,
+          verdict: "request_changes",
+        },
+      });
+      h.deps.dispatch = async (_msg, io) => {
+        await h.store.put(recoveredReview);
+        io.runStarted?.({ id: recoveredReview.id });
+        return { status: "completed" };
+      };
+      expect(
+        await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+            parentInstanceId: INSTANCE.id,
+            unit: "U12",
+            step: "U12/recovery/2/review",
+            preset: "review",
+            budget: 10,
+            brief: { kind: "review", unit: "U12", pr: PR.number, headSha: POST_HEAD, round: 2 },
+          }),
+          h.deps,
+        ),
+      ).toMatchObject({ status: 200, body: { runId: recoveredReview.id } });
+      // The independent review is now posted too: reselecting a sole changes
+      // request would block valid recovery, so later admission checks the id.
+      const independentReview: PullRequestReview = {
+        ...laterReview(),
+        id: 5324414427,
+        author: { login: "review-bot", id: 103 },
+        submittedAt: new Date(NOW).toISOString(),
+      };
+      const admit = () =>
+        handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+            parentInstanceId: INSTANCE.id,
+            unit: "U12",
+            step: `U12/recovery/${child === "findings" ? "2/findings" : "3/review"}`,
+            preset: child === "findings" ? "coding" : "review",
+            budget: 10,
+            brief:
+              child === "findings"
+                ? { kind: "findings", unit: "U12", pr: PR.number, headSha: POST_HEAD, reviewRunId: recoveredReview.id }
+                : {
+                    kind: "review",
+                    unit: "U12",
+                    pr: PR.number,
+                    headSha: POST_HEAD,
+                    round: 3,
+                    prior: { reviewRunId: recoveredReview.id },
+                  },
+          }),
+          h.deps,
+        );
+      const laterDispatch = vi.fn(registers("run-next-child"));
+      h.deps.dispatch = laterDispatch;
+      const before = await h.instances.listUnits(INSTANCE.id);
+      for (const scenario of [
+        "dismissed",
+        "missing",
+        "duplicate",
+        "changed body",
+        "changed author id",
+        "changed author login",
+        "changed head",
+        "changed time",
+        "unauthorized",
+        "unavailable",
+        "read failure",
+        "authorization failure",
+      ]) {
+        const trigger = { ...laterReview(), ...(scenario === "dismissed" ? { state: "DISMISSED" } : {}) };
+        if (scenario === "changed body") trigger.body += " edited";
+        if (scenario === "changed author id") trigger.author!.id = 102;
+        if (scenario === "changed author login") trigger.author!.login = "bob";
+        if (scenario === "changed head") trigger.commitId = HEAD;
+        if (scenario === "changed time") trigger.submittedAt = new Date(NOW).toISOString();
+        h.deps.fetchPrReviews = async () => {
+          if (scenario === "read failure") throw new Error("unavailable");
+          return scenario === "unavailable"
+            ? undefined
+            : [
+                ...(scenario === "missing" ? [] : [trigger]),
+                ...(scenario === "duplicate" ? [trigger] : []),
+                independentReview,
+              ];
+        };
+        h.deps.commenterAuthorized = async () => {
+          if (scenario === "authorization failure") throw new Error("unavailable");
+          return scenario !== "unauthorized";
+        };
+        expect(await admit(), scenario).toMatchObject({
+          status: 409,
+          body: { error: "recovery_later_review_invalid" },
+        });
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+        expect(laterDispatch).not.toHaveBeenCalled();
+      }
+      h.deps.fetchPrReviews = async () => [laterReview(), independentReview];
+      h.deps.commenterAuthorized = async () => true;
+      h.deps.dispatch = registers("run-next-child");
+      expect(await admit()).toMatchObject({ status: 200, body: { runId: "run-next-child" } });
+    },
+  );
+
+  it("post-approval recovery rejects a findings spawn before the claimed full review", async () => {
+    const h = await approvedHarness();
+    expect((await callRecovery(h)).status).toBe(200);
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        step: "U12/recovery/2/findings",
+        preset: "coding",
+        budget: 10,
+        brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: POST_HEAD, reviewRunId: "run-original-review" },
+      }),
+      h.deps,
+    );
+    expect(response!.status).toBe(409);
+    expect(h.dispatched).toEqual([]);
+  });
+
   const legacyRow = (): CoordinatorUnit => {
     const { publication: _publication, lastPush: _lastPush, ...row } = requestChangesRow();
     return {

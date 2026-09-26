@@ -1043,7 +1043,7 @@ async function runUnit(
     addressSeveritySource: plan.addressSeveritySource,
     // Recovery spends only the lease already carried by the claim. It never
     // opens another segment or idles for a renewal in this checkpoint.
-    grant: row?.recovery !== undefined ? { renewals: 0 } : plan.grant,
+    grant: row?.recovery !== undefined ? (row.recovery.accounting?.grant ?? { renewals: 0 }) : plan.grant,
     grantSource: plan.grantSource,
     verbosity: plan.verbosity,
     idleDays: row?.recovery !== undefined ? 0 : plan.idleDays,
@@ -1065,6 +1065,7 @@ async function runUnit(
           pr: row.pr!,
           expectedHeadSha: row.recovery.expectedHeadSha,
           reviewRunId: row.recovery.reviewRunId,
+          ...(row.recovery.accounting !== undefined ? { spendUsd: row.recovery.accounting.spendUsd } : {}),
           ...(row.recovery.findingsRunId !== undefined ? { findingsRunId: row.recovery.findingsRunId } : {}),
           ...(row.recovery.findings !== undefined ? { findings: row.recovery.findings } : {}),
         })
