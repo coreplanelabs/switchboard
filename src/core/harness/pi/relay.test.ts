@@ -187,6 +187,53 @@ describe("answerCompaction — the bot's word on how pi's compaction is written"
 });
 
 describe("authorizeToolCall — the gate", () => {
+  it("records exact leased push authorization only after the gate allows the owned destination", () => {
+    const { harness, events } = live();
+    const head = "a".repeat(40);
+    harness.rules.publication = { authority: { ref: "feat/x", expectedHeadSha: head } };
+    const command = `git push --force-with-lease=refs/heads/feat/x:${head} origin feat/x:feat/x`;
+    expect(authorizeToolCall(harness, { toolCallId: "push", tool: "bash", input: { command } })).toEqual({
+      allow: true,
+    });
+    expect(events).toEqual([
+      { type: "publication_push_authorized", callId: "push", ref: "feat/x", expectedHeadSha: head },
+    ]);
+    events.length = 0;
+    expect(
+      authorizeToolCall(harness, {
+        toolCallId: "foreign",
+        tool: "bash",
+        input: { command: command.replace("origin feat/x:feat/x", "origin feat/x:other") },
+      }),
+    ).toMatchObject({ allow: false });
+    expect(events.some((e) => e.type === "publication_push_authorized")).toBe(false);
+  });
+  it("refuses subsequent tools until push attribution settles, then allows a retry", () => {
+    const { harness } = live();
+    harness.rules.publication = {
+      authority: { ref: "feat/x", expectedHeadSha: "a".repeat(40) },
+      attributingCallId: "push",
+    };
+    for (const [tool, input] of [
+      ["bash", { command: "git update-ref -d refs/heads/feat/x" }],
+      ["write", { path: ".git/refs/heads/feat/x", content: "" }],
+      ["update_status", { checklist: "working" }],
+    ] as const) {
+      expect(authorizeToolCall(harness, { toolCallId: `next-${tool}`, tool, input })).toMatchObject({
+        allow: false,
+        reason: expect.stringContaining("push attribution is still pending"),
+      });
+    }
+    delete harness.rules.publication.attributingCallId;
+    expect(
+      authorizeToolCall(harness, {
+        toolCallId: "retry",
+        tool: "bash",
+        input: { command: "git update-ref -d refs/heads/feat/x" },
+      }),
+    ).toEqual({ allow: true });
+  });
+
   it("allows a relayed tool and an ordinary pi command; refuses a push off the run's branch with the rule as the reason and a tool_refused note", () => {
     const { harness, events } = live();
     expect(authorizeToolCall(harness, { toolCallId: "a", tool: "update_status", input: {} })).toEqual({ allow: true });

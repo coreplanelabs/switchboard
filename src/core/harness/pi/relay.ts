@@ -29,7 +29,8 @@ import type { Backend } from "../../trace/attrs.js";
 import { redactAndCap, type RunEvent } from "../../runEvents.js";
 import type { Span } from "../../trace/types.js";
 import { pointerSummary, type CompactionAnswer, type CompactionAsk } from "./compactionFallback.js";
-import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
+import { judgeToolCall, publicationAttributionRefusal, type ToolRuleContext } from "./toolRules.js";
+import { leasedPushCommand } from "../../publicationPush.js";
 
 /** One run driving a pi, as the routes see it. */
 export interface LiveHarness {
@@ -331,9 +332,25 @@ export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): Autho
     return { allow: false, reason };
   };
   if (blocked !== undefined) return refuse(blocked);
+  const pending = publicationAttributionRefusal(harness.rules, ask.toolCallId);
+  if (pending !== undefined) return refuse(pending);
   if (harness.tools.some((t) => t.name === ask.tool)) return { allow: true };
   const verdict = judgeToolCall(ask.tool, ask.input, harness.rules);
-  if (verdict.verdict === "allowed") return { allow: true };
+  if (verdict.verdict === "allowed") {
+    const authority = harness.rules.publication?.authority;
+    const input = ask.input as { command?: unknown } | undefined;
+    const push =
+      ask.tool === "bash" && typeof input?.command === "string" ? leasedPushCommand(input.command) : undefined;
+    if (
+      push !== undefined &&
+      authority !== undefined &&
+      !("blocked" in authority) &&
+      push.ref === authority.ref &&
+      push.expectedHeadSha === authority.expectedHeadSha
+    )
+      harness.emit({ type: "publication_push_authorized", callId: ask.toolCallId, ...push });
+    return { allow: true };
+  }
   return refuse(verdict.reason);
 }
 

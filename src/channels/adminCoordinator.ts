@@ -55,6 +55,7 @@ import {
   type GrantSource,
 } from "../core/budgets.js";
 import { DEFAULT_VERBOSITY, shows } from "../core/verbosity.js";
+import { pairedPublicationPush } from "../core/publicationPush.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { requestedByLine } from "../core/prDescription.js";
 import { threadPageLink } from "../core/dispatch/reply.js";
@@ -103,7 +104,7 @@ import {
   unescapeMarkdownTableCell,
 } from "../core/reviewVerdict.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
-import type { RunEvent, ShipRoundOutcome } from "../core/runEvents.js";
+import { COMMAND_CAP, type RunEvent, type ShipRoundOutcome } from "../core/runEvents.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 import type { RunRegistry } from "../core/runRegistry.js";
@@ -1927,6 +1928,114 @@ function publicationStepPrefix(row: CoordinatorUnit): string {
   return prefix;
 }
 
+/** Missing projections are repairable only from a complete, priced durable
+ * child. No remote observation or post-step prose can replace the tool pair.
+ * Also read earlier failed attempts: their missing projection is not proof
+ * that they did not push. The caller owns fresh facts and the ownership CAS. */
+async function reconcileMissingFindingsPush(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  runId: string,
+  head: string,
+  siblings: RunView[],
+  after: number,
+): Promise<boolean> {
+  const binding = row.publication;
+  if (binding === undefined) return false;
+  const read = await deps.runs.getRun(runId, { include: "messages" });
+  if (!read.ok) return false;
+  const run = read.value;
+  const complete = (r: typeof run) => {
+    const models = Object.values(r.usage?.byModel ?? {});
+    return (
+      r.finished &&
+      r.persisted === true &&
+      !r.provisional &&
+      !r.restarting &&
+      r.truncated === false &&
+      r.events !== undefined &&
+      r.eventCount === r.events.length &&
+      r.storedEventCount === r.events.length &&
+      r.events.every(
+        (e) =>
+          e.type !== "tool_call" ||
+          e.tool !== "bash" ||
+          (e.command !== undefined && e.command.length < COMMAND_CAP && !e.command.includes("…")),
+      ) &&
+      !r.events.some((e) => (e.type === "tool_result" && e.cut) || e.type === "pushed_head") &&
+      models.length > 0 &&
+      models.every((m) => typeof m.usd === "number" && Number.isFinite(m.usd) && m.usd >= 0)
+    );
+  };
+  const tags = run.events?.filter((e) => e.type === "coordinator_tag") ?? [];
+  const tag = tags.length === 1 ? tags[0] : undefined;
+  if (
+    !complete(run) ||
+    run.status !== "completed" ||
+    (run.pushed?.length ?? 0) !== 0 ||
+    run.headSha !== head ||
+    run.parentInstanceId !== instance.id ||
+    run.userId !== instance.userId ||
+    run.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+    run.threadKey !== (row.threadKey ?? instance.threadKey) ||
+    run.agent !== "coding" ||
+    run.startedAt < after ||
+    run.finishedAt === undefined ||
+    run.finishedAt < run.startedAt ||
+    tag?.parentInstanceId !== instance.id ||
+    tag.unit !== row.unit ||
+    tag.base !== instance.base ||
+    !samePublicationBinding(tag.publication, binding) ||
+    (run.pr !== undefined &&
+      (run.pr.number !== binding.pr || (run.pr.head !== undefined && run.pr.head !== row.branch))) ||
+    pairedPublicationPush(run.events!, binding, head) === undefined
+  )
+    return false;
+  for (const sibling of siblings.filter(
+    (r) => r.id !== runId && r.agent === "coding" && (r.finishedAt === undefined || r.finishedAt >= after),
+  )) {
+    if (
+      !sibling.finished ||
+      (sibling.status !== "failed" && sibling.status !== "interrupted") ||
+      sibling.parentInstanceId !== instance.id ||
+      sibling.userId !== instance.userId ||
+      sibling.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+      sibling.threadKey !== run.threadKey ||
+      sibling.startedAt < after ||
+      sibling.finishedAt === undefined ||
+      sibling.finishedAt > run.startedAt ||
+      (sibling.pushed?.length ?? 0) > 0
+    )
+      return false;
+    const prior = await deps.runs.getRun(sibling.id, { include: "messages" });
+    if (
+      !prior.ok ||
+      !complete(prior.value) ||
+      prior.value.events!.some(
+        (e) =>
+          e.type === "pushed_head" ||
+          (e.type === "tool_call" && e.tool === "bash" && /\bgit\s+push\b/.test(e.command ?? e.summary)),
+      )
+    )
+      return false;
+  }
+  // Evidence reads may take time. Recheck the ref after them, immediately
+  // before the caller reserves ownership and compares the original row.
+  const fresh = await deps.fetchPrFacts({ repo: instance.repo, number: binding.pr }).catch(() => undefined);
+  return (
+    fresh?.state === "open" &&
+    fresh.sameRepoHead === true &&
+    fresh.headBranchExists === true &&
+    fresh.headRef === binding.headRef &&
+    fresh.baseRef === binding.baseRef &&
+    fresh.headSha === head &&
+    fresh.verifiedHead?.repo.toLowerCase() === instance.repo.toLowerCase() &&
+    fresh.verifiedHead.ref === binding.publicationRef &&
+    fresh.verifiedHead.sha === head
+  );
+}
+
 /** Advance a publication binding only to the exact head recorded by its completed
  * authorized findings child. An unrelated force-push can never rewrite the durable
  * publication binding merely because the branch currently points there. */
@@ -1943,6 +2052,7 @@ async function advanceFindingsPublication(
   const latestReview = [...row.rounds].reverse().find((round) => round.agent === "review");
   const prefix = row.recovery !== undefined ? `${row.unit}/recovery` : publicationStepPrefix(row);
   const findingsPrefix = `${instance.id}:${prefix}/${latestReview?.index}/findings`;
+  let reconciledPush = false;
   // Ordinary findings must carry the exact authority used at dispatch, not
   // merely a receipt for whatever head happens to be on the remote now.
   if (row.recovery === undefined) {
@@ -1995,6 +2105,16 @@ async function advanceFindingsPublication(
       )
     )
       throw new PublicationBindingRefusal("publication_facts_mismatch");
+    if (child.ok && (child.value.pushed?.length ?? 0) === 0 && fullHead(facts.headSha))
+      reconciledPush = await reconcileMissingFindingsPush(
+        deps,
+        instance,
+        row,
+        runId,
+        facts.headSha,
+        listing.runs,
+        latestReview.at,
+      );
   }
   if (
     !child.ok ||
@@ -2011,7 +2131,8 @@ async function advanceFindingsPublication(
       : !isStepAttempt(child.value.idempotencyKey, findingsPrefix)) ||
     !fullHead(facts.headSha) ||
     child.value.headSha !== facts.headSha ||
-    child.value.pushed?.some((push) => push.ref === row.branch && push.sha === facts.headSha) !== true ||
+    (!reconciledPush &&
+      child.value.pushed?.some((push) => push.ref === row.branch && push.sha === facts.headSha) !== true) ||
     facts.state !== "open" ||
     facts.sameRepoHead !== true ||
     facts.headBranchExists !== true ||
@@ -2486,6 +2607,20 @@ export async function recoverOriginalUnit(
       const checkedAttempts = attempts.filter((run) => run.idempotencyKey === `${instance.id}:${checkedStep}`);
       const completed = checkedAttempts.length === 1 ? checkedAttempts[0] : undefined;
       const reviewFinishedAt = review.finishedAt;
+      const reconciledPush =
+        completed !== undefined &&
+        headMoved &&
+        reviewFinishedAt !== undefined &&
+        (completed.pushed?.length ?? 0) === 0 &&
+        (await reconcileMissingFindingsPush(
+          deps,
+          instance,
+          row,
+          completed.id,
+          facts.headSha,
+          unitListing.runs,
+          reviewFinishedAt,
+        ));
       if (
         reviewFinishedAt === undefined ||
         completed === undefined ||
@@ -2502,6 +2637,7 @@ export async function recoverOriginalUnit(
         (expectedHead !== reviewedHead && expectedHead !== facts.headSha) ||
         completed.pushed?.some((push) => push.ref !== row.branch) === true ||
         (headMoved &&
+          !reconciledPush &&
           completed.pushed?.some((push) => push.ref === row.branch && push.sha === facts!.headSha) !== true) ||
         completed.startedAt < reviewFinishedAt ||
         completed.finishedAt === undefined ||

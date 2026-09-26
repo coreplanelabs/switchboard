@@ -10,6 +10,7 @@ import { ExecInfraError } from "../../../execution/executor.js";
 import { identityChangedCondition } from "../container.js";
 import { HarnessContainerReplacedError } from "../contract.js";
 import { piDriver } from "../pi/testing/driver.js";
+import type { ToolRuleContext } from "../pi/toolRules.js";
 import { TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import type { DrivenRun, RunScript } from "../testing/scenarios.js";
 import { readSessionStore, readStoreSince, type OpenCodeFeedRecord } from "./client.js";
@@ -265,6 +266,71 @@ const settled = (type: "session.tool.success" | "session.tool.failed", callId: s
   });
 
 describe("the gate's honest cannot, the compaction row, the budget stop, the unknown kind", () => {
+  it("records the exact leased push authorization only for an allowed owned shell ask", () => {
+    const events: RunEvent[] = [];
+    const head = "a".repeat(40);
+    const bridge = new OpenCodeBridge({
+      emit: (e) => void events.push(e),
+      clock: () => NOW,
+      rules: {
+        identity: "write",
+        checkout: "/workspace",
+        publication: { authority: { ref: "feat/x", expectedHeadSha: head } },
+      },
+      relayedToolNames: new Set(),
+      onStep: async () => {},
+      seedLength: 1,
+      remainingMs: () => 60_000,
+    });
+    const command = `git push --force-with-lease=refs/heads/feat/x:${head} origin feat/x:feat/x`;
+    bridge.observe(asked_("per_push", "push", "shell", command));
+    expect(events).toContainEqual({
+      type: "publication_push_authorized",
+      callId: "push",
+      ref: "feat/x",
+      expectedHeadSha: head,
+      at: NOW,
+    });
+    events.length = 0;
+    bridge.observe(
+      asked_("per_foreign", "foreign", "shell", command.replace("origin feat/x:feat/x", "origin feat/x:other")),
+    );
+    expect(events.some((e) => e.type === "publication_push_authorized")).toBe(false);
+  });
+  it("refuses subsequent tools during push attribution without denying the push's secondary permission", () => {
+    const rules: ToolRuleContext = {
+      identity: "write",
+      checkout: "/workspace",
+      publication: {
+        authority: { ref: "feat/x", expectedHeadSha: "a".repeat(40) },
+        attributingCallId: "push",
+      },
+    };
+    const bridge = new OpenCodeBridge({
+      emit: () => {},
+      clock: () => NOW,
+      rules,
+      relayedToolNames: new Set(),
+      seedLength: 1,
+      remainingMs: () => 60_000,
+    });
+    expect(bridge.observe(asked_("per_directory", "push", "external_directory", "/workspace")).replies).toEqual([
+      expect.objectContaining({ reply: "once" }),
+    ]);
+    expect(
+      bridge.observe(asked_("per_delete", "delete", "shell", "git update-ref -d refs/heads/feat/x")).replies,
+    ).toEqual([
+      expect.objectContaining({
+        reply: "reject",
+        message: expect.stringContaining("push attribution is still pending"),
+      }),
+    ]);
+    delete rules.publication!.attributingCallId;
+    expect(
+      bridge.observe(asked_("per_retry", "retry", "shell", "git update-ref -d refs/heads/feat/x")).replies,
+    ).toEqual([expect.objectContaining({ reply: "once" })]);
+  });
+
   it("a permission.replied the bot did not send — one that raced ahead of the bot's decision, for an ask it never saw — is a bypass (a forged approval)", () => {
     const { bridge, events } = harness();
     const obs = bridge.observe(replied("per_forged", "once"));

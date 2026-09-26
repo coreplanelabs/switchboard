@@ -72,6 +72,7 @@ import { PiHarness } from "../harness/pi/piHarness.js";
 import { OpenCodeHarness } from "../harness/opencode/harness.js";
 import { HarnessInterruptedError } from "../harness/contract.js";
 import { scriptOpenCodeServe } from "../harness/opencode/testing/driver.js";
+import { judgeOpenCodeAsk } from "../harness/opencode/bridge.js";
 import { openCodeReplacedCallNote } from "../harness/opencode/session.js";
 import { FakeHarnessContainer } from "../harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
@@ -89,6 +90,7 @@ import type { ChatMessage } from "../chatMessage.js";
 import type { ResumeContext } from "./admission.js";
 import type { AppendableEvent, LiveRunRow, StepRecord } from "../runLedger/types.js";
 import type { RunRecord } from "../runRecord.js";
+import { publicationReceiptsFromState, restoredPublicationHead } from "../publicationPush.js";
 
 // Feature: docs/reference/specs/harness-pi.md, docs/reference/specs/run-history.md
 // items 20–22, docs/reference/specs/llm-output.md item 5 — the loop's own
@@ -1180,6 +1182,239 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(rec.pushed).toEqual([{ ref: BRANCH, sha: HEAD, by: "salvage" }]);
     expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
   });
+
+  const receiptCommitModes = [
+    "committed",
+    "trimmed",
+    "delayed-tip",
+    "failed-push",
+    "rejected",
+    "thrown",
+    "unprojected",
+    "detached",
+  ] as const;
+  it.each(receiptCommitModes)(
+    "a gated findings push records its receipt only after an atomic commit: %s",
+    async (mode) => {
+      const trim = mode === "trimmed";
+      const committed = mode === "committed" || trim || mode === "delayed-tip";
+      let startTip!: () => void;
+      let releaseTip!: () => void;
+      const tipStarted = new Promise<void>((resolve) => {
+        startTip = resolve;
+      });
+      const tipReleased = new Promise<void>((resolve) => {
+        releaseTip = resolve;
+      });
+      let localHead = "b".repeat(40);
+      const old = "a".repeat(40),
+        head = "b".repeat(40),
+        ref = "fix/existing";
+      const publication = {
+        repo: "o/r",
+        pr: 7,
+        headRef: ref,
+        baseRef: "main",
+        expectedHeadSha: old,
+        publicationRef: ref,
+        owner: { instanceId: "coord-p", unit: "U12" },
+      };
+      let pushed = false;
+      let receiptBeforeSalvage = false;
+      let fence: ToolRuleContext["publication"];
+      const inner = new InMemoryRunLedger(() => NOW);
+      const ledger = createLedgerWriteThrough({
+        ledger: inner,
+        gen: "gen-T",
+        fallback: { put: async () => {}, abandoned: () => {} },
+        warn: () => {},
+      });
+      const opened = await ledger.open({
+        runId: "run-l",
+        threadKey: THREAD,
+        startedAt: NOW,
+        meta: { agent: "coding", channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
+        card: null,
+        system: "test",
+        tools: [],
+        seed: { messages: [{ role: "user", content: [{ type: "text", text: "fix" }] }], budgetMs: 60_000 },
+      });
+      if (opened.kind !== "tracked") throw new Error("untracked test");
+      const working = { state: "working" as const, since: NOW, bound: NOW + 60_000 };
+      const row = inner.live.get("run-l")!;
+      row.liveState = working;
+      row.liveStateSeq = 0;
+      const assign = inner.assignLiveState.bind(inner);
+      const assignments = vi.spyOn(inner, "assignLiveState").mockImplementation(async (id, gen, assignment) => {
+        // A refused tool-call write detaches a previously tracked run before
+        // the successful push result arrives. Local projection is not a commit.
+        if (mode === "detached" && assignment.sourceEvents?.some((e) => e.type === "tool_call"))
+          return { ok: false, reason: "unknown-run" };
+        if (assignment.statePatch?.publicationReceipts !== undefined) {
+          if (mode === "rejected") return { ok: false, reason: "stale-sequence" };
+          if (mode === "thrown") throw new Error("receipt commit unavailable");
+        }
+        return assign(id, gen, assignment);
+      });
+      const s = endingIn(
+        async (_deps, run) => {
+          const command = `git push --force-with-lease=refs/heads/${ref}:${old} origin ${ref}:${ref}`;
+          expect(opened.run.tracked()).toBe(true);
+          fence = run.rules.publication;
+          const harness: LiveHarness = {
+            runId: run.runId,
+            rules: { ...run.rules, identity: "write" },
+            tools: [],
+            toolContext: run.toolContext,
+            emit: (e) => run.onEvent?.(e),
+            gateSaw: () => {},
+            toolSpan: () => undefined,
+            toolsBlocked: () => undefined,
+          };
+          expect(authorizeToolCall(harness, { toolCallId: "push", tool: "bash", input: { command } })).toEqual({
+            allow: true,
+          });
+          run.onEvent?.({ type: "tool_call", tool: "bash", callId: "push", command, summary: "push" });
+          pushed = mode !== "failed-push";
+          if (mode === "delayed-tip") {
+            // The gate's allowance starts the fence, not the delayed log of
+            // the tool result. Even a parallel next ask cannot mutate the ref.
+            expect(
+              authorizeToolCall(harness, {
+                toolCallId: "parallel",
+                tool: "bash",
+                input: { command: `git update-ref -d refs/heads/${ref}` },
+              }).allow,
+            ).toBe(false);
+          }
+          run.onEvent?.({
+            type: "tool_result",
+            tool: "bash",
+            callId: "push",
+            ok: pushed,
+            exitCode: pushed ? 0 : 1,
+            summary: pushed ? "pushed" : "rejected",
+            output: pushed
+              ? `To https://github.com/o/r\n + aaaaaaaa...bbbbbbbb ${ref} -> ${ref} (forced update)`
+              : "rejected",
+          });
+          if (mode === "delayed-tip") {
+            await tipStarted;
+            const command = `git update-ref -d refs/heads/${ref}`;
+            const pi = authorizeToolCall(harness, { toolCallId: "delete", tool: "bash", input: { command } });
+            const oc = judgeOpenCodeAsk("shell", [command], harness.rules, new Set());
+            if (pi.allow || oc.reply === "once") localHead = "";
+            releaseTip();
+            expect(pi.allow).toBe(false);
+            expect(oc.reply).toBe("reject");
+          }
+          if (trim) for (let i = 0; i < 40; i++) run.onEvent?.({ type: "assistant", text: `test output ${i}` });
+          return sessionAnswering("done");
+        },
+        {
+          coding: true,
+          ...(trim ? { backlogLimit: 24 } : {}),
+          repoCtx: { repo: "o/r", pr: 7, ref, baseRef: "main", headSha: old },
+          binding: { ref, sha: old, workspace: "/srv/wt/existing" },
+          coordinator: {
+            parentInstanceId: "coord-p",
+            idempotencyKey: "coord-p:U12/1/findings",
+            base: "main",
+            publication,
+          },
+          executor: {
+            exec: async (cmd) => {
+              if (cmd.includes("rev-parse refs/heads/")) {
+                if (mode === "detached") expect(opened.run.tracked()).toBe(false);
+                startTip();
+                if (mode === "delayed-tip") await tipReleased;
+                return localHead;
+              }
+              if (cmd.includes("rev-parse --abbrev-ref HEAD")) return ref;
+              if (cmd.includes("rev-parse HEAD") || cmd.includes("rev-parse @{u}")) return head;
+              if (cmd.includes("status --porcelain")) {
+                if (committed) {
+                  expect(inner.live.get("run-l")!.state.publicationReceipts).toEqual([
+                    expect.objectContaining({ type: "pushed_head", sha: head }),
+                  ]);
+                  expect(inner.events.get("run-l")).toContainEqual(
+                    expect.objectContaining({ type: "pushed_head", sha: head }),
+                  );
+                }
+                receiptBeforeSalvage ||= s.registry
+                  .snapshot("run-l", "tok")!
+                  .events.some((e) => e.type === "pushed_head" && e.sha === head);
+                return "";
+              }
+              if (cmd.includes("rev-list --count")) return "0";
+              if (cmd.includes("ls-remote")) return `${head}\trefs/heads/${ref}`;
+              return "";
+            },
+          },
+        },
+      );
+      s.deps.fetchPrFacts = async () => ({
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: ref,
+        baseRef: "main",
+        headSha: pushed ? head : old,
+        verifiedHead: { repo: "o/r", ref, sha: pushed ? head : old },
+      });
+      if (mode !== "unprojected")
+        s.registry.commitLiveState("run-l", { ok: true, liveState: working, liveStateSeq: 0 });
+      s.registry.subscribe("run-l", "tok", { onEvent: (e, seq) => opened.run.event(e, seq) });
+      const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run }));
+      // Flush later ordinary state writes too: none may smuggle an uncommitted
+      // receipt into the row a fresh process uses to restore its push fence.
+      await opened.run.close();
+      const state = JSON.parse(JSON.stringify(inner.live.get("run-l")!.state));
+      expect(restoredPublicationHead(publicationReceiptsFromState(state.publicationReceipts), publication)).toBe(
+        committed ? head : undefined,
+      );
+      expect(receiptBeforeSalvage).toBe(committed);
+      if (mode === "detached") {
+        expect(assignments.mock.calls.some(([, , assignment]) => assignment.statePatch?.publicationReceipts)).toBe(
+          false,
+        );
+        expect(s.registry.snapshot("run-l", "tok")!.events.some((e) => e.type === "pushed_head")).toBe(false);
+      }
+      expect(
+        judgeOpenCodeAsk(
+          "shell",
+          ["git status --short"],
+          { identity: "write", checkout: "/srv/wt/existing", publication: fence },
+          new Set(),
+        ).reply,
+      ).toBe("once");
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      const record = inner.finished.get("run-l")!;
+      if (committed) {
+        expect(record.pushed).toContainEqual({ ref, sha: head, by: "push" });
+        expect(record.events).toContainEqual(
+          expect.objectContaining({
+            type: "pushed_head",
+            receipt: { callId: "push", previousHeadSha: old, repo: "o/r", pr: 7, owner: publication.owner },
+          }),
+        );
+      } else if (mode === "failed-push") {
+        expect(record.events.some((e) => e.type === "pushed_head" && e.receipt !== undefined)).toBe(false);
+      } else {
+        expect(record.pushed ?? []).toEqual([]);
+        expect(record.events.some((e) => e.type === "pushed_head")).toBe(false);
+      }
+      expect(fence?.authority).toEqual(
+        committed
+          ? { ref, expectedHeadSha: head }
+          : mode === "failed-push"
+            ? { ref, expectedHeadSha: old }
+            : { blocked: "the successful push receipt could not be committed durably" },
+      );
+      await out.releaseWorkspace();
+    },
+  );
 
   it("a blocked existing-PR publication keeps the local checkpoint attached and renders truthful partial status without an alternate push", async () => {
     const EXPECTED = "a".repeat(40);
@@ -4031,6 +4266,86 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     at: seq,
     seq,
   });
+
+  it.each(["finish", "resume"])(
+    "a successful gated push receipt survives restart into %s without replaying the push or losing attribution",
+    async (mode) => {
+      const old = "a".repeat(40),
+        head = "b".repeat(40),
+        ref = "fix/existing";
+      const publication = {
+        repo: "o/r",
+        pr: 7,
+        headRef: ref,
+        baseRef: "main",
+        expectedHeadSha: old,
+        publicationRef: ref,
+        owner: { instanceId: "coord-p", unit: "U12" },
+      };
+      const receipt = {
+        type: "pushed_head",
+        ref,
+        sha: head,
+        by: "push",
+        receipt: { callId: "push", previousHeadSha: old, repo: "o/r", pr: 7, owner: publication.owner },
+      };
+      const state = JSON.parse(JSON.stringify({ publicationReceipts: [receipt], pushedBranch: ref }));
+      const resume = mode === "finish" ? finishing("done", { agent: "coding", state }) : reentering(state);
+      const commands: string[] = [];
+      const resumed = watched(piHarness);
+      const open = resumed.harness.open;
+      resumed.harness.open = async (deps, run) => {
+        expect(run.rules.publication).toEqual({ authority: { ref, expectedHeadSha: head } });
+        return open(deps, run);
+      };
+      const s = setup("done", {
+        agent: "coding",
+        coding: true,
+        provider: neverCalled(),
+        harness: {
+          harnesses: roster(resumed.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+        repoCtx: { repo: "o/r", pr: 7, ref, baseRef: "main", headSha: old },
+        binding: { ref, sha: head, workspace: "/srv/wt/existing" },
+        coordinator: {
+          parentInstanceId: "coord-p",
+          idempotencyKey: "coord-p:U12/1/findings",
+          base: "main",
+          publication,
+        },
+        executor: {
+          exec: async (command) => {
+            commands.push(command);
+            if (command.includes("rev-parse --abbrev-ref HEAD")) return ref;
+            if (command.includes("rev-parse")) return head;
+            if (command.includes("rev-list --count")) return "0";
+            if (command.includes("ls-remote")) return `${head}\trefs/heads/${ref}`;
+            return "";
+          },
+        },
+      });
+      s.deps.fetchPrFacts = async () => ({
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: ref,
+        baseRef: "main",
+        headSha: head,
+        verifiedHead: { repo: "o/r", ref, sha: head },
+      });
+      const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      const record = (await s.store.get("run-l"))!;
+      expect(record.pushed).toEqual([{ ref, sha: head, by: "push" }]);
+      expect(record.events.some((e) => e.type === "run_note" && e.kind === "publication_blocked")).toBe(false);
+      expect(commands.some((command) => command.startsWith("git push"))).toBe(false);
+      await out.releaseWorkspace();
+    },
+  );
 
   it("a verification-blocked existing PR with a clean checkout performs no PR lookup, edit, or create", async () => {
     const EXPECTED = "a".repeat(40);
