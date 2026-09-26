@@ -960,8 +960,9 @@ export async function dispatch(
     if (operatorMode !== "off") {
       // The thread's owner as the operator reads it (issue 2027; record 0051's
       // owner order; thread-admission item 9): a live run — the local slot, one
-      // live on another generation, or the page's unfinished run (a hosted
-      // pipeline runner) — else the page's idle unit. Under an owner the turn's
+      // live on another generation, or a non-hosted live run on the page —
+      // else the page's idle unit, then a hosted runner guarding its seed
+      // thread. Under an owner the turn's
       // projection narrows to steers and reads, and the prompt says the reply
       // is the owner's follow-up. Ended pipelines bypassed this turn above.
       const slot = admission.get(msg.threadKey);
@@ -990,7 +991,7 @@ export async function dispatch(
               // offers no steer line, the executor folds a steer bind like any
               // other, and the fold runs on to the seed refusal below, which
               // names the unit threads to reply in.
-              pageOwner.run.instanceId !== undefined
+              pageOwner.run.hosted === true
               ? { kind: "live" }
               : { kind: "live", runId: pageOwner.run.id }
             : pageOwner?.kind === "unit"
@@ -1189,16 +1190,17 @@ export async function dispatch(
     if (thread && !threadLive && deps.coordinatorInstances !== undefined) {
       const owner =
         pageOwner ?? (await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey));
-      if (owner.kind === "live" && owner.run.instanceId !== undefined) {
+      if (owner.kind === "live" && owner.run.hosted === true) {
         // The seed thread of a live pipeline runner (issue 2010; record 0051's
         // owner rule, thread-admission item 9): a hosted runner occupies no
         // admission slot, so `threadLive` is false here, yet the thread is the
         // runner's for its life — nothing runs beside it. A reply, directive
         // or not, is refused naming the owner and the unit thread to reply in,
         // never started as a rival run beside the live pipeline.
-        const units = await deps.coordinatorInstances
-          .listUnits(owner.run.instanceId)
-          .catch(() => [] as CoordinatorUnit[]);
+        const units =
+          owner.run.instanceId === undefined
+            ? []
+            : await deps.coordinatorInstances.listUnits(owner.run.instanceId).catch(() => [] as CoordinatorUnit[]);
         const open = units.filter((u) => u.ending === undefined);
         await refuse(
           refusalOf(

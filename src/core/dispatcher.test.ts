@@ -17235,7 +17235,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     // The seed thread's page: the ship runner is live and hosted — it holds no
     // admission slot, so `threadLive` is false — and names its instance.
     const thread = [
-      { id: "ship-1", startedAt: 0, finished: false, eventCount: 1, agent: "ship", instanceId: INSTANCE },
+      { id: "ship-1", startedAt: 0, finished: false, eventCount: 1, agent: "ship", instanceId: INSTANCE, hosted: true },
     ] as RunView[];
     const { io, replies } = fakeIO();
     const ended = await dispatch(deps, msg("agent:coding steer the child about the overlap", "slack:UADMIN"), io, {
@@ -19586,6 +19586,15 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const sends: string[] = [];
     deps.workflow = { get: async (id) => ({ sendEvent: async () => void sends.push(id) }) };
     const thread = [
+      {
+        id: "ship-parent",
+        startedAt: 1,
+        finished: false,
+        eventCount: 1,
+        agent: "ship",
+        instanceId,
+        hosted: true,
+      },
       { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: instanceId },
     ] as RunView[];
     deps.operatorModel = decides({
@@ -19608,6 +19617,10 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       mode: "on",
       outcome: "binds",
     });
+    expect(registry.snapshotById("r2")).toBeNull();
+    expect((await instances.listUnits(instanceId)).map((unit) => unit.branch)).toEqual([
+      "plan/fix-the-login-6435ec/u12",
+    ]);
 
     await dispatch(deps, msg("plane show", "slack:UADMIN"), fakeIO().io, { thread });
     expect(deps.invoked).toEqual(["plane.show"]);
@@ -19618,7 +19631,15 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const INSTANCE = "plan-fix-the-login-6435ec";
     const seedThread = () =>
       [
-        { id: "ship-1", startedAt: 0, finished: false, eventCount: 1, agent: "ship", instanceId: INSTANCE },
+        {
+          id: "ship-1",
+          startedAt: 0,
+          finished: false,
+          eventCount: 1,
+          agent: "ship",
+          instanceId: INSTANCE,
+          hosted: true,
+        },
       ] as RunView[];
     const units = [
       {
@@ -19913,7 +19934,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     // The seed thread's page: the ship runner is live and hosted — no
     // admission slot, an instance on its record, an inbox nothing drains.
     const thread = [
-      { id: "ship-1", startedAt: 0, finished: false, eventCount: 1, agent: "ship", instanceId: INSTANCE },
+      { id: "ship-1", startedAt: 0, finished: false, eventCount: 1, agent: "ship", instanceId: INSTANCE, hosted: true },
     ] as RunView[];
     const operator = decides({
       reason: "deliver it to the live runner",
