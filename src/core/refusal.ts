@@ -45,6 +45,7 @@ const CAUSE_OF = {
   repo_not_visible: "policy",
   repo_unverified: "system",
   repo_not_onboarded: "request",
+  pr_target_conflict: "request",
   repo_access: "policy",
   pr_head_unknown: "system",
   workspace_head_mismatch: "system",

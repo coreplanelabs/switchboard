@@ -564,6 +564,8 @@ export const REFUSAL_SENTENCES = {
     `📦 \`${p.slug}\` is not onboarded as a resident, so I did not start a *${p.agent}* run for it. ` +
     `${p.onboardHint} for a warm, deps-ready environment, or name the repository by URL ` +
     `(https://github.com/${p.slug}) to run in a cold per-thread sandbox.`,
+  pr_target_conflict: (p: { target: string; cited: string }) =>
+    `⚠️ This request starts with \`${p.target}\` but also cites \`${p.cited}\`. No run started because the pull request target is ambiguous.`,
   repo_access: (p: { repo: string; adminsHint: string }) =>
     `🚫 You're not on the allowlist for the \`${p.repo}\` repo environment. Ask ${p.adminsHint} for access.`,
   which_branch: (p: { repo: string | undefined }) =>

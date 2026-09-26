@@ -240,8 +240,22 @@ async function onboardedGuess(deps: AuthorizeDeps, msg: IncomingMessage, slug: s
 export async function authorizeRepo(
   deps: AuthorizeDeps,
   ctx: GateContext & GateCard & { agent: AgentDef; profile: RunProfile; needsRepo: boolean; repoCtx: RepoContext },
-): Promise<Gate<"repo_not_onboarded" | "repo_not_visible" | "repo_unverified" | "repo_access">> {
+): Promise<Gate<"pr_target_conflict" | "repo_not_onboarded" | "repo_not_visible" | "repo_unverified" | "repo_access">> {
   const { msg, refuse, card, shell, closeLines, clock, agent, profile, needsRepo, repoCtx } = ctx;
+  if (needsRepo && repoCtx.prConflict) {
+    const { target, cited } = repoCtx.prConflict;
+    await refuse(refusalOf("pr_target_conflict", REFUSAL_SENTENCES.pr_target_conflict({ target, cited })), () =>
+      card.done(
+        shell.close({
+          kind: "not_started",
+          icon: "⚠️",
+          reason: "conflicting pull requests",
+          ...closeLines(clock(), false),
+        }),
+      ),
+    );
+    return { kind: "refused", reason: "pr_target_conflict" };
+  }
   // A `repo-cold` run's vet was GitHub's, not the registry's
   // (docs/reference/specs/execution.md item 18): a refused slug is a repository
   // this installation cannot see — a resident fleet, or its absence, has

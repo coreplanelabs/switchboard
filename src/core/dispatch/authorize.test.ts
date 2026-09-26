@@ -186,6 +186,21 @@ describe("authorizeAgent — the agent gate, against the resolved agent", () => 
 describe("authorizeRepo — the repository gates, once the target has landed", () => {
   const coding = getAgent("coding");
 
+  it("refuses a routed task with conflicting PR references before starting a coding run", async () => {
+    const s = setup({ user: "slack:UADMIN" });
+    const result = await authorizeRepo(s.deps, {
+      ...s.gate,
+      ...s.cardCtx,
+      agent: coding,
+      profile: declaredProfile(coding),
+      needsRepo: true,
+      repoCtx: { prConflict: { target: "acme/api#8", cited: "acme/api#7" } },
+    });
+    expect(result).toEqual({ kind: "refused", reason: "pr_target_conflict" });
+    expect(s.replies[0]).toContain("acme/api#8");
+    expect(s.replies[0]).toContain("acme/api#7");
+  });
+
   it("a repo-needing agent whose bare slug the resident registry refused is not started: card closed, the reply says how to onboard — as a command for someone who may, as an ask for everyone else", async () => {
     const admin = setup({ user: "slack:UADMIN" });
     const repoCtx: RepoContext = { rejectedRepo: "acme/new" };

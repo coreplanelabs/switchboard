@@ -382,6 +382,12 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
         quoted: "🚫 You're not on the allowlist for the `o/r` repo environment. Ask an admin for access.",
       },
       {
+        code: "pr_target_conflict",
+        built: REFUSAL_SENTENCES.pr_target_conflict({ target: "o/r#8", cited: "o/r#7" }),
+        quoted:
+          "⚠️ This request starts with `o/r#8` but also cites `o/r#7`. No run started because the pull request target is ambiguous.",
+      },
+      {
         code: "follow_up_refused",
         built: refusalReply(liveThread, { requestedAgent: "review" }, 120_000),
         quoted:
