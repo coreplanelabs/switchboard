@@ -765,6 +765,133 @@ describe("run history routes", () => {
     });
   });
 
+  it("recovery evidence filters before the cap and attests only a complete valid set", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    const recoveryEvidence = { instanceId: "original", unit: "U12", threadKeys: ["slack:C1:original"] };
+    for (let i = 0; i < 205; i++) await putDirect(key, record(`noise-${i}`, now - i, { threadKey: "slack:C1:noise" }));
+    const relevant = [
+      record("parent", now - 1000, {
+        parentInstanceId: "original",
+        idempotencyKey: "original:U99/0/coding",
+        threadKey: "slack:C1:foreign",
+      }),
+      record("key", now - 2000, {
+        parentInstanceId: "contradiction",
+        idempotencyKey: "original:U12/0/coding",
+        threadKey: "slack:C1:foreign",
+      }),
+      record("thread", now - 3000, { threadKey: "slack:C1:original" }),
+      record("bare-key", now - 4000, {
+        parentInstanceId: "contradiction",
+        idempotencyKey: "original:U12",
+        threadKey: "slack:C1:foreign",
+      }),
+    ];
+    for (const row of relevant) await putDirect(key, row);
+    await putDirect(
+      key,
+      record("other-unit", now - 4000, {
+        parentInstanceId: "other",
+        idempotencyKey: "original:U120/0/coding",
+        threadKey: "slack:C1:foreign",
+      }),
+    );
+    await putDirect(
+      key,
+      record("bare-neighbor", now - 5000, {
+        parentInstanceId: "other",
+        idempotencyKey: "original:U120",
+        threadKey: "slack:C1:foreign",
+      }),
+    );
+    const result = await post("/runs/list", { storeKey: key, limit: 200, recoveryEvidence });
+    expect(result.status).toBe(200);
+    expect(result.data.evidenceComplete).toBe(true);
+    expect((result.data.items as RunRecord[]).map((row) => row.id)).toEqual(["parent", "key", "thread", "bare-key"]);
+    const full = await post("/runs/list", { storeKey: key, limit: 2, recoveryEvidence });
+    expect(full.data.evidenceComplete).toBe(false);
+    for (const extra of [{ before: now }, { threadKey: "slack:C1:original" }, { visibleTo: { kind: "all" } }])
+      expect((await post("/runs/list", { storeKey: key, recoveryEvidence, ...extra })).status).toBe(400);
+    expect(
+      (await post("/runs/list", { storeKey: key, recoveryEvidence: { ...recoveryEvidence, threadKeys: [] } })).status,
+    ).toBe(400);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec("UPDATE runs SET summary_json = ? WHERE run_id = ?", "{broken", "parent");
+    });
+    const corrupt = await post("/runs/list", { storeKey: key, limit: 200, recoveryEvidence });
+    expect(corrupt.data.evidenceComplete).toBe(false);
+  });
+
+  it.each<{ label: string; corrupt: (row: RunRecord) => unknown }>([
+    { label: "null", corrupt: () => null },
+    { label: "a boolean", corrupt: () => true },
+    { label: "a number", corrupt: () => 42 },
+    { label: "a string", corrupt: () => "corrupt" },
+    { label: "an array", corrupt: () => [] },
+    { label: "an empty object", corrupt: () => ({}) },
+    { label: "missing a required field", corrupt: (row) => ({ ...row, id: undefined }) },
+    { label: "carrying a malformed optional field", corrupt: (row) => ({ ...row, headSha: "invalid" }) },
+  ])("recovery evidence refuses a retained foreign-thread summary that is $label", async ({ corrupt }) => {
+    const key = storeKey();
+    const now = Date.now();
+    const recoveryEvidence = { instanceId: "original", unit: "U12", threadKeys: ["slack:C1:original"] };
+    await putDirect(key, record("original", now, { threadKey: "slack:C1:original" }));
+    const child = record("competing", now - 1000, {
+      parentInstanceId: "original",
+      idempotencyKey: "original:U12/0/coding",
+      threadKey: "slack:C1:foreign",
+    });
+    await putDirect(key, child);
+    await runInDurableObject(stubOf(key), async (_instance, state) => {
+      // Leave the SQL thread foreign and erase both JSON identity matches. Even
+      // a plausible object must pass the record parser, not just json_valid.
+      const summary = corrupt({ ...child, parentInstanceId: "other", idempotencyKey: "other:U12/0/coding" });
+      state.storage.sql.exec("UPDATE runs SET summary_json = ? WHERE run_id = ?", JSON.stringify(summary), child.id);
+    });
+    const result = await post("/runs/list", { storeKey: key, limit: 200, recoveryEvidence });
+    expect(result.status).toBe(200);
+    expect(result.data.evidenceComplete).toBe(false);
+    // Ordinary history still skips corrupt rows instead of failing the page.
+    const ordinary = await post("/runs/list", { storeKey: key });
+    expect((ordinary.data.items as RunRecord[]).map((row) => row.id)).toEqual(["original"]);
+    expect(ordinary.data.evidenceComplete).toBeUndefined();
+  });
+
+  it("recovery evidence validates past the evidence cap but only within retention", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    const recoveryEvidence = { instanceId: "original", unit: "U12", threadKeys: ["slack:C1:original"] };
+    await putDirect(key, record("original", now, { threadKey: "slack:C1:original" }));
+    for (let i = 0; i < 205; i++) await putDirect(key, record(`noise-${i}`, now - i, { threadKey: "slack:C1:noise" }));
+    await putDirect(key, record("corrupt", now - 2 * DAY, { threadKey: "slack:C1:foreign" }));
+    await runInDurableObject(stubOf(key), async (_instance, state) => {
+      state.storage.sql.exec("UPDATE runs SET summary_json = 'null', bytes = ? WHERE run_id = 'corrupt'", 32 * MIB);
+    });
+    const result = await post("/runs/list", { storeKey: key, limit: 200, recoveryEvidence });
+    expect(result.status).toBe(200);
+    expect(result.data.evidenceComplete).toBe(false);
+    // Each policy independently excludes the corrupt row without deleting it.
+    for (const policy of [
+      { retentionDays: 1, maxRuns: 5000, maxBytes: 64 * MIB },
+      { retentionDays: 30, maxRuns: 206, maxBytes: 64 * MIB },
+      { retentionDays: 30, maxRuns: 5000, maxBytes: 16 * MIB },
+    ]) {
+      await runInDurableObject(stubOf(key), async (_instance, state) => {
+        state.storage.sql.exec(
+          `INSERT INTO meta (key, value) VALUES ('policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+          JSON.stringify({ ...policy, policyUpdatedAt: now }),
+        );
+      });
+      const retained = await post("/runs/list", { storeKey: key, limit: 200, recoveryEvidence });
+      expect(retained.status).toBe(200);
+      expect(retained.data.evidenceComplete).toBe(true);
+      expect((retained.data.items as RunRecord[]).map((row) => row.id)).toEqual(["original"]);
+      expect(await rowCount(key, "runs")).toBe(207);
+    }
+  });
+
   it("list: newest-first, limit 1000 → at most 200 rows plus a cursor; before/sinceMs/agent/channel/threadKey/parentRunId/pr filters; no events on the wire", async () => {
     const key = storeKey();
     const now = Date.now();

@@ -530,7 +530,26 @@ export class WorkerRunLedger implements RunLedger {
 
   async listLive(): Promise<LiveRunRow[]> {
     const r = await this.post("/runs/live", { storeKey: this.opts.storeKey });
-    return Array.isArray(r.data.runs) ? (r.data.runs as LiveRunRow[]) : [];
+    const rows = r.data.runs;
+    if (
+      !Array.isArray(rows) ||
+      r.data.nextBefore !== undefined ||
+      rows.some(
+        (row: LiveRunRow) =>
+          !row ||
+          typeof row.runId !== "string" ||
+          !RUN_ID_PATTERN.test(row.runId) ||
+          !Number.isFinite(row.startedAt) ||
+          !row.meta ||
+          [row.meta.channelId, row.meta.userId, row.meta.threadKey].some((field) => typeof field !== "string") ||
+          [row.meta.parentInstanceId, row.meta.idempotencyKey].some(
+            (field) => field !== undefined && typeof field !== "string",
+          ),
+      ) ||
+      new Set(rows.map((row: LiveRunRow) => row.runId)).size !== rows.length
+    )
+      throw new PermanentStoreError("run ledger /runs/live returned incomplete or malformed rows");
+    return rows as LiveRunRow[];
   }
 
   async readEvents(runId: string): Promise<AppendableEvent[]> {

@@ -702,9 +702,50 @@ export function clampListLimit(limit: number | undefined): number {
   return Math.min(RUN_LIST_MAX_LIMIT, Math.max(1, Math.floor(limit)));
 }
 
+/** The recovery audit must see either identity claim, including contradictory
+ * parents, and any activity in the original threads. Never AND these claims. */
+export interface RecoveryEvidenceScope {
+  instanceId: string;
+  unit: string;
+  threadKeys: string[];
+}
+
+export function isRecoveryEvidenceScope(value: unknown): value is RecoveryEvidenceScope {
+  if (typeof value !== "object" || value === null) return false;
+  const scope = value as RecoveryEvidenceScope;
+  return (
+    typeof scope.instanceId === "string" &&
+    scope.instanceId.length > 0 &&
+    scope.instanceId.length <= 256 &&
+    typeof scope.unit === "string" &&
+    /^U[1-9][0-9]*$/.test(scope.unit) &&
+    scope.unit.length <= 64 &&
+    Array.isArray(scope.threadKeys) &&
+    scope.threadKeys.length > 0 &&
+    scope.threadKeys.length <= 2 &&
+    scope.threadKeys.every((key) => typeof key === "string" && key.length > 0 && key.length <= 256)
+  );
+}
+
+export function matchesRecoveryEvidence(
+  run: { parentInstanceId?: string; idempotencyKey?: string; threadKey?: string },
+  scope: RecoveryEvidenceScope,
+): boolean {
+  const unitKey = `${scope.instanceId}:${scope.unit}`;
+  return (
+    run.parentInstanceId === scope.instanceId ||
+    run.idempotencyKey === unitKey ||
+    run.idempotencyKey?.startsWith(`${unitKey}/`) === true ||
+    (run.threadKey !== undefined && scope.threadKeys.includes(run.threadKey))
+  );
+}
+
 /** The `list` query — the same fields on the wire (`/runs/list`) and in the
  *  `RunStore` interface. */
 export interface RunListOptions {
+  /** Internal admission audit: a complete bounded relevant set, never a UI page.
+   * A Worker must explicitly attest completeness; a full page is not evidence. */
+  recoveryEvidence?: RecoveryEvidenceScope;
   /** Rows to return: default `RUN_LIST_DEFAULT_LIMIT`, capped at `RUN_LIST_MAX_LIMIT`. */
   limit?: number;
   /** Cursor: only runs ordered after the last row seen — `finishedAt` strictly
