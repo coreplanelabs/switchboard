@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.265.1](https://github.com/coreplanelabs/switchboard/compare/v1.265.0...v1.265.1) (2026-09-26)
+
+
+### Bug fixes
+
+* **ship:** retain authorized findings push receipts ([#2415](https://github.com/coreplanelabs/switchboard/issues/2415)) ([cfeca37](https://github.com/coreplanelabs/switchboard/commit/cfeca37ec0106c53ee9c30100de4745492835ade))
+
 ## [1.265.0](https://github.com/coreplanelabs/switchboard/compare/v1.264.0...v1.265.0) (2026-09-26)
 
 
