@@ -388,13 +388,13 @@ describe("planDeploy", () => {
 
   it("from the published package there is no tree: both git checks are off whatever --allow-branch says, the root is the operator's directory at the package's version, and the text says the sources are the package's — never `origin/main`", () => {
     const fromPackage: DeployHost = {
-      root: { mode: "package", path: "/srv/switchboard", version: "1.12.0" },
+      root: { mode: "package", path: "/srv/switchboard", version: "1.12.0", commit: "a".repeat(40) },
       hasNodeModules: (dir) => dir === "deploy/cloudflare-memory",
     };
     const p = plan({}, fromPackage);
     expect(p.checks).toMatchObject({ account: TEST_PROFILE.account, cleanTree: false, atOriginMain: false });
     expect(plan({ allowBranch: true }, fromPackage).checks).toMatchObject({ cleanTree: false, atOriginMain: false });
-    expect(p.root).toEqual({ mode: "package", path: "/srv/switchboard", version: "1.12.0" });
+    expect(p.root).toEqual({ mode: "package", path: "/srv/switchboard", version: "1.12.0", commit: "a".repeat(40) });
     // The steps themselves are the same steps: the same dirs, commands and gates.
     expect(p.steps).toEqual(plan().steps);
     const text = formatPlan(p);

@@ -386,39 +386,79 @@ jobs:
       - name: what is live
         if: always()
         env:
-          CLI: ${{ steps.cli.outputs.cli }}
           LABEL: ${{ steps.cli.outputs.label }}
-          CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
         run: |
-          # Every Worker the profile has, with its /healthz and — for one whose
-          # health route needs a bearer — the env var holding it, from the plan;
-          # no hostname is typed here. The plan is read before the summary block
-          # so its failure is a workflow annotation (a `::warning::` only counts
-          # on stdout) while the table below still shows the gap.
-          plan_ok=true
-          # shellcheck disable=SC2086
-          if ! $CLI deploy plan --allow-branch --json > "$RUNNER_TEMP/fleet.json" 2> "$RUNNER_TEMP/fleet.err"; then
-            plan_ok=false
-            echo "::warning::the live table could not read the deployment profile — deploy plan failed: $(tr '\n' ' ' < "$RUNNER_TEMP/fleet.err")"
-            echo '{"steps":[]}' > "$RUNNER_TEMP/fleet.json"
+          # Freeze the selection BEFORE upload. Recomputing --affected now can
+          # erase a selected Worker from the receipt as soon as its health moves.
+          plan="$RUNNER_TEMP/plan.json"
+          summary="$GITHUB_STEP_SUMMARY"
+          printf '\n### Live after this run — `%s`\n\n' "$LABEL" >> "$summary"
+          if ! jq -se 'length == 1 and (.[0] | (.steps | type == "array") and (.root.mode == "checkout" or .root.mode == "package"))' "$plan" > /dev/null; then
+            echo "::error::readiness unproven: the pre-deploy plan is missing or unreadable"
+            echo "Readiness unproven: no valid pre-deploy selection. This run is not a successful deployment." >> "$summary"
+            exit 1
           fi
-          {
-            echo
-            echo "### Live after this run"
-            echo
-            echo "| Worker | build.commit |"
-            echo "|---|---|"
-            if [ "$plan_ok" = false ]; then echo "| (plan unreadable — see the warning) | ? |"; fi
-            jq -r '.steps[] | [.script, (.healthUrl // .wakeUrl // .liveGate.healthUrl // ""), (.liveGate.bearerEnv // "")] | @tsv' "$RUNNER_TEMP/fleet.json" |
-            while IFS=$'\t' read -r script url bearerEnv; do
-              if [ -z "$url" ]; then echo "| $script | (no health URL in the plan) |"; continue; fi
-              if [ -n "$bearerEnv" ] && [ -z "${!bearerEnv}" ]; then echo "| $script | (no $bearerEnv — not read) |"; continue; fi
-              if [ -n "$bearerEnv" ]; then auth=(-H "authorization: Bearer ${!bearerEnv}"); else auth=(); fi
-              # An unreachable Worker leaves jq with no input and no output — not an error — so default the empty answer too.
-              commit=$(curl -s --max-time 20 "${auth[@]}" "$url" | jq -r '.build.commit // "?"' 2>/dev/null || true)
-              c=${commit:-?}
-              echo "| $script | \`${c:0:7}\` |"
-            done
-            echo
-            echo "Deployed: \`$LABEL\`. A selected Worker is live when its commit matches; a skipped one keeps its previous commit by design."
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$(jq -r '.root.mode' "$plan")" = package ]; then
+            expected=$(jq -r '.root.commit // ""' "$plan")
+          else
+            expected="$GITHUB_SHA"
+          fi
+          if ! [[ "$expected" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::readiness unproven: the deployment's exact source commit is missing"
+            echo "Readiness unproven: no exact source commit. This run is not a successful deployment." >> "$summary"
+            exit 1
+          fi
+          printf '| Selected Worker | build.commit | readiness |\n|---|---|---|\n' >> "$summary"
+          failed=0
+          # Process substitution keeps failures in this shell, not a pipeline subshell.
+          while IFS= read -r step; do
+            script=$(jq -r '.script' <<< "$step")
+            url=$(jq -r '.healthUrl // .wakeUrl // .liveGate.healthUrl // ""' <<< "$step")
+            bearerEnv=$(jq -r '.liveGate.bearerEnv // ""' <<< "$step")
+            auth=()
+            problem=""
+            commit="?"
+            if [ -z "$url" ]; then
+              problem="no health URL"
+            elif [ -n "$bearerEnv" ] && [ -z "${!bearerEnv}" ]; then
+              problem="no $bearerEnv — health not read"
+            else
+              if [ -n "$bearerEnv" ]; then auth=(-H "authorization: Bearer ${!bearerEnv}"); fi
+              if ! curl --fail-with-body -sS --max-time 20 "${auth[@]}" "$url" > "$RUNNER_TEMP/health.json"; then
+                problem="health unreadable"
+              elif ! jq -se --arg expected "$expected" 'length == 1 and (.[0] | .ok == true and .build.commit == $expected)' "$RUNNER_TEMP/health.json" > /dev/null; then
+                problem="health not ready or missing/wrong commit (expected $expected)"
+              fi
+              commit=$(jq -r '.build.commit // "?"' "$RUNNER_TEMP/health.json" 2>/dev/null) || commit="?"
+            fi
+            if [ "$(jq -r '.name' <<< "$step")" = resident ]; then
+              base=$(jq -r '.drain.url // .setEnv.RESIDENT_BASE_URL // ""' <<< "$step")
+              registry_problem=""
+              if [ -z "$RESIDENT_READ_TOKEN" ] || [ -z "$base" ]; then
+                registry_problem="registry unreadable: no RESIDENT_READ_TOKEN or URL"
+              elif ! curl --fail-with-body -sS --max-time 20 -H "authorization: Bearer $RESIDENT_READ_TOKEN" "${base%/}/residents" > "$RUNNER_TEMP/residents.json"; then
+                registry_problem="registry unreadable"
+              elif ! jq -se '
+                length == 1 and (.[0] | has("draining") and .draining == null and
+                (.residents | type == "array") and .count == (.residents | length) and
+                ([.residents[].resource] | length == (unique | length)) and
+                all(.residents[]; (.resource | type == "string" and length > 0) and
+                  .live.imageReport == "current" and .live.error == null))
+              ' "$RUNNER_TEMP/residents.json" > /dev/null; then
+                # Names remain visible even when the drain cleared at its backstop.
+                details=$(jq -c '{draining, residents: [.residents[] | {resource, imageReport: .live.imageReport, error: .live.error}]}' "$RUNNER_TEMP/residents.json" 2>/dev/null) || details="malformed listing"
+                registry_problem="registry mismatch: $details"
+              fi
+              if [ -n "$registry_problem" ]; then problem="${problem:+$problem; }$registry_problem"; fi
+            fi
+            if [ -n "$problem" ]; then
+              failed=1
+              echo "::error::$script readiness unproven: $problem"
+            fi
+            printf '| %s | `%s` | %s |\n' "$script" "$commit" "${problem:-ready}" >> "$summary"
+          done < <(jq -c '.steps[]' "$plan")
+          if [ "$failed" -ne 0 ]; then
+            echo "Partial deployment or readiness unproven; uploaded builds were not rolled back. See the deploy step for what landed." >> "$summary"
+            exit 1
+          fi
+          echo "Selected Workers match the exact source commit; any selected resident fleet is undrained with current image reports. Skipped Workers were not judged against this release." >> "$summary"
