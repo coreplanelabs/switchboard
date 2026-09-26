@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { LinkCommand, LinkResult } from "./linkContract.js";
 
 // Persistence only: callers authenticate subjects and authorize link/recovery
 // ceremonies before using this seam. No adapter or policy consumes it yet.
@@ -81,6 +82,8 @@ export interface PersonDirectory {
   resolve(identity: ExternalIdentity): Promise<BindingResolution>;
   change(change: BindingChange): Promise<ChangeResult>;
   receipts(identity: ExternalIdentity): Promise<ReceiptsResult>;
+  /** Disabled dual-identity intent lifecycle; every command is one transaction. */
+  link(command: LinkCommand): Promise<LinkResult>;
 }
 
 /** The missing dependency is unavailable, never a guessed person or a new local store. */
