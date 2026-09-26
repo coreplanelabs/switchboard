@@ -6564,6 +6564,397 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       threadKey: INSTANCE.threadKey,
     });
 
+  const SALVAGED = "b".repeat(40);
+  const salvageFindings = [
+    { id: "F1", severity: "minor" as const, file: "src/a.ts", title: "keep the fence" },
+    {
+      id: "F2",
+      severity: "major" as const,
+      file: "src/b.ts",
+      title: "operator consent and preview receipt",
+      humanGated: true as const,
+    },
+  ];
+  const salvageHarness = async () => {
+    const workflows = new Set<string>();
+    const h = harness({
+      prFacts: exactRecoveryFacts(SALVAGED),
+      startRecovery: async (id) => {
+        const duplicate = workflows.has(id);
+        workflows.add(id);
+        return { kind: duplicate ? "duplicate" : "created", id };
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    const row = requestChangesRow();
+    row.rounds.push(
+      { index: 1, agent: "coding", outcome: "started", at: NOW - minutesToMs(15) },
+      { index: 1, agent: "coding", outcome: "aborted", at: NOW - minutesToMs(5) },
+    );
+    // Normal unit-end persists no typed cause, step or round for this abort.
+    row.ending = { kind: "aborted", report: "required findings outputs missing", at: NOW - minutesToMs(5) };
+    await h.instances.putUnits([row]);
+    await h.store.put(
+      reviewRecord({
+        startedAt: NOW - minutesToMs(40),
+        finishedAt: NOW - minutesToMs(30),
+        verdict: { verdict: "request_changes", summary: "fix and consent remain", findings: salvageFindings },
+      }),
+    );
+    await h.store.put(
+      completedOriginalFindings(SALVAGED, {
+        pushed: [{ ref: INSTANCE.branch, sha: SALVAGED, by: "salvage" }],
+        dispositions: [{ findingId: "F2", disposition: "declined", note: "consent still required" }],
+        events: [{ type: "coordinator_tag", parentInstanceId: INSTANCE.id, unit: "U12", base: "main", publication }],
+      }),
+    );
+    return h;
+  };
+
+  it("salvage recovery claims one original findings completion at the observed head without consuming its missing outputs", async () => {
+    const h = await salvageHarness();
+    const [before] = await h.instances.listUnits(INSTANCE.id);
+    const outcomes = await Promise.all([callRecovery(h), callRecovery(h)]);
+    expect(outcomes.some((result) => result.status === 200)).toBe(true);
+    expect(new Set(h.recoveries.map((entry) => entry.id))).toEqual(new Set(["recovery-run-original-review"]));
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed).toMatchObject({
+      branch: INSTANCE.branch,
+      pr: PR,
+      lastPush: SALVAGED,
+      publication: { ...publication, expectedHeadSha: SALVAGED },
+      recovery: {
+        kind: "findings",
+        round: 1,
+        findings: salvageFindings,
+        expectedHeadSha: SALVAGED,
+        reviewRunId: "run-original-review",
+        remainingMs: minutesToMs(60),
+        deadlineAt: NOW + minutesToMs(60),
+        previousEnding: before!.ending,
+        previousBinding: { publication, lastPush: HEAD },
+      },
+    });
+    expect(claimed!.recovery).not.toHaveProperty("findingsRunId");
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect((await h.instances.get(INSTANCE.id))!.caps).toEqual(recoveryInstance().caps);
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "already_started" } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(claimed);
+    expect(h.branches).toEqual([]);
+    expect(h.opens).toEqual([]);
+  });
+
+  it.each([
+    "foreign parent",
+    "foreign unit",
+    "foreign requester",
+    "foreign thread",
+    "foreign repo",
+    "foreign PR",
+    "foreign ref",
+    "missing salvage",
+    "ordinary push",
+    "missing observed head",
+    "stale observed head",
+    "missing authority",
+    "foreign authority",
+    "duplicate authority",
+    "truncated evidence",
+    "missing child",
+    "duplicate child",
+    "competing different-head push",
+    "foreign competing push",
+    "live attempt",
+    "overlapping attempt",
+    "missing finish",
+    "before review",
+    "after ending",
+    "wrong coding boundary",
+    "stale child boundary",
+    "complete contract",
+    "moved remote",
+    "wrong remote ref",
+    "closed PR",
+    "rival owner",
+    "stale CAS",
+    "partial listing",
+    "round cap",
+    "wall-clock cap",
+    "unknown spend",
+  ])("salvage recovery refuses %s without changing the row or owner", async (scenario) => {
+    const h = await salvageHarness();
+    const child = (await h.store.get("run-original-findings"))!;
+    let [row] = await h.instances.listUnits(INSTANCE.id);
+    if (scenario === "foreign parent") child.parentInstanceId = "other";
+    if (scenario === "foreign unit") child.idempotencyKey = `${INSTANCE.id}:U13/1/findings`;
+    if (scenario === "foreign requester") child.userId = "slack:UOTHER";
+    if (scenario === "foreign thread") child.threadKey = "slack:C1:other";
+    if (scenario === "foreign repo") child.repo = "other/repo";
+    if (scenario === "foreign PR") child.pr = { number: 999, url: "https://github.com/acme/api/pull/999" };
+    if (scenario === "foreign ref") child.pushed = [{ ref: "other", sha: SALVAGED, by: "salvage" }];
+    if (scenario === "missing salvage") child.pushed = [];
+    if (scenario === "ordinary push") child.pushed = [{ ref: INSTANCE.branch, sha: SALVAGED, by: "push" }];
+    if (scenario === "missing observed head") child.headSha = undefined;
+    if (scenario === "stale observed head") child.headSha = HEAD;
+    if (scenario === "missing authority") child.events = [];
+    if (scenario === "foreign authority")
+      child.events = [
+        {
+          type: "coordinator_tag",
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          base: "main",
+          publication: { ...publication, expectedHeadSha: "c".repeat(40) },
+        },
+      ];
+    if (scenario === "duplicate authority") child.events = [...child.events, ...child.events];
+    if (scenario === "truncated evidence") child.truncated = true;
+    if (scenario === "before review") child.startedAt = NOW - minutesToMs(35);
+    if (scenario === "after ending") child.finishedAt = NOW;
+    if (scenario === "wrong coding boundary") row!.rounds.at(-1)!.index = 2;
+    if (scenario === "stale child boundary") row!.rounds.at(-2)!.at = NOW - minutesToMs(12);
+    if (scenario === "complete contract") {
+      child.dispositions = salvageFindings.map((finding) => ({
+        findingId: finding.id,
+        disposition: "declined",
+        note: "not changed",
+      }));
+      child.events.push({
+        type: "pr_description",
+        description: { title: "fix(ship): keep the fence", tldr: "Updated." },
+      } as unknown as RunEvent);
+    }
+    await h.store.put(child);
+    if (scenario === "missing child")
+      vi.spyOn(h.deps.runs, "getRun").mockResolvedValue({ ok: false, error: "not_found" });
+    if (scenario === "missing finish") {
+      const get = h.deps.runs.getRun.bind(h.deps.runs);
+      vi.spyOn(h.deps.runs, "getRun").mockImplementation(async (id, opts) => {
+        const result = await get(id, opts);
+        return result.ok && id === child.id ? { ok: true, value: { ...result.value, finishedAt: undefined } } : result;
+      });
+    }
+    if (
+      ["duplicate child", "competing different-head push", "foreign competing push", "overlapping attempt"].includes(
+        scenario,
+      )
+    )
+      await h.store.put({
+        ...child,
+        id: "run-competing",
+        idempotencyKey: `${INSTANCE.id}:U12/1/findings/a2`,
+        ...(scenario === "foreign competing push" ? { parentInstanceId: "other" } : {}),
+        ...(scenario === "competing different-head push"
+          ? {
+              status: "failed",
+              headSha: "c".repeat(40),
+              pushed: [{ ref: INSTANCE.branch, sha: "c".repeat(40), by: "push" }],
+            }
+          : {}),
+        ...(scenario === "overlapping attempt" ? { status: "failed", pushed: [] } : {}),
+      });
+    if (scenario === "live attempt")
+      h.registry.create("competing child", {
+        agent: "coding",
+        channelId: INSTANCE.channelId,
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        parentInstanceId: INSTANCE.id,
+        idempotencyKey: `${INSTANCE.id}:U12/1/findings/a2`,
+      });
+    if (scenario === "moved remote") h.deps.fetchPrFacts = async () => exactRecoveryFacts("c".repeat(40));
+    if (scenario === "wrong remote ref")
+      h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(SALVAGED), headRef: "other" });
+    if (scenario === "closed PR")
+      h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(SALVAGED), state: "closed" });
+    if (scenario === "rival owner")
+      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    if (scenario === "stale CAS")
+      vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValueOnce({ ok: false, reason: "stale" });
+    if (scenario === "partial listing") {
+      const list = h.deps.runs.listRuns.bind(h.deps.runs);
+      vi.spyOn(h.deps.runs, "listRuns").mockImplementation(async (opts) => ({
+        ...(await list(opts)),
+        nextBefore: { finishedAt: 1, id: "older" },
+      }));
+    }
+    if (scenario === "round cap")
+      await h.instances.replace({ ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
+    if (scenario === "wall-clock cap") row = { ...row!, startedAt: NOW - minutesToMs(120) };
+    if (scenario === "unknown spend")
+      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+    await h.instances.putUnits([row!]);
+    const priorOwner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(priorOwner);
+    expect(h.recoveries).toEqual([]);
+    expect(h.dispatched).toEqual([]);
+    expect(h.branches).toEqual([]);
+    expect(h.opens).toEqual([]);
+  });
+
+  it("salvage recovery accepts only an earlier owned no-push failure and rolls back an unadmitted claim exactly", async () => {
+    const h = await salvageHarness();
+    await h.store.put(
+      completedOriginalFindings(HEAD, {
+        id: "run-earlier-failure",
+        status: "interrupted",
+        idempotencyKey: `${INSTANCE.id}:U12/1/findings/a1`,
+        pushed: [],
+        startedAt: NOW - minutesToMs(25),
+        finishedAt: NOW - minutesToMs(20),
+      }),
+    );
+    const before = await h.instances.listUnits(INSTANCE.id);
+    h.deps.startRecovery = async (id) => ({ kind: "failed", id, reason: "not admitted" });
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    h.deps.startRecovery = async (id) => ({ kind: "created", id });
+    expect((await callRecovery(h)).status).toBe(200);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.kind).toBe("findings");
+  });
+
+  it.each(["missing disposition", "missing description", "missing final head", "red CI", "human consent", "complete"])(
+    "salvage recovery keeps %s behind the findings and exact-head review gates",
+    async (scenario) => {
+      const h = await salvageHarness();
+      expect((await callRecovery(h)).status).toBe(200);
+      let head = SALVAGED;
+      const fixed = "c".repeat(40);
+      h.deps.fetchPrFacts = async () => exactRecoveryFacts(head);
+      h.deps.fetchCommitChecks = async () => ({ total: 1, pending: [], failed: [] });
+      h.deps.fetchRoundChecks = async () => ({
+        total: 1,
+        pending: [],
+        failed: scenario === "red CI" ? [{ name: "test", conclusion: "failure" }] : [],
+      });
+      h.deps.fixupCommitSubjects = async () => [];
+      const children: CoordinatorTag[] = [];
+      h.deps.dispatch = async (msg, io, opts) => {
+        const tag = opts!.coordinator;
+        children.push(tag);
+        expect(msg.userId).toBe(INSTANCE.userId);
+        expect(msg.threadKey).toBe(INSTANCE.threadKey);
+        expect(tag.transportWorkflowId).toBe("recovery-run-original-review");
+        if (children.length === 1) {
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/1/findings`);
+          expect(tag.publication).toMatchObject({ ...publication, expectedHeadSha: SALVAGED });
+          expect(msg.text).toContain("F1");
+          expect(msg.text).toContain("F2");
+          expect(msg.text).toContain("operator consent and preview receipt");
+          expect(tag.recovery?.expectedHeadSha).toBe(SALVAGED);
+          head = fixed;
+          await h.store.put(
+            completedOriginalFindings(fixed, {
+              id: "run-recovered-fix",
+              idempotencyKey: tag.idempotencyKey,
+              startedAt: NOW,
+              finishedAt: NOW,
+              headSha: scenario === "missing final head" ? undefined : fixed,
+              dispositions:
+                scenario === "missing disposition"
+                  ? [{ findingId: "F2", disposition: "declined", note: "consent remains" }]
+                  : salvageFindings.map((finding) => ({
+                      findingId: finding.id,
+                      disposition: "declined",
+                      note: "review must judge; consent is not granted",
+                    })),
+              events:
+                scenario === "missing description"
+                  ? []
+                  : [
+                      {
+                        type: "pr_description",
+                        description: { title: "fix(ship): keep the fence", tldr: "Updated." },
+                      } as unknown as RunEvent,
+                    ],
+            }),
+          );
+          io.runStarted?.({ id: "run-recovered-fix" });
+        } else if (children.length === 2) {
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/review`);
+          expect(tag.recovery?.expectedHeadSha).toBe(fixed);
+          expect(msg.text).toContain(fixed);
+          const verdict = scenario === "human consent" ? "request_changes" : "approve";
+          await h.store.put(
+            reviewRecord({
+              id: "run-recovered-review",
+              idempotencyKey: tag.idempotencyKey,
+              startedAt: NOW,
+              finishedAt: NOW,
+              reviewHead: fixed,
+              verdict: {
+                verdict,
+                summary: "independent review",
+                findings: scenario === "human consent" ? [salvageFindings[1]!] : [],
+              },
+              reviewPost: { posted: true, target: { repo: INSTANCE.repo, number: PR.number }, head: fixed, verdict },
+            }),
+          );
+          io.runStarted?.({ id: "run-recovered-review" });
+        } else {
+          expect(scenario).toBe("red CI");
+          expect(children).toHaveLength(3);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/findings`);
+          expect(msg.text).toContain("test");
+          // The red check requires a repair contract, not a merge-ready ending.
+          await h.store.put(
+            completedOriginalFindings(fixed, {
+              id: "run-ci-repair",
+              idempotencyKey: tag.idempotencyKey,
+              startedAt: NOW,
+              finishedAt: NOW,
+              pushed: [],
+              dispositions: [],
+              events: [],
+            }),
+          );
+          io.runStarted?.({ id: "run-ci-repair" });
+        }
+        return { status: "completed" };
+      };
+      const routes: string[] = [];
+      const bot: CoordinatorBot = {
+        step: async (route, body) => {
+          routes.push(route);
+          if (routes.length > 70) throw new Error("unbounded recovery");
+          const result = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${route}`, body), h.deps);
+          return { status: result.status, text: JSON.stringify(result.body) };
+        },
+      };
+      const steps: StepRunner = {
+        do: async (_name, _config, callback) => callback(),
+        sleep: async () => {
+          throw new Error("unexpected sleep");
+        },
+        waitForEvent: async () => ({ ok: true }),
+      };
+      const result = await runOriginalUnitRecovery(steps, bot, "recovery-run-original-review", {
+        kind: "recover-original-unit",
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+      });
+      const ending = scenario === "complete" ? "merge_ready" : scenario === "human consent" ? "idle" : "aborted";
+      expect(h.logs.filter((line) => line.includes("dispatch threw"))).toEqual([]);
+      expect(result, JSON.stringify(h.logs)).toMatchObject({ instance: INSTANCE.id, units: { U12: ending } });
+      expect(children).toHaveLength(scenario.startsWith("missing") ? 1 : scenario === "red CI" ? 3 : 2);
+      const [settled] = await h.instances.listUnits(INSTANCE.id);
+      if (scenario === "human consent")
+        expect(settled).toMatchObject({
+          ending: { kind: "held" },
+          recoveryHold: { cause: "human", gate: { findings: [salvageFindings[1]] } },
+        });
+      expect(settled!.recoveryReceipt?.reviewRunId).toBe("run-original-review");
+      expect((await callRecovery(h)).status).toBe(409);
+      expect(routes).not.toContain("unit-start");
+      expect(routes).not.toContain("branch");
+      expect(h.opens).toEqual([]);
+      expect(h.merges).toEqual([]);
+    },
+  );
+
   const legacyRow = (): CoordinatorUnit => {
     const { publication: _publication, lastPush: _lastPush, ...row } = requestChangesRow();
     return {
