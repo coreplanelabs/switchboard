@@ -16,6 +16,7 @@ export default defineConfig({
       "ensure-bucket.test.mjs",
       "artifactsCopy.test.ts",
       "prImages.test.ts",
+      "depotCi.test.ts",
       "knownLength.test.ts",
       "coordinator.test.ts",
       "modelProxyForwarding.test.ts",

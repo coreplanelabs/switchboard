@@ -1,3 +1,4 @@
+import { depotCiAuthorizations } from "../../execution/depotCiAuthorization.js";
 import { buildReviewPostBody, parseVerdictInput } from "../reviewVerdict.js";
 import type { Verbosity } from "../verbosity.js";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -387,6 +388,69 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     idempotencyKey: "key",
     base: "main",
   };
+  it("a coding child reads Depot failure evidence through its repo-bound Worker bridge", async () => {
+    vi.stubEnv("DEPOT_CI_BRIDGE_TOKEN", "internal-test-bearer");
+    const requests: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init: RequestInit) => {
+        const { ticket } = JSON.parse(String(init.body));
+        requests.push(depotCiAuthorizations.consume(ticket)!);
+        expect(new Headers(init.headers).get("authorization")).toBe("Bearer internal-test-bearer");
+        return Response.json({
+          attemptId: "attempt-one",
+          complete: true,
+          text: "FAIL parser: expected true got false",
+        });
+      }),
+    );
+    let turn = 0;
+    const scripted: Provider = {
+      name: "fake",
+      async complete() {
+        if (turn++ === 0)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "depot-call",
+                name: "depot_ci_logs",
+                input: { workflow: "workflow-one", jobId: "test" },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        return { content: [{ type: "text", text: "The parser assertion failed." }], stopReason: "end_turn" };
+      },
+    };
+    try {
+      const s = setup("", {
+        agent: "coding",
+        provider: scripted,
+        repoCtx: { repo: "acme/api", ref: "work" },
+        coordinator: WIP_COORDINATOR,
+      });
+      const out = answered(await runLoop(s.deps, s.ctx));
+      expect(out.toolCalls).toBe(1);
+      expect(requests).toEqual([
+        {
+          runId: "run-l",
+          repo: "acme/api",
+          operation: { operation: "logs", workflowId: "workflow-one", jobId: "test" },
+        },
+      ]);
+      s.ending.drain(true);
+      await s.writer.settled();
+      const record = (await s.store.get("run-l"))!;
+      const results = JSON.stringify(record.events.filter((e) => e.type === "tool_result"));
+      expect(results).toContain("FAIL parser: expected true got false");
+      expect(results).not.toContain("internal-test-bearer");
+    } finally {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  });
+
   // docs/reference/specs/agent-coding.md item 10: the thread's file upload
   // rides the tool context only when the channel has one — a coding run's
   // `attach_file` posts through the requesting thread's `attachFile`.

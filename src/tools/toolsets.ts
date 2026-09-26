@@ -13,6 +13,7 @@
 // out. There is one loop now and no filter: the table is exactly what is
 // relayed.
 
+import { DEPOT_CI_TOOLS } from "./depotCi.js";
 import { attachFileTool } from "./attach.js";
 import { planeShowTool } from "./plane.js";
 import { diffDigestTool } from "./diffDigest.js";
@@ -49,6 +50,7 @@ import { webFetchTool, webSearchTool } from "./web.js";
 // so the read-only review agent keeps it too.
 export const TOOLSETS: Record<string, RunnableTool[]> = {
   full: [
+    ...DEPOT_CI_TOOLS,
     attachFileTool,
     updateStatusTool,
     submitPrDescriptionTool,

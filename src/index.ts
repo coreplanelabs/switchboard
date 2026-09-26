@@ -115,6 +115,8 @@ import { OpenCodeHarness } from "./core/harness/opencode/harness.js";
 import type { HarnessRoster } from "./core/harness/roster.js";
 import { HarnessRegistry } from "./core/harness/pi/relay.js";
 import { createHarnessRoutesHandler, isHarnessPath } from "./channels/harnessRoutes.js";
+import { DEPOT_CI_AUTHORIZATION_PATH } from "./core/depotCi.js";
+import { handleDepotCiAuthorization } from "./execution/depotCiAuthorization.js";
 import { handleAdminTraceLog, TRACE_LOG_PATH } from "./channels/adminTraceLog.js";
 import { createSpanLog } from "./core/trace/spanLog.js";
 import {
@@ -1543,6 +1545,10 @@ export async function runBot(): Promise<void> {
       }
       if (isHarnessPath(path)) {
         harnessRoutes(req, res);
+        return;
+      }
+      if (path === DEPOT_CI_AUTHORIZATION_PATH) {
+        handleDepotCiAuthorization(req, res);
         return;
       }
       // An operator's bearer for a live run (a `deploy:write` ingress bearer, like

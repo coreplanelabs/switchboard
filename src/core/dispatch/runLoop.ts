@@ -118,6 +118,7 @@ import { artifactLink, cardActivity, compactActivity, replyAck, threadPageLink }
 import { shows } from "../verbosity.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
+import { buildDepotCi } from "../../execution/depotCi.js";
 
 /** Longest note summary the loop writes for an ending (`run_failed`, `workspace_torn_down`): a reason, not a stack dump. */
 const ENDING_NOTE_MAX = 500;
@@ -1168,6 +1169,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     web: webCapability(),
     skills: deps.skills,
     github: githubCapabilityFor(deps, chatActorOf(deps.config, msg)),
+    depotCi:
+      agent.name === "coding"
+        ? buildDepotCi({
+            runId: run.id,
+            repo: repoCtx.repo,
+            canUseRepo: (repo) =>
+              run.control.requested === undefined &&
+              registry.getById(run.id)?.finished === false &&
+              deps.config.canUseRepo(chatActorOf(deps.config, msg), repo),
+            baseUrl: deps.harness?.harnessUrl,
+          })
+        : undefined,
     agentName: agent.name,
     ...(repoCtx.repo ? { repo: repoCtx.repo } : {}),
     ...(spawn ? { spawn } : {}),

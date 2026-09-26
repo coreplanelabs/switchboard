@@ -13,6 +13,7 @@
 // from `src/tools/workspace.ts`, which keeps the native tool table until
 // record 0032's series deletes it with the native loop.
 
+import type { DepotCi } from "../core/depotCi.js";
 import type { ChatMessage, ToolResultContent } from "../core/chatMessage.js";
 import type { DigestReport } from "../core/diffDigest.js";
 import type { WaitCapability } from "../core/dispatch/awaitChildren.js";
@@ -91,6 +92,8 @@ export interface ToolContext {
    *  per-repo write gate. Injected by the dispatcher; absent → the tools
    *  report themselves unavailable. */
   github?: GithubCapability;
+  /** Repo-bound CI operations at the credential-holding Worker; never a Depot token. */
+  depotCi?: DepotCi;
   /** The calling agent's name — scopes list_skills/use_skill so an agent only
    *  sees and loads skills declared for it. */
   agentName?: string;

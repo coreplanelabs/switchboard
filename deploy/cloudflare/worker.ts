@@ -1,3 +1,5 @@
+import { depotCiAuthorization, handleDepotCi } from "./depotCi.ts";
+import { DEPOT_CI_AUTHORIZATION_PATH, DEPOT_CI_PATH } from "../../src/core/depotCi.ts";
 // Cloudflare Containers shim: runs the unchanged Switchboard image as a single
 // always-on container instance — the shape of any long-lived server on
 // Cloudflare Containers (singleton DO, cron keep-alive;
@@ -83,6 +85,8 @@ export interface Env {
   GITHUB_APP_ID?: string;
   GITHUB_APP_INSTALLATION_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
+  DEPOT_API_TOKEN?: string; // Worker-only organization credential: NEVER forwarded to any container
+  DEPOT_CI_BRIDGE_TOKEN?: string; // bot → Worker, narrow repo-bound CI operations only
   PUBLIC_BASE_URL?: string; // live-view: base for /runs/<id>?t=… links on the status card
   ACCESS_TEAM_DOMAIN?: string; // live-view SSO gate: Cloudflare Access team domain (JWKS + iss)
   ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
@@ -124,6 +128,7 @@ const FORWARDED_OPTIONAL = [
   "GITHUB_APP_ID",
   "GITHUB_APP_INSTALLATION_ID",
   "GITHUB_APP_PRIVATE_KEY",
+  "DEPOT_CI_BRIDGE_TOKEN",
   "PUBLIC_BASE_URL",
   "ACCESS_TEAM_DOMAIN",
   "ACCESS_AUD",
@@ -458,6 +463,17 @@ const withLength = (res: Response): Response => withKnownLength(res, (size) => n
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    // Permits can only be consumed through the Worker's fixed container
+    // binding. The public edge must never proxy this callback path.
+    if (pathname === DEPOT_CI_AUTHORIZATION_PATH) return new Response("not found", { status: 404 });
+    if (pathname === DEPOT_CI_PATH)
+      return handleDepotCi(request, {
+        depotToken: env.DEPOT_API_TOKEN,
+        bridgeToken: env.DEPOT_CI_BRIDGE_TOKEN,
+        authorize: (ticket, signal) =>
+          depotCiAuthorization(ticket, signal, (req) => getContainer(env.SWITCHBOARD, INSTANCE).fetch(req)),
+        fetch: (input, init) => fetch(input, init),
+      });
     // Only deliberately published copies are public. The existing run reader
     // and the bucket stay private; the write endpoint checks its own bearer.
     if (pathname.startsWith("/pr-images/")) return withLength(await handlePrImage(request, env.ARTIFACTS));
