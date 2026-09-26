@@ -89,6 +89,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0077 | [A plan becomes a durable work record before code starts](../decisions/0077-a-plan-becomes-a-durable-work-record-before-code-starts.md) | Store-canonical plan — one source-neutral front door pins a validated artifact; a provider URL addresses its human projection; execution composes plan, code and review from the pinned copy | accepted | 2026-09-22 |
 | 0078 | [Request context, operation target, publication destination, and evidence references are independent facts](../decisions/0078-request-context-operation-target-publication-destination-and-evidence-references-are-independent-facts.md) | Immutable typed request envelope — request acceptance preserves context and initiator, operation semantics select each target and publication destination, and authorized evidence can inform but never retarget an effect | proposed | 2026-09-23 |
 | 0079 | [A person outlives the surfaces they use](../decisions/0079-a-person-outlives-the-surfaces-they-use.md) | Verified external identities resolve to a durable person; each request retains its actor, authority and surface | proposed | 2026-09-25 |
+| 0081 | [Account linking proves both identities and revocation fences their use](../decisions/0081-account-linking-proves-both-identities-and-revocation-fences-their-use.md) | Dual authentication with a one-time intent; transactional binding and revision-fenced authorization | proposed | 2026-09-26 |
 
 <!-- /generated:decision-records -->
 
