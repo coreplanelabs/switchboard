@@ -194,6 +194,8 @@ export class PiAiProvider implements Provider {
         .result();
       return fromPiMessage(message, this.name, req.tools);
     } catch (err) {
+      // Pi's `aborted` stop reason is local cancellation, not provider health.
+      if (err instanceof Error && err.name === "AbortError") throw err;
       const failure = providerFailureOf(err);
       const schemaRejection =
         failure.schemaRejection ??
@@ -413,14 +415,15 @@ const STOP_REASONS: Partial<Record<StopReason, CompletionResult["stopReason"]>> 
  *  order (a redacted thinking back as a redacted block), the stop reason in
  *  the vocabulary's words (`length` is `max_tokens`, what the router refuses
  *  by name; anything pi has no word for here is `other`), the four counters
- *  as the usage. An error or an abort is a thrown error naming the provider
- *  and the model with pi's message — never a result. */
+ *  as the usage. A provider error names the provider and the model; a local
+ *  abort remains an AbortError. Neither is returned as a result. */
 export function fromPiMessage(
   message: PiAssistantMessage,
   provider: string,
   tools?: readonly ToolDef[],
 ): CompletionResult {
   if (message.stopReason === "error" || message.stopReason === "aborted") {
+    if (message.stopReason === "aborted") throw new DOMException("The model call was aborted", "AbortError");
     const raw = message.errorMessage ?? "the model call failed";
     const failure = classifyProviderFailure({ error: raw, provider, model: message.model });
     const schemaRejection =

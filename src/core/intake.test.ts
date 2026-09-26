@@ -164,18 +164,19 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
     expect(l.writes[0]?.receipt).toMatchObject({ source: "error", attempts: decision.attempts });
   });
 
-  it("a timeout crosses the typed provider-failure seam as transient; a thrown provider error is silent with source: error", async () => {
+  it("a local timeout has no provider failure; a thrown provider error is silent with source: error", async () => {
     const timedOut: RouteModel = async () => {
       const err = new Error("the operation timed out");
       err.name = "TimeoutError";
       throw err;
     };
-    expect(await decideIntake(input(), deps({ model: timedOut }))).toMatchObject({
+    const timeout = await decideIntake(input(), deps({ model: timedOut }));
+    expect(timeout).toMatchObject({
       verdict: "silent",
       source: "timeout",
-      providerFailure: "transient",
-      reason: "The model provider is temporarily unavailable; this request did not start.",
+      reason: "The request timed out before it could start.",
     });
+    expect(timeout.providerFailure).toBeUndefined();
 
     const failing: RouteModel = async () => {
       throw new Error("provider down");
@@ -211,7 +212,7 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
   // Feature: docs/reference/specs/model-proxy.md item 12b — askStructured
   // retains earlier malformed attempts by wrapping a later throw; the typed
   // ProviderFailure inside that wrapper still owns the disposition.
-  it("a timeout after a malformed answer keeps the attempt and crosses as a transient provider failure", async () => {
+  it("a local abort after a malformed answer keeps the attempt without a provider failure", async () => {
     let calls = 0;
     const model: RouteModel = async () => {
       if (calls++ === 0) return "not a verdict";
@@ -219,12 +220,27 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
       err.name = "AbortError";
       throw err;
     };
-    expect(await decideIntake(input(), deps({ model }))).toMatchObject({
+    const decision = await decideIntake(input(), deps({ model }));
+    expect(decision).toMatchObject({
       verdict: "silent",
       source: "timeout",
-      providerFailure: "transient",
-      reason: "The model provider is temporarily unavailable; this request did not start.",
+      reason: "The request timed out before it could start.",
       attempts: [{ outcome: "violation" }],
+    });
+    expect(decision.providerFailure).toBeUndefined();
+  });
+
+  it("an AbortError wrapper preserves its typed provider cause", async () => {
+    const model: RouteModel = async () => {
+      const err = new Error("aborted", { cause: classifyProviderFailure({ status: 402 }) });
+      err.name = "AbortError";
+      throw err;
+    };
+    const decision = await decideIntake(input(), deps({ model }));
+    expect(decision).toMatchObject({
+      verdict: "silent",
+      source: "error",
+      providerFailure: "credit-or-quota-exhausted",
     });
   });
 

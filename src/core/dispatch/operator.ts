@@ -40,6 +40,7 @@ import { AGENTS, COMPOUND_PRESET, machineNeedsRepo } from "../../agents/registry
 import {
   parseModelRef,
   providerFailureOf,
+  typedProviderFailureOf,
   renderProviderFailure,
   type ProviderFailureCause,
   type ToolDef,
@@ -59,7 +60,7 @@ import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
 import { effectiveConfirm } from "../../config/profile.js";
 import { boundBlastRadius, type CommandDef, type CommandInput } from "../commandRegistry.js";
 import { chatInvocation, cliWords, namedToInput } from "../commandSurface.js";
-import { STRUCTURED_RETRIES_MAX } from "../budgets.js";
+import { MINUTE_MS, STRUCTURED_RETRIES_MAX } from "../budgets.js";
 import { chatCallerFor, parseChatCommand, type ChatCommands } from "../commandChat.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RunEnding } from "../runEnding.js";
@@ -145,10 +146,9 @@ export const OPERATOR_READS_MAX = 4;
  * catalogue has four tools carrying the one known incompatible construct, so
  * an ordinary structured violation cannot spend any of these re-asks. */
 export const OPERATOR_SCHEMA_REASKS_MAX = 4;
-/** How long the operator may take before the event falls through to the
- *  readers (shadow: the decision is recorded as a refusal naming the
- *  timeout). The strong tier answers slower than the router's fast model. */
-export const OPERATOR_TIMEOUT_MS = 20_000;
+/** The bound for the whole operator loop, including its reads and repairs.
+ *  A local deadline is a transient no-lease failure, never a provider refusal. */
+export const OPERATOR_TIMEOUT_MS = MINUTE_MS;
 /** The question marker, record 0054's renderer's own words: the proposed line
  *  follows it as one code span, and the next turn's "yes" binds that line. */
 export const OPERATOR_QUESTION_MARKER = "Did you mean:";
@@ -172,7 +172,7 @@ export const OPERATOR_REQUEST_CAP = 600;
 export type OperatorDecision =
   | { kind: "binds"; binds: OperatorBind[]; reason: string }
   | { kind: "question"; text: string; proposal?: string; reason: string }
-  | { kind: "refusal"; cause: "policy" | "request"; text: string; reason: string }
+  | { kind: "refusal"; cause: "policy" | "request" | "timeout"; text: string; reason: string }
   | {
       kind: "refusal";
       cause: "provider";
@@ -1226,6 +1226,23 @@ export async function runOperator(
           const carried = attemptsOfThrow(err);
           if (carried) attempts.push(...carried);
           const failure = providerFailureOf(err);
+          const typedFailure = typedProviderFailureOf(err);
+          // A local deadline says nothing about provider health. Preserve any
+          // evidenced provider cause that raced with it; only a textless local
+          // abort or an unknown generic error is the deadline itself.
+          const localAbort = err instanceof Error && err.name === "AbortError";
+          if (
+            signal.aborted &&
+            typedFailure === undefined &&
+            (localAbort || (failure.cause === "permanent" && failure.status === undefined))
+          ) {
+            return answered({
+              kind: "refusal",
+              cause: "timeout",
+              reason: "operator_timeout",
+              text: "The routing request timed out; nothing started.",
+            });
+          }
           const rejected =
             failure.cause === "request-rejected" && failure.status === 400 ? failure.schemaRejection : undefined;
           const offered =
@@ -1743,12 +1760,17 @@ export async function executeOperatorDecision(
     await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
     return answered;
   }
-  if (event.providerFailure !== undefined) {
+  if (event.providerFailure !== undefined || event.refusalCause === "timeout") {
     // A failed door call is an availability fact, not a routing decision. It
     // renders once and ends at the door even in an owned thread; falling
     // through would silently reinterpret the request as general or a steer.
     io.requestFailed?.();
-    await io.reply(event.refusalText ?? renderProviderFailure(event.providerFailure, "ended"));
+    await io.reply(
+      event.refusalText ??
+        (event.providerFailure !== undefined
+          ? renderProviderFailure(event.providerFailure, "ended")
+          : "The routing request timed out; nothing started."),
+    );
     await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
     return answered;
   }

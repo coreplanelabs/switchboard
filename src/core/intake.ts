@@ -20,7 +20,13 @@
 // The model seam is the router's (`RouteModel`, `providerStructuredModel`) under
 // the router's timeout; nothing calls this module yet — the Slack adapter's
 // gate arrives in a later unit.
-import { providerFailureOf, renderProviderFailure, type ProviderFailureCause, type ToolDef } from "./provider.js";
+import {
+  providerFailureOf,
+  renderProviderFailure,
+  typedProviderFailureOf,
+  type ProviderFailureCause,
+  type ToolDef,
+} from "./provider.js";
 import { oneLine, redactAndCap } from "./redact.js";
 import { askStructured, attemptsOfThrow, StructuredAskError, type StructuredAttempt } from "./dispatch/structured.js";
 import { wrapUntrusted } from "./untrusted.js";
@@ -224,8 +230,8 @@ export async function decideIntake(input: IntakeInput, deps: IntakeDeps): Promis
  *  closed: a malformed answer — another tool, prose, an answer outside the
  *  enum — is re-asked with the violation named, at most the bounded retries,
  *  and after them the floor is `silent`/`error` with the last violation as
- *  the reason; a timeout is `silent`/`timeout` with the typed transient
- *  provider failure and any other throw `silent`/`error`, neither re-asked. */
+ *  the reason; a local timeout is `silent`/`timeout` without a provider
+ *  failure and any other throw `silent`/`error`, neither re-asked. */
 async function askModel(
   input: IntakeInput,
   deps: IntakeDeps,
@@ -261,14 +267,16 @@ async function askModel(
     );
     return { ...seam.value, attempts: seam.attempts };
   } catch (err) {
-    const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    const timedOut =
+      typedProviderFailureOf(err) === undefined &&
+      err instanceof Error &&
+      (err.name === "TimeoutError" || err.name === "AbortError");
     const attempts = attemptsOfThrow(err);
     if (timedOut) {
       return {
         verdict: "silent",
-        reason: renderProviderFailure("transient", "ended"),
+        reason: "The request timed out before it could start.",
         source: "timeout",
-        providerFailure: "transient",
         ...(attempts ? { attempts } : {}),
       };
     }
