@@ -18,7 +18,7 @@ A screenshot has one permitted PR-renderable address; publishing it never needs 
 | Criterion | Proof |
 |---|---|
 | Source keys, PNG MIME/signature, declared and actual size are checked; copies use an opaque fixed-shape URL | `[unit]` `src/artifacts/prImages.test.ts::PR image validation::*` |
-| Authenticated publication writes a separate marked copy; anonymous reads serve only published PNGs; refused requests expose no private object or storage error detail | `[unit]` `deploy/cloudflare/prImages.test.ts::PR image routes::*` |
+| Authenticated publication reads R2 host object fields without relying on enumeration and writes a separate marked copy; anonymous reads serve only published PNGs; refused requests expose no private object or storage error detail | `[unit]` `deploy/cloudflare/prImages.test.ts::PR image routes::*` |
 | R2 uses only the internal bearer and verifies the returned path; memory publication enforces the same content restrictions | `[unit]` `src/artifacts/store.test.ts::PR image publication::*` |
 | Store construction sends configured retention or its default to publication | `[unit]` `src/artifacts/buildStore.test.ts::buildArtifactStore (item 20)::publication receives configured retention or the artifact default` |
 | Explicit publication follows thread delivery, is repo-gated and off by default, and reports partial failures honestly | `[unit]` `src/tools/attach.test.ts::attach_file PR publication::*` |

@@ -57,7 +57,12 @@ export async function publishPrImage(
   if (!object) return json(404, { error: "artifact not found" });
   let bytes: Uint8Array;
   try {
-    bytes = await readPrImage({ ...object, contentType: object.httpMetadata?.contentType ?? "" });
+    // R2ObjectBody is a runtime object; its size and body need not be enumerable.
+    bytes = await readPrImage({
+      size: object.size,
+      body: object.body,
+      contentType: object.httpMetadata?.contentType ?? "",
+    });
   } catch {
     // A storage stream can fail with internal paths or stack details; the caller
     // needs only the stable validation result.
