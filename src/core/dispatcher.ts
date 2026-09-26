@@ -1894,15 +1894,26 @@ export async function dispatch(
     // the cited PR's head, not the contract branch). A review child keeps the
     // binding: the pull request IS its target.
     const contractBranch = opts.contract?.rebase.branch;
+    if (coordinator?.branch && contractBranch && coordinator.branch !== contractBranch)
+      throw new Error("the coordinator contract branch differs from its durable unit branch");
+    const coordinatorBranch = coordinator?.branch ?? contractBranch;
+    if (coordinator && agent.name === "coding") {
+      const targets = [recovery?.headRef, coordinator.publication?.headRef, coordinatorBranch]
+        .filter((value): value is string => value !== undefined)
+        .map((value) => (value.startsWith("refs/heads/") ? value : `refs/heads/${value}`));
+      if (targets.some((value) => value !== targets[0]))
+        throw new Error("the coordinator's durable branch targets disagree");
+      if (coordinator.publication && repoCtx.repo?.toLowerCase() !== coordinator.publication.repo.toLowerCase())
+        throw new Error("the coordinator's publication repository differs from the resolved repository");
+    }
     if (
-      opts.coordinator !== undefined &&
-      contractBranch !== undefined &&
-      agent.name !== "review" &&
-      repoCtx.refFromPr === true &&
-      repoCtx.ref !== contractBranch
+      coordinator !== undefined &&
+      coordinatorBranch !== undefined &&
+      agent.name === "coding" &&
+      repoCtx.ref !== coordinatorBranch
     ) {
       const { refFromPr: _refFromPr, headSha: _headSha, ...kept } = repoCtx;
-      repoCtx = { ...kept, ref: contractBranch };
+      repoCtx = { ...kept, ref: coordinatorBranch };
     }
 
     // The other half of issue 1860: a cited pull request that did NOT bind the
@@ -2471,6 +2482,71 @@ export async function dispatch(
       shell.setSetupLabel(`${liveStateWords(observation.state)}…`);
     };
 
+    // The same revocable run bearer also authenticates Git/gh at the trusted
+    // door. Mint it before attach so a cold clone never needs an installation
+    // token in the workspace. The outer finally revokes it on setup refusal.
+    const rawGithubBinding = resume?.row.state.githubDoorBinding;
+    const carriedGithubBinding =
+      rawGithubBinding && typeof rawGithubBinding === "object" && !Array.isArray(rawGithubBinding)
+        ? (rawGithubBinding as { repo?: string; ref?: string; refConfirmed?: boolean })
+        : undefined;
+    if (
+      rawGithubBinding !== undefined &&
+      (!carriedGithubBinding ||
+        (carriedGithubBinding.repo !== undefined && typeof carriedGithubBinding.repo !== "string") ||
+        (carriedGithubBinding.ref !== undefined && typeof carriedGithubBinding.ref !== "string") ||
+        (carriedGithubBinding.refConfirmed !== undefined && typeof carriedGithubBinding.refConfirmed !== "boolean"))
+    )
+      throw new Error("the resumed run's GitHub binding is invalid");
+    // A coding unit owns its contract branch even before it has a PR. The
+    // resolver's branch can be a cited PR or the repository default, neither
+    // of which may become this unit's first push target.
+    const githubBoundRef =
+      coordinator && agent.name === "coding"
+        ? (recovery?.headRef ??
+          coordinator.publication?.headRef ??
+          coordinatorBranch ??
+          carriedGithubBinding?.ref ??
+          resume?.row.meta.ref)
+        : repoCtx.pr
+          ? repoCtx.ref
+          : undefined;
+    if (coordinator && agent.name === "coding" && !githubBoundRef)
+      throw new Error("the coordinator coding unit has no durable branch target");
+    const bearer = mintRunBearer(deps, {
+      runId,
+      agent,
+      ...(modelCard ? { card: modelCard } : {}),
+      profile,
+      resolved,
+      registry,
+      root,
+      clock,
+      github: {
+        identity: profile.identity,
+        ...(repoCtx.repo ? { repo: repoCtx.repo } : {}),
+        ...(githubBoundRef ? { ref: githubBoundRef } : {}),
+      },
+    });
+    const githubDoor = bearer && deps.githubDoor ? { ...deps.githubDoor, bearer } : undefined;
+    if (githubDoor && deps.githubBindings && profile.identity !== "none") {
+      const registeredBinding = deps.githubBindings.register(
+        runId,
+        { ...(repoCtx.repo ? { repo: repoCtx.repo } : {}), ...(githubBoundRef ? { ref: githubBoundRef } : {}) },
+        carriedGithubBinding,
+        async (binding) =>
+          ledgerRun?.tracked() ? ledgerRun.setStateAndFlush({ githubDoorBinding: binding }) : deps.hostedRuns !== true,
+      );
+      if (!registeredBinding) throw new Error("the resumed run's GitHub binding differs from its target");
+      // Persist an initial contract target before provisioning. Otherwise a
+      // restart before the first push could lose its branch fence.
+      if (githubBoundRef && !carriedGithubBinding && ledgerRun?.tracked()) {
+        const binding = deps.githubBindings.get(runId);
+        if (!binding || !(await ledgerRun.setStateAndFlush({ githubDoorBinding: binding })))
+          throw new Error("the coordinator branch binding could not be saved");
+      }
+    }
+
     // The workspace attach (dispatch/provision.ts): the setup step that takes
     // minutes on a cold clone, and the ask-once refusal when no branch is bound.
     // A resume re-attaches where its row says the run ran (dispatch/reattach.ts;
@@ -2488,6 +2564,7 @@ export async function dispatch(
       clock,
       agent,
       profile,
+      ...(githubDoor ? { githubDoor } : {}),
       repoCtx,
       root,
       ...(reattach !== undefined ? { reattach } : {}),
@@ -2653,24 +2730,6 @@ export async function dispatch(
             ];
       }
     }
-    // The run's model-proxy bearer (dispatch/provision.ts; docs/reference/specs/model-proxy.md):
-    // minted the moment the executor is provisioned, bound to this run, pinned
-    // to its preset's model and caps, expiring at its budget plus the margin.
-    // Revoked by the ending above when the run finishes, and by the outer
-    // finally for a run that never reached its loop. A run on the pi harness
-    // hands it to pi as its provider key (docs/reference/specs/harness-pi.md);
-    // a native run never reads it.
-    const bearer = mintRunBearer(deps, {
-      runId,
-      agent,
-      ...(modelCard ? { card: modelCard } : {}),
-      profile,
-      resolved,
-      registry,
-      root,
-      clock,
-    });
-
     // Attach-head check (dispatch/authorize.ts): for a PR review on the resident
     // path, the attached sha against the resolved PR head, before any model turn.
     const headGate = await authorizeAttachedHead(deps, {
@@ -2934,6 +2993,7 @@ export async function dispatch(
       ledgerRun,
       resume,
       repoCtx,
+      ...(githubDoor ? { githubDoor } : {}),
       isPrReview,
       isCodingPrRun,
       reviewHead,
@@ -3140,6 +3200,7 @@ export async function dispatch(
     // after the attach, a throw in the prompt) is revoked here — the ending's
     // hook ran only for a run the loop finished.
     if (registered) deps.runBearers?.revoke(registered.id);
+    if (registered) deps.githubBindings?.unregister(registered.id);
     // A resumed dispatch that ended before its run loop started — an unknown
     // provider, a refusal, a gate — has adopted a row it will never finish
     // (item 38). Close it `interrupted` here, or the sweep would relaunch it

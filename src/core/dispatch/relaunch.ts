@@ -49,6 +49,7 @@ export interface RelaunchContext {
   agent: AgentDef;
   profile: RunProfile;
   repoCtx: RepoContext;
+  githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };
   /** The run's own span: the re-attach's `dispatch.workspace.attach` hangs under it. */
   root: Span;
   clock: Clock;
@@ -140,6 +141,7 @@ export async function prepareRelaunch(
       agent: ctx.agent,
       profile: ctx.profile,
       repoCtx: ctx.repoCtx,
+      ...(ctx.githubDoor ? { githubDoor: ctx.githubDoor } : {}),
       root: ctx.root,
       clock: ctx.clock,
       reattach: ctx.binding,

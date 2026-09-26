@@ -4,6 +4,8 @@ import { recordingSink } from "../core/testing/recordingSink.js";
 import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../core/trace/internalHosts.js";
 import { parseTraceparent } from "../core/trace/traceparent.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
+import { legacySandboxCredentialScrub } from "./legacySandboxCredentials.js";
+import { SANDBOX_CREDENTIAL_FILE } from "./sandboxCredentials.js";
 import { ExecCapacityError, ExecInfraError } from "./executor.js";
 import {
   FLEET_BUSY_WAIT_MAX_MS,
@@ -44,6 +46,28 @@ const sentBody = (c: { init: RequestInit }) => JSON.parse(String(c.init.body)) a
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("Cloudflare reused sandbox credential boundary", () => {
+  it("scrubs the old App token file before the first model command, once per executor", async () => {
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, scrubLegacyCredentials: true });
+    await ex.exec("git status");
+    await ex.exec("git log -1");
+    expect(calls.map((call) => sentBody(call).command)).toEqual([
+      legacySandboxCredentialScrub(SANDBOX_CREDENTIAL_FILE),
+      "git status",
+      "git log -1",
+    ]);
+  });
+
+  it("refuses every command when cleanup fails", async () => {
+    const { calls } = stubFetch({ stdout: "", stderr: "cleanup denied", exitCode: 1 });
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, scrubLegacyCredentials: true });
+    await expect(ex.exec("git status")).rejects.toThrow(/legacy Git credential cleanup failed/);
+    await expect(ex.exec("git log -1")).rejects.toThrow(/legacy Git credential cleanup failed/);
+    expect(calls).toHaveLength(1);
+  });
 });
 
 // Feature: docs/reference/specs/tracing.md item 21 — one `http.client` span per send under
@@ -230,9 +254,10 @@ describe("CloudflareSandboxExecutor credential file refresh", () => {
     expect((err as ExecInfraError).message).toContain("credential refresh failed");
   });
 
-  it("an executor without a credential source refreshes nothing — the pre-refresher paths are unchanged", async () => {
-    const { calls } = stubFetchSeq([OK]);
-    await new CloudflareSandboxExecutor(OPTS).exec("git push origin x");
+  it("a run-bearer push refusal is returned once without an App credential source", async () => {
+    const { calls } = stubFetchSeq([REFUSED]);
+    const out = await new CloudflareSandboxExecutor(OPTS).exec("git push origin x");
+    expect(out).toContain("Invalid username or token");
     expect(calls).toHaveLength(1);
   });
 });
@@ -970,10 +995,13 @@ describe("CloudflareSandboxExecutor seed", () => {
       ms: 21_500,
     };
     const { calls } = stubFetch(answer);
-    const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs: async () => ({ GH_TOKEN: "ghs_x" }) });
+    const ex = new CloudflareSandboxExecutor({
+      ...OPTS,
+      resolveEnvs: async () => ({ GH_ENTERPRISE_TOKEN: "run-bearer" }),
+    });
     await expect(ex.seed(seed)).resolves.toEqual(answer);
     expect(calls[0].url).toBe("https://sandbox.example/seed");
-    expect(sentBody(calls[0])).toEqual({ seed, env: { GH_TOKEN: "ghs_x" } });
+    expect(sentBody(calls[0])).toEqual({ seed, env: { GH_ENTERPRISE_TOKEN: "run-bearer" } });
   });
 
   it("a refusal is an answer, not a throw: the caller decides on the reason", async () => {

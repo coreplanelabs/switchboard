@@ -408,7 +408,7 @@ export type AttachedHeadGate =
  * A cold review starts in an empty per-thread workspace. Provision the exact
  * pull-request checkout there before the attached-head gate observes it: the
  * model never owns clone/checkout, and therefore never gets a first turn in an
- * empty directory. The fetch uses the run's injected credential through git's
+ * empty directory. The fetch uses the run's door bearer through git's
  * env-backed helper; no token enters this command text. `origin/HEAD` and the
  * resolved base are fetched beside the PR head because the review prompt diffs
  * against those remote-tracking refs.
@@ -420,7 +420,7 @@ function reviewCheckoutFacts(repoCtx: RepoContext & { repo: string; pr: number }
 } {
   return {
     remote: `https://github.com/${repoCtx.repo}.git`,
-    helper: `!f() { test -n "$GH_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_TOKEN"; }; f`,
+    helper: `!f() { test -n "$GH_ENTERPRISE_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_ENTERPRISE_TOKEN"; }; f`,
     refspecs: [
       "+HEAD:refs/remotes/origin/HEAD",
       `+refs/pull/${repoCtx.pr}/head:refs/remotes/origin/pull/${repoCtx.pr}/head`,

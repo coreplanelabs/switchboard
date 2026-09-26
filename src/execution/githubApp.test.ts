@@ -56,6 +56,24 @@ afterEach(() => {
 });
 
 describe("resolveGithubToken", () => {
+  it("mints door write tokens for one repository and keeps read/write caches separate", async () => {
+    configureApp();
+    const fetchMock = mockMint("ghs_door", 60 * 60_000);
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshModule();
+    await expect(mod.resolveGithubDoorToken("write")).rejects.toThrow(/repository/);
+    expect(await mod.resolveGithubDoorToken("write", "acme/api")).toBe("ghs_door");
+    expect(await mod.resolveGithubDoorToken("write", "acme/api")).toBe("ghs_door");
+    expect(await mod.resolveGithubDoorToken("read", "acme/api")).toBe("ghs_door");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const writes = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>);
+    expect(writes[0]).toEqual({ repositories: ["api"] });
+    expect(writes[1]).toMatchObject({
+      repositories: ["api"],
+      permissions: expect.objectContaining({ contents: "read" }),
+    });
+  });
+
   it("falls back to static GH_TOKEN when the App is not configured", async () => {
     process.env.GH_TOKEN = "ghp_static";
     const mod = await freshModule();

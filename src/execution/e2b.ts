@@ -19,10 +19,11 @@ import {
 } from "./sandboxCredentials.js";
 import { SANDBOX_CREDENTIAL_WRITE_TIMEOUT_MS } from "../core/budgets.js";
 import { systemClock } from "../core/trace/clock.js";
+import { legacySandboxCredentialScrub } from "./legacySandboxCredentials.js";
 
 // Remote execution in an E2B micro-VM. One sandbox per thread: the repo
-// checkout and GH_TOKEN live inside the sandbox, never on the bot host.
-// threadKey -> sandboxId is persisted so follow-ups in a thread reconnect to
+// checkout lives there, while the run bearer rides each command only.
+// threadKey -> safe sandbox binding is persisted so follow-ups reconnect to
 // the same sandbox; if it has expired we create a fresh one (repos re-clone —
 // same graceful degradation as losing the local workspace dir).
 
@@ -59,9 +60,8 @@ git interpret-trailers --in-place --if-exists addIfDifferent \\
 const HOOKS_DIR = "/home/user/.switchboard-hooks";
 
 // Best-effort per-sandbox setup: gh CLI + git identity + credential helper +
-// the agent-trailer hook. GH_TOKEN is provided via sandbox env, so `gh` and
-// (through the credential helper) `git` are authenticated without the token
-// ever appearing on disk. The fallback user.email stays OFF the GitHub domain
+// the agent-trailer hook. The run bearer rides per-command env, never the
+// sandbox's creation env. The fallback user.email stays OFF the GitHub domain
 // (a noreply-shaped address would render as a GitHub account it is not); the
 // real pairs ride the per-command env. The global core.hooksPath replaces
 // repo-local .git/hooks entirely — deliberate: an untrusted checkout's own
@@ -84,17 +84,13 @@ export interface E2BOptions {
   threadKey: string;
   /** sandbox idle lifetime; each request extends it */
   timeoutMs: number;
-  /** JSON file persisting threadKey -> sandboxId */
+  /** JSON file persisting threadKey -> sandbox binding */
   statePath: string;
-  /** Env vars for the sandbox (e.g. GH_TOKEN), resolved on EVERY command: the
-   *  micro-VM's creation-time env would otherwise carry the token minted for
-   *  the thread's first command for the sandbox's whole (reusable) life. */
+  /** Env vars resolved on EVERY command. The sandbox's creation-time env is
+   *  empty so no credential survives a run through micro-VM reuse. */
   resolveEnvs: () => Promise<Record<string, string>>;
-  /** The run's GitHub credential with its expiry, for the executor-side
-   *  per-exec credential-file refresh (src/execution/sandboxCredentials.ts —
-   *  the same refresher the Cloudflare sandbox executor runs, so a pi child's
-   *  push late in the run never dies on the token inherited at its start);
-   *  absent for a run that holds none. */
+  /** Legacy credential-file refresher seam. The factory does not provide an
+   *  App token source to model workspaces; they use the run bearer instead. */
   credential?: SandboxCredentialSource;
   /** resident repo/ref context — reserved for resident environments (not yet used) */
   repo?: string;
@@ -115,28 +111,55 @@ export class E2BExecutor implements Executor {
     const state = readState(opts.statePath);
     const existing = state[opts.threadKey];
 
-    if (existing) {
+    // Old entries name sandboxes created with an App token in their ambient
+    // environment. Removing their credential file cannot remove that token:
+    // retire the entire VM before giving any model command a workspace.
+    if (typeof existing === "string") {
       try {
-        const sbx = await Sandbox.connect(existing, { apiKey: opts.apiKey });
-        await sbx.setTimeout(opts.timeoutMs);
-        return new E2BExecutor(sbx, opts.resolveEnvs, opts.credential);
+        await Sandbox.kill(existing, { apiKey: opts.apiKey });
+      } catch {
+        throw new ExecInfraError("e2b legacy sandbox retirement failed", "refused");
+      }
+      delete state[opts.threadKey];
+      writeState(opts.statePath, state);
+    } else if (existing !== undefined && !isSafeBinding(existing)) {
+      throw new ExecInfraError("e2b sandbox credential boundary is unknown", "refused");
+    }
+
+    if (existing && typeof existing !== "string") {
+      let sbx: Sandbox | undefined;
+      try {
+        sbx = await Sandbox.connect(existing.sandboxId, { apiKey: opts.apiKey });
       } catch {
         // expired or gone — fall through and create a fresh one
         delete state[opts.threadKey];
+      }
+      if (sbx) {
+        await sbx.setTimeout(opts.timeoutMs);
+        await E2BExecutor.scrubLegacyCredential(sbx);
+        return new E2BExecutor(sbx, opts.resolveEnvs, opts.credential);
       }
     }
 
     const sbx = await Sandbox.create({
       apiKey: opts.apiKey,
       timeoutMs: opts.timeoutMs,
-      envs: await opts.resolveEnvs(),
     });
+    await E2BExecutor.scrubLegacyCredential(sbx);
     await sbx.commands.run(SETUP, { timeoutMs: 3 * 60_000 }).catch(() => {
       // gh install is best-effort; agents report failures via tool output
     });
-    state[opts.threadKey] = sbx.sandboxId;
+    state[opts.threadKey] = { sandboxId: sbx.sandboxId, credentialBoundary: "no-creation-env-v1" };
     writeState(opts.statePath, state);
     return new E2BExecutor(sbx, opts.resolveEnvs, opts.credential);
+  }
+
+  private static async scrubLegacyCredential(sbx: Sandbox): Promise<void> {
+    const result = await sbx.commands.run(legacySandboxCredentialScrub(E2B_CREDENTIAL_FILE), {
+      timeoutMs: SANDBOX_CREDENTIAL_WRITE_TIMEOUT_MS,
+    });
+    if (result.exitCode !== 0)
+      throw new ExecInfraError(`e2b legacy Git credential cleanup failed (exit ${result.exitCode})`, "refused");
   }
 
   /** Land the credential file in the micro-VM when the refresher says a write
@@ -255,16 +278,35 @@ function confine(p: string): string {
   return abs;
 }
 
-function readState(path: string): Record<string, string> {
+interface SafeBinding {
+  sandboxId: string;
+  credentialBoundary: "no-creation-env-v1";
+}
+
+function isSafeBinding(value: unknown): value is SafeBinding {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "sandboxId" in value &&
+    typeof value.sandboxId === "string" &&
+    value.sandboxId.length > 0 &&
+    "credentialBoundary" in value &&
+    value.credentialBoundary === "no-creation-env-v1"
+  );
+}
+
+type SandboxState = Record<string, string | SafeBinding>;
+
+function readState(path: string): SandboxState {
   if (!existsSync(path)) return {};
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as Record<string, string>;
+    return JSON.parse(readFileSync(path, "utf8")) as SandboxState;
   } catch {
     return {};
   }
 }
 
-function writeState(path: string, state: Record<string, string>): void {
+function writeState(path: string, state: SandboxState): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(state, null, 2));
 }

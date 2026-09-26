@@ -565,7 +565,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       text: "agent:coding budget:30 in acme/api: do the unit",
       receivedAt: NOW,
     });
-    expect(h.dispatched[0].opts).toEqual({ coordinator: TAG });
+    expect(h.dispatched[0].opts).toEqual({ coordinator: { ...TAG, branch: INSTANCE.branch } });
   });
 
   it("the decision's tier rides the child's request: `model` and `effort` on the body become the child's own directives, ahead of every scope (the one-door plan's tiers rule)", async () => {
@@ -614,7 +614,11 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     const noBase = harness();
     await noBase.instances.put(baseless);
     await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), noBase.deps);
-    expect(noBase.dispatched[0].opts!.coordinator).toEqual({ parentInstanceId: INSTANCE.id, idempotencyKey: KEY });
+    expect(noBase.dispatched[0].opts!.coordinator).toEqual({
+      parentInstanceId: INSTANCE.id,
+      idempotencyKey: KEY,
+      branch: INSTANCE.branch,
+    });
     expect("base" in noBase.dispatched[0].opts!.coordinator).toBe(false);
   });
 
@@ -3214,6 +3218,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(opts!.coordinator).toEqual({
       parentInstanceId: PLAN_INSTANCE.id,
       idempotencyKey: "plan-fixture:U10/1/review",
+      branch: "plan/fixture/u10",
       base: "main",
     });
     expect(AGENTS.review.identity).toBe("read");
@@ -3364,6 +3369,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(opts!.coordinator).toEqual({
       parentInstanceId: PLAN_INSTANCE.id,
       idempotencyKey: "plan-fixture:U10/0/coding",
+      branch: "plan/fixture/u10",
       base: "main",
     });
     const contract = (opts as { contract?: ChildContract }).contract!;
@@ -3411,7 +3417,12 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(findingsDispatch.msg.text).toContain("[minor] F1 src/a.ts:3 — off by one");
     expect(findingsDispatch.msg.text).toContain("Review:\nChanges requested: one nit.");
     expect(findingsDispatch.opts).toEqual({
-      coordinator: { parentInstanceId: PLAN_INSTANCE.id, idempotencyKey: "plan-fixture:U10/1/findings", base: "main" },
+      coordinator: {
+        parentInstanceId: PLAN_INSTANCE.id,
+        idempotencyKey: "plan-fixture:U10/1/findings",
+        branch: "plan/fixture/u10",
+        base: "main",
+      },
     });
     // No dispatch of this route carries a finding-id tag: the tool records what the run submits and the
     // runner matches the ids.

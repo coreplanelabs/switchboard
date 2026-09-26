@@ -122,6 +122,7 @@ import {
 import type { Operations } from "./operations.js";
 import type { ResidentAdminClient } from "./residentAdmin.js";
 import { bearerHashOf, RunBearerStore } from "./modelProxy/runBearers.js";
+import { GitBindings } from "./modelProxy/gitBindings.js";
 
 /** `CoreDeps` plus the two backends the registry's `repo.*` commands reach
  *  through the catalogue wiring (tests inject them here; production resolves
@@ -251,6 +252,8 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
     config,
     completions: { get: () => provider },
     runBearers,
+    githubDoor: { baseUrl: "https://git.bot.test" },
+    githubBindings: new GitBindings(),
     harness: {
       harnesses: { pi: piHarness, opencode: openCodeHarness },
       registry: harnesses,
@@ -2046,12 +2049,13 @@ describe("repo/ref resolution + resident prompt selection", () => {
     await dispatch(deps, msg("add the tests' names to the PR description", "slack:UADMIN"), io);
     expect(replies).toContain("answer");
     const attach = calls.find((c) => c.path === "/attach");
-    expect(attach?.body).toEqual({
+    expect(attach?.body).toMatchObject({
       resource: "repo:acme/api",
       threadKey: "slack:CX:1.0",
       refHint: "fix/x",
       sha: SHA,
       ownPr: { number: 7, ref: "fix/x" },
+      githubDoor: { baseUrl: "https://git.bot.test", bearer: expect.any(String) },
     });
     expect(
       statuses.some((s) =>
@@ -4745,8 +4749,17 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const registry = new RunRegistry({ genId: () => "r-u1", genToken: () => "t-u1" });
     deps.runRegistry = registry;
     const { io, replies } = fakeIO();
+    const branch = ["plan", "p", "u1"].join("/");
+    const unitId = "U" + "1";
+    const contract = contractFromPlan({
+      planMarkdown: `### ${unitId}. do the unit\n\ndo the unit\n`,
+      unitId,
+      readSpec: () => undefined,
+      rebase: { branch, onto: "main" },
+    });
     await dispatch(deps, msg("agent:coding in acme/api on branch plan/p/u1: do the unit", "slack:UADMIN"), io, {
       coordinator: { parentInstanceId: "plan-p", idempotencyKey: "plan-p:u1/0/coding", base: "main" },
+      contract,
     });
     expect(spy.calls).toHaveLength(1);
     expect(spy.calls[0].headBranch).toBe("plan/p/u1");
@@ -4809,6 +4822,33 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(spy.calls).toHaveLength(1);
     expect(spy.calls[0].headBranch).toBe("plan/p/u1");
     expect(spy.calls[0].base).toBe("main");
+  });
+
+  it("pins a coding unit's first push to its contract branch before any PR exists", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    const branch = ["plan", "p", "u1"].join("/");
+    const unitId = "U" + "1";
+    wireChildLedger(deps);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    deps.runRegistry = new RunRegistry({ genId: () => "r-branch-fence", genToken: () => "t-branch-fence" });
+    codingExecutor({ head: HEAD, branch, bindingRef: branch });
+    deps.openPullRequest = openSpy().fn;
+    const contract = contractFromPlan({
+      planMarkdown: `### ${unitId}. do the unit\n\ndo the unit\n`,
+      unitId,
+      readSpec: () => undefined,
+      rebase: { branch, onto: "main" },
+    });
+    await dispatch(deps, msg("agent:coding in acme/api: do the unit", "slack:UADMIN"), fakeIO().io, {
+      coordinator: { parentInstanceId: "plan-p", idempotencyKey: "plan-p:u1/0/coding", base: "main" },
+      contract,
+    });
+    expect(deps.runBearers?.grantOf("r-branch-fence")?.github).toEqual({
+      identity: "write",
+      repo: "acme/api",
+      ref: branch,
+    });
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].ref).toBe(branch);
   });
 
   // Issue 1860, the merged half: a MERGED pull request cited as a receipt
@@ -10992,6 +11032,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
   it("a coordinator's child (DispatchOptions.coordinator) carries parentInstanceId and idempotencyKey on the reserved row, the claimed row, the live summary and the finish record; a second coordinator dispatch onto the live thread is refused coordinator_thread_live and says nothing", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     const tag = { parentInstanceId: "ship_acme_api_1", idempotencyKey: "ship_acme_api_1:u12/0/coding" };
+    const childTag = { ...tag, branch: "main" };
     let rowAtAttach: ReturnType<InMemoryRunLedger["live"]["get"]>;
     const real = vi.mocked(makeExecutor).getMockImplementation()!;
     vi.mocked(makeExecutor).mockImplementationOnce(async (...args) => {
@@ -11008,14 +11049,14 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         rowAtFirstCall ??= structuredClone(ledger.live.get("run-l"));
         summaryAtFirstCall ??= registry.getById("run-l");
         // A retried spawn lands while the child is live: refused, nothing steered.
-        secondOutcome ??= await dispatch(deps, msg("hello again"), second.io, { coordinator: tag });
+        secondOutcome ??= await dispatch(deps, msg("hello again"), second.io, { coordinator: childTag });
         return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
       },
     };
     const { deps, registry, writer, warnings } = wired(provider, { ledger });
     deps.admission = new ThreadAdmission<DispatchFollowUp>();
     const { io, replies } = ioWithCard();
-    const outcome = await dispatch(deps, msg("hello there"), io, { coordinator: tag });
+    const outcome = await dispatch(deps, msg("hello there"), io, { coordinator: childTag });
     await writer.settled();
     expect(outcome).toEqual({ status: "completed" });
     expect(rowAtAttach).toMatchObject({ runId: "run-l", phase: "attaching", meta: tag });
@@ -15947,6 +15988,9 @@ describe("inbound staging (record 0033)", () => {
     const provider = capturingProvider();
     const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
     wireChildLedger(deps);
+    const branch = ["plan", "p", "u1"].join("/");
+    const unitId = "U" + "1";
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: branch });
     const store = new InMemoryArtifactStore({
       bucket: "test",
       fetch: (async () =>
@@ -15993,6 +16037,12 @@ describe("inbound staging (record 0033)", () => {
           idempotencyKey: `${parentInstanceId}:u1/0/coding`,
           base: "main",
         },
+        contract: contractFromPlan({
+          planMarkdown: `### ${unitId}. match the screenshots\n\nmatch the screenshots\n`,
+          unitId,
+          readSpec: () => undefined,
+          rebase: { branch, onto: "main" },
+        }),
       },
     );
 

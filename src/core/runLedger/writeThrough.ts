@@ -254,6 +254,8 @@ export interface LedgerRun {
   assignLiveState(assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult>;
   /** Merge into the run's state and send it (coalesced: the newest wins). */
   setState(patch: RunState): void;
+  /** Commit a security binding before the side effect it authorizes. */
+  setStateAndFlush(patch: RunState): Promise<boolean>;
   /** `live → finishing`, before the reply — the double-answer gate (D9). */
   finishing(): Promise<FinishingGate>;
   /** A reserved run that never started (item 42): the row goes with no record,
@@ -506,6 +508,9 @@ export class NullLedgerRun implements LedgerRun {
   }
   setState(_patch: RunState): void {
     // no ledger to mirror onto
+  }
+  async setStateAndFlush(_patch: RunState): Promise<boolean> {
+    return false;
   }
   async finishing(): Promise<FinishingGate> {
     return "unavailable";
@@ -1133,6 +1138,13 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.state = { ...this.state, ...patch };
       this.stateDirty = true;
       this.stateSending = this.stateSending.then(() => this.sendState());
+    }
+
+    async setStateAndFlush(patch: RunState): Promise<boolean> {
+      if (!this.tracked() || this.finished) return false;
+      this.setState(patch);
+      await this.stateSending;
+      return this.tracked() && !this.finished && !this.stateDirty;
     }
 
     /** The merged snapshot, sent once per burst of patches; a transient failure

@@ -50,6 +50,8 @@ export default defineConfig({
       "controlReset.test.ts",
       "notServiceable.test.ts",
       "reuseAttach.test.ts",
+      "credentialBoundary.test.ts",
+      "legacyCredentials.test.ts",
       "rebindAttach.test.ts",
       "releaseAtRunEnd.test.ts",
       "runRegistration.test.ts",

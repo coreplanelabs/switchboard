@@ -153,8 +153,8 @@ export function parseSeed(v: unknown): { ok: true; seed: SandboxSeed } | { ok: f
  *   3. the deps view, when one was restored, replaces whatever `node_modules`
  *      the checkout carries (older snapshots still hold one);
  *   4. the thread's ref is fetched from origin (the credential is the exec
- *      env's `GH_TOKEN`, through the image's `gh` credential helper — never a
- *      token in this text) and checked out, at its resolved head when the
+ *      run bearer through the Git door and per-command env — never a token
+ *      in this text) and checked out, at its resolved head when the
  *      fetch holds it, else at the fetched tip; without a thread ref the
  *      checkout stays on the snapshot's branch;
  *   5. the head is printed last: the answer's `sha`. */

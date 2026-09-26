@@ -9,10 +9,10 @@ It runs commands a model wrote and does not try to make the model's judgment saf
 ```mermaid
 flowchart TB
     subgraph control ["Control plane — the bot"]
-        BOT["Slack tokens · model keys<br/>bearers to the other planes<br/>no repo-write credential when execution is sandboxed or resident"]
+        BOT["Slack tokens · model keys<br/>bearers to the other planes<br/>trusted-side GitHub App mint and Git door"]
     end
     subgraph exec ["Execution plane — one sandbox per thread"]
-        S1["thread A<br/>checkout + a token scoped to what this agent may do"]
+        S1["thread A<br/>checkout + revocable run bearer"]
         S2["thread B<br/>a separate container"]
     end
     subgraph resident ["Resident plane — one container per onboarded repository"]
@@ -22,18 +22,19 @@ flowchart TB
     GH(["GitHub"])
     BOT -->|"per tool call"| S1 & S2
     BOT -->|"operator bearer · per tool call"| RW --> RD
-    S1 & S2 -->|"git push"| GH
-    RD -->|"git push · per-attach credential file"| GH
-    BOT -->|"App token · opens and edits the PR"| GH
+    S1 & S2 -->|"git and gh · run bearer"| BOT
+    RD -->|"git and gh · run bearer"| BOT
+    RW -->|"root-owned mirror fetch"| GH
+    BOT -->|"repo-bound Git proxy · PR operations"| GH
 ```
 
 | Plane | Holds | A compromise yields |
 |---|---|---|
-| Control: the bot | Slack tokens, model keys, bearers; no code-pushing credential once execution is sandboxed or resident | A chatty assistant and the conversations it sees |
-| Execution: one container per thread | The checkout and a GitHub token scoped to the agent's role; a read-only agent's token cannot push | One checkout and one repository for the token's one-hour life; nothing else is reachable |
-| Resident: warm checkouts of onboarded repositories | Its own GitHub App key, never seen by the bot; a per-thread credential file for one attach | The repositories it is attached to; nothing about Slack or the model |
+| Control: the bot | Slack tokens, model keys and GitHub App credentials; the Git door mints repo-bound tokens inside this trusted process | Control of the bot, its conversations and its trusted GitHub actions |
+| Execution: one container per thread | The checkout and a revocable run bearer; no App installation token in model command env or credential files | The run's bounded Git/gh capability until revocation, subject to the door's repository/ref policy |
+| Resident: warm checkouts of onboarded repositories | Its own GitHub App key for the root-owned mirror; thread worktrees hold only a run bearer during commands | Mirror access for onboarded repositories; thread commands remain bounded by the Git door |
 
-Planes never share a credential: the bot's App key and the resident's are two secrets for one GitHub App, rotated separately, and each Worker checks its own bearer first ([decision 0009](../decisions/0009-residents-second-credential-domain.md)).
+The bot and resident retain separate App keys for the same GitHub App, rotated separately. No model workspace receives either App key or an installation token; each Worker checks its own bearer first ([decision 0009](../decisions/0009-residents-second-credential-domain.md)).
 
 `local` execution collapses the planes: tools run on the bot host as its user, fine only while everyone who reaches the bot is trusted ([Execution and trust](execution-and-trust.md)).
 
@@ -60,9 +61,9 @@ An entry has three axes (actions, channels, repositories); an absent axis is emp
 | Default | If you do nothing |
 |---|---|
 | Credentials come from the environment only | A key in `config.yaml` is not read; a missing one fails startup. |
-| A credential in the process is a `Secret` | Read once through one module and revealed only where it crosses a boundary — an SDK constructor, an `Authorization` header, a sandbox's env. Logged, stringified or serialized, it is `[secret:<NAME>]`; a raw `process.env` read of one anywhere else is a lint error, so a new leak fails CI. |
+| A credential in the process is a `Secret` | Read once through one module and revealed only where it crosses a boundary — an SDK constructor, an `Authorization` header, or the trusted Git door. Logged, stringified or serialized, it is `[secret:<NAME>]`; a raw `process.env` read of one anywhere else is a lint error, so a new leak fails CI. |
 | Channel config, repository management, run operations | Never a baseline; only an entry or an admin's `all` confers them. |
-| The review agent's sandbox | A read-only GitHub token, whatever the model tries. |
+| The review agent's sandbox | A run bearer whose Git door grant permits reads and refuses Git writes. |
 | Trace context from an outside caller | Stripped and re-minted. |
 | A Worker's bearer does not match | `401`; nothing degrades to open. |
 
@@ -70,7 +71,7 @@ Free text the model sees is data, not instruction: run records wrap it as untrus
 
 ## Not defended
 
-The review agent is read-only by token and toolset, not by a wall around `bash`; under `local` it can write files. A sandbox contains damage to one repository, but the model can still do anything its token allows there. Whoever holds the control plane holds the conversation ([Known limits](known-limits.md)).
+The review agent is read-only at the Git door, not by a wall around `bash`; under `local` it can write files. A sandbox limits host filesystem access, but a stolen run bearer can still act within its repository/ref policy until revocation. Whoever holds the control plane holds the conversation ([Known limits](known-limits.md)).
 
 ## Read next
 

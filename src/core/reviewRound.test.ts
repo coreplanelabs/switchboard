@@ -6,6 +6,7 @@ import { AGENTS } from "../agents/registry.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { declaredProfile } from "../config/profile.js";
 import { resetResidentProbeCache } from "../execution/factory.js";
+import { TEST_GITHUB_CREDENTIALS } from "../execution/testing/githubCredentials.js";
 import type { Executor } from "../execution/executor.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { FollowUpTurnInput } from "./harness/contract.js";
@@ -93,6 +94,7 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
       execution: { resident: { baseUrl: "https://resident.example" } },
       workspaceDir: join(dir, "workspaces"),
       dataDir: dir,
+      githubCredentials: TEST_GITHUB_CREDENTIALS,
     };
   }
 
@@ -107,6 +109,7 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
         repo: "acme/api",
         ref: "patch-1",
         headSha: HEAD,
+        githubDoor: { baseUrl: "https://git.example", bearer: "sbr_test.secret" },
       },
       logKey: "t-ro",
     });
@@ -128,6 +131,7 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
         profile: declaredProfile(AGENTS.coding),
         repo: "acme/api",
         ref: "main",
+        githubDoor: { baseUrl: "https://git.example", bearer: "sbr_test.secret" },
       },
       logKey: "t-rw",
     });
@@ -148,6 +152,7 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
         profile: declaredProfile(AGENTS.coding),
         repo: "acme/api",
         ref: "main",
+        githubDoor: { baseUrl: "https://git.example", bearer: "sbr_test.secret" },
       },
       logKey: "t-hard",
     });

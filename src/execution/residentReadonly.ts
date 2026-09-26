@@ -15,9 +15,9 @@
  *
  *  Mode is sticky per attach, not per thread: the binding records the mode
  *  the tree was last built for, and an attach in the OTHER mode recreates the
- *  tree (a credential-less, mirror-origin tree must never be handed to a
- *  writable run, and a writable tree's credential file must never survive
- *  into a read-only run). Recreating is the simple safe option — the only
+ *  tree (a mirror-origin tree must never be handed to a writable run, and a
+ *  writable tree's door origin must never survive into a read-only run).
+ *  Recreating is the simple safe option — the only
  *  state a tree carries between attaches is scratch files, and a mode switch
  *  on one thread is rare (a thread is normally one agent for its whole life). */
 
@@ -37,12 +37,13 @@ export interface ReadonlyAttachPlan {
   /** True when the existing tree was built for the other mode and must be wiped
    *  before reuse — evaluated before the ordinary dirty/stale checks. */
   modeSwitch: boolean;
-  /** Mint a repo-scoped token for the tree and write the credential file (writable only). A read-only attach never puts a token in the tree; the mirror's own recovery fetch (root, outside the tree) may still mint one. */
+  /** Legacy mode projection. The Worker uses the Git door for writable trees;
+   *  neither mode writes an App token into a thread tree. */
   credentialFile: boolean;
-  /** Remove any credential file / helper config from the tree (read-only, every
-   *  attach — a reused tree may predate this rule). */
+  /** Read-only mode requires cleanup; the Worker also scrubs writable trees
+   *  before attaching the Git door. */
   scrubCredentials: boolean;
-  /** What the worktree's `origin` points at after clone. */
+  /** Legacy origin fallback; the Worker overrides writable origin with the door. */
   originUrl: string;
 }
 
@@ -51,7 +52,7 @@ export function planReadonlyAttach(input: {
   /** The thread's existing binding, if any. `evicted` trees are gone from disk
    *  and are recreated anyway, so their recorded mode is irrelevant. */
   prior?: { readonly?: boolean; evicted?: boolean };
-  /** `owner/name` of the repo — the writable origin. */
+  /** `owner/name` of the repo — used by the legacy origin fallback. */
   slug: string;
   /** The resident's bare mirror path — the read-only origin. Thread users are
    *  denied traversal into it (root:worker1 750), so fetch/push fail while

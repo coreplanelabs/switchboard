@@ -50,7 +50,12 @@ function dirs(): Pick<ExecutorFactoryOptions, "workspaceDir" | "dataDir"> {
 
 /** The context a dispatch hands the factory: the preset and its declared
  *  profile — the run's effective profile when no boundary caps anything. */
-const ctxOf = (agent: AgentDef) => ({ threadKey: "slack:CX:1.0", agent, profile: declaredProfile(agent) });
+const ctxOf = (agent: AgentDef) => ({
+  threadKey: "slack:CX:1.0",
+  agent,
+  profile: declaredProfile(agent),
+  githubDoor: { baseUrl: "https://door.example", bearer: "sbr_test.secret" },
+});
 const ctx = (agentName: string) => ctxOf(AGENTS[agentName]);
 
 describe("makeExecutor per-agent provisioning", () => {
@@ -91,42 +96,55 @@ describe("makeExecutor per-agent provisioning", () => {
     expect(existsSync(d.workspaceDir)).toBe(false);
   });
 
-  it("a local backend honors the effective profile's identity on every exec instead of inheriting an arbitrary host credential", async () => {
+  it("a local backend gives model commands the run bearer without an App token", async () => {
     const d = dirs();
     vi.mocked(resolveGithubToken).mockClear();
     const writing = await makeExecutor({ ...d }, ctx("coding"));
     expect(writing.executor).toBeInstanceOf(LocalExecutor);
     expect(writing.backend).toBe("local");
     expect(existsSync(join(d.workspaceDir, "slack_CX_1.0"))).toBe(true);
-    await expect(writing.executor.exec('printf %s "$GH_TOKEN"')).resolves.toBe("ghs_write");
-    expect(resolveGithubToken).toHaveBeenLastCalledWith("write");
+    await expect(writing.executor.exec('printf %s "${GH_TOKEN-unset}|$GH_ENTERPRISE_TOKEN"')).resolves.toBe(
+      "unset|sbr_test.secret",
+    );
 
     const reading = await makeExecutor({ ...d }, ctx("review"));
-    await expect(reading.executor.exec('printf %s "$GH_TOKEN"')).resolves.toBe("ghs_read");
-    expect(resolveGithubToken).toHaveBeenLastCalledWith("read");
+    await expect(reading.executor.exec('printf %s "${GH_TOKEN-unset}|$GH_ENTERPRISE_TOKEN"')).resolves.toBe(
+      "unset|sbr_test.secret",
+    );
+    expect(resolveGithubToken).not.toHaveBeenCalled();
   });
 
-  it("refuses a read identity when only an unscoped static token is available, and a write identity when no credential is available", async () => {
-    vi.mocked(githubAppConfigured).mockReturnValue(false);
+  it("a door-backed local run exposes only its revocable run bearer to model commands", async () => {
+    const selected = await makeExecutor(
+      { ...dirs(), githubCredentials: { assertProfileIdentity: () => {} } },
+      {
+        ...ctx("coding"),
+        repo: "acme/api",
+        githubDoor: { baseUrl: "http://127.0.0.1:1234", bearer: "sbr_test.secret", ghConfigDir: "/tmp/gh-config" },
+      },
+    );
+    const env = await selected.executor.exec(
+      'printf "%s|%s|%s|%s" "${GH_TOKEN-unset}" "$GH_ENTERPRISE_TOKEN" "$GH_HOST" "$GH_CONFIG_DIR"',
+    );
+    expect(env).toBe("unset|sbr_test.secret|127.0.0.1:1234|/tmp/gh-config");
+    expect(resolveGithubToken).not.toHaveBeenCalled();
+  });
+
+  it("refuses read and write workspace attach without a door, even when an App or PAT is available", async () => {
     vi.stubEnv("GH_TOKEN", "ghp_static");
-    await expect(makeExecutor({ ...dirs() }, ctx("review"))).rejects.toThrow(
-      /profile identity "read".*GitHub App.*static GH_TOKEN cannot be scoped down/i,
-    );
-
-    vi.stubEnv("GH_TOKEN", "");
-    await expect(makeExecutor({ ...dirs() }, ctx("review"))).rejects.toThrow(
-      /profile identity "read".*no GitHub credential is configured/i,
-    );
-    await expect(makeExecutor({ ...dirs() }, ctx("coding"))).rejects.toThrow(
-      /profile identity "write".*no GitHub credential is configured/i,
-    );
-
-    vi.mocked(githubAppConfigured).mockReturnValue(true);
-    vi.mocked(resolveGithubToken).mockResolvedValueOnce(null);
-    const mintFailed = await makeExecutor({ ...dirs() }, ctx("review"));
-    await expect(mintFailed.executor.exec("echo must-not-run")).rejects.toThrow(
-      /profile identity "read".*no GitHub credential is available/i,
-    );
+    const noDoor = (agent: string) => ({ ...ctx(agent), githubDoor: undefined });
+    await expect(makeExecutor({ ...dirs() }, noDoor("review"))).rejects.toThrow(/read.*GitHub door run bearer/i);
+    await expect(makeExecutor({ ...dirs() }, noDoor("coding"))).rejects.toThrow(/write.*GitHub door run bearer/i);
+    await expect(
+      makeExecutor(
+        { ...dirs() },
+        {
+          ...noDoor("coding"),
+          profile: { ...ctx("coding").profile, machine: "repo-cold" as const },
+        },
+      ),
+    ).rejects.toThrow(/write.*GitHub door run bearer/i);
+    expect(resolveGithubToken).not.toHaveBeenCalled();
   });
 
   it("a repo-requiring agent gets the Cloudflare backend when configured", async () => {
@@ -147,15 +165,12 @@ describe("makeExecutor per-agent provisioning", () => {
     );
   });
 
-  // Security: the review agent's sandbox has `gh` + the credential
-  // helper, so a write-capable GH_TOKEN there would let the model — or a
-  // prompt-injected diff — post/review/push. Least-privilege closes it at the
-  // token: a `read` identity gets a READ-scoped token, a `write` identity gets
-  // WRITE. (The bot-process review post uses its own write token, unaffected.)
+  // Both identities use a revocable run bearer; the trusted door enforces
+  // read versus write and never gives its App token to a model command.
   const envOf = (ex: unknown) =>
     (ex as { opts: { resolveEnvs: () => Promise<Record<string, string>> } }).opts.resolveEnvs();
 
-  it("a readonly agent's sandbox gets a READ-scoped token; a full agent gets WRITE", async () => {
+  it("read and write sandboxes get only the run bearer", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.mocked(resolveGithubToken).mockClear();
     const cf: ExecutorFactoryOptions = {
@@ -165,17 +180,20 @@ describe("makeExecutor per-agent provisioning", () => {
     const review = await makeExecutor(cf, ctx("review")); // identity "read"
     const coding = await makeExecutor(cf, ctx("coding")); // identity "write"
 
-    // …and the scoped token is exactly what lands in the sandbox env.
-    expect((await envOf(review.executor)).GH_TOKEN).toBe("ghs_read");
-    expect((await envOf(coding.executor)).GH_TOKEN).toBe("ghs_write");
-    expect(resolveGithubToken).toHaveBeenCalledWith("read");
-    expect(resolveGithubToken).toHaveBeenCalledWith("write");
+    expect((await envOf(review.executor)).GH_ENTERPRISE_TOKEN).toBe("sbr_test.secret");
+    expect((await envOf(coding.executor)).GH_ENTERPRISE_TOKEN).toBe("sbr_test.secret");
+    expect((await envOf(review.executor)).GH_TOKEN).toBeUndefined();
+    expect((await envOf(coding.executor)).GH_TOKEN).toBeUndefined();
+    expect(await envOf(coding.executor)).toMatchObject({
+      GIT_CONFIG_KEY_2: "credential.helper",
+      GIT_CONFIG_VALUE_2: "",
+      GIT_CONFIG_KEY_3: "credential.helper",
+      GIT_CONFIG_VALUE_3: "!gh auth git-credential",
+    });
+    expect(resolveGithubToken).not.toHaveBeenCalled();
   });
 
-  // Feature: docs/reference/specs/execution.md item 5 — the credential is resolved when a
-  // command runs, never captured when the executor is built (a token captured
-  // at build time would expire under a 20-minute first command).
-  it("the sandbox credential is resolved per command, not captured at executor construction", async () => {
+  it("the sandbox env resolves the run bearer for each command without minting App tokens", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.mocked(resolveGithubToken).mockClear();
     const cf: ExecutorFactoryOptions = {
@@ -185,11 +203,9 @@ describe("makeExecutor per-agent provisioning", () => {
     const review = await makeExecutor(cf, ctx("review"));
     expect(resolveGithubToken).not.toHaveBeenCalled();
 
-    expect((await envOf(review.executor)).GH_TOKEN).toBe("ghs_read");
-    // The mint rotates (a fresh token after the reuse margin): the next command
-    // sees the new one, because nothing was captured.
-    vi.mocked(resolveGithubToken).mockResolvedValueOnce("ghs_read_rotated");
-    expect((await envOf(review.executor)).GH_TOKEN).toBe("ghs_read_rotated");
+    expect((await envOf(review.executor)).GH_ENTERPRISE_TOKEN).toBe("sbr_test.secret");
+    expect((await envOf(review.executor)).GH_ENTERPRISE_TOKEN).toBe("sbr_test.secret");
+    expect(resolveGithubToken).not.toHaveBeenCalled();
   });
 
   // Feature: docs/reference/specs/execution.md item 5 — the commit identity
@@ -211,13 +227,14 @@ describe("makeExecutor per-agent provisioning", () => {
     };
     const coding = await makeExecutor(cf, { ...ctx("coding"), requester: "slack:U0123" });
     const env = await envOf(coding.executor);
-    expect(env).toEqual({
-      GH_TOKEN: "ghs_write",
+    expect(env).toMatchObject({
+      GH_ENTERPRISE_TOKEN: "sbr_test.secret",
       GIT_AUTHOR_NAME: "ivy-dev",
       GIT_AUTHOR_EMAIL: "4242+ivy-dev@users.noreply.github.com",
       GIT_COMMITTER_NAME: "switchboard-app[bot]",
       GIT_COMMITTER_EMAIL: "111+switchboard-app[bot]@users.noreply.github.com",
     });
+    expect(env.GH_TOKEN).toBeUndefined();
     vi.mocked(resolveGithubIdentity).mockResolvedValue(undefined);
   });
 });
@@ -491,6 +508,7 @@ describe("makeExecutor resident selection", () => {
         refHint: "fix/x",
         sha: SHA,
         ownPr,
+        githubDoor: { baseUrl: "https://door.example", bearer: "sbr_test.secret" },
       });
       await makeExecutor(residentOpts(), repoCtx());
       expect(bodies[3]).not.toHaveProperty("ownPr");
@@ -2199,14 +2217,12 @@ describe("makeExecutor machine classes", () => {
     expect(binding).toBeUndefined();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(optsOf(executor)).toMatchObject({ repo: "jshttp/vary", ref: "master" });
-    // The credential is the run's, scoped by the profile's identity: a `write`
-    // identity writes, a `read` one reads.
-    await expect(optsOf(executor).resolveEnvs()).resolves.toEqual({ GH_TOKEN: "ghs_write" });
+    expect(await optsOf(executor).resolveEnvs()).toMatchObject({ GH_ENTERPRISE_TOKEN: "sbr_test.secret" });
     const readonly = await makeExecutor(bothBackends(), {
       ...ctxOf(agentOn("repo-cold", AGENTS.review)),
       repo: "jshttp/vary",
     });
-    await expect(optsOf(readonly.executor).resolveEnvs()).resolves.toEqual({ GH_TOKEN: "ghs_read" });
+    expect(await optsOf(readonly.executor).resolveEnvs()).toMatchObject({ GH_ENTERPRISE_TOKEN: "sbr_test.secret" });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -2234,9 +2250,10 @@ describe("makeExecutor machine classes", () => {
       agent: AGENTS.coding,
       profile: { machine: "repo-cold", identity: "read", minutes: 45 },
       repo: "jshttp/vary",
+      githubDoor: { baseUrl: "https://door.example", bearer: "sbr_test.secret" },
     });
-    await expect(optsOf(reading.executor).resolveEnvs()).resolves.toEqual({ GH_TOKEN: "ghs_read" });
-    expect(resolveGithubToken).toHaveBeenLastCalledWith("read");
+    expect(await optsOf(reading.executor).resolveEnvs()).toMatchObject({ GH_ENTERPRISE_TOKEN: "sbr_test.secret" });
+    expect(resolveGithubToken).not.toHaveBeenCalled();
     // Identity `none` on a class with a checkout: the checkout is cloned anonymously, no token is minted.
     vi.mocked(resolveGithubToken).mockClear();
     const anonymous = await makeExecutor(bothBackends(), {
@@ -2477,7 +2494,12 @@ describe("makeExecutor seeded sandbox", () => {
   function stubFetch(...responses: Array<{ status?: number; body?: unknown; reject?: string }>) {
     const calls: string[] = [];
     const bodies: Array<Record<string, unknown> | undefined> = [];
+    const scrubs: Array<Record<string, unknown>> = [];
     const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (new URL(String(url)).pathname === "/exec") {
+        scrubs.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(JSON.stringify({ exitCode: 0 }), { status: 200 });
+      }
       calls.push(new URL(String(url)).pathname);
       bodies.push(init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined);
       const next = responses.shift();
@@ -2486,7 +2508,7 @@ describe("makeExecutor seeded sandbox", () => {
       return new Response(JSON.stringify(next.body ?? {}), { status: next.status ?? 200 });
     });
     vi.stubGlobal("fetch", fn);
-    return { fn, calls, bodies };
+    return { fn, calls, bodies, scrubs };
   }
   const SHA = "0123456789abcdef0123456789abcdef01234567";
   const HEAD = "89abcdef0123456789abcdef0123456789abcdef";
@@ -2519,10 +2541,12 @@ describe("makeExecutor seeded sandbox", () => {
 
   it("a refused resident with a snapshot → one POST /seed with the thread's ref, the seeded facts on the selection, the reason and the seed on the note", async () => {
     stubEnvs();
-    const { calls, bodies } = stubFetch(degraded(C1), seededAnswer(C1));
+    const { calls, bodies, scrubs } = stubFetch(degraded(C1), seededAnswer(C1));
     const sel = await makeExecutor(residentOpts(), repoCtx());
     expect(sel.executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(calls).toEqual(["/status", "/seed"]);
+    expect(scrubs).toHaveLength(1);
+    expect(String(scrubs[0]?.command)).toContain("/workspace/.git-credentials");
     expect(bodies[1]?.seed).toEqual({
       slug: "jshttp/vary",
       checkoutBackupId: C1,

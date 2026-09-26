@@ -20,6 +20,7 @@ export default defineConfig({
       "knownLength.test.ts",
       "coordinator.test.ts",
       "modelProxyForwarding.test.ts",
+      "githubDoorForwarding.test.ts",
     ],
   },
 });

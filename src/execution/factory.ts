@@ -37,14 +37,7 @@ import {
 } from "./resident.js";
 import { repoResourceId } from "../core/residentAdmin.js";
 import { nearMatch } from "../core/nearMatch.js";
-import {
-  githubAppConfigured,
-  resolveGithubCredential,
-  resolveGithubIdentity,
-  resolveGithubToken,
-  type GithubTokenScope,
-} from "./githubApp.js";
-import type { SandboxCredential, SandboxCredentialSource } from "./sandboxCredentials.js";
+import { githubAppConfigured, resolveGithubIdentity, type GithubTokenScope } from "./githubApp.js";
 import { bindingOf, type BindingSource } from "./authorBinding.js";
 import { pairOfBinding, requesterPairFor } from "./identityRewrite.js";
 import { isServiceable } from "./residentState.js";
@@ -90,12 +83,8 @@ export interface ExecutionConfig {
 }
 
 export interface GithubCredentialProvider {
-  /** Refuse before provisioning when this process cannot honor the profile. */
+  /** Test seam for profile validation; model workspaces never receive an App token. */
   assertProfileIdentity(identity: Identity, machine: MachineClass): void;
-  /** Resolve the token injected into a local process or initial sandbox env. */
-  token(scope: GithubTokenScope): Promise<string | null>;
-  /** Resolve the refreshable credential handed to a remote sandbox. */
-  credential(scope: GithubTokenScope | undefined, opts?: { fresh?: boolean }): Promise<SandboxCredential | null>;
 }
 
 export interface ExecutorFactoryOptions {
@@ -107,8 +96,7 @@ export interface ExecutorFactoryOptions {
    *  (a test, a caller without config), no binding is read and the bot pair
    *  authors. */
   bindings?: BindingSource;
-  /** The process credential boundary. Production uses the live App/PAT
-   *  provider; tests inject an in-memory provider instead of ambient secrets. */
+  /** Profile validation seam. Production checks the App; tests may inject it. */
   githubCredentials?: GithubCredentialProvider;
 }
 
@@ -119,6 +107,8 @@ export interface ExecutorFactoryOptions {
  *  probe). */
 export interface ExecutorContext {
   threadKey: string;
+  /** Run-bound credential accepted only by the trusted GitHub door. */
+  githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };
   /** the resolved agent (never mutated here) — named in the null executor's error */
   agent: AgentDef;
   /** The run's EFFECTIVE profile (docs/decisions/0026-capability-profiles-and-request-routing.md):
@@ -385,6 +375,12 @@ export async function makeExecutor(
   if (machine === "none") {
     return { executor: new NullExecutor(ctx.agent.name), backend: "local" };
   }
+  if (machine !== "blank" && ctx.profile.identity !== "none" && !ctx.githubDoor)
+    throw new Error(
+      `profile identity "${ctx.profile.identity}" requires a GitHub door run bearer before workspace attach`,
+    );
+  if (machine !== "blank" && ctx.profile.identity !== "none" && !githubAppConfigured() && !opts.githubCredentials)
+    throw new Error(`profile identity "${ctx.profile.identity}" requires the GitHub App for the trusted door`);
   // A resume re-attaches where the row says the run ran (run-history item 54)
   // and never provisions again: the branches below are a fresh run's.
   if (ctx.reattach !== undefined) return reattachWorkspace(opts, ctx, ctx.reattach, span);
@@ -501,9 +497,13 @@ export async function makeExecutor(
             refHint: ctx.ref,
             readonly,
             sha: ctx.headSha,
-            // The run's commit identity pairs, resolved per exec (record 0062):
-            // the resident holds its own credential, so the pairs alone ride.
-            resolveEnvs: () => gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
+            // The run bearer and commit identity pairs ride each exec. The
+            // resident keeps its App credential only at the root-owned mirror.
+            resolveEnvs: async () => ({
+              ...(ctx.githubDoor ? residentDoorEnvs(ctx.githubDoor, ctx.repo) : {}),
+              ...(await gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx))),
+            }),
+            ...(ctx.githubDoor ? { githubDoor: ctx.githubDoor } : {}),
             ...(ctx.ownPr !== undefined ? { ownPr: ctx.ownPr } : {}),
             ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
             ...(ctx.onLiveStateObservation !== undefined ? { onLiveStateObservation: ctx.onLiveStateObservation } : {}),
@@ -771,9 +771,13 @@ async function reattachWorkspace(
     readonly: ctx.profile.identity === "read" ? true : undefined,
     sha: ctx.headSha,
     reuse: true,
-    // The run's commit identity pairs, resolved per exec (record 0062): the
-    // resident holds its own credential, so the pairs alone ride.
-    resolveEnvs: () => gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
+    ...(ctx.githubDoor ? { githubDoor: ctx.githubDoor } : {}),
+    // The run bearer and commit identity pairs ride each exec. The resident's
+    // App credential remains at the root-owned mirror.
+    resolveEnvs: async () => ({
+      ...(ctx.githubDoor ? residentDoorEnvs(ctx.githubDoor, ctx.repo) : {}),
+      ...(await gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx))),
+    }),
     ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
     ...(ctx.onLiveStateObservation !== undefined ? { onLiveStateObservation: ctx.onLiveStateObservation } : {}),
   });
@@ -1151,42 +1155,71 @@ interface PerThreadInputs {
   ref?: string;
   /** the sandbox env, resolved per command (docs/reference/specs/execution.md item 5) */
   resolveEnvs: () => Promise<Record<string, string>>;
-  /** the run's GitHub credential with its expiry, for the sandbox executor's
-   *  per-exec credential-file refresh (src/execution/sandboxCredentials.ts);
-   *  absent for a run that holds none (blank class, the empty-env paths) */
-  credential?: SandboxCredentialSource;
 }
 
-/** The per-thread inputs of a class that carries the checkout: the resolved
- *  repo and ref, and the run's GitHub credential — the profile's identity —
- *  plus its commit identity pairs in the env. */
+/** A per-thread checkout carries the resolved repo/ref, the run bearer and
+ * commit identity pairs. No App credential enters the model workspace. */
 function perThreadCheckout(opts: ExecutorFactoryOptions, ctx: ExecutorContext): PerThreadInputs {
   const github = opts.githubCredentials ?? processGithubCredentials;
   github.assertProfileIdentity(ctx.profile.identity, ctx.profile.machine);
   const scope = githubTokenScopeFor(ctx.profile.identity);
+  if (scope) {
+    if (!ctx.githubDoor)
+      throw new Error(`profile identity "${ctx.profile.identity}" requires a GitHub door run bearer`);
+    const door = ctx.githubDoor;
+    return {
+      threadKey: ctx.threadKey,
+      repo: ctx.repo,
+      ref: ctx.ref,
+      resolveEnvs: async () => ({
+        ...githubDoorEnvs(door, ctx.repo),
+        ...(await gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx))),
+      }),
+    };
+  }
+  return { threadKey: ctx.threadKey, repo: ctx.repo, ref: ctx.ref, resolveEnvs: async () => ({}) };
+}
+
+/** Every model command gets a revocable run bearer and a Git/gh route to the
+ * trusted door, never an installation token or a credential-store copy of it. */
+function githubDoorEnvs(door: NonNullable<ExecutorContext["githubDoor"]>, repo?: string): Record<string, string> {
+  const base = new URL(door.baseUrl);
+  const gitBase = `${base.origin}/git/`;
+  const localRewrite: Record<string, string> =
+    base.protocol === "http:"
+      ? { GIT_CONFIG_KEY_4: `url.${base.origin}/.insteadOf`, GIT_CONFIG_VALUE_4: `https://${base.host}/` }
+      : {};
   return {
-    threadKey: ctx.threadKey,
-    repo: ctx.repo,
-    ref: ctx.ref,
-    resolveEnvs: () => githubEnvs(ctx.profile.identity, authorSourceOf(opts, ctx), github.token),
-    credential: (o) => github.credential(scope, o),
+    GH_HOST: base.host,
+    GH_ENTERPRISE_TOKEN: door.bearer,
+    ...(repo ? { GH_REPO: `${base.host}/${repo}` } : {}),
+    ...(door.ghConfigDir ? { GH_CONFIG_DIR: door.ghConfigDir } : {}),
+    GIT_CONFIG_COUNT: base.protocol === "http:" ? "5" : "4",
+    GIT_CONFIG_KEY_0: `url.${gitBase}.insteadOf`,
+    GIT_CONFIG_VALUE_0: "https://github.com/",
+    GIT_CONFIG_KEY_1: `url.${gitBase}.insteadOf`,
+    GIT_CONFIG_VALUE_1: "git@github.com:",
+    GIT_CONFIG_KEY_2: "credential.helper",
+    GIT_CONFIG_VALUE_2: "",
+    GIT_CONFIG_KEY_3: "credential.helper",
+    GIT_CONFIG_VALUE_3: "!gh auth git-credential",
+    ...localRewrite,
   };
 }
 
-/**
- * Refuse a per-thread backend before provisioning when this process cannot
- * provide the effective profile's identity. A resident supplies and enforces
- * its own credential, including a read-only attach. A static PAT can satisfy
- * `write`, but its permissions
- * are opaque and cannot be reduced to `read`; no credential cannot satisfy
- * either identity. `blank` deliberately carries no credential, so only
- * `none` is truthful there. A configured App is checked lazily when the first
- * credential is minted; a mint failure refuses that command before it runs.
- */
+function residentDoorEnvs(door: NonNullable<ExecutorContext["githubDoor"]>, repo?: string): Record<string, string> {
+  return {
+    ...githubDoorEnvs(door, repo),
+    // The resident image has git but does not require gh. This helper reads
+    // only the run bearer from the command's own environment.
+    GIT_CONFIG_VALUE_3: `!f() { test -n "$GH_ENTERPRISE_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_ENTERPRISE_TOKEN"; }; f`,
+  };
+}
+
+/** Profile validation stays separate from the GitHub door's trusted-side mint.
+ * A model workspace receives only its revocable run bearer. */
 const processGithubCredentials: GithubCredentialProvider = {
   assertProfileIdentity,
-  token: resolveGithubToken,
-  credential: resolveGithubCredential,
 };
 
 function assertProfileIdentity(identity: Identity, machine: MachineClass): void {
@@ -1196,18 +1229,8 @@ function assertProfileIdentity(identity: Identity, machine: MachineClass): void 
     }
     return;
   }
-  if (identity === "none" || githubAppConfigured()) return;
-  if (identity === "read") {
-    if (processSecrets.get("GH_TOKEN")) {
-      throw new Error(
-        `profile identity "read" requires a GitHub App credential; a static GH_TOKEN cannot be scoped down to read-only`,
-      );
-    }
-    throw new Error(`profile identity "read" cannot run because no GitHub credential is configured`);
-  }
-  if (!processSecrets.get("GH_TOKEN")) {
-    throw new Error(`profile identity "write" cannot run because no GitHub credential is configured`);
-  }
+  if (identity !== "none" && !githubAppConfigured())
+    throw new Error(`profile identity "${identity}" requires the GitHub App for the trusted door`);
 }
 
 /** The per-thread backends (the pre-resident selection, unchanged). */
@@ -1231,7 +1254,6 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, input: PerThr
       timeoutMs: (opts.execution?.timeoutMinutes ?? 30) * 60_000,
       statePath: resolve(opts.dataDir, "sandboxes.json"),
       resolveEnvs: input.resolveEnvs,
-      ...(input.credential !== undefined ? { credential: input.credential } : {}),
       repo: input.repo,
       ref: input.ref,
     });
@@ -1244,15 +1266,16 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, input: PerThr
     const apiKeyEnv = opts.execution.apiKeyEnv ?? "SANDBOX_TOKEN";
     const token = processSecrets.named(apiKeyEnv);
     if (!token) throw new Error(`execution.type is "cloudflare" but ${apiKeyEnv} is not set`);
-    return new CloudflareSandboxExecutor({
+    const executor = new CloudflareSandboxExecutor({
       url: opts.execution.url,
       token: token.reveal(),
       threadKey,
       resolveEnvs: input.resolveEnvs,
-      ...(input.credential !== undefined ? { credential: input.credential } : {}),
       repo: input.repo,
       ref: input.ref,
+      scrubLegacyCredentials: true,
     });
+    return executor;
   }
 
   throw new Error(`Unknown execution.type "${type}" (valid: local, e2b, cloudflare)`);
@@ -1282,16 +1305,8 @@ class NullExecutor implements Executor {
   }
 }
 
-/** The scope of the GitHub credential a run holds, decided from its profile's
- *  identity — never from the prompt, never from the toolset name.
- *  Least-privilege: a `read` identity (the review agent) gets a READ-scoped
- *  token, so even though its sandbox has `gh` + the credential helper, it
- *  physically cannot post/review/push from inside — the deterministic review
- *  post is done by the bot process (githubComments.ts) with a write token, so
- *  this doesn't weaken it. A `write` identity (coding) gets the write-scoped
- *  token it needs to push and open PRs. A `none` identity mints nothing. The
- *  sandbox env (`githubEnvs`) and the `repo-cold` repository vet
- *  (`githubRepoProbe`) mint with this scope, so the vet sees what the run will. */
+/** The trusted-side repository probe's scope, derived from the profile.
+ * Model commands use the door and never hold the resulting App credential. */
 export function githubTokenScopeFor(identity: Identity): GithubTokenScope | undefined {
   return identity === "none" ? undefined : identity;
 }
@@ -1350,22 +1365,6 @@ export async function gitIdentityEnvs(
     GIT_COMMITTER_NAME: botPair.name,
     GIT_COMMITTER_EMAIL: botPair.email,
   };
-}
-
-/** GitHub credential for the sandbox env: freshly-minted App installation
- *  token when a GitHub App is configured, else static GH_TOKEN, else none —
- *  and none at all for an identity that mints nothing — with the commit
- *  identity pairs (`gitIdentityEnvs`) beside it for a `write` identity. */
-async function githubEnvs(
-  identity: Identity,
-  author: AuthorEnvSource,
-  tokenFor: (scope: GithubTokenScope) => Promise<string | null>,
-): Promise<Record<string, string>> {
-  const scope = githubTokenScopeFor(identity);
-  if (scope === undefined) return {};
-  const token = await tokenFor(scope);
-  if (!token) throw new Error(`profile identity "${identity}" cannot run because no GitHub credential is available`);
-  return { GH_TOKEN: token, ...(await gitIdentityEnvs(identity, author)) };
 }
 
 /** The per-thread executor's backend, from the configured execution type. */

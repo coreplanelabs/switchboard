@@ -32,3 +32,7 @@ Residency is a generic resource-typed primitive, `<type>:<id>`, with `repo:<owne
 ## Pattern
 
 Least privilege and blast-radius containment through a trust boundary per plane. Capability-style tokens scoped to one resource for one attach.
+
+## Amended 2026-09-26: a thread no longer holds an App token
+
+Re-evaluation: a writable resident thread could read its own `.git/github-credentials` through a model-controlled shell. The resident Worker still owns a separate App key and uses a repository-scoped token for its root-owned mirror. It no longer mints or writes an App token into a thread worktree. On attach it removes any older thread credential file, points the writable origin at the bot's Git door, and requires the run bearer on each writable command. The trusted door exchanges that bearer for a repository-pinned App token only after checking the run's repository and ref. The bot therefore handles Git data and trusted-side token minting; the separation of the resident's root-owned mirror key remains. Live validation of the changed boundary is required after deployment.

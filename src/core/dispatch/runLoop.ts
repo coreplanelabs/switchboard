@@ -197,6 +197,7 @@ export interface RunLoopContext {
   ledgerRun: LedgerRun | undefined;
   resume: ResumeContext | undefined;
   repoCtx: RepoContext;
+  githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };
   isPrReview: boolean;
   isCodingPrRun: boolean;
   /** The head this run reviews at the start; the settle may advance it. */
@@ -1551,6 +1552,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               agent: ctx.agent,
               profile,
               repoCtx,
+              ...(ctx.githubDoor ? { githubDoor: ctx.githubDoor } : {}),
               root,
               clock,
               harness,

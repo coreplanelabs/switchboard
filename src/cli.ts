@@ -50,7 +50,7 @@
 import "./loadEnv.js";
 import { createServer } from "node:http";
 import { Console } from "node:console";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { buildArtifactStore } from "./artifacts/buildStore.js";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -93,7 +93,10 @@ import type { HarnessRoster } from "./core/harness/roster.js";
 import { HarnessRegistry } from "./core/harness/pi/relay.js";
 import { LedgerTakeover } from "./core/runLedger/takeover.js";
 import { RunBearerStore } from "./core/modelProxy/runBearers.js";
+import { GitBindings } from "./core/modelProxy/gitBindings.js";
 import { createModelProxyHandler, isModelProxyPath } from "./channels/modelProxy.js";
+import { createGithubDoorHandler, isGithubDoorPath } from "./channels/githubDoor.js";
+import { resolveGithubDoorToken } from "./execution/githubApp.js";
 import { createHarnessRoutesHandler, isHarnessPath } from "./channels/harnessRoutes.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
@@ -693,8 +696,9 @@ async function main(): Promise<void> {
   // run here). The roster is the same two objects the bot wires (harness.md
   // item 8), so a preset's configuration word means the same thing here.
   const runBearers = new RunBearerStore({ clock: systemClock });
+  const githubBindings = new GitBindings();
   const harnesses = new HarnessRegistry();
-  const loopback = await askLoopbackServer({ bearers: runBearers, harnesses, config });
+  const loopback = await askLoopbackServer({ bearers: runBearers, bindings: githubBindings, harnesses, config });
   const roster: HarnessRoster = {
     pi: new PiHarness(config.config.pi?.compaction ? { compaction: config.config.pi.compaction } : {}),
     opencode: new OpenCodeHarness(
@@ -705,6 +709,8 @@ async function main(): Promise<void> {
     config,
     completions,
     runBearers,
+    githubBindings,
+    githubDoor: { baseUrl: loopback.url, ghConfigDir: loopback.ghConfigDir },
     harness: {
       harnesses: roster,
       registry: harnesses,
@@ -753,9 +759,10 @@ async function main(): Promise<void> {
  *  its bearer. Closed once the run's record has settled. */
 async function askLoopbackServer(input: {
   bearers: RunBearerStore;
+  bindings: GitBindings;
   harnesses: HarnessRegistry;
   config: ConfigStore;
-}): Promise<{ url: string; close: () => void }> {
+}): Promise<{ url: string; ghConfigDir: string; close: () => void }> {
   const modelProxy = createModelProxyHandler({
     bearers: input.bearers,
     providers: () => input.config.config.providers,
@@ -766,9 +773,15 @@ async function askLoopbackServer(input: {
   const takeover = new LedgerTakeover();
   takeover.settle();
   const harnessRoutes = createHarnessRoutesHandler({ bearers: input.bearers, harnesses: input.harnesses, takeover });
+  const githubDoor = createGithubDoorHandler({
+    bearers: input.bearers,
+    bindings: input.bindings,
+    token: resolveGithubDoorToken,
+  });
   const server = createServer((req, res) => {
     const path = (req.url ?? "/").split("?")[0];
     if (isModelProxyPath(path)) modelProxy(req, res);
+    else if (isGithubDoorPath(path)) void githubDoor(req, res);
     else if (isHarnessPath(path)) harnessRoutes(req, res);
     else {
       res.writeHead(404, { "content-type": "text/plain" });
@@ -781,7 +794,26 @@ async function askLoopbackServer(input: {
   });
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("ask: the loopback server has no port");
-  return { url: `http://127.0.0.1:${address.port}`, close: () => server.close() };
+  const ghConfigDir = mkdtempSync(join(tmpdir(), "switchboard-gh-"));
+  const socketPath = join(ghConfigDir, "api.sock");
+  const unix = createServer((req, res) => void githubDoor(req, res));
+  await new Promise<void>((resolve, reject) => {
+    unix.once("error", reject);
+    unix.listen(socketPath, () => resolve());
+  });
+  writeFileSync(
+    join(ghConfigDir, "config.yml"),
+    `http_unix_socket: ${JSON.stringify(socketPath)}\ngit_protocol: https\n`,
+    { mode: 0o600 },
+  );
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    ghConfigDir,
+    close: () => {
+      server.close();
+      unix.close(() => rmSync(ghConfigDir, { recursive: true, force: true }));
+    },
+  };
 }
 
 // Run only when invoked as a script (tsx/node src/cli.ts, the `switchboard`

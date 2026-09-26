@@ -34,7 +34,7 @@
 // with an honest `warning` when it is not.
 //
 // Operator data plane: POST /attach (per-thread worktree off the bare mirror
-// + sticky ref binding + dep materialization + per-attach credential file),
+// + sticky ref binding + dep materialization + Git door origin),
 // POST /exec (privilege-dropped per-thread execution), POST /read and /write
 // (thread-user file ops confined to the worktree), an in-DO mirror mutex
 // serializing every mirror mutation, and an inactivity sweep that evicts idle
@@ -61,11 +61,11 @@
 //      here reads them and no request header is ever forwarded into a
 //      resident. The ONLY env the resident itself injects into a command is
 //      GIT_TERMINAL_PROMPT=0 (validated through validateEnvNames); GitHub
-//      tokens travel via a root-only one-shot credential file, never env and
-//      never argv.
+//      root-owned mirror tokens travel via a one-shot credential file, never
+//      into thread env or argv. Thread commands receive only a run bearer.
 //   4. The GitHub App PRIVATE KEY exists only in Worker/DO scope. The
-//      container sees nothing but 1-hour installation tokens scoped to the
-//      resident's own repo, injected per command. Install/build executions
+//      root-owned mirror commands use 1-hour installation tokens scoped to the
+//      resident's own repo. Install/build executions
 //      (untrusted repo code) run unprivileged (worker1) and token-free
 //      (docs/decisions/0009-residents-second-credential-domain.md).
 import {
@@ -82,6 +82,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
 import { DurableObject } from "cloudflare:workers";
+import { legacyCredentialScrubCommand } from "./legacyCredentials.js";
 import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { selectBindingsToPurge } from "../../src/execution/bindingPurge.js";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
@@ -162,10 +163,7 @@ import {
 } from "../../src/execution/residentExecWrap.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
-import {
-  CREDENTIAL_EXPIRY_MARGIN_MS,
-  shouldRefreshThreadCredentials,
-} from "../../src/execution/residentCredentials.js";
+import { CREDENTIAL_EXPIRY_MARGIN_MS } from "../../src/execution/residentCredentials.js";
 import {
   recordFiring,
   scheduleForCron,
@@ -973,10 +971,8 @@ export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh
   }
   // A repudiated token must never be re-served: drop the slug's cache entry and
   // mint anew. Otherwise serve a cached token while it has more than the refresh
-  // margin left: the same threshold `shouldRefreshThreadCredentials`
-  // refreshes at, so a token the cache hands out is never one a fresh attach
-  // would immediately have to re-mint. Was 5 min — too little for a 20-minute
-  // exec to run under.
+  // margin left, so a root-owned mirror operation never starts on a token
+  // likely to expire during its network call.
   if (opts?.fresh) githubTokenCache.delete(slug);
   const cached = opts?.fresh ? undefined : githubTokenCache.get(slug);
   if (cached && systemClock() < cached.expiresAtMs - CREDENTIAL_EXPIRY_MARGIN_MS) return cached;
@@ -1218,6 +1214,9 @@ interface ThreadBinding {
    *  Absent (pre-field binding) → the next writable exec falls back to the
    *  `credentialsWrittenAt` file-age rule; cleared alongside it on attach. */
   tokenExpiresAtMs?: number;
+  /** Non-secret host of the run-bearer Git door. The bearer lives only in
+   *  the attach request and the run's per-exec environment. */
+  githubDoorHost?: string;
   /** The deps-store entry this tree's node_modules is a view of (item 59);
    *  protects the entry from eviction while the binding lives. Absent on a
    *  binding made before the store, or on a tree with no deps. */
@@ -1248,9 +1247,8 @@ interface AttachOk {
    *  the container its pi runs in. Absent when the kernel does not say. */
   container?: string;
   deps: ThreadDepsMechanism;
-  /** `ok` — credential file written; `unavailable` — writable attach but no
-   *  token (see credentialsError); `none` — read-only attach, deliberately no
-   *  credentials and an unfetchable origin (item 50). */
+  /** `ok` — writable origin uses the Git door; `unavailable` — no door;
+   *  `none` — read-only attach with an unfetchable origin (item 50). */
   credentials: "ok" | "unavailable" | "none";
   credentialsError?: string;
   /** Echo of the mode the tree was built for. */
@@ -5506,13 +5504,14 @@ export class ResidentDO extends Sandbox<Env> {
     record?: ResidentRecord,
     traceparent?: string,
     reason: RefHintReason = NO_REF_HINT_REASON,
+    githubDoor?: { baseUrl: string; bearer: string },
   ): Promise<AttachOk | ThreadErr> {
     // One step trace per attach (docs/reference/specs/tracing.md item 19): every command
     // the attach runs lands on it, and the answer carries it.
     const t0 = systemClock();
     const trace = createStepTrace(t0);
     const res = await this.stepTrace.run(trace, () =>
-      this.attachThreadTraced(threadKey, refHint, readonly, wantSha, reuse, record, t0, reason),
+      this.attachThreadTraced(threadKey, refHint, readonly, wantSha, reuse, record, t0, reason, githubDoor),
     );
     // The same steps as the resident's own `resident.attach` root (item 22).
     emitStepRoot("resident.attach", t0, trace.steps(), traceparent, "error" in res ? refusalOutcome(res) : "ok");
@@ -5529,6 +5528,7 @@ export class ResidentDO extends Sandbox<Env> {
     record: ResidentRecord | undefined,
     t0: number,
     reason: RefHintReason,
+    githubDoor?: { baseUrl: string; bearer: string },
   ): Promise<AttachOk | ThreadErr> {
     try {
       await this.ensureHydrated();
@@ -5586,6 +5586,7 @@ export class ResidentDO extends Sandbox<Env> {
           t0,
           record,
           reason,
+          githubDoor,
         );
         // The run this attach opens is now in flight until its release —
         // whatever its op counters read between the bot's calls (item 44).
@@ -5626,7 +5627,10 @@ export class ResidentDO extends Sandbox<Env> {
     t0: number,
     recordFromRoute: ResidentRecord | undefined,
     reason: RefHintReason,
+    githubDoor?: { baseUrl: string; bearer: string },
   ): Promise<AttachOk | ThreadErr> {
+    if (!readonly && !githubDoor)
+      return { error: "writable attach requires a Git door run bearer", status: 403, cause: "request" };
     try {
       await this.refreshIfStale(resourceId);
     } catch (err) {
@@ -5667,6 +5671,8 @@ export class ResidentDO extends Sandbox<Env> {
     // branch. The own-PR move remains for callers that name no branch of their
     // own but carry the typed follow-up fact.
     const storedPrior = stored.get(threadBindingKey(threadKey)) as ThreadBinding | undefined;
+    if (!readonly && storedPrior?.githubDoorHost && !githubDoor)
+      return { error: "Git door credential is required to reattach this writable tree", status: 403, cause: "request" };
     const namedRef = refHint !== null && !reason.refByDefault && reason.ownPr === null;
     const rebind = namedRef
       ? { binding: storedPrior }
@@ -5737,6 +5743,7 @@ export class ResidentDO extends Sandbox<Env> {
         record,
         binding,
         mode,
+        githubDoor,
         rollback,
         namedRef,
         refChanged: storedPrior !== undefined && storedPrior.ref !== binding.ref,
@@ -5968,6 +5975,7 @@ export class ResidentDO extends Sandbox<Env> {
     record: ResidentRecord;
     binding: ThreadBinding;
     mode: ReturnType<typeof planReadonlyAttach>;
+    githubDoor?: { baseUrl: string; bearer: string };
     rollback: () => Promise<void>;
     /** This ask named the ref; a missing named branch may not fall back. */
     namedRef: boolean;
@@ -5977,7 +5985,7 @@ export class ResidentDO extends Sandbox<Env> {
     rebound?: Rebound;
     rebindRefused?: RebindRefused;
   }): Promise<AttachOk | ThreadErr> {
-    const { threadKey, refHint, wantSha, reuse, slug, t0, facts, record, mode, rollback } = input;
+    const { threadKey, refHint, wantSha, reuse, slug, t0, facts, record, mode, rollback, githubDoor } = input;
     const { rebound, rebindRefused } = input;
     // Reassigned once, under the lock, when the bound ref turns out gone from
     // the mirror and the binding goes back to the default (item 16's second
@@ -5987,24 +5995,8 @@ export class ResidentDO extends Sandbox<Env> {
     let refChanged = input.refChanged;
     let returned: Returned | undefined;
 
-    // Command-level token mint — before the lock so mint latency
-    // never holds the mutex, and failure never blocks the attach.
-    let token: string | null = null;
-    let tokenExpiresAtMs: number | null = null;
-    let credentialsError: string | undefined;
-    if (!mode.credentialFile) {
-      // Read-only: no token for the TREE — nothing to leak, nothing to push with.
-    } else if (githubAppConfigured(this.env)) {
-      try {
-        const minted = await mintRepoScopedToken(this.env, slug);
-        token = minted.token;
-        tokenExpiresAtMs = minted.expiresAtMs;
-      } catch (err) {
-        credentialsError = errMsg(err);
-      }
-    } else {
-      credentialsError = "github-app-not-configured: GITHUB_APP_* secrets are unset";
-    }
+    // The mirror may mint a repository-scoped token as root for recovery fetches.
+    // The thread receives no installation token, even on a writable attach.
     // The mirror's recovery fetch — a ref pushed since the last refresh cycle:
     // missing from the mirror, or present at a tip that is not the commit the
     // caller expects (`wantSha`, item 51) — is the RESIDENT's operation: root,
@@ -6026,7 +6018,7 @@ export class ResidentDO extends Sandbox<Env> {
     // pre-check, the fetch under the lock and the return gate alike.
     let want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });
     const returnable = input.namedRef ? false : canReturnToDefault(binding, facts.defaultRef);
-    let fetchToken: string | null = token;
+    let fetchToken: string | null = null;
     if (
       !fetchToken &&
       githubAppConfigured(this.env) &&
@@ -6127,7 +6119,11 @@ export class ResidentDO extends Sandbox<Env> {
           throw new StepError("rev-parse", `the mirror's tip of ${JSON.stringify(binding.ref)} could not be read`);
         }
         const threadLockKey = await this.lockfileKey(sha);
-        const recreated = await this.ensureThreadWorktree(binding, sha, mode.originUrl, mode.modeSwitch, {
+        const originUrl = githubDoor && !mode.readonly ? `${githubDoor.baseUrl}/git/${slug}.git` : mode.originUrl;
+        // A reused tree can execute Git hooks during the worktree probes.
+        // Delete legacy token files as root before its first thread-user command.
+        if (mode.scrubCredentials || githubDoor) await this.scrubThreadCredentialFiles(binding);
+        const recreated = await this.ensureThreadWorktree(binding, sha, originUrl, mode.modeSwitch, {
           detached: target.kind === "sha",
           reuse,
           refChanged,
@@ -6173,9 +6169,10 @@ export class ResidentDO extends Sandbox<Env> {
 
     let deps: { deps: ThreadDepsMechanism; reconciled: boolean; depsKey?: string };
     let credentials: AttachOk["credentials"] = mode.readonly ? "none" : "unavailable";
-    let credentialsWrittenAt: number | undefined;
-    let credentialTokenExpiresAtMs: number | undefined;
     try {
+      // A reused old tree or an interrupted old attach may still have a
+      // user-readable App token. Remove it before install/build hooks run.
+      if (mode.scrubCredentials || githubDoor) await this.scrubThreadCredentials(binding);
       deps = await this.materializeThreadDeps(
         binding,
         locked.value.threadLockKey,
@@ -6183,15 +6180,14 @@ export class ResidentDO extends Sandbox<Env> {
         facts.lockfileHash,
         record.commands.install,
       );
-      if (mode.scrubCredentials) {
-        // Every read-only attach, reused tree included: a tree built before
-        // this rule (or by a writable attach on this thread) may carry a file.
-        await this.scrubThreadCredentials(binding);
-      } else if (token) {
-        credentialsWrittenAt = await this.writeThreadCredentials(binding, token);
-        // Persist the token's expiry beside the write time so the first writable
-        // exec refreshes off the token's own life, not the file's age.
-        credentialTokenExpiresAtMs = tokenExpiresAtMs ?? undefined;
+      if (githubDoor && !mode.readonly) {
+        await this.threadRunOk(
+          binding.user,
+          binding.worktreePath,
+          `git remote set-url origin ${shellQuote(`${githubDoor.baseUrl}/git/${slug}.git`)}`,
+          "worktree-door-remote",
+          DEFAULT_EXEC_TIMEOUT_MS,
+        );
         credentials = "ok";
       }
     } catch (err) {
@@ -6217,7 +6213,12 @@ export class ResidentDO extends Sandbox<Env> {
     // read-only attach scrubbed the file, a writable one either rewrote it
     // (stamped below) or could not — and "unknown" is what makes the next exec
     // re-mint.
-    const { credentialsWrittenAt: _prior, tokenExpiresAtMs: _priorExp, ...bindingSansCred } = binding;
+    const {
+      credentialsWrittenAt: _prior,
+      tokenExpiresAtMs: _priorExp,
+      githubDoorHost: _priorDoor,
+      ...bindingSansCred
+    } = binding;
     await this.ctx.storage.put(threadBindingKey(threadKey), {
       ...bindingSansCred,
       lastAttachAt: new Date(systemClock()).toISOString(),
@@ -6226,10 +6227,7 @@ export class ResidentDO extends Sandbox<Env> {
       ...(deps.depsKey ? { depsKey: deps.depsKey } : {}),
       sha: locked.value.sha,
       readonly: mode.readonly,
-      // A writable attach that could not mint keeps nothing to date: the next
-      // exec sees the file missing and re-mints (or logs and runs without).
-      ...(credentialsWrittenAt !== undefined ? { credentialsWrittenAt } : {}),
-      ...(credentialTokenExpiresAtMs !== undefined ? { tokenExpiresAtMs: credentialTokenExpiresAtMs } : {}),
+      ...(githubDoor && !mode.readonly ? { githubDoorHost: new URL(githubDoor.baseUrl).host } : {}),
     } satisfies ThreadBinding);
     // Item 55: the tree is on disk now; the next refresh instance's `measure`
     // step counts it — the admission's free-space term is a live `df`, and the
@@ -6248,7 +6246,6 @@ export class ResidentDO extends Sandbox<Env> {
       ...(container !== undefined ? { container } : {}),
       deps: deps.deps,
       credentials,
-      ...(credentialsError ? { credentialsError } : {}),
       readonly: mode.readonly,
       mutexWaitMs: locked.waitedMs,
       attachMs: systemClock() - t0,
@@ -6281,8 +6278,8 @@ export class ResidentDO extends Sandbox<Env> {
    *  need write access there), and hardlinked objects would let a chown-ed
    *  owner chmod shared inodes under every other tree. A no-hardlink clone
    *  gives the thread user a fully-owned repo whose writes stay in its own
-   *  .git; `origin` is repointed at GitHub so fetch/push use the per-attach
-   *  credential file rather than the (deliberately unreadable) mirror. */
+   *  .git; writable `origin` is repointed at the Git door so fetch/push use
+   *  the run bearer rather than the (deliberately unreadable) mirror. */
   private async ensureThreadWorktree(
     binding: ThreadBinding,
     sha: string,
@@ -6363,7 +6360,7 @@ export class ResidentDO extends Sandbox<Env> {
       });
     }
     await this.runOk(["chown", "-R", `${binding.user}:${binding.user}`, wt], "worktree-chown");
-    // Writable: origin → GitHub (fetch/push via the per-attach credential file).
+    // Writable: origin → Git door (fetch/push with the run bearer).
     // Read-only: origin stays the local mirror, which thread users cannot
     // traverse (root:worker1 750) — fetch/push fail legibly, while the
     // clone-time remote-tracking refs still serve `git diff origin/<base>...HEAD`.
@@ -6395,16 +6392,25 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  /** Read-only attach (item 50): make sure the tree carries no credential file
-   *  and no credential helper — idempotent, run on every read-only attach. */
+  /** Before a thread runs, remove both legacy App-token locations: the Git
+   * store and the staging file an interrupted old attach could leave behind.
+   * A deletion failure aborts attach before any model command. */
   private async scrubThreadCredentials(binding: ThreadBinding): Promise<void> {
-    const cred = `${binding.worktreePath}/.git/github-credentials`;
+    await this.scrubThreadCredentialFiles(binding);
     await this.threadRunOk(
       binding.user,
       binding.worktreePath,
-      `rm -f ${cred} && (git config --unset-all credential.helper || true)`,
-      "thread-cred-scrub",
+      "git config --unset-all credential.helper || true",
+      "thread-cred-helper-scrub",
       DEFAULT_EXEC_TIMEOUT_MS,
+    );
+  }
+
+  private async scrubThreadCredentialFiles(binding: ThreadBinding): Promise<void> {
+    await this.runOk(
+      legacyCredentialScrubCommand(binding.worktreePath, `/workspace/.stage-${binding.user}`),
+      "thread-cred-file-scrub",
+      { timeoutMs: DEFAULT_EXEC_TIMEOUT_MS },
     );
   }
 
@@ -7018,78 +7024,6 @@ export class ResidentDO extends Sandbox<Env> {
     this.stageDirsReady.add(user);
   }
 
-  /** Per-attach credential file: the minted token reaches the
-   *  worktree via the SDK file API into a 700 per-user staging dir, then a
-   *  privilege-dropped `cat` into `.git/github-credentials` (0600, owned by
-   *  the thread user). The token never appears in argv or process-wide env —
-   *  `ps` from another thread user sees file PATHS at most. The worktree's
-   *  git credential helper points at the file. Returns the write time the
-   *  caller persists as `credentialsWrittenAt`. */
-  private async writeThreadCredentials(binding: ThreadBinding, token: string): Promise<number> {
-    const stageDir = `/workspace/.stage-${binding.user}`;
-    const stage = `${stageDir}/cred`;
-    await this.ensureStageDir(binding.user, stageDir);
-    await this.writeFile(stage, `https://x-access-token:${token}@github.com\n`);
-    await this.runOk(
-      ["sh", "-c", `chown ${binding.user}:${binding.user} ${stage} && chmod 600 ${stage}`],
-      "stage-perms",
-    );
-    const cred = `${binding.worktreePath}/.git/github-credentials`;
-    await this.threadRunOk(
-      binding.user,
-      binding.worktreePath,
-      `umask 077 && cat ${stage} > ${cred} && rm -f ${stage} && chmod 600 ${cred} && git config credential.helper 'store --file=${cred}'`,
-      "thread-cred",
-      DEFAULT_EXEC_TIMEOUT_MS,
-    );
-    return systemClock();
-  }
-
-  /** Per-exec credential refresh: the attach-time token lives one
-   *  hour, a coding run can push later than that, and git's `store` helper
-   *  erases a 401'd credential from the file — so before every writable exec,
-   *  size the file (one `stat`) and let the pure `shouldRefreshThreadCredentials`
-   *  decide; on refresh, re-mint (cached per slug) and rewrite. Returns the
-   *  new write time, or undefined when nothing changed. Never throws: a mint
-   *  failure is command-level — logged, and the command runs with whatever the
-   *  file holds (never a lifecycle transition). Unconfigured App → nothing to
-   *  refresh, silently (attach already reported `credentials:"unavailable"`). */
-  private async refreshThreadCredentialsIfDue(
-    binding: ThreadBinding,
-  ): Promise<{ writtenAtMs: number; tokenExpiresAtMs: number } | undefined> {
-    if (binding.readonly || !githubAppConfigured(this.env)) return undefined;
-    const cred = `${binding.worktreePath}/.git/github-credentials`;
-    const sized = await this.run(["stat", "-c", "%s", cred]);
-    const fileBytes = sized.exitCode === 0 ? Number.parseInt(sized.stdout.trim(), 10) : null;
-    const decision = shouldRefreshThreadCredentials({
-      writtenAtMs: binding.credentialsWrittenAt ?? null,
-      tokenExpiresAtMs: binding.tokenExpiresAtMs ?? null,
-      nowMs: systemClock(),
-      fileBytes: fileBytes === null || Number.isNaN(fileBytes) ? null : fileBytes,
-      readonly: binding.readonly ?? false,
-    });
-    if (!decision.refresh) return undefined;
-    const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
-    try {
-      // An `empty` file means git's `store` helper erased a token GitHub had
-      // REJECTED (401) — so the per-slug cache may still hold that same dead
-      // token, and serving it would rewrite the rejection and 401 the next
-      // exec too. Force a fresh mint for a repudiated token; an
-      // expiry-driven refresh still reuses the cache.
-      const minted = await mintRepoScopedToken(this.env, resource.slice("repo:".length), {
-        fresh: decision.reason === "empty",
-      });
-      const writtenAt = await this.writeThreadCredentials(binding, minted.token);
-      console.log(`credentials: refreshed for ${binding.threadKey} (${decision.reason})`);
-      return { writtenAtMs: writtenAt, tokenExpiresAtMs: minted.expiresAtMs };
-    } catch (err) {
-      console.log(
-        `credentials: refresh failed (${decision.reason}: ${errMsg(err)}) — command runs without a fresh token`,
-      );
-      return undefined;
-    }
-  }
-
   /** Shared entry checks for exec/read/write: hydrated resident, live
    *  binding, worktree actually on disk (the container may have slept since
    *  the last attach — disk is cache, re-attach recreates). */
@@ -7213,15 +7147,17 @@ export class ResidentDO extends Sandbox<Env> {
     const pre = await this.threadPreflight(threadKey);
     if ("error" in pre) return pre;
     const { binding } = pre;
-    const refreshed = await this.refreshThreadCredentialsIfDue(binding);
+    if (!binding.readonly && !binding.githubDoorHost)
+      return { error: "writable command requires a Git door binding", status: 403, cause: "request" };
+    if (
+      binding.githubDoorHost &&
+      (env?.GH_HOST !== binding.githubDoorHost ||
+        !/^sbr_[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]{20,128}$/.test(env?.GH_ENTERPRISE_TOKEN ?? ""))
+    )
+      return { error: "Git door run bearer is missing from this command", status: 403, cause: "request" };
     await this.ctx.storage.put(threadBindingKey(threadKey), {
       ...binding,
       lastAttachAt: new Date(systemClock()).toISOString(), // exec counts as activity for the sweep
-      // A refresh re-mints and rewrites: persist both the new write time and the
-      // new token expiry so the next exec's decision keys on this token.
-      ...(refreshed
-        ? { credentialsWrittenAt: refreshed.writtenAtMs, tokenExpiresAtMs: refreshed.tokenExpiresAtMs }
-        : {}),
     } satisfies ThreadBinding);
 
     // A runtime replacement or a control reset under the command propagates to
@@ -9636,6 +9572,30 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
   const refByDefault = parseRefByDefault(body.refByDefault);
   if ("error" in refByDefault) return json({ error: refByDefault.error }, 400);
   const reason: RefHintReason = { ownPr: parsedOwnPr.ownPr, refByDefault: refByDefault.refByDefault };
+  let githubDoor: { baseUrl: string; bearer: string } | undefined;
+  if (body.githubDoor !== undefined) {
+    const value = body.githubDoor as Record<string, unknown>;
+    if (!value || typeof value !== "object" || typeof value.baseUrl !== "string" || typeof value.bearer !== "string")
+      return json({ error: "invalid Git door attach credential" }, 400);
+    let url: URL;
+    try {
+      url = new URL(value.baseUrl);
+    } catch {
+      return json({ error: "invalid Git door base URL" }, 400);
+    }
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.pathname !== "/" ||
+      url.search ||
+      url.hash ||
+      !/^sbr_[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]{20,128}$/.test(value.bearer)
+    )
+      return json({ error: "invalid Git door attach credential" }, 400);
+    githubDoor = { baseUrl: url.origin, bearer: value.bearer };
+  }
+  if (!readonly.readonly && !githubDoor) return json({ error: "writable attach requires a Git door run bearer" }, 403);
   // Post-validation, the answer streams like /exec (item 59): heartbeat
   // whitespace then ONE JSON document over HTTP 200, so an attach that waits
   // on a deps install (minutes) cannot lose the connection the way a plain
@@ -9653,6 +9613,7 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
         ctx.record,
         traceparent,
         reason,
+        githubDoor,
       ),
     ),
     ({ result, levels }) => ({ ...(result as object), ...(levels ? { levels } : {}) }),
