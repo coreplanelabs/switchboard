@@ -217,6 +217,10 @@ export interface RepoContext {
    *  not verify, try again" reply. Never set alongside `repo`; outranks `rejectedRepo`
    *  when both would apply (a registry that was down cannot have refused). */
   unverifiedRepo?: string;
+  /** A routed task opened with one PR but cited another. Refuse before the
+   *  workspace and model turn so neither a citation nor thread history can
+   *  silently replace its target. */
+  prConflict?: { target: string; cited: string };
 }
 
 // GitHub owner: alphanumeric + hyphens, no leading/trailing hyphen, ≤39.
@@ -242,11 +246,44 @@ function unwrapSlack(text: string): string {
 }
 
 /** A current, unquoted `PR #N` reference. Its repository must still come from
- * a durable thread PR; the number alone never establishes one. */
+ * a durable thread PR or an explicitly routed task; the number alone never
+ * establishes one. */
 export function barePrNumberOf(text: string): number | undefined {
   const token = /\b(?:PR|pull request)\s*#(\d+)\b/i.exec(unwrapSlack(text).replace(CODE_SPAN, " "))?.[1];
   const number = token === undefined ? undefined : Number(token);
   return number !== undefined && Number.isSafeInteger(number) && number > 0 ? number : undefined;
+}
+
+/** A coordinator-style routing clause that starts its task with one PR. */
+function routedPrTargetOf(text: string): { repo: string; number: number } | undefined {
+  const clean = unwrapSlack(text).replace(CODE_SPAN, " ");
+  const match =
+    /^\s*(?:(?:<@[^>\s]+>|[a-z]+:\S+)\s+)*in\s+(\S+)(?:\s+on\s+(?:the\s+)?branch\s+\S+)?\s*:\s*(?:PR|pull request)\s*#(\d+)\b/i.exec(
+      clean,
+    );
+  const repo = match === null ? undefined : slugOf(match[1]!);
+  const number = match === null ? undefined : Number(match[2]);
+  return repo !== undefined && number !== undefined && Number.isSafeInteger(number) && number > 0
+    ? { repo, number }
+    : undefined;
+}
+
+/** Every PR citation the resolver can bind must agree with the routed target. */
+function conflictingRoutedPrOf(text: string, target: { repo: string; number: number }): string | undefined {
+  const clean = unwrapSlack(text);
+  const refs: Array<{ repo: string; number: number }> = [];
+  for (const match of clean.replace(CODE_SPAN, " ").matchAll(/\b(?:PR|pull request)\s*#(\d+)\b/gi))
+    refs.push({ repo: target.repo, number: Number(match[1]) });
+  for (const match of clean.matchAll(/https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+)\/pull\/(\d+)/gi)) {
+    const repo = slugOf(`${match[1]}/${match[2]}`);
+    if (repo !== undefined) refs.push({ repo, number: Number(match[3]) });
+  }
+  for (const match of clean.matchAll(/\b([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)#(\d+)\b/g)) {
+    const repo = slugOf(match[1]!);
+    if (repo !== undefined) refs.push({ repo, number: Number(match[2]) });
+  }
+  const conflict = refs.find((ref) => ref.repo !== target.repo || ref.number !== target.number);
+  return conflict === undefined ? undefined : `${conflict.repo}#${conflict.number}`;
 }
 
 /** A PR URL or `owner/name#N` in the current message, before any thread
@@ -559,6 +596,10 @@ export async function resolveRepoContext(
   operatorRepo?: string,
 ): Promise<RepoContext> {
   const s = extractSignals(msg.text);
+  const routedPr = routedPrTargetOf(msg.text);
+  const conflictingPr = routedPr === undefined ? undefined : conflictingRoutedPrOf(msg.text, routedPr);
+  if (routedPr !== undefined && conflictingPr !== undefined)
+    return { prConflict: { target: `${routedPr.repo}#${routedPr.number}`, cited: conflictingPr } };
   const thread = threadSignals(history);
   // The first bare candidate the probe refused, remembered so the dispatcher
   // can say why nothing was bound — only meaningful when `repo` stays
@@ -644,10 +685,13 @@ export async function resolveRepoContext(
     unverified = undefined;
   }
 
-  // A bare PR number has a repository only in a thread with a durable PR.
-  // Resolve it against that repository so the current request can override
-  // an older cited PR without treating arbitrary issue prose as a target.
-  const bareNumber = !s.pr && repo === records?.pr?.repo ? barePrNumberOf(msg.text) : undefined;
+  // A bare PR number has a repository in a thread with a durable PR, or when
+  // an explicitly addressed repo's routed task OPENS with that PR. Spawned
+  // coordinator children have no run-record signal: without the routed form,
+  // an older PR in their thread can override the child contract's target.
+  // The conflict check above already rejected citations of another PR.
+  const bareNumber =
+    !s.pr && (repo === records?.pr?.repo || routedPr?.repo === repo) ? barePrNumberOf(msg.text) : undefined;
   const namedPr = s.pr ?? (repo && bareNumber !== undefined ? { repo, number: bareNumber } : undefined);
 
   // PR head — one REST call whenever the CURRENT message names a PR of the

@@ -179,7 +179,16 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
       instanceId: "plan-old",
       unit: "U12",
     });
+    expect(
+      parseOriginalUnitRecoveryRequest("recover unit plan-old:U12\n*Sent using* ChatGPT Connector (Local MCP)"),
+    ).toEqual({ instanceId: "plan-old", unit: "U12" });
+    expect(
+      parseOriginalUnitRecoveryRequest(
+        parseDirectives("agent:ship recover unit plan-old:U12\n*Sent using* ChatGPT Connector (Local MCP)").text,
+      ),
+    ).toEqual({ instanceId: "plan-old", unit: "U12" });
     expect(parseOriginalUnitRecoveryRequest("recover unit plan-old:U12 now")).toBeUndefined();
+    expect(parseOriginalUnitRecoveryRequest("recover unit plan-old:U12\n*Sent using* an unknown app")).toBeUndefined();
     expect(parseOriginalUnitRecoveryRequest("recover plan-old:U12")).toBeUndefined();
     expect(parseOriginalUnitRecoveryRequest("recover unit not-a-key")).toBeUndefined();
   });

@@ -336,6 +336,58 @@ describe("resolveRepoContext: PR-source flags for ship", () => {
     expect(other.prIsThreadOwn).toBeUndefined();
   });
 
+  it("a ship child whose task opens with the existing PR binds that PR independently of its durable publication", async () => {
+    const history = [{ role: "user" as const, text: "review https://github.com/acme/api/pull/7", at: 1_000 }];
+    stubFetch({ body: { state: "open", head: { ref: "fix/quota", sha: SHA, repo: { full_name: "acme/api" } } } });
+    const ctx = await resolveRepoContext(
+      msg(
+        "in acme/api on branch fix/quota: PR #8 was merge-ready, but now conflicts with main. Resolve the conflict on the existing branch and keep PR #8.",
+      ),
+      history,
+    );
+    expect(ctx).toMatchObject({ repo: "acme/api", pr: 8, prFromMessage: true, ref: "fix/quota", headSha: SHA });
+  });
+
+  it("a routed task citing two PRs refuses the conflicting target before inheriting a prior PR", async () => {
+    const history = [{ role: "user" as const, text: "review https://github.com/acme/api/pull/7", at: 1_000 }];
+    const ctx = await resolveRepoContext(
+      msg("in acme/api on branch fix/quota: PR #8 supersedes PR #7. Keep PR #8."),
+      history,
+    );
+    expect(ctx).toEqual({ prConflict: { target: "acme/api#8", cited: "acme/api#7" } });
+  });
+
+  it("a routed task refuses a conflicting PR URL even when the URL would otherwise be the strongest signal", async () => {
+    const ctx = await resolveRepoContext(
+      msg("in acme/api on branch fix/quota: PR #8 needs review; compare https://github.com/acme/api/pull/7 first."),
+    );
+    expect(ctx).toEqual({ prConflict: { target: "acme/api#8", cited: "acme/api#7" } });
+  });
+
+  it("a quoted PR URL cannot override a routed PR without triggering the conflict gate", async () => {
+    const ctx = await resolveRepoContext(
+      msg("in acme/api on branch fix/quota: PR #8 needs review; see `https://github.com/acme/api/pull/7`."),
+    );
+    expect(ctx).toEqual({ prConflict: { target: "acme/api#8", cited: "acme/api#7" } });
+    const shorthand = await resolveRepoContext(
+      msg("in acme/api on branch fix/quota: PR #8 needs review; see `acme/api#7`."),
+    );
+    expect(shorthand).toEqual({ prConflict: { target: "acme/api#8", cited: "acme/api#7" } });
+  });
+
+  it("a routed task refuses a PR URL in another repo and accepts its own PR URL", async () => {
+    const different = await resolveRepoContext(
+      msg("in acme/api on branch fix/quota: PR #8 needs review; see https://github.com/acme/web/pull/8."),
+    );
+    expect(different).toEqual({ prConflict: { target: "acme/api#8", cited: "acme/web#8" } });
+
+    stubFetch({ body: { state: "open", head: { ref: "fix/quota", sha: SHA, repo: { full_name: "acme/api" } } } });
+    const matching = await resolveRepoContext(
+      msg("in acme/api on branch fix/quota: PR #8 needs review; see https://github.com/acme/api/pull/8."),
+    );
+    expect(matching).toMatchObject({ repo: "acme/api", pr: 8, prFromMessage: true });
+  });
+
   it("a PR named in the current message sets prFromMessage, and its bound head ref sets refFromPr", async () => {
     stubFetch({ body: { state: "open", head: { ref: "feat/x", sha: SHA, repo: { full_name: "acme/api" } } } });
     const ctx = await resolveRepoContext(msg("look into https://github.com/acme/api/pull/508 for the regression"), []);
