@@ -1889,6 +1889,44 @@ const samePublicationOwner = (
   right: { instanceId: string; unit: string },
 ) => left?.instanceId === right.instanceId && left.unit === right.unit;
 
+/** Bindings cross independent serializers; property insertion order is not authority. */
+const samePublicationBinding = (
+  left: ExistingPrPublicationBinding | undefined,
+  right: ExistingPrPublicationBinding,
+): boolean =>
+  left !== undefined &&
+  left.repo === right.repo &&
+  left.pr === right.pr &&
+  left.headRef === right.headRef &&
+  left.baseRef === right.baseRef &&
+  left.expectedHeadSha === right.expectedHeadSha &&
+  left.publicationRef === right.publicationRef &&
+  samePublicationOwner(left.owner, right.owner);
+
+/** Replay the durable wake chain, not a child's claimed /rN. Each same-segment
+ * lease answer opens exactly one resume; gaps or two answers for one idle
+ * cannot authorize a current publication step. This reconstructs identity,
+ * never a missing lease start or additional recovery budget. */
+function publicationStepPrefix(row: CoordinatorUnit): string {
+  const segment = row.segments?.reduce((latest, entry) => Math.max(latest, entry.index), 1) ?? 1;
+  if ((row.segments?.filter((entry) => entry.index === segment).length ?? 0) > 1)
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  const base = stepPrefixOf(row.unit, segment > 1 ? { segment, renewalsSpent: 0, spendUsd: null } : undefined);
+  const resumes = Object.entries(row.wakes ?? {}).filter(
+    ([, answer]) => answer.kind === "segment" && answer.index === segment && answer.leaseMs !== undefined,
+  );
+  let prefix = base;
+  for (let attempt = 1; attempt <= resumes.length; attempt += 1) {
+    const idlePrefix = `${prefix}/idle/`;
+    const answers = resumes.filter(
+      ([key]) => key.startsWith(idlePrefix) && /^[1-9][0-9]*$/.test(key.slice(idlePrefix.length)),
+    );
+    if (answers.length !== 1) throw new PublicationBindingRefusal("publication_facts_mismatch");
+    prefix = `${base}/r${attempt}`;
+  }
+  return prefix;
+}
+
 /** Advance a publication binding only to the exact head recorded by its completed
  * authorized findings child. An unrelated force-push can never rewrite the durable
  * publication binding merely because the branch currently points there. */
@@ -1903,11 +1941,7 @@ async function advanceFindingsPublication(
   const child = await deps.runs.getRun(runId, { include: "messages" });
   const owner = { instanceId: instance.id, unit: row.unit };
   const latestReview = [...row.rounds].reverse().find((round) => round.agent === "review");
-  const segment = row.segments?.reduce((latest, entry) => Math.max(latest, entry.index), 1) ?? 1;
-  const prefix =
-    row.recovery !== undefined
-      ? `${row.unit}/recovery`
-      : stepPrefixOf(row.unit, segment > 1 ? { segment, renewalsSpent: 0, spendUsd: null } : undefined);
+  const prefix = row.recovery !== undefined ? `${row.unit}/recovery` : publicationStepPrefix(row);
   const findingsPrefix = `${instance.id}:${prefix}/${latestReview?.index}/findings`;
   // Ordinary findings must carry the exact authority used at dispatch, not
   // merely a receipt for whatever head happens to be on the remote now.
@@ -1923,21 +1957,42 @@ async function advanceFindingsPublication(
       tag?.parentInstanceId !== instance.id ||
       tag.unit !== row.unit ||
       tag.base !== instance.base ||
-      JSON.stringify(tag.publication) !== JSON.stringify(row.publication)
+      !samePublicationBinding(tag.publication, row.publication)
     )
       throw new PublicationBindingRefusal("publication_facts_mismatch");
     const listing = await deps.runs.listRuns({
-      status: "finished",
+      status: "all",
       visibleTo: EVERY_RUN,
       threadKey: row.threadKey ?? instance.threadKey,
       limit: RUN_LIST_MAX_LIMIT,
     });
+    const attempts = listing.runs.filter(
+      (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, findingsPrefix),
+    );
+    // A failed attempt without a push is not a second publication. Only an
+    // earlier, finished, same-author attempt may be disregarded: a second
+    // success, any push, overlap, or live child keeps the evidence ambiguous.
     if (
       listing.storeUnavailable ||
       listing.nextBefore !== undefined ||
-      listing.runs.filter(
-        (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, findingsPrefix),
-      ).length !== 1
+      attempts.filter((run) => run.id === runId).length !== 1 ||
+      attempts.some(
+        (run) =>
+          run.id !== runId &&
+          !(
+            run.finished &&
+            (run.status === "failed" || run.status === "interrupted") &&
+            run.agent === "coding" &&
+            run.userId === instance.userId &&
+            run.repo?.toLowerCase() === instance.repo.toLowerCase() &&
+            run.threadKey === (row.threadKey ?? instance.threadKey) &&
+            run.startedAt >= latestReview.at &&
+            run.finishedAt !== undefined &&
+            run.finishedAt >= run.startedAt &&
+            run.finishedAt <= child.value.startedAt &&
+            (run.pushed?.length ?? 0) === 0
+          ),
+      )
     )
       throw new PublicationBindingRefusal("publication_facts_mismatch");
   }
@@ -2279,7 +2334,7 @@ export async function recoverOriginalUnit(
     const reviewThreadKey = row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey;
     const unitThreadKey = row.threadKey ?? instance.threadKey;
     const listing = await deps.runs.listRuns({
-      status: publication === undefined ? "all" : "finished",
+      status: "all",
       visibleTo: EVERY_RUN,
       threadKey: reviewThreadKey,
       limit: RUN_LIST_MAX_LIMIT,
@@ -2288,7 +2343,7 @@ export async function recoverOriginalUnit(
       unitThreadKey === reviewThreadKey
         ? listing
         : await deps.runs.listRuns({
-            status: publication === undefined ? "all" : "finished",
+            status: "all",
             visibleTo: EVERY_RUN,
             threadKey: unitThreadKey,
             limit: RUN_LIST_MAX_LIMIT,
@@ -2408,34 +2463,73 @@ export async function recoverOriginalUnit(
     )
       return json(409, { ok: false, error: "recovery_facts_mismatch", at });
 
-    const findingsStep = `${segmentPrefix}/${boundary.index}/findings/pr-check`;
-    const findingsPrefix = `${instance.id}:${segmentPrefix}/${boundary.index}/findings`;
+    const findingsStep = `${segmentPrefix}/${boundary.index}/findings`;
+    const findingsPrefix = `${instance.id}:${findingsStep}`;
     const headMoved = facts.headSha !== reviewedHead || expectedHead !== reviewedHead;
-    const completedFindings = unitListing.runs.filter(
-      (run) =>
-        boundary.outcome === "request_changes" &&
-        row.ending?.cause === "step_threw" &&
-        row.ending.step === findingsStep &&
-        row.ending.round === boundary.index &&
-        (expectedHead === reviewedHead || expectedHead === facts!.headSha) &&
-        run.finished &&
-        run.status === "completed" &&
-        run.agent === "coding" &&
-        run.parentInstanceId === instance.id &&
-        run.userId === instance.userId &&
-        run.repo?.toLowerCase() === instance.repo.toLowerCase() &&
-        run.threadKey === unitThreadKey &&
-        isStepAttempt(run.idempotencyKey, findingsPrefix) &&
-        run.headSha === facts!.headSha &&
-        (!headMoved || run.pushed?.some((push) => push.ref === row.branch && push.sha === facts!.headSha) === true) &&
-        run.startedAt >= (candidates[0]!.finishedAt ?? candidates[0]!.startedAt) &&
-        (run.finishedAt === undefined || run.finishedAt <= row.ending.at),
-    );
-    if (completedFindings.length > 1 || (headMoved && completedFindings.length !== 1))
-      return json(409, { ok: false, error: "recovery_head_moved", at });
-    if (completedFindings.length === 1) {
-      findingsRunId = completedFindings[0]!.id;
-      findingsKey = completedFindings[0]!.idempotencyKey!;
+    const failedStep = row.ending.step;
+    // Recognize check-shaped failures before validating the exact action. A
+    // malformed suffix or trailing path must not fall through to more coding.
+    if (row.ending.cause === "step_threw" && failedStep?.includes("/pr-check") === true) {
+      const checkedStep = failedStep.slice(0, -"/pr-check".length);
+      // A failed post-findings check is never permission to code again. Even
+      // when the head did not move, its exact completed attempt must be proven.
+      if (
+        !failedStep.endsWith("/pr-check") ||
+        boundary.outcome !== "request_changes" ||
+        !isStepAttempt(checkedStep, findingsStep) ||
+        row.ending.round !== boundary.index
+      )
+        return json(409, { ok: false, error: "recovery_head_moved", at });
+      const attempts = unitListing.runs.filter(
+        (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, findingsPrefix),
+      );
+      const checkedAttempts = attempts.filter((run) => run.idempotencyKey === `${instance.id}:${checkedStep}`);
+      const completed = checkedAttempts.length === 1 ? checkedAttempts[0] : undefined;
+      const reviewFinishedAt = review.finishedAt;
+      if (
+        reviewFinishedAt === undefined ||
+        completed === undefined ||
+        !completed.finished ||
+        completed.status !== "completed" ||
+        completed.agent !== "coding" ||
+        completed.userId !== instance.userId ||
+        completed.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+        completed.threadKey !== unitThreadKey ||
+        (completed.pr !== undefined &&
+          (completed.pr.number !== pr.number ||
+            (completed.pr.head !== undefined && completed.pr.head !== row.branch))) ||
+        completed.headSha !== facts.headSha ||
+        (expectedHead !== reviewedHead && expectedHead !== facts.headSha) ||
+        completed.pushed?.some((push) => push.ref !== row.branch) === true ||
+        (headMoved &&
+          completed.pushed?.some((push) => push.ref === row.branch && push.sha === facts!.headSha) !== true) ||
+        completed.startedAt < reviewFinishedAt ||
+        completed.finishedAt === undefined ||
+        completed.finishedAt < completed.startedAt ||
+        completed.finishedAt > row.ending.at ||
+        // Inspect every attempt, not just runs matching the current PR head:
+        // any competing success or push remains ambiguous after a later push.
+        attempts.some(
+          (run) =>
+            run.id !== completed.id &&
+            !(
+              run.finished &&
+              (run.status === "failed" || run.status === "interrupted") &&
+              run.agent === "coding" &&
+              run.userId === instance.userId &&
+              run.repo?.toLowerCase() === instance.repo.toLowerCase() &&
+              run.threadKey === unitThreadKey &&
+              run.startedAt >= reviewFinishedAt &&
+              run.finishedAt !== undefined &&
+              run.finishedAt >= run.startedAt &&
+              run.finishedAt <= completed.startedAt &&
+              (run.pushed?.length ?? 0) === 0
+            ),
+        )
+      )
+        return json(409, { ok: false, error: "recovery_head_moved", at });
+      findingsRunId = completed.id;
+      findingsKey = completed.idempotencyKey!;
       expectedHead = facts.headSha;
       kind = "review";
       round = boundary.index + 1;
@@ -2444,7 +2538,10 @@ export async function recoverOriginalUnit(
         lastPush: expectedHead,
         publication: { ...publication, expectedHeadSha: expectedHead },
       };
-    } else expectedHead = reviewedHead;
+    } else {
+      if (headMoved) return json(409, { ok: false, error: "recovery_head_moved", at });
+      expectedHead = reviewedHead;
+    }
     const floor = minutesToMs(leaseMinimum(kind === "findings" ? "fix" : "review"));
     if (!Number.isFinite(remainingMs) || remainingMs < floor)
       return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
