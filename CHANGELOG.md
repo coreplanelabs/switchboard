@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.266.1](https://github.com/coreplanelabs/switchboard/compare/v1.266.0...v1.266.1) (2026-09-26)
+
+
+### Bug fixes
+
+* keep GitHub App credentials outside workspace runs ([#2431](https://github.com/coreplanelabs/switchboard/issues/2431)) ([17795aa](https://github.com/coreplanelabs/switchboard/commit/17795aa48b52a76b399ba9a9a5b48e5fb0a1e72d))
+* **runs:** preserve run bounds after resident waits ([#2428](https://github.com/coreplanelabs/switchboard/issues/2428)) ([fd6dee9](https://github.com/coreplanelabs/switchboard/commit/fd6dee931d6ac790061642b7b488ab079d81b50d))
+* **ship:** recover original units beyond unrelated history ([#2425](https://github.com/coreplanelabs/switchboard/issues/2425)) ([816bcfa](https://github.com/coreplanelabs/switchboard/commit/816bcfa9892aa8094cd82757be4f95187f8bfda6))
+
 ## [1.266.0](https://github.com/coreplanelabs/switchboard/compare/v1.265.1...v1.266.0) (2026-09-26)
 
 
