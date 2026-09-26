@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.265.0](https://github.com/coreplanelabs/switchboard/compare/v1.264.0...v1.265.0) (2026-09-26)
+
+
+### Features
+
+* **authz:** verify human proofs for offline account linking ([#2401](https://github.com/coreplanelabs/switchboard/issues/2401)) ([68e523a](https://github.com/coreplanelabs/switchboard/commit/68e523a7c06a06141f00cd81340fc9aecb8a0705))
+
+
+### Bug fixes
+
+* **harness:** parse multiline pushes without extra refspecs ([#2408](https://github.com/coreplanelabs/switchboard/issues/2408)) ([345ed44](https://github.com/coreplanelabs/switchboard/commit/345ed4416e7b0d8be7a86bd9d2516f5490f96cb1))
+* **ship:** honor PR numbers in completed unit threads ([#2409](https://github.com/coreplanelabs/switchboard/issues/2409)) ([e95df26](https://github.com/coreplanelabs/switchboard/commit/e95df261ef9be23f075cc80f37d1baec933e6d9d))
+* **ship:** name mismatched finding IDs in failed rounds ([#2403](https://github.com/coreplanelabs/switchboard/issues/2403)) ([d1eb938](https://github.com/coreplanelabs/switchboard/commit/d1eb938ac7f17b7d9f37900dda2ab22638eb1732))
+
 ## [1.264.0](https://github.com/coreplanelabs/switchboard/compare/v1.263.0...v1.264.0) (2026-09-26)
 
 
