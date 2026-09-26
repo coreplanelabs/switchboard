@@ -1044,7 +1044,15 @@ async function runUnit(
     addressSeveritySource: plan.addressSeveritySource,
     // Recovery spends only the lease already carried by the claim. It never
     // opens another segment or idles for a renewal in this checkpoint.
-    grant: row?.recovery !== undefined ? { renewals: 0 } : plan.grant,
+    grant:
+      row?.recovery === undefined
+        ? plan.grant
+        : (row.recovery.accounting?.grant ??
+          // A missing capped carry must still stop before dispatch, while an
+          // uncapped legacy checkpoint must not acquire plan renewals.
+          (plan.grant?.costCapUsd !== undefined
+            ? { renewals: 0, costCapUsd: plan.grant.costCapUsd }
+            : { renewals: 0 })),
     grantSource: plan.grantSource,
     verbosity: plan.verbosity,
     idleDays: row?.recovery !== undefined ? 0 : plan.idleDays,
@@ -1055,7 +1063,13 @@ async function runUnit(
     ...(lastPush !== undefined ? { lastPush } : {}),
     ...(session !== undefined ? { session } : {}),
     ...(row?.recovery !== undefined
-      ? { recovery: { remainingMs: row.recovery.remainingMs, unitKey: `${instanceId}:${unit}` } }
+      ? {
+          recovery: {
+            remainingMs: row.recovery.remainingMs,
+            unitKey: `${instanceId}:${unit}`,
+            ...(row.recovery.accounting !== undefined ? { renewalsSpent: row.recovery.accounting.renewalsSpent } : {}),
+          },
+        }
       : {}),
   };
   let state: UnitPipelineState =
@@ -1066,6 +1080,7 @@ async function runUnit(
           pr: row.pr!,
           expectedHeadSha: row.recovery.expectedHeadSha,
           reviewRunId: row.recovery.reviewRunId,
+          ...(row.recovery.accounting !== undefined ? { spendUsd: row.recovery.accounting.spendUsd } : {}),
           ...(row.recovery.findingsRunId !== undefined ? { findingsRunId: row.recovery.findingsRunId } : {}),
           ...(row.recovery.findings !== undefined ? { findings: row.recovery.findings } : {}),
         })
