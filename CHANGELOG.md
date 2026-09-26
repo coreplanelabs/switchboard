@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.266.0](https://github.com/coreplanelabs/switchboard/compare/v1.265.1...v1.266.0) (2026-09-26)
+
+
+### Features
+
+* **coding:** inspect and retry Depot CI through the edge ([#2413](https://github.com/coreplanelabs/switchboard/issues/2413)) ([a941941](https://github.com/coreplanelabs/switchboard/commit/a9419417ac34710cb9c43c0abb093f6c53905fbd))
+* **web:** stage disabled account-link consent ([#2407](https://github.com/coreplanelabs/switchboard/issues/2407)) ([9caf6b3](https://github.com/coreplanelabs/switchboard/commit/9caf6b3562be30af91c3065e3b2b666e0b2bc708))
+
+
+### Bug fixes
+
+* **ship:** keep existing-PR recovery bound and callable ([#2422](https://github.com/coreplanelabs/switchboard/issues/2422)) ([481ef85](https://github.com/coreplanelabs/switchboard/commit/481ef85b0175e5a86133511177b9180b204b64c1))
+* **ship:** keep named PRs bound across stopped pipelines ([#2418](https://github.com/coreplanelabs/switchboard/issues/2418)) ([3b2ea78](https://github.com/coreplanelabs/switchboard/commit/3b2ea78408a1e20aef4386014abaa8cfc08452f5))
+* **ship:** refuse unproved historical recovery authority ([#2419](https://github.com/coreplanelabs/switchboard/issues/2419)) ([546381f](https://github.com/coreplanelabs/switchboard/commit/546381f182f97541fd041a8e23579391a4843b5f))
+
 ## [1.265.1](https://github.com/coreplanelabs/switchboard/compare/v1.265.0...v1.265.1) (2026-09-26)
 
 
