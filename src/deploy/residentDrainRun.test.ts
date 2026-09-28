@@ -20,7 +20,8 @@ import { deployStep, type SandboxGateDeps, type StepExec } from "./run.js";
 // step drains the fleet: `POST /drain` before its first attempt when the admin
 // bearer is in the env, a wait past a run's whole lease while the runs in
 // flight end, `POST /undrain` after the step whatever it ended as; without the
-// bearer, today's wait and a line that says so. Every I/O is injected.
+// bearer, today's wait and a line that says so, but the uploaded step cannot
+// prove image readiness without reconciliation. Every I/O is injected.
 
 const HEAD = "62e4e9ad464820900b07bed176e140af6682c598";
 const UNTIL = "2026-09-18T06:10:00.000Z";
@@ -54,6 +55,22 @@ const residentStep: DeployStep = {
   drain: { url: "https://switchboard-resident.example.test", tokenEnv: RESIDENT_DRAIN_TOKEN_ENV },
   why: "per-repo DOs",
 };
+const currentRegistry = {
+  ok: true,
+  draining: null,
+  count: 1,
+  residents: [{ resource: "repo:acme/api", live: { imageReport: "current" } }],
+};
+const pendingRegistry = {
+  ...currentRegistry,
+  draining: { holds: ["repo:acme/api"] },
+  residents: [{ resource: "repo:acme/api", live: { imageReport: "pending" } }],
+};
+const held: PostAnswer = { status: 200, body: { cleared: false, held: ["repo:acme/api"] } };
+const pendingReconcile: PostAnswer = {
+  status: 200,
+  body: { reconciled: [{ resource: "repo:acme/api", result: "restarted", verified: false }] },
+};
 const plan = { waitMaxMs: 10 * 60_000, pollMs: 60_000 };
 
 function harness(env: Record<string, string>, posts: PostAnswer[] = [drained, lifted]) {
@@ -66,7 +83,10 @@ function harness(env: Record<string, string>, posts: PostAnswer[] = [drained, li
     sleep: async (ms) => {
       clock += ms;
     },
-    readHealth: async () => ({ error: "unscripted" }),
+    readHealth: async (url) =>
+      url.endsWith("/residents")
+        ? { status: 200, body: currentRegistry }
+        : { status: 200, body: { ok: true, build: { commit: HEAD } } },
     readAppState: async () => ({ error: "unscripted" }),
     readInstances: async () => ({ error: "unscripted" }),
     probeExec: async () => ({ body: { stdout: "", stderr: "", exitCode: 1 } }),
@@ -174,9 +194,9 @@ describe("the pure pieces", () => {
 
 describe("deployStep (resident) drains the fleet", () => {
   it("with the admin bearer: /drain is posted BEFORE the first attempt, the refusals are waited out, the deploy lands, /reconcile is posted INSIDE the drain window, /undrain after it", async () => {
-    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 2));
-    expect(r).toEqual({ ok: true, versionId: "0c48b341-f216-4262-81c0-bc62ecb5669a", live: "n/a" });
+    expect(r).toEqual({ ok: true, versionId: "0c48b341-f216-4262-81c0-bc62ecb5669a", live: "live" });
     expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "exec", "exec", "postJson", "postJson"]);
     expect(h.calls[0].args).toEqual([
       "https://switchboard-resident.example.test/drain",
@@ -188,31 +208,34 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(h.calls[5].args).toEqual(["https://switchboard-resident.example.test/undrain", "drn", {}]);
     const lines = h.plain();
     expect(lines[0]).toBe(drainBeganLine("resident", drained));
-    expect(lines.at(-2)).toBe(
+    expect(lines.at(-3)).toBe(
       "[deploy:all] resident: fleet reconciled and every container verified on the new image (repo:acme/api restarted)",
     );
-    expect(lines.at(-1)).toBe("[deploy:all] resident: fleet reopened");
+    expect(lines.at(-2)).toBe("[deploy:all] resident: fleet reopened");
     // The drained wait is the longer budget: the heartbeat counts against 60 min, not 30.
     expect(lines.some((l) => l.includes("(60 min left)"))).toBe(true);
   });
 
-  it("without the bearer: no POST at all, the line says the step waits without a drain, and the budget is the step's own", async () => {
-    const h = harness({});
+  it("without the bearer: no POST at all, the line says the step waits without a drain, the budget is the step's own, and the upload ends partially", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read" });
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 1));
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("partial deployment");
+    expect(r.reason).toContain("reconcile");
     expect(h.calls.map((c) => c.dep)).toEqual(["exec", "exec"]);
     expect(h.plain()[0]).toBe(drainSkippedLine("resident", RESIDENT_DRAIN_TOKEN_ENV));
     expect(h.plain().some((l) => l.includes("(30 min left)"))).toBe(true);
   });
 
   it("a drain the Worker refused (a rejected bearer) is said, the wait is today's — and the reconcile and /undrain are still posted after: a drain whose answer was lost may have landed", async () => {
-    const h = harness({ RESIDENT_DRAIN_TOKEN: "stale" }, [
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "stale" }, [
       { status: 401, body: { error: "unauthorized" } },
       { status: 401, body: { error: "unauthorized" } },
       { status: 401, body: { error: "unauthorized" } },
     ]);
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("partial deployment");
     expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "postJson", "postJson"]);
     expect(h.plain()[0]).toContain("could NOT be drained (HTTP 401: unauthorized)");
     expect(h.plain().at(-2)).toContain("could NOT be reconciled onto the new image (HTTP 401: unauthorized)");
@@ -220,7 +243,7 @@ describe("deployStep (resident) drains the fleet", () => {
   });
 
   it("a /drain whose answer was lost (the transport failed after the record may have landed) waits the undrained budget and still reconciles and lifts the drain after", async () => {
-    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [
       { error: "POST … failed: The operation was aborted" },
       reconciled,
       lifted,
@@ -229,13 +252,13 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(r.ok).toBe(true);
     expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "exec", "postJson", "postJson"]);
     expect(h.plain().some((l) => l.includes("(30 min left)"))).toBe(true);
-    expect(h.plain().at(-1)).toBe(
+    expect(h.plain().at(-2)).toBe(
       "[deploy:all] resident: fleet reopened — the drain had landed although its answer was lost",
     );
   });
 
   it("refusing past the drained budget fails by name with the drained suffix — the fleet is still reopened, and NOT reconciled: nothing deployed, so there is no new image to reconcile onto", async () => {
-    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" });
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" });
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 1_000));
     expect(r.ok).toBe(false);
     expect(r.reason).toContain("preflight still refusing after 60 min (in flight: repo:acme/api (2 in flight))");
@@ -246,10 +269,164 @@ describe("deployStep (resident) drains the fleet", () => {
   });
 
   it("a failed deploy command (not a refusal) ends the step at once and still reopens the fleet", async () => {
-    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" });
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" });
     const failing: StepExec = async () => ({ code: 1, output: "✘ [ERROR] A request to the Cloudflare API failed." });
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, failing);
     expect(r.ok).toBe(false);
     expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "postJson"]);
+  });
+});
+
+describe("resident deployment readiness", () => {
+  it.each([false, true])(
+    "a current registry without a drain bearer cannot prove image readiness (force=%s)",
+    async (force) => {
+      // No pending marker also reads as current: it does not prove this deploy's image.
+      const h = harness({ RESIDENT_READ_TOKEN: "read" });
+      const step = force
+        ? { ...residentStep, forcedBy: "RESIDENT_DEPLOY_FORCE", retryOnPreflightRefusal: false }
+        : residentStep;
+      const result = await deployStep(step, plan, HEAD, h.io, h.deps, exec(h, 0));
+      expect(result).toMatchObject({
+        ok: false,
+        versionId: "0c48b341-f216-4262-81c0-bc62ecb5669a",
+        live: expect.stringContaining("deployed, not live"),
+        reason: expect.stringContaining("partial deployment"),
+      });
+      expect(result.reason).toContain("reconcile");
+      expect(h.calls.map((c) => c.dep)).toEqual(["exec"]);
+      expect(h.plain().some((line) => line.startsWith("[deploy:all] resident: live"))).toBe(false);
+    },
+  );
+
+  it.each(["drain endpoint", "POST capability"])(
+    "a current registry without the %s cannot bypass reconciliation",
+    async (missing) => {
+      const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" });
+      const step = { ...residentStep };
+      if (missing === "drain endpoint") delete step.drain;
+      else delete h.deps.postJson;
+      const result = await deployStep(step, plan, HEAD, h.io, h.deps, exec(h, 0));
+      expect(result.ok).toBe(false);
+      expect(result.reason).toContain("partial deployment");
+      expect(result.reason).toContain("reconcile");
+      expect(h.calls.map((c) => c.dep)).toEqual(["exec"]);
+    },
+  );
+
+  it("a healthy new Worker with cleared:false and pending image reports is a partial deployment, not success", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, pendingReconcile, held]);
+    const health = h.deps.readHealth;
+    h.deps.readHealth = async (url, bearer) =>
+      url.endsWith("/residents") ? { status: 200, body: pendingRegistry } : health(url, bearer);
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result.ok).toBe(false);
+    expect(result.live).toContain("deployed, not live");
+    expect(result.versionId).toBe("0c48b341-f216-4262-81c0-bc62ecb5669a");
+    expect(result.reason).toContain("partial deployment");
+    expect(result.reason).toContain("repo:acme/api");
+    expect(h.deps.now()).toBe(10 * 60_000);
+    expect(h.calls.filter((c) => c.dep === "exec")).toHaveLength(1);
+  });
+
+  it("waits for delayed current reports AND an undrained authenticated registry before succeeding", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, pendingReconcile, held]);
+    const health = h.deps.readHealth;
+    let reads = 0;
+    h.deps.readHealth = async (url, bearer) => {
+      if (!url.endsWith("/residents")) return health(url, bearer);
+      expect(bearer).toBe("read");
+      expect(h.calls.at(-1)?.args[0]).toContain("/undrain");
+      reads++;
+      return {
+        status: 200,
+        body:
+          reads === 1
+            ? pendingRegistry
+            : reads === 2
+              ? { ...currentRegistry, draining: pendingRegistry.draining }
+              : currentRegistry,
+      };
+    };
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: true, live: "live" });
+    expect(reads).toBe(3);
+    expect(h.deps.now()).toBeGreaterThan(0);
+  });
+
+  it("a drain cleared by its backstop does not make a pending image report current", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, pendingReconcile, held]);
+    const health = h.deps.readHealth;
+    h.deps.readHealth = async (url, bearer) =>
+      url.endsWith("/residents") ? { status: 200, body: { ...pendingRegistry, draining: null } } : health(url, bearer);
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("repo:acme/api");
+    expect(result.reason).toContain("pending");
+  });
+
+  it("an old healthy Worker cannot reconcile the old image before the exact deployed build arrives", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    const health = h.deps.readHealth;
+    let reads = 0;
+    h.deps.readHealth = async (url, bearer) => {
+      if (url.endsWith("/healthz") && reads++ === 0) {
+        expect(h.calls.filter((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")).toHaveLength(
+          0,
+        );
+        return { status: 200, body: { ok: true, build: { commit: "b".repeat(40) } } };
+      }
+      return health(url, bearer);
+    };
+    expect((await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0))).ok).toBe(true);
+    expect(h.deps.now()).toBeGreaterThan(0);
+  });
+
+  it("the readiness deadline bounds each read and includes time already spent reconciling", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, pendingReconcile, held]);
+    const post = h.deps.postJson!;
+    h.deps.postJson = async (...args) => {
+      if (args[0].endsWith("/reconcile")) await h.deps.sleep(10 * 60_000 - 1);
+      return post(...args);
+    };
+    const health = h.deps.readHealth;
+    h.deps.readHealth = async (url, bearer, timeoutMs) => {
+      if (url.endsWith("/residents")) {
+        expect(timeoutMs).toBe(1);
+        await h.deps.sleep(timeoutMs!);
+        return { status: 200, body: pendingRegistry };
+      }
+      return health(url, bearer);
+    };
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result.ok).toBe(false);
+    expect(h.deps.now()).toBe(10 * 60_000);
+  });
+
+  it("a force bypass with reconciliation does not bypass authenticated registry readiness", async () => {
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    const result = await deployStep(
+      { ...residentStep, forcedBy: "RESIDENT_DEPLOY_FORCE", retryOnPreflightRefusal: false },
+      plan,
+      HEAD,
+      h.io,
+      h.deps,
+      exec(h, 0),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("registry unreadable");
+    expect(result.reason).toContain("partial deployment");
+  });
+
+  it("a missing reconcile answer fails partially and still attempts the lift", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [
+      drained,
+      { error: "lost reconcile" },
+      lifted,
+    ]);
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("reconcile");
+    expect(h.calls.at(-1)?.args[0]).toContain("/undrain");
   });
 });

@@ -885,7 +885,6 @@ describe("the production deploy is one reusable workflow", () => {
       'npm run --silent cli -- deploy plan $ARGS --allow-branch | tee "$RUNNER_TEMP/plan.txt"',
       "git status --porcelain",
       "npm run --silent cli -- deploy all $ARGS --allow-branch",
-      'if ! npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/fleet.json" 2> "$RUNNER_TEMP/fleet.err"; then',
     ]);
     expect(checkoutSteps.filter((s) => s.run).map((s) => s.name)).toEqual([
       "only from main",
