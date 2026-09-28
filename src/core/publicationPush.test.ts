@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   leasedPushCommand,
+  mentionsGitPush,
   pairedPublicationPush,
   restoredPublicationHead,
   publicationReceiptsFromState,
@@ -56,6 +57,28 @@ describe("leased publication push evidence", () => {
     expect(pairedPublicationPush(events, binding, head)?.sha).toBe(head);
     result.output += "\ndone";
     expect(pairedPublicationPush(events, binding, head)).toBeUndefined();
+  });
+
+  it("records a leased Git door push with a bounded Git config option and Git's remote tracking line", () => {
+    const events = pair();
+    const call = events[0] as Extract<RunEvent, { type: "tool_call" }>;
+    const result = events[1] as Extract<RunEvent, { type: "tool_result" }>;
+    call.command = `git -c http.postBuffer=52428800 push --force-with-lease=refs/heads/${ref}:${old} -u origin ${ref}:refs/heads/${ref}`;
+    result.output = `To https://door.example/git/acme/api.git\n + aaaaaaaa...bbbbbbbb ${ref} -> ${ref} (forced update)\nBranch '${ref}' set up to track remote branch '${ref}' from 'origin'.`;
+    expect(leasedPushCommand(call.command)).toEqual({ ref, expectedHeadSha: old });
+    expect(pairedPublicationPush(events, binding, head, "push", "https://door.example")).toMatchObject({
+      type: "pushed_head",
+      sha: head,
+      receipt: { previousHeadSha: old, repo: binding.repo },
+    });
+    expect(pairedPublicationPush(events, binding, head, undefined, "https://door.example")?.sha).toBe(head);
+    expect(pairedPublicationPush(events, binding, head, "push", "https://other.example")).toBeUndefined();
+    expect(mentionsGitPush(call.command)).toBe(true);
+    events.push({ ...call, callId: "competing" });
+    expect(pairedPublicationPush(events, binding, head, undefined, "https://door.example")).toBeUndefined();
+    events.pop();
+    call.command = call.command.replace("52428800", "${SHELL_VALUE}");
+    expect(leasedPushCommand(call.command)).toBeUndefined();
   });
 
   it.each([

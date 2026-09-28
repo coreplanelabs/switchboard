@@ -20,7 +20,7 @@ import { RunRegistry } from "../runRegistry.js";
 import { createLedgerWriteThrough, NullLedgerRun, NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { planResume, transcriptSource } from "../runLedger/resume.js";
-import { localWorkspaceDir } from "../../execution/factory.js";
+import { localWorkspaceDir, type ExecutorSelection } from "../../execution/factory.js";
 import { reattachWorkspace } from "./provision.js";
 import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import { GitBindings, type GitPublicationClaim } from "../modelProxy/gitBindings.js";
@@ -217,6 +217,8 @@ function setup(
     coordinator?: CoordinatorTag;
     /** The resident binding the round attached at, when the round ran on a resident. */
     binding?: ResidentBinding;
+    /** The seeded sandbox's checked-out ref and head, when resident attach falls back. */
+    seeded?: ExecutorSelection["seeded"];
     /** The artifact store (record 0033), when the deployment configures one. */
     artifacts?: ArtifactStore;
     /** A pull-request review round: the head the dispatcher pinned and the seams the settle and the post-step call.
@@ -345,6 +347,7 @@ function setup(
         executor: (opts.executor ?? {}) as never,
         backend: "local" as const,
         ...(opts.binding ? { binding: opts.binding } : {}),
+        ...(opts.seeded ? { seeded: opts.seeded } : {}),
       },
       release: async (opts: { hardStopped: boolean; commandInFlight?: boolean; gateBypassed?: boolean }) =>
         void releases.push(
@@ -1629,6 +1632,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   const receiptCommitModes = [
     "committed",
+    "door-command",
     "trimmed",
     "delayed-tip",
     "failed-push",
@@ -1641,7 +1645,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     "a gated findings push records its receipt only after an atomic commit: %s",
     async (mode) => {
       const trim = mode === "trimmed";
-      const committed = mode === "committed" || trim || mode === "delayed-tip";
+      const committed = mode === "committed" || mode === "door-command" || trim || mode === "delayed-tip";
       let startTip!: () => void;
       let releaseTip!: () => void;
       const tipStarted = new Promise<void>((resolve) => {
@@ -1702,7 +1706,10 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       });
       const s = endingIn(
         async (_deps, run) => {
-          const command = `git push --force-with-lease=refs/heads/${ref}:${old} origin ${ref}:${ref}`;
+          const command =
+            mode === "door-command"
+              ? `git -c http.postBuffer=52428800 push --force-with-lease=refs/heads/${ref}:${old} -u origin ${ref}:refs/heads/${ref}`
+              : `git push --force-with-lease=refs/heads/${ref}:${old} origin ${ref}:${ref}`;
           expect(opened.run.tracked()).toBe(true);
           fence = run.rules.publication;
           const harness: LiveHarness = {
@@ -1739,7 +1746,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
             exitCode: pushed ? 0 : 1,
             summary: pushed ? "pushed" : "rejected",
             output: pushed
-              ? `To https://github.com/o/r\n + aaaaaaaa...bbbbbbbb ${ref} -> ${ref} (forced update)`
+              ? `To https://git.bot.test/git/o/r.git\n + aaaaaaaa...bbbbbbbb ${ref} -> ${ref} (forced update)${mode === "door-command" ? `\nBranch '${ref}' set up to track remote branch '${ref}' from 'origin'.` : ""}`
               : "rejected",
           });
           if (mode === "delayed-tip") {
@@ -2937,6 +2944,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       repoCtx: RepoContext;
       coordinator?: CoordinatorTag;
       binding?: ResidentBinding;
+      seeded?: ExecutorSelection["seeded"];
       instances?: InMemoryCoordinatorInstanceStore;
       freshHead?: string;
     }) => {
@@ -3039,6 +3047,32 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
         existing,
       ),
     ).toEqual({ verdict: "allowed" });
+    const seededCheckout = {
+      slug: "o/r",
+      ref: "fix/existing",
+      sha: expected,
+      workspace: "/workspace/checkout",
+      cached: false,
+      ms: 1,
+    };
+    const seeded = await rulesOf({
+      repoCtx: { repo: "o/r", pr: 7, ref: "fix/existing", headSha: expected },
+      seeded: seededCheckout,
+      coordinator: publicationTag,
+    });
+    expect(seeded.publication).toMatchObject({ authority: { ref: "fix/existing", expectedHeadSha: expected } });
+    const foreignSeed = await rulesOf({
+      repoCtx: { repo: "o/r", pr: 7, ref: "fix/existing", headSha: expected },
+      seeded: { ...seededCheckout, slug: "other/r" },
+      coordinator: publicationTag,
+    });
+    expect(foreignSeed.publication).toMatchObject({ authority: { blocked: expect.any(String) } });
+    const staleSeed = await rulesOf({
+      repoCtx: { repo: "o/r", pr: 7, ref: "fix/existing", headSha: expected },
+      seeded: { ...seededCheckout, sha: "c".repeat(40) },
+      coordinator: publicationTag,
+    });
+    expect(staleSeed.publication).toMatchObject({ authority: { blocked: expect.stringContaining("head") } });
     const moved = await rulesOf({
       repoCtx: { repo: "o/r", pr: 7, ref: "fix/existing", headSha: expected },
       binding: { ref: "fix/existing", sha: expected, workspace: "/srv/wt/existing" },
@@ -3089,7 +3123,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     });
     expect(push(plain, "feat/anything")).toBe("allowed");
     expect(push(plain, "main")).toBe("refused");
-  });
+  }, 15_000);
 
   it("a preset in a process without the harness roster, a public URL or a bearer fails the run naming what is missing", async () => {
     const noDeps = setup("", { agent: "coding", yaml: PI_YAML, harness: null, bearer: "sbr_x.y" });
@@ -4711,9 +4745,13 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     seq,
   });
 
-  it.each(["finish", "resume"])(
-    "a successful gated push receipt survives restart into %s without replaying the push or losing attribution",
-    async (mode) => {
+  it.each([
+    ["finish", false],
+    ["resume", false],
+    ["resume", true],
+  ] as const)(
+    "a successful gated push receipt survives restart into %s (seeded: %s) without replaying the push or losing attribution",
+    async (mode, seeded) => {
       const old = "a".repeat(40),
         head = "b".repeat(40),
         ref = "fix/existing";
@@ -4753,7 +4791,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
           containerFor: () => new FakeHarnessContainer(),
         },
         repoCtx: { repo: "o/r", pr: 7, ref, baseRef: "main", headSha: old },
-        binding: { ref, sha: head, workspace: "/srv/wt/existing" },
+        ...(seeded
+          ? { seeded: { slug: "o/r", ref, sha: head, workspace: "/workspace/checkout", cached: true, ms: 0 } }
+          : { binding: { ref, sha: head, workspace: "/srv/wt/existing" } }),
         coordinator: {
           parentInstanceId: "coord-p",
           idempotencyKey: "coord-p:U12/1/findings",

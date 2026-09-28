@@ -2108,6 +2108,51 @@ describe("makeExecutor resident selection", () => {
       expect(fn).not.toHaveBeenCalled();
     });
 
+    it("a seeded sandbox re-attach observes the owned checkout before restoring its publication facts", async () => {
+      stubEnvs();
+      const { fn } = stubFetch();
+      const seed = { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout" };
+      const head = "b".repeat(40);
+      const observe = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockImplementation(async (command) => {
+        if (command.includes("rev-parse --abbrev-ref HEAD")) return `${seed.ref}\n`;
+        if (command.includes("rev-parse HEAD")) return `${head}\n`;
+        if (command.includes("config --get remote.origin.url")) return `https://github.com/${seed.slug}.git\n`;
+        return "";
+      });
+      const sel = await makeExecutor(residentOpts(), {
+        ...repoCtx(),
+        reattach: { backend: "sandbox", seeded: seed },
+      });
+      expect(sel.seeded).toEqual({ ...seed, sha: head, cached: true, ms: 0 });
+      expect(fn).not.toHaveBeenCalled();
+      observe.mockRestore();
+    });
+
+    it("a seeded sandbox re-attach refuses a foreign or unreadable checkout", async () => {
+      stubEnvs();
+      stubFetch();
+      const seed = { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout" };
+      let ref = "other-branch";
+      let head = `${"b".repeat(40)}\n`;
+      let origin = `https://github.com/${seed.slug}.git\n`;
+      const observe = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockImplementation(async (command) => {
+        if (command.includes("rev-parse --abbrev-ref HEAD")) return ref;
+        if (command.includes("rev-parse HEAD")) return head;
+        if (command.includes("config --get remote.origin.url")) return origin;
+        return "";
+      });
+      const reattach = () =>
+        makeExecutor(residentOpts(), { ...repoCtx(), reattach: { backend: "sandbox", seeded: seed } });
+      await expect(reattach()).rejects.toThrow(WorkspaceReattachRefusedError);
+      ref = seed.ref;
+      origin = "https://github.com/other/repo.git\n";
+      await expect(reattach()).rejects.toThrow(WorkspaceReattachRefusedError);
+      origin = `https://github.com/${seed.slug}.git\n`;
+      head = "exit 128: not a git repository";
+      await expect(reattach()).rejects.toThrow(WorkspaceReattachRefusedError);
+      observe.mockRestore();
+    });
+
     it("a resident binding without a configured resident, or without a resolved repo, cannot be re-attached and says so", async () => {
       stubEnvs();
       stubFetch();
@@ -2444,6 +2489,23 @@ describe("the workspace binding on the row", () => {
     expect(workspaceBindingFor({ executor: new LocalExecutor("/tmp/x"), backend: "sandbox" })).toEqual({
       backend: "sandbox",
     });
+    expect(
+      workspaceBindingFor({
+        executor: new LocalExecutor("/tmp/x"),
+        backend: "sandbox",
+        seeded: {
+          slug: "jshttp/vary",
+          ref: "fix/existing",
+          sha: "a".repeat(40),
+          workspace: "/workspace/checkout",
+          cached: false,
+          ms: 100,
+        },
+      }),
+    ).toEqual({
+      backend: "sandbox",
+      seeded: { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout" },
+    });
     expect(workspaceBindingFor({ executor: new LocalExecutor("/tmp/x") })).toBeUndefined();
   });
 
@@ -2455,6 +2517,21 @@ describe("the workspace binding on the row", () => {
       container: "vm-1",
     });
     expect(workspaceBindingOf({ backend: "sandbox" })).toEqual({ backend: "sandbox" });
+    expect(
+      workspaceBindingOf({
+        backend: "sandbox",
+        seeded: { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout" },
+      }),
+    ).toEqual({
+      backend: "sandbox",
+      seeded: { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout" },
+    });
+    expect(
+      workspaceBindingOf({
+        backend: "sandbox",
+        seeded: { slug: "jshttp/vary", ref: 7, workspace: "/workspace/checkout" },
+      }),
+    ).toEqual({ backend: "sandbox" });
     expect(workspaceBindingOf({ backend: "sandbox", user: 7 })).toEqual({ backend: "sandbox" });
     expect(workspaceBindingOf({ backend: "mainframe" })).toBeUndefined();
     expect(workspaceBindingOf({ workspace: "/w" })).toBeUndefined();

@@ -15,14 +15,19 @@ const refName = (s: string): boolean =>
   /^[a-zA-Z0-9_/-]+(?:\.[a-zA-Z0-9_/-]+)*$/.test(s) && !s.includes("..") && !s.startsWith("-");
 const shortRef = (s: string): string => s.replace(/^refs\/heads\//, "");
 
+/** Broad enough to count competing Git config pushes; leasedPushCommand
+ * separately proves whether one selected call is authorized evidence. */
+export const mentionsGitPush = (command: string): boolean => /\bgit(?:\s+-c\s+\S+)*\s+push\b/.test(command);
+
 /** Deliberately not a shell interpreter. Only a standalone literal push can
  * attest its result: pipelines, scripts, substitutions and compound commands
  * cannot prove which operation produced stdout or the successful exit. */
 export function leasedPushCommand(command: string): { ref: string; expectedHeadSha: string } | undefined {
   if (command.length >= COMMAND_CAP) return;
   const literal = command.replace(/[ \t]+2>&1[ \t]*$/, "");
-  if (!/^git push\s/.test(literal) || /[\n\r'"`$;|<>\\&]/.test(literal)) return;
-  const words = literal.trim().split(/\s+/).slice(2);
+  const prefix = /^git(?: -c http\.postBuffer=[0-9]+)? push\s/.exec(literal);
+  if (!prefix || /[\n\r'"`$;|<>\\&]/.test(literal)) return;
+  const words = literal.slice(prefix[0].length).trim().split(/\s+/);
   const leases = words.filter((w) => w.startsWith("--force-with-lease="));
   if (leases.length !== 1) return;
   const lease = /^--force-with-lease=refs\/heads\/([^:]+):([a-f0-9]{40})$/.exec(leases[0]!);
@@ -42,13 +47,14 @@ export function pairedPublicationPush(
   binding: ExistingPrPublicationBinding,
   head: string,
   callId?: string,
+  gitDoorBaseUrl?: string,
 ): PushEvent | undefined {
   if (!fullSha(head) || !fullSha(binding.expectedHeadSha) || head === binding.expectedHeadSha) return;
   const calls = events.filter(
     (e): e is Extract<RunEvent, { type: "tool_call" }> =>
       e.type === "tool_call" &&
       e.tool === "bash" &&
-      (callId === undefined ? /\bgit\s+push\b/.test(e.command ?? e.summary) : e.callId === callId),
+      (callId === undefined ? mentionsGitPush(e.command ?? e.summary) : e.callId === callId),
   );
   if (calls.length !== 1) return;
   const call = calls[0]!;
@@ -76,20 +82,36 @@ export function pairedPublicationPush(
   )
     return;
   let lines = result.output.trim().split(/\r?\n/);
-  const tracking = `branch '${binding.publicationRef}' set up to track 'origin/${binding.publicationRef}'.`;
+  const tracking = [
+    `branch '${binding.publicationRef}' set up to track 'origin/${binding.publicationRef}'.`,
+    `Branch '${binding.publicationRef}' set up to track remote branch '${binding.publicationRef}' from 'origin'.`,
+  ];
   if (
     /(?:^|\s)(?:-u|--set-upstream)(?:\s|$)/.test(call.command) &&
-    lines.filter((line) => line === tracking).length === 1
+    lines.filter((line) => tracking.includes(line)).length === 1
   )
-    lines = lines.filter((line) => line !== tracking);
+    lines = lines.filter((line) => !tracking.includes(line));
   if (lines.length !== 2) return;
-  const remote = /^To (?:https:\/\/github\.com\/|git@github\.com:|github\.com:)([^\s]+?)(?:\.git)?$/.exec(lines[0]!);
+  const githubRemote = /^To (?:https:\/\/github\.com\/|git@github\.com:|github\.com:)([^\s]+?)(?:\.git)?$/.exec(
+    lines[0]!,
+  );
+  let doorRemote: string | undefined;
+  if (gitDoorBaseUrl !== undefined) {
+    try {
+      doorRemote = `${new URL(gitDoorBaseUrl).origin}/git/${binding.repo}`;
+    } catch {
+      return;
+    }
+  }
+  const remoteMatches =
+    doorRemote === undefined
+      ? githubRemote?.[1]?.toLowerCase() === binding.repo.toLowerCase()
+      : lines[0] === `To ${doorRemote}` || lines[0] === `To ${doorRemote}.git`;
   const update = /^\s*\+?\s*([a-f0-9]{7,40})(\.{2,3})([a-f0-9]{7,40})\s+(\S+) -> (\S+)( \(forced update\))?$/.exec(
     lines[1]!,
   );
   if (
-    !remote ||
-    remote[1]!.toLowerCase() !== binding.repo.toLowerCase() ||
+    !remoteMatches ||
     !update ||
     !binding.expectedHeadSha.startsWith(update[1]!) ||
     !head.startsWith(update[3]!) ||

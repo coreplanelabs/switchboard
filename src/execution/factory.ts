@@ -43,6 +43,8 @@ import { pairOfBinding, requesterPairFor } from "./identityRewrite.js";
 import { isServiceable } from "./residentState.js";
 import { systemClock } from "../core/trace/clock.js";
 import { processSecrets, type Secret, type Secrets } from "../secrets.js";
+import { shellQuote } from "./shellQuote.js";
+import { parseRevParseOutput } from "../core/reviewedHead.js";
 
 export interface ResidentExecutionConfig {
   /** base URL of the resident Worker (deploy/cloudflare-resident/) */
@@ -170,6 +172,8 @@ export interface WorkspaceBinding {
   /** The identity of the container the workspace is in (docs/reference/specs/harness-pi.md
    *  item 8), when the attach answered one: the resident's is its VM's boot id. */
   container?: string;
+  /** A resident fallback's seed identity, retained so re-attach can verify the same checkout. */
+  seeded?: Pick<SeededSandbox, "slug" | "ref" | "workspace">;
 }
 
 const BACKENDS: readonly Backend[] = ["local", "resident", "sandbox", "e2b"];
@@ -180,11 +184,25 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
   if (typeof value !== "object" || value === null) return undefined;
   const v = value as Record<string, unknown>;
   if (typeof v.backend !== "string" || !(BACKENDS as readonly string[]).includes(v.backend)) return undefined;
+  const seed = typeof v.seeded === "object" && v.seeded !== null ? (v.seeded as Record<string, unknown>) : undefined;
+  const seeded =
+    v.backend === "sandbox" &&
+    seed &&
+    typeof seed.slug === "string" &&
+    /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(seed.slug) &&
+    typeof seed.ref === "string" &&
+    seed.ref.length > 0 &&
+    seed.ref.length <= 255 &&
+    typeof seed.workspace === "string" &&
+    seed.workspace === SEED_CHECKOUT_DIR
+      ? { slug: seed.slug, ref: seed.ref, workspace: seed.workspace }
+      : undefined;
   return {
     backend: v.backend as Backend,
     ...(typeof v.workspace === "string" && v.workspace ? { workspace: v.workspace } : {}),
     ...(typeof v.user === "string" && v.user ? { user: v.user } : {}),
     ...(typeof v.container === "string" && v.container ? { container: v.container } : {}),
+    ...(seeded ? { seeded } : {}),
   };
 }
 
@@ -202,6 +220,15 @@ export function workspaceBindingFor(
     ...(b?.workspace !== undefined ? { workspace: b.workspace } : {}),
     ...(b?.user !== undefined ? { user: b.user } : {}),
     ...(b?.container !== undefined ? { container: b.container } : {}),
+    ...(selection.backend === "sandbox" && selection.seeded
+      ? {
+          seeded: {
+            slug: selection.seeded.slug,
+            ref: selection.seeded.ref,
+            workspace: selection.seeded.workspace,
+          },
+        }
+      : {}),
   };
 }
 
@@ -695,7 +722,29 @@ async function reattachWorkspace(
       ctx.profile.machine === "blank"
         ? { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }
         : perThreadCheckout(opts, ctx);
-    return { executor: await makePerThreadExecutor(opts, input), backend: perThreadBackend(opts) };
+    const executor = await makePerThreadExecutor(opts, input);
+    if (!recorded.seeded) return { executor, backend: perThreadBackend(opts) };
+    if (recorded.backend !== "sandbox" || ctx.repo?.toLowerCase() !== recorded.seeded.slug.toLowerCase())
+      throw refuse("the seeded checkout's repository does not match the recorded run");
+    const git = `git -C ${shellQuote(recorded.seeded.workspace)}`;
+    const observed = async (command: string): Promise<string | undefined> =>
+      executor.exec(`${git} ${command}`, { timeoutMs: 30_000, span }).catch(() => undefined);
+    const ref = await observed("rev-parse --abbrev-ref HEAD");
+    const headOutput = await observed("rev-parse HEAD");
+    // Read the stored origin, not `remote get-url`: the Git door's insteadOf rewrite changes the latter.
+    const origin = await observed("config --get remote.origin.url");
+    const sha = headOutput === undefined ? undefined : parseRevParseOutput(headOutput);
+    if (
+      ref?.trim() !== recorded.seeded.ref ||
+      sha === undefined ||
+      origin?.trim().toLowerCase() !== `https://github.com/${recorded.seeded.slug}.git`.toLowerCase()
+    )
+      throw refuse("the seeded checkout's origin, ref or head could not be verified");
+    return {
+      executor,
+      backend: perThreadBackend(opts),
+      seeded: { ...recorded.seeded, sha, cached: true, ms: 0 },
+    };
   }
   const resident = opts.execution?.resident;
   if (!resident) throw refuse("no resident backend is configured in this process");
