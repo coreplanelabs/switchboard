@@ -57,7 +57,7 @@
   ],
   "configHash": "007281f07956386ae92602b79b030ec83f64da89346f551a9e67ec51075157ae",
   "inputs": {
-    "package-lock.json": "a22e08b2886ccd18dc2aab5e4d3b2069b8023db972fb850b1e9601cfc3bc9906",
+    "package-lock.json": "ef88e8656c00de271d1627fdd0e2949af09b4a392a596490a3e8c55911bb3957",
     "package.json": "269b09f2ada65cb8ce1b6878b537a61d3cdc344932a15a2632ac3e2156711b38",
     "scripts/screenshot-output-worker.mts": "4183d9c7909ebb82903a8caa715b4facc48076eb2d9238c8706cacf35862003b",
     "scripts/screenshots.mts": "cf676e658502c7ad59c4b262ed878c4c7591a2f83d31bc26806e19d9c0d5493e",
@@ -287,7 +287,7 @@
     "src/tools/submit.ts": "c8b7f98d0851d1ea197a9a1cd00a5f5e052deab74b753c098c5c1b09893dee60",
     "src/tools/toolsets.ts": "ab84073e284ccaa6eb3207c2b46a66ca3e2e0e95013beb97d7c631d62e09b6d5",
     "src/tools/web.ts": "87d36a49a61e7a51db098d7ced7e0db05f154b2d7741827d793b12fd9f0fede8",
-    "web/package.json": "1145dda77c4d80b54d518cdfce76782f8145da2e4cfef9bf0797022574533981",
+    "web/package.json": "622b1aca803d8feafc167f7f47e8ffcbf40911749b516c76f76489f4d3fff0cc",
     "web/src/App.vue": "4f602098f253ba82425491f6665f6ce8647e559703d3da8efe18ed6cc66c72f6",
     "web/src/assets/main.css": "64d8dd8426df76b08c2b08cbe0098ae2e329a67e9c475a3ddb55f6fb292cdddd",
     "web/src/components/AppNav.vue": "19d68cc7cb5b71bf01d2dd8c0cb445f22c554d0367496891b9e8062d6382fb16",
