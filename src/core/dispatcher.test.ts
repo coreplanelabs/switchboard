@@ -9630,6 +9630,35 @@ workspaceDir: __WORKDIR__
     });
   });
 
+  it("an operator-bound file request gives the door the plan and durably seeds the same file onto the generated unit", async () => {
+    const { deps, instances } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.residentSlugs = async () => ["acme/api"];
+    deps.operatorModel = vi.fn<RouteModel>(async (prompt) => {
+      expect(prompt.user).toContain("Release api-v3.39.0 changed the dashboard");
+      expect(prompt.user).toContain("Onboarded repository candidates: `acme/api`");
+      return { tool: "bind_preset", input: { preset: "ship", repo: "acme/api", reason: "the attached plan" } };
+    });
+    deps.runRegistry = new RunRegistry({ genId: () => "run-ship-file", genToken: () => "tok" });
+    const { io } = fakeIO();
+    await dispatch(
+      deps,
+      {
+        ...msg("implement this plan", "slack:UADMIN"),
+        documents: [{ name: "plan.md", mediaType: "text/plain", data: "Release api-v3.39.0 changed the dashboard" }],
+      },
+      io,
+    );
+    const { instance, unit } = await handed(instances, "run-ship-file");
+    expect(instance).toMatchObject({ repo: "acme/api" });
+    expect(unit).toMatchObject({ title: "implement this plan" });
+    expect(await instances.listEvents({ instanceId: instance!.id, unit: unit!.unit })).toEqual([
+      expect.objectContaining({
+        text: "Attachments from the ship request.",
+        attachments: [expect.objectContaining({ name: "plan.md", data: "Release api-v3.39.0 changed the dashboard" })],
+      }),
+    ]);
+  });
+
   it("a resume prefers the PR's OWN base ref over the repo default (non-default-base ship PR): the runner is handed that base", async () => {
     const { deps, instances } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, ref: SHIP_BRANCH }); // thread text names no base

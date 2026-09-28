@@ -388,6 +388,7 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
         ts: m.ts,
         threadTs: m.thread_ts ?? m.ts,
         files: m.files,
+        fileShare: m.subtype === "file_share",
         botUserId,
         thread,
         trigger: decision === "handle-if-bot-in-thread" ? "thread-follow-up" : "dm",
@@ -430,6 +431,8 @@ interface SlackEvent {
   ts: string;
   threadTs: string;
   files?: SlackFile[];
+  /** A message event identified as a file share even if its file list was omitted. */
+  fileShare?: boolean;
   botUserId?: string;
   /** The thread's messages when the handler has already fetched them (the
    *  follow-up path's bot-in-thread check); `history()` reuses them. */
@@ -817,6 +820,52 @@ export interface ReceivedSlackMessage {
   thread?: RunView[];
 }
 
+/** An app_mention may omit `files` whether or not the message has a file.
+ *  Read Slack's canonical row before routing, and reuse that thread page for
+ *  history instead of charging an agent run a second replies call. */
+async function filesForEvent(client: SlackClient, ev: SlackEvent): Promise<SlackFile[] | undefined> {
+  if (ev.files?.length) return ev.files;
+  const prefetched = ev.thread?.find((message) => message.ts === ev.ts);
+  // A thread page is already the canonical message, including a known empty
+  // file list. Ordinary text messages use their own event metadata.
+  if (prefetched) return prefetched.files;
+  // Reconnect catch-up built this event from Slack's history, so another
+  // exact-message lookup cannot recover metadata the canonical row lacks.
+  if (ev.caughtUp) return ev.files;
+  if (ev.trigger !== "mention" && !ev.fileShare) return undefined;
+  try {
+    if (ev.trigger === "mention") {
+      // A normal agent run reads this same page through SlackIO.history().
+      // The app_mention event has no reliable file-bearing flag, so a text
+      // heuristic would lose attached plans again. Reuse the page for both
+      // purposes; a long thread may need the exact-source fallback below.
+      const page = await client.conversations.replies({
+        channel: ev.channel,
+        ts: ev.threadTs,
+        limit: THREAD_PAGE_LIMIT,
+      });
+      const messages = (page.messages as SlackThreadMessage[] | undefined) ?? [];
+      if (messages.length > 0) ev.thread = messages;
+      const source = messages.find((message) => message.ts === ev.ts);
+      if (source) return source.files;
+    }
+    const page = await client.conversations.replies({
+      channel: ev.channel,
+      ts: ev.threadTs,
+      oldest: ev.ts,
+      latest: ev.ts,
+      inclusive: true,
+      limit: 1,
+    });
+    return (page.messages as SlackThreadMessage[] | undefined)?.find((message) => message.ts === ev.ts)?.files;
+  } catch (err) {
+    console.warn(
+      `[files] ${ev.channel}:${ev.ts} source message lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return undefined;
+  }
+}
+
 /** How many of the thread's newest turns the verdict sees (record 0058). */
 const INTAKE_TURNS = 12;
 /** The page `threadIfBotInIt` fetches; a page this full may not be the thread's end. */
@@ -918,10 +967,12 @@ export async function receiveSlackMessage(
           console.error(`[catch-up] ${ev.channel}:${ev.ts} delay note failed: ${err.message}`);
         })
       : Promise.resolve();
+  const files = await filesForEvent(client, ev);
+  span.setAttrs({ resolvedFiles: files?.length ?? 0 });
   // Independent budgets, independent downloads — the two passes overlap.
   const [imagePass, documentPass] = await Promise.all([
-    fetchImages(ev.files, MAX_IMAGES_PER_MESSAGE),
-    fetchDocuments(ev.files, MAX_DOCS_PER_MESSAGE),
+    fetchImages(files, MAX_IMAGES_PER_MESSAGE),
+    fetchDocuments(files, MAX_DOCS_PER_MESSAGE),
     delayNote,
   ]);
   // When an artifact store exists, accepted inline media keeps the original
@@ -931,7 +982,7 @@ export async function receiveSlackMessage(
   // path lands the file at its zero-based Slack slot.
   const source = (accepted: { file: SlackFile; size: number }) => {
     if (!policy.staging) return undefined;
-    const workspaceIndex = ev.files?.indexOf(accepted.file) ?? -1;
+    const workspaceIndex = files?.indexOf(accepted.file) ?? -1;
     return workspaceIndex < 0 ? undefined : acceptedStagedFile(accepted, ev.ts, workspaceIndex);
   };
   const images = imagePass.images.map((image, i) => {
@@ -1151,13 +1202,12 @@ async function intakeEvidence(
 }
 
 /** Exported for tests. */
-/** The channel IO for a run resumed after a restart (docs/reference/specs/run-history.md
- *  item 38): the thread from the ledger row's `threadKey`, the requester from
- *  its meta, and the card it already has. There is no triggering event — the
- *  message that started the run was handled by the previous generation. */
+/** The channel IO rebuilt from a row (docs/reference/specs/run-history.md
+ *  item 38): a child or continuing run has no triggering message; a request
+ *  restarted during attach does, and history must skip that current turn. */
 export function resumeSlackIO(
   client: SlackClient,
-  run: { channel: string; threadTs: string; user: string; cardTs?: string; botUserId?: string },
+  run: { channel: string; threadTs: string; user: string; cardTs?: string; botUserId?: string; requestTs?: string },
   opts: { statusClient?: SlackClient; statusBudget?: StatusBudget } = {},
 ): SlackIO {
   return new SlackIO(
@@ -1166,11 +1216,11 @@ export function resumeSlackIO(
       channel: run.channel,
       user: run.user,
       text: "",
-      ts: run.threadTs,
+      ts: run.requestTs ?? run.threadTs,
       threadTs: run.threadTs,
       botUserId: run.botUserId,
     },
-    { ...opts, ...(run.cardTs ? { existingCard: { ts: run.cardTs } } : {}) },
+    { ...opts, synthetic: run.requestTs === undefined, ...(run.cardTs ? { existingCard: { ts: run.cardTs } } : {}) },
   );
 }
 
@@ -1202,7 +1252,7 @@ export function clickSlackIO(
       threadTs: click.threadTs,
       botUserId: click.botUserId,
     },
-    { ...opts, offerMessage: click.offer },
+    { ...opts, offerMessage: click.offer, synthetic: true },
   );
 }
 
@@ -1358,12 +1408,15 @@ export class SlackIO implements ChannelIO {
      *  `client`; production passes `createStatusClient`'s). `statusBudget`: the
      *  edit budget drawn from (default the process's one). `offerMessage`: the
      *  confirmation a click landed on (slack-channel.md item 14) — the first
-     *  `reply` completes it in place; later replies post in the thread. */
+     *  `reply` completes it in place; later replies post in the thread.
+     *  `synthetic` means there was no triggering Slack message to remove from
+     *  history; a rebuilt handle's `ts` is only the thread address. */
     private opts: {
       existingCard?: { ts: string };
       statusClient?: SlackClient;
       statusBudget?: StatusBudget;
       offerMessage?: OfferMessage;
+      synthetic?: boolean;
     } = {},
   ) {}
 
@@ -1483,9 +1536,8 @@ export class SlackIO implements ChannelIO {
   /** A child run's thread of its own (docs/reference/specs/slack-channel.md item
    *  11): the lead is posted top-level in this conversation's channel — a
    *  Slack thread hangs off a top-level message, never off a reply — and the
-   *  thread's IO is built from the posted `ts` the way `resumeSlackIO` builds
-   *  one from a row's parts: the same requester, the same clients and budget,
-   *  no triggering event. The permalink rides as the thread's `sourceUrl` when
+   *  thread's IO uses the posted `ts` as the lead to skip from history: the
+   *  same requester, clients and budget. The permalink rides as `sourceUrl` when
    *  the team URL is known. */
   async openThread(lead: string): Promise<OpenedThread> {
     const posted = await this.client.chat.postMessage({ channel: this.ev.channel, text: mdToMrkdwn(lead) });
@@ -1650,15 +1702,18 @@ export class SlackIO implements ChannelIO {
           await this.client.conversations.replies({
             channel: this.ev.channel,
             ts: this.ev.threadTs,
-            limit: 50,
+            limit: THREAD_PAGE_LIMIT,
           })
         ).messages ??
         [];
-      // The mapping is `threadTurns` (slack/threadTurns.ts): the triggering
+      // The mapping is `threadTurns` (slack/threadTurns.ts): a real triggering
       // message is skipped because the dispatcher appends it as the current
-      // turn, and the same rules read a linked thread for the conversation
-      // reader, so the two paths cannot drift.
-      const kept = threadTurns(thread, { skipTs: this.ev.ts, botUserId: this.ev.botUserId });
+      // turn. A rebuilt handle has no triggering message, even though its
+      // thread address is also the parent's timestamp.
+      const kept = threadTurns(thread, {
+        ...(this.opts.synthetic ? {} : { skipTs: this.ev.ts }),
+        botUserId: this.ev.botUserId,
+      });
       // Download attachments newest-first so each thread-wide budget favors the
       // most recent files when a long thread overflows it. Images and documents
       // draw from independent budgets — one pool can't starve the other.

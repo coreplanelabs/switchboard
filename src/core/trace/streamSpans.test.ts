@@ -85,6 +85,8 @@ describe("attrs", () => {
     expect(invalidAttrKeys({ host: "https://x.example/?t=SECRET" })).toEqual(["host"]);
     expect(invalidAttrKeys({ execMs: Number.NaN })).toEqual(["execMs"]);
     expect(ATTR_KEYS).toContain("queuedBehindMs");
+    expect(invalidAttrKeys({ files: 0, resolvedFiles: 1 })).toEqual([]);
+    expect(invalidAttrKeys({ resolvedFiles: "1" } as never)).toEqual(["resolvedFiles"]);
     // The Workers' own roots (docs/reference/specs/tracing.md item 25): counts, never names.
     expect(invalidAttrKeys({ residents: 3, swept: 120 })).toEqual([]);
     // The catch-up root's silenced count (docs/reference/specs/slack-channel.md item 7): a number like its sibling counts.

@@ -86,7 +86,7 @@ import { RunnerOwnershipFence } from "./core/runnerOwnership.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { LedgerTakeover } from "./core/runLedger/takeover.js";
 import { nullChannelIO } from "./core/nullChannelIo.js";
-import type { ChannelIO } from "./core/types.js";
+import type { ChannelIO, IncomingMessage } from "./core/types.js";
 import { AGENTS, getAgent, IDENTITIES, MACHINE_CLASSES } from "./agents/registry.js";
 import { systemClock } from "./core/trace/index.js";
 import { resumeSlackIO } from "./channels/slack.js";
@@ -905,7 +905,10 @@ export async function runBot(): Promise<void> {
   // conversation in the same lane, replies logged as undeliverable (record
   // 0060); HTTP and MCP have no thread to speak into, so their handle logs;
   // any other platform, none.
-  const threadIoFor = (thread: { threadKey: string; userId: string; cardTs?: string }): ChannelIO | undefined => {
+  const threadIoFor = (
+    thread: { threadKey: string; userId: string; cardTs?: string },
+    request?: IncomingMessage,
+  ): ChannelIO | undefined => {
     const [platform, channel, threadTs] = thread.threadKey.split(":");
     if (platform === "slack" && channel && threadTs) {
       return resumeSlackIO(
@@ -914,6 +917,7 @@ export async function runBot(): Promise<void> {
           channel,
           threadTs,
           user: thread.userId.replace(/^slack:/, ""),
+          ...(request ? { requestTs: request.messageId ?? threadTs } : {}),
           ...(thread.cardTs ? { cardTs: thread.cardTs } : {}),
         },
         { statusClient },
@@ -1848,7 +1852,7 @@ export async function runBot(): Promise<void> {
       },
       // The handle from the row's METADATA (record 0060): a hosted row's key
       // column carries the host suffix and names no thread of any channel.
-      ioFor: (row) => threadIoFor(resumeIoTarget(row)),
+      ioFor: (row, request) => threadIoFor(resumeIoTarget(row), request),
       // A re-hosted parent's card is this generation's again, so the connect's
       // orphan sweep leaves it alone (slack-channel item 8).
       keepCardLive: adoptLiveCard,

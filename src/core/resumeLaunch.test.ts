@@ -179,6 +179,7 @@ describe("the pure pieces", () => {
 describe("launchResumes", () => {
   function harness(over: { io?: ChannelIO | undefined; agent?: AgentDef | undefined } = {}) {
     const dispatched: { msg: IncomingMessage; opts: DispatchOptions }[] = [];
+    const ioRequests: (IncomingMessage | undefined)[] = [];
     const closed: { runId: string; why: string }[] = [];
     const logs: string[] = [];
     const io: ChannelIO | undefined =
@@ -187,13 +188,16 @@ describe("launchResumes", () => {
         : { reply: async () => {}, status: async () => ({ update() {}, async done() {} }), history: async () => [] };
     const run = (runs: ResumableRun[]) =>
       launchResumes({} as CoreDeps, runs, {
-        ioFor: () => io,
+        ioFor: (_row, request) => {
+          ioRequests.push(request);
+          return io;
+        },
         close: async (r, why) => void closed.push({ runId: r.row.runId, why }),
         agentFor: () => ("agent" in over ? over.agent : reviewAgent),
         dispatchFn: async (_deps, msg, _io, opts) => void dispatched.push({ msg, opts }),
         log: (l) => logs.push(l),
       });
-    return { run, dispatched, closed, logs };
+    return { run, dispatched, ioRequests, closed, logs };
   }
 
   it("plans and dispatches a resumable run with the full ResumeContext — the plan, the row, the last step, the events, the highest seq, the repo context — under the row's identity", async () => {
@@ -276,6 +280,7 @@ describe("launchResumes", () => {
       userName: "uma",
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
       channelName: "eng",
+      messageId: "3.0",
       images: [{ mediaType: "image/png", data: "QUJD" }],
     };
     const restart: ResumableRun = {
@@ -287,6 +292,7 @@ describe("launchResumes", () => {
     const outcome = await h.run([restart]);
     expect(outcome).toEqual({ launched: ["r1"], closed: [] });
     const { msg, opts } = h.dispatched[0];
+    expect(h.ioRequests).toEqual([msg]);
     expect(msg).toEqual({
       channelId: "slack:C1",
       userId: "slack:UA",
@@ -295,6 +301,7 @@ describe("launchResumes", () => {
       userName: "uma",
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
       channelName: "eng",
+      messageId: "3.0",
       images: [{ mediaType: "image/png", data: "QUJD" }],
     });
     expect(opts.resume).toBeUndefined();

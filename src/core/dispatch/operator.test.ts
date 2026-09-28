@@ -83,6 +83,98 @@ const ctxOf = (over: Partial<OperatorTurnContext> = {}): OperatorTurnContext => 
 });
 
 describe("the operator is one loop with typed tools", () => {
+  it("an attached plan supplies routing evidence and an onboarded repository without rewriting the request", async () => {
+    const plan = "Release atlas-v3.39.0 changed the health dashboard.";
+    const escapedToken = `sk-\x1b[31m${"A".repeat(20)} `;
+    const boundaryToken = `sk-${"B".repeat(20)}`;
+    const unsafeMediaType = `text/plain; token=sk-${"C".repeat(20)}\x1b[31m${"m".repeat(200)}`;
+    const secretDocument = `${escapedToken}${"x".repeat(24_000 - plan.length - escapedToken.length - 9)}${boundaryToken}`;
+    const dir = mkdtempSync(join(tmpdir(), "swb-operator-plan-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+channels:
+  "slack:CX":
+    repo: acme/gateway
+`,
+    );
+    const config = new ConfigStore(path, join(dir, "overrides.json"));
+    const result = await operatorStage(
+      {
+        config,
+        residentSlugs: async () => ["acme/gateway", "acme/atlas"],
+        operatorModel: async (prompt) => {
+          expect(prompt.user).toContain("plan.md");
+          expect(prompt.user).toContain("atlas-v3.39.0");
+          expect(prompt.user).not.toContain("sk-AAAA");
+          expect(prompt.user).not.toContain("sk-BBBBBB");
+          expect(prompt.user).not.toContain("sk-CCCC");
+          expect(prompt.user).not.toContain("\x1b");
+          for (const name of ["metadata.txt", "metadata.png", "metadata.zip"]) {
+            const header = prompt.user.split("\n").find((line) => line.includes(name));
+            expect(header?.length).toBeLessThan(160);
+          }
+          expect(prompt.user).toContain("acme/atlas");
+          expect(prompt.user).toContain("acme/gateway");
+          expect(prompt.user).toContain("diagram.png (image/png): body unavailable to the operator");
+          expect(prompt.user).toContain("archive.zip (application/zip): body unavailable to the operator");
+          expect(prompt.user).not.toContain("https://files.example/archive.zip");
+          expect(prompt.user).toContain("<request>\nship F0PLAN\n</request>");
+          expect(prompt.system).toContain("an opaque file identifier in the text does not identify an existing run");
+          return {
+            tool: OPERATOR_BIND_TOOL,
+            input: { preset: "ship", repo: "acme/atlas", reason: "the attached plan targets atlas" },
+          };
+        },
+      },
+      {
+        msg: {
+          channelId: "slack:CX",
+          userId: "slack:UX",
+          text: "ship F0PLAN",
+          threadKey: "slack:CX:1.0",
+          documents: [
+            { name: "plan.md", mediaType: "text/plain", data: plan },
+            { name: "secrets.txt", mediaType: "text/plain", data: secretDocument },
+            { name: "metadata.txt", mediaType: unsafeMediaType, data: "sample" },
+          ],
+          images: [
+            { name: "diagram.png", mediaType: "image/png", data: "AAAA" },
+            { name: "metadata.png", mediaType: unsafeMediaType, data: "AAAA" },
+          ],
+          staged: [
+            {
+              name: "archive.zip",
+              size: 100,
+              type: "application/zip",
+              url: "https://files.example/archive.zip",
+              messageId: "1.0",
+            },
+            {
+              name: "metadata.zip",
+              size: 100,
+              type: unsafeMediaType,
+              url: "https://files.example/metadata.zip",
+              messageId: "1.0",
+            },
+          ],
+        },
+        mode: "on",
+      },
+    );
+    expect(result).toMatchObject({
+      outcome: "binds",
+      binds: [{ line: "agent:ship ship F0PLAN", repo: "acme/atlas" }],
+    });
+  });
   it("the turn's tools are ask, bind_preset with the projection's presets as the enum, each command's own tool, then the reads — no decide tool and no refusal exists", () => {
     const tools = operatorTools(input());
     const names = tools.map((t) => t.name);
@@ -184,6 +276,12 @@ describe("the operator is one loop with typed tools", () => {
       kind: "decision",
       decision: { kind: "question", text: "Which listing?", proposal: "runs list" },
     });
+    expect(
+      parseOperatorTurn(
+        { tool: OPERATOR_ASK_TOOL, input: { text: "Which repository contains the plan?", reason: "no target" } },
+        ctxOf(),
+      ),
+    ).toMatchObject({ kind: "decision", decision: { kind: "question", text: "Which repository contains the plan?" } });
     expect(
       parseOperatorTurn(
         { tool: OPERATOR_ASK_TOOL, input: { text: "Review it?", proposal: "agent:research", reason: "fork" } },
