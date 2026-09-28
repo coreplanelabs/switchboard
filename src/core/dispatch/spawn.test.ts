@@ -140,6 +140,19 @@ const parent = (io: ChannelIO, over: Partial<SpawnParent> = {}): SpawnParent => 
 });
 
 describe("spawnChild — the one path a child run is born through", () => {
+  it("carries the parent's repository and ref beside the prompt, not only in it", async () => {
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const prompt = "Inspect the defect illustrated by https://github.com/acme/web/pull/7";
+    await spawnChild(deps(dispatch), parent(channel().io), {
+      preset: "explore",
+      repo: "acme/api",
+      ref: "unit/repair",
+      prompt,
+    });
+    expect(calls[0].opts).toMatchObject({ operationTarget: { repo: "acme/api", ref: "unit/repair" } });
+    expect(calls[0].msg.text).toContain(prompt);
+  });
+
   it("builds the child's message as the requesting user on the opened thread and calls dispatch() with `parent` set: the child registers and the parent gets its id, thread and link", async () => {
     const { dispatch, calls } = fakeDispatch(registers("run-child"));
     const d = deps(dispatch);

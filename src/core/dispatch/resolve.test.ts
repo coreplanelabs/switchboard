@@ -459,28 +459,29 @@ describe("resolveTarget — the provider checked, and the target repo/ref/PR sta
     expect(await second.repoCtxP).toEqual({});
   });
 
-  it("passes the operator's typed repository slot to target resolution", async () => {
+  it("passes fallback facts separately from accepted operation authority to target resolution", async () => {
     const calls: unknown[] = [];
     const deps: ResolveDeps = {
       config: configStore(),
-      resolveRepoContext: (_message, _history, _records, operatorRepo) => {
-        calls.push(operatorRepo);
-        return { repo: operatorRepo };
+      resolveRepoContext: (_message, _history, _records, fallbackRepo, _reviewBarePr, operationTarget) => {
+        calls.push({ fallbackRepo, operationTarget });
+        return operationTarget ?? { repo: fallbackRepo };
       },
     };
-    const agent = getAgent("review");
+    const agent = getAgent("coding");
     const out = resolveTarget(deps, {
-      msg: msg("review again"),
+      msg: msg("continue the coding task"),
       history,
       agent,
       profile: declaredProfile(agent),
-      resolved: resolvedFor("review"),
+      resolved: resolvedFor("coding"),
       resume: undefined,
       root: root(message).root,
-      operatorRepo: "acme/api",
+      operatorRepo: "acme/other",
+      operationTarget: { repo: "acme/api", ref: "unit/repair" },
     });
-    expect(await out.repoCtxP).toEqual({ repo: "acme/api" });
-    expect(calls).toEqual(["acme/api"]);
+    expect(await out.repoCtxP).toEqual({ repo: "acme/api", ref: "unit/repair" });
+    expect(calls).toEqual([{ fallbackRepo: "acme/other", operationTarget: { repo: "acme/api", ref: "unit/repair" } }]);
   });
 
   it("a resume carries the repo context its row was reclaimed with: the resolver is not asked", async () => {

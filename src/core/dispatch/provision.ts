@@ -39,7 +39,7 @@ import { selfDescriptionBlock, type BuildFacts } from "../selfDescription.js";
 import { customInstructionsBlock } from "../customInstructions.js";
 import type { ResidentFleetFacts } from "../residentFleet.js";
 import { attachRoundWorkspace, makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
-import { ownPrOf, type RepoContext } from "../repoContext.js";
+import { ownPrOf, type OperationTarget, type RepoContext } from "../repoContext.js";
 import { redactSecrets, type AgentSource, type RunEvent } from "../runEvents.js";
 import { RunEventLane } from "../runEventLane.js";
 import { oneLine } from "../redact.js";
@@ -690,6 +690,8 @@ export interface ReserveContext {
   profile: RunProfile;
   resolved: ResolvedRequest;
   repoCtx: RepoContext;
+  /** The accepted target, stored separately from repoCtx's evidence fields. */
+  operationTarget?: OperationTarget;
   channelVisibility: ChannelVisibility;
   runId: string;
   startedAt: number;
@@ -731,6 +733,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     profile,
     resolved,
     repoCtx,
+    operationTarget,
     channelVisibility,
     runId,
     startedAt,
@@ -764,6 +767,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
             threadKey: msg.threadKey,
             channelVisibility,
             ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+            ...(operationTarget !== undefined ? { operationTarget } : {}),
             ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
             ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
             ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),

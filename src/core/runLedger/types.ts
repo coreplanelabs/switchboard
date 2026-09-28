@@ -53,6 +53,8 @@ export interface LiveRunMeta {
   threadKey: string;
   channelVisibility?: ChannelVisibility;
   repo?: string;
+  /** Accepted execution target, distinct from resolved citation and channel facts. */
+  operationTarget?: { repo: string; ref?: string };
   sourceUrl?: string;
   userName?: string;
   /** The bound credential behind the person (authorization.md item 15): a

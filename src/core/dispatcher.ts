@@ -9,7 +9,7 @@ import { assignRunLiveState, type ResidentLiveStateObservation } from "./runLive
 import { liveStateWords } from "./plane/decide.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
 import { cardShapeLineOf, queuedCaption } from "./runShape.js";
-import { barePrNumberOf, explicitPrOf, type RepoContext } from "./repoContext.js";
+import { barePrNumberOf, explicitPrOf, type RepoContext, type OperationTarget } from "./repoContext.js";
 import { redactSecrets, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import type { LiveThread } from "./threadAdmission.js";
@@ -124,6 +124,7 @@ import {
   abandonLostWorkspace,
   announceChildRoll,
   carriedCoordinatorTag,
+  carriedOperationTarget,
   carriedRunIdentity,
   carriedWorkspaceBinding,
   prepareRestartTurn,
@@ -437,6 +438,9 @@ export function activeRunCount(): number {
 }
 
 export interface DispatchOptions {
+  /** The parent's admitted operation target, not a prompt hint. Reviews keep
+   * their independently resolved PR target; ordinary authorization still runs. */
+  operationTarget?: OperationTarget;
   resume?: ResumeContext;
   restart?: RestartContext;
   /** Set by a channel adapter whose intake gate already read the thread's runs
@@ -858,6 +862,7 @@ export async function dispatch(
         restartOf?: string;
         note: string;
         coordinator?: CoordinatorTag;
+        operationTarget?: OperationTarget;
         /** The `restarting` record the row was closed with (issue 2081): kept so
          *  a restart dispatch that dies before the successor's claim ends that
          *  record for real instead of leaving it answering still-running. */
@@ -948,8 +953,7 @@ export async function dispatch(
     // words (the plain-words model unit): applied at directive precedence
     // (`resolveRun`'s `operatorModel`), exactly as `model:<ref>` would.
     let operatorModel: string | undefined;
-    // The repository the typed bind carries. Target resolution treats it as a
-    // fallback below an explicit current-message target.
+    // The accepted bind is authority, not the thread/channel fallback facts.
     let operatorRepo: string | undefined;
     // An ended generated pipeline's stable plan id and remaining caps: read
     // from its coordinator rows and handed to ship so neither a formatted
@@ -1274,9 +1278,15 @@ export async function dispatch(
       if (namedReleasedPr !== undefined) threadPr = namedReleasedPr;
     }
     const inheritedRepo =
-      operatorRepo ??
       (thread ? newestFinishedRunOf(thread)?.repo : undefined) ??
       deps.config.scopes(msg.channelId, msg.userId).channel.repo;
+    const carriedTarget = resume
+      ? carriedOperationTarget(resume.row)
+      : restart
+        ? carriedOperationTarget(restart.row)
+        : undefined;
+    const operationTarget =
+      opts.operationTarget ?? carriedTarget ?? (operatorRepo !== undefined ? { repo: operatorRepo } : undefined);
     const historicalRoutePreset = restart?.row.meta.route?.preset;
     const resolveCurrent = () =>
       resolveRun(deps, {
@@ -1839,7 +1849,9 @@ export async function dispatch(
             resume,
             root,
             ...(threadPr ? { records: { pr: threadPr } } : {}),
-            ...(inheritedRepo !== undefined ? { operatorRepo: inheritedRepo } : {}),
+            ...(operatorRepo !== undefined || inheritedRepo !== undefined
+              ? { operatorRepo: operatorRepo ?? inheritedRepo }
+              : {}),
             reviewBarePr: true,
           })
         : undefined;
@@ -1908,6 +1920,7 @@ export async function dispatch(
     // along, and its outcome is the one the caller gets.
     if (outcome.kind === "redispatch")
       return dispatch(deps, msg, io, {
+        ...(operationTarget !== undefined ? { operationTarget } : {}),
         ...(opts.parent ? { parent: opts.parent } : {}),
         ...(opts.seed ? { seed: opts.seed } : {}),
         ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
@@ -1972,6 +1985,7 @@ export async function dispatch(
       root,
       ...(threadPr ? { records: { pr: threadPr } } : {}),
       ...(inheritedRepo !== undefined ? { operatorRepo: inheritedRepo } : {}),
+      ...(agent.name !== "review" && operationTarget !== undefined ? { operationTarget } : {}),
       ...(earlyRepoTarget !== undefined ? { repoTarget: earlyRepoTarget } : {}),
     });
 
@@ -2095,6 +2109,26 @@ export async function dispatch(
       const { headSha: _headSha, ...kept } = repoCtx;
       repoCtx = kept;
     }
+
+    // A direct typed coding act needs a branch before the Git door is minted.
+    // The door's first-push allowance cannot choose the branch on its behalf.
+    const directCodingTarget =
+      !coordinator && agent.name === "coding"
+        ? opts.operationTarget?.ref !== undefined
+          ? opts.operationTarget
+          : carriedTarget?.ref !== undefined
+            ? carriedTarget
+            : !resume && !restart && opts.restartOf === undefined
+              ? opts.operationTarget
+              : undefined
+        : undefined;
+    if (
+      directCodingTarget &&
+      (!directCodingTarget.ref ||
+        repoCtx.repo?.toLowerCase() !== directCodingTarget.repo.toLowerCase() ||
+        repoCtx.ref !== directCodingTarget.ref)
+    )
+      throw new Error("the accepted coding branch is missing or differs from the resolved target");
 
     // The repository gates (dispatch/authorize.ts): not onboarded, unverified,
     // access — each closes the card and replies by name.
@@ -2318,6 +2352,7 @@ export async function dispatch(
         profile,
         resolved,
         repoCtx,
+        ...(agent.name !== "review" && operationTarget !== undefined ? { operationTarget } : {}),
         channelVisibility,
         runId,
         startedAt,
@@ -2673,9 +2708,7 @@ export async function dispatch(
           coordinatorBranch ??
           carriedGithubBinding?.ref ??
           resume?.row.meta.ref)
-        : repoCtx.pr
-          ? repoCtx.ref
-          : undefined;
+        : (directCodingTarget?.ref ?? (repoCtx.pr ? repoCtx.ref : undefined));
     if (coordinator && agent.name === "coding" && !githubBoundRef)
       throw new Error("the coordinator coding unit has no durable branch target");
     const bearer = mintRunBearer(deps, {
@@ -2808,6 +2841,7 @@ export async function dispatch(
             note: "workspace lost, resumed from the request",
             ...(abandoned.closed !== undefined ? { closed: abandoned.closed } : {}),
             ...(coordinator !== undefined ? { coordinator } : {}),
+            ...(operationTarget !== undefined ? { operationTarget } : {}),
           };
         resumeRowClosed = true;
       }
@@ -3235,6 +3269,7 @@ export async function dispatch(
       // reason.
       restartRequest = {
         ...ran.restart,
+        ...(operationTarget !== undefined ? { operationTarget } : {}),
         note:
           ran.refusal === "container_replaced" || ran.refusal === "workspace_lost"
             ? "container replaced, resumed from the request"
@@ -3500,6 +3535,7 @@ export async function dispatch(
         ...(restartRequest.restartOf !== undefined ? { restartOf: restartRequest.restartOf } : {}),
         ...(restartIdentity !== undefined ? { carried: restartIdentity } : {}),
         ...(restartRequest.coordinator !== undefined ? { coordinator: restartRequest.coordinator } : {}),
+        ...(restartRequest.operationTarget !== undefined ? { operationTarget: restartRequest.operationTarget } : {}),
       });
       const restarted = await dispatch(deps, restart.msg, io, restart.opts).catch((err: unknown) => {
         console.error(

@@ -570,7 +570,10 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       text: "agent:coding budget:30 in acme/api: do the unit",
       receivedAt: NOW,
     });
-    expect(h.dispatched[0].opts).toEqual({ coordinator: { ...TAG, branch: INSTANCE.branch } });
+    expect(h.dispatched[0].opts).toEqual({
+      coordinator: { ...TAG, branch: INSTANCE.branch },
+      operationTarget: { repo: INSTANCE.repo, ref: INSTANCE.branch },
+    });
   });
 
   it("the decision's tier rides the child's request: `model` and `effort` on the body become the child's own directives, ahead of every scope (the one-door plan's tiers rule)", async () => {
@@ -3420,7 +3423,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
   });
 
-  it("spawn with a contract brief composes the coding child's turn from the plan at the base ref: the unit's branch in the text, the contract and the tag as its options; a findings brief dispatches the review run's findings into the unit thread as `agent:coding` with the tag as its only option, no finding-id tag; a brief for a unit without a thread is 409; a brief the bot cannot compose is 502", async () => {
+  it("spawn with a contract brief composes the coding child's turn from the plan at the base ref: the unit's branch in the text, the contract and the tag as its options; a findings brief dispatches the review run's findings into the unit thread as `agent:coding` with the tag and operation target, no finding-id tag; a brief for a unit without a thread is 409; a brief the bot cannot compose is 502", async () => {
     const h = await planHarness();
     await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0", issue: 834 })]);
     const res = await call(h, "spawn", {
@@ -3487,6 +3490,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(findingsDispatch.msg.text).toContain("[minor] F1 src/a.ts:3 — off by one");
     expect(findingsDispatch.msg.text).toContain("Review:\nChanges requested: one nit.");
     expect(findingsDispatch.opts).toEqual({
+      operationTarget: { repo: PLAN_INSTANCE.repo, ref: "plan/fixture/u10" },
       coordinator: {
         parentInstanceId: PLAN_INSTANCE.id,
         idempotencyKey: "plan-fixture:U10/1/findings",

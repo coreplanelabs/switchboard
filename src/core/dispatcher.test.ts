@@ -4893,6 +4893,23 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(vi.mocked(makeExecutor).mock.calls[0][1].ref).toBe(branch);
   });
 
+  it("pins a direct coding run's first push to its accepted branch before any PR exists", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    const branch = "work/accepted";
+    deps.runRegistry = new RunRegistry({ genId: () => "r-direct-fence", genToken: () => "t-direct-fence" });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: branch });
+    codingExecutor({ head: HEAD, branch, bindingRef: branch });
+    deps.openPullRequest = openSpy().fn;
+    await dispatch(deps, msg("agent:coding in acme/api: do the work", "slack:UADMIN"), fakeIO().io, {
+      operationTarget: { repo: "acme/api", ref: branch },
+    });
+    expect(deps.runBearers?.grantOf("r-direct-fence")?.github).toEqual({
+      identity: "write",
+      repo: "acme/api",
+      ref: branch,
+    });
+  });
+
   // Issue 1860, the merged half: a MERGED pull request cited as a receipt
   // binds no ref at the resolver (`refFromPr` unset), so the coordinator drop
   // above never fires — yet the resolver still carries the merged PR's frozen
@@ -11357,6 +11374,39 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       return { ...h, provider, repoCtx, instance, admin, call, spawnBody, io, replies, started, finished, dispatched };
     }
 
+    it("a spawned write child keeps the parent's operation repository and ref when its prompt cites a foreign PR", async () => {
+      const h = await setup();
+      delete h.deps.resolveRepoContext;
+      const fetch = vi.fn(async () => new Response("{}", { status: 404 }));
+      vi.stubGlobal("fetch", fetch);
+      vi.mocked(makeExecutor).mockRejectedValueOnce(new Error("stop after observing attach target"));
+      const prompt =
+        "Apply the fix illustrated by https://github.com/acme/other/pull/7 and https://github.com/acme/other/tree/foreign";
+      expect(await h.call("spawn", { ...h.spawnBody, prompt })).toMatchObject({
+        status: 200,
+        body: { runId: "run-l" },
+      });
+      await Promise.all(h.dispatched);
+      await h.writer.settled();
+      expect(makeExecutor).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          repo: h.instance.repo,
+          ref: h.instance.branch,
+          profile: expect.objectContaining({ identity: "write" }),
+        }),
+        expect.anything(),
+      );
+      expect(await h.store.get("run-l")).toMatchObject({ repo: h.instance.repo, parentInstanceId: h.instance.id });
+      const record = (await h.store.get("run-l"))!;
+      expect(record.events.find((e) => e.type === "run_meta")).toMatchObject({
+        repo: h.instance.repo,
+        ref: h.instance.branch,
+      });
+      expect(record.events.find((e) => e.type === "run_meta")).not.toHaveProperty("pr");
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
     it.each(["coding", "review"] as const)(
       "keeps the advertised %s id and original binding on a pre-model setup failure and replay",
       async (preset) => {
@@ -12032,6 +12082,61 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       "and also the numbers",
     ]);
     expect(warnings).toEqual([]);
+  });
+
+  it("a reclaimed coding request keeps its accepted repository and branch instead of a foreign PR citation", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const target = { repo: "acme/api", ref: "unit/repair" };
+    const request = msg(
+      "agent:coding in acme/api: fix the issue illustrated by https://github.com/acme/web/pull/7",
+      "slack:UADMIN",
+    );
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      phase: "attaching",
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: target.repo,
+        ref: target.ref,
+        operationTarget: target,
+        request: durableInboxMessage(request, request.text, 5_000),
+      },
+      system: "",
+      tools: [],
+    });
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const provider = capturingProvider("done");
+    const { deps, writer } = wired(provider, { ledger });
+    const resolve = vi.fn(
+      (_msg, _history, _records, _fallback, _review, operationTarget?: { repo: string; ref?: string }) =>
+        operationTarget ?? { repo: "acme/web", ref: "foreign" },
+    );
+    deps.resolveRepoContext = resolve;
+    const fake = {
+      exec: async () => "",
+      readFile: async () => "",
+      writeFile: async () => "",
+      release: async () => ({ released: true }),
+    };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
+    const outcome = await dispatch(deps, restored.msg, ioWithCard().io, {
+      restart: { row: reclaimed.row, inbox: reclaimed.inbox },
+    });
+    await writer.settled();
+    expect(outcome.status).toBe("completed");
+    expect(resolve.mock.calls.at(-1)?.[5]).toEqual(target);
+    expect(makeExecutor).toHaveBeenCalledWith(expect.anything(), expect.objectContaining(target), expect.anything());
+    expect(provider.requests).toHaveLength(1);
   });
 
   it("a restarted historical route reuses the row's preset and repaints its reason without a model call or new route event", async () => {
@@ -12891,6 +12996,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     });
     const ledger = new InMemoryRunLedger(() => 10_000);
     const request = msg("agent:coding fix it", "slack:UADMIN");
+    const operationTarget = { repo: "acme/api", ref: "main" };
     await ledger.claim({
       runId: "run-old",
       threadKey: "slack:CX:1.0",
@@ -12905,6 +13011,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         model: "anthropic/coding-model",
         repo: "acme/api",
         ref: "main",
+        operationTarget,
         request: durableInboxMessage(request, request.text, 4_000),
         // a coordinator's child (run-history item 48a): the tag rides the row's meta and its event
         parentInstanceId: "plan-p",
@@ -12931,7 +13038,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     const provider = capturingProvider("started over and done");
     const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
-    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    const resolve = vi.fn(
+      (_msg, _history, _records, _fallback, _review, target?: { repo: string; ref?: string }) =>
+        target ?? { repo: "acme/web", ref: "foreign" },
+    );
+    deps.resolveRepoContext = resolve;
     const plan = planResume({
       transcript: {
         complete: true,
@@ -12985,6 +13096,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(attaches[3].body).not.toHaveProperty("reuse");
     expect(calls.every((c) => c.host === "resident.example")).toBe(true);
     expect(provider.requests).toHaveLength(1);
+    expect(resolve.mock.calls.at(-1)?.[5]).toEqual(operationTarget);
     expect(replies.at(-1)).toBe("started over and done");
     // ONE run on the index beside the refusal's `door` record (record 0054):
     // the restarted run is `run-old` itself — the page a person opened for that
@@ -19807,7 +19919,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   const parseOnlyCommands = () => (parseRegistry ??= operatorDeps(ON_YAML).deps.commands!);
   const decides = (input: {
     reason?: string;
-    binds?: { line: string; reason?: string }[];
+    binds?: { line: string; reason?: string; repo?: string }[];
     question?: { text: string; proposal?: string };
   }) =>
     vi.fn<RouteModel>(async () => {
@@ -19824,7 +19936,15 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
           routablePresets().map((p) => p.name),
         );
         if (preset !== undefined)
-          return { tool: "bind_preset", input: { preset, request: bind.line, reason: bind.reason ?? "why" } };
+          return {
+            tool: "bind_preset",
+            input: {
+              preset,
+              request: bind.line,
+              reason: bind.reason ?? "why",
+              ...(bind.repo ? { repo: bind.repo } : {}),
+            },
+          };
         throw new Error(`the scripted line does not parse: ${bind.line}`);
       }
       const def = commands.list().find((c) => c.id === parsed.id)!;
@@ -19884,6 +20004,121 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       refusal: "repo_not_onboarded",
       repoResolution: "rejected",
       repoTargetRelation: "unresolved",
+    });
+  });
+
+  it.each([false, true])(
+    "an accepted operation bind keeps the requested repository despite a foreign PR citation (follow-up: %s)",
+    async (followUp) => {
+      const { deps, registry, provider } = operatorDeps(ON_YAML);
+      await deps.config.setChannelOverride("slack:CX", { repo: "acme/web" });
+      deps.operatorModel = decides({
+        binds: [
+          {
+            line: "agent:explore in acme/switchboard: investigate the defect",
+            reason: "the operation target",
+            repo: "acme/switchboard",
+          },
+        ],
+      });
+      const fetch = vi.fn(async () => new Response("{}", { status: 404 }));
+      vi.stubGlobal("fetch", fetch);
+      const text = followUp
+        ? "Check the same defect as https://github.com/acme/web/pull/7"
+        : "In acme/switchboard: investigate the defect illustrated by https://github.com/acme/web/pull/7";
+      const history: HistoryItem[] = followUp ? [{ role: "user", text: "in acme/switchboard: investigate" }] : [];
+      await dispatch(deps, msg(text, "slack:UADMIN"), fakeIO(history).io, {
+        thread: followUp
+          ? [
+              {
+                id: "prior",
+                repo: "acme/switchboard",
+                agent: "explore",
+                finished: true,
+                startedAt: 1,
+                finishedAt: 2,
+                eventCount: 0,
+              },
+            ]
+          : [],
+      });
+      expect(registry.snapshotById("r1")?.events.find((e) => e.type === "operator")).toMatchObject({
+        outcome: "binds",
+        binds: [expect.objectContaining({ line: expect.stringContaining("agent:explore") })],
+      });
+      expect(makeExecutor).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ repo: "acme/switchboard" }),
+        expect.anything(),
+      );
+      const meta = registry.snapshotById("r1")?.events.find((e) => e.type === "run_meta");
+      expect(meta).toMatchObject({ repo: "acme/switchboard" });
+      expect(meta).not.toHaveProperty("pr");
+      expect(JSON.stringify(provider.requests)).toContain("https://github.com/acme/web/pull/7");
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("an accepted operation target still passes repository authorization before any executor", async () => {
+    const { deps, provider } = operatorDeps(ON_YAML.replace("restrict:\n", "restrict:\n  repos: [acme/private]\n"));
+    const outcome = await dispatch(
+      deps,
+      msg("agent:explore inspect https://github.com/acme/public/pull/7"),
+      fakeIO().io,
+      {
+        operationTarget: { repo: "acme/private", ref: "unit/repair" },
+      },
+    );
+    expect(outcome).toMatchObject({ status: "refused", refusal: "repo_access" });
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(provider.requests).toEqual([]);
+  });
+
+  it("a review target stays separate from the accepted operation repository and channel default", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    await deps.config.setChannelOverride("slack:CX", { repo: "acme/api" });
+    deps.operatorModel = decides({
+      binds: [
+        {
+          line: "agent:review https://github.com/acme/web/pull/5",
+          reason: "review the requested PR",
+          repo: "acme/web",
+        },
+      ],
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              state: "open",
+              head: { ref: "reviewed", sha: "a".repeat(40), repo: { full_name: "acme/web" } },
+              base: { ref: "main" },
+              object: { sha: "a".repeat(40) },
+            }),
+          ),
+      ),
+    );
+    deps.postReviewComment = vi.fn(async () => {});
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: {
+        exec: async (command) => (command.includes("git rev-parse HEAD") ? `${"a".repeat(40)}\n` : ""),
+        readFile: async () => "",
+        writeFile: async () => "",
+      },
+    });
+    await dispatch(deps, msg("in acme/api: review acme/web#5", "slack:UADMIN"), fakeIO().io, {
+      operationTarget: { repo: "acme/api", ref: "operation" },
+    });
+    expect(makeExecutor).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ repo: "acme/web" }),
+      expect.anything(),
+    );
+    expect(registry.snapshotById("r1")?.events.find((e) => e.type === "run_meta")).toMatchObject({
+      repo: "acme/web",
+      pr: 5,
     });
   });
 
