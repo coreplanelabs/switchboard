@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 // package whose tests vitest 5 can run is a project there, so `npx vitest run
 // <filter>` from the root finds a test wherever it lives, and CI shards the
 // union. The memory Worker is the documented exception (its tests run inside
-// workerd on @cloudflare/vitest-pool-workers, which pins vitest 4); so is the
+// workerd on @cloudflare/vitest-plugin, which pins vitest 4); so is the
 // npm package, whose tests need the package BUILT — the smoke test packs and
 // installs it — which its own `verify` does first and the root shards never
 // would. A new workspace with a `test` script must join the projects list, or

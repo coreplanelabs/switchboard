@@ -1,5 +1,7 @@
-import { SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { ScheduleFiring } from "../../src/core/schedules.ts";
+import { ScheduleDO } from "./worker.ts";
 
 // Feature: docs/reference/specs/live-view.md item 13 — the ScheduleDO: the durable
 // record of scheduled firings behind the /runs "Scheduled" panel. The Worker
@@ -26,7 +28,7 @@ async function post(path: string, body: unknown, headers: Record<string, string>
   return { status: res.status, data };
 }
 
-const firing = (schedule: string, firedAt: number, over: Record<string, unknown> = {}) => ({
+const firing = (schedule: string, firedAt: number, over: Partial<ScheduleFiring> = {}): ScheduleFiring => ({
   schedule,
   firedAt,
   outcome: "completed",
@@ -78,11 +80,12 @@ describe("schedule firing routes", () => {
 
   it("is bounded per schedule: the oldest firings fall off past the cap", async () => {
     const s = name();
-    let retained = 0;
-    for (let i = 0; i < 105; i++) {
-      retained = (await post("/schedules/record", { firing: firing(s, i) })).data.retained as number;
-    }
-    expect(retained).toBe(100);
+    // Seed inside one object callback; the final route call still proves the
+    // cap without spending the case's deadline on 104 test-boundary crossings.
+    await runInDurableObject(env.SCHEDULES.get(env.SCHEDULES.idFromName("schedules")), async (inst: ScheduleDO) => {
+      for (let i = 0; i < 104; i++) await inst.record(firing(s, i));
+    });
+    expect((await post("/schedules/record", { firing: firing(s, 104) })).data.retained).toBe(100);
     expect((await latestOf([s]))[0].firedAt).toBe(104);
   });
 

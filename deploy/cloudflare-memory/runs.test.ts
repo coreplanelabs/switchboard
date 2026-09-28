@@ -100,6 +100,10 @@ const putDirect = (
   rec: RunRecord,
   proposal?: { policy: Record<string, number>; policyUpdatedAt: number },
 ) => runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.put(rec, proposal));
+const putDirectMany = (key: string, records: RunRecord[]) =>
+  runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
+    for (const rec of records) await inst.put(rec);
+  });
 
 // docs/reference/specs/run-history.md item 56: the record's usage is stored beside
 // the row; `/runs/usage` answers one row per run with its thread, channel and
@@ -769,7 +773,7 @@ describe("run history routes", () => {
     const key = storeKey();
     const now = Date.now();
     const recoveryEvidence = { instanceId: "original", unit: "U12", threadKeys: ["slack:C1:original"] };
-    for (let i = 0; i < 205; i++) await putDirect(key, record(`noise-${i}`, now - i, { threadKey: "slack:C1:noise" }));
+    const noise = Array.from({ length: 205 }, (_, i) => record(`noise-${i}`, now - i, { threadKey: "slack:C1:noise" }));
     const relevant = [
       record("parent", now - 1000, {
         parentInstanceId: "original",
@@ -788,23 +792,20 @@ describe("run history routes", () => {
         threadKey: "slack:C1:foreign",
       }),
     ];
-    for (const row of relevant) await putDirect(key, row);
-    await putDirect(
-      key,
+    await putDirectMany(key, [
+      ...noise,
+      ...relevant,
       record("other-unit", now - 4000, {
         parentInstanceId: "other",
         idempotencyKey: "original:U120/0/coding",
         threadKey: "slack:C1:foreign",
       }),
-    );
-    await putDirect(
-      key,
       record("bare-neighbor", now - 5000, {
         parentInstanceId: "other",
         idempotencyKey: "original:U120",
         threadKey: "slack:C1:foreign",
       }),
-    );
+    ]);
     const result = await post("/runs/list", { storeKey: key, limit: 200, recoveryEvidence });
     expect(result.status).toBe(200);
     expect(result.data.evidenceComplete).toBe(true);
@@ -863,9 +864,11 @@ describe("run history routes", () => {
     const key = storeKey();
     const now = Date.now();
     const recoveryEvidence = { instanceId: "original", unit: "U12", threadKeys: ["slack:C1:original"] };
-    await putDirect(key, record("original", now, { threadKey: "slack:C1:original" }));
-    for (let i = 0; i < 205; i++) await putDirect(key, record(`noise-${i}`, now - i, { threadKey: "slack:C1:noise" }));
-    await putDirect(key, record("corrupt", now - 2 * DAY, { threadKey: "slack:C1:foreign" }));
+    await putDirectMany(key, [
+      record("original", now, { threadKey: "slack:C1:original" }),
+      ...Array.from({ length: 205 }, (_, i) => record(`noise-${i}`, now - i, { threadKey: "slack:C1:noise" })),
+      record("corrupt", now - 2 * DAY, { threadKey: "slack:C1:foreign" }),
+    ]);
     await runInDurableObject(stubOf(key), async (_instance, state) => {
       state.storage.sql.exec("UPDATE runs SET summary_json = 'null', bytes = ? WHERE run_id = 'corrupt'", 32 * MIB);
     });
@@ -895,9 +898,9 @@ describe("run history routes", () => {
   it("list: newest-first, limit 1000 → at most 200 rows plus a cursor; before/sinceMs/agent/channel/threadKey/parentRunId/pr filters; no events on the wire", async () => {
     const key = storeKey();
     const now = Date.now();
-    for (let i = 0; i < 230; i++) {
-      await putDirect(
-        key,
+    await putDirectMany(
+      key,
+      Array.from({ length: 230 }, (_, i) =>
         record(`r${String(i).padStart(3, "0")}`, now - i * 1000, {
           events: events(1),
           agent: i % 2 ? "review" : "coding",
@@ -918,8 +921,8 @@ describe("run history routes", () => {
                 ? { reviewPost: { posted: false, reason: "head moved" } }
                 : { pr: { number: 43, url: "https://github.com/acme/api/pull/43" } }),
         }),
-      );
-    }
+      ),
+    );
     const page = await post("/runs/list", { storeKey: key, limit: 1000 });
     const items = page.data.items as Array<Record<string, unknown>>;
     expect(items).toHaveLength(200);

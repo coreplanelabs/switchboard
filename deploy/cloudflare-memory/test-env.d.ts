@@ -8,7 +8,7 @@ declare module "cloudflare:test" {
 
 declare global {
   namespace Cloudflare {
-    // This version of @cloudflare/vitest-pool-workers types `env` as
+    // The Cloudflare Vitest plugin types `env` as
     // `Cloudflare.Env` (the wrangler-typegen convention), not ProvidedEnv —
     // extend it too so tests see the Worker's own bindings.
     // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- augmentation by inheritance is the intended shape
