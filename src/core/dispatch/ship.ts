@@ -253,10 +253,18 @@ export async function runShipBranch(
     );
     if (answer.status !== 200) {
       const error = typeof answer.body.error === "string" ? answer.body.error : "original-unit recovery was refused";
+      const spent = answer.body.spendUsd;
+      const cap = answer.body.costCapUsd;
       const reason =
-        error === "recovery_budget_unknown" && typeof answer.body.reason === "string"
-          ? `${error}: ${answer.body.reason}`
-          : error;
+        error === "recovery_cost_cap_exhausted" &&
+        typeof spent === "number" &&
+        Number.isFinite(spent) &&
+        typeof cap === "number" &&
+        Number.isFinite(cap)
+          ? `Original-unit recovery refused: $${spent.toFixed(2)} spent against the original $${cap.toFixed(2)} cost cap. Continue the existing pull request only under separate authorization, then request review of its exact head.`
+          : error === "recovery_budget_unknown" && typeof answer.body.reason === "string"
+            ? `${error}: ${answer.body.reason}`
+            : error;
       await refuse(refusalOf("setup_failed", reason), () =>
         card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
       );

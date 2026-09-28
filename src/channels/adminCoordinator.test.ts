@@ -8984,7 +8984,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       const h = await legacyHarness();
       await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
       await h.instances.putUnits([legacyRow()]);
-      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_cost_cap_exhausted" } });
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_cost_cap_exhausted", spendUsd: 0.5, costCapUsd: 0.5 },
+      });
       expect(h.recoveries).toEqual([]);
     });
 

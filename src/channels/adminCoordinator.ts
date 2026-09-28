@@ -3116,7 +3116,13 @@ export async function recoverOriginalUnit(
     const spend = historicalRecoverySpend(instance, row, [...histories.values()]);
     if ("reason" in spend) return unknownBudget(spend.reason);
     if (grant.costCapUsd !== undefined && spend.usd >= grant.costCapUsd)
-      return json(409, { ok: false, error: "recovery_cost_cap_exhausted", at });
+      return json(409, {
+        ok: false,
+        error: "recovery_cost_cap_exhausted",
+        spendUsd: spend.usd,
+        costCapUsd: grant.costCapUsd,
+        at,
+      });
     if (grant.costCapUsd !== undefined || postApproval)
       accounting = {
         spendUsd: spend.usd,

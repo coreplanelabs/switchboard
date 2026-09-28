@@ -316,6 +316,36 @@ describe("original-unit recovery accounting", () => {
     expect(d.state.spendUsd).toBe(expectedSpend);
   });
 
+  it("shows the separate PR action when a recovered no-verdict review spends the original cap", () => {
+    const state = openRecoveredUnitPipeline(
+      input({
+        merge: "person",
+        grant: { renewals: 0, costCapUsd: 50 },
+        recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+      }),
+      T0,
+      {
+        kind: "review",
+        round: 2,
+        pr: { number: 7, url: PR_URL },
+        expectedHeadSha: HEAD_A,
+        reviewRunId: "run-original-review",
+        spendUsd: 48,
+      },
+    );
+    const d = new Driver(state);
+    runChild(d, "run-recovered-review", finished({ status: "failed", costUsd: 3 }), T0 + MIN);
+
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "no_verdict" } });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("$51.00 spent against the original $50.00 cost cap");
+    expect(report).toContain(`existing pull request (${PR_URL})`);
+    expect(report).toContain("separate authorization");
+    const quiet = renderUnitReport(d.state, undefined, "quiet");
+    expect(quiet).toContain("$51.00 spent against the original $50.00 cost cap");
+    expect(quiet).toContain(`existing pull request (${PR_URL})`);
+  });
+
   it("reads a completed findings push at its exact remote head before ending an exhausted recovery", () => {
     const d = new Driver(
       openRecoveredUnitPipeline(
@@ -2113,6 +2143,32 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(report).toContain("Review round 1 ended without a submitted verdict");
     expect(report).not.toContain("ran out of budget");
     expect(report).toContain("run run-r1");
+  });
+
+  it("a capped no-verdict stop does not suggest restarting the exhausted unit", () => {
+    const d = fresh(input({ generated: true, grant: { renewals: 6, costCapUsd: 50 } }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      d,
+      "run-c0",
+      finished({ status: "completed", costUsd: 3, pr: { number: 7, url: PR_URL, created: true } }),
+      T0 + 10 * MIN,
+    );
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+      at: T0 + 10 * MIN,
+    });
+    runChild(d, "run-r1", finished({ status: "failed", costUsd: 52 }), T0 + 20 * MIN);
+
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "no_verdict" } });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("$55.00 spent against the original $50.00 cost cap");
+    expect(report).toContain(PR_URL);
+    expect(report).not.toContain("start ship again");
+    const quiet = renderUnitReport(d.state, undefined, "quiet");
+    expect(quiet).toContain("$55.00 spent against the original $50.00 cost cap");
+    expect(quiet).toContain(`existing pull request (${PR_URL})`);
   });
 
   it("an approve whose post did not land is an honest abort, never merge-ready — the report carries the child's recorded reason and says how to continue in the runner's words", () => {

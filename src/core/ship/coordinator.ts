@@ -3883,9 +3883,16 @@ function renderUnitReportWithWake(
   const rounds = `${e.reviewRounds} review round${e.reviewRounds === 1 ? "" : "s"}`;
   const prUrl = s.pr?.url;
   const prLine = prUrl ? ` PR: ${prUrl}` : "";
+  const spentCapAction = (): string | undefined => {
+    const cap = s.input.grant?.costCapUsd;
+    if (cap === undefined || s.spendUsd === null || s.spendUsd < cap) return undefined;
+    return `Next action: $${s.spendUsd.toFixed(2)} spent against the original $${cap.toFixed(2)} cost cap; this unit cannot start another child. Continue ${prUrl ? `the existing pull request (${prUrl})` : "the saved branch"} only under separate authorization, then request review of its exact head.`;
+  };
   const nextAction = (checkpoint?: { branch: string; sha: string }): string => {
     if (durableWake)
       return `The unit remains live; a reply in this thread is recorded as its continuation action${prUrl ? ` from the open pull request (${prUrl})` : " from the saved branch state"}.`;
+    const cappedAction = spentCapAction();
+    if (cappedAction !== undefined) return cappedAction;
     const reconcile = checkpoint
       ? `verify \`${checkpoint.sha.slice(0, 7)}\` is on \`${checkpoint.branch}\`, then reconcile the remote branch and pull request if needed`
       : prUrl
@@ -4167,7 +4174,10 @@ function renderUnitReportWithWake(
       ]);
     case "no_verdict":
       if (!shows(verbosity, "verbose"))
-        return `⚠️ No verdict from review round ${e.round.index} — aborted after ${rounds}.${prLine}`;
+        return join([
+          `⚠️ No verdict from review round ${e.round.index} — aborted after ${rounds}.${prLine}`,
+          spentCapAction(),
+        ]);
       return join([
         `⚠️ Review round ${e.round.index} ended without a submitted verdict (budget, refusal, or stop) — ship never converts that into a request for changes, so no findings step ran.`,
         writeUpPointer(s, e.round.kind, s.reviewRunByRound[e.round.index]),
