@@ -23,6 +23,7 @@ import { planResume, transcriptSource } from "../runLedger/resume.js";
 import { localWorkspaceDir } from "../../execution/factory.js";
 import { reattachWorkspace } from "./provision.js";
 import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
+import { GitBindings, type GitPublicationClaim } from "../modelProxy/gitBindings.js";
 import { RUN_BEARER_ENV } from "../harness/pi/process.js";
 import {
   HarnessContainerReplacedError,
@@ -1277,6 +1278,354 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(rec.pushed).toEqual([{ ref: BRANCH, sha: HEAD, by: "salvage" }]);
     expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
   });
+
+  it("commits a Git-door existing-PR intent before forwarding and its accepted head before reporting success", async () => {
+    const old = "a".repeat(40);
+    const head = "b".repeat(40);
+    const ref = "fix/existing";
+    const publication = {
+      repo: "o/r",
+      pr: 7,
+      headRef: ref,
+      baseRef: "main",
+      expectedHeadSha: old,
+      publicationRef: ref,
+      owner: { instanceId: "coord-p", unit: "U12" },
+    };
+    const bindings = new GitBindings();
+    expect(
+      bindings.register(
+        "run-l",
+        { repo: "o/r", ref },
+        { repo: "o/r", ref: `refs/heads/${ref}`, refConfirmed: true },
+        async () => true,
+        true,
+      ),
+    ).toBe(true);
+    const inner = new InMemoryRunLedger(() => NOW);
+    const ledger = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "gen-T",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+    const opened = await ledger.open({
+      runId: "run-l",
+      threadKey: THREAD,
+      startedAt: NOW,
+      meta: { agent: "coding", channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
+      card: null,
+      system: "test",
+      tools: [],
+      seed: { messages: [{ role: "user", content: [{ type: "text", text: "fix" }] }], budgetMs: 60_000 },
+    });
+    if (opened.kind !== "tracked") throw new Error("untracked test");
+    const working = { state: "working" as const, since: NOW, bound: NOW + 60_000 };
+    const row = inner.live.get("run-l")!;
+    row.liveState = working;
+    row.liveStateSeq = 0;
+    const s = endingIn(
+      async () => {
+        const update = { ref: `refs/heads/${ref}`, old, next: head };
+        const claim = await bindings.beginPublication("run-l", update);
+        expect(claim).toBeDefined();
+        expect(inner.live.get("run-l")!.state.doorPublicationPending).toMatchObject({ update });
+        expect(inner.live.get("run-l")!.state.publicationReceipts).toBeUndefined();
+        expect(await claim!.finish("accepted")).toBe(true);
+        expect(inner.live.get("run-l")!.state.doorPublicationPending).toBeNull();
+        expect(inner.live.get("run-l")!.state.publicationReceipts).toContainEqual(
+          expect.objectContaining({ type: "pushed_head", sha: head }),
+        );
+        return sessionAnswering("done");
+      },
+      {
+        coding: true,
+        repoCtx: { repo: "o/r", pr: 7, ref, baseRef: "main", headSha: old },
+        binding: { ref, sha: old, workspace: "/srv/wt/existing" },
+        coordinator: {
+          parentInstanceId: "coord-p",
+          idempotencyKey: "coord-p:U12/1/findings",
+          base: "main",
+          publication,
+        },
+        executor: {
+          exec: async (cmd) => {
+            if (cmd.includes("rev-parse --abbrev-ref HEAD")) return ref;
+            if (cmd.includes("rev-parse HEAD") || cmd.includes("rev-parse @{u}")) return head;
+            if (cmd.includes("ls-remote")) return `${head}\trefs/heads/${ref}`;
+            return "";
+          },
+        },
+      },
+    );
+    s.deps.githubBindings = bindings;
+    s.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: ref,
+      baseRef: "main",
+      headSha: old,
+      verifiedHead: { repo: "o/r", ref, sha: old },
+    });
+    s.registry.commitLiveState("run-l", { ok: true, liveState: working, liveStateSeq: 0 });
+    s.registry.subscribe("run-l", "tok", { onEvent: (event, seq) => opened.run.event(event, seq) });
+    answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run }));
+    await opened.run.close();
+    expect(restoredPublicationHead(publicationReceiptsFromState(row.state.publicationReceipts), publication)).toBe(
+      head,
+    );
+    s.ending.drain(undefined);
+    await s.writer.settled();
+  });
+
+  it.each(["accepted", "unknown"] as const)(
+    "keeps a forwarded Git-door %s outcome in the final record after the model ends",
+    async (outcome) => {
+      const old = "a".repeat(40);
+      const head = "b".repeat(40);
+      const ref = "fix/existing";
+      const publication = {
+        repo: "o/r",
+        pr: 7,
+        headRef: ref,
+        baseRef: "main",
+        expectedHeadSha: old,
+        publicationRef: ref,
+        owner: { instanceId: "coord-p", unit: "U12" },
+      };
+      const bindings = new GitBindings();
+      expect(
+        bindings.register(
+          "run-l",
+          { repo: "o/r", ref },
+          { repo: "o/r", ref: `refs/heads/${ref}`, refConfirmed: true },
+          async () => true,
+          true,
+        ),
+      ).toBe(true);
+      const inner = new InMemoryRunLedger(() => NOW);
+      const ledger = createLedgerWriteThrough({
+        ledger: inner,
+        gen: "gen-T",
+        fallback: { put: async () => {}, abandoned: () => {} },
+        warn: () => {},
+      });
+      const opened = await ledger.open({
+        runId: "run-l",
+        threadKey: THREAD,
+        startedAt: NOW,
+        meta: { agent: "coding", channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
+        card: null,
+        system: "test",
+        tools: [],
+        seed: { messages: [{ role: "user", content: [{ type: "text", text: "fix" }] }], budgetMs: 60_000 },
+      });
+      if (opened.kind !== "tracked") throw new Error("untracked test");
+      const working = { state: "working" as const, since: NOW, bound: NOW + 60_000 };
+      inner.live.get("run-l")!.liveState = working;
+      inner.live.get("run-l")!.liveStateSeq = 0;
+      let claimReady!: (claim: GitPublicationClaim) => void;
+      const claimed = new Promise<GitPublicationClaim>((resolve) => (claimReady = resolve));
+      let waitEntered!: () => void;
+      const waiting = new Promise<void>((resolve) => (waitEntered = resolve));
+      const originalWait = bindings.waitForPublication.bind(bindings);
+      vi.spyOn(bindings, "waitForPublication").mockImplementation(async (runId, timeoutMs) => {
+        waitEntered();
+        return originalWait(runId, timeoutMs);
+      });
+      const s = endingIn(
+        async () => {
+          const claim = await bindings.beginPublication("run-l", { ref: `refs/heads/${ref}`, old, next: head });
+          expect(claim).toBeDefined();
+          claimReady(claim!);
+          return sessionAnswering("done");
+        },
+        {
+          coding: true,
+          repoCtx: { repo: "o/r", pr: 7, ref, baseRef: "main", headSha: old },
+          binding: { ref, sha: old, workspace: "/srv/wt/existing" },
+          coordinator: {
+            parentInstanceId: "coord-p",
+            idempotencyKey: "coord-p:U12/1/findings",
+            base: "main",
+            publication,
+          },
+          executor: {
+            exec: async (cmd) => {
+              if (cmd.includes("rev-parse --abbrev-ref HEAD")) return ref;
+              if (cmd.includes("rev-parse HEAD") || cmd.includes("rev-parse @{u}")) return old;
+              if (cmd.includes("ls-remote")) return `${old}\trefs/heads/${ref}`;
+              return "";
+            },
+          },
+        },
+      );
+      s.deps.githubBindings = bindings;
+      s.deps.fetchPrFacts = async () => ({
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: ref,
+        baseRef: "main",
+        headSha: old,
+        verifiedHead: { repo: "o/r", ref, sha: old },
+      });
+      s.registry.commitLiveState("run-l", { ok: true, liveState: working, liveStateSeq: 0 });
+      s.registry.subscribe("run-l", "tok", { onEvent: (event, seq) => opened.run.event(event, seq) });
+      const finishing = runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run });
+      const claim = await claimed;
+      await waiting;
+      expect(inner.finished.has("run-l")).toBe(false);
+      expect(await claim.finish(outcome)).toBe(outcome === "accepted");
+      answered(await finishing);
+      await opened.run.close();
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      expect(inner.live.has("run-l")).toBe(false);
+      const record = inner.finished.get("run-l")!;
+      if (outcome === "accepted") {
+        expect(record.pushed).toContainEqual({ ref, sha: head, by: "push" });
+        expect(record.doorPublicationPending).toBeUndefined();
+      } else {
+        expect(record.pushed ?? []).not.toContainEqual({ ref, sha: head, by: "push" });
+        expect(record.doorPublicationPending).toMatchObject({
+          repo: "o/r",
+          pr: 7,
+          owner: publication.owner,
+          update: { ref: `refs/heads/${ref}`, old, next: head },
+        });
+        expect(record.events).toContainEqual(
+          expect.objectContaining({ type: "run_note", kind: "publication_blocked" }),
+        );
+      }
+    },
+  );
+
+  it.each(["accepted", "unknown", "settled-before-fence"] as const)(
+    "keeps a forwarded branch Git-door %s outcome in the final record after the model ends",
+    async (outcome) => {
+      const old = "a".repeat(40);
+      const head = "b".repeat(40);
+      const ref = "unit-branch";
+      const description: PrDescription = {
+        title: "fix(core): retain the branch push outcome",
+        tldr: "Keeps the unit PR unpublished until its push outcome is known.",
+        why: "A model answer can arrive while Git is still forwarding a pack.",
+        pointers: [
+          { label: "Push result", text: "The durable intent remains.", anchor: { path: "src/a", from: 1, to: 2 } },
+        ],
+        feedbackWanted: "The run-seal fence.",
+        risk: "A delayed PR until reconciliation.",
+        verified: "Focused test.",
+        decisions: [],
+        validation: { criteria: [{ criterion: "pending push", proof: "PR unchanged" }] },
+      };
+      const bindings = new GitBindings();
+      expect(
+        bindings.register(
+          "run-l",
+          { repo: "o/r", ref },
+          { repo: "o/r", ref: `refs/heads/${ref}`, refConfirmed: true },
+          async () => true,
+        ),
+      ).toBe(true);
+      const inner = new InMemoryRunLedger(() => NOW);
+      const ledger = createLedgerWriteThrough({
+        ledger: inner,
+        gen: "gen-T",
+        fallback: { put: async () => {}, abandoned: () => {} },
+        warn: () => {},
+      });
+      const opened = await ledger.open({
+        runId: "run-l",
+        threadKey: THREAD,
+        startedAt: NOW,
+        meta: { agent: "coding", channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
+        card: null,
+        system: "test",
+        tools: [],
+        seed: { messages: [{ role: "user", content: [{ type: "text", text: "fix" }] }], budgetMs: 60_000 },
+      });
+      if (opened.kind !== "tracked") throw new Error("untracked test");
+      const working = { state: "working" as const, since: NOW, bound: NOW + 60_000 };
+      inner.live.get("run-l")!.liveState = working;
+      inner.live.get("run-l")!.liveStateSeq = 0;
+      let claimReady!: (claim: GitPublicationClaim) => void;
+      const claimed = new Promise<GitPublicationClaim>((resolve) => (claimReady = resolve));
+      let waitEntered!: () => void;
+      const waiting = new Promise<void>((resolve) => (waitEntered = resolve));
+      const originalWait = bindings.waitForPublication.bind(bindings);
+      vi.spyOn(bindings, "waitForPublication").mockImplementation(async (runId, timeoutMs) => {
+        waitEntered();
+        return originalWait(runId, timeoutMs);
+      });
+      let forwardedClaim: GitPublicationClaim | undefined;
+      let settledDuringObservation = false;
+      const s = endingIn(
+        async (_deps, run) => {
+          run.toolContext.onPrDescription?.(description);
+          const update = { ref: `refs/heads/${ref}`, old, next: head };
+          const claim = await bindings.beginBranch("run-l", update);
+          expect(claim).toBeDefined();
+          expect(inner.live.get("run-l")!.state.doorPublicationPending).toMatchObject({ update });
+          forwardedClaim = claim;
+          claimReady(claim!);
+          return sessionAnswering("done");
+        },
+        {
+          coding: true,
+          repoCtx: { repo: "o/r", ref },
+          binding: { ref, sha: old, workspace: "/srv/wt/branch" },
+          coordinator: { parentInstanceId: "coord-p", idempotencyKey: "coord-p:U12/1/coding", base: "main" },
+          executor: {
+            exec: async (cmd) => {
+              if (cmd.includes("rev-parse --abbrev-ref HEAD")) return ref;
+              if (cmd.includes("rev-parse HEAD") || cmd.includes("rev-parse @{u}")) return old;
+              if (cmd.includes("ls-remote")) {
+                if (outcome === "settled-before-fence" && forwardedClaim && !settledDuringObservation) {
+                  settledDuringObservation = true;
+                  expect(await forwardedClaim.finish("accepted")).toBe(true);
+                }
+                return `${old}\trefs/heads/${ref}`;
+              }
+              return "";
+            },
+          },
+        },
+      );
+      s.deps.githubBindings = bindings;
+      const open = vi.fn(async () => ({ number: 9, htmlUrl: "https://github.com/o/r/pull/9", created: true }));
+      s.deps.openPullRequest = open;
+      s.registry.commitLiveState("run-l", { ok: true, liveState: working, liveStateSeq: 0 });
+      s.registry.subscribe("run-l", "tok", { onEvent: (event, seq) => opened.run.event(event, seq) });
+      const finishing = runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run });
+      const claim = await claimed;
+      await waiting;
+      expect(inner.finished.has("run-l")).toBe(false);
+      if (outcome !== "settled-before-fence") expect(await claim.finish(outcome)).toBe(outcome === "accepted");
+      else expect(settledDuringObservation).toBe(true);
+      const out = answered(await finishing);
+      expect(out.prNote).toBeUndefined();
+      expect(open).not.toHaveBeenCalled();
+      await opened.run.close();
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      const record = inner.finished.get("run-l")!;
+      if (outcome === "accepted" || outcome === "settled-before-fence") {
+        expect(record.pushed).toContainEqual({ ref, sha: head, by: "push" });
+        expect(record.doorPublicationPending).toBeUndefined();
+      } else {
+        expect(record.pushed ?? []).not.toContainEqual({ ref, sha: head, by: "push" });
+        expect(record.doorPublicationPending).toMatchObject({
+          repo: "o/r",
+          owner: { instanceId: "coord-p", unit: "U12" },
+          update: { ref: `refs/heads/${ref}`, old, next: head },
+        });
+        expect(record.doorPublicationPending).not.toHaveProperty("pr");
+      }
+    },
+  );
 
   const receiptCommitModes = [
     "committed",
@@ -4442,6 +4791,59 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     },
   );
 
+  it("a resumed child keeps an earlier uncertain branch write on its finished record", async () => {
+    const old = "a".repeat(40);
+    const next = "b".repeat(40);
+    const ref = "unit-branch";
+    const pending = { id: "intent-before-restart", update: { ref: `refs/heads/${ref}`, old, next } };
+    const description: PrDescription = {
+      title: "fix(core): hold an uncertain branch push",
+      tldr: "Keeps the unit PR unpublished while the prior Git result is uncertain.",
+      why: "A restarted child cannot infer that the earlier push was rejected.",
+      pointers: [
+        { label: "Push result", text: "The durable intent remains.", anchor: { path: "src/a", from: 1, to: 2 } },
+      ],
+      feedbackWanted: "The publication fence.",
+      risk: "A delayed PR until reconciliation.",
+      verified: "Focused test.",
+      decisions: [],
+      validation: { criteria: [{ criterion: "uncertain push", proof: "PR unchanged" }] },
+    };
+    const resume = finishing("done", {
+      agent: "coding",
+      state: { doorPublicationPending: pending, prDescription: description, pushedBranch: ref },
+    });
+    const s = setup("done", {
+      agent: "coding",
+      coding: true,
+      provider: neverCalled(),
+      repoCtx: { repo: "o/r", ref },
+      binding: { ref, sha: old, workspace: "/srv/wt/branch" },
+      coordinator: { parentInstanceId: "coord-p", idempotencyKey: "coord-p:U12/1/coding", base: "main" },
+      executor: {
+        exec: async (command) => {
+          if (command.includes("rev-parse --abbrev-ref HEAD")) return ref;
+          if (command.includes("rev-parse")) return old;
+          if (command.includes("rev-list --count")) return "0";
+          if (command.includes("ls-remote")) return `${old}\trefs/heads/${ref}`;
+          return "";
+        },
+      },
+    });
+    const open = vi.fn(async () => ({ number: 9, htmlUrl: "https://github.com/o/r/pull/9", created: true }));
+    s.deps.openPullRequest = open;
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+    expect(out.prNote).toBeUndefined();
+    expect(open).not.toHaveBeenCalled();
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect((await s.store.get("run-l"))!.doorPublicationPending).toMatchObject({
+      ...pending,
+      repo: "o/r",
+      owner: { instanceId: "coord-p", unit: "U12" },
+    });
+  });
+
   it("a verification-blocked existing PR with a clean checkout performs no PR lookup, edit, or create", async () => {
     const EXPECTED = "a".repeat(40);
     const MOVED = "c".repeat(40);
@@ -4725,8 +5127,27 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       createdAt: NOW,
     });
     s.deps.coordinatorInstances = instances;
+    const bindings = new GitBindings();
+    expect(
+      bindings.register(
+        "run-l",
+        { repo: "o/r", ref: BRANCH },
+        { repo: "o/r", ref: `refs/heads/${BRANCH}`, refConfirmed: true },
+        async () => true,
+      ),
+    ).toBe(true);
+    expect(bindings.setBranchRecorder("run-l", { begin: async () => true, finish: async () => true })).toBe(true);
+    s.deps.githubBindings = bindings;
     const opened: Array<Record<string, unknown>> = [];
+    let lateAdmission = false;
     s.deps.openPullRequest = async (target) => {
+      const claim = await bindings.beginBranch("run-l", {
+        ref: `refs/heads/${BRANCH}`,
+        old: HEAD,
+        next: "c".repeat(40),
+      });
+      lateAdmission = claim !== undefined;
+      if (claim) await claim.finish("not_forwarded");
       opened.push({ ...target });
       return { number: 9, htmlUrl: "https://github.com/o/r/pull/9", created: true };
     };
@@ -4739,6 +5160,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     });
     const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
     expect(opened).toHaveLength(1);
+    expect(lateAdmission).toBe(false);
     expect(opened[0]).toMatchObject({ repo: "o/r", headBranch: BRANCH, base: "feat/trunk" });
     expect(out.prNote).toContain("PR opened");
   });

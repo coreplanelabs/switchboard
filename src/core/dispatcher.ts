@@ -2538,6 +2538,7 @@ export async function dispatch(
         carriedGithubBinding,
         async (binding) =>
           ledgerRun?.tracked() ? ledgerRun.setStateAndFlush({ githubDoorBinding: binding }) : deps.hostedRuns !== true,
+        coordinator?.publication !== undefined || repoCtx.pr !== undefined,
       );
       if (!registeredBinding) throw new Error("the resumed run's GitHub binding differs from its target");
       // Persist an initial contract target before provisioning. Otherwise a

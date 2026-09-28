@@ -96,6 +96,14 @@ curl -sS "${H[@]}" -d '{"op":"recreate-container","resource":"repo:acme/api"}' "
 
 `409 recreate-refused` names why (mid-flight: wait; `down`: rebuild). If the recreated container does not answer either, `POST /rebuild {"resource":…}` reprovisions from the code host on a fresh container. The reset of last resort is `POST /offboard` then `POST /onboard` with the same body the repository was onboarded with: the only path that destroys the VM and forgets every stored fact, the SDK's included. `stop-container` is not a recovery here — it sends a SIGTERM a wedged runtime ignores.
 
+## Bring existing residents onto the pool-user generation fence
+
+A resident created before durable pool-user spends has no generation ledger. The newer Worker refuses another thread or operation on that resident with `pool-generation-unknown` until its container is confirmed destroyed and a fresh generation is recorded. A Worker deploy or a `warm` status alone does not do this. Keep its existing work held while the ledger is unknown.
+
+After the containing release is verified live, an authorized operator handles each repository separately. Read `/debug info` and the fleet's active runs first: `inFlight` and `runsInFlight` must be zero, no refresh or restore may be in progress, and the resident must be settled (`warm` or `degraded`). Use the admin `recreate-container` operation above only in that idle window. A `409` or uncertain destroy leaves the repository held; do not retry through another credential or bypass the refusal. Its `202` response confirms the checked destroy and starts restoration, but does not prove restoration completed.
+
+Poll `/debug info` until `state` is `warm`, `lastRestore.at` is later than the response's `restoreStartedAt`, `imageReport` is `current`, `recreateAdmissionHeld` is false, and `poolUsersSpent` is a number. Independently confirm the expected image and a fresh physical placement, with the previous disk and processes gone. Record these facts for **each** resident before admitting new work there. A missing ledger, stale image, active run, failed restore, or uncertain placement keeps only that repository held; a successful check on one resident does not clear the others.
+
 ## For this installation
 
 The project's own production, not Switchboard:

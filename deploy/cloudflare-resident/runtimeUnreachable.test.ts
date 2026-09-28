@@ -158,10 +158,14 @@ describe("the ladder — each rung acts once, logs once and hands the step back 
     expect(recreate).toMatch(/throw err;/);
     const impl = method("recreateContainer");
     expect(impl).toMatch(/this\.swapIncarnation\(\);/);
-    const forget = impl.indexOf("await this.forgetRuntimeIdentity()");
-    const destroy = impl.indexOf("await this.destroy()");
-    expect(forget, "the SDK's runtime identity is forgotten").toBeGreaterThan(-1);
-    expect(destroy, "the VM is destroyed").toBeGreaterThan(forget);
+    expect(impl).toMatch(/await this\.destroyConfirmed\(\);/);
+    const fenced = method("destroyConfirmed");
+    const mark = fenced.indexOf("mark:");
+    const forget = fenced.indexOf("await this.forgetRuntimeIdentity()");
+    const destroy = fenced.indexOf("await this.destroy()");
+    expect(mark, "durable uncertainty is marked").toBeGreaterThan(-1);
+    expect(forget, "SDK identity is forgotten after the mark").toBeGreaterThan(mark);
+    expect(destroy, "VM destroy follows identity invalidation").toBeGreaterThan(forget);
     expect(impl).toMatch(/await this\.setResidentState\("degraded", reason\);/);
     expect(impl).not.toMatch(
       /deleteBackupObjects|dropDepsBackups|SNAPSHOT_KEY|DEPS_BACKUP_KEY_PREFIX|initResident|deleteAll/,
@@ -172,7 +176,7 @@ describe("the ladder — each rung acts once, logs once and hands the step back 
   it("rung 4 (down): the VM is destroyed and the resident goes down through goDown with the reason — the step ends failed, never thrown", () => {
     const body = escalate();
     const down = body.slice(body.indexOf('case "down"'));
-    expect(down).toMatch(/await this\.destroy\(\)/);
+    expect(down).toMatch(/await this\.destroyConfirmed\(\)/);
     expect(down).toMatch(/await this\.goDown\(reason\)/);
     expect(down).toMatch(/return \{ status: "failed", reason/);
     expect(down).not.toMatch(/throw err;/);
@@ -205,13 +209,15 @@ describe("the admin op and the read view", () => {
 
   it("debugRecreateContainer refuses a mid-flight or down resident by name, otherwise destroys through recreateContainer and starts the restore", () => {
     const body = method("debugRecreateContainer");
+    const checked = method("debugRecreateContainerChecked");
     expect(body).toMatch(/recreate-refused/);
-    expect(body).toMatch(/"onboarding" \|\| [\s\S]*?"refreshing" \|\| [\s\S]*?"restoring"/);
-    expect(body).toMatch(/=== "down"/);
-    expect(body).toMatch(/await this\.recreateContainer\(/);
-    expect(body).toMatch(/this\.ensureHydrated\(\)/);
-    expect(body).toMatch(/recreated: true/);
-    expect(body).toMatch(/restoreStartedAt/);
+    expect(body).toMatch(/this\.recreateAdmission\.run\(\(\) => this\.debugRecreateContainerChecked\(\)\)/);
+    expect(checked).toMatch(/"onboarding" \|\| [\s\S]*?"refreshing" \|\| [\s\S]*?"restoring"/);
+    expect(checked).toMatch(/=== "down"/);
+    expect(checked).toMatch(/await this\.recreateContainer\(/);
+    expect(checked).toMatch(/this\.ensureHydrated\(\)/);
+    expect(checked).toMatch(/recreated: true/);
+    expect(checked).toMatch(/restoreStartedAt/);
   });
 
   it("/debug info answers the counter and its rung under `runtimeUnreachable` (read scope sees it)", () => {
@@ -226,12 +232,10 @@ describe("the escape hatches start on a fresh container and leave the object abl
   it("rebuild forgets the SDK's runtime identity and destroys the container before it reprovisions — the incident's rebuild reprovisioned onto the same wedged VM", () => {
     const body = method("rebuild");
     const dry = body.indexOf("if (dryRun) return plan;");
-    const forget = body.indexOf("await this.forgetRuntimeIdentity()");
-    const destroy = body.indexOf("await this.destroy()");
+    const destroy = body.indexOf("await this.destroyConfirmed()");
     const init = body.indexOf("await this.initResident(");
     expect(dry).toBeGreaterThan(-1);
-    expect(forget, "the identity is forgotten past the dry run").toBeGreaterThan(dry);
-    expect(destroy, "the destroy follows the forget").toBeGreaterThan(forget);
+    expect(destroy, "the fenced destroy follows the dry run").toBeGreaterThan(dry);
     expect(init, "provisioning starts on the fresh container").toBeGreaterThan(destroy);
     expect(body.slice(dry, init)).toMatch(/this\.swapIncarnation\(\);/);
   });

@@ -780,6 +780,37 @@ function idleWakeRun(input: {
 }
 
 describe("the plan runner's driver — the Workflow body over the step runner (item 9)", () => {
+  it.each(["event", "timeout"] as const)(
+    "the %s confirmation retries an addressed finished child's pending record under the short bound and continues",
+    async (confirmation) => {
+      const s = steps({ "U10/0/coding/wait/1": confirmation, "U10/1/review/wait/1": "event" });
+      const b = bot({
+        plan: [planAnswer([row("U10")], T0, "person")],
+        "unit-start": [started("U10")],
+        branch: [branched("U10")],
+        spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+        "read-record": [
+          ok({ ok: false, error: "record_pending" }, T0 + 10 * MIN, 409),
+          codingDone("run-c0", T0 + 10 * MIN),
+          reviewApproved("run-r1", T0 + 20 * MIN),
+        ],
+        "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+        round: [acked(), acked(), acked(), acked()],
+        "unit-end": [acked(T0 + 20 * MIN)],
+        finish: [acked(T0 + 20 * MIN)],
+      });
+
+      await expect(runPlan(s.runner, b.client, INSTANCE)).resolves.toMatchObject({
+        units: { U10: "merge_ready" },
+        outcome: "completed",
+      });
+      expect(b.of("read-record").filter((body) => body.runId === "run-c0")).toHaveLength(2);
+      expect(s.taken.filter((taken) => taken.kind === "sleep" && taken.name.includes("record-visible"))).toEqual([
+        { kind: "sleep", name: "U10/0/coding/read/1/record-visible/1", ms: SHIP_RECORD_VISIBILITY.retryMs },
+      ]);
+    },
+  );
+
   it("a one-unit plan runs coding, then review to approve, then the runner's merge at the approved head, and ends merged: the steps in order under the machine's names, every spawn typed by its brief and clipped budget, every wait typed `run-finished-<runId>` for one chunk and followed by a read-record, the round boundaries and the ending told to the bot, the finish completed", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({

@@ -305,6 +305,34 @@ describe("clampRetentionPolicy", () => {
 });
 
 describe("isRunRecord", () => {
+  it("keeps an uncertain Git publication owner and ref transition on a finished record", () => {
+    const pending = {
+      id: "intent-1",
+      repo: "o/r",
+      pr: 7,
+      owner: { instanceId: "coord-p", unit: "U12" },
+      update: { ref: "refs/heads/fix/existing", old: "a".repeat(40), next: "b".repeat(40) },
+    };
+    const fitted = fitRecordToBudget(record({ doorPublicationPending: pending }), MAX_RECORD_BYTES);
+    expect(fitted.doorPublicationPending).toEqual(pending);
+    expect(isRunRecord(JSON.parse(JSON.stringify(fitted)))).toBe(true);
+    expect(
+      isRunRecord({ ...fitted, doorPublicationPending: { ...pending, update: { ...pending.update, old: "?" } } }),
+    ).toBe(false);
+  });
+
+  it("keeps an uncertain first-branch transition before a pull request exists", () => {
+    const pending = {
+      id: "branch-intent",
+      repo: "o/r",
+      owner: { instanceId: "coord-p", unit: "U12" },
+      update: { ref: "refs/heads/feature", old: "0".repeat(40), next: "b".repeat(40) },
+    };
+    const fitted = fitRecordToBudget(record({ doorPublicationPending: pending }), MAX_RECORD_BYTES);
+    expect(fitted.doorPublicationPending).toEqual(pending);
+    expect(isRunRecord(JSON.parse(JSON.stringify(fitted)))).toBe(true);
+  });
+
   it("accepts a well-formed record", () => {
     expect(isRunRecord(record())).toBe(true);
     expect(isRunRecord(JSON.parse(JSON.stringify(record({ label: undefined, agent: undefined }))))).toBe(true);

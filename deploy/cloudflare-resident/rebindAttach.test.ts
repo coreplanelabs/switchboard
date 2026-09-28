@@ -45,9 +45,7 @@ describe("a named ref replaces the sticky fallback before the worktree is provis
     const allocate = method("allocateThreadUser");
     expect(allocate).toMatch(/replaceRef = false,/);
     expect(allocate).toMatch(/const replacingRef = existing !== undefined && replaceRef && existing\.ref !== ref;/);
-    expect(allocate).toMatch(
-      /if \(existing && !existing\.evicted && existing\.user && !replacingRef && !recordingNamedAuthority\)/,
-    );
+    expect(allocate).toMatch(/if \(existingUser && !replacingRef && !recordingNamedAuthority\)/);
     expect(allocate).toMatch(/ref: replacingRef \? ref : \(existing\?\.ref \?\? ref\),/);
     expect(allocate).toMatch(
       /worktreePath: replacingRef \? worktreePath : \(existing\?\.worktreePath \?\? worktreePath\),/,
@@ -57,7 +55,8 @@ describe("a named ref replaces the sticky fallback before the worktree is provis
     // remains authoritative until the final attach write. A failed attach
     // discards the provisional checkout; a success discards the old one.
     expect(allocate).toMatch(/const deferRefWrite = replacingRef && !existing\.evicted && existing\.user !== "";/);
-    expect(allocate).toMatch(/if \(!deferRefWrite\) await this\.ctx\.storage\.put\(key, binding\);/);
+    expect(allocate).toMatch(/if \(!deferRefWrite\) await this\.putThreadBinding\(binding\);/);
+    expect(method("putThreadBinding")).toContain("this.ctx.storage.transaction(async (txn) => {");
     expect(allocate).toMatch(/return \{ binding, wrote: !deferRefWrite \};/);
     expect(body).toMatch(/const replacingNamedRef = namedRef && prior !== undefined && prior\.ref !== ref;/);
     expect(body).toMatch(/await replacementWorktreePath\(threadKey, ref, prior\.worktreePath\)/);
@@ -109,9 +108,7 @@ describe("a named ref replaces the sticky fallback before the worktree is provis
     expect(allocate).toMatch(
       /const recordingNamedAuthority = existing !== undefined && replaceRef && existing\.boundBy !== boundBy;/,
     );
-    expect(allocate).toMatch(
-      /if \(existing && !existing\.evicted && existing\.user && !replacingRef && !recordingNamedAuthority\)/,
-    );
+    expect(allocate).toMatch(/if \(existingUser && !replacingRef && !recordingNamedAuthority\)/);
     expect(allocate).toMatch(/replacingRef \|\| recordingNamedAuthority\s*\? \{ boundBy \}/);
     expect(allocate).toMatch(/ref: replacingRef \? ref : \(existing\?\.ref \?\? ref\),/);
     expect(allocate).toMatch(
@@ -279,7 +276,7 @@ describe("moveOntoOwnBranch: the mirror must hold the branch, then the row moves
 
   it("the move is recorded on the row and nothing on disk is touched — the tree is the attach's to provision at the new ref, at the binding's stored path", () => {
     expect(move).toMatch(/const moved: ThreadBinding = \{ \.\.\.current, ref: plan\.to, rebound \};/);
-    expect(move).toMatch(/await this\.ctx\.storage\.put\(threadBindingKey\(current\.threadKey\), moved\);/);
+    expect(move).toMatch(/await this\.putThreadBinding\(moved\);/);
     expect(move).toMatch(/return \{ kind: "rebound", moved, rebound \};/);
     expect(move).not.toMatch(/rm", "-rf"/);
     expect(move).not.toMatch(/git", "clone"/);
@@ -422,7 +419,7 @@ describe("a binding whose own branch is gone from the mirror returns to the defa
     // a binding bound by name to a branch it pushed returns too.
     expect(back).not.toMatch(/current\.rebound === undefined/);
     expect(back).not.toMatch(/canReturnToDefault\(/);
-    expect(back).toMatch(/await this\.ctx\.storage\.put\(key, back\.binding\);/);
+    expect(back).toMatch(/await this\.putThreadBinding\(back\.binding\);/);
     expect(back).toMatch(
       /is gone from the mirror .* — returned to \$\{back\.returned\.to\}; the tree is provisioned there/,
     );
@@ -475,7 +472,7 @@ describe("the run's pushed branches survive the tree: the detach body's `pushed`
     expect(evicted).toBeGreaterThan(read);
     const keep = method("rememberOwnBranches");
     expect(keep).toMatch(/ownBranches: rememberOwnBranches\(binding\.ownBranches, pushed, /);
-    expect(keep).toMatch(/await this\.ctx\.storage\.put\(threadBindingKey\(threadKey\), /);
+    expect(keep).toMatch(/await this\.putThreadBinding\(/);
   });
 
   it("the memory rides every binding rewrite: a re-allocation after eviction carries it, and the type declares it", () => {

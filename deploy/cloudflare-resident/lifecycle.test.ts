@@ -97,9 +97,13 @@ describe("no lifecycle timer — the resident's cycles are Workflow instances, n
     const residentDO = source.slice(source.indexOf("export class ResidentDO"));
     const body = methodOf(residentDO, "constructor");
     expect(body, "ResidentDO declares a constructor").not.toBeNull();
-    expect(body).toMatch(/super\(/);
-    expect(body).toMatch(/for \(const name of RETIRED_SCHEDULE_CALLBACKS\) this\.deleteSchedules\(name\)/);
-    expect(body).not.toMatch(/blockConcurrencyWhile|await /);
+    const inherited = body!.indexOf("super(");
+    const retiredRows = body!.indexOf("for (const name of RETIRED_SCHEDULE_CALLBACKS) this.deleteSchedules(name)");
+    const initialize = body!.indexOf("this.ctx.blockConcurrencyWhile(");
+    expect(inherited).toBeGreaterThanOrEqual(0);
+    expect(retiredRows).toBeGreaterThan(inherited);
+    expect(initialize).toBeGreaterThan(retiredRows);
+    expect(body!.slice(0, retiredRows)).not.toMatch(/blockConcurrencyWhile|await /);
   });
 
   it.each(ALL_FILES)("%s has no `alarm-missed` reason — nothing can stamp it", (_name, source) => {

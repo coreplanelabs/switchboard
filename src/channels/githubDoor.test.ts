@@ -1,8 +1,9 @@
 import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { RunBearerStore } from "../core/modelProxy/runBearers.js";
+import { GIT_RECEIVE_PACK_FORWARD_TIMEOUT_MS } from "../core/budgets.js";
 import { GitBindings } from "../core/modelProxy/gitBindings.js";
-import { createGithubDoorHandler } from "./githubDoor.js";
+import { createGithubDoorHandler, type GithubDoorDeps } from "./githubDoor.js";
 
 const grant = {
   runId: "12345678-1234-1234-1234-123456789abc",
@@ -18,7 +19,7 @@ const grant = {
   github: { identity: "write" as const, repo: "o/r", ref: "fix" },
 };
 
-async function fixture(bindings?: GitBindings) {
+async function fixture(bindings?: GitBindings, token?: GithubDoorDeps["token"]) {
   const bearers = new RunBearerStore({ clock: () => 1_000 });
   const bearer = bearers.mint(grant);
   const upstream = vi.fn(async (url: string, _init?: RequestInit) => {
@@ -39,7 +40,7 @@ async function fixture(bindings?: GitBindings) {
     bearers,
     bindings,
     fetcher: upstream,
-    token: async (scope, repo) => `${scope}:${repo ?? "all"}`,
+    token: token ?? (async (scope, repo) => `${scope}:${repo ?? "all"}`),
   });
   const server = createServer(handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -55,6 +56,8 @@ async function fixture(bindings?: GitBindings) {
 }
 
 describe("GitHub run-bearer door", () => {
+  const allowBranchReceipt = (bindings: GitBindings, runId: string) =>
+    bindings.setBranchRecorder(runId, { begin: async () => true, finish: async () => true });
   it("rejects oversized credentials and refuses upstream redirects without forwarding the bearer", async () => {
     const f = await fixture();
     try {
@@ -276,11 +279,400 @@ describe("GitHub run-bearer door", () => {
     }
   });
 
+  it("holds an existing PR behind fresh authority and refuses a stale old head at the HTTP door", async () => {
+    const bindings = new GitBindings();
+    expect(bindings.register(grant.runId, { repo: "o/r", ref: "fix" }, undefined, undefined, true)).toBe(true);
+    const f = await fixture(bindings);
+    const old = "1".repeat(40);
+    const next = "2".repeat(40);
+    const auth = `Basic ${Buffer.from(`x-access-token:${f.bearer}`).toString("base64")}`;
+    const push = (head: string) => {
+      const line = Buffer.from(`${head} ${next} refs/heads/fix\0report-status`);
+      const body = Buffer.concat([
+        Buffer.from((line.length + 4).toString(16).padStart(4, "0")),
+        line,
+        Buffer.from("0000PACK"),
+      ]);
+      return fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/x-git-receive-pack-request" },
+        body,
+      });
+    };
+    try {
+      expect((await push(old)).status).toBe(403);
+      expect(f.upstream).not.toHaveBeenCalled();
+      expect(bindings.setPublication(grant.runId, { ref: "fix", expectedHeadSha: old })).toBe(true);
+      const stale = await push("3".repeat(40));
+      expect(await stale.text()).toContain("existing PR head differs from the authorized lease");
+      expect(f.upstream.mock.calls.some(([url]) => url === "https://github.com/o/r.git/git-receive-pack")).toBe(false);
+      const begin = vi.fn(async () => true);
+      const finish = vi.fn(async () => true);
+      expect(bindings.setPublicationRecorder(grant.runId, { begin, finish })).toBe(true);
+      f.upstream.mockImplementation(async (url: string) => {
+        if (url === "https://api.github.com/repos/o/r")
+          return new Response(JSON.stringify({ default_branch: "main" }), {
+            headers: { "content-type": "application/json" },
+          });
+        const report = (line: string) => {
+          const bytes = Buffer.from(line);
+          return Buffer.concat([Buffer.from((bytes.length + 4).toString(16).padStart(4, "0")), bytes]);
+        };
+        return new Response(
+          Buffer.concat([report("unpack ok\n"), report("ok refs/heads/fix\n"), Buffer.from("0000")]),
+          {
+            headers: { "content-type": "application/x-git-receive-pack-result" },
+          },
+        );
+      });
+      expect((await push(old)).status).toBe(200);
+      expect(f.upstream.mock.calls.some(([url]) => url === "https://github.com/o/r.git/git-receive-pack")).toBe(true);
+      expect(begin).toHaveBeenCalledWith({ old, next, ref: "refs/heads/fix" });
+      expect(finish).toHaveBeenCalledWith({ old, next, ref: "refs/heads/fix" }, "accepted");
+      expect(bindings.publicationOf(grant.runId)).toEqual({ ref: "fix", expectedHeadSha: next });
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("refuses an existing PR push without a trusted durable receipt writer", async () => {
+    const bindings = new GitBindings();
+    expect(bindings.register(grant.runId, { repo: "o/r", ref: "fix" }, undefined, undefined, true)).toBe(true);
+    const old = "1".repeat(40);
+    expect(bindings.setPublication(grant.runId, { ref: "fix", expectedHeadSha: old })).toBe(true);
+    const f = await fixture(bindings);
+    const line = Buffer.from(`${old} ${"2".repeat(40)} refs/heads/fix\0report-status`);
+    const body = Buffer.concat([
+      Buffer.from((line.length + 4).toString(16).padStart(4, "0")),
+      line,
+      Buffer.from("0000PACK"),
+    ]);
+    try {
+      const auth = `Basic ${Buffer.from(`x-access-token:${f.bearer}`).toString("base64")}`;
+      const response = await fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/x-git-receive-pack-request" },
+        body,
+      });
+      expect(response.status).toBe(403);
+      expect(f.upstream.mock.calls.some(([url]) => url === "https://github.com/o/r.git/git-receive-pack")).toBe(false);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("refuses a branch push without a durable receipt writer", async () => {
+    const bindings = new GitBindings();
+    expect(bindings.register(grant.runId, { repo: "o/r", ref: "fix" }, undefined)).toBe(true);
+    const f = await fixture(bindings);
+    const line = Buffer.from(`${"1".repeat(40)} ${"2".repeat(40)} refs/heads/fix\0report-status`);
+    const body = Buffer.concat([
+      Buffer.from((line.length + 4).toString(16).padStart(4, "0")),
+      line,
+      Buffer.from("0000PACK"),
+    ]);
+    try {
+      const auth = `Basic ${Buffer.from(`x-access-token:${f.bearer}`).toString("base64")}`;
+      const response = await fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/x-git-receive-pack-request" },
+        body,
+      });
+      expect(response.status).toBe(403);
+      expect(f.upstream.mock.calls.some(([url]) => url === "https://github.com/o/r.git/git-receive-pack")).toBe(false);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("withholds an accepted existing-PR push when its durable outcome fails and blocks another write", async () => {
+    const bindings = new GitBindings();
+    const old = "1".repeat(40);
+    const next = "2".repeat(40);
+    expect(bindings.register(grant.runId, { repo: "o/r", ref: "fix" }, undefined, undefined, true)).toBe(true);
+    expect(bindings.setPublication(grant.runId, { ref: "fix", expectedHeadSha: old })).toBe(true);
+    const begin = vi.fn(async () => true);
+    const finish = vi.fn(async () => false);
+    expect(bindings.setPublicationRecorder(grant.runId, { begin, finish })).toBe(true);
+    const f = await fixture(bindings);
+    const line = Buffer.from(`${old} ${next} refs/heads/fix\0report-status`);
+    const body = Buffer.concat([
+      Buffer.from((line.length + 4).toString(16).padStart(4, "0")),
+      line,
+      Buffer.from("0000PACK"),
+    ]);
+    const pkt = (line: string) => {
+      const bytes = Buffer.from(line);
+      return Buffer.concat([Buffer.from((bytes.length + 4).toString(16).padStart(4, "0")), bytes]);
+    };
+    f.upstream.mockImplementation(async (url: string) =>
+      url === "https://api.github.com/repos/o/r"
+        ? new Response(JSON.stringify({ default_branch: "main" }))
+        : new Response(Buffer.concat([pkt("unpack ok\n"), pkt("ok refs/heads/fix\n"), Buffer.from("0000")]), {
+            headers: { "content-type": "application/x-git-receive-pack-result" },
+          }),
+    );
+    try {
+      const auth = `Basic ${Buffer.from(`x-access-token:${f.bearer}`).toString("base64")}`;
+      const push = () =>
+        fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+          method: "POST",
+          headers: { authorization: auth, "content-type": "application/x-git-receive-pack-request" },
+          body,
+        });
+      expect((await push()).status).toBe(503);
+      expect(begin).toHaveBeenCalledOnce();
+      expect(finish).toHaveBeenCalledWith({ old, next, ref: "refs/heads/fix" }, "accepted");
+      expect(bindings.publicationOf(grant.runId)).toMatchObject({ blocked: expect.any(String) });
+      expect((await push()).status).toBe(403);
+      expect(
+        f.upstream.mock.calls.filter(([url]) => url === "https://github.com/o/r.git/git-receive-pack"),
+      ).toHaveLength(1);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("attributes a one-use forwarded push after revocation under a bounded request", async () => {
+    const bindings = new GitBindings();
+    const old = "1".repeat(40);
+    const next = "2".repeat(40);
+    expect(bindings.register(grant.runId, { repo: "o/r", ref: "fix" }, undefined, undefined, true)).toBe(true);
+    expect(bindings.setPublication(grant.runId, { ref: "fix", expectedHeadSha: old })).toBe(true);
+    const begin = vi.fn(async () => true);
+    const finish = vi.fn(async () => true);
+    expect(bindings.setPublicationRecorder(grant.runId, { begin, finish })).toBe(true);
+    const f = await fixture(bindings);
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    let enteredForward!: () => void;
+    const forwarding = new Promise<void>((resolve) => (enteredForward = resolve));
+    let releaseForward!: () => void;
+    const held = new Promise<void>((resolve) => (releaseForward = resolve));
+    let forwardSignal: AbortSignal | undefined;
+    const pkt = (line: string) => {
+      const bytes = Buffer.from(line);
+      return Buffer.concat([Buffer.from((bytes.length + 4).toString(16).padStart(4, "0")), bytes]);
+    };
+    f.upstream.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === "https://api.github.com/repos/o/r") return new Response(JSON.stringify({ default_branch: "main" }));
+      forwardSignal = init?.signal ?? undefined;
+      enteredForward();
+      await held;
+      return new Response(Buffer.concat([pkt("unpack ok\n"), pkt("ok refs/heads/fix\n"), Buffer.from("0000")]), {
+        headers: { "content-type": "application/x-git-receive-pack-result" },
+      });
+    });
+    const line = Buffer.from(`${old} ${next} refs/heads/fix\0report-status`);
+    const body = Buffer.concat([
+      Buffer.from((line.length + 4).toString(16).padStart(4, "0")),
+      line,
+      Buffer.from("0000PACK"),
+    ]);
+    try {
+      const auth = `Basic ${Buffer.from(`x-access-token:${f.bearer}`).toString("base64")}`;
+      const pending = fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/x-git-receive-pack-request" },
+        body,
+      });
+      await forwarding;
+      expect(begin).toHaveBeenCalledWith({ old, next, ref: "refs/heads/fix" });
+      expect(forwardSignal).toBeInstanceOf(AbortSignal);
+      expect(timeout).toHaveBeenCalledWith(GIT_RECEIVE_PACK_FORWARD_TIMEOUT_MS);
+      f.bearers.revoke(grant.runId);
+      expect(bindings.setPublication(grant.runId, { blocked: "run ended" })).toBe(true);
+      releaseForward();
+      expect((await pending).status).toBe(200);
+      expect(finish).toHaveBeenCalledWith({ old, next, ref: "refs/heads/fix" }, "accepted");
+      expect(bindings.publicationOf(grant.runId)).toEqual({ blocked: "run ended" });
+    } finally {
+      releaseForward();
+      timeout.mockRestore();
+      await f.close();
+    }
+  });
+
+  it("bounds a first-branch receive-pack forward without changing its branch identity", async () => {
+    const bindings = new GitBindings();
+    expect(bindings.register(grant.runId, { repo: "o/r" }, undefined, async () => true)).toBe(true);
+    expect(allowBranchReceipt(bindings, grant.runId)).toBe(true);
+    const f = await fixture(bindings);
+    const bearer = f.bearers.mint({ ...grant, github: { identity: "write", repo: "o/r" } });
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const ref = "refs/heads/unit-branch";
+    const pkt = (line: string) => {
+      const bytes = Buffer.from(line);
+      return Buffer.concat([Buffer.from((bytes.length + 4).toString(16).padStart(4, "0")), bytes]);
+    };
+    f.upstream.mockImplementation(async (url: string) => {
+      if (url === "https://api.github.com/repos/o/r") return new Response(JSON.stringify({ default_branch: "main" }));
+      return new Response(Buffer.concat([pkt("unpack ok\n"), pkt(`ok ${ref}\n`), Buffer.from("0000")]), {
+        headers: { "content-type": "application/x-git-receive-pack-result" },
+      });
+    });
+    const line = Buffer.from(`${"0".repeat(40)} ${"2".repeat(40)} ${ref}\0report-status`);
+    const body = Buffer.concat([
+      Buffer.from((line.length + 4).toString(16).padStart(4, "0")),
+      line,
+      Buffer.from("0000PACK"),
+    ]);
+    try {
+      const auth = `Basic ${Buffer.from(`x-access-token:${bearer}`).toString("base64")}`;
+      const result = await fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/x-git-receive-pack-request" },
+        body,
+      });
+      expect(result.status).toBe(200);
+      expect(bindings.get(grant.runId)).toMatchObject({ ref, refConfirmed: true });
+      expect(timeout).toHaveBeenCalledWith(GIT_RECEIVE_PACK_FORWARD_TIMEOUT_MS);
+      expect(
+        f.upstream.mock.calls.find(([url]) => url === "https://github.com/o/r.git/git-receive-pack")?.[1]?.signal,
+      ).toBeInstanceOf(AbortSignal);
+    } finally {
+      timeout.mockRestore();
+      await f.close();
+    }
+  });
+
+  it("leaves a first branch create-only when its bounded receive-pack forward aborts", async () => {
+    const bindings = new GitBindings();
+    expect(bindings.register(grant.runId, { repo: "o/r" }, undefined, async () => true)).toBe(true);
+    expect(allowBranchReceipt(bindings, grant.runId)).toBe(true);
+    const f = await fixture(bindings);
+    const bearer = f.bearers.mint({ ...grant, github: { identity: "write", repo: "o/r" } });
+    const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => nativeTimeout(1));
+    const ref = "refs/heads/unit-branch";
+    f.upstream.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === "https://api.github.com/repos/o/r") return new Response(JSON.stringify({ default_branch: "main" }));
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    const line = Buffer.from(`${"0".repeat(40)} ${"2".repeat(40)} ${ref}\0report-status`);
+    const body = Buffer.concat([
+      Buffer.from((line.length + 4).toString(16).padStart(4, "0")),
+      line,
+      Buffer.from("0000PACK"),
+    ]);
+    try {
+      const auth = `Basic ${Buffer.from(`x-access-token:${bearer}`).toString("base64")}`;
+      const result = await fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/x-git-receive-pack-request" },
+        body,
+      });
+      expect(result.status).toBe(502);
+      expect(timeout).toHaveBeenCalledWith(GIT_RECEIVE_PACK_FORWARD_TIMEOUT_MS);
+      expect(bindings.get(grant.runId)).toMatchObject({ ref, refConfirmed: false });
+    } finally {
+      timeout.mockRestore();
+      await f.close();
+    }
+  });
+
+  it("refuses an in-flight receive-pack after its run binding and bearer are revoked", async () => {
+    const bindings = new GitBindings();
+    expect(
+      bindings.register(
+        grant.runId,
+        { repo: "o/r", ref: "fix" },
+        { repo: "o/r", ref: "refs/heads/fix", refConfirmed: true },
+        async () => true,
+      ),
+    ).toBe(true);
+    const f = await fixture(bindings);
+    let enteredMetadata!: () => void;
+    const metadataStarted = new Promise<void>((resolve) => (enteredMetadata = resolve));
+    let releaseMetadata!: () => void;
+    const metadataHeld = new Promise<void>((resolve) => (releaseMetadata = resolve));
+    f.upstream.mockImplementation(async (url: string) => {
+      if (url === "https://api.github.com/repos/o/r") {
+        enteredMetadata();
+        await metadataHeld;
+        return new Response(JSON.stringify({ default_branch: "main" }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("upstream accepted", { status: 200 });
+    });
+    const old = "1".repeat(40);
+    const next = "2".repeat(40);
+    const line = Buffer.from(`${old} ${next} refs/heads/fix\0report-status`);
+    const body = Buffer.concat([
+      Buffer.from((line.length + 4).toString(16).padStart(4, "0")),
+      line,
+      Buffer.from("0000PACK"),
+    ]);
+    try {
+      const auth = `Basic ${Buffer.from(`x-access-token:${f.bearer}`).toString("base64")}`;
+      const pending = fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/x-git-receive-pack-request" },
+        body,
+      });
+      await metadataStarted;
+      bindings.unregister(grant.runId);
+      f.bearers.revoke(grant.runId);
+      releaseMetadata();
+      const response = await pending;
+      expect(response.status).toBe(403);
+      expect(f.upstream.mock.calls.some(([url]) => url === "https://github.com/o/r.git/git-receive-pack")).toBe(false);
+    } finally {
+      releaseMetadata();
+      await f.close();
+    }
+  });
+
+  it("refuses receive-pack revoked while its write token is being minted", async () => {
+    const bindings = new GitBindings();
+    expect(bindings.register(grant.runId, { repo: "o/r", ref: "fix" }, undefined)).toBe(true);
+    expect(allowBranchReceipt(bindings, grant.runId)).toBe(true);
+    let enteredMint!: () => void;
+    const mintStarted = new Promise<void>((resolve) => (enteredMint = resolve));
+    let releaseMint!: () => void;
+    const mintHeld = new Promise<void>((resolve) => (releaseMint = resolve));
+    const f = await fixture(bindings, async (scope, repo) => {
+      if (scope === "write") {
+        enteredMint();
+        await mintHeld;
+      }
+      return `${scope}:${repo ?? "all"}`;
+    });
+    const old = "1".repeat(40);
+    const next = "2".repeat(40);
+    const line = Buffer.from(`${old} ${next} refs/heads/fix\0report-status`);
+    const body = Buffer.concat([
+      Buffer.from((line.length + 4).toString(16).padStart(4, "0")),
+      line,
+      Buffer.from("0000PACK"),
+    ]);
+    try {
+      const auth = `Basic ${Buffer.from(`x-access-token:${f.bearer}`).toString("base64")}`;
+      const pending = fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/x-git-receive-pack-request" },
+        body,
+      });
+      await mintStarted;
+      bindings.unregister(grant.runId);
+      f.bearers.revoke(grant.runId);
+      releaseMint();
+      expect((await pending).status).toBe(403);
+      expect(f.upstream.mock.calls.some(([url]) => url === "https://github.com/o/r.git/git-receive-pack")).toBe(false);
+    } finally {
+      releaseMint();
+      await f.close();
+    }
+  });
+
   it("keeps a rejected first branch creation create-only until Git confirms it", async () => {
     const bindings = new GitBindings();
     const f = await fixture(bindings);
     const runId = "12345678-1234-1234-1234-123456789abf";
     expect(bindings.register(runId, { repo: "o/r" }, undefined, async () => true)).toBe(true);
+    expect(allowBranchReceipt(bindings, runId)).toBe(true);
     const bearer = f.bearers.mint({ ...grant, runId, github: { identity: "write", repo: "o/r" } });
     const auth = `Basic ${Buffer.from(`x-access-token:${bearer}`).toString("base64")}`;
     const ref = "refs/heads/existing";
@@ -291,9 +683,16 @@ describe("GitHub run-bearer door", () => {
     const body = (old: string) =>
       Buffer.concat([packet(`${old} ${"2".repeat(40)} ${ref}\0report-status`), Buffer.from("0000PACK")]);
     const report = (result: string) =>
-      new Response(Buffer.concat([packet("unpack ok\n"), packet(`${result} ${ref}\n`), Buffer.from("0000")]), {
-        headers: { "content-type": "application/x-git-receive-pack-result" },
-      });
+      new Response(
+        Buffer.concat([
+          packet("unpack ok\n"),
+          packet(`${result} ${ref}${result === "ng" ? " rejected" : ""}\n`),
+          Buffer.from("0000"),
+        ]),
+        {
+          headers: { "content-type": "application/x-git-receive-pack-result" },
+        },
+      );
     let pushes = 0;
     f.upstream.mockImplementation(async (url: string) => {
       if (url.endsWith("git-receive-pack")) return report(++pushes === 1 ? "ng" : "ok");
@@ -313,6 +712,7 @@ describe("GitHub run-bearer door", () => {
       const pending = bindings.get(runId);
       bindings.unregister(runId);
       expect(bindings.register(runId, { repo: "o/r" }, pending, async () => true)).toBe(true);
+      expect(allowBranchReceipt(bindings, runId)).toBe(true);
       expect(await (await push("1".repeat(40))).text()).toContain("first push must create a new branch");
       expect(pushes).toBe(1);
       expect(await (await push("0".repeat(40))).text()).toContain(`ok ${ref}`);
@@ -320,6 +720,7 @@ describe("GitHub run-bearer door", () => {
       const confirmed = bindings.get(runId);
       bindings.unregister(runId);
       expect(bindings.register(runId, { repo: "o/r" }, confirmed, async () => true)).toBe(true);
+      expect(allowBranchReceipt(bindings, runId)).toBe(true);
       expect(await (await push("1".repeat(40))).text()).toContain(`ok ${ref}`);
       expect(pushes).toBe(3);
     } finally {

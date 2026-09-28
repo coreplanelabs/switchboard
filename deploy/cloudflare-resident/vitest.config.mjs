@@ -51,6 +51,8 @@ export default defineConfig({
       "notServiceable.test.ts",
       "reuseAttach.test.ts",
       "credentialBoundary.test.ts",
+      "destroyFence.test.ts",
+      "poolSpends.test.ts",
       "legacyCredentials.test.ts",
       "rebindAttach.test.ts",
       "releaseAtRunEnd.test.ts",

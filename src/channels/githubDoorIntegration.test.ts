@@ -7,6 +7,7 @@ import { once } from "node:events";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { RunBearerStore } from "../core/modelProxy/runBearers.js";
+import { GitBindings } from "../core/modelProxy/gitBindings.js";
 import { createGithubDoorHandler } from "./githubDoor.js";
 
 const execFileAsync = promisify(execFile);
@@ -14,7 +15,16 @@ async function git(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
     encoding: "utf8",
     timeout: 15_000,
-    env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
+    // The real peer must see only this fixture's helper, never a resident's
+    // global helper or injected per-command Git configuration.
+    env: {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_COUNT: "0",
+      GIT_CONFIG_PARAMETERS: undefined,
+      GIT_TERMINAL_PROMPT: "0",
+    },
   });
   return stdout.trim();
 }
@@ -128,6 +138,108 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
       await git("-C", clone, "commit", "--allow-empty", "-m", "refused");
       await expect(git("-c", `credential.helper=${helper}`, "-C", clone, "push", "origin", "main")).rejects.toThrow();
       expect(await git("-C", repo, "rev-parse", "refs/heads/main")).toBe(main);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("attributes an existing-PR push accepted by Git before its run is revoked", async () => {
+    const root = mkdtempSync(join(tmpdir(), "switchboard-git-door-existing-"));
+    const repo = join(root, "o", "r.git");
+    const source = join(root, "source");
+    mkdirSync(join(root, "o"));
+    await git("init", "--bare", repo);
+    await git("-C", repo, "config", "http.receivepack", "true");
+    await git("init", "-b", "main", source);
+    await git("-C", source, "config", "user.name", "Test");
+    await git("-C", source, "config", "user.email", "test@example.invalid");
+    await git("-C", source, "commit", "--allow-empty", "-m", "start");
+    await git("-C", source, "remote", "add", "origin", repo);
+    await git("-C", source, "push", "origin", "main");
+    await git("-C", repo, "symbolic-ref", "HEAD", "refs/heads/main");
+    await git("-C", source, "checkout", "-b", "fix");
+    await git("-C", source, "commit", "--allow-empty", "-m", "existing head");
+    await git("-C", source, "push", "origin", "fix");
+    const old = await git("-C", repo, "rev-parse", "refs/heads/fix");
+    const runId = "12345678-1234-1234-1234-123456789abc";
+    const bearers = new RunBearerStore({ clock: () => 1_000 });
+    const bearer = bearers.mint({
+      runId,
+      modelRef: "x/y",
+      providerName: "x",
+      providerWire: "openai-chat",
+      model: "y",
+      maxTokens: 100,
+      maxTurns: 10,
+      expiresAt: 2_000,
+      span: {} as never,
+      publish: () => {},
+      github: { identity: "write", repo: "o/r", ref: "fix" },
+    });
+    const bindings = new GitBindings();
+    expect(
+      bindings.register(
+        runId,
+        { repo: "o/r", ref: "fix" },
+        { repo: "o/r", ref: "refs/heads/fix", refConfirmed: true },
+        async () => true,
+        true,
+      ),
+    ).toBe(true);
+    expect(bindings.setPublication(runId, { ref: "fix", expectedHeadSha: old })).toBe(true);
+    const recorded: string[] = [];
+    expect(
+      bindings.setPublicationRecorder(runId, {
+        begin: async (update) => {
+          recorded.push(`pending:${update.old}:${update.next}`);
+          return true;
+        },
+        finish: async (update, outcome) => {
+          recorded.push(`${outcome}:${update.old}:${update.next}`);
+          return true;
+        },
+      }),
+    ).toBe(true);
+    let forwarded = 0;
+    const handler = createGithubDoorHandler({
+      bearers,
+      bindings,
+      token: async () => "trusted-only",
+      fetcher: async (url, init) => {
+        if (url.startsWith("https://api.github.com/"))
+          return new Response(JSON.stringify({ default_branch: "main" }), {
+            headers: { "content-type": "application/json" },
+          });
+        const response = await gitBackend(root, url, init);
+        if (url.endsWith("/git-receive-pack")) {
+          forwarded++;
+          expect(init?.signal).toBeInstanceOf(AbortSignal);
+          bearers.revoke(runId);
+          expect(bindings.setPublication(runId, { blocked: "run ended" })).toBe(true);
+        }
+        return response;
+      },
+    });
+    const server = createServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("missing port");
+      const url = `http://127.0.0.1:${addr.port}/git/o/r.git`;
+      const helper = `!f() { printf '%s\\n' 'username=x-access-token' 'password=${bearer}'; }; f`;
+      await git("-C", source, "remote", "set-url", "origin", url);
+      await git("-C", source, "commit", "--allow-empty", "-m", "approved fix");
+      const next = await git("-C", source, "rev-parse", "HEAD");
+      await git("-c", `credential.helper=${helper}`, "-C", source, "push", "origin", "fix");
+      expect(await git("-C", repo, "rev-parse", "refs/heads/fix")).toBe(next);
+      expect(recorded).toEqual([`pending:${old}:${next}`, `accepted:${old}:${next}`]);
+      expect(bindings.publicationOf(runId)).toEqual({ blocked: "run ended" });
+      expect(forwarded).toBe(1);
+      await git("-C", source, "commit", "--allow-empty", "-m", "not authorized");
+      await expect(git("-c", `credential.helper=${helper}`, "-C", source, "push", "origin", "fix")).rejects.toThrow();
+      expect(forwarded).toBe(1);
+      expect(await git("-C", repo, "rev-parse", "refs/heads/fix")).toBe(next);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(root, { recursive: true, force: true });

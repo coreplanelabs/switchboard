@@ -103,7 +103,7 @@ export interface RunDeps
     RecordDeps,
     Pick<AdmissionDeps, "runLedger">,
     Pick<AuthorizeDeps, "fetchPrHead">,
-    Pick<ProvisionDeps, "skills" | "runBearers" | "dataDir" | "githubCredentials"> {
+    Pick<ProvisionDeps, "skills" | "runBearers" | "dataDir" | "githubCredentials" | "githubBindings"> {
   config: ConfigStore;
   /**
    * The harness's process-wide pieces (docs/reference/specs/harness.md): the

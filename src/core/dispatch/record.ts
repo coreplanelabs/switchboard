@@ -315,6 +315,8 @@ export function assembleRunRecord(input: {
   /** The final workspace head the run loop observed independently of the
    *  model and push events. Omitted when this run had no readable Git head. */
   headSha?: string;
+  /** A Git-door write still uncertain when the live ledger row closes. */
+  doorPublicationPending?: RunRecord["doorPublicationPending"];
   /** The typed handoff the run submitted (docs/reference/specs/agent-ship.md item 14),
    *  as the tool accepted it; redacted HERE, the one assembly, so no caller
    *  can forget. Omitted (not set undefined) when the run submitted none. */
@@ -428,6 +430,7 @@ export function assembleRunRecord(input: {
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     ...(input.headSha !== undefined ? { headSha: input.headSha } : {}),
+    ...(input.doorPublicationPending !== undefined ? { doorPublicationPending: input.doorPublicationPending } : {}),
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
     ...(input.verdict !== undefined ? { verdict: redactVerdict(input.verdict) } : {}),
     ...(input.reviewHead !== undefined ? { reviewHead: input.reviewHead } : {}),
@@ -637,6 +640,7 @@ export interface FinishRecordContext {
   ledgerRun: LedgerRun | undefined;
   /** The final Git head the run loop observed after its tail settled. */
   headSha?: string;
+  doorPublicationPending?: RunRecord["doorPublicationPending"];
   /** The handoff the run loop captured from `submit_handoff`, when one was submitted. */
   handoff?: Handoff;
   /** The verdict a review run submitted and the head it reviewed; the dispositions a fix round submitted. */
@@ -683,6 +687,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     root,
     ledgerRun,
     headSha,
+    doorPublicationPending,
     handoff,
     verdict,
     reviewHead,
@@ -715,6 +720,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           diagnosis,
           seal,
           ...(headSha !== undefined ? { headSha } : {}),
+          ...(doorPublicationPending !== undefined ? { doorPublicationPending } : {}),
           ...(handoff !== undefined ? { handoff } : {}),
           ...(verdict !== undefined ? { verdict } : {}),
           ...(reviewHead !== undefined ? { reviewHead } : {}),

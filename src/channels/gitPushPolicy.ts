@@ -69,6 +69,8 @@ export interface PushPolicy {
   defaultBranch?: string;
   /** An existing PR's exact head, when the run is updating one. */
   boundRef?: string;
+  /** A trusted existing-PR lease, never inferred from the presented Git command. */
+  expectedHeadSha?: string;
   /** The first push may choose exactly one non-default branch; the door then pins it. */
   firstBranch?: boolean;
 }
@@ -91,6 +93,12 @@ export function authorizePushRefs(
     : undefined;
   if ((!boundRef && !policy.firstBranch) || (policy.firstBranch && prefix.commands.length !== 1))
     return { ok: false, reason: "A single branch is not bound to this run" };
+  if (policy.expectedHeadSha !== undefined) {
+    if (!/^[0-9a-f]{40}$/.test(policy.expectedHeadSha) || !boundRef || prefix.commands.length !== 1)
+      return { ok: false, reason: "existing PR publication lease is invalid" };
+    if (prefix.commands[0]?.old !== policy.expectedHeadSha)
+      return { ok: false, reason: "existing PR head differs from the authorized lease" };
+  }
   for (const command of prefix.commands) {
     if (command.ref === defaultRef) return { ok: false, reason: "default branch push refused" };
     if (boundRef && command.ref !== boundRef) return { ok: false, reason: "ref is outside this run's binding" };
