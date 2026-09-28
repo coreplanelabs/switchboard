@@ -1182,7 +1182,7 @@ export interface UnitPipelineInput {
   /** A terminal original unit re-entered at its unchanged reviewed head. The
    * exact remaining lease is carried in milliseconds; the step prefix keeps
    * every new durable step under `<original instance>:<unit>/recovery/...`. */
-  recovery?: { remainingMs: number; unitKey: string };
+  recovery?: { remainingMs: number; unitKey: string; renewalsSpent?: number };
 }
 
 type Phase =
@@ -1418,6 +1418,7 @@ export function openRecoveredUnitPipeline(
     pr: PrRef;
     expectedHeadSha: string;
     reviewRunId: string;
+    spendUsd?: number;
     findingsRunId?: string;
     findings?: Finding[];
   },
@@ -1436,12 +1437,10 @@ export function openRecoveredUnitPipeline(
     reviewRestarts: 0,
     pr: recovery.pr,
     lastReviewHead: recovery.expectedHeadSha,
-    // Legacy terminal rows do not carry a complete lifetime category split or
-    // cumulative dollars. Recovery therefore measures only this checkpoint;
-    // admission refuses a cost-capped row rather than resetting an enforced
-    // total, and reports label this split as checkpoint-local.
+    // Elapsed categories remain checkpoint-local. Enforced cumulative dollars
+    // come only from the admission claim's complete persisted child evidence.
     spentMs: { coding: 0, review: 0, waiting: 0 },
-    spendUsd: 0,
+    spendUsd: recovery.spendUsd ?? (input.grant?.costCapUsd === undefined ? 0 : null),
     findingsByRound: recovery.kind === "findings" ? { [recovery.round]: recovery.findings ?? [] } : {},
     humanAnswersByRound: {},
     dispositionsByRound: {},
@@ -1748,7 +1747,10 @@ function idleEnding(s: UnitPipelineState, ending: UnitEnding): Extract<UnitEndin
   const grant = s.input.grant ?? DEFAULT_GRANT;
   // Unspent: an idle spends no renewal — the wake's segment does (this plan's
   // fifth unit) — so the row says what the grant still holds.
-  const renewalsLeft = Math.max(0, grant.renewals - (s.input.session?.renewalsSpent ?? 0));
+  const renewalsLeft = Math.max(
+    0,
+    grant.renewals - (s.input.recovery?.renewalsSpent ?? s.input.session?.renewalsSpent ?? 0),
+  );
   // The head to continue from: a segment's own; a review_pending's reviewed
   // head — the pull request's, known even when the coding record carried none,
   // so the re-issue's resume-at-review fact survives the idle; else the last
@@ -1833,7 +1835,10 @@ function parkHumanGate(
     kind: "idle",
     why: "held",
     idled: held,
-    renewalsLeft: Math.max(0, grant.renewals - (s.input.session?.renewalsSpent ?? 0)),
+    renewalsLeft: Math.max(
+      0,
+      grant.renewals - (s.input.recovery?.renewalsSpent ?? s.input.session?.renewalsSpent ?? 0),
+    ),
     ...(s.lastReviewHead !== undefined ? { from: s.lastReviewHead } : {}),
     ...(s.lastCodingRunId !== undefined ? { runId: s.lastCodingRunId } : {}),
     spendUsd: s.spendUsd,
@@ -1879,10 +1884,29 @@ function capEnding(s: UnitPipelineState, round?: RoundRef, refused?: Carve): Uni
   };
 }
 
+/** A recovered unit keeps its original dollar cap across the checkpoint. */
+function recoveryCostEnding(s: UnitPipelineState): UnitEnding | undefined {
+  const cap = s.input.grant?.costCapUsd;
+  if (s.input.recovery === undefined || cap === undefined) return undefined;
+  if (s.spendUsd !== null && Number.isFinite(s.spendUsd) && s.spendUsd >= 0 && s.spendUsd < cap) return undefined;
+  return {
+    kind: "aborted",
+    reason:
+      s.spendUsd === null
+        ? `The original $${cap} cost cap cannot be proven: cumulative child spend is unknown.`
+        : `The original $${cap} cost cap is exhausted; cumulative child spend is $${s.spendUsd}.`,
+    reviewRounds: s.reviewRounds,
+  };
+}
+
 /** Start a round if its carve holds (agent-ship item 8): a round the
  *  remainder cannot carve above its floor is not dispatched, and the unit ends
  *  at the cap naming the round, what it would have got and the floor. */
 function enterRound(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNote[] = []): Transition {
+  if (s.input.recovery !== undefined && round.index > s.input.caps.maxRounds)
+    return end(s, { kind: "round_cap", maxRounds: s.input.caps.maxRounds, reviewRounds: s.reviewRounds }, notes);
+  const costEnding = recoveryCostEnding(s);
+  if (costEnding !== undefined) return end(s, costEnding, notes);
   const carved = roundCarve(s, round);
   if (carved.kind === "refused") return end(s, capEnding(s, round, carved), notes);
   const reviewRounds = round.kind === "review" ? round.index : s.reviewRounds;
@@ -1977,6 +2001,11 @@ function settleCoding(
         }
       : {}),
   };
+  // A completed findings child may have moved the head. Its verification
+  // read reconciles that head before the cap ends the unit.
+  const costEnding = recoveryCostEnding(next);
+  if (costEnding !== undefined && !(round.kind === "findings" && facts.status === "completed"))
+    return end(next, costEnding, [roundNote(round, "aborted")]);
   const readySalvage = round.kind === "coding" && completedSameHeadSalvage(next, facts.pushed, facts);
   const checkpoint = interruptedCheckpoint(next, facts.pushed, round.kind === "findings" ? undefined : facts);
   const mode = stopMode(facts.status);
@@ -2123,10 +2152,11 @@ function settleReview(
   facts: Extract<ChildFacts, { finished: true }>,
 ): Transition {
   const mode = stopMode(facts.status);
+  const charged = { ...s, spendUsd: addSpend(s.spendUsd, facts.costUsd) };
   if (!facts.verdict) {
     if (mode !== undefined)
       return end(
-        s,
+        charged,
         {
           kind: "stopped",
           mode,
@@ -2137,7 +2167,7 @@ function settleReview(
         [roundNote(round, "stopped")],
       );
     return end(
-      s,
+      charged,
       {
         kind: "no_verdict",
         round,
@@ -2149,13 +2179,14 @@ function settleReview(
   }
   const verdict = facts.verdict;
   const next: UnitPipelineState = {
-    ...s,
-    spendUsd: addSpend(s.spendUsd, facts.costUsd),
+    ...charged,
     findingsByRound: { ...s.findingsByRound, [round.index]: verdict.findings },
     ...(facts.reviewHead !== undefined ? { lastReviewHead: facts.reviewHead } : {}),
     ...(verdict.summary !== undefined ? { lastVerdictSummary: verdict.summary } : {}),
   };
   const notes = [roundNote(round, verdict.verdict)];
+  const costEnding = recoveryCostEnding(next);
+  if (costEnding !== undefined) return end(next, costEnding, notes);
   if (verdict.verdict === "approve") {
     // Merge-ready stands on the POSTED approval: an approve whose post did
     // not land left no approving review on the pull request. The reason is
@@ -3839,11 +3870,10 @@ function renderUnitReportWithWake(
   const level = s.input.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY;
   const levelLine = `Severity addressed: ${level} and above (set by ${s.input.addressSeveritySource ?? "org"}).`;
   // The grant as the instance carries it (decision 0046): spent of granted,
-  // the cap when one is set, and who granted it — zero of zero until a scope
-  // or a directive says otherwise, and nothing spends it before the renewal
-  // decision exists.
+  // the cap when one is set, and who granted it. A capped recovery carries
+  // proven spent renewals; an uncapped legacy checkpoint has zero capacity.
   const grant = s.input.grant ?? DEFAULT_GRANT;
-  const grantLine = `Renewals: 0 of ${grant.renewals} spent${grant.costCapUsd !== undefined ? `, cost cap $${grant.costCapUsd}` : ""} (granted by ${s.input.grantSource ?? "org"}).`;
+  const grantLine = `Renewals: ${s.input.recovery?.renewalsSpent ?? 0} of ${grant.renewals} spent${grant.costCapUsd !== undefined ? `, cost cap $${grant.costCapUsd}` : ""} (granted by ${s.input.grantSource ?? "org"}).`;
   const lastFindings = s.findingsByRound[e.reviewRounds] ?? [];
   const skipped = lastFindings.filter((f) => !findingsAtOrAbove([f], level).length);
   const skippedLine =

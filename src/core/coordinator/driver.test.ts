@@ -260,6 +260,152 @@ describe("runOriginalUnitRecovery", () => {
     expect(b.of("branch")).toEqual([]);
   });
 
+  it("passes the original cost cap and cumulative spend into the recovered review", async () => {
+    const s = steps({ "U10/recovery/1/review/wait/1": "event" });
+    const grant = { renewals: 2, costCapUsd: 50 };
+    const accounting = {
+      spendUsd: 49,
+      children: [{ runId: "run-original-review", key: `${INSTANCE}:U10/1/review`, usd: 49 }],
+      grant,
+      renewalsSpent: 1,
+    };
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([recoveryRow("review", { accounting })], T0, "person", { grant })],
+      spawn: [spawned("run-r1")],
+      "read-record": [
+        record(
+          {
+            id: "run-r1",
+            finished: true,
+            status: "completed",
+            costUsd: 2,
+            reviewHead: HEAD,
+            reviewPosted: true,
+            verdict: { verdict: "request_changes", summary: "fix remains", findings: [] },
+          },
+          T0 + MIN,
+        ),
+      ],
+      round: [acked(), acked()],
+      "unit-end": [acked(T0 + MIN)],
+    });
+
+    const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+
+    expect(summary.units).toEqual({ U10: "aborted" });
+    expect(b.of("spawn")).toHaveLength(1);
+    expect(JSON.stringify(b.of("unit-end"))).toContain("cost cap");
+  });
+
+  it("keeps spent original renewals out of a recovered human-gate balance", async () => {
+    const s = steps({ "U10/recovery/2/review/wait/1": "event" });
+    const grant = { renewals: 2, costCapUsd: 50 };
+    const accounting = {
+      spendUsd: 15,
+      children: [{ runId: "run-original-review", key: `${INSTANCE}:U10/1/review`, usd: 15 }],
+      grant,
+      renewalsSpent: 1,
+    };
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [
+        planAnswer([recoveryRow("review", { round: 2, step: "U10/recovery/2/review", accounting })], T0, "person", {
+          grant,
+        }),
+      ],
+      spawn: [spawned("run-r2")],
+      "read-record": [
+        record(
+          {
+            id: "run-r2",
+            finished: true,
+            status: "completed",
+            costUsd: 1,
+            reviewHead: HEAD,
+            reviewPosted: true,
+            verdict: {
+              verdict: "request_changes",
+              summary: "person must confirm the receipt",
+              findings: [{ id: "F1", severity: "minor", file: "src/a.ts", title: "confirm receipt", humanGated: true }],
+            },
+          },
+          T0 + MIN,
+        ),
+      ],
+      round: [acked(), acked()],
+      "unit-end": [acked(T0 + MIN)],
+    });
+
+    const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+
+    expect(summary.units).toEqual({ U10: "idle" });
+    expect(b.of("unit-end")).toMatchObject([{ ending: { kind: "held", why: "held", renewalsLeft: 1 } }]);
+  });
+
+  it("keeps an uncapped recovered checkpoint at zero renewal capacity", async () => {
+    const s = steps({ "U10/recovery/1/review/wait/1": "event" });
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([recoveryRow("review")], T0, "person", { grant: { renewals: 2 } })],
+      spawn: [spawned("run-r1")],
+      "read-record": [
+        record(
+          {
+            id: "run-r1",
+            finished: true,
+            status: "completed",
+            reviewHead: HEAD,
+            reviewPosted: true,
+            verdict: {
+              verdict: "request_changes",
+              summary: "person must confirm the receipt",
+              findings: [{ id: "F1", severity: "minor", file: "src/a.ts", title: "confirm receipt", humanGated: true }],
+            },
+          },
+          T0 + MIN,
+        ),
+      ],
+      round: [acked(), acked()],
+      "unit-end": [acked(T0 + MIN)],
+    });
+
+    const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+
+    expect(summary.units).toEqual({ U10: "idle" });
+    expect(b.of("unit-end")).toMatchObject([{ ending: { kind: "held", why: "held", renewalsLeft: 0 } }]);
+  });
+
+  it("does not dispatch a capped recovery when the plan row lacks spend carry", async () => {
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([recoveryRow("review")], T0, "person", { grant: { renewals: 0, costCapUsd: 50 } })],
+      "unit-end": [acked()],
+    });
+
+    const summary = await runOriginalUnitRecovery(steps().runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+
+    expect(summary.units).toEqual({ U10: "aborted" });
+    expect(b.of("spawn")).toEqual([]);
+    expect(JSON.stringify(b.of("unit-end"))).toContain("cost cap");
+  });
+
   it("continues a completed original findings checkpoint directly with its read-only re-review", async () => {
     const HEAD_2 = "b".repeat(40);
     const s = steps({ "U10/recovery/2/review/wait/1": "event" });

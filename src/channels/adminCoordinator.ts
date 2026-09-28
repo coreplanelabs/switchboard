@@ -79,6 +79,7 @@ import {
   type CoordinatorTag,
   type CoordinatorUnit,
   type ExistingPrPublicationBinding,
+  type RecoveryAccounting,
   type ThreadEvent,
   type UnitIdle,
   type UnitWakeAnswer,
@@ -2312,7 +2313,7 @@ function historicalRecoverySpend(
   instance: CoordinatorInstance,
   row: CoordinatorUnit,
   runs: RunView[],
-): { usd: number } | { reason: string } {
+): { usd: number; children: RecoveryAccounting["children"] } | { reason: string } {
   const unitKey = `${instance.id}:${row.unit}`;
   const unitPrefix = `${unitKey}/`;
   // A bare unit key claims this unit but has no auditable step identity.
@@ -2325,24 +2326,73 @@ function historicalRecoverySpend(
     )
   )
     return { reason: "child_identity_mismatch" };
-  let usd = 0;
+  const pricedChildren: RecoveryAccounting["children"] = [];
+  const stagedChildren: {
+    run: RunView;
+    segment: number;
+    round: number;
+    order: number;
+    action: "coding" | "review" | "findings" | "rebase";
+  }[] = [];
+  const stageOrder = (agent: "coding" | "review", index: number): number =>
+    agent === "review" ? index * 2 - 1 : index * 2;
+  const segmentAt = (at: number): number => row.segments?.filter((segment) => segment.at <= at).at(-1)?.index ?? 1;
+  const approvalGateMatches = (note: CoordinatorUnit["rounds"][number], run: RunView): boolean => {
+    if (run.verdict?.verdict !== "approve") return false;
+    const level = instance.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY;
+    const labels = findingsAtOrAbove(run.verdict.findings ?? [], level).map(
+      (finding) => `${finding.id} (${finding.severity})`,
+    );
+    if (labels.length === 0) return note.gate === undefined;
+    return (
+      note.gate?.level === level &&
+      note.gate.findings.length === labels.length &&
+      new Set(note.gate.findings).size === labels.length &&
+      labels.every((label) => note.gate!.findings.includes(label))
+    );
+  };
+  const permitsNextStage = (note: CoordinatorUnit["rounds"][number], action: string): boolean => {
+    if (note.agent === "coding") return note.outcome === "pr_opened";
+    if (action === "rebase") return note.outcome === "approve" && note.gate === undefined;
+    if (action === "findings")
+      return (
+        note.outcome === "request_changes" ||
+        note.outcome === "checks_failed" ||
+        note.outcome === "dequeued" ||
+        (note.outcome === "approve" && (note.gate?.findings.length ?? 0) > 0)
+      );
+    return (
+      note.outcome === "approve" ||
+      note.outcome === "request_changes" ||
+      note.outcome === "checks_failed" ||
+      note.outcome === "dequeued"
+    );
+  };
   for (const run of children) {
     if (!run.finished) return { reason: "child_active" };
     const suffix = run.idempotencyKey!.slice(unitPrefix.length);
     // Resumed /rN histories cannot prove their lease start in this schema.
-    const match = /^(?:s([2-9]|[1-9][0-9]+)\/)?(0|[1-9][0-9]*)\/(coding|review|findings)(?:\/a[1-9][0-9]*)?$/.exec(
-      suffix,
-    );
+    const match =
+      /^(?:s([2-9]|[1-9][0-9]+)\/)?(0|[1-9][0-9]*)\/(coding|review|findings|rebase)(?:\/a[1-9][0-9]*)?$/.exec(suffix);
+    const roundIndex = Number(match?.[2]);
+    const action = match?.[3] as "coding" | "review" | "findings" | "rebase" | undefined;
     if (
       match === null ||
+      !Number.isSafeInteger(roundIndex) ||
+      (roundIndex === 0 ? action !== "coding" : action === "coding") ||
       run.parentInstanceId !== instance.id ||
       run.userId !== instance.userId ||
       run.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
-      run.agent !== (match[3] === "review" ? "review" : "coding") ||
+      run.agent !== (action === "review" ? "review" : "coding") ||
       run.threadKey !==
         (run.agent === "review"
           ? (row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey)
           : (row.threadKey ?? instance.threadKey)) ||
+      (run.pr !== undefined &&
+        (run.pr.number !== row.pr?.number ||
+          run.pr.url !== row.pr?.url ||
+          (run.pr.head !== undefined && run.pr.head !== row.branch))) ||
+      run.pushed?.some((push) => push.ref !== row.branch || !fullHead(push.sha)) === true ||
       (match[1] !== undefined && !row.segments?.some((segment) => segment.index === Number(match[1])))
     )
       return { reason: "child_identity_mismatch" };
@@ -2368,19 +2418,6 @@ function historicalRecoverySpend(
     const segmentStart = row.segments?.find((segment) => segment.index === segmentIndex)?.at ?? row.startedAt!;
     const segmentEnd = row.segments?.find((segment) => segment.index === segmentIndex + 1)?.at ?? row.ending!.at;
     if (run.startedAt < segmentStart || run.finishedAt > segmentEnd) return { reason: "child_round_mismatch" };
-    if (run.agent === "review") {
-      const boundaries = row.rounds.filter(
-        (entry) =>
-          entry.agent === "review" &&
-          entry.index === Number(match[2]) &&
-          entry.at >= segmentStart &&
-          entry.at <= segmentEnd,
-      );
-      const start = boundaries.find((entry) => entry.outcome === "started");
-      const end = boundaries.find((entry) => entry.outcome !== "started");
-      if (start === undefined || end === undefined || run.startedAt < start.at || run.finishedAt > end.at)
-        return { reason: "child_round_mismatch" };
-    }
     const models = Object.values(run.usage?.byModel ?? {});
     if (
       models.length === 0 ||
@@ -2397,27 +2434,205 @@ function historicalRecoverySpend(
       )
     )
       return { reason: "child_price_unknown" };
-    usd += models.reduce((total, model) => total + model.usd!, 0);
+    const childUsd = models.reduce((total, model) => total + model.usd!, 0);
+    pricedChildren.push({ runId: run.id, key: run.idempotencyKey!, usd: childUsd });
+    stagedChildren.push({
+      run,
+      segment: segmentIndex,
+      round: roundIndex,
+      order: stageOrder(run.agent === "review" ? "review" : "coding", roundIndex),
+      action: action!,
+    });
   }
-  if (!Number.isFinite(usd)) return { reason: "child_price_unknown" };
   const ordered = [...children].sort((left, right) => left.startedAt - right.startedAt);
   if (ordered.some((run, index) => index > 0 && run.startedAt < ordered[index - 1]!.finishedAt!))
     return { reason: "child_history_overlapping" };
-  for (const round of row.rounds.filter((entry) => entry.outcome === "started")) {
-    const action = round.agent === "review" ? "review" : round.index === 0 ? "coding" : "findings";
-    const segment = row.segments?.filter((entry) => entry.at <= round.at).at(-1)?.index ?? 1;
-    const prefix = stepPrefixOf(row.unit, segment > 1 ? { segment, renewalsSpent: 0, spendUsd: null } : undefined);
+  if (new Set(children.map((run) => run.idempotencyKey)).size !== children.length)
+    return { reason: "child_history_ambiguous" };
+  for (const child of stagedChildren) {
+    // No later stage may precede an earlier paid child, even when a legacy
+    // coding run has no retained start note.
     if (
-      !children.some(
-        (run) =>
-          run.agent === round.agent &&
-          isStepAttempt(run.idempotencyKey, `${instance.id}:${prefix}/${round.index}/${action}`) &&
-          run.startedAt >= round.at,
+      stagedChildren.some(
+        (prior) =>
+          (prior.segment < child.segment || (prior.segment === child.segment && prior.order < child.order)) &&
+          prior.run.finishedAt! > child.run.startedAt,
+      )
+    )
+      return { reason: "child_round_mismatch" };
+    // A later child may precede its own started note, but the previous
+    // round's terminal note was persisted before the driver could spawn it.
+    if (
+      row.rounds.some(
+        (note) =>
+          note.outcome !== "started" &&
+          (row.segments?.filter((segment) => segment.at <= note.at).at(-1)?.index ?? 1) === child.segment &&
+          stageOrder(note.agent === "review" ? "review" : "coding", note.index) < child.order &&
+          child.run.startedAt < note.at,
+      )
+    )
+      return { reason: "child_round_mismatch" };
+  }
+  const terminalRetryEvidence = (child: (typeof stagedChildren)[number]): boolean => {
+    const ending = row.ending;
+    if (
+      child.action !== "findings" ||
+      ending?.kind !== "failed" ||
+      ending.cause !== "step_threw" ||
+      ending.round !== child.round ||
+      !ending.step?.endsWith("/pr-check")
+    )
+      return false;
+    const stage = `${stepPrefixOf(row.unit, child.segment > 1 ? { segment: child.segment, renewalsSpent: 0, spendUsd: null } : undefined)}/${child.round}/findings`;
+    const checkedStep = ending.step.slice(0, -"/pr-check".length);
+    if (!isStepAttempt(checkedStep, stage)) return false;
+    const prefix = `${instance.id}:${stage}`;
+    const key = child.run.idempotencyKey!;
+    if (!isStepAttempt(key, prefix)) return false;
+    const ordinal = (value: string, base: string) => (value === base ? 0 : Number(value.slice(base.length + 2)));
+    if (ordinal(key, prefix) > ordinal(checkedStep, stage)) return false;
+    return (
+      key === `${instance.id}:${checkedStep}` ||
+      ((child.run.status === "failed" || child.run.status === "interrupted") && (child.run.pushed?.length ?? 0) === 0)
+    );
+  };
+  const startedNotes = row.rounds
+    .filter((note) => note.outcome === "started")
+    .map((note) => ({
+      note,
+      segment: segmentAt(note.at),
+      order: stageOrder(note.agent === "review" ? "review" : "coding", note.index),
+    }));
+  const groupKeys = new Set([
+    ...stagedChildren.map((child) => `${child.segment}:${child.order}`),
+    ...startedNotes.map((start) => `${start.segment}:${start.order}`),
+  ]);
+  for (const groupKey of groupKeys) {
+    const stageChildren = stagedChildren
+      .filter((child) => `${child.segment}:${child.order}` === groupKey)
+      .sort((left, right) => left.run.startedAt - right.run.startedAt);
+    const starts = startedNotes.filter((start) => `${start.segment}:${start.order}` === groupKey);
+    if (new Set(stageChildren.map((child) => child.action)).size > 1 || starts.length > stageChildren.length)
+      return { reason: "child_history_missing" };
+    const first = stageChildren[0];
+    if (
+      first?.action === "review" &&
+      (stageChildren.length !== 1 ||
+        first.run.idempotencyKey !==
+          `${instance.id}:${stepPrefixOf(row.unit, first.segment > 1 ? { segment: first.segment, renewalsSpent: 0, spendUsd: null } : undefined)}/${first.round}/review`)
+    )
+      return { reason: "child_round_mismatch" };
+    const extraCount = stageChildren.length - starts.length;
+    const extras = stageChildren.slice(0, extraCount);
+    if (
+      extras.some(
+        (child) =>
+          !terminalRetryEvidence(child) &&
+          !(
+            starts.length === 0 &&
+            stageChildren.length === 1 &&
+            child.segment === 1 &&
+            child.round === 0 &&
+            child.action === "coding" &&
+            child.run.idempotencyKey === `${unitPrefix}0/coding` &&
+            child.run.status === "completed" &&
+            child.run.pushed?.some((push) => push.ref === row.branch) === true
+          ),
       )
     )
       return { reason: "child_history_missing" };
+    for (const [index, start] of starts.entries()) {
+      const child = stageChildren[extraCount + index]!;
+      if (child.run.startedAt > start.note.at || (index > 0 && child.run.startedAt < starts[index - 1]!.note.at))
+        return { reason: "child_history_missing" };
+      if (child.action === "review") {
+        const terminal = row.rounds
+          .filter(
+            (note) =>
+              note.agent === "review" &&
+              note.index === child.round &&
+              note.outcome !== "started" &&
+              note.outcome !== "checks_restarted" &&
+              segmentAt(note.at) === child.segment &&
+              note.at >= start.note.at,
+          )
+          .at(-1);
+        if (terminal === undefined || child.run.finishedAt! > terminal.at) return { reason: "child_round_mismatch" };
+        const expectedVerdict =
+          terminal.outcome === "checks_failed"
+            ? "approve"
+            : terminal.outcome === "approve" || terminal.outcome === "request_changes"
+              ? terminal.outcome
+              : undefined;
+        const approvalNotes = row.rounds.filter(
+          (note) =>
+            note.agent === "review" &&
+            note.index === child.round &&
+            note.outcome === "approve" &&
+            segmentAt(note.at) === child.segment &&
+            note.at >= start.note.at &&
+            note.at <= terminal.at,
+        );
+        if (
+          terminal.outcome === "dequeued" ||
+          approvalNotes.some((note) => !approvalGateMatches(note, child.run)) ||
+          (terminal.outcome === "checks_failed" && approvalNotes.length === 0) ||
+          (expectedVerdict !== undefined &&
+            (child.run.verdict?.verdict !== expectedVerdict ||
+              row.pr === undefined ||
+              !fullHead(child.run.reviewHead) ||
+              reviewPostedByRecord(child.run, { repo: instance.repo, number: row.pr.number })?.reviewPosted !== true))
+        )
+          return { reason: "child_round_mismatch" };
+      }
+    }
+    const stage = stageChildren[0]!;
+    const later = stagedChildren
+      .filter((child) => child.segment === stage.segment && child.order > stage.order)
+      .sort((left, right) => left.order - right.order || left.run.startedAt - right.run.startedAt)[0];
+    if (later !== undefined) {
+      if (later.order !== stage.order + 1) return { reason: "child_round_mismatch" };
+      const lastStart = starts.at(-1)?.note.at;
+      const terminal = row.rounds
+        .filter(
+          (note) =>
+            note.outcome !== "started" &&
+            note.agent === stage.run.agent &&
+            note.index === stage.round &&
+            segmentAt(note.at) === stage.segment &&
+            note.at <= later.run.startedAt,
+        )
+        .at(-1);
+      if (
+        (lastStart !== undefined && (terminal === undefined || terminal.at < lastStart)) ||
+        (terminal === undefined && !stageChildren.every((child) => child.action === "coding" && child.round === 0)) ||
+        (terminal !== undefined &&
+          (!(
+            permitsNextStage(terminal, later.action) ||
+            (stage.action === "review" &&
+              later.action === "findings" &&
+              terminal.outcome === "approve" &&
+              row.rounds.some(
+                (note) =>
+                  note.agent === "coding" &&
+                  note.index === stage.round &&
+                  note.outcome === "dequeued" &&
+                  segmentAt(note.at) === stage.segment &&
+                  note.at >= terminal.at &&
+                  note.at <= later.run.startedAt,
+              ))
+          ) ||
+            stageChildren.some((child) => child.run.finishedAt! > terminal.at)))
+      )
+        return { reason: "child_round_mismatch" };
+    }
   }
-  return { usd };
+  pricedChildren.sort((left, right) => left.key.localeCompare(right.key));
+  // The receipt validates this sum in child order. Compute it after sorting
+  // so a different listing order cannot change the fractional USD total.
+  const usd = pricedChildren.reduce((sum, child) => sum + child.usd, 0);
+  if (!Number.isFinite(usd)) return { reason: "child_price_unknown" };
+  return { usd, children: pricedChildren };
 }
 
 /** Recover one ended original unit without passing through generated-plan
@@ -2480,6 +2695,17 @@ export async function recoverOriginalUnit(
   )
     return json(409, { ok: false, error: "recovery_binding_mismatch", at });
 
+  // Legacy round notes retain the check outcome, but not the typed findings
+  // or their dispositions. An earlier failed check cannot authorize a later
+  // findings child merely because another review followed it.
+  if (row.rounds.some((note) => note.outcome === "checks_failed"))
+    return json(409, {
+      ok: false,
+      error: "recovery_checks_evidence_unavailable",
+      reason: "check_findings_not_retained",
+      at,
+    });
+
   const existingClaim = row.recovery;
   let kind: "findings" | "review";
   let round: number;
@@ -2492,6 +2718,7 @@ export async function recoverOriginalUnit(
   let findings: Finding[] | undefined;
   let findingsRunId: string | undefined;
   let findingsKey: string | undefined;
+  let accounting: RecoveryAccounting | undefined;
   let claimRow = row;
   let facts: PullRequestFacts | undefined;
   let originalRow: CoordinatorUnit | undefined;
@@ -2508,7 +2735,15 @@ export async function recoverOriginalUnit(
       findings,
       findingsRunId,
       findingsKey,
+      accounting,
     } = existingClaim);
+    if (
+      (instance.grant?.costCapUsd !== undefined && accounting === undefined) ||
+      (accounting !== undefined &&
+        (accounting.grant.renewals !== instance.grant?.renewals ||
+          accounting.grant.costCapUsd !== instance.grant?.costCapUsd))
+    )
+      return json(409, { ok: false, error: "recovery_budget_unknown", reason: "grant_carry_mismatch", at });
     if (
       publication === undefined ||
       existingClaim.expectedHeadSha !== expectedHead ||
@@ -2531,16 +2766,6 @@ export async function recoverOriginalUnit(
         break;
       }
     const boundary = boundaryPosition >= 0 ? row.rounds[boundaryPosition] : undefined;
-    // Check failures are synthesized findings, not the approving review's
-    // findings. The legacy row retained only the outcome word, so neither
-    // that approval nor a later push proves the check-disposition contract.
-    if (boundary?.outcome === "checks_failed")
-      return json(409, {
-        ok: false,
-        error: "recovery_checks_evidence_unavailable",
-        reason: "check_findings_not_retained",
-        at,
-      });
     if (boundary === undefined || (boundary.outcome !== "request_changes" && boundary.outcome !== "no_verdict"))
       return json(409, { ok: false, error: "recovery_ending_unsupported", at });
     if (row.rounds.slice(boundaryPosition + 1).some((candidate) => candidate.agent === "review"))
@@ -2680,13 +2905,15 @@ export async function recoverOriginalUnit(
     if (grant.costCapUsd !== undefined && histories.size === 0) return unknownBudget("cost_cap_spend_unknown");
     const spend = historicalRecoverySpend(instance, row, [...histories.values()]);
     if ("reason" in spend) return unknownBudget(spend.reason);
-    if (grant.costCapUsd !== undefined) {
-      if (spend.usd >= grant.costCapUsd) return json(409, { ok: false, error: "recovery_cost_cap_exhausted", at });
-      // The current recovery claim and driver cannot carry cumulative spend
-      // and an original cost cap. Proving retained prices is not permission
-      // to drop that cap; refuse until the durable carry seam exists.
-      return unknownBudget("cost_cap_carry_unavailable");
-    }
+    if (grant.costCapUsd !== undefined && spend.usd >= grant.costCapUsd)
+      return json(409, { ok: false, error: "recovery_cost_cap_exhausted", at });
+    if (grant.costCapUsd !== undefined)
+      accounting = {
+        spendUsd: spend.usd,
+        children: spend.children,
+        grant: { ...grant },
+        renewalsSpent: latestSegmentIndex - 1,
+      };
     const reviewRuns = listing.runs.filter((run) => run.threadKey === reviewThreadKey);
     const unitRuns = listing.runs.filter((run) => run.threadKey === unitThreadKey);
     const reviewKeyPrefix = `${instance.id}:${segmentPrefix}/${round}/review`;
@@ -2932,7 +3159,12 @@ export async function recoverOriginalUnit(
       const replacement = consumed
         ? {
             ...originalRow,
-            recoveryReceipt: { reviewRunId, workflowId, at },
+            recoveryReceipt: {
+              reviewRunId,
+              workflowId,
+              at,
+              ...(accounting !== undefined ? { accounting } : {}),
+            },
           }
         : originalRow;
       const restored = await deps.instances.compareAndReplaceUnit(claimedRow, replacement).catch(() => undefined);
@@ -3020,6 +3252,7 @@ export async function recoverOriginalUnit(
         claimedAt: at,
         step: stepName,
         reviewRunId,
+        ...(accounting !== undefined ? { accounting } : {}),
         ...(findingsRunId !== undefined ? { findingsRunId } : {}),
         ...(findingsKey !== undefined ? { findingsKey } : {}),
         ...(findings !== undefined ? { findings } : {}),
@@ -3762,7 +3995,13 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     return json(409, { ok: false, error: "recovery_claim_mismatch", at });
   const host = row.recovery !== undefined ? ({ kind: "not_host" } as const) : await hostRunOf(deps, instance);
   if (host.kind === "not_host" && row.recovery === undefined) return json(409, { ok: false, error: "not_host", at });
-  const note = { index: body.index, agent: body.agent, outcome: body.outcome as string, at, ...(gate ? { gate } : {}) };
+  const note = {
+    index: body.index,
+    agent: body.agent,
+    outcome: body.outcome as string,
+    at,
+    ...(gate ? { gate } : {}),
+  };
   const previous = row.rounds.at(-1);
   if (
     row.recovery !== undefined &&
@@ -4154,6 +4393,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       ? {
           recoveryReceipt: {
             reviewRunId: row.recovery.reviewRunId,
+            ...(row.recovery.accounting !== undefined ? { accounting: row.recovery.accounting } : {}),
             workflowId: row.recovery.workflowId,
             at,
           },

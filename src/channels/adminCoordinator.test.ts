@@ -5,7 +5,12 @@ import { Secret } from "../secrets.js";
 import { AGENTS } from "../agents/registry.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
-import type { CoordinatorInstance, CoordinatorTag, CoordinatorUnit } from "../core/coordinator/contract.js";
+import {
+  isCoordinatorUnit,
+  type CoordinatorInstance,
+  type CoordinatorTag,
+  type CoordinatorUnit,
+} from "../core/coordinator/contract.js";
 import {
   runPlan,
   runOriginalUnitRecovery,
@@ -6640,6 +6645,617 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         );
     };
 
+    it("carries complete priced history into a cost-capped original unit", async () => {
+      const h = await legacyHarness();
+      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      await h.instances.putUnits([legacyRow()]);
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+        startedAt: legacyRow().startedAt,
+        branch: legacyRow().branch,
+        pr: legacyRow().pr,
+        recovery: { accounting: { spendUsd: 0.5, grant: { renewals: 0, costCapUsd: 5 }, renewalsSpent: 0 } },
+      });
+      expect(h.recoveries).toHaveLength(1);
+    });
+
+    it.each([
+      ["while the child runs", 39, 30],
+      ["after the child finishes", 29, 20],
+    ])("accepts a priced review child whose round-start note lands %s", async (_case, noteMinutes, endMinutes) => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = legacyRow();
+      row.rounds[0] = { ...row.rounds[0]!, at: NOW - minutesToMs(noteMinutes) };
+      row.rounds[1] = { ...row.rounds[1]!, at: NOW - minutesToMs(endMinutes) };
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding());
+      await h.store.put(reviewRecord());
+
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery?.accounting?.children).toHaveLength(2);
+    });
+
+    it("refuses a priced review completed before the original coding child", async () => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = requestChangesRow();
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding());
+      await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(58), finishedAt: NOW - minutesToMs(57) }));
+
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_budget_unknown", reason: "child_round_mismatch" },
+      });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it("refuses a review child that starts before the previous coding round's terminal note", async () => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = legacyRow();
+      row.rounds.unshift({ index: 0, agent: "coding", outcome: "pr_opened", at: NOW - minutesToMs(44) });
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding());
+      await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(45) + 30_000, finishedAt: NOW - minutesToMs(42) }));
+
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_budget_unknown", reason: "child_round_mismatch" },
+      });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it("refuses a findings child that starts before the review verdict note", async () => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = requestChangesRow();
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding());
+      await h.store.put(reviewRecord({ finishedAt: NOW - minutesToMs(36) }));
+      await h.store.put(
+        completedOriginalFindings(HEAD, {
+          status: "failed",
+          pushed: [],
+          startedAt: NOW - minutesToMs(35),
+          finishedAt: NOW - minutesToMs(32),
+        }),
+      );
+
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_budget_unknown", reason: "child_round_mismatch" },
+      });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it.each(["missing", "transient", "aborted", "stale", "pr_opened"] as const)(
+      "requires a completed coding transition before a later review (%s)",
+      async (scenario) => {
+        const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+        await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+        const row = requestChangesRow();
+        const started = { index: 0, agent: "coding" as const, outcome: "started" as const, at: NOW - minutesToMs(54) };
+        const outcome = scenario === "stale" ? "pr_opened" : scenario;
+        const terminal =
+          outcome === "missing"
+            ? []
+            : [{ index: 0, agent: "coding" as const, outcome, at: NOW - minutesToMs(scenario === "stale" ? 56 : 44) }];
+        row.rounds =
+          scenario === "stale" ? [...terminal, started, ...row.rounds] : [started, ...terminal, ...row.rounds];
+        await h.instances.putUnits([row]);
+        await h.store.put(originalCoding());
+        await h.store.put(reviewRecord());
+
+        const response = await callRecovery(h);
+        if (scenario === "pr_opened") {
+          expect(response).toMatchObject({ status: 200 });
+          expect(h.recoveries).toHaveLength(1);
+        } else {
+          expect(response).toMatchObject({
+            status: 409,
+            body: { error: "recovery_budget_unknown", reason: "child_round_mismatch" },
+          });
+          expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+          expect(h.recoveries).toEqual([]);
+        }
+      },
+    );
+
+    it("requires a completed findings transition before the next review round", async () => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = requestChangesRow();
+      row.rounds = [
+        { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(54) },
+        { index: 1, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(49) },
+        { index: 1, agent: "coding", outcome: "started", at: NOW - minutesToMs(44) },
+        { index: 2, agent: "review", outcome: "started", at: NOW - minutesToMs(39) },
+        { index: 2, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(30) },
+      ];
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding({ startedAt: NOW - minutesToMs(59), finishedAt: NOW - minutesToMs(56) }));
+      await h.store.put(
+        reviewRecord({ id: "run-review-one", startedAt: NOW - minutesToMs(55), finishedAt: NOW - minutesToMs(50) }),
+      );
+      await h.store.put(
+        completedOriginalFindings(HEAD, {
+          status: "failed",
+          pushed: [],
+          startedAt: NOW - minutesToMs(45),
+          finishedAt: NOW - minutesToMs(42),
+        }),
+      );
+      await h.store.put(
+        reviewRecord({
+          id: "run-review-two",
+          idempotencyKey: `${INSTANCE.id}:U12/2/review`,
+          startedAt: NOW - minutesToMs(40),
+          finishedAt: NOW - minutesToMs(35),
+        }),
+      );
+
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_budget_unknown", reason: "child_round_mismatch" },
+      });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it.each([1, 2])("refuses an unrecorded paid findings stage %i", async (index) => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = requestChangesRow();
+      row.ending = { ...row.ending!, at: NOW - minutesToMs(10) };
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding());
+      await h.store.put(reviewRecord());
+      await h.store.put(
+        completedOriginalFindings(HEAD, {
+          idempotencyKey: `${INSTANCE.id}:U12/${index}/findings`,
+          status: "failed",
+          pushed: [],
+          startedAt: NOW - minutesToMs(25),
+          finishedAt: NOW - minutesToMs(20),
+        }),
+      );
+
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_budget_unknown", reason: "child_history_missing" },
+      });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it.each([
+      ["foreign PR number", { pr: { number: 999, url: PR.url } }],
+      ["foreign PR URL", { pr: { number: PR.number, url: "https://github.com/acme/api/pull/999" } }],
+      ["foreign PR head", { pr: { number: PR.number, url: PR.url, head: "other-branch" } }],
+      ["foreign pushed ref", { pushed: [{ ref: "other-branch", sha: HEAD, by: "push" as const }] }],
+    ] as [string, Partial<RunRecord>][])("refuses a priced review with a %s", async (_case, over) => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = requestChangesRow();
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding());
+      await h.store.put(reviewRecord(over));
+
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_budget_unknown", reason: "child_identity_mismatch" },
+      });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it.each([
+      ["approve", "ungated", true],
+      ["approve", "unrecorded gate", false],
+      ["approve", "wrong gate level", false],
+      ["approve", "missing gate label", false],
+      ["request_changes", "ungated", false],
+    ] as const)(
+      "binds an approved review note to the posted review before rebase (%s child, %s)",
+      async (firstVerdict, gateCase, expectedAdmitted) => {
+        const rebased = "b".repeat(40);
+        const h = harness({ prFacts: exactRecoveryFacts(rebased) });
+        await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+        const row = requestChangesRow();
+        row.publication = { ...publication, expectedHeadSha: rebased };
+        row.lastPush = rebased;
+        row.rounds = [
+          { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(54) },
+          {
+            index: 1,
+            agent: "review",
+            outcome: "approve",
+            at: NOW - minutesToMs(49),
+            ...(gateCase === "wrong gate level" || gateCase === "missing gate label"
+              ? {
+                  gate: {
+                    level: gateCase === "wrong gate level" ? ("major" as const) : ("minor" as const),
+                    findings: gateCase === "wrong gate level" ? ["F1 (minor)", "F2 (major)"] : ["F1 (minor)"],
+                  },
+                }
+              : {}),
+          },
+          { index: 1, agent: "coding", outcome: "started", at: NOW - minutesToMs(44) },
+          { index: 1, agent: "coding", outcome: "pr_opened", at: NOW - minutesToMs(38) },
+          { index: 2, agent: "review", outcome: "started", at: NOW - minutesToMs(34) },
+          { index: 2, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(30) },
+        ];
+        await h.instances.putUnits([row]);
+        await h.store.put(originalCoding({ startedAt: NOW - minutesToMs(59), finishedAt: NOW - minutesToMs(56) }));
+        await h.store.put(
+          reviewRecord({
+            id: "run-review-one",
+            startedAt: NOW - minutesToMs(55),
+            finishedAt: NOW - minutesToMs(50),
+            verdict: {
+              verdict: firstVerdict,
+              summary: "reviewed",
+              findings:
+                gateCase === "ungated"
+                  ? []
+                  : [
+                      { id: "F1", severity: "minor", file: "src/a.ts", title: "first finding" },
+                      { id: "F2", severity: "major", file: "src/b.ts", title: "second finding" },
+                    ],
+            },
+            reviewPost: {
+              posted: true,
+              target: { repo: INSTANCE.repo, number: PR.number },
+              head: HEAD,
+              verdict: firstVerdict,
+            },
+          }),
+        );
+        await h.store.put(
+          completedOriginalFindings(rebased, {
+            id: "run-original-rebase",
+            idempotencyKey: `${INSTANCE.id}:U12/1/rebase`,
+            startedAt: NOW - minutesToMs(45),
+            finishedAt: NOW - minutesToMs(41),
+          }),
+        );
+        await h.store.put(
+          reviewRecord({
+            id: "run-review-two",
+            idempotencyKey: `${INSTANCE.id}:U12/2/review`,
+            startedAt: NOW - minutesToMs(35),
+            finishedAt: NOW - minutesToMs(31),
+            reviewHead: rebased,
+            reviewPost: {
+              posted: true,
+              target: { repo: INSTANCE.repo, number: PR.number },
+              head: rebased,
+              verdict: "request_changes",
+            },
+          }),
+        );
+
+        if (expectedAdmitted) {
+          expect(await callRecovery(h)).toMatchObject({ status: 200 });
+          expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery?.accounting?.children).toHaveLength(4);
+          expect(h.recoveries).toHaveLength(1);
+        } else {
+          expect(await callRecovery(h)).toMatchObject({
+            status: 409,
+            body: { error: "recovery_budget_unknown", reason: "child_round_mismatch" },
+          });
+          expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+          expect(h.recoveries).toEqual([]);
+        }
+      },
+    );
+
+    it.each(["request_changes", "checks_failed", "dequeued"] as const)(
+      "refuses review round two after %s without the required findings stage",
+      async (outcome) => {
+        const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+        await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+        const row = requestChangesRow();
+        row.rounds = [
+          { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(54) },
+          {
+            index: 1,
+            agent: "review",
+            outcome: outcome === "dequeued" ? "approve" : outcome,
+            at: NOW - minutesToMs(49),
+          },
+          ...(outcome === "dequeued"
+            ? [{ index: 1, agent: "coding" as const, outcome: "dequeued" as const, at: NOW - minutesToMs(45) }]
+            : []),
+          { index: 2, agent: "review", outcome: "started", at: NOW - minutesToMs(39) },
+          { index: 2, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(30) },
+        ];
+        await h.instances.putUnits([row]);
+        await h.store.put(originalCoding({ startedAt: NOW - minutesToMs(59), finishedAt: NOW - minutesToMs(56) }));
+        await h.store.put(
+          reviewRecord({
+            id: "run-review-one",
+            startedAt: NOW - minutesToMs(55),
+            finishedAt: NOW - minutesToMs(50),
+            ...(outcome === "dequeued"
+              ? {
+                  verdict: { verdict: "approve", summary: "clean", findings: [] },
+                  reviewPost: {
+                    posted: true,
+                    target: { repo: INSTANCE.repo, number: PR.number },
+                    head: HEAD,
+                    verdict: "approve",
+                  },
+                }
+              : {}),
+          }),
+        );
+        await h.store.put(
+          reviewRecord({
+            id: "run-review-two",
+            idempotencyKey: `${INSTANCE.id}:U12/2/review`,
+            startedAt: NOW - minutesToMs(40),
+            finishedAt: NOW - minutesToMs(35),
+          }),
+        );
+
+        expect(await callRecovery(h)).toMatchObject({
+          status: 409,
+          body:
+            outcome === "checks_failed"
+              ? { error: "recovery_checks_evidence_unavailable", reason: "check_findings_not_retained" }
+              : { error: "recovery_budget_unknown", reason: "child_round_mismatch" },
+        });
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+        expect(h.recoveries).toEqual([]);
+      },
+    );
+
+    it("refuses same-round review retries without a durable accounting boundary", async () => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = requestChangesRow();
+      row.rounds = [
+        { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(54) },
+        { index: 1, agent: "review", outcome: "approve", at: NOW - minutesToMs(49) },
+        { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(44) },
+        { index: 1, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(30) },
+      ];
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding({ startedAt: NOW - minutesToMs(59), finishedAt: NOW - minutesToMs(56) }));
+      await h.store.put(
+        reviewRecord({ id: "run-review-one", startedAt: NOW - minutesToMs(55), finishedAt: NOW - minutesToMs(50) }),
+      );
+      await h.store.put(
+        reviewRecord({
+          id: "run-review-two",
+          idempotencyKey: `${INSTANCE.id}:U12/1/review/a2`,
+          startedAt: NOW - minutesToMs(45),
+          finishedAt: NOW - minutesToMs(35),
+        }),
+      );
+
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_budget_unknown", reason: "round_history_invalid" },
+      });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it.each([
+      ["typed dequeue", "dequeued", "approve", true],
+      ["missing transition", "missing", "approve", false],
+      ["dequeue conflicts with posted review", "dequeued", "request_changes", false],
+      ["failed checks without retained findings", "checks_failed", "approve", false],
+      ["failed checks conflict with posted review", "checks_failed", "request_changes", false],
+      ["matching gated approval", "gate_match", "approve", true],
+      ["gated finding absent from verdict", "gate_mismatch", "approve", false],
+      ["gated approval at the wrong severity", "gate_wrong_level", "approve", false],
+      ["gated approval missing one finding", "gate_incomplete", "approve", false],
+    ] as const)(
+      "binds findings authorization to the posted review and typed transition (%s)",
+      async (_case, transition, firstVerdict, expectedAdmitted) => {
+        const pushed = "b".repeat(40);
+        const h = harness({ prFacts: exactRecoveryFacts(pushed) });
+        await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+        const row = requestChangesRow();
+        row.publication = { ...publication, expectedHeadSha: pushed };
+        row.lastPush = pushed;
+        row.ending = { ...row.ending!, at: NOW - minutesToMs(5) };
+        row.rounds = [
+          { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(54) },
+          {
+            index: 1,
+            agent: "review",
+            outcome: "approve",
+            at: NOW - minutesToMs(49),
+            ...(transition.startsWith("gate_")
+              ? {
+                  gate: {
+                    level: transition === "gate_wrong_level" ? ("major" as const) : ("minor" as const),
+                    findings: ["F1 (minor)"],
+                  },
+                }
+              : {}),
+          },
+          ...(transition === "dequeued"
+            ? [{ index: 1, agent: "coding" as const, outcome: "dequeued" as const, at: NOW - minutesToMs(45) }]
+            : transition === "checks_failed"
+              ? [{ index: 1, agent: "review" as const, outcome: "checks_failed" as const, at: NOW - minutesToMs(45) }]
+              : []),
+          { index: 1, agent: "coding", outcome: "started", at: NOW - minutesToMs(40) },
+          { index: 1, agent: "coding", outcome: "pr_opened", at: NOW - minutesToMs(34) },
+          { index: 2, agent: "review", outcome: "started", at: NOW - minutesToMs(24) },
+          { index: 2, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(10) },
+        ];
+        await h.instances.putUnits([row]);
+        await h.store.put(originalCoding({ startedAt: NOW - minutesToMs(59), finishedAt: NOW - minutesToMs(56) }));
+        await h.store.put(
+          reviewRecord({
+            id: "run-review-one",
+            startedAt: NOW - minutesToMs(55),
+            finishedAt: NOW - minutesToMs(50),
+            verdict: {
+              verdict: firstVerdict,
+              summary: "reviewed",
+              findings:
+                transition === "gate_match" || transition === "gate_wrong_level" || transition === "gate_incomplete"
+                  ? [
+                      { id: "F1", severity: "minor" as const, file: "src/a.ts", title: "keep the fence" },
+                      ...(transition === "gate_incomplete"
+                        ? [{ id: "F2", severity: "major" as const, file: "src/b.ts", title: "keep the second fence" }]
+                        : []),
+                    ]
+                  : [],
+            },
+            reviewPost: {
+              posted: true,
+              target: { repo: INSTANCE.repo, number: PR.number },
+              head: HEAD,
+              verdict: firstVerdict,
+            },
+          }),
+        );
+        await h.store.put(
+          completedOriginalFindings(pushed, {
+            id: "run-dequeued-findings",
+            startedAt: NOW - minutesToMs(41),
+            finishedAt: NOW - minutesToMs(36),
+          }),
+        );
+        await h.store.put(
+          reviewRecord({
+            id: "run-review-two",
+            idempotencyKey: `${INSTANCE.id}:U12/2/review`,
+            startedAt: NOW - minutesToMs(25),
+            finishedAt: NOW - minutesToMs(15),
+            reviewHead: pushed,
+            reviewPost: {
+              posted: true,
+              target: { repo: INSTANCE.repo, number: PR.number },
+              head: pushed,
+              verdict: "request_changes",
+            },
+          }),
+        );
+
+        if (expectedAdmitted) {
+          expect(await callRecovery(h)).toMatchObject({ status: 200 });
+          expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery?.accounting?.children).toHaveLength(4);
+          expect(h.recoveries).toHaveLength(1);
+        } else {
+          expect(await callRecovery(h)).toMatchObject({
+            status: 409,
+            body:
+              transition === "checks_failed"
+                ? { error: "recovery_checks_evidence_unavailable", reason: "check_findings_not_retained" }
+                : { error: "recovery_budget_unknown", reason: "child_round_mismatch" },
+          });
+          expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+          expect(h.recoveries).toEqual([]);
+        }
+      },
+    );
+
+    it("refuses a coding child whose start follows its persisted round-start note", async () => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = legacyRow();
+      row.rounds.unshift({ index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(56) });
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding());
+      await h.store.put(reviewRecord());
+
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_budget_unknown", reason: "child_history_missing" },
+      });
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it("accepts a priced coding child that starts before its persisted round-start note", async () => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = legacyRow();
+      row.rounds.unshift({ index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(54) });
+      row.rounds.splice(1, 0, { index: 0, agent: "coding", outcome: "pr_opened", at: NOW - minutesToMs(44) });
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding());
+      await h.store.put(reviewRecord());
+
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery?.accounting?.children).toHaveLength(2);
+    });
+
+    it("refuses distinct historical children with the same step key before claiming a cost-capped unit", async () => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = legacyRow();
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding());
+      await h.store.put(reviewRecord());
+      await h.store.put(
+        completedOriginalFindings(HEAD, {
+          status: "failed",
+          pushed: [],
+          startedAt: NOW - minutesToMs(25),
+          finishedAt: NOW - minutesToMs(22),
+        }),
+      );
+      await h.store.put(
+        completedOriginalFindings(HEAD, {
+          id: "run-duplicate-findings-key",
+          status: "failed",
+          pushed: [],
+          startedAt: NOW - minutesToMs(20),
+          finishedAt: NOW - minutesToMs(17),
+        }),
+      );
+      const replace = vi.spyOn(h.instances, "compareAndReplaceUnit");
+
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: "recovery_budget_unknown", reason: "child_history_ambiguous" },
+      });
+      expect(replace).not.toHaveBeenCalled();
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    });
+
+    it("sums fractional child prices in the same order as the durable receipt", async () => {
+      const h = await legacyHarness();
+      const priced = (usd: number) => ({
+        ...historicalUsage,
+        byModel: { "test/historical": { ...historicalUsage.byModel["test/historical"], usd } },
+      });
+      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      const row = legacyRow();
+      row.rounds.push({ index: 1, agent: "coding", outcome: "started", at: NOW - minutesToMs(14) });
+      await h.instances.putUnits([row]);
+      await h.store.put(originalCoding({ usage: priced(0.1) }));
+      await h.store.put(
+        completedOriginalFindings(HEAD, {
+          status: "failed",
+          pushed: [],
+          usage: priced(0.4),
+        }),
+      );
+      await h.store.put(reviewRecord({ usage: priced(0.2) }));
+
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      const claimed = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      const accounting = claimed.recovery!.accounting!;
+      expect(accounting.children.map((child) => child.usd)).toEqual([0.1, 0.4, 0.2]);
+      expect(accounting.spendUsd).toBe(accounting.children.reduce((sum, child) => sum + child.usd, 0));
+      expect(isCoordinatorUnit(JSON.parse(JSON.stringify(claimed)))).toBe(true);
+    });
+
     it("reaches original recovery gates beyond 200 unrelated persisted runs", async () => {
       const h = await legacyHarness();
       await fillUnrelatedHistory(h);
@@ -6708,53 +7324,51 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       },
     );
 
-    it.each([
-      "cost cap",
-      "spend carry",
-      "expired lease",
-      "moved head",
-      "foreign ref",
-      "lost ownership",
-      "missing review",
-    ])("complete saturated history still refuses at the existing %s gate", async (scenario) => {
-      const h = await legacyHarness();
-      await fillUnrelatedHistory(h);
-      let error = "recovery_budget_unknown";
-      if (scenario === "cost cap" || scenario === "spend carry") {
-        await h.instances.replace({
-          ...recoveryInstance(),
-          grant: { renewals: 0, costCapUsd: scenario === "cost cap" ? 0.5 : 5 },
+    it.each(["cost cap", "expired lease", "moved head", "foreign ref", "lost ownership", "missing review"])(
+      "complete saturated history still refuses at the %s gate",
+      async (scenario) => {
+        const h = await legacyHarness();
+        await fillUnrelatedHistory(h);
+        let error = "recovery_budget_unknown";
+        if (scenario === "cost cap") {
+          await h.instances.replace({
+            ...recoveryInstance(),
+            grant: { renewals: 0, costCapUsd: 0.5 },
+          });
+          await h.instances.putUnits([legacyRow()]);
+          error = "recovery_cost_cap_exhausted";
+        }
+        if (scenario === "expired lease") {
+          h.deps.clock = () => NOW + minutesToMs(121);
+          error = "recovery_wall_clock_exhausted";
+        }
+        if (scenario === "moved head") {
+          h.deps.fetchPrFacts = async () => exactRecoveryFacts("b".repeat(40));
+          error = "recovery_head_moved";
+        }
+        if (scenario === "foreign ref") {
+          h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(HEAD), headRef: "other" });
+          error = "recovery_facts_mismatch";
+        }
+        if (scenario === "lost ownership") {
+          h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+          error = "publication_ownership_changed";
+        }
+        if (scenario === "missing review") {
+          await h.store.put(reviewRecord({ reviewPost: undefined }));
+          error = "recovery_budget_unknown";
+        }
+        const before = await h.instances.listUnits(INSTANCE.id);
+        const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+        expect(await callRecovery(h)).toMatchObject({
+          status: 409,
+          body: { error, ...(scenario === "missing review" ? { reason: "child_round_mismatch" } : {}) },
         });
-        await h.instances.putUnits([legacyRow()]);
-        error = scenario === "cost cap" ? "recovery_cost_cap_exhausted" : "recovery_budget_unknown";
-      }
-      if (scenario === "expired lease") {
-        h.deps.clock = () => NOW + minutesToMs(121);
-        error = "recovery_wall_clock_exhausted";
-      }
-      if (scenario === "moved head") {
-        h.deps.fetchPrFacts = async () => exactRecoveryFacts("b".repeat(40));
-        error = "recovery_head_moved";
-      }
-      if (scenario === "foreign ref") {
-        h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(HEAD), headRef: "other" });
-        error = "recovery_facts_mismatch";
-      }
-      if (scenario === "lost ownership") {
-        h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
-        error = "publication_ownership_changed";
-      }
-      if (scenario === "missing review") {
-        await h.store.put(reviewRecord({ reviewPost: undefined }));
-        error = "recovery_review_evidence_ambiguous";
-      }
-      const before = await h.instances.listUnits(INSTANCE.id);
-      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
-      expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error } });
-      expect(cas).not.toHaveBeenCalled();
-      expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
-      expect(h.recoveries).toEqual([]);
-    });
+        expect(cas).not.toHaveBeenCalled();
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+        expect(h.recoveries).toEqual([]);
+      },
+    );
 
     it("reads uncached foreign live evidence beyond a full unrelated live and persisted page", async () => {
       const h = await legacyHarness();
@@ -6871,12 +7485,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       [
         "future review",
         { startedAt: NOW - minutesToMs(20), finishedAt: NOW - minutesToMs(15) },
-        "child_round_mismatch",
+        "child_history_missing",
       ],
       [
         "duplicate review",
         { id: "run-extra-review", startedAt: NOW - minutesToMs(25), finishedAt: NOW - minutesToMs(20) },
-        "child_round_mismatch",
+        "child_history_ambiguous",
       ],
       [
         "unproved resume",
@@ -7052,16 +7666,19 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       expect(h.recoveries).toEqual([]);
     });
 
-    it("names the missing spend carry even when every retained child has a historical price", async () => {
+    it("refuses a claimed cost-capped recovery when its original grant changes", async () => {
       const h = await legacyHarness();
       await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
       await h.instances.putUnits([legacyRow()]);
+      expect((await callRecovery(h)).status).toBe(200);
+      const claimed = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 6 } });
+      await h.instances.putUnits([claimed]);
       expect(await callRecovery(h)).toMatchObject({
         status: 409,
-        body: { error: "recovery_budget_unknown", reason: "cost_cap_carry_unavailable" },
+        body: { error: "recovery_budget_unknown", reason: "grant_carry_mismatch" },
       });
-      expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(legacyRow());
-      expect(h.recoveries).toEqual([]);
+      expect(h.recoveries).toHaveLength(1);
     });
 
     it("refuses a proven spent cost cap without resetting the cumulative total", async () => {
@@ -8336,7 +8953,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       const admission = await callRecovery(h);
       if (!scenario.startsWith("authorized")) {
         const historyReasons: Record<string, string> = {
+          "foreign ref": "child_identity_mismatch",
           "foreign requester": "child_identity_mismatch",
+          "foreign PR": "child_identity_mismatch",
           "foreign earlier requester": "child_identity_mismatch",
           "ambiguous push": "child_history_overlapping",
           "duplicate checked attempt": "child_history_overlapping",
@@ -8346,7 +8965,24 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           "missing earlier finish": "child_time_invalid",
           "active attempt": "child_active",
         };
-        const reason = historyReasons[scenario!];
+        const historyMissing = new Set([
+          "stale attempt",
+          "invalid check suffix",
+          "malformed check action",
+          "trailing check path",
+          "nested malformed check action",
+          "malformed initial check action",
+          "foreign malformed check action",
+          "wrong check unit",
+          "wrong check round",
+          "unmatched attempt",
+          "earlier completed push to another head",
+          "earlier failed push to another head",
+          "earlier interrupted push to another head",
+          "earlier completed without push",
+        ]);
+        const reason =
+          historyReasons[scenario!] ?? (historyMissing.has(scenario!) ? "child_history_missing" : undefined);
         expect(admission).toMatchObject({
           status: 409,
           body: reason === undefined ? { error: "recovery_head_moved" } : { error: "recovery_budget_unknown", reason },
@@ -8772,15 +9408,18 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.recoveries).toEqual([]);
   });
 
-  it("refuses a cost-capped terminal row because cumulative spend is not durable enough to preserve the cap", async () => {
-    const h = harness();
+  it("refuses a cost-capped terminal row whose historical review price is missing", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put({ ...recoveryInstance(), grant: { renewals: 2, costCapUsd: 50 } });
     await h.instances.putUnits([requestChangesRow()]);
-    await h.store.put(reviewRecord());
+    await h.store.put(reviewRecord({ usage: undefined }));
 
     const response = await callRecovery(h);
 
-    expect(response).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown" } });
+    expect(response).toMatchObject({
+      status: 409,
+      body: { error: "recovery_budget_unknown", reason: "child_price_unknown" },
+    });
     expect(h.recoveries).toEqual([]);
   });
 
@@ -8804,6 +9443,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         rounds: [
           { index: 1, agent: "review", outcome: "started", at: NOW - minutesToMs(55) },
           { index: 1, agent: "review", outcome: "request_changes", at: NOW - minutesToMs(50) },
+          { index: 1, agent: "coding", outcome: "started", at: NOW - minutesToMs(47) },
+          { index: 1, agent: "coding", outcome: "pr_opened", at: NOW - minutesToMs(43) },
           ...requestChangesRow().rounds.map((entry) => ({ ...entry, index: 2 })),
         ],
       },
@@ -8811,6 +9452,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord({ idempotencyKey: `${INSTANCE.id}:U12/2/review` }));
     await h.store.put(
       reviewRecord({ id: "run-old-review", startedAt: NOW - minutesToMs(55), finishedAt: NOW - minutesToMs(50) }),
+    );
+    await h.store.put(
+      completedOriginalFindings(HEAD, {
+        startedAt: NOW - minutesToMs(48),
+        finishedAt: NOW - minutesToMs(44),
+      }),
     );
 
     const response = await callRecovery(h);
@@ -9256,7 +9903,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         htmlUrl: PR.url,
       },
     });
-    await h.instances.put(recoveryInstance());
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
@@ -9280,6 +9927,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(settled!.recoveryReceipt).toMatchObject({
       reviewRunId: "run-original-review",
       workflowId: "recovery-run-original-review",
+      accounting: { spendUsd: 0.25, grant: { renewals: 0, costCapUsd: 5 } },
     });
     expect(settled!.ending?.kind).toBe("merge_ready");
     expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();

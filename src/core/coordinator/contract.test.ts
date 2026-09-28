@@ -338,6 +338,37 @@ describe("isCoordinatorUnit — one unit's row", () => {
     const claimed = { ...unit, ending: undefined, recovery };
     expect(isCoordinatorUnit(claimed)).toBe(true);
     expect(isCoordinatorUnit(JSON.parse(JSON.stringify(claimed)))).toBe(true);
+    const accounting = {
+      spendUsd: 15,
+      children: [{ runId: "run-c0", key: "plan-old:U12/0/coding", usd: 15 }],
+      grant: { renewals: 2, costCapUsd: 50 },
+      renewalsSpent: 0,
+    };
+    expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, accounting } })).toBe(true);
+    expect(
+      isCoordinatorUnit({ ...claimed, recovery: { ...recovery, accounting: { ...accounting, spendUsd: 0 } } }),
+    ).toBe(false);
+    expect(
+      isCoordinatorUnit({
+        ...claimed,
+        recovery: {
+          ...recovery,
+          accounting: { ...accounting, children: [...accounting.children, ...accounting.children], spendUsd: 30 },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isCoordinatorUnit({
+        ...claimed,
+        recovery: { ...recovery, accounting: { ...accounting, grant: { renewals: 0, costCapUsd: 10 } } },
+      }),
+    ).toBe(false);
+    expect(
+      isCoordinatorUnit({
+        ...unit,
+        recoveryReceipt: { reviewRunId: "run-r1", workflowId: "recovery-run-r1", at: 4_000, accounting },
+      }),
+    ).toBe(true);
     expect(isCoordinatorUnit({ ...claimed, ending: unit.ending })).toBe(false);
     expect(isCoordinatorUnit({ ...claimed, idle: { why: "aborted", at: 3_000, renewalsLeft: 0, wakes: 0 } })).toBe(
       false,
