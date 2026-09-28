@@ -1,25 +1,8 @@
-/** The per-thread sandbox's git credential, kept fresh by the EXECUTOR for the
- *  run's whole life — the sandbox half of the one credential refresher the
- *  execution layer owns (the resident half is the Worker's per-exec refresh,
- *  driven by the same pure decision in ./residentCredentials.ts).
- *
- *  Background: the sandbox's `GH_TOKEN` is a 1-hour GitHub App installation
- *  token, resolved per exec — but the harness process (pi) is started once and
- *  its bash children inherit the environment of that one start exec, so the
- *  token the run's own `git push` authenticated with was the one minted at
- *  attach and nothing ever refreshed it. A push past ~60 minutes answered
- *  `remote: Invalid username or token`, and nothing in the container could
- *  recover. The fix deletes that write-at-attach path as git's credential
- *  source: the executor lands the credential in a store FILE before the first
- *  exec and re-lands it whenever the token nears expiry (the executor's own
- *  execs — the harness polls the container through it every second — are the
- *  refresh cadence), and the write resets the global helper list so the
- *  inherited env token stops being what git asks for.
- *
- *  The decision is the resident's own (`shouldRefreshThreadCredentials`):
- *  refresh when nothing was written yet or the written token is within
- *  `CREDENTIAL_EXPIRY_MARGIN_MS` of its expiry, so an exec never starts on a
- *  token that cannot outlive it. */
+/** Optional legacy sandbox credential refresher. Production executor
+ *  construction leaves this source unwired: model commands receive only a
+ *  revocable Git-door run bearer, never an App installation token or a store
+ *  file. Direct executor callers and focused tests retain this behavior for
+ *  old sandboxes; the Git-door path scrubs the old file before model work. */
 
 import { shouldRefreshThreadCredentials } from "./residentCredentials.js";
 

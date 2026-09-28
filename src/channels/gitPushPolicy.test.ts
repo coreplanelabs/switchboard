@@ -74,6 +74,35 @@ describe("receive-pack command boundary", () => {
     ).toMatchObject({ ok: false });
   });
 
+  it("refuses an existing PR update unless its Git command names the exact authorized old head", () => {
+    const policy = {
+      identity: "write" as const,
+      repo: "acme/api",
+      boundRepo: "acme/api",
+      defaultBranch: "main",
+      boundRef: "fix-2250",
+      expectedHeadSha: old,
+    };
+    expect(authorizePushRefs(inspectReceivePackPrefix(push(`${old} ${next} refs/heads/fix-2250`)), policy)).toEqual({
+      ok: true,
+    });
+    expect(
+      authorizePushRefs(inspectReceivePackPrefix(push(`${"3".repeat(40)} ${next} refs/heads/fix-2250`)), policy),
+    ).toMatchObject({ ok: false });
+    expect(
+      authorizePushRefs(
+        inspectReceivePackPrefix(push(`${old} ${next} refs/heads/fix-2250`, `${old} ${next} refs/heads/fix-2250`)),
+        policy,
+      ),
+    ).toMatchObject({ ok: false });
+    expect(
+      authorizePushRefs(inspectReceivePackPrefix(push(`${old} ${next} refs/heads/fix-2250`)), {
+        ...policy,
+        expectedHeadSha: "invalid",
+      }),
+    ).toMatchObject({ ok: false });
+  });
+
   it("allows a new non-default branch when a write run has no pinned ref", () => {
     const parsed = inspectReceivePackPrefix(push(`${zero} ${next} refs/heads/new-work`));
     expect(

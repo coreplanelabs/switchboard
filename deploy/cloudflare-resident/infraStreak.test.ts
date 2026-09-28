@@ -38,7 +38,7 @@ describe("refreshFailed climbs the ladder for resident steps and parks for repo 
     expect(branch).toMatch(/setResidentState\("degraded", failure\.reason\)/);
   });
 
-  it("a resident step's failure is counted and the rung decides: count → degraded; recreate → recreateContainer with the infra-streak reason; down → destroy, forget the runtime identity, clear the row, goDown", () => {
+  it("a resident step's failure is counted and the rung decides: count → degraded; recreate → recreateContainer with the infra-streak reason; down → fenced destroy, clear the row, goDown", () => {
     const b = body();
     expect(b).toMatch(/const row = await this\.noteInfraStreak\(failure\.step\)/);
     expect(b).toMatch(/switch \(infraStreakRung\(row\.count\)\)/);
@@ -46,8 +46,7 @@ describe("refreshFailed climbs the ladder for resident steps and parks for repo 
     expect(recreate).toMatch(/await this\.recreateContainer\(infraStreakReason\(row, "recreate"\)\)/);
     const down = b.slice(b.indexOf('case "down"'));
     expect(down).toMatch(/infraStreakReason\(row, "down"\)/);
-    expect(down).toMatch(/await this\.forgetRuntimeIdentity\(\)/);
-    expect(down).toMatch(/await this\.destroy\(\)/);
+    expect(down).toMatch(/await this\.destroyConfirmed\(\)/);
     expect(down).toMatch(/storage\.delete\(INFRA_STREAK_KEY\)/);
     expect(down).toMatch(/await this\.goDown\(reason\)/);
   });

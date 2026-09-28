@@ -5,6 +5,7 @@ import { systemClock } from "../core/trace/clock.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
 import type { Span } from "../core/trace/types.js";
 import { processSecrets, type Secret } from "../secrets.js";
+import { DOOR_PUSH_PERMISSIONS, verifyGithubMintScope } from "./githubMintScope.js";
 
 // GitHub App authentication: the idiomatic org-owned bot identity.
 // No machine user, no seat, no long-lived PAT. The bot holds the app's
@@ -15,7 +16,7 @@ import { processSecrets, type Secret } from "../secrets.js";
 //
 // Door tokens never enter resident, cold, E2B or local model commands. The
 // older generic resolver below remains for trusted bot operations; the door
-// uses its own repository-keyed cache and permission-restricted read mint.
+// uses its own repository-keyed cache and operation-scoped read/write mints.
 //
 // Secrets (all three required to activate; otherwise GH_TOKEN is used as-is),
 // each read through src/secrets.ts and revealed only into the JWT, the mint URL
@@ -116,18 +117,15 @@ export async function resolveGithubToken(scope: GithubTokenScope = "write", span
 /** A GitHub credential for the trusted Git/API door. The caller must never
  * put this result in a model command's environment, file, helper, or output. */
 export async function resolveGithubDoorToken(scope: GithubTokenScope, repo?: string): Promise<string> {
-  if (scope === "write" && !repo) throw new Error("GitHub door write token requires a repository");
-  if (repo && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))
-    throw new Error("GitHub door repository must be owner/name");
+  if (!repo) throw new Error("GitHub door token requires a repository");
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("GitHub door repository must be owner/name");
   const app = appCredentials();
   if (!app) throw new Error("GitHub door requires the GitHub App; an opaque GH_TOKEN cannot enforce read scope");
-  const key = `${scope}:${repo ?? "*"}`;
+  const key = `${scope}:${repo}`;
   const cached = doorCache.get(key);
   if (cached && systemClock() < cached.expiresAtMs - TOKEN_REUSE_MARGIN_MS) return cached.token;
-  const payload = {
-    ...(repo ? { repositories: [repo.slice(repo.lastIndexOf("/") + 1)] } : {}),
-    ...(scope === "read" ? { permissions: READ_ONLY_PERMISSIONS } : {}),
-  };
+  const permissions = scope === "read" ? READ_ONLY_PERMISSIONS : DOOR_PUSH_PERMISSIONS;
+  const payload = { repositories: [repo.slice(repo.lastIndexOf("/") + 1)], permissions };
   const res = await fetch(`https://api.github.com/app/installations/${app.installationId.reveal()}/access_tokens`, {
     method: "POST",
     headers: {
@@ -143,6 +141,7 @@ export async function resolveGithubDoorToken(scope: GithubTokenScope, repo?: str
     throw new Error(`GitHub door token mint failed: HTTP ${res.status} ${redactAndCap(body, 300)}`);
   }
   const data = (await res.json()) as { token: string; expires_at: string };
+  verifyGithubMintScope(data, repo, permissions);
   doorCache.set(key, { token: data.token, expiresAtMs: Date.parse(data.expires_at) });
   return data.token;
 }

@@ -33,10 +33,25 @@ async function freshModule() {
 function mockMint(token: string, expiresInMs: number) {
   return vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     void url;
-    void init;
-    return new Response(JSON.stringify({ token, expires_at: new Date(Date.now() + expiresInMs).toISOString() }), {
-      status: 201,
-    });
+    const requested = init?.body
+      ? (JSON.parse(String(init.body)) as { repositories?: string[]; permissions?: object })
+      : {};
+    return new Response(
+      JSON.stringify({
+        token,
+        expires_at: new Date(Date.now() + expiresInMs).toISOString(),
+        ...(requested.permissions ? { permissions: requested.permissions } : {}),
+        ...(requested.repositories
+          ? {
+              repository_selection: "selected",
+              repositories: requested.repositories.map((name) => ({ full_name: `acme/${name}` })),
+            }
+          : {}),
+      }),
+      {
+        status: 201,
+      },
+    );
   });
 }
 
@@ -56,7 +71,7 @@ afterEach(() => {
 });
 
 describe("resolveGithubToken", () => {
-  it("mints door write tokens for one repository and keeps read/write caches separate", async () => {
+  it("mints door write tokens for one repository with only Git push permissions and keeps scope caches separate", async () => {
     configureApp();
     const fetchMock = mockMint("ghs_door", 60 * 60_000);
     vi.stubGlobal("fetch", fetchMock);
@@ -65,13 +80,99 @@ describe("resolveGithubToken", () => {
     expect(await mod.resolveGithubDoorToken("write", "acme/api")).toBe("ghs_door");
     expect(await mod.resolveGithubDoorToken("write", "acme/api")).toBe("ghs_door");
     expect(await mod.resolveGithubDoorToken("read", "acme/api")).toBe("ghs_door");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(await mod.resolveGithubDoorToken("write", "acme/other")).toBe("ghs_door");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     const writes = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>);
-    expect(writes[0]).toEqual({ repositories: ["api"] });
-    expect(writes[1]).toMatchObject({
+    expect(writes[0]).toEqual({
       repositories: ["api"],
-      permissions: expect.objectContaining({ contents: "read" }),
+      permissions: { contents: "write", workflows: "write", metadata: "read" },
     });
+    expect(writes[1]).toEqual({
+      repositories: ["api"],
+      permissions: {
+        contents: "read",
+        pull_requests: "read",
+        issues: "read",
+        actions: "read",
+        checks: "read",
+        metadata: "read",
+      },
+    });
+    expect(writes[2]).toEqual({ ...writes[0], repositories: ["other"] });
+  });
+
+  it("refuses a door mint whose returned scope exceeds the requested repository or permissions, without caching it", async () => {
+    configureApp();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            token: "ghs_unguarded",
+            expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+            permissions: { contents: "write", workflows: "write", issues: "write", metadata: "read" },
+            repository_selection: "selected",
+            repositories: [{ full_name: "acme/api" }],
+          }),
+          { status: 201 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            token: "ghs_foreign",
+            expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+            permissions: { contents: "write", workflows: "write", metadata: "read" },
+            repository_selection: "selected",
+            repositories: [{ full_name: "acme/foreign" }],
+          }),
+          { status: 201 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshModule();
+    await expect(mod.resolveGithubDoorToken("write", "acme/api")).rejects.toThrow(/scope/);
+    await expect(mod.resolveGithubDoorToken("write", "acme/api")).rejects.toThrow(/scope/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts a door mint response that omits implicit Metadata", async () => {
+    configureApp();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          token: "ghs_scoped",
+          expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+          permissions: { contents: "write", workflows: "write" },
+          repository_selection: "selected",
+          repositories: [{ full_name: "acme/api" }],
+        }),
+        { status: 201 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshModule();
+    await expect(mod.resolveGithubDoorToken("write", "acme/api")).resolves.toBe("ghs_scoped");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a door mint whose repository selection remains all", async () => {
+    configureApp();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          token: "ghs_all_repos",
+          expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+          permissions: { contents: "write", workflows: "write", metadata: "read" },
+          repository_selection: "all",
+          repositories: [{ full_name: "acme/api" }],
+        }),
+        { status: 201 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshModule();
+    await expect(mod.resolveGithubDoorToken("write", "acme/api")).rejects.toThrow(/scope/);
   });
 
   it("falls back to static GH_TOKEN when the App is not configured", async () => {

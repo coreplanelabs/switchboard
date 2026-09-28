@@ -199,6 +199,9 @@ export interface RunView {
    *  decision 0046) — what a renewal reads progress off; from the store as
    *  the artifacts above. */
   pushed?: RunRecord["pushed"];
+  /** A Git write may have reached GitHub without a committed outcome. A
+   * coordinator must reconcile it before advancing the original unit. */
+  doorPublicationPending?: RunRecord["doorPublicationPending"];
   lease?: RunRecord["lease"];
   /** What the run cost in tokens, per model (`RunRecord.usage`, run-history
    *  item 56), and what that is in dollars through the price table
@@ -412,7 +415,7 @@ export interface RunsService {
    *  registry's rows. Empty without a ledger; a ledger that cannot be read is a
    *  warning and empty. */
   liveElsewhere(visibleTo: Predicate): Promise<RunView[]>;
-  getRun(id: string, opts?: { include?: "messages" }): Promise<Result<RunRecordView>>;
+  getRun(id: string, opts?: { include?: "messages"; requireFinalRecord?: boolean }): Promise<Result<RunRecordView>>;
   getRunEvents(id: string, opts: { afterSeq?: number; limit?: number }): Promise<Result<RunEventsPageView>>;
   getRunFriction(id: string): Promise<Result<RunFrictionView>>;
   stopRun(id: string, mode: StopMode, actor: RunActor): Promise<Result<StopRunView>>;
@@ -843,6 +846,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       | "dispositions"
       | "handoff"
       | "pr"
+      | "doorPublicationPending"
       | "restarting"
       | "restartUntil"
       | "usage"
@@ -867,6 +871,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       ...(row.dispositions !== undefined ? { dispositions: row.dispositions } : {}),
       ...(row.handoff !== undefined ? { handoff: row.handoff } : {}),
       ...(row.pr !== undefined ? { pr: row.pr } : {}),
+      ...(row.doorPublicationPending !== undefined ? { doorPublicationPending: row.doorPublicationPending } : {}),
       ...(row.restarting !== undefined ? { restarting: row.restarting } : {}),
       ...(row.restartUntil !== undefined ? { restartUntil: row.restartUntil } : {}),
       ...(row.pushed !== undefined ? { pushed: row.pushed } : {}),
@@ -1146,6 +1151,17 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     },
 
     async getRun(id, opts = {}) {
+      // The coordinator must not settle a child from a registry finish alone:
+      // its final record is written only after the reply is sealed. A pending
+      // Git write may be absent from that temporary registry projection.
+      if (opts.requireFinalRecord) {
+        const record = await storeGet(id);
+        if (!record || record.provisional === true) return notFound;
+        const { events, ...rest } = record;
+        const view: RunRecordView = persistedView(rest, prices);
+        if (opts.include === "messages") view.events = events;
+        return { ok: true, value: view };
+      }
       const summary = registry.getById(id);
       const snap = summary ? registry.snapshotById(id) : null;
       if (summary && snap) {

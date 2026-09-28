@@ -189,7 +189,7 @@ describe("every eviction records what the tree held", () => {
   });
 
   it("evictBinding takes the measurement and stamps the counts, or the probe's failure, beside evictedWhy — both absent for a clean tree", () => {
-    expect(evict).toMatch(/tree\?: EvictedTree,\s*\): Promise<boolean> \{/);
+    expect(evict).toMatch(/tree\?: EvictedTree,\s*\): Promise<"evicted" \| "changed" \| "cleanup-failed"> \{/);
     expect(evict).toMatch(
       /evictedWhy: why,\s*evictedLeftBehind: tree && "leftBehind" in tree \? tree\.leftBehind : undefined,\s*evictedUnmeasured: tree && "unmeasured" in tree \? tree\.unmeasured : undefined,\s*\} satisfies ThreadBinding\);/,
     );
@@ -211,7 +211,7 @@ describe("every eviction records what the tree held", () => {
 
   it("the sweep measures too, with the runtime up — for the record only, never a keep", () => {
     const sweep = method("sweepWorktrees");
-    const activeNow = sweep.indexOf("const activeNow = await this.isRuntimeActive().catch(() => false);");
+    const activeNow = sweep.indexOf("const activeNow = await this.isRuntimeActive().catch(() => true);");
     const measure = sweep.indexOf(
       "const tree = activeNow ? await this.measureTreeBeforeEviction(current) : undefined;",
     );

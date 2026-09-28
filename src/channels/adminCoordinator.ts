@@ -1593,8 +1593,17 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   // Finished: the final reply and the typed artifacts the record carries — the
   // coding child's pull request, the review child's verdict and whether it
   // stands on the pull request, the coding run's dispositions.
-  const full = await deps.runs.getRun(body.runId, { include: "messages" });
-  const record = full.ok ? full.value : view;
+  const full = await deps.runs
+    .getRun(body.runId, { include: "messages", requireFinalRecord: true })
+    .catch(() => undefined);
+  if (full === undefined) return json(503, { ok: false, error: "record_unavailable", at });
+  if (!full.ok) return json(409, { ok: false, error: "record_pending", at });
+  const record = full.value;
+  // A Git report may have been accepted upstream after our receive-pack
+  // request became uncertain. Neither an absent pushed[] receipt nor the
+  // child's completed status proves the original PR head stayed put.
+  if (record.doorPublicationPending !== undefined)
+    return json(409, { ok: false, error: "door_publication_unresolved", at });
   const finalReply = finalReplyOf(record.events);
   const reviewAskedAt = reviewAskedAtOf(record.events);
   const description = record.events?.some((event) => event.type === "pr_description") === true;
@@ -3090,6 +3099,19 @@ export async function recoverOriginalUnit(
         return unknownBudget("child_history_ambiguous");
       histories.set(run.id, run);
     }
+    // Do not renew a terminal unit over an earlier uncertain Git-door write.
+    // This is a durable run-record fact, independent of the current PR head.
+    if (
+      [...histories.values()].some(
+        (run) =>
+          run.finished &&
+          run.parentInstanceId === instance.id &&
+          run.agent === "coding" &&
+          run.doorPublicationPending?.owner?.instanceId === instance.id &&
+          run.doorPublicationPending.owner?.unit === row.unit,
+      )
+    )
+      return json(409, { ok: false, error: "door_publication_unresolved", at });
     if (grant.costCapUsd !== undefined && histories.size === 0) return unknownBudget("cost_cap_spend_unknown");
     const spend = historicalRecoverySpend(instance, row, [...histories.values()]);
     if ("reason" in spend) return unknownBudget(spend.reason);

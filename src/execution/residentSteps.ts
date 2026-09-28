@@ -29,6 +29,7 @@ export const RESIDENT_STEP_LABELS = {
   git: "a git command",
   "git-setup": "configuring git",
   "stage-perms": "securing the credential stage",
+  "stage-write-cleanup": "removing a failed staged write",
   install: "installing dependencies",
   build: "building",
   test: "running the tests",

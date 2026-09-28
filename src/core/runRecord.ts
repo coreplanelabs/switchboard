@@ -279,6 +279,17 @@ export interface RunRecord {
    *  last `pushed_head` event's sha winning — the fact a renewal reads to know
    *  the run made progress. Present only on a run that pushed. */
   pushed?: PushedHead[];
+  /** A Git-door write whose remote outcome was still uncertain at seal. The
+   * live ledger row is deleted at finish, so recovery retains this exact
+   * ref transition until head reconciliation. A PR number exists only for a
+   * verified existing-PR publication. */
+  doorPublicationPending?: {
+    id: string;
+    repo: string;
+    pr?: number;
+    owner?: { instanceId: string; unit: string };
+    update: { ref: string; old: string; next: string };
+  };
   /** What the run cost in tokens, per model, summed from its `model.turn`
    *  spans at finish (`usageOfEvents`; docs/reference/specs/costs.md, cost by user).
    *  Every record written since carries it (zero turns included); one written
@@ -1124,6 +1135,27 @@ export function isRunRecord(v: unknown): v is RunRecord {
     )
   )
     return false;
+  if (r.doorPublicationPending !== undefined) {
+    const pending = r.doorPublicationPending;
+    if (typeof pending !== "object" || pending === null) return false;
+    const { id, repo, pr, owner, update } = pending as Record<string, unknown>;
+    if (
+      typeof id !== "string" ||
+      !id ||
+      typeof repo !== "string" ||
+      !repo ||
+      (pr !== undefined && (!Number.isInteger(pr) || (pr as number) < 1))
+    )
+      return false;
+    if (owner !== undefined && (typeof owner !== "object" || owner === null)) return false;
+    if (typeof update !== "object" || update === null) return false;
+    const o = owner as Record<string, unknown> | undefined;
+    const u = update as Record<string, unknown>;
+    if (o !== undefined && (typeof o.instanceId !== "string" || typeof o.unit !== "string")) return false;
+    if (typeof u.ref !== "string" || !u.ref.startsWith("refs/heads/")) return false;
+    if (typeof u.old !== "string" || !/^[0-9a-f]{40}$/.test(u.old)) return false;
+    if (typeof u.next !== "string" || !/^[0-9a-f]{40}$/.test(u.next)) return false;
+  }
   // A parent is named by a run id (item 46): the same shape as the record's own.
   if (r.parentRunId !== undefined && (typeof r.parentRunId !== "string" || !RUN_ID_PATTERN.test(r.parentRunId)))
     return false;

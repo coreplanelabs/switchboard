@@ -975,6 +975,71 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 });
 
 describe("POST /admin/coordinator/read-record — a run of the instance, and no other (item 9)", () => {
+  it("waits for the durable final record when the registry finished before its reply was sealed", async () => {
+    const h = harness();
+    const child = h.registry.create("coding · child", {
+      agent: "coding",
+      channelId: INSTANCE.channelId,
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      ...TAG,
+    });
+    h.registry.finish(child.id, "completed");
+    const read = () =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+          parentInstanceId: INSTANCE.id,
+          runId: child.id,
+          unit: "U12",
+        }),
+        h.deps,
+      );
+
+    expect(await read()).toMatchObject({ status: 409, body: { error: "record_pending" } });
+    vi.spyOn(h.store, "get").mockRejectedValueOnce(new Error("history store unavailable"));
+    expect(await read()).toMatchObject({ status: 503, body: { error: "record_unavailable" } });
+    await h.store.put(
+      record(child.id, {
+        ...TAG,
+        doorPublicationPending: {
+          id: "intent-1",
+          repo: INSTANCE.repo,
+          pr: 77,
+          owner: { instanceId: INSTANCE.id, unit: "U12" },
+          update: { ref: `refs/heads/${INSTANCE.branch}`, old: "7".repeat(40), next: "8".repeat(40) },
+        },
+      }),
+    );
+    expect(await read()).toMatchObject({ status: 409, body: { error: "door_publication_unresolved" } });
+  });
+
+  it("refuses to settle a finished child while its Git-door write still has an unknown outcome", async () => {
+    const h = harness();
+    await h.store.put(
+      record("run-pending-door", {
+        ...TAG,
+        doorPublicationPending: {
+          id: "intent-1",
+          repo: INSTANCE.repo,
+          pr: 77,
+          owner: { instanceId: INSTANCE.id, unit: "U12" },
+          update: { ref: `refs/heads/${INSTANCE.branch}`, old: "7".repeat(40), next: "8".repeat(40) },
+        },
+      }),
+    );
+
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+          parentInstanceId: INSTANCE.id,
+          runId: "run-pending-door",
+          unit: "U12",
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "door_publication_unresolved" } });
+  });
+
   it("answers a live child's status and a finished child's status and final reply; a run of another instance, a run of none, and an unknown id are not_found alike", async () => {
     const h = harness();
     const live = h.registry.create("coding · child", {
@@ -7779,6 +7844,41 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(40), finishedAt: NOW - minutesToMs(30) }));
     return h;
   };
+
+  it("refuses an original-unit recovery while a same-unit Git-door outcome remains unknown", async () => {
+    const h = await legacyHarness();
+    await h.store.put(
+      originalCoding({
+        doorPublicationPending: {
+          id: "intent-1",
+          repo: INSTANCE.repo,
+          pr: PR.number,
+          owner,
+          update: { ref: `refs/heads/${INSTANCE.branch}`, old: HEAD, next: "8".repeat(40) },
+        },
+      }),
+    );
+
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "door_publication_unresolved" } });
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it("refuses original-unit recovery for an unresolved branch write before a PR exists", async () => {
+    const h = await legacyHarness();
+    await h.store.put(
+      originalCoding({
+        doorPublicationPending: {
+          id: "branch-intent",
+          repo: INSTANCE.repo,
+          owner,
+          update: { ref: `refs/heads/${INSTANCE.branch}`, old: "0".repeat(40), next: "8".repeat(40) },
+        },
+      }),
+    );
+
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "door_publication_unresolved" } });
+    expect(h.recoveries).toEqual([]);
+  });
 
   describe("historical admission", () => {
     const fillUnrelatedHistory = async (h: ReturnType<typeof harness>) => {

@@ -64,6 +64,16 @@ export const QUESTION_TTL_MS = DAY_MS;
  *  that FAILED is never cached — the next read asks again. */
 export const AUTHOR_BINDING_TTL_MS = 15 * MINUTE_MS;
 
+/** Maximum local lifetime of any Git receive-pack forward. The bounded
+ *  request prevents a write connection outliving its run indefinitely after
+ *  revocation. An aborted remote write has an unknown outcome; existing-PR
+ *  writes retain their owned pending intent for authoritative reconciliation. */
+export const GIT_RECEIVE_PACK_FORWARD_TIMEOUT_MS = 5 * MINUTE_MS;
+/** The run's final record waits for that one forwarded report, plus a small
+ *  durable-receipt margin, before sealing. If it still has no answer, the
+ *  pending intent stays as an uncertain write and no retry is authorized. */
+export const GIT_PUBLICATION_SETTLE_TIMEOUT_MS = GIT_RECEIVE_PACK_FORWARD_TIMEOUT_MS + 10 * SECOND_MS;
+
 /** How long a dispatch's FIRST attach to a resident — a fresh run's, or a
  *  resumed run's re-attach to its recorded worktree — waits for the resident
  *  to wake when the Worker typed its refusal as the platform's transient

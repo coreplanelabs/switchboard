@@ -10,6 +10,8 @@
 // settle's re-review, the review's verdict turn and the description turn
 // (harness-pi item 14) and is ended here after them. The stage's claim and
 // the tools' capabilities are run.ts.
+import { randomUUID } from "node:crypto";
+import { GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
@@ -64,6 +66,7 @@ import type { McpToolsForRun } from "../../mcp/source.js";
 import { currentPrHeadSha, prCommitsSince, recordPrOf, type RepoContext } from "../repoContext.js";
 import { verifyExistingPrPublication } from "../existingPrPublication.js";
 import { pairedPublicationPush, restoredPublicationHead, publicationReceiptsFromState } from "../publicationPush.js";
+import type { GitPublicationUpdate } from "../modelProxy/gitBindings.js";
 import { PrDescriptionSchema, redactPrDescription, type PrDescription } from "../prDescription.js";
 import { parseHandoff, type Handoff } from "../ship/handoff.js";
 import {
@@ -364,6 +367,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const blockExistingPrPublication = (reason: string): void => {
     existingPrPublication = { blocked: reason };
     if (existingPrPublicationFence !== undefined) existingPrPublicationFence.authority = existingPrPublication;
+    if (ctx.githubDoor) deps.githubBindings?.setPublication(run.id, existingPrPublication);
   };
   // The start state of the run's branch (record 0062; identityRewrite.ts):
   // fired HERE, at the attach, so the identity rewrite in the post-step
@@ -416,6 +420,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the checklist the card shows, the verdict/description already submitted,
   // the branch already pushed.
   const restored = resume?.row.state ?? {};
+  // An intent without a completed outcome is a possible remote write. A
+  // restart never guesses that it was harmless from an absent local event.
+  const unresolvedDoorPublication =
+    restored.doorPublicationPending !== undefined && restored.doorPublicationPending !== null;
+  const resumedDoorPublication = unresolvedDoorPublication
+    ? (restored.doorPublicationPending as { id: string; update: GitPublicationUpdate })
+    : undefined;
+  let activeDoorPublication: { id: string; update: GitPublicationUpdate } | undefined;
   // The bounded display backlog may trim a push during a long test run. Its
   // small typed receipts also ride the durable state, atomically with results.
   const restoredReceipts = publicationReceiptsFromState(restored.publicationReceipts);
@@ -424,6 +436,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     restoredPublicationHead(restoredReceipts, coordinator.publication) !== undefined
       ? restoredReceipts
       : [];
+  const branchReceipts: Array<Extract<RunEvent, { type: "pushed_head" }>> =
+    Array.isArray(restored.branchPushReceipts) &&
+    restored.branchPushReceipts.every(
+      (value: unknown) =>
+        typeof value === "object" &&
+        value !== null &&
+        (value as { type?: unknown }).type === "pushed_head" &&
+        (value as { by?: unknown }).by === "push" &&
+        typeof (value as { ref?: unknown }).ref === "string" &&
+        typeof (value as { sha?: unknown }).sha === "string" &&
+        /^[0-9a-f]{40}$/.test((value as { sha: string }).sha) &&
+        (value as { receipt?: unknown }).receipt === undefined,
+    )
+      ? (restored.branchPushReceipts as Array<Extract<RunEvent, { type: "pushed_head" }>>)
+      : [];
   const retainPublicationReceipts = () => {
     const history = registry.snapshot(run.id, run.token)?.events ?? [];
     const latest = publicationReceipts.at(-1);
@@ -431,6 +458,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // behind a newer mechanical salvage or identity-rewrite push.
     if (latest !== undefined && !history.some((e) => e.type === "pushed_head" && e.ref === latest.ref))
       registry.publish(run.id, latest);
+  };
+  const retainBranchReceipts = () => {
+    const history = registry.snapshot(run.id, run.token)?.events ?? [];
+    for (const receipt of branchReceipts) {
+      if (
+        !history.some((event) => event.type === "pushed_head" && event.ref === receipt.ref && event.sha === receipt.sha)
+      )
+        registry.publish(run.id, receipt);
+    }
   };
   let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
   // Typed (`StatusActivity`): a bash call rides as its full command, which
@@ -645,6 +681,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           publishEvent(receipt, false);
           existingPrPublication = { ref: receipt.ref, expectedHeadSha: receipt.sha };
           if (existingPrPublicationFence !== undefined) existingPrPublicationFence.authority = existingPrPublication;
+          if (ctx.githubDoor) deps.githubBindings?.setPublication(run.id, existingPrPublication);
         } else blockExistingPrPublication("the successful push receipt could not be committed durably");
       }
       if (
@@ -1290,11 +1327,141 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       );
       existingPrPublication = verified.ok ? verified.publication : { blocked: verified.reason };
       existingPrPublicationFence = { authority: existingPrPublication };
+      if (unresolvedDoorPublication)
+        blockExistingPrPublication("an earlier Git door publication outcome is unresolved");
+      if (ctx.githubDoor && deps.githubBindings && !deps.githubBindings.setPublication(run.id, existingPrPublication))
+        blockExistingPrPublication("the Git door could not bind existing PR publication authority");
+      if (
+        ctx.githubDoor &&
+        deps.githubBindings &&
+        !deps.githubBindings.setPublicationRecorder(run.id, {
+          begin: async (update) => {
+            let committed = false;
+            await events.write(async () => {
+              const authority = existingPrPublicationFence?.authority;
+              if (
+                !ledgerRun?.tracked() ||
+                unresolvedDoorPublication ||
+                activeDoorPublication ||
+                !authority ||
+                "blocked" in authority ||
+                update.ref !== `refs/heads/${authority.ref}` ||
+                update.old !== authority.expectedHeadSha
+              )
+                return;
+              const pending = { id: randomUUID(), update };
+              committed = await ledgerRun.setStateAndFlush({ doorPublicationPending: pending });
+              if (committed) activeDoorPublication = pending;
+              else blockExistingPrPublication("the Git door publication intent could not be committed durably");
+            });
+            return committed;
+          },
+          finish: async (update, outcome) => {
+            let committed = false;
+            await events.write(async () => {
+              const pending = activeDoorPublication;
+              if (
+                !ledgerRun?.tracked() ||
+                !pending ||
+                pending.update.ref !== update.ref ||
+                pending.update.old !== update.old ||
+                pending.update.next !== update.next
+              ) {
+                blockExistingPrPublication("the Git door publication intent was lost");
+                return;
+              }
+              if (outcome === "accepted") {
+                const receipt: Extract<RunEvent, { type: "pushed_head" }> = {
+                  type: "pushed_head",
+                  ref: original.publicationRef,
+                  sha: update.next,
+                  by: "push",
+                  receipt: {
+                    callId: `door:${pending.id}`,
+                    previousHeadSha: update.old,
+                    repo: original.repo,
+                    pr: original.pr,
+                    owner: { ...original.owner },
+                  },
+                };
+                committed = await ledgerRun.setStateAndFlush({
+                  doorPublicationPending: null,
+                  publicationReceipts: [...publicationReceipts, receipt],
+                });
+                if (committed) {
+                  activeDoorPublication = undefined;
+                  publicationReceipts.push(receipt);
+                  publishEvent(receipt, false);
+                  existingPrPublication = { ref: original.publicationRef, expectedHeadSha: update.next };
+                  if (existingPrPublicationFence) existingPrPublicationFence.authority = existingPrPublication;
+                }
+              } else {
+                committed = await ledgerRun.setStateAndFlush({ doorPublicationPending: null });
+                if (committed) activeDoorPublication = undefined;
+              }
+              if (!committed)
+                blockExistingPrPublication("the Git door publication outcome could not be committed durably");
+            });
+            return committed;
+          },
+        })
+      )
+        blockExistingPrPublication("the Git door has no durable publication recorder");
       if (!verified.ok)
         shell.note(
           "quiet",
           `Existing-PR publication is blocked: ${verified.reason}. Work stays on the bound checkout; no alternate branch or pull request will be published.`,
         );
+    }
+    if (ctx.githubDoor && deps.githubBindings && coordinator?.publication === undefined && repoCtx.pr === undefined) {
+      if (!unresolvedDoorPublication)
+        deps.githubBindings.setBranchRecorder(run.id, {
+          begin: async (update) => {
+            let committed = false;
+            await events.write(async () => {
+              if (!ledgerRun?.tracked() || activeDoorPublication) return;
+              const pending = { id: randomUUID(), update };
+              committed = await ledgerRun.setStateAndFlush({ doorPublicationPending: pending });
+              if (committed) activeDoorPublication = pending;
+            });
+            return committed;
+          },
+          finish: async (update, outcome) => {
+            let committed = false;
+            await events.write(async () => {
+              const pending = activeDoorPublication;
+              if (
+                !ledgerRun?.tracked() ||
+                !pending ||
+                pending.update.ref !== update.ref ||
+                pending.update.old !== update.old ||
+                pending.update.next !== update.next
+              )
+                return;
+              if (outcome === "accepted") {
+                const receipt: Extract<RunEvent, { type: "pushed_head" }> = {
+                  type: "pushed_head",
+                  ref: update.ref.slice("refs/heads/".length),
+                  sha: update.next,
+                  by: "push",
+                };
+                committed = await ledgerRun.setStateAndFlush({
+                  doorPublicationPending: null,
+                  branchPushReceipts: [...branchReceipts, receipt],
+                });
+                if (committed) {
+                  activeDoorPublication = undefined;
+                  branchReceipts.push(receipt);
+                  publishEvent(receipt, false);
+                }
+              } else {
+                committed = await ledgerRun.setStateAndFlush({ doorPublicationPending: null });
+                if (committed) activeDoorPublication = undefined;
+              }
+            });
+            return committed;
+          },
+        });
     }
     if (finish) {
       onEvent({
@@ -1879,6 +2046,44 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // ending left running is read off the record once it has — here, once,
     // whatever the post-step does next.
     await endHarness();
+    // The last model turn and its checkpoint are finished. Close the Git door
+    // before any PR lookup or edit: a delayed receive-pack request otherwise
+    // could begin after the post-step's one-time pending check. A forwarded
+    // request still gets its bounded chance to commit an accepted or uncertain
+    // outcome to this run before the PR observes the remote branch.
+    let doorPostStepBlocked = false;
+    if (ctx.githubDoor && deps.githubBindings) {
+      if (existingPrPublication !== undefined)
+        deps.githubBindings.setPublication(run.id, { blocked: "the model turn has ended" });
+      else deps.githubBindings.blockBranch(run.id, "the model turn has ended");
+      await deps.githubBindings.waitForPublication(run.id, GIT_PUBLICATION_SETTLE_TIMEOUT_MS);
+      await events.drain();
+      retainPublicationReceipts();
+      retainBranchReceipts();
+      if (isCodingPrRun && !tailSkipped() && activeDoorPublication === undefined) {
+        // A push can settle between the earlier workspace read and this fence;
+        // a snapshot of activeDoorPublication alone would miss it. Re-read
+        // after closing admission even when no claim is pending now.
+        await observeWorkspaceNow();
+        const accepted = existingPrPublication !== undefined ? publicationReceipts.at(-1) : branchReceipts.at(-1);
+        if (
+          accepted !== undefined &&
+          (observedBranch !== accepted.ref || observedHead !== accepted.sha || observedRemoteHead !== accepted.sha)
+        ) {
+          // The durable Git-door receipt says the upstream accepted a new
+          // tip, but this workspace/remote read did not establish it. Never
+          // let the PR post-step publish an older observed head over that
+          // receipt or open/edit a PR at a tip whose identity is uncertain.
+          doorPostStepBlocked = true;
+          events.publish({
+            type: "run_note",
+            kind: "publication_blocked",
+            summary: "the accepted Git write's head was not confirmed by the final workspace and remote read",
+            at: clock(),
+          });
+        }
+      }
+    }
     // Ordinarily, what the run leaves uncommitted or unpushed does not outlive
     // it: a run starts from a clean tree (resident-repos item 17), and release
     // discards a resident tree. The one bounded exception is a publication
@@ -1985,13 +2190,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // the dispatch's resolved ref — binding is only ever set on the resident
     // path (factory.ts), so no resident check is needed. The note rides on
     // the final reply below. A hard stop observed nothing above and posts
-    // nothing; a relaunch that ended the run likewise (`tailSkipped`). An
-    // existing-PR publication denial skips the whole post-step: no lookup,
-    // edit or open may reuse stale intent or create a replacement pull request.
+    // nothing; a relaunch that ended the run likewise (`tailSkipped`).
+    // An unresolved Git-door write skips the whole post-step: an accepted
+    // push may still arrive after the model answer, so no lookup, edit or open
+    // may publish from a branch whose remote outcome is still uncertain.
+    // An existing-PR publication denial also blocks the whole post-step.
     if (
       isCodingPrRun &&
       !tailSkipped() &&
       !endingSalvageAttempted &&
+      !doorPostStepBlocked &&
+      activeDoorPublication === undefined &&
+      !unresolvedDoorPublication &&
       !(existingPrPublication !== undefined && "blocked" in existingPrPublication)
     ) {
       // A child may run in its own unit thread: link the request that started
@@ -2202,8 +2412,24 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     };
   } finally {
     clearInterval(heartbeat);
+    if (ctx.githubDoor && deps.githubBindings) {
+      // Stop new admissions first. A previously forwarded request still owns
+      // one pending intent; its report must reach this run's durable record
+      // before registry.finish takes the final snapshot and the ledger seals.
+      if (existingPrPublication !== undefined) blockExistingPrPublication("the run is ending");
+      else deps.githubBindings.blockBranch(run.id, "the run is ending");
+      await deps.githubBindings.waitForPublication(run.id, GIT_PUBLICATION_SETTLE_TIMEOUT_MS);
+      if (activeDoorPublication || resumedDoorPublication)
+        events.publish({
+          type: "run_note",
+          kind: "publication_blocked",
+          summary: "a Git write remains uncertain; reconcile the recorded ref transition before retrying",
+          at: clock(),
+        });
+    }
     await events.drain();
     retainPublicationReceipts();
+    retainBranchReceipts();
     const status = statusNow();
     // The two final boundaries land before the registry closes. A tracked run
     // commits each boundary durably before fan-out; an untracked run keeps the
@@ -2298,6 +2524,24 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       root,
       ledgerRun,
       ...(observedHead !== undefined ? { headSha: observedHead } : {}),
+      ...((activeDoorPublication ?? resumedDoorPublication) !== undefined &&
+      (coordinator?.publication?.repo ?? repoCtx.repo ?? deps.githubBindings?.get(run.id)?.repo) !== undefined
+        ? {
+            doorPublicationPending: {
+              ...(activeDoorPublication ?? resumedDoorPublication)!,
+              repo: (coordinator?.publication?.repo ?? repoCtx.repo ?? deps.githubBindings?.get(run.id)?.repo)!,
+              ...(coordinator?.publication !== undefined ? { pr: coordinator.publication.pr } : {}),
+              ...(coordinator !== undefined && unitOfIdempotencyKey(coordinator.idempotencyKey) !== undefined
+                ? {
+                    owner: {
+                      instanceId: coordinator.parentInstanceId,
+                      unit: unitOfIdempotencyKey(coordinator.idempotencyKey)!,
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}),
       ...(handoff !== undefined ? { handoff } : {}),
       ...(verdict !== undefined ? { verdict } : {}),
       ...(reviewHead !== undefined ? { reviewHead } : {}),

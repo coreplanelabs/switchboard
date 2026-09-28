@@ -99,6 +99,7 @@ export type ReclaimWhy =
   | "busy"
   | "run-held"
   | "re-attached"
+  | "cleanup-failed"
   | Extract<RefFate, "gone" | "merged" | "closed">;
 
 /** Evict this binding now? A finished ref (gone/merged/closed) is reclaimed

@@ -4221,6 +4221,27 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     return deps;
   }
 
+  it("a direct coding run on an existing PR begins with Git writes blocked until trusted publication authority exists", async () => {
+    const deps = codingDeps(describeThenAnswer(undefined, "Checked the PR."));
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      pr: 7,
+      ref: "fix/pr",
+      refFromPr: true,
+      headSha: HEAD,
+      baseRef: "main",
+    });
+    deps.runRegistry = new RunRegistry({ genId: () => "run-direct-pr", genToken: () => "token-direct-pr" });
+    codingExecutor({ head: HEAD, branch: "fix/pr", bindingRef: "fix/pr" });
+    let publication: ReturnType<GitBindings["publicationOf"]>;
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => {
+      publication = deps.githubBindings?.publicationOf("run-direct-pr");
+      return piAnswered("Checked the PR.");
+    });
+    await dispatch(deps, msg("agent:coding inspect acme/api#7", "slack:UADMIN"), fakeIO().io);
+    expect(publication).toEqual({ blocked: "existing PR publication is not verified" });
+  });
+
   it("a directive coding ask for a decision record receives the runner's reservation in its brief and run metadata", async () => {
     const requests: CompletionRequest[] = [];
     const provider: Provider = {

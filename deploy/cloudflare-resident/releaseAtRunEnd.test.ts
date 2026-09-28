@@ -45,11 +45,12 @@ describe("detachThread releases the tree whatever it holds, and names what it di
   it("the measurement is a non-force release's alone — a read-only tree holds nothing, a hard stop's tree is whatever the killed command left — and runs only with the runtime up", () => {
     expect(detach).toMatch(/let tree: EvictedTree \| undefined;\s*if \(!force && active\) tree = await/);
     const measure = detach.indexOf("tree = await this.measureTreeBeforeEviction(binding);");
-    const kill = detach.indexOf("await this.killThreadUserProcesses(plan.user);");
+    const kill = detach.indexOf("await this.killThreadUserProcesses(plan.user, threadKey)");
     const drain = detach.indexOf("const left = await this.waitForThreadDrain(threadKey);");
     expect(kill).toBeGreaterThan(-1);
     expect(drain).toBeGreaterThan(kill);
     expect(measure).toBeGreaterThan(drain);
+    expect(method("killThreadUserProcesses")).toContain("this.poolUserOwnerMatches(user, `thread:${threadKey}`)");
   });
 
   it("an op in flight still keeps (the pure planForceDetach), force still kills it first, and the re-checks before the eviction stand", () => {
@@ -93,7 +94,7 @@ describe("the clean-idle sweep releases on idleness alone", () => {
     expect(sweep).toMatch(
       /if \(!current \|\| current\.evicted \|\| current\.lastAttachAt !== binding\.lastAttachAt\) \{/,
     );
-    expect(sweep).toMatch(/const activeNow = await this\.isRuntimeActive\(\)\.catch\(\(\) => false\);/);
+    expect(sweep).toMatch(/const activeNow = await this\.isRuntimeActive\(\)\.catch\(\(\) => true\);/);
     expect(sweep).toMatch(/last >= cutoff \? "clean-idle" : "ttl"/);
   });
 });

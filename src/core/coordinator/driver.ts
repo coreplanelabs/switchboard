@@ -687,6 +687,18 @@ function isOpaqueNotFound(reply: BotReply): boolean {
   }
 }
 
+/** A finished, addressed child whose final record is still being sealed.
+ * Unlike an opaque 404, this answer already establishes the child's identity. */
+function isRecordPending(reply: BotReply): boolean {
+  if (reply.status !== 409) return false;
+  try {
+    const body = JSON.parse(reply.text) as { ok?: unknown; error?: unknown };
+    return body?.ok === false && body.error === "record_pending";
+  } catch {
+    return false;
+  }
+}
+
 async function readRecordStep(
   step: StepRunner,
   bot: CoordinatorBot,
@@ -696,8 +708,9 @@ async function readRecordStep(
   for (let retry = 0; ; retry++) {
     const name = retry === 0 ? action.step : `${action.step}/record-read/${retry}`;
     const reply = await step.do(name, STEP_CONFIG, () => call(bot, "read-record", body, true));
-    if (!isOpaqueNotFound(reply) || action.finishedObserved !== true || retry >= SHIP_RECORD_VISIBILITY.retries)
-      return reply;
+    const pending = isRecordPending(reply);
+    const eventQualifiedMissing = action.finishedObserved === true && isOpaqueNotFound(reply);
+    if ((!pending && !eventQualifiedMissing) || retry >= SHIP_RECORD_VISIBILITY.retries) return reply;
     await step.sleep(`${action.step}/record-visible/${retry + 1}`, SHIP_RECORD_VISIBILITY.retryMs);
   }
 }

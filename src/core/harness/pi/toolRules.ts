@@ -122,7 +122,7 @@ const outside = (reason: string): ToolVerdict => ({ verdict: "outside-profile", 
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
-/** The executor's credential store beside the worktree
+/** A legacy credential store beside the worktree
  *  (`<worktree>/.git/github-credentials`, src/execution/residentCredentials.ts)
  *  and git's global equivalent — a coding run never reads either. */
 const CREDENTIAL_FILE = /(^|[\s/'"`])(\.git\/)?(github-credentials|\.git-credentials)($|[\s'"`|;&])/;
@@ -133,9 +133,9 @@ const CREDENTIAL_FILE = /(^|[\s/'"`])(\.git\/)?(github-credentials|\.git-credent
  *  neither is a dump. */
 const ENV_DUMP =
   /(^|[;&|(]\s*)((printenv|env)(\s+-[A-Za-z0-9-]+)*|export\s+-p|declare\s+-[a-zA-Z]*[px][a-zA-Z]*|set)\s*($|[|;&>)])|\/proc\/(self|\d+)\/environ|process\.env(?![.[\w])/;
-/** A variable named like a credential, expanded or printed: a coding run
- *  holds no model key, token or bearer to reach for — the executor's GitHub
- *  credential is a git helper, never a variable. */
+/** A variable named like a credential, expanded or printed. This lexical
+ *  guard is defense in depth; the model can already hold its revocable run
+ *  bearer, while no App token enters the workspace. */
 const CREDENTIAL_VAR =
   /\$\{?[A-Z][A-Z0-9_]*(_API_KEY|_TOKEN|_SECRET|_BEARER|_PASSWORD)\b|printenv\s+[A-Z][A-Z0-9_]*(_API_KEY|_TOKEN|_SECRET|_BEARER|_PASSWORD)\b/;
 /** Merging or approving a pull request, by the GitHub CLI or the REST API —

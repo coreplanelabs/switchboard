@@ -2,7 +2,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { once } from "node:events";
 import type { RunBearerStore } from "../core/modelProxy/runBearers.js";
-import type { GitBindings } from "../core/modelProxy/gitBindings.js";
+import { GIT_RECEIVE_PACK_FORWARD_TIMEOUT_MS } from "../core/budgets.js";
+import type { GitBinding, GitBindings, GitPublicationClaim } from "../core/modelProxy/gitBindings.js";
 import { authorizePushRefs, inspectReceivePackPrefix, type PushPrefix } from "./gitPushPolicy.js";
 import { GIT_DOOR_PATH, isGithubDoorPath } from "./githubDoorPaths.js";
 import { scopedGraphqlRead, scopedRestRead } from "./githubDoorApiScope.js";
@@ -36,6 +37,12 @@ function runBearer(header: string | undefined): string | undefined {
   if (scheme !== "basic" || !/^[A-Za-z0-9+/=]+$/.test(value)) return undefined;
   const pair = Buffer.from(value, "base64").toString("utf8");
   return pair.startsWith("x-access-token:") ? pair.slice("x-access-token:".length) : undefined;
+}
+
+function sameBinding(left: GitBinding | undefined, right: GitBinding | undefined): boolean {
+  return (
+    !!left && !!right && left.repo === right.repo && left.ref === right.ref && left.refConfirmed === right.refConfirmed
+  );
 }
 
 /** The request path may vary; its upstream scheme and host never do. */
@@ -215,14 +222,14 @@ function packetPayloads(report: Buffer): Buffer[] | undefined {
   return flushed && offset === report.length ? payloads : undefined;
 }
 
-function acceptedCreation(report: Buffer, ref: string): boolean {
+function pushReportOutcome(report: Buffer, ref: string): "accepted" | "rejected" | "unknown" {
   const outer = packetPayloads(report);
-  if (!outer) return false;
+  if (!outer) return "unknown";
   const chunks: Buffer[] = [];
   let sideband = false;
   for (let data of outer) {
     if (data[0] === 2) continue; // progress channel
-    if (data[0] === 3) return false; // fatal channel
+    if (data[0] === 3) return "unknown"; // fatal channel
     if (data[0] === 1) {
       sideband = true;
       data = data.subarray(1);
@@ -231,10 +238,17 @@ function acceptedCreation(report: Buffer, ref: string): boolean {
   }
   const payload = Buffer.concat(chunks);
   const inner = sideband ? packetPayloads(payload) : undefined;
-  if (sideband && !inner) return false;
+  if (sideband && !inner) return "unknown";
   const text = (inner ? Buffer.concat(inner) : payload).toString("utf8");
   const lines = text.trimEnd().split("\n");
-  return lines.length === 2 && lines[0] === "unpack ok" && lines[1] === `ok ${ref}`;
+  if (lines.length !== 2) return "unknown";
+  if (lines[0] === "unpack ok" && lines[1] === `ok ${ref}`) return "accepted";
+  if (lines[0]?.startsWith("unpack ") && lines[1]?.startsWith(`ng ${ref} `)) return "rejected";
+  return "unknown";
+}
+
+function acceptedCreation(report: Buffer, ref: string): boolean {
+  return pushReportOutcome(report, ref) === "accepted";
 }
 
 export function createGithubDoorHandler(deps: GithubDoorDeps) {
@@ -259,12 +273,31 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
       const gitGrant = verdict.grant.github;
       if (!gitGrant || gitGrant.identity === "none") return answer(res, 403, "GitHub identity is absent for this run");
       const recorded = deps.bindings?.get(verdict.grant.runId);
+      const bindingGeneration = deps.bindings?.generationOf(verdict.grant.runId);
+      const publication = deps.bindings?.publicationOf(verdict.grant.runId);
       if (deps.bindings && !recorded) return answer(res, 403, "GitHub binding is absent for this run");
       // The run grant comes from dispatch's resolved repository. A model may
       // never choose an installed repository by asking for Git discovery.
       const boundRepo = gitGrant.repo;
       if (!boundRepo || (recorded?.repo && recorded.repo.toLowerCase() !== boundRepo.toLowerCase()))
         return answer(res, 403, "repository binding is required for GitHub access");
+      const stillAuthorized = (binding: GitBinding | undefined): boolean => {
+        const current = deps.bearers.verify(presented ?? "");
+        if (!current.ok || current.grant.runId !== verdict.grant.runId) return false;
+        const github = current.grant.github;
+        if (
+          !github ||
+          github.identity !== gitGrant.identity ||
+          github.repo !== gitGrant.repo ||
+          github.ref !== gitGrant.ref
+        )
+          return false;
+        if (!deps.bindings) return true;
+        return (
+          bindingGeneration === deps.bindings.generationOf(verdict.grant.runId) &&
+          sameBinding(binding, deps.bindings.get(verdict.grant.runId))
+        );
+      };
       const method = req.method ?? "GET";
       if (url.pathname.startsWith("/api/")) {
         const graphql = url.pathname === "/api/graphql";
@@ -275,6 +308,7 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
         if (graphql ? !body || !scopedGraphqlRead(body, boundRepo) : !scopedRestRead(path, boundRepo))
           return answer(res, 403, "API read is outside this run's repository binding");
         const token = await deps.token("read", boundRepo);
+        if (!stillAuthorized(recorded)) return answer(res, 403, "GitHub authority is no longer valid for this request");
         const init = {
           method,
           headers: upstreamHeaders(req, token, false),
@@ -299,12 +333,15 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
       if (action === "info/refs" ? method !== "GET" : method !== "POST") return answer(res, 405, "invalid Git method");
       if (receive && gitGrant.identity !== "write")
         return answer(res, 403, "GitHub write identity is absent for this run");
+      if (receive && publication && "blocked" in publication)
+        return answer(res, 403, "existing PR publication is blocked");
       if (boundRepo && boundRepo.toLowerCase() !== repo.toLowerCase())
         return answer(res, 403, "repository is outside this run's binding");
       let parsed: PushPrefix | undefined;
       let body: Readable | undefined;
       let defaultBranch: string | undefined;
       let pendingBranchRef: string | undefined;
+      let publicationClaim: GitPublicationClaim | undefined;
       if (receive) {
         const readToken = await deps.token("read", repo);
         const metadata = await fetcher(githubUrl("api.github.com", `/repos/${repo}`), {
@@ -332,6 +369,7 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
           defaultBranch,
           boundRef,
           firstBranch,
+          ...(publication && "expectedHeadSha" in publication ? { expectedHeadSha: publication.expectedHeadSha } : {}),
         });
         if (!decision.ok) return refusePush(res, parsed, decision.reason);
         if (firstBranch && parsed.kind === "commands") pendingBranchRef = parsed.commands[0]!.ref;
@@ -342,19 +380,69 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
               return refusePush(res, parsed, "branch binding could not be saved");
           } else refs.set(verdict.grant.runId, { ref: first, confirmed: false });
         }
+        if (parsed.kind === "commands") {
+          if (publication && "expectedHeadSha" in publication) {
+            publicationClaim = await deps.bindings?.beginPublication(verdict.grant.runId, parsed.commands[0]!);
+            if (!publicationClaim) return answer(res, 403, "trusted existing PR publication receipt is unavailable");
+          } else if (deps.bindings) {
+            publicationClaim = await deps.bindings.beginBranch(verdict.grant.runId, parsed.commands[0]!);
+            if (!publicationClaim) return answer(res, 403, "trusted branch publication receipt is unavailable");
+          }
+        }
       }
-      const token = await deps.token(receive ? "write" : "read", repo);
-      const upstream = await fetcher(githubUrl("github.com", `/${repo}.git/${action}`, url.search), {
-        method,
-        headers: upstreamHeaders(req, token, true),
-        redirect: "manual",
-        ...(body
-          ? { body, duplex: "half" as const }
-          : action === "git-upload-pack"
-            ? { body: req, duplex: "half" as const }
+      const forwardBinding = deps.bindings?.get(verdict.grant.runId);
+      let token: string;
+      try {
+        token = await deps.token(receive ? "write" : "read", repo);
+      } catch (error) {
+        await publicationClaim?.finish("not_forwarded");
+        throw error;
+      }
+      if (!stillAuthorized(forwardBinding)) {
+        await publicationClaim?.finish("not_forwarded");
+        return answer(res, 403, "GitHub authority is no longer valid for this request");
+      }
+      let upstream: Response;
+      try {
+        upstream = await fetcher(githubUrl("github.com", `/${repo}.git/${action}`, url.search), {
+          method,
+          headers: upstreamHeaders(req, token, true),
+          redirect: "manual",
+          ...(action === "git-receive-pack"
+            ? { signal: AbortSignal.timeout(GIT_RECEIVE_PACK_FORWARD_TIMEOUT_MS) }
             : {}),
-      } as RequestInit);
-      if (upstream.status >= 300 && upstream.status < 400) return answer(res, 502, "GitHub redirect refused");
+          ...(body
+            ? { body, duplex: "half" as const }
+            : action === "git-upload-pack"
+              ? { body: req, duplex: "half" as const }
+              : {}),
+        } as RequestInit);
+      } catch (error) {
+        await publicationClaim?.finish("unknown");
+        throw error;
+      }
+      if (upstream.status >= 300 && upstream.status < 400) {
+        await publicationClaim?.finish("unknown");
+        return answer(res, 502, "GitHub redirect refused");
+      }
+      if (publicationClaim && parsed?.kind === "commands") {
+        const report = await receiveReport(upstream).catch(() => undefined);
+        if (!report) {
+          await publicationClaim.finish("unknown");
+          return answer(res, 502, "GitHub receive-pack report is unavailable or exceeds the limit");
+        }
+        const outcome = upstream.ok ? pushReportOutcome(report, parsed.commands[0]!.ref) : "unknown";
+        if (!(await publicationClaim.finish(outcome)))
+          return answer(res, 503, "Git publication outcome could not be committed durably");
+        if (outcome === "accepted" && pendingBranchRef && deps.bindings) {
+          if (!(await deps.bindings.confirmRef(verdict.grant.runId, pendingBranchRef)))
+            return answer(res, 503, "branch created but binding confirmation could not be saved");
+        }
+        return await proxyResponse(
+          res,
+          new Response(new Uint8Array(report), { status: upstream.status, headers: upstream.headers }),
+        );
+      }
       if (receive && action === "info/refs" && upstream.ok) {
         const advertisement = stripPushOptions(Buffer.from(await upstream.arrayBuffer()));
         res.writeHead(upstream.status, {
