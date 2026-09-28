@@ -509,6 +509,25 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     ]);
   });
 
+  it("a failed generated unit with no PR reissues on its original branch and seeds an attached plan for the new attempt", async () => {
+    const id = "plan-warm-the-cache-on-wake-dfa06c";
+    const h = harness({ status: { [id]: { kind: "status", status: "errored" } } });
+    const req = input({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "in acme/api: warm the cache on wake",
+    });
+    await handOffToCoordinator(h.deps, req);
+    const [unit] = await h.instances.listUnits(id);
+    await h.instances.putUnits([{ ...unit!, ending: { kind: "held", report: "no plan context", at: NOW } }]);
+    req.msg.documents = [{ name: "plan.md", mediaType: "text/plain", data: "Warm the cache on wake" }];
+    const again = await handOffToCoordinator(h.deps, req);
+    expect(again).toMatchObject({ status: "completed", instanceId: `${id}-2` });
+    expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([{ branch: unit!.branch, unit: unit!.unit }]);
+    expect(await h.instances.listEvents({ instanceId: `${id}-2`, unit: unit!.unit })).toEqual([
+      expect.objectContaining({ attachments: [expect.objectContaining({ name: "plan.md" })] }),
+    ]);
+  });
+
   it("an owned generated thread pins its re-issue to the recorded plan id and branch even if the durable task's display text would hash differently", async () => {
     const id = "plan-owned-task";
     const h = harness({ status: { [id]: { kind: "status", status: "complete" } } });

@@ -253,6 +253,60 @@ describe("SlackIO.history — thread reuse and concurrent attachment downloads",
     expect(items.map((i) => i.text)).toEqual(["earlier"]);
   });
 
+  it("a rebuilt handle keeps the parent message and its plan attachment for a coding child", async () => {
+    const plan = "Implement the health dashboard plan in acme/atlas";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(plan, { status: 200, headers: { "content-type": "text/plain" } })),
+    );
+    const replies = vi.fn(async () => ({
+      messages: [
+        {
+          user: "UA",
+          text: "<@UBOT> implement this plan",
+          ts: "1.0",
+          files: [
+            {
+              id: "FPLAN",
+              name: "plan.md",
+              mimetype: "text/plain",
+              size: plan.length,
+              url_private_download: "https://files.slack.test/plan.md",
+            },
+          ],
+        },
+        { user: "UA", text: "<@UBOT> implement this now", ts: "3.0" },
+      ],
+    }));
+    const client = guardOutbound({ conversations: { replies } } as unknown as ConstructorParameters<typeof SlackIO>[0]);
+    const items = await resumeSlackIO(client, {
+      channel: "C1",
+      threadTs: "1.0",
+      user: "UA",
+      botUserId: "UBOT",
+    }).history();
+    expect(items.map((i) => i.text)).toEqual(["implement this plan", "implement this now"]);
+    expect(items[0]?.documents?.[0]).toMatchObject({ name: "plan.md", data: plan });
+  });
+
+  it("a rebuilt handle for a restarted request skips that request but keeps the earlier plan", async () => {
+    const replies = vi.fn(async () => ({
+      messages: [
+        { user: "UA", text: "<@UBOT> implement this plan", ts: "1.0" },
+        { user: "UA", text: "<@UBOT> implement this now", ts: "3.0" },
+      ],
+    }));
+    const client = guardOutbound({ conversations: { replies } } as unknown as ConstructorParameters<typeof SlackIO>[0]);
+    const items = await resumeSlackIO(client, {
+      channel: "C1",
+      threadTs: "1.0",
+      requestTs: "3.0",
+      user: "UA",
+      botUserId: "UBOT",
+    }).history();
+    expect(items.map((i) => i.text)).toEqual(["implement this plan"]);
+  });
+
   it("downloads a message's images concurrently — every fetch starts before any finishes", async () => {
     let inFlight = 0;
     let peak = 0;
@@ -456,6 +510,24 @@ describe("SlackIO.openThread (docs/reference/specs/slack-channel.md item 11)", (
     const known = client("https://acme.slack.com/");
     const opened = await new SlackIO(known.c, ev).openThread("lead");
     expect(opened.thread.sourceUrl).toBe("https://acme.slack.com/archives/C1/p771");
+  });
+
+  it("excludes the posted lead from the new child's history", async () => {
+    const postMessage = vi.fn(async () => ({ ok: true, ts: "77.1" }));
+    const replies = vi.fn(async () => ({
+      messages: [
+        { bot_id: "B1", text: "↳ child lead", ts: "77.1" },
+        { user: "UA", text: "follow-up", ts: "78.0" },
+      ],
+    }));
+    const test = vi.fn(async () => ({ ok: true }));
+    const c = guardOutbound({
+      chat: { postMessage },
+      conversations: { replies },
+      auth: { test },
+    } as unknown as ConstructorParameters<typeof SlackIO>[0]);
+    const opened = await new SlackIO(c, ev).openThread("↳ child lead");
+    expect((await opened.io.history()).map((item) => item.text)).toEqual(["follow-up"]);
   });
 
   it("a chat.postMessage answer without a ts is refused by name — never a thread keyed on `undefined`", async () => {
@@ -1331,6 +1403,164 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
       ...over,
     };
   }
+
+  it("an app mention missing file metadata reads its exact Slack message before the operator sees the request", async () => {
+    const ts = nextTs();
+    const plan = "Release atlas-v3.39.0 changed the health dashboard";
+    const file = {
+      id: "FPLAN",
+      name: "plan.md",
+      mimetype: "text/plain",
+      size: plan.length,
+      url_private_download: "https://files.slack.test/plan.md",
+    };
+    const s = gateClient([{ messages: [{ user: "UASKER", text: "implement this plan", ts, files: [file] }] }]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(plan, { status: 200 })),
+    );
+    const { span, attrs } = spanStub();
+    const out = await receiveSlackMessage(
+      s.client,
+      { channel: "CGATE", user: "UASKER", text: "implement this plan", ts, threadTs: ts, trigger: "mention" },
+      span,
+      POLICY,
+      [],
+    );
+    expect(s.replies).toHaveBeenCalledWith({ channel: "CGATE", ts, limit: 50 });
+    expect(attrs).toMatchObject({ files: 0, resolvedFiles: 1 });
+    expect(out?.message.documents).toMatchObject([{ name: "plan.md", data: plan }]);
+  });
+
+  it("a text-only app mention reuses its source read as the run's history page", async () => {
+    const ts = nextTs();
+    const ev = { channel: "CGATE", user: "UASKER", text: "hello", ts, threadTs: ts, trigger: "mention" as const };
+    const s = gateClient([{ messages: [{ user: "UASKER", text: "hello", ts }] }]);
+    const out = await receiveSlackMessage(s.client, ev, spanStub().span, POLICY, []);
+    expect(out?.message.text).toBe("hello");
+    expect(await new SlackIO(s.client, ev).history()).toEqual([]);
+    expect(s.replies).toHaveBeenCalledOnce();
+    expect(s.replies).toHaveBeenCalledWith({ channel: "CGATE", ts, limit: 50 });
+  });
+
+  it("an app mention beyond the history page still recovers its attached plan", async () => {
+    const ts = nextTs();
+    const threadTs = "100.000000";
+    const older = Array.from({ length: 50 }, (_, i) => ({
+      user: "UOTHER",
+      text: "older",
+      ts: `100.${String(i).padStart(6, "0")}`,
+    }));
+    const plan = "Apply the attached plan";
+    const file = {
+      id: "FPLAN",
+      name: "plan.md",
+      mimetype: "text/plain",
+      size: plan.length,
+      url_private_download: "https://files.slack.test/plan.md",
+    };
+    const s = gateClient([
+      { messages: older },
+      { messages: [{ user: "UASKER", text: "implement this", ts, files: [file] }] },
+    ]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(plan, { status: 200 })),
+    );
+    const out = await receiveSlackMessage(
+      s.client,
+      { channel: "CGATE", user: "UASKER", text: "implement this", ts, threadTs, trigger: "mention" },
+      spanStub().span,
+      POLICY,
+      [],
+    );
+    expect(s.replies).toHaveBeenNthCalledWith(1, { channel: "CGATE", ts: threadTs, limit: 50 });
+    expect(s.replies).toHaveBeenNthCalledWith(2, {
+      channel: "CGATE",
+      ts: threadTs,
+      oldest: ts,
+      latest: ts,
+      inclusive: true,
+      limit: 1,
+    });
+    expect(out?.message.documents).toMatchObject([{ name: "plan.md", data: plan }]);
+  });
+
+  it("a text-only DM does not fetch its source message just to look for files", async () => {
+    const s = gateClient();
+    const ts = nextTs();
+    const out = await receiveSlackMessage(
+      s.client,
+      { channel: "CGATE", user: "UASKER", text: "hello", ts, threadTs: ts, trigger: "dm" },
+      spanStub().span,
+      POLICY,
+      [],
+    );
+    expect(out?.message.text).toBe("hello");
+    expect(s.replies).not.toHaveBeenCalled();
+  });
+
+  it("a file-share DM with omitted file metadata recovers the attachment", async () => {
+    const ts = nextTs();
+    const plan = "Implement the attached plan";
+    const file = {
+      id: "FPLAN",
+      name: "plan.md",
+      mimetype: "text/plain",
+      size: plan.length,
+      url_private_download: "https://files.slack.test/plan.md",
+    };
+    const s = gateClient([{ messages: [{ user: "UASKER", text: "implement this", ts, files: [file] }] }]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(plan, { status: 200 })),
+    );
+    const out = await receiveSlackMessage(
+      s.client,
+      { channel: "CGATE", user: "UASKER", text: "implement this", ts, threadTs: ts, trigger: "dm", fileShare: true },
+      spanStub().span,
+      POLICY,
+      [],
+    );
+    expect(s.replies).toHaveBeenCalledOnce();
+    expect(out?.message.documents).toMatchObject([{ name: "plan.md", data: plan }]);
+  });
+
+  it("a prefetched text-only message is authoritative and costs no second replies call", async () => {
+    const s = gateClient();
+    const ts = nextTs();
+    const out = await receiveSlackMessage(
+      s.client,
+      {
+        channel: "CGATE",
+        user: "UASKER",
+        text: "what next?",
+        ts,
+        threadTs: parentTs,
+        trigger: "mention",
+        thread: [...shortThread, { user: "UASKER", text: "what next?", ts }],
+      },
+      spanStub().span,
+      POLICY,
+      [],
+    );
+    expect(out?.message.text).toBe("what next?");
+    expect(s.replies).not.toHaveBeenCalled();
+  });
+
+  it("a catch-up message already read from Slack history does not fetch its source again", async () => {
+    const s = gateClient();
+    const ts = nextTs();
+    const out = await receiveSlackMessage(
+      s.client,
+      { channel: "CGATE", user: "UASKER", text: "hello", ts, threadTs: ts, trigger: "mention", caughtUp: true },
+      spanStub().span,
+      POLICY,
+      [],
+    );
+    expect(out?.message.text).toBe("hello");
+    expect(s.replies).not.toHaveBeenCalled();
+  });
 
   it("admits the source message once when a relay loops the bot's reply back into the same thread", async () => {
     const s = gateClient();

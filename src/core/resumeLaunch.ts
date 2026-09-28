@@ -157,7 +157,7 @@ export function resumeIoTarget(row: LiveRunRow): { threadKey: string; userId: st
 
 export interface LaunchResumesOptions {
   /** The channel IO for a row, or undefined when its channel cannot be resumed on. */
-  ioFor: (row: LiveRunRow) => ChannelIO | undefined;
+  ioFor: (row: LiveRunRow, request?: IncomingMessage) => ChannelIO | undefined;
   /** Close a run the plan refuses, with the reason (the boot reclaim's closer). */
   close: (run: ResumableRun, why: string) => Promise<void>;
   agentFor: (name: string | undefined) => AgentDef | undefined;
@@ -296,7 +296,7 @@ export async function launchResumes(
         await closeWith(run, "the row's request has a shape this build cannot read");
         continue;
       }
-      const io = opts.ioFor(row);
+      const io = opts.ioFor(row, restored.msg);
       if (!io) {
         await closeWith(run, `channel ${row.meta.channelId} cannot be resumed on`);
         continue;

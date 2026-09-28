@@ -25,6 +25,8 @@ export interface AttrDomain {
   // slack.receive
   caughtUp: boolean;
   files: number;
+  /** Files found on the canonical source message after event metadata is normalized. */
+  resolvedFiles: number;
   dedupe: "fresh" | "duplicate";
   /** How the requester was found (slack-channel.md item 13): the sender, the configured relay app's footer, or the app itself. */
   requester: "message" | "relay-footer" | "bot";
@@ -193,6 +195,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   runId: "string",
   caughtUp: "boolean",
   files: "number",
+  resolvedFiles: "number",
   dedupe: "string",
   requester: "string",
   intake: "string",
