@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import type { Identity } from "../../../agents/registry.js";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
 import type { ChatMessage, ContentPart } from "../../chatMessage.js";
-import { renderProviderFailure, type CompletionRequest, type CompletionResult } from "../../provider.js";
+import { type CompletionRequest, type CompletionResult } from "../../provider.js";
 import type { RunEvent, StopMode } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
@@ -925,7 +925,10 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       // model call when the clock ran out, the call's failure is a note, and
       // the run answered under the budget's label — naming the failed call
       // where the write-up would have been — never as a failed model call.
-      const failure = run.harness === "pi" ? renderProviderFailure("permanent") : FAILED_MODEL_CALL_ERROR;
+      const failure =
+        run.harness === "pi"
+          ? "The model call ended without a classified result; no provider failure was established."
+          : FAILED_MODEL_CALL_ERROR;
       assert.equal(answered(run), timeBudgetAnswer("", CONFORMANCE_MAX_MINUTES, failure));
       const budget = notes(run).filter((n) => n.kind === "time_budget_exhausted");
       assert.deepEqual(

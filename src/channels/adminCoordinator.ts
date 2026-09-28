@@ -1635,8 +1635,8 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
       // — so a capped grant never renews on an understated total.
       costUsd: record.cost?.usd ?? null,
       ...(record.handoff !== undefined ? { handoffLists: record.handoff } : {}),
-      // The failure by name (run-history item 57): a `provider_transient` lets
-      // the machine re-run a round-0 child that pushed nothing (issue 1932).
+      // The failure by name (run-history item 57): a retryable model-call
+      // failure lets the machine re-run a round-0 child that pushed nothing.
       ...(record.failure !== undefined ? { failure: record.failure } : {}),
       // What ended an interrupted child (issue 1876), off its record's own
       // events: the unit's ending names the actual cause in the user's nouns.

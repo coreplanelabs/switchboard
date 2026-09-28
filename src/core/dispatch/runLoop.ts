@@ -36,7 +36,11 @@ import { harnessContainerFor } from "../harness/botHostContainer.js";
 import { workspaceBindingFor } from "../../execution/factory.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
 import { isContainerGone } from "../harness/container.js";
-import { ModelPolicyRefusedError, ModelTransientFailureError } from "../harness/pi/harness.js";
+import {
+  ModelPolicyRefusedError,
+  ModelStreamIncompleteError,
+  ModelTransientFailureError,
+} from "../harness/pi/harness.js";
 import type { ExistingPrPublicationAuthority, ExistingPrPublicationFence } from "../harness/pi/toolRules.js";
 import {
   HARD_STOP_MESSAGE,
@@ -2134,6 +2138,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       }
       if (err instanceof ModelPolicyRefusedError) failure = { kind: "policy_refusal" };
       else if (err instanceof ModelTransientFailureError) failure = { kind: "provider_transient" };
+      else if (err instanceof ModelStreamIncompleteError) failure = { kind: "model_stream_incomplete" };
       // The record must say why a failed run failed even when the reply is
       // never delivered (run-history.md): the error's message, redacted and
       // capped, published before the finish below closes the stream.

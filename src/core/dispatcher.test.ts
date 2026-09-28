@@ -94,7 +94,7 @@ import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { createLedgerWriteThrough, NullLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { textTurnsOf } from "./dispatch/textTurns.js";
 import type { HarnessSession } from "./harness/contract.js";
-import { runPiHarnessOpen } from "./harness/pi/harness.js";
+import { runPiHarnessOpen, UNKNOWN_MODEL_TERMINAL_MESSAGE } from "./harness/pi/harness.js";
 import { PiHarness } from "./harness/pi/piHarness.js";
 import { OpenCodeHarness } from "./harness/opencode/harness.js";
 import { HarnessRegistry, authorizeToolCall, relayToolCall, type ToolCallAsk } from "./harness/pi/relay.js";
@@ -1195,7 +1195,7 @@ describe("executor provisioning by agent resources", () => {
     expect(last.title).toContain("*coding*");
     expect(last.title).not.toContain("setup failed");
     expect(statuses.some((f) => f.title.includes("setup failed"))).toBe(false); // never relabeled
-    expect(replies.some((r) => r.includes(renderProviderFailure("permanent")))).toBe(true);
+    expect(replies.some((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE))).toBe(true);
   });
 
   it("a coding ask still selects the configured remote backend", async () => {
@@ -6286,10 +6286,9 @@ describe("closed-card checklist and review verdict run link", () => {
     const deps = makeDeps(YAML_FIXTURE, provider);
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
-    const fail = replies.find((r) => r.includes(renderProviderFailure("permanent")));
-    expect(fail).toMatch(
-      /⚠️ The model provider refused the call; the request ended without exposing the provider's response\.\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)/,
-    );
+    const fail = replies.find((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE));
+    expect(fail).toContain(`⚠️ ${UNKNOWN_MODEL_TERMINAL_MESSAGE}`);
+    expect(fail).toMatch(/\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)/);
   });
 
   // harness-pi item 6: a call the provider refused under its usage policy is
@@ -8648,7 +8647,7 @@ describe("run history write path", () => {
     const rec = await store.get("run-h");
     expect(rec?.status).toBe("failed");
     expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input"]);
-    expect(replies.some((r) => r.includes(renderProviderFailure("permanent")))).toBe(true);
+    expect(replies.some((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE))).toBe(true);
     expect(activeRunCount()).toBe(0);
   });
 
@@ -10417,7 +10416,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await run;
     // The first run failed and said so; the follow-up was NOT lost with it: it
     // ran as its own turn, on its own sender's channel handle.
-    expect(first.replies.some((r) => r.includes(renderProviderFailure("permanent")))).toBe(true);
+    expect(first.replies.some((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE))).toBe(true);
     expect(second.replies.at(-1)).toBe("answer 2");
     expect(second.statuses.length).toBeGreaterThan(0); // its own card
     expect(requests).toHaveLength(2);
@@ -10604,7 +10603,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     expect(registry.requestStop("r1", "t", "soft")).toEqual({ ok: true, mode: "soft" });
     settle().fail(new Error("finale exploded")); // the in-flight call fails AFTER the stop
     await run;
-    expect(first.replies.some((r) => r.includes(renderProviderFailure("permanent")))).toBe(true);
+    expect(first.replies.some((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE))).toBe(true);
     expect(second.replies).toHaveLength(2);
     expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this folded follow-up/);
     expect(requests).toHaveLength(1); // no fresh turn
@@ -13382,7 +13381,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     fail(new Error("provider exploded"));
     await run;
     await writer.settled();
-    expect(a.replies.some((r) => r.includes(renderProviderFailure("permanent")))).toBe(true);
+    expect(a.replies.some((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE))).toBe(true);
     expect(b.replies.at(-1)).toBe("answer 2");
     // The fresh turn's reservation met run-1's row, waited for its finish, claimed again, and its own finish went through the ledger.
     expect(order).toEqual([

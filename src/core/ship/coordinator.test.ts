@@ -1951,6 +1951,20 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
 describe("the transient re-run — round 0 dies on a provider transient with nothing pushed (issue 1932)", () => {
   const transientChild = finished({ status: "failed", failure: { kind: "provider_transient" } });
 
+  it("an incomplete local model stream gets one round-0 retry without being reported as provider-down", () => {
+    const d = fresh(input({ merge: "person" }));
+    const streamChild = finished({ status: "failed", failure: { kind: "model_stream_incomplete" } });
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(d, "run-c0", streamChild, T0 + 5 * MIN);
+    d.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_commits" }, at: T0 + 6 * MIN });
+    expect(d.action).toMatchObject({ type: "spawn", step: "U10/0/coding/a2" });
+    runChild(d, "run-c1", streamChild, T0 + 11 * MIN);
+    d.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_commits" }, at: T0 + 12 * MIN });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "transient" } });
+    expect(renderUnitReport(d.state)).toContain("model stream ended before a complete answer");
+    expect(renderUnitReport(d.state)).not.toContain("provider transient");
+  });
+
   it("a transient with nothing pushed re-runs round 0 once — a fresh attempt under fresh step names — and the re-run's success continues the pipeline", () => {
     const d = fresh(input({ merge: "person" }));
     d.answer({ type: "branch", ok: true, at: T0 });

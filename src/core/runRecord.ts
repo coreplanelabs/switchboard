@@ -572,12 +572,15 @@ function isRunPullRequestShape(v: unknown): v is RunPullRequest {
  *  explanation's words — so the session's next seed leaves the refused
  *  request out of its tail (docs/reference/specs/session-log.md item 9).
  *  `provider_transient`: the run's model call failed on a provider transient
- *  (a gateway 5xx, a cut stream, a gateway timeout) with the harness's retry
+ *  (a gateway 5xx or timeout) with the harness's retry
  *  ladder spent — the ship runner reads it off the child's record to re-run a
  *  round-0 child that pushed nothing instead of aborting the unit
- *  (docs/reference/specs/agent-ship.md item 9, issue 1932). A failure without
+ *  (docs/reference/specs/agent-ship.md item 9, issue 1932).
+ *  `model_stream_incomplete`: pi's answer stream ended incomplete after its
+ *  local retry lease, with no provider-down evidence; Ship grants the same
+ *  one re-run when nothing was pushed. A failure without
  *  a name here leaves the record without the field. */
-export const RUN_FAILURE_KINDS = ["policy_refusal", "provider_transient"] as const;
+export const RUN_FAILURE_KINDS = ["policy_refusal", "provider_transient", "model_stream_incomplete"] as const;
 export type RunFailureKind = (typeof RUN_FAILURE_KINDS)[number];
 export interface RunFailure {
   kind: RunFailureKind;

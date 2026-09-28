@@ -1262,6 +1262,43 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(outcomes.slice(0, 3)).toEqual(["started", "transient", "started"]);
   });
 
+  it("an incomplete local stream failure survives read-record and earns Ship's one empty-branch retry", async () => {
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U10/0/coding/a2/wait/1": "event",
+    });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), spawned("run-c1", T0 + 6 * MIN)],
+      "read-record": [
+        record(
+          { id: "run-c0", finished: true, status: "failed", failure: { kind: "model_stream_incomplete" } },
+          T0 + 5 * MIN,
+        ),
+        record(
+          { id: "run-c1", finished: true, status: "failed", failure: { kind: "model_stream_incomplete" } },
+          T0 + 11 * MIN,
+        ),
+      ],
+      "pr-check": [
+        prNone(),
+        ok({ ok: true, state: "none", unrecovered: "no_commits" }, T0 + 6 * MIN),
+        ok({ ok: true, state: "none", unrecovered: "no_commits" }, T0 + 12 * MIN),
+      ],
+      round: [acked(), acked(), acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 12 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 12 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "transient" });
+    expect(s.names()).toContain("U10/0/coding/a2");
+    expect((b.of("unit-end") as Array<{ ending: { report: string } }>)[0].ending.report).toContain(
+      "model stream ended before a complete answer",
+    );
+  });
+
   it("a deploy roll's child-interrupted event settles the wait beside run-finished (item 47a): the read-record confirms the interrupted child and the round ends at once with the child's own reason, never the budget clip", async () => {
     const s = steps({ "U10/0/coding/wait/1/interrupted": "event" });
     const b = bot({
