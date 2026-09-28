@@ -23,11 +23,11 @@ describe("deps-drift expectedPackagePaths", () => {
       "node_modules/vue": {},
       "node_modules/@img/sharp-libvips-linux-x64": { optional: true },
       "node_modules/fsevents": { devOptional: true },
-      "deploy/cloudflare-memory/node_modules/@cloudflare/vitest-pool-workers": {},
+      "deploy/cloudflare-memory/node_modules/@cloudflare/vitest-plugin": {},
       "node_modules/wrangler/node_modules/miniflare": {},
     };
     expect(expectedPackagePaths(packages)).toEqual([
-      "deploy/cloudflare-memory/node_modules/@cloudflare/vitest-pool-workers",
+      "deploy/cloudflare-memory/node_modules/@cloudflare/vitest-plugin",
       "node_modules/vue",
       "node_modules/wrangler/node_modules/miniflare",
     ]);
@@ -41,7 +41,7 @@ describe("deps-drift nodeModulesRoots", () => {
       web: {},
       "deploy/cloudflare-memory": {},
       "node_modules/vue": {},
-      "deploy/cloudflare-memory/node_modules/@cloudflare/vitest-pool-workers": {},
+      "deploy/cloudflare-memory/node_modules/@cloudflare/vitest-plugin": {},
       "node_modules/wrangler/node_modules/miniflare": {},
     };
     expect(nodeModulesRoots(packages)).toEqual([
@@ -75,7 +75,7 @@ describe("deps-drift evaluateDepsDrift", () => {
     "deploy/cloudflare-memory": {},
     "node_modules/miniflare": {},
     "node_modules/@img/sharp-libvips-darwin-arm64": { optional: true },
-    "deploy/cloudflare-memory/node_modules/@cloudflare/vitest-pool-workers": {},
+    "deploy/cloudflare-memory/node_modules/@cloudflare/vitest-plugin": {},
   };
 
   it("a clean tree passes: every non-optional path present, every entry known", () => {
@@ -85,7 +85,7 @@ describe("deps-drift evaluateDepsDrift", () => {
         root === "node_modules"
           ? ["miniflare"]
           : root === "deploy/cloudflare-memory/node_modules"
-            ? ["@cloudflare/vitest-pool-workers"]
+            ? ["@cloudflare/vitest-plugin"]
             : null,
     };
     expect(evaluateDepsDrift(packages, disk)).toEqual({ missing: [], extraneous: [], checked: 2 });
@@ -97,7 +97,7 @@ describe("deps-drift evaluateDepsDrift", () => {
       list: (root: string) => (root === "node_modules" ? ["miniflare"] : null),
     };
     expect(evaluateDepsDrift(packages, disk).missing).toEqual([
-      "deploy/cloudflare-memory/node_modules/@cloudflare/vitest-pool-workers",
+      "deploy/cloudflare-memory/node_modules/@cloudflare/vitest-plugin",
     ]);
   });
 

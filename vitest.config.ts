@@ -6,7 +6,7 @@ import { defineConfig } from "vitest/config";
 // at once (`--project bot|web|worker-bot|worker-resident` narrows to one;
 // `--changed origin/main` runs what a branch's diff reaches). The memory
 // Worker is NOT a project here: it runs inside workerd on
-// @cloudflare/vitest-pool-workers, which pins vitest 4 — `npm test -w
+// @cloudflare/vitest-plugin, which pins vitest 4 — `npm test -w
 // deploy/cloudflare-memory` is its entry. Nor is the npm package: its tests
 // need the package BUILT (the smoke test installs the packed tarball), which
 // `npm run verify -w packages/switchboard` and CI's `package` job do first and

@@ -128,8 +128,8 @@ describe("the install scratch tree and the store commit", () => {
     expect(script).toContain("test -d '/workspace/deps/.scratch-x/node_modules'");
   });
 
-  // The incident that forced nested coverage: the lockfile placed
-  // @cloudflare/vitest-pool-workers under deploy/cloudflare-memory/node_modules,
+  // The case that forced nested coverage: the lockfile placed a test package
+  // under deploy/cloudflare-memory/node_modules,
   // the entry carried only the top-level node_modules, so every resident tree
   // lacked the nested dir — the hoisted miniflare lost its only dependent,
   // `npm ls --omit=dev` attributed its sharp subtree to production, and
@@ -141,12 +141,12 @@ describe("the install scratch tree and the store commit", () => {
       const staging = join(root, `.staging-${KEY_A}-n`);
       const entry = join(root, KEY_A);
       mkdirSync(join(scratch, "node_modules", "wrangler", "node_modules", "inner"), { recursive: true });
-      mkdirSync(join(scratch, "deploy", "cloudflare-memory", "node_modules", "@cloudflare", "vitest-pool-workers"), {
+      mkdirSync(join(scratch, "deploy", "cloudflare-memory", "node_modules", "@cloudflare", "vitest-plugin"), {
         recursive: true,
       });
       mkdirSync(join(scratch, ".git", "node_modules"), { recursive: true });
       writeFileSync(
-        join(scratch, "deploy", "cloudflare-memory", "node_modules", "@cloudflare", "vitest-pool-workers", "p.js"),
+        join(scratch, "deploy", "cloudflare-memory", "node_modules", "@cloudflare", "vitest-plugin", "p.js"),
         "1",
       );
       const r = spawnSync(
@@ -171,7 +171,7 @@ describe("the install scratch tree and the store commit", () => {
       expect(
         spawnSync("test", [
           "-f",
-          join(entry, "deploy", "cloudflare-memory", "node_modules", "@cloudflare", "vitest-pool-workers", "p.js"),
+          join(entry, "deploy", "cloudflare-memory", "node_modules", "@cloudflare", "vitest-plugin", "p.js"),
         ]).status,
       ).toBe(0);
       // .git is never a source of entries; the scratch is gone.
