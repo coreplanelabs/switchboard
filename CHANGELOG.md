@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.267.1](https://github.com/coreplanelabs/switchboard/compare/v1.267.0...v1.267.1) (2026-09-28)
+
+
+### Bug fixes
+
+* **deploy:** keep resident drain closed until reconciliation ([#2444](https://github.com/coreplanelabs/switchboard/issues/2444)) ([7bf29e8](https://github.com/coreplanelabs/switchboard/commit/7bf29e89ddf30469dfb3f17754e4bc72c99b6f27))
+* harden resident isolation and Git publication ([#2450](https://github.com/coreplanelabs/switchboard/issues/2450)) ([0d833cc](https://github.com/coreplanelabs/switchboard/commit/0d833cc2d970b0cfd5178d35b31134a9dfff2f6e))
+* **ship:** recover original units after post-approval changes ([#2414](https://github.com/coreplanelabs/switchboard/issues/2414)) ([fc300ae](https://github.com/coreplanelabs/switchboard/commit/fc300ae066f904581f109cd32b968406bd23f5e3))
+
 ## [1.267.0](https://github.com/coreplanelabs/switchboard/compare/v1.266.1...v1.267.0) (2026-09-28)
 
 
