@@ -65,7 +65,7 @@ exit ${opts.httpFailure ? 22 : 0}
     writeFileSync(join(dir, "receipt.sh"), receipt);
     const result = spawnSync("bash", ["-e", "-o", "pipefail", join(dir, "receipt.sh")], {
       encoding: "utf8",
-      timeout: 10_000,
+      timeout: 30_000,
       env: {
         PATH: `${dir}:${process.env.PATH}`,
         RUNNER_TEMP: dir,
@@ -86,7 +86,10 @@ exit ${opts.httpFailure ? 22 : 0}
   }
 }
 
-describe("what is live deployment receipt", () => {
+// Each case executes the release shell with real jq and curl processes. A CI
+// shard can spend more than Vitest's 5s default under concurrent jobs. Keep
+// the case budget above the child timeout so a hung shell fails by name.
+describe("what is live deployment receipt", { timeout: 35_000 }, () => {
   it("the executable workflow fails a healthy Worker when registry image reports are pending", () => {
     const r = runReceipt({
       registry: {

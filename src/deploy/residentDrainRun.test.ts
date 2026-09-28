@@ -17,11 +17,9 @@ import { RESIDENT_WAIT_MAX_MS, type DeployStep } from "./plan.js";
 import { deployStep, type SandboxGateDeps, type StepExec } from "./run.js";
 
 // Feature: docs/reference/specs/release-and-deploy.md item 31 — the resident
-// step drains the fleet: `POST /drain` before its first attempt when the admin
-// bearer is in the env, a wait past a run's whole lease while the runs in
-// flight end, `POST /undrain` after the step whatever it ended as; without the
-// bearer, today's wait and a line that says so, but the uploaded step cannot
-// prove image readiness without reconciliation. Every I/O is injected.
+// step drains the fleet before upload and lifts only after it can prove no
+// upload or reconcile the new image. An uncertain upload leaves the fleet
+// closed through the drain backstop. Every I/O is injected.
 
 const HEAD = "62e4e9ad464820900b07bed176e140af6682c598";
 const UNTIL = "2026-09-18T06:10:00.000Z";
@@ -227,7 +225,7 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(h.plain().some((l) => l.includes("(30 min left)"))).toBe(true);
   });
 
-  it("a drain the Worker refused (a rejected bearer) is said, the wait is today's — and the reconcile and /undrain are still posted after: a drain whose answer was lost may have landed", async () => {
+  it("a rejected drain bearer cannot reconcile an uploaded image, so it sends no lift", async () => {
     const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "stale" }, [
       { status: 401, body: { error: "unauthorized" } },
       { status: 401, body: { error: "unauthorized" } },
@@ -236,10 +234,10 @@ describe("deployStep (resident) drains the fleet", () => {
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
     expect(r.ok).toBe(false);
     expect(r.reason).toContain("partial deployment");
-    expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "postJson", "postJson"]);
+    expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "postJson"]);
     expect(h.plain()[0]).toContain("could NOT be drained (HTTP 401: unauthorized)");
     expect(h.plain().at(-2)).toContain("could NOT be reconciled onto the new image (HTTP 401: unauthorized)");
-    expect(h.plain().at(-1)).toContain("the lift answered HTTP 401: unauthorized and no drain was confirmed");
+    expect(h.plain().at(-1)).toContain("any drain that landed stays closed");
   });
 
   it("a /drain whose answer was lost (the transport failed after the record may have landed) waits the undrained budget and still reconciles and lifts the drain after", async () => {
@@ -268,12 +266,33 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(h.calls.filter((c) => c.dep === "exec")).toHaveLength(RESIDENT_DRAINED_WAIT_MAX_MS / plan.pollMs + 1);
   });
 
-  it("a failed deploy command (not a refusal) ends the step at once and still reopens the fleet", async () => {
+  it("a failed deploy command may have uploaded, so it leaves the fleet closed", async () => {
     const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" });
     const failing: StepExec = async () => ({ code: 1, output: "✘ [ERROR] A request to the Cloudflare API failed." });
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, failing);
     expect(r.ok).toBe(false);
-    expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "postJson"]);
+    expect(r.reason).toContain("partial deployment");
+    expect(h.calls.map((c) => c.dep)).toEqual(["postJson"]);
+    expect(h.plain().at(-1)).toContain("fleet stays closed");
+  });
+
+  it("a thrown resident command cannot lift a drain after an uncertain upload", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" });
+    const failing: StepExec = async () => {
+      throw new Error("deploy connection lost");
+    };
+    await expect(deployStep(residentStep, plan, HEAD, h.io, h.deps, failing)).rejects.toThrow("deploy connection lost");
+    expect(h.calls.map((c) => c.dep)).toEqual(["postJson"]);
+    expect(h.plain().at(-1)).toContain("fleet stays closed");
+  });
+
+  it("an upload line beside a preflight refusal does not prove that no upload landed", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" });
+    const ambiguous: StepExec = async () => ({ code: 1, output: `${REFUSED}\nUploaded switchboard-resident` });
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, ambiguous);
+    expect(result.reason).toContain("partial deployment");
+    expect(h.calls.map((c) => c.dep)).toEqual(["postJson"]);
+    expect(h.plain().at(-1)).toContain("fleet stays closed");
   });
 });
 
@@ -313,6 +332,21 @@ describe("resident deployment readiness", () => {
       expect(h.calls.map((c) => c.dep)).toEqual(["exec"]);
     },
   );
+
+  it("keeps the fleet drained when the uploaded Worker never reports the expected commit", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained]);
+    const health = h.deps.readHealth;
+    h.deps.readHealth = async (url, bearer, timeoutMs) =>
+      url.endsWith("/healthz")
+        ? { status: 200, body: { ok: true, build: { commit: "b".repeat(40) } } }
+        : health(url, bearer, timeoutMs);
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("partial deployment");
+    expect(h.calls.some((call) => call.args[0] === "https://switchboard-resident.example.test/reconcile")).toBe(false);
+    expect(h.calls.some((call) => call.args[0] === "https://switchboard-resident.example.test/undrain")).toBe(false);
+    expect(h.plain().at(-1)).toContain("fleet stays closed");
+  });
 
   it("a healthy new Worker with cleared:false and pending image reports is a partial deployment, not success", async () => {
     const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, pendingReconcile, held]);
@@ -418,7 +452,7 @@ describe("resident deployment readiness", () => {
     expect(result.reason).toContain("partial deployment");
   });
 
-  it("a missing reconcile answer fails partially and still attempts the lift", async () => {
+  it("a missing reconcile answer fails partially and leaves the fleet closed", async () => {
     const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [
       drained,
       { error: "lost reconcile" },
@@ -427,6 +461,7 @@ describe("resident deployment readiness", () => {
     const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("reconcile");
-    expect(h.calls.at(-1)?.args[0]).toContain("/undrain");
+    expect(h.calls.some((call) => call.args[0] === "https://switchboard-resident.example.test/undrain")).toBe(false);
+    expect(h.plain().at(-1)).toContain("fleet stays closed");
   });
 });

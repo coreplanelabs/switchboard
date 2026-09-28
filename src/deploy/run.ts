@@ -954,13 +954,29 @@ async function deployStepTraced(
   let result: StepOutcome;
   let readyDeadline = 0;
   let resources: string[] = [];
+  // Once the resident command starts, its upload may have landed even if the
+  // command or health read fails. Only a proved preflight refusal or a
+  // successful reconcile makes an explicit lift safe.
+  let safeToLift = true;
   try {
-    result = await deployStepLoop(step, plan, expectedCommit, io, deps, exec, root, {
-      started,
-      waitMaxMs,
-      deadline,
-      drained: drain.drained,
-    });
+    result = await deployStepLoop(
+      step,
+      plan,
+      expectedCommit,
+      io,
+      deps,
+      exec,
+      root,
+      {
+        started,
+        waitMaxMs,
+        deadline,
+        drained: drain.drained,
+      },
+      (mayHaveUploaded) => {
+        if (step.name === "resident") safeToLift = !mayHaveUploaded;
+      },
+    );
     if (result.ok && step.name === "resident") {
       readyDeadline = deps.now() + RESIDENT_READY_WAIT_MS;
       // Reconcile only against the new Worker; an old healthy build can stamp
@@ -977,18 +993,18 @@ async function deployStepTraced(
             result,
             "reconcile did not confirm the affected fleet; image reports cannot be trusted",
           );
-        else resources = reconciled;
+        else {
+          resources = reconciled;
+          safeToLift = true;
+        }
       }
     }
   } finally {
-    // Whatever the step ended as — live, refused past the budget, failed — the
-    // lift is requested; a drain nobody lifted would end by itself, but a run should
-    // not wait the margin out for a deploy that is over.
-    // Lifted whenever a drain was ASKED for, not only when its answer said it
-    // landed: a `/drain` whose answer was lost after the registry stored the
-    // record would otherwise close the fleet for the record's whole life.
-    // `/undrain` is idempotent, and a rejected bearer answers 401 to both alike.
-    if (drain.attempted) await endDrain(step, drain, io, deps);
+    if (drain.attempted && safeToLift) await endDrain(step, drain, io, deps);
+    else if (drain.attempted)
+      io.log(
+        `[deploy:all] resident: ${drain.drained ? "fleet stays closed" : "any drain that landed stays closed"} — the uploaded image is not reconciled; verify the image and lift with the drain bearer, or wait for the drain backstop${drain.until ? ` at ${drain.until}` : ""}`,
+      );
   }
   if (result.ok && step.name === "resident") {
     const problem = await waitForResident(step, expectedCommit, readyDeadline, io, deps, resources);
@@ -1005,6 +1021,14 @@ function residentNotReady(result: StepOutcome, problem: string): StepOutcome {
     ok: false,
     live: `deployed, not live: ${problem}`,
     reason: `partial deployment — resident Worker uploaded but NOT ready: ${problem}; no rollback performed`,
+  };
+}
+
+function uncertainResidentUpload(problem: string): StepOutcome {
+  return {
+    ok: false,
+    live: "deployed, not live: upload outcome uncertain",
+    reason: `partial deployment — resident command ended without proving no upload (${problem}); the fleet stays closed until verified recovery or the drain backstop`,
   };
 }
 
@@ -1047,8 +1071,8 @@ async function waitForResident(
 /** The fleet drain before the step's first attempt: with the step's drain and its drain bearer
  *  in the env, `POST /drain` for the drained wait plus the margin; the line says what happened.
  *  Without either, the step waits as before and the line says so. `attempted` is whether a
- *  `/drain` was posted at all — the `finally` lifts on it — and `drained` whether the answer
- *  said the record landed, which sizes the wait. */
+ *  `/drain` was posted at all; `drained` is whether its answer confirmed the record,
+ *  which sizes the wait. An upload without reconciliation does not lift it. */
 async function beginDrain(
   step: DeployStep,
   expectedCommit: string,
@@ -1107,6 +1131,7 @@ async function deployStepLoop(
   exec: StepExec,
   root: Span,
   wait: { started: number; waitMaxMs: number; deadline: number; drained: boolean },
+  uploadState: (mayHaveUploaded: boolean) => void = () => {},
 ): Promise<StepOutcome> {
   const { started, waitMaxMs, deadline } = wait;
   for (;;) {
@@ -1114,6 +1139,7 @@ async function deployStepLoop(
     const application = step.liveGate
       ? { before: await readAppBeforeUpload(step, step.liveGate, io, deps) }
       : undefined;
+    if (step.name === "resident") uploadState(true);
     const r = await exec(step, io);
     const outcome = classifyDeployOutput(r.code, r.output);
     if (outcome.kind === "deployed") {
@@ -1164,6 +1190,16 @@ async function deployStepLoop(
         reason: `deployed but NOT live — ${gate.reason}`,
       };
     }
+    if (outcome.kind === "preflight-refused" && step.name === "resident") {
+      // Only the structured resident preflight refusal, with no upload line,
+      // proves that this attempt did not change the Worker image.
+      if (
+        !/^\[resident-preflight\] preflight REFUSED:/m.test(r.output) ||
+        /\bUploaded\b|Current Version ID:/i.test(r.output)
+      )
+        return uncertainResidentUpload(outcome.reason);
+      uploadState(false);
+    }
     if (outcome.kind === "preflight-refused" && step.retryOnPreflightRefusal) {
       const left = deadline - deps.now();
       // The budget ran out with the refusal standing: the step FAILS by name,
@@ -1186,6 +1222,7 @@ async function deployStepLoop(
       await deps.sleep(plan.pollMs);
       continue;
     }
+    if (step.name === "resident" && outcome.kind === "failed") return uncertainResidentUpload(outcome.reason);
     return { ok: false, live: "not deployed", reason: outcome.reason };
   }
 }
