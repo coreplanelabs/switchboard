@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.267.0](https://github.com/coreplanelabs/switchboard/compare/v1.266.1...v1.267.0) (2026-09-28)
+
+
+### Features
+
+* **docs:** isolate screenshot capture profiles ([#2357](https://github.com/coreplanelabs/switchboard/issues/2357)) ([0e7a39d](https://github.com/coreplanelabs/switchboard/commit/0e7a39d9aa320ea35d143d5b4d2230e92f6075d9))
+
+
+### Bug fixes
+
+* **deploy:** wait for resident registry readiness ([#2429](https://github.com/coreplanelabs/switchboard/issues/2429)) ([8b485af](https://github.com/coreplanelabs/switchboard/commit/8b485af6de09c55cca7ca772e4178d4dd9b7edee))
+* **dispatcher:** preserve attached plans through routing ([#2434](https://github.com/coreplanelabs/switchboard/issues/2434)) ([bb4ca75](https://github.com/coreplanelabs/switchboard/commit/bb4ca759cc9eda5cec44613c3305ab0939f11051))
+* **docs:** refresh screenshot manifests after main changes ([#2441](https://github.com/coreplanelabs/switchboard/issues/2441)) ([722ec26](https://github.com/coreplanelabs/switchboard/commit/722ec26eed0fd3a134a5f222b16e18a8972316b3))
+* **harness:** classify pi terminal outcomes honestly ([#2345](https://github.com/coreplanelabs/switchboard/issues/2345)) ([fdad5f8](https://github.com/coreplanelabs/switchboard/commit/fdad5f879afc897c6607b50e8b3a116b4cc73a7e))
+* **process:** allow real shell cache test time in CI ([#2445](https://github.com/coreplanelabs/switchboard/issues/2445)) ([c181305](https://github.com/coreplanelabs/switchboard/commit/c181305632e293f27ba969ab5b30147657944c29))
+* **process:** stabilize memory Worker CI ([#2440](https://github.com/coreplanelabs/switchboard/issues/2440)) ([76af9a7](https://github.com/coreplanelabs/switchboard/commit/76af9a7f72c356399bdb74d01bc34e6080a3f1db))
+* **providers:** observe unexpected proxy response closes ([#2347](https://github.com/coreplanelabs/switchboard/issues/2347)) ([7096251](https://github.com/coreplanelabs/switchboard/commit/7096251496a23843c14a92bf6ad1d00d0902cd9f))
+* **ship:** carry original cost cap through recovery ([#2439](https://github.com/coreplanelabs/switchboard/issues/2439)) ([29dd4d7](https://github.com/coreplanelabs/switchboard/commit/29dd4d7ca1e269ec8d042609f4575eda120b026d))
+* **ship:** recover incomplete salvage-pushed findings ([#2411](https://github.com/coreplanelabs/switchboard/issues/2411)) ([848fabd](https://github.com/coreplanelabs/switchboard/commit/848fabd32c6841f5dbe818b0cd425f0082660677))
+
 ## [1.266.1](https://github.com/coreplanelabs/switchboard/compare/v1.266.0...v1.266.1) (2026-09-26)
 
 
