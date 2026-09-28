@@ -1243,6 +1243,9 @@ type Phase =
        *  must independently prove an open branch and pull request at exactly
        *  `childHead`; neither a push record nor this flag is remote evidence. */
       findingsReady?: true;
+      /** A capped recovery must verify this pushed head before ending, but
+       * missing findings outputs still forbid review or merge-ready success. */
+      findingsIncomplete?: string[];
       /** The coding child died (`failed` or `interrupted`) after it may have
        *  pushed: the pr-check recovers a pushed branch by opening its pull
        *  request; with nothing pushed the unit ends with the child's own reason. */
@@ -1648,7 +1651,7 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
       return {
         type: "pr-check",
         step: `${roundStep(s, p.round)}/pr-check`,
-        ...(p.dead !== undefined || p.recover === true || p.findingsReady === true
+        ...(p.dead !== undefined || p.recover === true || p.findingsReady === true || p.findingsIncomplete !== undefined
           ? { recover: { runId: p.runId } }
           : {}),
         // The adopted pull request rides the check so the bot can follow it
@@ -1884,7 +1887,8 @@ function capEnding(s: UnitPipelineState, round?: RoundRef, refused?: Carve): Uni
   };
 }
 
-/** A recovered unit keeps its original dollar cap across the checkpoint. */
+/** Recovery cannot buy another child (or claim readiness) after the original
+ * dollar cap is spent. Unknown cost is not zero and never resets that cap. */
 function recoveryCostEnding(s: UnitPipelineState): UnitEnding | undefined {
   const cap = s.input.grant?.costCapUsd;
   if (s.input.recovery === undefined || cap === undefined) return undefined;
@@ -2037,6 +2041,21 @@ function settleCoding(
     if (facts.description !== true) missingOutputs.push("missing updated pull request description");
     const observedHead = fullHead(facts.headSha);
     if (observedHead === undefined) missingOutputs.push("missing final observed commit");
+    if (
+      missingOutputs.length > 0 &&
+      costEnding !== undefined &&
+      observedHead !== undefined &&
+      facts.pushed?.length === 1 &&
+      facts.pushed[0]?.ref === next.input.unit.branch &&
+      facts.pushed[0]?.sha === observedHead
+    )
+      return {
+        state: {
+          ...next,
+          phase: { at: "pr-check", round, runId, childHead: observedHead, findingsIncomplete: missingOutputs },
+        },
+        notes: [],
+      };
     if (missingOutputs.length > 0)
       return end(
         next,
@@ -2656,7 +2675,7 @@ function finishSupersededChild(
     if (phase.round.kind === "findings") {
       const settled = settleCoding(s, phase.round, phase.runId, facts);
       const ready = settled.state.phase;
-      if (ready.at === "pr-check" && ready.findingsReady === true)
+      if (ready.at === "pr-check" && (ready.findingsReady === true || ready.findingsIncomplete !== undefined))
         return settlePrCheck(settled.state, ready, supersession.pullRequest);
       return settled;
     }
@@ -2709,11 +2728,24 @@ export function reconcileTerminalPr(s: UnitPipelineState, pr: PrCheck): UnitPipe
 /** The pull request heading the branch after round 0 or a findings step. */
 function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-check" }>, pr: PrCheck): Transition {
   const { round } = phase;
+  const endIncompleteFindings = (verified: UnitPipelineState): Transition => {
+    const cap = recoveryCostEnding(verified);
+    return end(
+      verified,
+      {
+        kind: "aborted",
+        reason: `${cap?.kind === "aborted" ? `${cap.reason} ` : ""}The completed findings work still lacks required results (${phase.findingsIncomplete?.join("; ")}); no review started.`,
+        round,
+        reviewRounds: verified.reviewRounds,
+      },
+      [roundNote(round, "aborted")],
+    );
+  };
   // A completed findings run is not ready because it says it pushed. It is
   // ready only when this independent read sees the adopted pull request at the
   // exact full observed source head (and, while open, its live branch). Every
   // other remote fact is a resumable stop with no review or merged success.
-  if (phase.findingsReady === true) {
+  if (phase.findingsReady === true || phase.findingsIncomplete !== undefined) {
     const observedHead = fullHead(phase.childHead)!;
     const withPr = pr.state !== "none" ? { ...s, pr: { number: pr.prNumber, url: pr.url } } : s;
     if (pr.state === "merged") {
@@ -2745,6 +2777,8 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
           },
           [roundNote(round, "aborted")],
         );
+      if (phase.findingsIncomplete !== undefined)
+        return endIncompleteFindings({ ...withPr, lastReviewHead: remoteHead });
       return foundMerged(withPr, pr, [roundNote(round, "completed")]);
     }
     if (pr.state !== "open" || pr.headBranchExists === false)
@@ -2788,6 +2822,10 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
         },
         [roundNote(round, "aborted")],
       );
+    const reconciled = { ...withPr, lastReviewHead: remoteHead };
+    if (phase.findingsIncomplete !== undefined) return endIncompleteFindings(reconciled);
+    const costEnding = recoveryCostEnding(reconciled);
+    if (costEnding !== undefined) return end(reconciled, costEnding, [roundNote(round, "aborted")]);
     return roundOnOpenPr(withPr, phase, pr);
   }
   // The merge landed during the round: the child found nothing left to ship

@@ -195,6 +195,57 @@ describe("original-unit recovery accounting", () => {
     expect(renderUnitReport(d.state)).toContain("cost cap");
   });
 
+  it.each([
+    ["matching", HEAD_B, HEAD_B],
+    ["stale", HEAD_A, HEAD_A],
+  ] as const)(
+    "checks a %s remote head before ending incomplete findings at the cost cap",
+    (_case, remoteHead, savedHead) => {
+      const state = openRecoveredUnitPipeline(
+        input({
+          merge: "person",
+          grant: { renewals: 2, costCapUsd: 50 },
+          recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+        }),
+        T0,
+        {
+          kind: "findings",
+          round: 1,
+          pr: { number: 7, url: PR_URL },
+          expectedHeadSha: HEAD_A,
+          reviewRunId: "run-original-review",
+          findings: [FINDING],
+          spendUsd: 48,
+        },
+      );
+      const d = new Driver(state);
+      d.answer({ type: "spawn", outcome: "spawned", runId: "run-findings", at: T0 });
+      d.answer({ type: "wait", outcome: "event" });
+      d.answer({
+        type: "read-record",
+        run: {
+          finished: true,
+          status: "completed",
+          costUsd: 2,
+          dispositions: [],
+          description: false,
+          headSha: HEAD_B,
+          pushed: [{ ref: d.state.input.unit.branch, sha: HEAD_B, by: "push" }],
+        },
+        at: T0 + MIN,
+      });
+      expect(d.action).toMatchObject({ type: "pr-check", step: "U10/recovery/1/findings/pr-check", pr: 7 });
+      d.answer({
+        type: "pr-check",
+        pr: { state: "open", prNumber: 7, url: PR_URL, headSha: remoteHead, headBranchExists: true },
+        at: T0 + 2 * MIN,
+      });
+      expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+      expect(d.state.lastReviewHead).toBe(savedHead);
+      expect(renderUnitReport(d.state)).toContain(_case === "matching" ? "cost cap" : "pull request is at");
+    },
+  );
+
   it("carries admission spend and stops before a further child when the original cost cap is exhausted or unknown", () => {
     for (const costUsd of [2, null]) {
       const state = openRecoveredUnitPipeline(
@@ -263,6 +314,53 @@ describe("original-unit recovery accounting", () => {
 
     expect(d.action).toMatchObject({ type: "end" });
     expect(d.state.spendUsd).toBe(expectedSpend);
+  });
+
+  it("reads a completed findings push at its exact remote head before ending an exhausted recovery", () => {
+    const d = new Driver(
+      openRecoveredUnitPipeline(
+        input({
+          merge: "person",
+          grant: { renewals: 2, costCapUsd: 50 },
+          recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+        }),
+        T0,
+        {
+          kind: "review",
+          round: 2,
+          pr: { number: 7, url: PR_URL },
+          expectedHeadSha: HEAD_A,
+          reviewRunId: "run-original-approval",
+          spendUsd: 48,
+        },
+      ),
+    );
+    runChild(
+      d,
+      "run-full-review",
+      finished({
+        status: "completed",
+        costUsd: 1,
+        reviewHead: HEAD_A,
+        reviewPosted: true,
+        verdict: { verdict: "request_changes", summary: "fix remains", findings: [FINDING] },
+      }),
+      T0 + MIN,
+    );
+    runChild(
+      d,
+      "run-findings",
+      findingsCompleted({ costUsd: 2, dispositions: [FIXED], headSha: HEAD_B }),
+      T0 + 2 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "pr-check" });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 3 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    expect(renderUnitReport(d.state)).toContain("cost cap");
   });
 
   it("never opens a recovery review beyond the original round cap", () => {
