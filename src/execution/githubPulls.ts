@@ -1325,6 +1325,8 @@ async function fetchGithubListPages(base: string, token: string | null): Promise
 }
 
 export interface PullRequestReview {
+  /** Immutable GitHub review identity; legacy or malformed rows carry none. */
+  id?: number;
   author?: { login?: string; id?: number };
   state: string;
   commitId?: string;
@@ -1392,6 +1394,7 @@ export async function fetchPullRequestReviews(pr: {
   if (rows === undefined) return undefined;
   return rows.flatMap((r) => {
     const row = r as {
+      id?: unknown;
       user?: { login?: unknown; id?: unknown };
       state?: unknown;
       commit_id?: unknown;
@@ -1409,6 +1412,7 @@ export async function fetchPullRequestReviews(pr: {
               },
             }
           : {}),
+        ...(typeof row.id === "number" && Number.isSafeInteger(row.id) && row.id > 0 ? { id: row.id } : {}),
         state: row.state,
         ...(typeof row.commit_id === "string" ? { commitId: row.commit_id } : {}),
         ...(typeof row.submitted_at === "string" ? { submittedAt: row.submitted_at } : {}),

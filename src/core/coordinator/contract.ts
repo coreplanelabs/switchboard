@@ -493,6 +493,15 @@ export interface RoundGate {
   findings: string[];
 }
 
+/** A later human review is evidence to investigate, never typed findings. */
+export interface RecoveryReviewEvidence {
+  id: number;
+  reviewer: { login: string; id: number };
+  headSha: string;
+  submittedAt: number;
+  body: string;
+}
+
 /** The original grant and historically priced children carried through a recovery checkpoint. */
 export interface RecoveryAccounting {
   spendUsd: number;
@@ -506,6 +515,7 @@ export interface RecoveryAccounting {
  * the original instance/unit idempotency namespace. */
 export interface OriginalUnitRecovery {
   kind: "findings" | "review";
+  externalReview?: RecoveryReviewEvidence;
   accounting?: RecoveryAccounting;
   round: number;
   expectedHeadSha: string;
@@ -540,6 +550,7 @@ export interface OriginalUnitRecovery {
 }
 
 export interface OriginalUnitRecoveryReceipt {
+  externalReview?: RecoveryReviewEvidence;
   accounting?: RecoveryAccounting;
   reviewRunId: string;
   workflowId: string;
@@ -767,7 +778,18 @@ export const isUnitWakeAnswer = (v: unknown): v is UnitWakeAnswer => {
   );
 };
 
+const isPositiveId = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
 const isDollars = (v: unknown): v is number => isFinite(v) && v >= 0;
+const isRecoveryReview = (v: unknown): v is RecoveryReviewEvidence =>
+  isObject(v) &&
+  isPositiveId(v.id) &&
+  isObject(v.reviewer) &&
+  isText(v.reviewer.login) &&
+  isPositiveId(v.reviewer.id) &&
+  typeof v.headSha === "string" &&
+  /^[0-9a-f]{40}$/i.test(v.headSha) &&
+  isFinite(v.submittedAt) &&
+  typeof v.body === "string";
 const isRecoveryAccounting = (v: unknown): v is RecoveryAccounting =>
   isObject(v) &&
   isDollars(v.spendUsd) &&
@@ -839,6 +861,12 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
       STEP_NAME_PATTERN.test(r.recovery.step) &&
       isText(r.recovery.reviewRunId) &&
       (r.recovery.accounting === undefined || isRecoveryAccounting(r.recovery.accounting)) &&
+      (r.recovery.externalReview === undefined ||
+        (isRecoveryReview(r.recovery.externalReview) &&
+          r.recovery.kind === "review" &&
+          isRecoveryAccounting(r.recovery.accounting) &&
+          r.recovery.findings === undefined &&
+          r.recovery.findingsRunId === undefined)) &&
       (r.recovery.findingsRunId === undefined || isText(r.recovery.findingsRunId)) &&
       (r.recovery.findingsKey === undefined || isText(r.recovery.findingsKey)) &&
       ((r.recovery.findingsRunId === undefined && r.recovery.findingsKey === undefined) ||
@@ -869,6 +897,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
     r.recoveryReceipt !== undefined &&
     (!isObject(r.recoveryReceipt) ||
       !isText(r.recoveryReceipt.reviewRunId) ||
+      (r.recoveryReceipt.externalReview !== undefined && !isRecoveryReview(r.recoveryReceipt.externalReview)) ||
       (r.recoveryReceipt.accounting !== undefined && !isRecoveryAccounting(r.recoveryReceipt.accounting)) ||
       typeof r.recoveryReceipt.workflowId !== "string" ||
       !INSTANCE_ID_PATTERN.test(r.recoveryReceipt.workflowId) ||

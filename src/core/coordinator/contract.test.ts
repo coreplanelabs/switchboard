@@ -373,6 +373,31 @@ describe("isCoordinatorUnit — one unit's row", () => {
     expect(isCoordinatorUnit({ ...claimed, idle: { why: "aborted", at: 3_000, renewalsLeft: 0, wakes: 0 } })).toBe(
       false,
     );
+    const externalReview = {
+      id: 5324414426,
+      reviewer: { login: "alice", id: 101 },
+      headSha: "a".repeat(40),
+      submittedAt: 2_000,
+      body: "inspect",
+    };
+    const postApproval = { ...recovery, kind: "review", findings: undefined, externalReview, accounting };
+    expect(isCoordinatorUnit({ ...claimed, recovery: postApproval })).toBe(true);
+    expect(isCoordinatorUnit({ ...claimed, recovery: { ...postApproval, accounting: undefined } })).toBe(false);
+    expect(
+      isCoordinatorUnit({ ...claimed, recovery: { ...postApproval, externalReview: { ...externalReview, id: -1 } } }),
+    ).toBe(false);
+    expect(
+      isCoordinatorUnit({ ...claimed, recovery: { ...postApproval, accounting: { ...accounting, spendUsd: 0 } } }),
+    ).toBe(false);
+    expect(
+      isCoordinatorUnit({
+        ...claimed,
+        recovery: {
+          ...postApproval,
+          accounting: { ...accounting, children: [...accounting.children, ...accounting.children], spendUsd: 30 },
+        },
+      }),
+    ).toBe(false);
     expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, remainingMs: 0 } })).toBe(false);
     expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, workflowId: "bad:id" } })).toBe(false);
     expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, previousBinding: {} } })).toBe(true);

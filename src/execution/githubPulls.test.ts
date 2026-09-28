@@ -783,6 +783,7 @@ describe("githubPulls", () => {
           new Response(
             JSON.stringify([
               {
+                id: 5324414426,
                 user: { login: "acme-switchboard[bot]", id: 318072483 },
                 state: "COMMENTED",
                 commit_id: "c".repeat(40),
@@ -797,6 +798,7 @@ describe("githubPulls", () => {
       );
       expect(await fetchPullRequestReviews({ repo: "acme/api", number: 7 })).toEqual([
         {
+          id: 5324414426,
           author: { login: "acme-switchboard[bot]", id: 318072483 },
           state: "COMMENTED",
           commitId: "c".repeat(40),
