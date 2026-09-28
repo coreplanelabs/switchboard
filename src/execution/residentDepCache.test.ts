@@ -161,38 +161,43 @@ describe("depCacheScript nested node_modules (a lockfile that installs into a wo
   it("a checkout-backed script (no store entry) has no nested walk — the pre-store behavior is untouched", () => {
     expect(depCacheScript("/workspace/checkout", "/wt", "worker4")).not.toContain("nested=");
   });
-  it("runs for real: the nested node_modules lands in the tree as shared inodes, its mutable listing and nested= line are emitted; a tree without the parent dir is skipped silently", () => {
-    const dir = mkdtempSync(join(tmpdir(), "nested-"));
-    try {
-      const entry = join(dir, "deps", "k");
-      const wt = join(dir, "wt");
-      mkdirSync(join(entry, "node_modules", "pkg"), { recursive: true });
-      writeFileSync(join(entry, "node_modules", "pkg", "index.js"), "1");
-      mkdirSync(join(entry, "deploy", "w", "node_modules", ".cache"), { recursive: true });
-      writeFileSync(join(entry, "deploy", "w", "node_modules", "p.js"), "1");
-      mkdirSync(join(entry, "gone", "node_modules"), { recursive: true }); // tree has no `gone/`
-      mkdirSync(join(wt, "deploy", "w"), { recursive: true });
-      const me = execFileSync("id", ["-un"], { encoding: "utf8" }).trim();
-      const script = depCacheScript(join(dir, "checkout"), wt, me, {
-        nodeModulesSrc: join(entry, "node_modules"),
-      });
-      const out = execFileSync("sh", ["-c", script], { encoding: "utf8" });
-      const parsed = parseDepCacheScriptOutput(out);
-      expect(parsed.failedStep).toBeNull();
-      expect(parsed.nested).toEqual(["deploy/w/node_modules"]);
-      expect(existsSync(join(wt, "deploy", "w", "node_modules", "p.js"))).toBe(true);
-      expect(existsSync(join(wt, "gone"))).toBe(false);
-      expect(parsed.mutableListing).toContain(join(wt, "deploy", "w", "node_modules", ".cache"));
-      // mutableCachePaths scoped to the nested root picks up its cache, and
-      // scoped to the top-level root it does not — the swap stays per root.
-      expect(mutableCachePaths(join(wt, "deploy", "w", "node_modules"), parsed.mutableListing)).toEqual([
-        join(wt, "deploy", "w", "node_modules", ".cache"),
-      ]);
-      expect(mutableCachePaths(join(wt, "node_modules"), parsed.mutableListing)).toEqual([]);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  // The real shell forks cp, find, chown and sh; shared Linux CI can take more than 5s.
+  it(
+    "runs for real: the nested node_modules lands in the tree as shared inodes, its mutable listing and nested= line are emitted; a tree without the parent dir is skipped silently",
+    { timeout: 15_000 },
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), "nested-"));
+      try {
+        const entry = join(dir, "deps", "k");
+        const wt = join(dir, "wt");
+        mkdirSync(join(entry, "node_modules", "pkg"), { recursive: true });
+        writeFileSync(join(entry, "node_modules", "pkg", "index.js"), "1");
+        mkdirSync(join(entry, "deploy", "w", "node_modules", ".cache"), { recursive: true });
+        writeFileSync(join(entry, "deploy", "w", "node_modules", "p.js"), "1");
+        mkdirSync(join(entry, "gone", "node_modules"), { recursive: true }); // tree has no `gone/`
+        mkdirSync(join(wt, "deploy", "w"), { recursive: true });
+        const me = execFileSync("id", ["-un"], { encoding: "utf8" }).trim();
+        const script = depCacheScript(join(dir, "checkout"), wt, me, {
+          nodeModulesSrc: join(entry, "node_modules"),
+        });
+        const out = execFileSync("sh", ["-c", script], { encoding: "utf8" });
+        const parsed = parseDepCacheScriptOutput(out);
+        expect(parsed.failedStep).toBeNull();
+        expect(parsed.nested).toEqual(["deploy/w/node_modules"]);
+        expect(existsSync(join(wt, "deploy", "w", "node_modules", "p.js"))).toBe(true);
+        expect(existsSync(join(wt, "gone"))).toBe(false);
+        expect(parsed.mutableListing).toContain(join(wt, "deploy", "w", "node_modules", ".cache"));
+        // mutableCachePaths scoped to the nested root picks up its cache, and
+        // scoped to the top-level root it does not — the swap stays per root.
+        expect(mutableCachePaths(join(wt, "deploy", "w", "node_modules"), parsed.mutableListing)).toEqual([
+          join(wt, "deploy", "w", "node_modules", ".cache"),
+        ]);
+        expect(mutableCachePaths(join(wt, "node_modules"), parsed.mutableListing)).toEqual([]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("depCacheScript (all five dirs in ONE fork, tagged output)", () => {
