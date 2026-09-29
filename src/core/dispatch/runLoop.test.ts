@@ -6080,6 +6080,13 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       expect(record.pushed).toEqual([{ ref, sha: head, by: "push" }]);
       expect(record.events.some((e) => e.type === "run_note" && e.kind === "publication_blocked")).toBe(false);
       expect(commands.some((command) => /^git(?: -C '[^']+')? push/.test(command))).toBe(false);
+      if (seeded) {
+        expect(commands).toContain("git -C '/workspace/checkout' status --porcelain");
+        expect(commands).toContain("git -C '/workspace/checkout' rev-parse HEAD");
+        expect(commands.some((command) => command.startsWith("git status") || command.startsWith("ls -d */.git"))).toBe(
+          false,
+        );
+      }
       await out.releaseWorkspace();
     },
   );
