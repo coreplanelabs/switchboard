@@ -32,7 +32,7 @@ import {
 export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "unavailable" };
 export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type CompareAndReplaceUnitResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
-export type AppendEventResult = { ok: true; seq: number } | { ok: false; reason: "unavailable" };
+export type AppendEventResult = { ok: true; seq: number } | { ok: false; reason: "ended" | "unavailable" };
 export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type AnswerWakeResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type MarkStoppedResult = { ok: true } | { ok: false; reason: "unknown_instance" | "unavailable" };
@@ -101,7 +101,7 @@ export interface CoordinatorInstanceStore {
    *  sibling of the unit rows, never a
    *  field on them: `putUnits` replaces a row whole, and an append landing
    *  between a route's read and its put would be lost (record 0051). */
-  appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult>;
+  appendEvent(key: UnitEventKey, event: ThreadEventInput, requireActive?: boolean): Promise<AppendEventResult>;
   /** The unit's events in sequence order; `unconsumedOnly` filters to the rows no spawn or run has consumed. */
   listEvents(key: UnitEventKey, unconsumedOnly?: boolean): Promise<ThreadEvent[]>;
   /** Named sequences consumed by a spawn step or a run — idempotent: a row already consumed keeps its first consumer. */
@@ -230,7 +230,15 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     if (instance.stop === undefined) this.rows.set(instanceId, JSON.stringify({ ...instance, stop: { at } }));
     return { ok: true };
   }
-  async appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult> {
+  async appendEvent(key: UnitEventKey, event: ThreadEventInput, requireActive = false): Promise<AppendEventResult> {
+    if (requireActive) {
+      const instanceText = this.rows.get(key.instanceId);
+      const unitText = this.units.get(unitKey(key));
+      const instance = instanceText ? (JSON.parse(instanceText) as CoordinatorInstance) : undefined;
+      const unit = unitText ? (JSON.parse(unitText) as CoordinatorUnit) : undefined;
+      if (!instance || !unit || instance.stop || unit.ending || unit.recovery || unit.recoveryHold)
+        return { ok: false, reason: "ended" };
+    }
     const list = this.events.get(unitKey(key)) ?? [];
     // A channel message id and the ship hand-off's seed id are durable event
     // identities. Returning the first row makes an append retry idempotent;
@@ -318,7 +326,7 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
   async markStopped(_instanceId: string, _at: number): Promise<MarkStoppedResult> {
     return { ok: false, reason: "unavailable" };
   }
-  async appendEvent(_key: UnitEventKey, _event: ThreadEventInput): Promise<AppendEventResult> {
+  async appendEvent(_key: UnitEventKey, _event: ThreadEventInput, _requireActive = false): Promise<AppendEventResult> {
     return { ok: false, reason: "unavailable" };
   }
   async listEvents(_key: UnitEventKey, _unconsumedOnly?: boolean): Promise<ThreadEvent[]> {
@@ -508,15 +516,16 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     throw new Error(`coordinator store /runs/coordinator/stop: unexpected answer (HTTP ${r.status})`);
   }
 
-  async appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult> {
+  async appendEvent(key: UnitEventKey, event: ThreadEventInput, requireActive = false): Promise<AppendEventResult> {
     // The state Worker caps again after assigning the sequence, but its HTTP
     // request-body fence runs first. Cap here too so an accepted 5–10 MB file
     // reaches that boundary as the small dropped-count row the store contract
     // promises, never as a transport-level 413.
     const capped = capThreadEvent(event);
-    const r = await this.post("/runs/coordinator/events/append", { ...key, event: capped });
-    const d = r.data as { ok?: unknown; seq?: unknown };
+    const r = await this.post("/runs/coordinator/events/append", { ...key, event: capped, requireActive });
+    const d = r.data as { ok?: unknown; seq?: unknown; reason?: unknown };
     if (d.ok === true && typeof d.seq === "number") return { ok: true, seq: d.seq };
+    if (r.status === 409 && d.reason === "ended") return { ok: false, reason: "ended" };
     throw new Error(`coordinator store /runs/coordinator/events/append: unexpected answer (HTTP ${r.status})`);
   }
 

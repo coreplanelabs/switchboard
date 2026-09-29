@@ -2917,9 +2917,29 @@ export class RunHistoryDO extends DurableObject<Env> {
     instanceId: string,
     unit: string,
     event: Omit<ThreadEvent, "seq">,
-  ): Promise<{ ok: true; seq: number }> {
+    requireActive = false,
+  ): Promise<{ ok: true; seq: number } | { ok: false; reason: "ended" }> {
     let seq = 1;
+    let ended = false;
     this.ctx.storage.transactionSync(() => {
+      if (requireActive) {
+        const instanceText = this.sql
+          .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, instanceId)
+          .toArray()[0]?.json;
+        const unitText = this.sql
+          .exec<{ json: string }>(
+            `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+            instanceId,
+            unit,
+          )
+          .toArray()[0]?.json;
+        const instance = instanceText ? (JSON.parse(instanceText) as CoordinatorInstance) : undefined;
+        const row = unitText ? (JSON.parse(unitText) as CoordinatorUnit) : undefined;
+        if (!instance || !row || instance.stop || row.ending || row.recovery || row.recoveryHold) {
+          ended = true;
+          return;
+        }
+      }
       if (event.id !== undefined) {
         const existing = this.sql
           .exec<{ seq: number; json: string }>(
@@ -2949,7 +2969,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify(capped),
       );
     });
-    return { ok: true, seq };
+    return ended ? { ok: false, reason: "ended" } : { ok: true, seq };
   }
 
   /** The unit's events in sequence order; `unconsumedOnly` filters to the rows nothing has consumed. */
@@ -6239,11 +6259,19 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (pathname === "/runs/coordinator/events/append") {
       if (!isThreadEvent({ ...(b.event as Record<string, unknown>), seq: 1 }))
         return json({ error: "event must be a thread event (without its seq)" }, 400);
+      if (b.requireActive !== undefined && typeof b.requireActive !== "boolean")
+        return json({ error: "requireActive must be boolean" }, 400);
       // The store assigns the sequence and the consumer: a caller's `seq` or
       // `consumedBy` is dropped, so no row is born consumed in its JSON while
       // its column still lists it unconsumed.
       const { seq: _ignored, consumedBy: _fresh, ...event } = b.event as ThreadEvent;
-      const r = await stub.appendUnitEvent(b.instanceId, b.unit, event as Omit<ThreadEvent, "seq" | "consumedBy">);
+      const r = await stub.appendUnitEvent(
+        b.instanceId,
+        b.unit,
+        event as Omit<ThreadEvent, "seq" | "consumedBy">,
+        b.requireActive === true,
+      );
+      if (!r.ok) return json(r, 409);
       console.log(`[runs/coordinator/events/append] ${key.value} ${b.instanceId}:${b.unit} seq ${r.seq}`);
       return json(r);
     }

@@ -164,8 +164,8 @@ export function createMainTaskActions(deps: MainTaskActionsDeps) {
     if (!isThreadEvent({ ...event, seq: 1 })) return { kind: "invalid" };
     const key = { instanceId: instance.id, unit: unit.unit };
     try {
-      const appended = await deps.instances.appendEvent(key, event);
-      if (!appended.ok) return { kind: "unavailable" };
+      const appended = await deps.instances.appendEvent(key, event, true);
+      if (!appended.ok) return { kind: appended.reason === "ended" ? "ended" : "unavailable" };
       const persisted = (await deps.instances.listEvents(key)).find((row) => row.id === id);
       // An id is a replay key, never permission to silently replace a prior steer.
       if (!persisted) return { kind: "unavailable" };

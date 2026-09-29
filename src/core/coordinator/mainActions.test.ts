@@ -213,6 +213,28 @@ describe("main task actions", () => {
     });
   });
 
+  it("a stop racing the append leaves no steer on a terminal unit", async () => {
+    const { instances } = await fixture();
+    const actions = createMainTaskActions({
+      instances: {
+        getMainTask: instances.getMainTask.bind(instances),
+        get: instances.get.bind(instances),
+        listUnits: instances.listUnits.bind(instances),
+        appendEvent: async (key, event, guard) => {
+          await instances.markStopped(INSTANCE.id, 2_000);
+          return instances.appendEvent(key, event, guard);
+        },
+        listEvents: instances.listEvents.bind(instances),
+      },
+      plane: { stop: vi.fn() },
+      clock: () => 2_000,
+    });
+    expect(await actions.steer(actor(), { actId: ACT, eventId: "race-1", words: "Continue" })).toEqual({
+      kind: "ended",
+    });
+    expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: "task" })).toEqual([]);
+  });
+
   it("a mismatched stored brief refuses a steer before writing an event", async () => {
     const { instances } = await fixture();
     const actions = createMainTaskActions({

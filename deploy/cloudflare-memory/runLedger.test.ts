@@ -1413,6 +1413,48 @@ describe("run ledger — the coordinator's unit events (record 0051's reply-as-e
     ...over,
   });
 
+  it("guards a main-task steer against a stop in the same append transaction", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: INSTANCE_ID,
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+      repo: "acme/api",
+      branch: "plan/steer/u12",
+      base: "main",
+      createdAt: 1_000,
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: INSTANCE_ID,
+      unit: "U12",
+      slug: "u12",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+    };
+    const body = { storeKey: key, instanceId: INSTANCE_ID, unit: "U12", requireActive: true };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] })).status).toBe(200);
+    expect(
+      await post("/runs/coordinator/events/append", { ...body, event: event("first", { id: "steer-1" }) }),
+    ).toEqual({
+      status: 200,
+      data: { ok: true, seq: 1 },
+    });
+    expect((await post("/runs/coordinator/stop", { storeKey: key, instanceId: INSTANCE_ID, at: 6_000 })).status).toBe(
+      200,
+    );
+    expect(
+      await post("/runs/coordinator/events/append", { ...body, event: event("later", { id: "steer-2" }) }),
+    ).toEqual({
+      status: 409,
+      data: { ok: false, reason: "ended" },
+    });
+    expect((await post("/runs/coordinator/events/list", body)).data).toMatchObject({ events: [{ text: "first" }] });
+  });
+
   it("append assigns sequences in order and caps per event; list filters unconsumed; mark-consumed is idempotent; a put of the unit row leaves the events untouched", async () => {
     const key = storeKey();
     const body = { storeKey: key, instanceId: INSTANCE_ID, unit: "U12" };
