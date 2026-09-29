@@ -4,6 +4,7 @@ import { recordingSink } from "../testing/recordingSink.js";
 import { createAlsContext, createTickingClock } from "../testing/tickingClock.js";
 import { classifyError } from "./classify.js";
 import { createTracer, ERROR_MESSAGE_CAP, sanitizeSpanName, SPAN_NAME_MAX } from "./tracer.js";
+import type { SpanRecord, SpanRootIdentity, SpanSink } from "./types.js";
 
 /** The W3C Trace Context specification's own example trace id and parent span id. */
 const W3C_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
@@ -179,6 +180,29 @@ describe("createTracer", () => {
     expect(root.record().attrs).toEqual({ channel: "slack", status: "completed" });
     root.end();
     expect(sink.ended("request")?.attrs).toEqual({ channel: "slack", status: "completed" });
+  });
+
+  it("shares only the local root identity with descendant ends while records stay snapshots", () => {
+    const ends: Array<{ record: SpanRecord; root?: SpanRootIdentity }> = [];
+    const sink: SpanSink = { onEnd: (record, root) => void ends.push({ record, root }) };
+    const tracer = createTracer({ clock: () => 1_000 });
+    const root = tracer.start("request", {
+      sinks: [sink],
+      attrs: { runId: "first" },
+      parent: { traceId: W3C_TRACE, parentId: W3C_SPAN },
+    });
+    const child = root.start("run.agent", { attrs: { runId: "child" } });
+    child.end();
+    root.end("ok", { runId: "next" });
+    child.graft("post.history_write", { startedAt: 1_000, endedAt: 1_010 });
+    expect(ends.map((end) => end.root)).toEqual(Array(3).fill({ name: "request", runId: "next" }));
+    expect(ends[0]!.root).toBe(ends[2]!.root);
+    expect(ends[0]!.record.attrs.runId).toBe("child");
+    expect(ends[2]!.record.attrs.runId).toBeUndefined();
+    expect(ends[0]!.record).not.toHaveProperty("rootIdentity");
+    tracer.start("request", { sinks: [sink] }).end("ok", { runId: "other" });
+    expect(ends[3]!.root).toEqual({ name: "request", runId: "other" });
+    expect(ends[0]!.root?.runId).toBe("next");
   });
 
   it("the test context propagates the current span through awaits; a bare await under the root sees none", async () => {

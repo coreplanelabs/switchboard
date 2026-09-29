@@ -129,6 +129,7 @@ channels:
           expect(prompt.user).not.toContain("https://files.example/archive.zip");
           expect(prompt.user).toContain("<request>\nship F0PLAN\n</request>");
           expect(prompt.system).toContain("an opaque file identifier in the text does not identify an existing run");
+          expect(prompt.system).toContain("A generic repository name in prose is insufficient");
           return {
             tool: OPERATOR_BIND_TOOL,
             input: { preset: "ship", repo: "acme/atlas", reason: "the attached plan targets atlas" },
@@ -172,7 +173,7 @@ channels:
     );
     expect(result).toMatchObject({
       outcome: "binds",
-      binds: [{ line: "agent:ship ship F0PLAN", repo: "acme/atlas" }],
+      binds: [{ line: "agent:ship ship F0PLAN", repo: "acme/atlas", repoSource: "attachment" }],
     });
   });
   it("the turn's tools are ask, bind_preset with the projection's presets as the enum, each command's own tool, then the reads — no decide tool and no refusal exists", () => {
@@ -227,11 +228,11 @@ channels:
         tool: OPERATOR_BIND_TOOL,
         input: { preset: "research", repo: "acme/api", reason: "the thread target" },
       },
-      ctxOf({ requestText: "review again" }),
+      ctxOf({ requestText: "review again", threadRepo: "acme/api" }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
     expect(turn.decision.binds).toEqual([
-      { line: "agent:research review again", reason: "the thread target", repo: "acme/api" },
+      { line: "agent:research review again", reason: "the thread target", repo: "acme/api", repoSource: "thread" },
     ]);
     expect(
       parseOperatorTurn(
@@ -239,6 +240,199 @@ channels:
         ctxOf(),
       ),
     ).toMatchObject({ kind: "violation", violation: expect.stringContaining("owner/name") as unknown as string });
+  });
+
+  it("rejects a repository absent from the request and inherited context, even when it is onboarded", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "other/tooling", reason: "review PR" } },
+      ctxOf({ requestText: "review PR #7", presets: ["review"], residentRepos: ["acme/api", "other/tooling"] }),
+    );
+    expect(turn).toMatchObject({ kind: "violation", violation: expect.stringContaining("no evidence") });
+  });
+
+  it("a bare-PR review with no grounded repository asks before it can bind", async () => {
+    const answers: RouteToolCall[] = [
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", reason: "review PR" } },
+      { tool: OPERATOR_ASK_TOOL, input: { text: "Which repository owns PR #7?", reason: "missing target" } },
+    ];
+    const answer = await runOperator(
+      input({ text: "review PR #7", projection: projectionOf(["review"]), residentRepos: ["acme/api"] }),
+      async () => answers.shift()!,
+    );
+    expect(answer.decision).toMatchObject({ kind: "question", text: "Which repository owns PR #7?" });
+    expect(answer.attempts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ violation: expect.stringContaining("repository") })]),
+    );
+  });
+
+  it.each([
+    "review PR #7; the example mentions `acme/api`, but I haven't named the target",
+    "review PR #7; the example mentions acme/api, but I haven't named the target",
+    "review PR #7; acme/api is a path cited only as context",
+    "review PR #7; see packages/acme/api/routes.ts for context",
+    "review PR #7; the example is `in acme/api`",
+    "review PR #7; in `example` acme/api is only context",
+    "review PR #7; example:\n```\nin acme/api\n```",
+    "review PR #7; the example is `https://github.com/acme/api/pull/7`",
+    "review PR #7; the example is `acme/api#7`",
+  ])("rejects incidental request slugs as target evidence: %s", (requestText) => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "mentions API" } },
+      ctxOf({ requestText, presets: ["review"], residentRepos: ["acme/api"] }),
+    );
+    expect(turn).toMatchObject({ kind: "violation", violation: expect.stringContaining("no evidence") });
+  });
+
+  it.each([
+    "review https://github.com/acme/api/pull/7",
+    "review <https://github.com/acme/api/pull/7|PR #7>",
+    "review acme/api#7",
+    "review PR #7 in Acme/Api",
+    "agent:review in acme/api: PR #7",
+    "review PR #7 on the acme/api repository",
+  ])("accepts explicit request targets: %s", (requestText) => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "explicit target" } },
+      ctxOf({ requestText, presets: ["review"] }),
+    );
+    expect(turn).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ repo: "acme/api", repoSource: "request" }] },
+    });
+  });
+
+  it("an addressed review target outranks a contextual repository URL", () => {
+    const requestText = "review PR #7 in acme/web; see https://github.com/acme/api for context";
+    const wrong = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "context link" } },
+      ctxOf({ requestText, presets: ["review"], channelRepo: "acme/api" }),
+    );
+    expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("conflicts") });
+    const target = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/web", reason: "addressed target" } },
+      ctxOf({ requestText, presets: ["review"] }),
+    );
+    expect(target).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ repo: "acme/web", repoSource: "request" }] },
+    });
+  });
+
+  it("an addressed review PR outranks a contextual PR citation", () => {
+    const requestText = "review PR #7 in acme/web; see https://github.com/acme/api/pull/12 for context";
+    const wrong = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "context citation" } },
+      ctxOf({ requestText, presets: ["review"], channelRepo: "acme/api" }),
+    );
+    expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("conflicts") });
+    const target = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/web", reason: "addressed target" } },
+      ctxOf({ requestText, presets: ["review"] }),
+    );
+    expect(target).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ repo: "acme/web", repoSource: "request" }] },
+    });
+  });
+
+  it("a contextual PR citation cannot override a thread review target through the channel default", () => {
+    const requestText = "review PR #7; see https://github.com/acme/api/pull/9 for context";
+    const wrong = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "channel default" } },
+      ctxOf({ requestText, presets: ["review"], threadRepo: "acme/web", channelRepo: "acme/api" }),
+    );
+    expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("thread") });
+    const target = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/web", reason: "thread target" } },
+      ctxOf({ requestText, presets: ["review"], threadRepo: "acme/web", channelRepo: "acme/api" }),
+    );
+    expect(target).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ repo: "acme/web", repoSource: "thread" }] },
+    });
+  });
+
+  it("a contextual repository URL is not an explicit review target", () => {
+    const requestText = "review PR #7; see https://github.com/acme/api for context";
+    const wrong = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "context link" } },
+      ctxOf({ requestText, presets: ["review"] }),
+    );
+    expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("no evidence") });
+  });
+
+  it("a preceding contextual repository URL is not an explicit review target", () => {
+    const requestText = "See https://github.com/acme/api for context; review PR #7";
+    const wrong = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "context link" } },
+      ctxOf({ requestText, presets: ["review"] }),
+    );
+    expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("no evidence") });
+  });
+
+  it("an address in a preceding contextual PR citation is not review target evidence", () => {
+    const requestText = "See https://github.com/acme/api/pull/9 in acme/api for context; review PR #7";
+    const wrong = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "context citation" } },
+      ctxOf({ requestText, presets: ["review"] }),
+    );
+    expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("no evidence") });
+  });
+
+  it("an explicit repository URL survives a later contextual PR citation", () => {
+    const requestText = "review https://github.com/acme/web PR #7; see https://github.com/acme/api/pull/9 for context";
+    const wrong = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "context citation" } },
+      ctxOf({ requestText, presets: ["review"], channelRepo: "acme/api" }),
+    );
+    expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("conflicts") });
+    const target = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/web", reason: "explicit target" } },
+      ctxOf({ requestText, presets: ["review"], channelRepo: "acme/api" }),
+    );
+    expect(target).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ repo: "acme/web", repoSource: "request" }] },
+    });
+  });
+
+  it("a contextual PR's repository address is not evidence for the bare review", () => {
+    const requestText = "review PR #7; see PR #8 in acme/api for context";
+    const wrong = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "context address" } },
+      ctxOf({ requestText, presets: ["review"] }),
+    );
+    expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("no evidence") });
+  });
+
+  it.each([
+    { threadRepo: "acme/api", source: "thread" },
+    { channelRepo: "acme/api", source: "channel" },
+  ])("incidental request text keeps the inherited evidence source: $source", ({ source, ...facts }) => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "inherited target" } },
+      ctxOf({ requestText: "review PR #7; the example mentions `acme/api`", presets: ["review"], ...facts }),
+    );
+    expect(turn).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ repo: "acme/api", repoSource: source }] },
+    });
+  });
+
+  it("records whether a repository came from the request or channel default", () => {
+    const bind = (requestText: string, repo: string, channelRepo?: string) =>
+      parseOperatorTurn(
+        { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo, reason: "review" } },
+        ctxOf({ requestText, presets: ["review"], ...(channelRepo ? { channelRepo } : {}) }),
+      );
+    expect(bind("review https://github.com/acme/api/pull/7", "acme/api")).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ repo: "acme/api", repoSource: "request" }] },
+    });
+    expect(bind("review PR #7", "acme/api", "acme/api")).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ repo: "acme/api", repoSource: "channel" }] },
+    });
   });
 
   it("a typo'd directive head naming the bound preset is stripped from the request the bind carries", () => {
@@ -497,6 +691,52 @@ defaults:
     expect(prompts[0].user).not.toContain("model provider");
   });
 
+  it("shows only authorized onboarded candidates for a bare PR and keeps them distinct from target evidence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-operator-repos-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+restrict:
+  repos: [acme/private]
+`,
+    );
+    const config = new ConfigStore(path, join(dir, "overrides.json"));
+    const prompts: RoutePrompt[] = [];
+    const residentSlugs = vi.fn(async () => ["acme/private", "acme/api", "bad-slug"]);
+    const result = await operatorStage(
+      {
+        config,
+        residentSlugs,
+        operatorModel: async (prompt) => {
+          prompts.push(prompt);
+          return { tool: OPERATOR_ASK_TOOL, input: { text: "Which repository contains PR #7?", reason: "bare PR" } };
+        },
+      },
+      {
+        msg: { channelId: "slack:CX", userId: "slack:UX", text: "review PR #7", threadKey: "slack:CX:1.0" },
+        mode: "on",
+      },
+    );
+    expect(residentSlugs).toHaveBeenCalledTimes(1);
+    expect(prompts[0].system).toContain("Installation organization: `acme`");
+    expect(prompts[0].user).toContain("Onboarded repository candidates: `acme/api`");
+    expect(prompts[0].user).not.toContain("acme/private");
+    expect(prompts[0].user).not.toContain("bad-slug");
+    expect(result?.repoContext).toEqual({
+      organization: "acme",
+      candidateStatus: "available",
+      candidateCount: 1,
+    });
+  });
+
   it("filters the MCP catalog through the requester's preset authorization before the operator sees it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-operator-source-auth-"));
     const path = join(dir, "config.yaml");
@@ -550,6 +790,210 @@ restrict:
 });
 
 describe("runOperator — the loop over a scripted model", () => {
+  it("an incidental slug is repaired into a repository question rather than a review bind", async () => {
+    const answers: RouteToolCall[] = [
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "mentions API" } },
+      { tool: OPERATOR_ASK_TOOL, input: { text: "Which repository owns PR #7?", reason: "no target" } },
+    ];
+    const model = vi.fn(async () => answers.shift()!);
+    const answer = await runOperator(
+      input({
+        text: "review PR #7; the example mentions `acme/api`, but I haven't named the target",
+        projection: projectionOf(["review"]),
+        residentRepos: ["acme/api"],
+      }),
+      model,
+    );
+    expect(answer.decision).toEqual({ kind: "question", text: "Which repository owns PR #7?", reason: "no target" });
+    expect(model).toHaveBeenCalledTimes(2);
+    expect(answer.attempts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ violation: expect.stringContaining("no evidence") })]),
+    );
+  });
+
+  it("an attachment's explicit slug outranks a generic repository name in its prose", async () => {
+    const answers: RouteToolCall[] = [
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/api", reason: "mentions API" } },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/web", reason: "plan target" } },
+    ];
+    const answer = await runOperator(
+      input({
+        text: "ship the attached plan",
+        projection: projectionOf(["ship"]),
+        repoCandidates: ["acme/api", "acme/web"],
+        attachments: [{ name: "plan.md", mediaType: "text/markdown", text: "Target: acme/web. Call the API." }],
+      }),
+      async () => answers.shift()!,
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/web", repoSource: "attachment" }],
+    });
+    expect(answer.attempts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ violation: expect.stringContaining("attachment") })]),
+    );
+  });
+
+  it("a repository link with a path in the attached plan grounds the target", async () => {
+    const answer = await runOperator(
+      input({
+        text: "ship the attached plan",
+        projection: projectionOf(["ship"]),
+        channelRepo: "acme/api",
+        repoCandidates: ["acme/api", "acme/web"],
+        attachments: [
+          {
+            name: "plan.md",
+            mediaType: "text/markdown",
+            text: "Target: https://github.com/acme/web/tree/main.",
+          },
+        ],
+      }),
+      async () => ({ tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/web", reason: "plan target" } }),
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/web", repoSource: "attachment" }],
+    });
+  });
+
+  it.each([
+    { repo: "acme/api", reason: "channel default" },
+    { repo: undefined, reason: "implicit channel default" },
+  ])("a unique attachment target outranks a different channel default: $reason", async ({ repo, reason }) => {
+    const answers: RouteToolCall[] = [
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", ...(repo ? { repo } : {}), reason } },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/web", reason: "plan target" } },
+    ];
+    const answer = await runOperator(
+      input({
+        text: "ship the attached plan",
+        projection: projectionOf(["ship"]),
+        channelRepo: "acme/api",
+        repoCandidates: ["acme/api", "acme/web"],
+        attachments: [{ name: "plan.md", mediaType: "text/markdown", text: "Target: acme/web." }],
+      }),
+      async () => answers.shift()!,
+    );
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ repo: "acme/web", repoSource: "attachment" }] });
+    expect(answer.attempts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ violation: expect.stringContaining("attachment") })]),
+    );
+  });
+
+  it("a repository link in an attachment still conflicts with another release target", async () => {
+    const answers: RouteToolCall[] = [
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/web", reason: "linked repository" } },
+      { tool: OPERATOR_ASK_TOOL, input: { text: "Which repository is the target?", reason: "conflicting evidence" } },
+    ];
+    const answer = await runOperator(
+      input({
+        text: "ship the attached plan",
+        projection: projectionOf(["ship"]),
+        repoCandidates: ["acme/api", "acme/web"],
+        attachments: [
+          {
+            name: "plan.md",
+            mediaType: "text/markdown",
+            text: "Repository: github.com/acme/web/tree/main. Release target: api-v4.",
+          },
+        ],
+      }),
+      async () => answers.shift()!,
+    );
+    expect(answer.decision).toMatchObject({ kind: "question", text: "Which repository is the target?" });
+    expect(answer.attempts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ violation: expect.stringContaining("conflicting") })]),
+    );
+  });
+
+  it("conflicting attachment targets permit a repository-free preset", async () => {
+    const answer = await runOperator(
+      input({
+        text: "summarize this cross-repository comparison",
+        projection: projectionOf(["general"]),
+        repoCandidates: ["acme/api", "acme/web"],
+        attachments: [{ name: "comparison.md", mediaType: "text/markdown", text: "Compare acme/api and acme/web." }],
+      }),
+      async () => ({ tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "summarize" } }),
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ line: expect.stringContaining("agent:general") }],
+    });
+  });
+
+  it("conflicting attachment targets still require a question for a repository preset without a typed repo", async () => {
+    const answers: RouteToolCall[] = [
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", reason: "ship it" } },
+      { tool: OPERATOR_ASK_TOOL, input: { text: "Which repository is the target?", reason: "conflicting evidence" } },
+    ];
+    const answer = await runOperator(
+      input({
+        text: "ship the attached plan",
+        projection: projectionOf(["ship"]),
+        repoCandidates: ["acme/api", "acme/web"],
+        attachments: [
+          { name: "plan.md", mediaType: "text/markdown", text: "Release target web-v4; related acme/api." },
+        ],
+      }),
+      async () => answers.shift()!,
+    );
+    expect(answer.decision).toMatchObject({ kind: "question", text: "Which repository is the target?" });
+  });
+
+  it("conflicting attachment slug and release token require a target question, even with a channel default", async () => {
+    const answers: RouteToolCall[] = [
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/api", reason: "related service" } },
+      {
+        tool: OPERATOR_ASK_TOOL,
+        input: { text: "Which repository is the plan's target?", reason: "conflicting file evidence" },
+      },
+    ];
+    const answer = await runOperator(
+      input({
+        text: "ship the attached plan",
+        projection: projectionOf(["ship"]),
+        channelRepo: "acme/api",
+        repoCandidates: ["acme/api", "acme/web"],
+        attachments: [
+          { name: "plan.md", mediaType: "text/markdown", text: "Release target: web-v4. Related service: acme/api." },
+        ],
+      }),
+      async () => answers.shift()!,
+    );
+    expect(answer.decision).toEqual({
+      kind: "question",
+      text: "Which repository is the plan's target?",
+      reason: "conflicting file evidence",
+    });
+    expect(answer.attempts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ violation: expect.stringContaining("conflicting") })]),
+    );
+  });
+
+  it("an explicit request target resolves conflicting attachment evidence", async () => {
+    const answer = await runOperator(
+      input({
+        text: "ship the attached plan in acme/web",
+        projection: projectionOf(["ship"]),
+        channelRepo: "acme/api",
+        repoCandidates: ["acme/api", "acme/web"],
+        attachments: [
+          { name: "plan.md", mediaType: "text/markdown", text: "Release target: web-v4. Related service: acme/api." },
+        ],
+      }),
+      async () => ({
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", repo: "acme/web", reason: "requested target" },
+      }),
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/web", repoSource: "request" }],
+    });
+  });
+
   it("a local deadline is a timeout refusal when the adapter loses the abort reason", async () => {
     const answer = await runOperator(
       input(),
@@ -1146,18 +1590,36 @@ describe("the projection and the prompt order", () => {
     expect(request).toBeGreaterThan(newer);
   });
 
-  it("the system half carries the repository facts rendered from the docs index, and the refusal rule names the policy ground (issue 2043)", () => {
+  it("the system half treats docs as ordinary work without assigning Switchboard paths to another repo", () => {
     const prompt = buildOperatorPrompt(input({ briefs: ["acme/api: a REST service"] }));
     const projection = prompt.system.indexOf("Presets this author may run");
-    const facts = prompt.system.indexOf("Repository facts:");
     const briefs = prompt.system.indexOf("Repository briefs:");
-    expect(facts).toBeGreaterThan(projection);
-    expect(briefs).toBeGreaterThan(facts);
-    expect(prompt.system).toContain("docs/decisions/*.md");
-    expect(prompt.system).toContain("docs/plans/*.md");
-    expect(prompt.system).toContain("a ship unit edits like any other file");
+    expect(briefs).toBeGreaterThan(projection);
+    expect(prompt.system).not.toContain("docs/decisions/*.md");
+    expect(prompt.system).not.toContain("docs/plans/*.md");
+    expect(prompt.system).toContain("Decision records and plans are ordinary repository docs changes");
+    expect(answerOperatorRead(OPERATOR_READ_TOOLS.repoFacts, input())).toContain("Switchboard source-tree facts");
     expect(prompt.system).toContain("a refusal exists only where the authorization policy makes one");
     expect(prompt.system).toContain("When you cannot act, ask one question or end the turn.");
+  });
+
+  it("names the installation separately from the target and scopes source-tree facts", () => {
+    const prompt = buildOperatorPrompt(
+      input({
+        text: "review PR #7",
+        organization: "acme",
+        channelRepo: "acme/api",
+        residentRepos: ["acme/api", "acme/web"],
+      }),
+    );
+    expect(prompt.system).toContain("Installation organization: `acme`");
+    expect(prompt.system).not.toContain("docs/decisions/*.md");
+    expect(prompt.user).toContain("Channel default repository: `acme/api`");
+    expect(prompt.user).toContain("Onboarded repository candidates: `acme/api`, `acme/web`");
+    expect(prompt.system).toContain("A bare PR number does not identify a repository");
+    expect(prompt.system).toContain("A later PR link offered as context does not replace");
+    expect(prompt.system).toContain("a repository link offered only as context does not identify that PR's repository");
+    expect(prompt.system).toContain("Repository-free work can proceed without a repository");
   });
 
   it("an owned thread's prompt narrows the projection to steers and reads and says the reply is the owner's follow-up (issue 2027; thread-admission item 9)", () => {

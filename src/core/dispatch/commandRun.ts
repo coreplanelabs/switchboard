@@ -174,11 +174,15 @@ export async function recordRoutedDecision(
  * with the refused route outcomes, so refusals per day, cause and code read
  * off the run store alone.
  */
-export async function recordRefusal(
+type DoorDecision =
+  | { kind: "refusal"; refusal: Refusal; operator?: OperatorEventFields }
+  | { kind: "operator"; operator: OperatorEventFields };
+
+/** One runless decision, one door record and one trace correlation. */
+async function recordDoorDecision(
   deps: FastPathDeps,
   msg: IncomingMessage,
-  _io: ChannelIO,
-  refusal: Refusal,
+  decision: DoorDecision,
   ending: RunEnding,
   trace: RequestTrace,
 ): Promise<void> {
@@ -186,11 +190,10 @@ export async function recordRefusal(
   const root = trace.root;
   const clock = deps.clock ?? systemClock;
   const threadKey = msg.threadKey || msg.channelId;
-  // No span of its own: the caller records inside its `dispatch.refuse` span.
   const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
   const run = registry.create(
     composeRunLabel({
-      agent: refusal.code,
+      agent: decision.kind === "refusal" ? decision.refusal.code : `operator_${decision.operator.outcome}`,
       channelId: msg.channelId,
       userId: msg.userId,
       channelName: msg.channelName,
@@ -208,22 +211,23 @@ export async function recordRefusal(
       ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
     },
   );
+  root.setAttrs({ runId: run.id });
   registry.publish(run.id, {
     type: "input",
     text: redactSecrets(msg.text),
     messageId: messageIdOf(msg, run.id),
     at: clock(),
   });
-  registry.publish(run.id, {
-    type: "refusal",
-    code: refusal.code,
-    cause: refusal.cause,
-    text: redactAndCap(refusalLine(refusal), ROUTE_RECEIPT_CAP),
-    at: clock(),
-  });
-  // The door said no and said it cleanly: the record's status is `completed` —
-  // `failed` is for a command whose own work broke — and the refusal event
-  // says what was refused.
+  if (decision.operator) registry.publish(run.id, { type: "operator", ...decision.operator, at: clock() });
+  if (decision.kind === "refusal")
+    registry.publish(run.id, {
+      type: "refusal",
+      code: decision.refusal.code,
+      cause: decision.refusal.cause,
+      text: redactAndCap(refusalLine(decision.refusal), ROUTE_RECEIPT_CAP),
+      at: clock(),
+    });
+  // The door made a clean decision. A failed status belongs to work that ran.
   const status: RunStatus = "completed";
   registry.finish(run.id, status);
   ending.finished(run.id);
@@ -256,16 +260,20 @@ export async function recordRefusal(
   });
 }
 
-/**
- * An `on`-mode operator decision that started no run, as a run record (record
- * 0057; run-history item 60: every admitted chat event's decision is one
- * `operator` event on the run that carries the request). A question, a refusal
- * and a decision whose every bind was handed back answer the person and run
- * nothing — so the record is written here, the way a door refusal's is: agent
- * `door`, status `completed`, no surface told of the run, no thread claimed;
- * the redacted request as its `input` event and the decision as its one
- * `operator` event, every line already redacted and cut by the parse.
- */
+/** Record a refusal, with the operator choice when one preceded the gate. */
+export async function recordRefusal(
+  deps: FastPathDeps,
+  msg: IncomingMessage,
+  _io: ChannelIO,
+  refusal: Refusal,
+  ending: RunEnding,
+  trace: RequestTrace,
+  operator?: OperatorEventFields,
+): Promise<void> {
+  await recordDoorDecision(deps, msg, { kind: "refusal", refusal, ...(operator ? { operator } : {}) }, ending, trace);
+}
+
+/** Record an operator decision that answered without starting a run. */
 export async function recordOperatorDecision(
   deps: FastPathDeps,
   msg: IncomingMessage,
@@ -273,68 +281,7 @@ export async function recordOperatorDecision(
   ending: RunEnding,
   trace: RequestTrace,
 ): Promise<void> {
-  const registry = deps.runRegistry ?? defaultRunRegistry;
-  const root = trace.root;
-  const clock = deps.clock ?? systemClock;
-  const threadKey = msg.threadKey || msg.channelId;
-  const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
-  const run = registry.create(
-    composeRunLabel({
-      agent: `operator_${event.outcome}`,
-      channelId: msg.channelId,
-      userId: msg.userId,
-      channelName: msg.channelName,
-      userName: msg.userName,
-      text: msg.text,
-    }),
-    {
-      agent: DOOR_RUN_AGENT,
-      channelId: msg.channelId,
-      userId: msg.userId,
-      threadKey,
-      channelVisibility,
-      receivedAt: trace.receivedAt,
-      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-      ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
-    },
-  );
-  registry.publish(run.id, {
-    type: "input",
-    text: redactSecrets(msg.text),
-    messageId: messageIdOf(msg, run.id),
-    at: clock(),
-  });
-  registry.publish(run.id, { type: "operator", ...event, at: clock() });
-  const status: RunStatus = "completed";
-  registry.finish(run.id, status);
-  ending.finished(run.id);
-  const snap = registry.snapshot(run.id, run.token);
-  const finishedAt = snap?.finishedAt ?? clock();
-  const diagnosis = analyzeRunFriction(snap?.events ?? [], {
-    finished: true,
-    truncated: snap?.truncated ?? false,
-    owner: "command",
-    window: { start: trace.receivedAt, end: finishedAt },
-  });
-  ending.register({
-    runId: run.id,
-    flipOnPostFinishFailure: false,
-    write: (seal) =>
-      deps.runHistoryWriter.write(
-        assembleRunRecord({
-          run,
-          snap,
-          agent: DOOR_RUN_AGENT,
-          msg: { ...msg, threadKey },
-          channelVisibility,
-          finishedAt,
-          status,
-          diagnosis,
-          seal,
-        }),
-        { span: root },
-      ),
-  });
+  await recordDoorDecision(deps, msg, { kind: "operator", operator: event }, ending, trace);
 }
 
 /**

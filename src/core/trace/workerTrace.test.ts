@@ -6,6 +6,7 @@ import { recordingSink } from "../testing/recordingSink.js";
 import { logLineOf } from "./sinks.js";
 import { parseTraceparent } from "./traceparent.js";
 import { createTracer } from "./tracer.js";
+import type { SpanRootIdentity } from "./types.js";
 import {
   adoptedParent,
   refusalFilter,
@@ -99,6 +100,15 @@ describe("shimRoute", () => {
 });
 
 describe("refusalFilter / workerLogSink", () => {
+  it("forwards root identity alongside accepted records", () => {
+    const identities: Array<SpanRootIdentity | undefined> = [];
+    const sink = refusalFilter({ onEnd: (_rec, root) => void identities.push(root) });
+    const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [sink] });
+    root.start("dispatch.history").end();
+    root.setAttrs({ runId: "door-a" });
+    expect(identities).toEqual([{ name: "request", runId: "door-a" }]);
+  });
+
   it("drops a root that ended 401 or 403 and passes every other record through; the worker sink is slow-level with the filter on", () => {
     const inner = recordingSink();
     const filtered = refusalFilter(inner);

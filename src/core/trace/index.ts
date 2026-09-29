@@ -6,6 +6,7 @@ export type {
   SpanContext,
   SpanOptions,
   SpanRecord,
+  SpanRootIdentity,
   SpanSink,
   SpanStatus,
   Tracer,

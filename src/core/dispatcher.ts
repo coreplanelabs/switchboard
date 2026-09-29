@@ -680,6 +680,7 @@ export async function dispatch(
   // span, and never twice when the catch-all follows a gate that already
   // recorded (a setup failure's silent close, then its error reply).
   let refusalRecorded = false;
+  let operatorEvent: OperatorEventFields | undefined;
   let childSetupFinalizer: (() => void) | undefined;
   let childSetupRefusal: Refusal | undefined;
   let childSetupFinished = false;
@@ -690,7 +691,8 @@ export async function dispatch(
       childSetupRefusal ??= refusal;
       return;
     }
-    await recordRefusal(deps, msg, io, refusal, ending, trace);
+    await recordRefusal(deps, msg, io, refusal, ending, trace, operatorEvent);
+    operatorEvent = undefined;
   };
   // A gate refusal is the site's `Refusal` — its own sentence, the cause from
   // the one table — stamped, the side work (a card close, a release) run
@@ -892,7 +894,6 @@ export async function dispatch(
       parseDirectives(msg.text).agent !== undefined ||
       (deps.commands !== undefined && parseChatCommand(msg.text, deps.commands) !== null);
     let operatorMode = configuredOperator === "on" && typedDecision ? "off" : configuredOperator;
-    let operatorEvent: OperatorEventFields | undefined;
     // The preset an `on` decision binds on the person's own words, with the
     // decision's event on the run.
     let operatorPreset: string | undefined;
@@ -1003,15 +1004,32 @@ export async function dispatch(
                 : pageOwner?.kind === "pipeline_ambiguous"
                   ? { kind: "pipeline", unit: pageOwner.units.map((unit) => unit.unit).join(", ") }
                   : undefined;
-      operatorEvent = await root.span("dispatch.operator", () =>
-        operatorStage(deps, {
+      operatorEvent = await root.span("dispatch.operator", async (span) => {
+        const event = await operatorStage(deps, {
           msg: doorMsg,
           mode: operatorMode,
           ...(operatorThread ? { thread: operatorThread } : {}),
           ...(opts.intake ? { intake: opts.intake } : {}),
           ...(threadOwner ? { owner: threadOwner } : {}),
-        }),
-      );
+        });
+        if (event) {
+          const repoSource = event.binds?.find((bind) => bind.repoSource !== undefined)?.repoSource;
+          const attrs = {
+            operatorOutcome: event.outcome,
+            operatorAttempts: event.attempts?.length ?? 0,
+            ...(event.repoContext
+              ? {
+                  operatorRepoCatalog: event.repoContext.candidateStatus,
+                  operatorRepoCandidates: event.repoContext.candidateCount,
+                }
+              : {}),
+            ...(repoSource ? { operatorRepoSource: repoSource } : {}),
+          };
+          span.setAttrs(attrs);
+          root.setAttrs(attrs);
+        }
+        return event;
+      });
       // Under `shadow`, a reply into a thread a run holds is a follow-up
       // admission steers, not a request of its own: the decision is written
       // beside the fold, onto the live run's record, and the reply goes on to
@@ -1682,6 +1700,7 @@ export async function dispatch(
             root,
             ...(threadPr ? { records: { pr: threadPr } } : {}),
             ...(inheritedRepo !== undefined ? { operatorRepo: inheritedRepo } : {}),
+            reviewBarePr: true,
           })
         : undefined;
     if (earlyRepoTarget !== undefined) {

@@ -374,6 +374,31 @@ describe("recordRefusal — every refusal is a run record (record 0054, as amend
     expect(text.endsWith("…")).toBe(true);
   });
 
+  it("keeps a preceding operator choice and the refusal on one trace-linked door record", async () => {
+    const d = deps();
+    const kept = keepingWriter();
+    d.runHistoryWriter = kept.writer;
+    const { message, io, ending, trace } = request("review PR #7", d);
+    await recordRefusal(d, message, io, refusalOf("repo_not_onboarded", "repository unavailable"), ending, trace, {
+      mode: "on",
+      outcome: "binds",
+      reason: "review request",
+      binds: [
+        { line: "agent:review review PR #7", reason: "review request", repo: "other/tooling", repoSource: "request" },
+      ],
+      repoContext: { organization: "acme", candidateStatus: "available", candidateCount: 1 },
+      latencyMs: 12,
+      outputTokens: 9,
+    });
+    ending.drain(undefined);
+    const events = kept.records()[0]!.events;
+    expect(contentTypes(events)).toEqual(["input", "operator", "refusal"]);
+    expect(kept.records()[0]!.operator?.binds?.[0]?.repo).toBe("other/tooling");
+    expect(kept.records()[0]!.operator?.binds?.[0]?.repoSource).toBe("request");
+    expect(kept.records()[0]!.operator?.repoContext).toMatchObject({ organization: "acme", candidateCount: 1 });
+    expect(trace.root.record().attrs.runId).toBe("run-cmd");
+  });
+
   it("a message with no thread of its own records with the channel as its thread key", async () => {
     const d = deps();
     const kept = keepingWriter();

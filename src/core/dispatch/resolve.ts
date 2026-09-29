@@ -57,6 +57,7 @@ export interface ResolveDeps {
     history: HistoryItem[],
     records?: RunRecordSignals,
     operatorRepo?: string,
+    reviewBarePr?: boolean,
   ) => Promise<RepoContext> | RepoContext;
 }
 
@@ -237,6 +238,8 @@ export interface ResolveTargetContext {
   records?: RunRecordSignals;
   /** The typed/factual repository inherited through the operator door. */
   operatorRepo?: string;
+  /** A review may pair a bare PR number with the repository after vetting. */
+  reviewBarePr?: boolean;
   /** A repository resolution already started before admission. */
   repoTarget?: ResolvedRepoTarget;
 }
@@ -247,27 +250,56 @@ export interface ResolveTargetContext {
  */
 export function resolveRepoTarget(
   deps: ResolveDeps,
-  ctx: Pick<ResolveTargetContext, "msg" | "history" | "profile" | "resume" | "root" | "records" | "operatorRepo">,
+  ctx: Pick<
+    ResolveTargetContext,
+    "msg" | "history" | "profile" | "resume" | "root" | "records" | "operatorRepo" | "reviewBarePr"
+  >,
 ): ResolvedRepoTarget {
   const { msg, history, profile, resume, root } = ctx;
   const needsRepo = machineNeedsRepo(profile.machine);
-  const repoCtxP: Promise<RepoContext> = root.span("dispatch.repo_context", () =>
-    resume
-      ? Promise.resolve(resume.repoCtx)
+  const repoCtxP: Promise<RepoContext> = root.span("dispatch.repo_context", async (span) => {
+    const resolvedCtx = resume
+      ? resume.repoCtx
       : needsRepo
-        ? Promise.resolve(
+        ? await Promise.resolve(
             deps.resolveRepoContext
-              ? deps.resolveRepoContext(msg, history, ctx.records, ctx.operatorRepo)
+              ? deps.resolveRepoContext(msg, history, ctx.records, ctx.operatorRepo, ctx.reviewBarePr)
               : resolveRepoContext(
                   msg,
                   history,
                   ...repoVetFor(profile, deps.config.config.execution?.resident),
                   ctx.records,
                   ctx.operatorRepo,
+                  ctx.reviewBarePr,
                 ),
-          ).then((resolvedCtx) => resolvedCtx ?? {})
-        : Promise.resolve({}),
-  );
+          )
+        : {};
+    const result: RepoContext = resolvedCtx ?? {};
+    const attrs = {
+      repoResolution: !needsRepo
+        ? "skipped"
+        : result.prConflict
+          ? "conflict"
+          : result.unverifiedRepo
+            ? "unverified"
+            : result.rejectedRepo
+              ? "rejected"
+              : result.repo
+                ? "resolved"
+                : "unresolved",
+      repoTargetRelation:
+        ctx.operatorRepo === undefined
+          ? "not_proposed"
+          : result.repo === undefined
+            ? "unresolved"
+            : result.repo.toLowerCase() === ctx.operatorRepo.toLowerCase()
+              ? "matched"
+              : "overridden",
+    } as const;
+    span.setAttrs(attrs);
+    if (needsRepo) root.setAttrs(attrs);
+    return result;
+  });
   repoCtxP.catch(() => {});
   return { needsRepo, repoCtxP };
 }
@@ -332,7 +364,12 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
   // Target repo/ref for resident environments, resolved before the model turn.
   // Review requests may have started it before admission so a closed PR never
   // owns the thread; every other request starts it here as before.
-  const { needsRepo, repoCtxP } = ctx.repoTarget ?? resolveRepoTarget(deps, ctx);
+  const { needsRepo, repoCtxP } =
+    ctx.repoTarget ??
+    resolveRepoTarget(deps, {
+      ...ctx,
+      reviewBarePr: ctx.agent.name === "review",
+    });
   return { needsRepo, repoCtxP, modelCard, decisions };
 }
 

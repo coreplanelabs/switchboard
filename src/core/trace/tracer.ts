@@ -99,6 +99,7 @@ interface SpanInit {
   sinks: SpanSink[];
   startedAt: number | undefined;
   attrs: SpanAttrs | undefined;
+  rootIdentity?: { name: string; runId?: string };
 }
 
 class SpanImpl implements Span {
@@ -109,6 +110,8 @@ class SpanImpl implements Span {
   ended = false;
   private readonly sinks: SpanSink[];
   private readonly rec: SpanRecord;
+  private readonly rootIdentity: { name: string; runId?: string };
+  private readonly isLocalRoot: boolean;
 
   constructor(
     private readonly shared: Shared,
@@ -118,6 +121,8 @@ class SpanImpl implements Span {
     this.parentId = init.parentId;
     this.name = sanitizeSpanName(init.name);
     this.sinks = init.sinks;
+    this.isLocalRoot = init.rootIdentity === undefined;
+    this.rootIdentity = init.rootIdentity ?? { name: this.name, runId: init.attrs?.runId };
     this.rec = {
       traceId: this.traceId,
       spanId: this.id,
@@ -164,6 +169,7 @@ class SpanImpl implements Span {
       sinks: this.sinks,
       startedAt: opts?.startedAt,
       attrs: opts?.attrs,
+      rootIdentity: this.rootIdentity,
     });
     child.emitStart();
     return child;
@@ -177,6 +183,7 @@ class SpanImpl implements Span {
       sinks: this.sinks,
       startedAt: opts.startedAt,
       attrs: opts.attrs,
+      rootIdentity: this.rootIdentity,
     });
     child.emitStart();
     child.endAt(Math.max(opts.startedAt, opts.endedAt), opts.status ?? "ok", opts.errorKind, opts.errorCode);
@@ -196,7 +203,7 @@ class SpanImpl implements Span {
     }
     for (const s of this.sinks) {
       try {
-        s.onEnd(this.record());
+        s.onEnd(this.record(), this.rootIdentity);
       } catch (err) {
         this.shared.warn(
           `[trace] sink onEnd threw for ${this.name}: ${err instanceof Error ? err.message : String(err)}`,
@@ -215,7 +222,7 @@ class SpanImpl implements Span {
     this.rec.status = status ?? this.rec.status ?? "ok";
     for (const s of this.sinks) {
       try {
-        s.onEnd(this.record());
+        s.onEnd(this.record(), this.rootIdentity);
       } catch (err) {
         this.shared.warn(
           `[trace] sink onEnd threw for ${this.name}: ${err instanceof Error ? err.message : String(err)}`,
@@ -239,6 +246,7 @@ class SpanImpl implements Span {
 
   setAttrs(attrs: SpanAttrs): void {
     (this.rec as { attrs: SpanAttrs }).attrs = { ...this.rec.attrs, ...attrs };
+    if (this.isLocalRoot) this.rootIdentity.runId = this.rec.attrs.runId;
   }
 
   record(): SpanRecord {

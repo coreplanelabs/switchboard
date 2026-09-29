@@ -14734,7 +14734,13 @@ describe("no gaps: every awaited step runs inside a span (docs/reference/specs/t
       ["io.reply", "dispatch.refuse"],
     ]);
     const root = log.ended("request")!;
-    expect(root.attrs).toEqual({ channel: "slack", status: "refused", refusal: "agent_allowlist", cause: "policy" });
+    expect(root.attrs).toMatchObject({
+      channel: "slack",
+      status: "refused",
+      refusal: "agent_allowlist",
+      cause: "policy",
+      runId: "run-g",
+    });
     expect(log.ended("dispatch.refuse")!.attrs).toEqual({
       outcome: "agent_allowlist",
       refusal: "agent_allowlist",
@@ -19152,6 +19158,48 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     return { deps, provider, registry };
   }
 
+  it("keeps the operator choice on the same door record when the repository gate refuses", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    const spans: { name: string; attrs: Record<string, unknown> }[] = [];
+    deps.sinks = [{ onEnd: (span) => void spans.push(span) }];
+    deps.capabilities = { ...deps.capabilities, residents: true };
+    deps.resolveRepoContext = () => ({ rejectedRepo: "acme/try-catch" });
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "review", repo: "acme/try-catch", reason: "review request" },
+    }));
+    const { io } = fakeIO();
+    await dispatch(deps, msg("review in acme/try-catch: check PR #7", "slack:UADMIN"), io);
+    const events = registry.snapshotById("r1")!.events;
+    expect(events.filter((event) => event.type === "operator")).toHaveLength(1);
+    expect(events.find((event) => event.type === "operator")).toMatchObject({
+      outcome: "binds",
+      binds: [{ repo: "acme/try-catch", repoSource: "request" }],
+      repoContext: { organization: "acme", candidateStatus: "skipped", candidateCount: 0 },
+    });
+    expect(events.find((event) => event.type === "refusal")).toMatchObject({ code: "repo_not_onboarded" });
+    expect(registry.snapshotById("r2")).toBeNull();
+    expect(spans.find((span) => span.name === "dispatch.operator")?.attrs).toMatchObject({
+      operatorOutcome: "binds",
+      operatorRepoSource: "request",
+      operatorAttempts: 1,
+      operatorRepoCatalog: "skipped",
+      operatorRepoCandidates: 0,
+    });
+    expect(spans.find((span) => span.name === "dispatch.repo_context")?.attrs).toMatchObject({
+      repoResolution: "rejected",
+      repoTargetRelation: "unresolved",
+    });
+    expect(spans.find((span) => span.name === "request")?.attrs).toMatchObject({
+      runId: "r1",
+      operatorOutcome: "binds",
+      operatorRepoSource: "request",
+      refusal: "repo_not_onboarded",
+      repoResolution: "rejected",
+      repoTargetRelation: "unresolved",
+    });
+  });
+
   it("`mcp list` is the typed MCP registry command in chat, never an operator or help request", async () => {
     const { deps } = operatorDeps(ON_YAML);
     deps.operatorModel = vi.fn<RouteModel>();
@@ -20208,16 +20256,16 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const ended = await dispatch(deps, msg("also cover the docs", "slack:UADMIN"), io, { thread: seedThread() });
     expect(ended).toMatchObject({ status: "refused", refusal: "pipeline_thread_owned" });
     expect(replies.some((r) => r.includes("slack:CX:99.0"))).toBe(true);
-    // No rival run beside the pipeline, and no ledger hole: the refusal's door
-    // record and the decision's own ride the registry side by side (item 29).
+    // No rival run beside the pipeline: its refusal and decision share a door record.
     expect(provider.requests).toHaveLength(0);
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "refusal")).toMatchObject({
       code: "pipeline_thread_owned",
     });
-    expect(registry.snapshotById("r2")!.events.find((e) => e.type === "operator")).toMatchObject({
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
       mode: "on",
       outcome: "binds",
     });
+    expect(registry.snapshotById("r2")).toBeNull();
 
     // Under shadow the same exit has no live slot to land the row on: the door
     // record keeps it, so the shadow ledger has no hole either.
@@ -20234,7 +20282,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       thread: seedThread(),
     });
     expect(shadowEnded).toMatchObject({ status: "refused", refusal: "pipeline_thread_owned" });
-    expect(shadow.registry.snapshotById("r2")!.events.find((e) => e.type === "operator")).toMatchObject({
+    expect(shadow.registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
       mode: "shadow",
       outcome: "binds",
     });
@@ -20497,8 +20545,8 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const prompt: RoutePrompt = operator.mock.calls[0]![0];
     expect(prompt.user).toContain("This thread is owned by a live run:");
     expect(prompt.user).not.toContain("steer run");
-    // No ledger hole: the decision lands on a door record beside the refusal's.
-    expect(registry.snapshotById("r2")!.events.find((e) => e.type === "operator")).toMatchObject({
+    // No ledger hole: the decision and refusal share a door record.
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
       mode: "on",
       outcome: "binds",
     });
