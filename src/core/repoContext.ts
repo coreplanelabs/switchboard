@@ -314,9 +314,9 @@ interface DirectPrDecision {
   conflict?: { target: string; cited: string };
 }
 
-/** Consider every direct PR citation, not just the first URL. A contextual
- * clause supplies evidence; two distinct requested PRs require a question. */
-function directPrDecisionOf(text: string): DirectPrDecision {
+/** Consider every direct PR citation, not just the first URL. An accepted
+ * repository ignores foreign citations; two requested local PRs conflict. */
+function directPrDecisionOf(text: string, acceptedRepo?: string): DirectPrDecision {
   const clean = unwrapSlack(text).replace(CODE_SPAN, " ");
   const decision: DirectPrDecision = { seen: false };
   const refs =
@@ -325,6 +325,7 @@ function directPrDecisionOf(text: string): DirectPrDecision {
     const repo = slugOf(match[4] ?? `${match[1]}/${match[2]}`);
     const number = Number(match[5] ?? match[3]);
     if (repo === undefined || !Number.isSafeInteger(number) || number < 1) continue;
+    if (acceptedRepo !== undefined && repo !== acceptedRepo) continue;
     decision.seen = true;
     if (
       contextCueOf({
@@ -383,7 +384,11 @@ function routedPrTargetOf(text: string): { repo: string; number: number } | unde
     );
   const repo = match === null ? undefined : slugOf(match[1]!);
   const number = match === null ? undefined : Number(match[2]);
-  return repo !== undefined && number !== undefined && Number.isSafeInteger(number) && number > 0
+  return repo !== undefined &&
+    number !== undefined &&
+    Number.isSafeInteger(number) &&
+    number > 0 &&
+    !contextCueOf({ before: "", after: clean.slice(match![0].length) })
     ? { repo, number }
     : undefined;
 }
@@ -669,8 +674,9 @@ function headBranchRef(text: string): string | undefined {
 
 /** The person's explicit branch syntax, never a ref from a cited URL. */
 function requestBranchRef(text: string): string | undefined {
-  const branchToken = /(?:^|\s)branch:(\S+)/i.exec(text);
-  return headBranchRef(text) ?? (branchToken ? validRef(stripPunct(branchToken[1])) : undefined);
+  const signalText = unwrapSlack(text).replace(CODE_SPAN, (m) => m.replace(/\S/g, "\u0000"));
+  const branchToken = /(?:^|\s)branch:(\S+)/i.exec(signalText);
+  return headBranchRef(signalText) ?? (branchToken ? validRef(stripPunct(branchToken[1])) : undefined);
 }
 
 /** Pure, sync signal extraction from one message text (no network). */
@@ -955,9 +961,35 @@ export async function resolveRepoContext(
   const selected = reviewBarePr ? selectedSignalsOf(msg.text) : undefined;
   const s = selected?.signals ?? extractSignals(msg.text);
   const direct = selected?.direct;
+  const operationDirect = boundRepo === undefined ? undefined : directPrDecisionOf(msg.text, boundRepo);
+  if (operationDirect?.conflict !== undefined) return { prConflict: operationDirect.conflict };
+  const operationBareConflict = boundRepo === undefined ? undefined : conflictingBarePrOf(msg.text);
+  if (boundRepo !== undefined && operationBareConflict !== undefined)
+    return {
+      prConflict: {
+        target: `${boundRepo}#${operationBareConflict.target}`,
+        cited: `${boundRepo}#${operationBareConflict.cited}`,
+      },
+    };
+  const operationBareNumber = boundRepo === undefined ? undefined : barePrNumberOf(msg.text);
+  if (
+    boundRepo !== undefined &&
+    operationDirect?.target !== undefined &&
+    operationBareNumber !== undefined &&
+    operationDirect.target.number !== operationBareNumber
+  )
+    return {
+      prConflict: {
+        target: `${boundRepo}#${operationDirect.target.number}`,
+        cited: `${boundRepo}#${operationBareNumber}`,
+      },
+    };
   const routed = routedPrTargetOf(msg.text);
   const routedPr = boundRepo === undefined || routed?.repo === boundRepo ? routed : undefined;
-  const conflictingPr = routedPr === undefined ? undefined : conflictingRoutedPrOf(msg.text, routedPr, boundRepo);
+  // Accepted operations already checked requested direct and bare PRs above;
+  // the legacy routed gate also counts contextual citations.
+  const conflictingPr =
+    routedPr === undefined || boundRepo !== undefined ? undefined : conflictingRoutedPrOf(msg.text, routedPr);
 
   if (routedPr !== undefined && conflictingPr !== undefined)
     return { prConflict: { target: `${routedPr.repo}#${routedPr.number}`, cited: conflictingPr } };
@@ -1092,18 +1124,20 @@ export async function resolveRepoContext(
   }
 
   // A bare PR number has a repository in a thread with a durable PR, when
-  // an explicitly addressed repo's routed task OPENS with that PR, or for a
-  // review whose repository was independently vetted. Spawned
+  // an accepted operation supplies it, when an addressed routed task OPENS
+  // with that PR, or for a review whose repository was independently vetted. Spawned
   // coordinator children have no run-record signal: without the routed form,
   // an older PR in their thread can override the child contract's target.
   // An accepted operation ignores foreign evidence; conflicting local PR
   // targets still refuse. The legacy review path keeps its existing rules.
   const bareNumber =
-    (!s.pr || addressedBareReview || contextualPr) &&
-    (repo === records?.pr?.repo || routedPr?.repo === repo || (reviewBarePr && repo !== undefined))
-      ? barePrNumberOf(msg.text)
-      : undefined;
-  const requestedDirectPr = boundRepo === undefined ? undefined : directPrDecisionOf(msg.text).target;
+    boundRepo !== undefined
+      ? operationBareNumber
+      : (!s.pr || addressedBareReview || contextualPr) &&
+          (repo === records?.pr?.repo || routedPr?.repo === repo || (reviewBarePr && repo !== undefined))
+        ? barePrNumberOf(msg.text)
+        : undefined;
+  const requestedDirectPr = operationDirect?.target;
   const namedPr =
     boundRepo !== undefined
       ? (routedPr ??
@@ -1144,15 +1178,12 @@ export async function resolveRepoContext(
     // (it pins no ref here, and as the attach's expected commit it could only
     // earn a `stale-tip` refusal) — and a state the answer did not carry
     // binds nothing.
-    if (head?.ref && head.state === "open" && operationTarget === undefined) {
+    if (head?.ref && head.state === "open" && operationTarget?.ref === undefined) {
       ref = head.ref;
       refFromPr = true;
     }
     headSha = head?.sha;
-    baseRef =
-      operationTarget === undefined || (operationTarget.ref !== undefined && operationTarget.ref === head?.ref)
-        ? head?.base
-        : undefined;
+    baseRef = operationTarget?.ref === undefined || operationTarget.ref === head?.ref ? head?.base : undefined;
     prSize = head?.size;
     facts = head?.facts;
     if (head?.state === "closed")

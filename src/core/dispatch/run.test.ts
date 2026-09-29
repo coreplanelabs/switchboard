@@ -17,10 +17,13 @@ import {
 } from "../runLedger/writeThrough.js";
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
 import { NullRunStore } from "../runStore.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { createLedgerWriteThrough } from "../runLedger/writeThrough.js";
 import type { IncomingMessage } from "../types.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { ResumeContext } from "./admission.js";
 import { resolveRun } from "./resolve.js";
+import { carriedOperationTarget } from "./reattach.js";
 import {
   claimRun,
   DEPLOY_RESTART_NOTICE,
@@ -147,6 +150,48 @@ function setup() {
 }
 
 describe("claimRun — the ledger claim once the prompt exists", () => {
+  it("promotes a reserved accepted target without losing it before reclaim", async () => {
+    const { deps, base } = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const through = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-T",
+      fallback: new NullRunStore(),
+      warn: () => {},
+      setInterval: () => ({ unref: () => {} }),
+    });
+    const operationTarget = { repo: "acme/api", ref: "unit/repair" };
+    const reservation = await through.reserve({
+      runId: base.run.id,
+      threadKey: THREAD,
+      startedAt: NOW,
+      meta: {
+        agent: "coding",
+        model: base.resolved.modelRef,
+        channelId: base.msg.channelId,
+        userId: base.msg.userId,
+        threadKey: THREAD,
+        repo: "acme/api",
+        operationTarget,
+        request: { text: base.msg.text },
+      },
+    });
+    expect(reservation.kind).toBe("tracked");
+    if (reservation.kind !== "tracked") return;
+    expect(ledger.live.get(base.run.id)?.meta.operationTarget).toEqual(operationTarget);
+    const claimed = await claimRun(
+      { ...deps, runLedger: through },
+      { ...base, operationTarget, reserved: reservation.run, resume: undefined, ledgerRun: undefined },
+    );
+    expect(claimed?.tracked()).toBe(true);
+    expect(ledger.live.get(base.run.id)?.phase).toBe("live");
+    expect(ledger.live.get(base.run.id)?.meta.operationTarget).toEqual(operationTarget);
+    ledger.live.get(base.run.id)!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-NEW", NOW, 30_000);
+    expect(carriedOperationTarget(reclaimed.row)).toEqual(operationTarget);
+    await claimed?.close();
+  });
+
   it("a reserved fresh run promotes its reservation: the row carries the identity, the prompt and tools verbatim, the seed, the card, and the hooks; every event from here on is mirrored", async () => {
     const { deps, ledger, registry, run, base } = setup();
     const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });

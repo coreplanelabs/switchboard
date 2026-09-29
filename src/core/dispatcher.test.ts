@@ -4263,6 +4263,27 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(publication).toEqual({ blocked: "existing PR publication is not verified" });
   });
 
+  it("keeps a verified requested PR head as the attach pin when its branch was already accepted", async () => {
+    const deps = codingDeps(describeThenAnswer(undefined, "Checked the PR."));
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "fix/pr",
+      pr: 7,
+      prFromMessage: true,
+      headSha: HEAD,
+      baseRef: "main",
+    });
+    codingExecutor({ head: HEAD, branch: "fix/pr", bindingRef: "fix/pr" });
+    await dispatch(deps, msg("agent:coding fix acme/api#7", "slack:UADMIN"), fakeIO().io, {
+      operationTarget: { repo: "acme/api", ref: "fix/pr" },
+    });
+    expect(vi.mocked(makeExecutor).mock.calls[0][1]).toMatchObject({
+      repo: "acme/api",
+      ref: "fix/pr",
+      headSha: HEAD,
+    });
+  });
+
   it("a directive coding ask for a decision record receives the runner's reservation in its brief and run metadata", async () => {
     const requests: CompletionRequest[] = [];
     const provider: Provider = {
@@ -4908,6 +4929,45 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
       repo: "acme/api",
       ref: branch,
     });
+  });
+
+  it("allows a direct coding child with an accepted repository and a resolved request branch", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    const branch = "work/requested";
+    deps.runRegistry = new RunRegistry({ genId: () => "r-repo-only", genToken: () => "t-repo-only" });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: branch });
+    codingExecutor({ head: HEAD, branch, bindingRef: branch });
+    deps.openPullRequest = openSpy().fn;
+    await dispatch(
+      deps,
+      msg("agent:coding in acme/api on branch work/requested: do the work", "slack:UADMIN"),
+      fakeIO().io,
+      {
+        operationTarget: { repo: "acme/api" },
+      },
+    );
+    expect(deps.runBearers?.grantOf("r-repo-only")?.github).toEqual({
+      identity: "write",
+      repo: "acme/api",
+      ref: branch,
+    });
+  });
+
+  it("does not start a repository-only coding act on the default branch when its requested PR head is unavailable", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, prFromMessage: true });
+    const { io, replies } = fakeIO();
+    const outcome = await dispatch(
+      deps,
+      msg("agent:coding fix https://github.com/acme/api/pull/7", "slack:UADMIN"),
+      io,
+      {
+        operationTarget: { repo: "acme/api" },
+      },
+    );
+    expect(outcome).toMatchObject({ status: "refused", refusal: "pr_head_unknown" });
+    expect(replies.join(" ")).toContain("Retry this task when GitHub can read it");
+    expect(makeExecutor).not.toHaveBeenCalled();
   });
 
   // Issue 1860, the merged half: a MERGED pull request cited as a receipt
@@ -10748,6 +10808,34 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     };
     return { io, replies };
   }
+
+  it("carries a fresh accepted target from dispatch through reservation and claim", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const target = { repo: "acme/api", ref: "unit/repair" };
+    let rowAtModel: ReturnType<InMemoryRunLedger["live"]["get"]>;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        rowAtModel = structuredClone(ledger.live.get("run-l"));
+        return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, writer } = wired(provider, { ledger });
+    deps.resolveRepoContext = () => target;
+    const fake = {
+      exec: async () => "",
+      readFile: async () => "",
+      writeFile: async () => "",
+      release: async () => ({ released: true }),
+    };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    await dispatch(deps, msg("agent:coding in acme/api: fix it", "slack:UADMIN"), ioWithCard().io, {
+      operationTarget: target,
+    });
+    await writer.settled();
+    expect(rowAtModel?.phase).toBe("live");
+    expect(rowAtModel?.meta.operationTarget).toEqual(target);
+  });
 
   it("a hard stop relayed before the registry row exists aborts setup and closes the reservation", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");

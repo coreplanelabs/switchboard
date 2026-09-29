@@ -2096,37 +2096,46 @@ export async function dispatch(
     // no fetch brings a live branch's tip to a dead pull request's frozen
     // head, the resident answers `stale-tip`, and the run falls back cold at
     // the dead commit — the coordinator child off its unit branch, the plain
-    // ask off the default. For a non-review run the sha pins only the ref
-    // that came WITH it from the same open PR; otherwise it is context, never
-    // the attach's expected commit. A review run keeps it: the pull request
-    // is its target and the sha is the reviewed head's pin.
+    // ask off the default. For a non-review run the sha pins the ref that came
+    // with the same open PR, or an accepted ref verified as that PR's head;
+    // otherwise it is context, never the attach's expected commit. A review
+    // run keeps it: the pull request is its target and the sha pins that head.
+    const matchedAcceptedPrHead =
+      operationTarget?.ref !== undefined &&
+      repoCtx.pr !== undefined &&
+      repoCtx.ref === operationTarget.ref &&
+      /^[0-9a-f]{40}$/.test(repoCtx.headSha ?? "");
     if (
       agent.name !== "review" &&
       repoCtx.prFromMessage === true &&
       repoCtx.refFromPr !== true &&
+      !matchedAcceptedPrHead &&
       repoCtx.headSha !== undefined
     ) {
       const { headSha: _headSha, ...kept } = repoCtx;
       repoCtx = kept;
     }
 
-    // A direct typed coding act needs a branch before the Git door is minted.
-    // The door's first-push allowance cannot choose the branch on its behalf.
-    const directCodingTarget =
-      !coordinator && agent.name === "coding"
-        ? opts.operationTarget?.ref !== undefined
-          ? opts.operationTarget
-          : carriedTarget?.ref !== undefined
-            ? carriedTarget
-            : !resume && !restart && opts.restartOf === undefined
-              ? opts.operationTarget
-              : undefined
-        : undefined;
+    // A direct typed coding act keeps an accepted branch when one was named.
+    // A repository-only target may resolve its branch from the request or PR.
+    const directCodingTarget = !coordinator && agent.name === "coding" ? operationTarget : undefined;
+    if (
+      directCodingTarget !== undefined &&
+      directCodingTarget.ref === undefined &&
+      repoCtx.prFromMessage === true &&
+      repoCtx.pr !== undefined &&
+      (repoCtx.refFromPr !== true || !/^[0-9a-f]{40}$/.test(repoCtx.headSha ?? ""))
+    ) {
+      const reason = "The requested pull request head could not be verified. Retry this task when GitHub can read it.";
+      await refuse(refusalOf("pr_head_unknown", reason), () =>
+        card.done(shell.close({ kind: "not_started", icon: "🔀", reason, ...closeLines(clock(), false) })),
+      );
+      return ended;
+    }
     if (
       directCodingTarget &&
-      (!directCodingTarget.ref ||
-        repoCtx.repo?.toLowerCase() !== directCodingTarget.repo.toLowerCase() ||
-        repoCtx.ref !== directCodingTarget.ref)
+      (repoCtx.repo?.toLowerCase() !== directCodingTarget.repo.toLowerCase() ||
+        (directCodingTarget.ref !== undefined && repoCtx.ref !== directCodingTarget.ref))
     )
       throw new Error("the accepted coding branch is missing or differs from the resolved target");
 
@@ -2708,7 +2717,7 @@ export async function dispatch(
           coordinatorBranch ??
           carriedGithubBinding?.ref ??
           resume?.row.meta.ref)
-        : (directCodingTarget?.ref ?? (repoCtx.pr ? repoCtx.ref : undefined));
+        : (directCodingTarget?.ref ?? (directCodingTarget || repoCtx.pr ? repoCtx.ref : undefined));
     if (coordinator && agent.name === "coding" && !githubBoundRef)
       throw new Error("the coordinator coding unit has no durable branch target");
     const bearer = mintRunBearer(deps, {
@@ -3100,6 +3109,7 @@ export async function dispatch(
       profile,
       resolved,
       repoCtx,
+      ...(agent.name !== "review" && operationTarget !== undefined ? { operationTarget } : {}),
       channelVisibility,
       run,
       registry,
