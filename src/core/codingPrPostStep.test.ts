@@ -1951,6 +1951,21 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     expect(w.commands).toContain("git push origin 'HEAD:refs/heads/plan/p/u1'");
   });
 
+  it("checkpoints a cold sandbox clone from its repository directory", async () => {
+    const w = fakeExecutor({
+      "git status": "exit 128: fatal: not a git repository (or any of the parent directories): .git",
+      "ls -d */.git": "sample/.git\n",
+      "git -C 'sample' status": " M src/a.ts\n",
+      "git -C 'sample' rev-list": "1\n",
+      "git -C 'sample' rev-parse HEAD": "abc123def456abc123def456abc123def456ab12\n",
+    });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "completion" });
+    expect(out).toMatchObject({ pushed: true, head: "abc123def456abc123def456abc123def456ab12" });
+    expect(w.commands).toContain("git -C 'sample' add -A");
+    expect(w.commands.some((command) => command.startsWith("git -C 'sample' commit -m"))).toBe(true);
+    expect(w.commands).toContain("git -C 'sample' push origin 'HEAD:refs/heads/plan/p/u1'");
+  });
+
   it("a compaction checkpoint pushes the unpushed commits without committing when the tree is clean", async () => {
     const w = fakeExecutor({ "git status": "\n", "git rev-list": "2\n" });
     const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "compaction" });

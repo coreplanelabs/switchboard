@@ -604,6 +604,9 @@ describe("coding prompts: the fast gates before every push (agent-coding item 13
     // the full verification is CI's gate, named, and the head is pushed early for CI to judge
     expect(FAST_GATES_BEFORE_PUSH).toContain("The full verification is CI's gate — `npm run verify` runs there");
     expect(FAST_GATES_BEFORE_PUSH).toContain("push a head early and let CI judge it");
+    expect(FAST_GATES_BEFORE_PUSH).toContain("In another repository, use its documented equivalents");
+    expect(FAST_GATES_BEFORE_PUSH).toContain("An equivalent command is not a contract deviation");
+    expect(FAST_GATES_BEFORE_PUSH).toContain("Record a check you cannot run as unproven");
     // the receipts rule stays the contract's own: only a plan child has a handoff
     expect(FAST_GATES_BEFORE_PUSH).not.toContain("handoff");
     expect(FAST_GATES_BEFORE_PUSH).not.toContain("validation table");
