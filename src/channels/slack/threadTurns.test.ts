@@ -23,6 +23,23 @@ describe("threadTurns — the thread-page-to-turns mapping", () => {
     expect(turns.map((t) => t.at)).toEqual([1_000, 2_000]);
   });
 
+  it("strips the connector's leading bot name from history as from the current request", () => {
+    const turns = threadTurns(
+      [
+        { user: "UA", text: "@switchboard agent:review https://github.com/acme/api/pull/7", ts: "1.0" },
+        { user: "UA", text: "I typed @switchboard in this sentence", ts: "2.0" },
+      ],
+      { botUserId: "UBOT" },
+    );
+    expect(turns.map((turn) => turn.text)).toEqual([
+      "agent:review https://github.com/acme/api/pull/7",
+      "I typed @switchboard in this sentence",
+    ]);
+    expect(
+      threadTurns([{ user: "UA", text: "@switchboard is the bot's name", ts: "3.0" }], {}).map((turn) => turn.text),
+    ).toEqual(["@switchboard is the bot's name"]);
+  });
+
   it("with no skip ts every message is kept — a linked thread has no triggering message", () => {
     const thread = [
       { user: "UA", text: "one", ts: "1.0" },

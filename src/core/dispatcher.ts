@@ -1024,12 +1024,16 @@ export async function dispatch(
                   msg.threadKey,
                 );
           if (continuationOwner.kind === "pipeline" || continuationOwner.kind === "pipeline_ambiguous") {
+            const endedPrOwner =
+              pageOwner.kind === "pipeline" || pageOwner.kind === "pipeline_ambiguous" ? pageOwner : undefined;
+            const ownedUnits = endedPrOwner?.kind === "pipeline" ? [endedPrOwner.unit] : (endedPrOwner?.units ?? []);
             canReviewEndedPr =
-              pageOwner.kind === "pipeline" &&
+              endedPrOwner !== undefined &&
               !unfinishedOwner &&
               explicitPr !== undefined &&
-              pageOwner.unit.pr?.number === explicitPr.number &&
-              pageOwner.run.repo?.toLowerCase() === explicitPr.repo &&
+              ownedUnits.length > 0 &&
+              ownedUnits.every((unit) => unit.pr?.number === explicitPr.number) &&
+              endedPrOwner.run.repo?.toLowerCase() === explicitPr.repo &&
               operatorThread.every((run) => run.finished) &&
               admission.get(msg.threadKey) === undefined &&
               deps.threadsElsewhere.get(msg.threadKey) === undefined;
@@ -1086,7 +1090,11 @@ export async function dispatch(
                     ...(canReviewEndedPr ? { allowReview: true } : {}),
                   }
                 : pageOwner?.kind === "pipeline_ambiguous"
-                  ? { kind: "pipeline", unit: pageOwner.units.map((unit) => unit.unit).join(", ") }
+                  ? {
+                      kind: "pipeline",
+                      unit: pageOwner.units.map((unit) => unit.unit).join(", "),
+                      ...(canReviewEndedPr ? { allowReview: true } : {}),
+                    }
                   : undefined;
       operatorEvent = await root.span("dispatch.operator", async (span) => {
         const event = await operatorStage(deps, {
@@ -1391,6 +1399,7 @@ export async function dispatch(
       }
       if (
         owner.kind === "pipeline_ambiguous" &&
+        !(canReviewEndedPr && operatorPreset === "review") &&
         (directives.agent === undefined || (directives.agent === "ship" && explicitPr !== undefined))
       ) {
         await io.reply(

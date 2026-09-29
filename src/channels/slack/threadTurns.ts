@@ -84,6 +84,12 @@ export function stripAppFooter(text: string): string {
   return out;
 }
 
+/** Connector posts may spell the bot's display name as plain text instead of
+ * a Slack user mention. Only the leading address is transport chrome. */
+export function stripBotNameAddress(text: string): string {
+  return text.replace(/^\s*@switchboard(?=\s|$)\s*/i, "");
+}
+
 /**
  * Map a thread page to turns. Drops the triggering message (by `skipTs`), the
  * bot's own status cards (`STATUS_PREFIXES`), and any message left with neither
@@ -95,7 +101,7 @@ export function threadTurns(messages: readonly SlackThreadMessage[], opts: Threa
   for (const mm of messages) {
     if (opts.skipTs !== undefined && mm.ts === opts.skipTs) continue;
     const raw = mm.text ?? "";
-    const text = stripAppFooter(opts.botUserId ? raw.replaceAll(`<@${opts.botUserId}>`, "") : raw);
+    const text = stripAppFooter(opts.botUserId ? stripBotNameAddress(raw.replaceAll(`<@${opts.botUserId}>`, "")) : raw);
     if (STATUS_PREFIXES.some((p) => text.startsWith(p))) continue;
     const files = mm.bot_id ? undefined : mm.files;
     if (!text && !files?.length) continue;

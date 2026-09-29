@@ -27,7 +27,7 @@ import type { IntakeMode } from "../config/validate.js";
 import { parseDirectives } from "../directives.js";
 import { DEFAULT_VERBOSITY, shows, type Verbosity } from "../core/verbosity.js";
 import { renderOffer } from "../core/confirmations.js";
-import { type SlackThreadMessage, stripAppFooter, threadTurns } from "./slack/threadTurns.js";
+import { type SlackThreadMessage, stripAppFooter, stripBotNameAddress, threadTurns } from "./slack/threadTurns.js";
 import {
   createStatusBudget,
   STATUS_EDITS_PER_MINUTE,
@@ -1871,5 +1871,6 @@ async function threadIfBotInIt(
  *  Slack app footer (`stripAppFooter` in slack/threadTurns.ts — the same strip
  *  every history and quoted-thread turn gets). Exported for tests. */
 export function stripMention(text: string, botUserId?: string): string {
-  return stripAppFooter(botUserId ? text.replaceAll(`<@${botUserId}>`, "") : text.replace(/<@[A-Z0-9]+>/, ""));
+  const withoutMention = botUserId ? text.replaceAll(`<@${botUserId}>`, "") : text.replace(/<@[A-Z0-9]+>/, "");
+  return stripAppFooter(stripBotNameAddress(withoutMention));
 }
