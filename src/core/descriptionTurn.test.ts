@@ -104,6 +104,21 @@ describe("descriptionTurnTarget — when a description turn is due", () => {
     expect(findOpenPr).not.toHaveBeenCalled();
   });
 
+  it("an existing-PR checkout at the remote tip without an accepted push receipt gets no description turn", async () => {
+    const findOpenPr = vi.fn(async () => PR);
+    expect(
+      await descriptionTurnTarget({
+        observed: observation(),
+        description: undefined,
+        target,
+        confirmedPush: false,
+        findOpenPr,
+        logKey: "t",
+      }),
+    ).toBeUndefined();
+    expect(findOpenPr).not.toHaveBeenCalled();
+  });
+
   it("the workspace sat on the base branch, or no repo / branch / head is observable → no turn", async () => {
     const findOpenPr = vi.fn(async () => PR);
     const cases: Array<{ observed: WorkspaceObservation; target: CodingPrTarget }> = [

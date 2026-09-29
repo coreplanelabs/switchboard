@@ -634,6 +634,8 @@ export async function runCodingPrPostStep(input: {
    *  and state are for everyone; the head it was rendered at is `verbose`. */
   verbosity: Verbosity;
   observed: WorkspaceObservation;
+  /** Existing-PR Ship runs count a push only when this run has its accepted publication receipt. */
+  confirmedPush?: boolean;
   description: PrDescription | undefined;
   target: CodingPrTarget;
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
@@ -710,7 +712,24 @@ export async function runCodingPrPostStep(input: {
   const headSha = normalizeHead(observed.head);
   const branch = observed.branch;
   const remoteHead = normalizeHead(observed.remoteHead);
-  const pushed = headSha !== undefined && remoteHead !== undefined && sameCommit(remoteHead, headSha);
+  const pushed =
+    input.confirmedPush !== false &&
+    headSha !== undefined &&
+    remoteHead !== undefined &&
+    sameCommit(remoteHead, headSha);
+  // Existing-PR Ship runs have a durable push recorder. Without its accepted
+  // receipt, even a submitted description cannot edit the pre-existing PR:
+  // every later branch can reach an open-or-edit path from remote equality.
+  if (input.confirmedPush === false) {
+    if (prDescription === undefined) return undefined;
+    input.publish({
+      type: "run_note",
+      kind: "pr_not_opened",
+      summary: "existing pull request not edited: this run has no accepted push receipt",
+      at: systemClock(),
+    });
+    return "⚠️ A PR description was submitted, but this run has no accepted push to its existing pull request, so the pull request was not edited.";
+  }
   const compareUrl =
     repo && branch && pushed ? `https://github.com/${repo}/compare/${encodeGithubPathSegments(branch)}` : undefined;
   // HEAD moved after the push: the head branch is the one the run's
@@ -771,8 +790,9 @@ export async function runCodingPrPostStep(input: {
   // toolRules.ts, refuse a run's push to the base its pull request would
   // target and to the repository's default), or the thread's own pull
   // request's head branch (`pushedPastOwnPr`), never the base by the base's
-  // name. Telling a run's push from a checkout for certain would take a
-  // record of the remote before the run; nothing observes one today.
+  // name. Existing-PR Ship runs have an accepted push receipt and require it;
+  // ordinary runs have no such receipt, so a matching remote tip alone still
+  // cannot distinguish their push from a checkout.
   const pushedBranch = branch !== undefined && branch !== base && pushed;
   // The pushed head is a fact of the run before anything a pull request adds
   // (run-history item 2; decision 0046): the branch the run pushed and the sha
