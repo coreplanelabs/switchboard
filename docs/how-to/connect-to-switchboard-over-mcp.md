@@ -18,7 +18,10 @@ The email links MCP runs to Slack; this command links Slack to GitHub.
 ## 4. Publish the map and grant
 After the PR merges, open [Sync MCP access](https://github.com/coreplanelabs/switchboard/actions/workflows/sync-mcp-access.yml) in GitHub Actions and click **Run workflow**. It uploads the map, pushes the grant, and restarts the bot. Wait for the run to pass.
 ## 5. Connect your MCP client
-Set `SWITCHBOARD_MCP_TOKEN` to your personal bearer in the environment your MCP client inherits. Copy the bearer from your personal 1Password item, then run one of these commands:
-- Client launched from zsh on macOS: `export SWITCHBOARD_MCP_TOKEN="$(pbpaste)"` — start the client in that shell.
-- Codex or another macOS desktop app: `launchctl setenv SWITCHBOARD_MCP_TOKEN "$(pbpaste)"` — fully quit and reopen the app. Repeat after logging in to your Mac.
-Connect to the production URL above over Streamable HTTP. Configure bearer authentication to read that variable, then call `runs_list` to check the connection.
+Keep the bearer in your personal 1Password item. First, add these lines to `~/.codex/config.toml`:
+`[mcp_servers.switchboard]`
+`url = "https://switchboard.coreplanelabs.dev/mcp"`
+`bearer_token_env_var = "SWITCHBOARD_MCP_TOKEN"`
+Then fully quit Codex. With 1Password CLI signed in, launch Codex desktop on macOS with this command:
+`SWITCHBOARD_MCP_TOKEN='op://<your vault>/<your item>/token' op run -- /Applications/ChatGPT.app/Contents/MacOS/ChatGPT`
+`op run` passes the bearer through the app's environment, not a command-line argument. Use this same command after every full quit or restart (including subsequent launches), not the Dock, so Codex inherits the bearer. Ask it to call Switchboard's `runs_list` tool to check the connection.
