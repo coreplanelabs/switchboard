@@ -308,7 +308,11 @@ export async function salvageBudgetPush(
   span?: Span,
 ): Promise<{ pushed: boolean; summary: string; head?: string; publicationBlocked?: string }> {
   const trace = span ? { span } : undefined;
-  const run = (cmd: string) => executor.exec(cmd, trace);
+  const run = async (cmd: string) => {
+    const output = await executor.exec(cmd, trace);
+    if (parseExitPrefix(output).failed) throw new Error(output.trim());
+    return output;
+  };
   const probe = (cmd: string) => run(cmd).catch(() => "");
   const words =
     opts.cue === "compaction"
@@ -344,7 +348,8 @@ export async function salvageBudgetPush(
     // ignore rules still keep dependency caches, credentials and attachment
     // staging out. The measure is `run`, not `probe`: a failure is the salvage
     // failing, never a tree read as clean.
-    const dirty = (await run("git status --porcelain")).trim() !== "";
+    const status = (await run("git status --porcelain")).trim();
+    const dirty = status !== "" && status !== "(no output)";
     const endingCheckpoint = opts.cue !== "compaction" && opts.cue !== "completion";
     if (dirty) {
       await run("git add -A");
