@@ -111,7 +111,7 @@ describe("OpenCodeHarness — the contract's object", () => {
   it("find answers alive-here when the recorded port answers (any status), dead when no server answers", async () => {
     const alive = new FakeHarnessContainer();
     alive.vm = "vm-here";
-    // The password-guarded health answers 401 without the bearer find does not hold: an answer means the server is up.
+    // The password-guarded info answers 401 without the bearer find does not hold: an answer means the server is up.
     alive.onRequest = () => ({ status: 401, headers: {}, body: "" });
     expect(await object.find(facts({ container: "vm-here" }), alive)).toBe("alive-here");
 
@@ -260,7 +260,7 @@ describe("OpenCodeHarness — the relaunch in the replacement container, and a r
       },
     ]);
     // The rebuild imported the record with the in-flight call settled by the replaced note.
-    const imported = r.requests.find((q) => q.path === "/api/session/import");
+    const imported = r.requests.find((q) => q.path === "/api/experimental/session/import");
     expect(imported).toBeDefined();
     const body = JSON.parse(imported!.body ?? "{}") as { messages: Array<{ type: string; content?: unknown[] }> };
     const settledContent = body.messages
@@ -306,7 +306,7 @@ describe("OpenCodeHarness — the relaunch in the replacement container, and a r
     expect(r.outcome).toEqual({ kind: "answered", answer: "fresh" });
     // The recorded port was probed — and refused the connection — before the fresh start.
     const probes = r.requests.filter((q) => q.port === recordedPortOf(rowFacts));
-    expect(probes.map((q) => q.path)).toEqual(["/api/health"]);
+    expect(probes.map((q) => q.path)).toEqual(["/api/info"]);
     // A pid that does not answer is nobody's here; the dead server's root on this disk goes.
     expect(r.killed).not.toContain(999);
     expect(r.killed).not.toContain(888);
@@ -376,17 +376,17 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
     // No second server; the live server and its tailer end once, at the session's end, never before.
     expect(r.starts).toHaveLength(0);
     expect(r.killed).toEqual([999, 888]);
-    // The row's server, on its recorded port, with the row's password as the Basic auth on every request: the health, the store, the pending asks, then the continue steered into the execution under way.
+    // The row's server, on its recorded port, with the row's password as the Basic auth on every request: the info, the store, the pending asks, then the continue steered into the execution under way.
     const recorded = r.requests.filter((q) => q.port === recordedPortOf(rowFacts));
     expect(recorded.map((q) => `${q.method} ${q.path}`).slice(0, 4)).toEqual([
-      "GET /api/health",
+      "GET /api/info",
       "GET /api/session/ses_run-c/message?order=asc&limit=200",
       "GET /api/session/ses_run-c/permission",
       "POST /api/session/ses_run-c/prompt",
     ]);
     for (const q of recorded) expect(q.secretHeaders).toEqual({ Authorization: expect.stringMatching(/^Basic /) });
     expect(JSON.parse(recorded[3].body ?? "{}")).toMatchObject({ delivery: "steer" });
-    expect(r.requests.some((q) => q.path === "/api/session/import")).toBe(false);
+    expect(r.requests.some((q) => q.path === "/api/experimental/session/import")).toBe(false);
     // The relayed call the plugin re-asked for was answered from the record — the tool never ran in the bot — and its settlement is on the record as the call's result.
     expect(r.statusReports).toEqual([]);
     expect(toolResults(r).map((e) => [e.callId, e.ok])).toEqual([["c-s", false]]);
@@ -522,7 +522,7 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
       const replies = r.requests.filter((q) => /\/permission\/per_c0\/reply$/.test(q.path));
       expect(replies).toHaveLength(1);
       expect(replies[0].port).toBe(recordedPortOf(rowFacts));
-      expect(JSON.parse(replies[0].body ?? "{}")).toMatchObject({ reply });
+      expect(JSON.parse(replies[0].body ?? "{}")).toMatchObject({ decision: reply });
       // The call's result on the record, and on the ledger as the next step's user turn.
       const result = toolResults(r).find((e) => e.callId === "c0");
       expect(result).toMatchObject({ tool: "bash", ok });
@@ -683,7 +683,7 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
       });
       return { driver, r };
     };
-    // Refused after the health passed (the session refused): the row's bearer never joins this generation's proxy, and the fresh start runs on this generation's own.
+    // Refused after the info passed (the session refused): the row's bearer never joins this generation's proxy, and the fresh start runs on this generation's own.
     const refused = new RunBearerStore({ clock });
     refused.mint(grant());
     const a = await run({ bearers: refused, reattach: { refuseSession: true } });
@@ -834,7 +834,9 @@ describe("the model reference on every request that carries one names the config
   const request: ChatMessage = { role: "user", content: [{ type: "text", text: "do the thing" }] };
   const modelRefsOf = (r: DrivenRun) =>
     r.requests
-      .filter((q) => q.method === "POST" && (q.path === "/api/session" || q.path === "/api/session/import"))
+      .filter(
+        (q) => q.method === "POST" && (q.path === "/api/session" || q.path === "/api/experimental/session/import"),
+      )
       .map((q) => {
         const body = JSON.parse(q.body ?? "{}") as { model?: unknown; info?: { model?: unknown } };
         return { path: q.path, model: q.path === "/api/session" ? body.model : body.info?.model };
@@ -857,7 +859,7 @@ describe("the model reference on every request that carries one names the config
     });
     expect(seeded.outcome).toEqual({ kind: "answered", answer: "continuing" });
     expect(modelRefsOf(seeded)).toEqual([
-      { path: "/api/session/import", model: { providerID: PROXY_PROVIDER, id: "claude-fable-5" } },
+      { path: "/api/experimental/session/import", model: { providerID: PROXY_PROVIDER, id: "claude-fable-5" } },
     ]);
 
     const rebuilt = await driver.run({
@@ -873,7 +875,7 @@ describe("the model reference on every request that carries one names the config
     });
     expect(rebuilt.outcome).toEqual({ kind: "answered", answer: "resumed" });
     expect(modelRefsOf(rebuilt)).toEqual([
-      { path: "/api/session/import", model: { providerID: PROXY_PROVIDER, id: "claude-fable-5" } },
+      { path: "/api/experimental/session/import", model: { providerID: PROXY_PROVIDER, id: "claude-fable-5" } },
     ]);
     // The bot's provider name reaches no request at all.
     for (const r of [oneTurn, seeded, rebuilt])

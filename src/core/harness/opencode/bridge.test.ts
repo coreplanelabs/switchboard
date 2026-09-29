@@ -132,6 +132,23 @@ describe("OPENCODE_EVENT_DISPOSITION — every event the server streams is decid
     expect(openCodeDispositionOf("session.made.up.kind")).toBeUndefined();
   });
 
+  it.each(["provider.updated", "model.updated", "session.permissions"])(
+    "%s is structure under the pinned event vocabulary, not a failure or session ending",
+    (type) => {
+      const { bridge, events } = harness();
+      expect(openCodeDispositionOf(type)).toBe("structure");
+      expect(bridge.observe(ev(type))).toEqual({ replies: [], settled: false });
+      expect(events).toEqual([]);
+    },
+  );
+
+  it("location shutdown is server structure, not an unknown event or a session ending", () => {
+    const { bridge, events } = harness();
+    expect(openCodeDispositionOf("location.shutdown")).toBe("structure");
+    expect(bridge.observe(ev("location.shutdown"))).toEqual({ replies: [], settled: false });
+    expect(events).toEqual([]);
+  });
+
   it("its counts by class — the record table at a glance", () => {
     const counts = openCodeDispositionCounts();
     expect(counts.mapped + counts.structure + counts.folded + counts.note + counts.impossible).toBe(
@@ -2208,7 +2225,7 @@ describe("wind-down parity, an undelivered follow-up, and the alive-here reconci
     // anything was ended; nothing else was asked of it.
     const recordedPort = rowFacts.harness === "opencode" ? rowFacts.port : -1;
     expect(r.requests.filter((q) => q.port === recordedPort).map((q) => q.path)).toEqual([
-      "/api/health",
+      "/api/info",
       "/api/session/ses_run-c/message?order=asc&limit=200",
     ]);
     // Both the row's server and its tailer are ended before the fresh start.

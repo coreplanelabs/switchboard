@@ -8,7 +8,7 @@
 // proxy as the one provider and the `switchboard` agent whose rules ask the
 // bot before every tool and hide what the identity does not hold, the launch
 // through the container seam on a loopback port the seam picks, the readiness
-// that reads the server's health, checks the configuration took and settles
+// that reads the server's info, checks the configuration took and settles
 // the plugin before the first session, and the tailer started beside it. Pure
 // where it can be — strings and records — with one async function over the
 // seam for the launch.
@@ -37,7 +37,8 @@ import {
   openCodeAuthHeader,
   parseConfigEntries,
   parseFeedRecord,
-  parseHealth,
+  parseServerInfo,
+  parsePluginStates,
   type OpenCodeConfigEntry,
   type OpenCodePermissionRule,
 } from "./client.js";
@@ -60,7 +61,7 @@ export const OPENCODE_PLUGIN_REF = "./plugins/switchboard";
  *  `OPENCODE_SERVER_PASSWORD` is the legacy fallback). It stays in the server's
  *  environment in `serve` mode — only `--stdio` deletes it (`packages/cli/src/server-process.ts:70-74`). */
 export const OPENCODE_PASSWORD_ENV = "OPENCODE_PASSWORD";
-/** How long the server may take to answer its health with the pin's version. */
+/** How long the server may take to answer its info with the pin's version. */
 export const OPENCODE_READY_MS = 30_000;
 /** Between two readiness probes that found no server yet. */
 export const OPENCODE_READY_POLL_MS = 250;
@@ -601,7 +602,7 @@ export function loadedDocument(
 }
 
 /** Thrown when the run's server did not become ready: which step refused it
- *  and why, by name — the health that never answered in time, a password the
+ *  and why, by name — the info that never answered in time, a password the
  *  server refused, a version on PATH other than the pin, a configuration key
  *  that did not take, a plugin activation that failed — with the server's
  *  stderr tail when it has one. Never quotes a body that could carry the bearer. */
@@ -628,7 +629,7 @@ export interface OpenCodeLaunchDeps {
 /** What a launch answers: the server's pid (the wrapper's, the group it runs
  *  in) and its loopback port — the row's facts — the tailer's pid, the
  *  password the requests carry, the paths the files went to (the root the
- *  container made), and the version the health answered. */
+ *  container made), and the version the info answered. */
 export interface OpenCodeStarted {
   pid: number;
   port: number;
@@ -642,7 +643,7 @@ export interface OpenCodeStarted {
 
 /** The launch: the root the container makes for the run, the files, the
  *  server on a free loopback port with the environment above, readiness —
- *  `GET /api/health` with the password answering 200 with the pin's version
+ *  `GET /api/info` with the password answering 200 with the pin's version
  *  within the bound (a 401 is the password refused, a version off the pin is
  *  a binary this build does not drive, a server that exited is its stderr;
  *  each a named failure at once), then `GET /api/config` echoing the run's
@@ -689,10 +690,10 @@ export async function launchOpenCode(
   let poll = pollMs;
   while (version === undefined) {
     if (probePid && !(await container.alive(pid)))
-      throw await notReady("the server exited before it answered its health");
+      throw await notReady("the server exited before it answered its info");
     let res: HarnessResponse | undefined;
     try {
-      res = await request(OPENCODE_ROUTES["health.get"]);
+      res = await request(OPENCODE_ROUTES["server.info"]);
       probePid = false;
     } catch (err) {
       if (isContainerGone(err)) throw err;
@@ -702,19 +703,18 @@ export async function launchOpenCode(
     if (res) {
       if (res.status === 401) throw await notReady("the server refused the run's password");
       // 500 is the server's own word for a start that failed (`packages/server/src/process.ts:214-224`): nothing to poll for.
-      if (res.status === 500) throw await notReady("the server reported that its start failed (health answered 500)");
+      if (res.status === 500) throw await notReady("the server reported that its start failed (info answered 500)");
       if (res.status === 200) {
-        const health = parseHealth(res.body);
-        if (!health) throw await notReady("the health answered something that is not the health shape");
-        if (health.version !== OPENCODE_VERSION)
-          throw await notReady(`the opencode on PATH is ${health.version}; this build drives ${OPENCODE_VERSION}`);
-        version = health.version;
+        const info = parseServerInfo(res.body);
+        if (!info) throw await notReady("the info answered something that is not the info shape");
+        if (info.version !== OPENCODE_VERSION)
+          throw await notReady(`the opencode on PATH is ${info.version}; this build drives ${OPENCODE_VERSION}`);
+        version = info.version;
         break;
       }
-      last = `the health answered ${res.status}`;
+      last = `the info answered ${res.status}`;
     }
-    if (clock() >= deadline)
-      throw await notReady(`the server did not answer its health within ${readyMs} ms (${last})`);
+    if (clock() >= deadline) throw await notReady(`the server did not answer its info within ${readyMs} ms (${last})`);
     await sleep(poll);
     if (clock() - startedAt >= 1000) poll = Math.min(OPENCODE_READY_POLL_MAX_MS, poll * 2);
   }
@@ -728,9 +728,23 @@ export async function launchOpenCode(
   const problem = configProblem(info, placed);
   if (problem) throw await notReady(`the run's configuration ${problem}`);
 
-  const activation = await request(OPENCODE_ROUTES["plugin.awaitActivation"]);
-  if (activation.status < 200 || activation.status >= 300)
-    throw await notReady(`plugin activation answered ${activation.status}`);
+  // The pin removed await-activation. Its inventory exposes a plugin only
+  // after setup settles, so require the relay itself to be active, not merely
+  // a successful inventory request or an unrelated plugin's active state.
+  while (true) {
+    const inventory = await request(OPENCODE_ROUTES["plugin.list"]);
+    if (inventory.status !== 200) throw await notReady(`plugin inventory answered ${inventory.status}`);
+    const plugins = parsePluginStates(inventory.body);
+    if (!plugins) throw await notReady("the plugin inventory answered something that is not the inventory shape");
+    // A discovery failure can have no id; its local source still identifies this run's relay.
+    const relay = plugins.find(
+      (plugin) => plugin.id === "switchboard" || (plugin.id === undefined && plugin.sourcePath === paths.pluginDir),
+    );
+    if (relay?.status === "failed") throw await notReady("the relay plugin failed to activate");
+    if (relay?.status === "active") break;
+    if (clock() >= deadline) throw await notReady(`the relay plugin did not activate within ${readyMs} ms`);
+    await sleep(pollMs);
+  }
 
   const tailer = await container.start({
     paths: paths.tailer,

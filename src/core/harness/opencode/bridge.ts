@@ -120,6 +120,7 @@ import {
   type OpenCodeFeedRecord,
   type OpenCodeMessage,
   type OpenCodePermissionRequest,
+  type OpenCodePermissionReply,
 } from "./client.js";
 import { openCodeDispositionOf } from "./dispositions.js";
 import { openCodeReplacedCallNote, openCodeSettlementNote, openCodeStoreRowCount } from "./session.js";
@@ -2883,7 +2884,10 @@ export async function driveOpenCode(
     for (const reply of obs.replies) {
       let resolution: OpenCodeReplyResolution;
       const route = openCodePermissionReplyRoute(conn.sessionID, reply.requestID);
-      const body = { reply: reply.reply, ...(reply.message ? { message: reply.message } : {}) };
+      const body: OpenCodePermissionReply = {
+        decision: reply.reply,
+        ...(reply.message ? { message: reply.message } : {}),
+      };
       try {
         const res = await request(route, body);
         resolution =

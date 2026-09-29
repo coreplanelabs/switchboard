@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { AssistantMessage as PiAssistantMessage, Context, Model, ProviderStreams } from "@earendil-works/pi-ai";
+import type { AssistantMessage as PiAssistantMessage, Model, ProviderStreams } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { secretsFrom } from "../../secrets.js";
 import type { CompletionRequest, ProviderConfig } from "../provider.js";
@@ -607,6 +607,49 @@ describe("toPiContext — the completion vocabulary in pi's shape", () => {
     ]);
   });
 
+  it("tool arguments cross the pi boundary as JSON objects without changing the caller's input", () => {
+    const input = { nested: { keep: [null, true, 3, "text"], omit: undefined }, omit: undefined };
+    const ctx = toPiContext(
+      {
+        model: "m",
+        messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "tool", input }] }],
+        maxTokens: 10,
+      },
+      model(),
+      CLOCK,
+    );
+    const turn = ctx.messages[0];
+    expect(turn.role).toBe("assistant");
+    if (turn.role !== "assistant") throw new Error("expected an assistant message");
+    expect(turn.content[0]).toStrictEqual({
+      type: "toolCall",
+      id: "t1",
+      name: "tool",
+      arguments: { nested: { keep: [null, true, 3, "text"] } },
+    });
+    expect(input).toHaveProperty("omit");
+    expect(input.nested).toHaveProperty("omit");
+  });
+
+  it.each([null, "text", 5, ["array"], { toJSON: () => "not an object" }])(
+    "non-object tool arguments become an empty argument object (%j)",
+    (input) => {
+      const ctx = toPiContext(
+        {
+          model: "m",
+          messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t1", name: "tool", input }] }],
+          maxTokens: 10,
+        },
+        model(),
+        CLOCK,
+      );
+      const turn = ctx.messages[0];
+      expect(turn.role).toBe("assistant");
+      if (turn.role !== "assistant") throw new Error("expected an assistant message");
+      expect(turn.content).toStrictEqual([{ type: "toolCall", id: "t1", name: "tool", arguments: {} }]);
+    },
+  );
+
   it("a tool result carrying parts keeps its text and images; an error result says so; a result whose call is not in the conversation is named by its id", () => {
     const ctx = toPiContext(
       {
@@ -808,7 +851,11 @@ describe("fromPiMessage — pi's assistant message as the completion result", ()
 describe("the adapter seam — a scripted pi API stands in for the wire", () => {
   /** A `ProviderStreams` that answers with one message and keeps what it was handed. */
   function scriptedApi(answer: PiAssistantMessage) {
-    const calls: Array<{ model: Model<PiApi>; context: Context; options: unknown }> = [];
+    const calls: Array<{
+      model: Model<PiApi>;
+      context: Parameters<ProviderStreams["stream"]>[1];
+      options: unknown;
+    }> = [];
     const stream: ProviderStreams["stream"] = (model, context, options) => {
       calls.push({ model: model as Model<PiApi>, context, options });
       const out = createAssistantMessageEventStream();
@@ -842,7 +889,17 @@ describe("the adapter seam — a scripted pi API stands in for the wire", () => 
     const result = await table.get("anthropic").complete(routeRequest());
     expect(calls).toHaveLength(1);
     expect(calls[0].model).toMatchObject({ id: "claude-haiku-4-5", api: "anthropic-messages", maxTokens: 200 });
-    expect(calls[0].context.systemPrompt).toBe("You route one chat request.");
+    expect(calls[0].context).toEqual({
+      messages: [
+        {
+          role: "system",
+          content: "You route one chat request.",
+          toolsAdded: [{ name: "route", description: ROUTE_TOOL.description, parameters: ROUTE_TOOL.inputSchema }],
+          timestamp: 0,
+        },
+        { role: "user", content: [{ type: "text", text: "<request>review PR 7</request>" }], timestamp: CLOCK() },
+      ],
+    });
     expect(calls[0].options).toMatchObject({ apiKey: "sk-ant-test", toolChoice: { type: "tool", name: "route" } });
     expect(result).toEqual({
       content: [{ type: "text", text: '{"preset":"general","reason":"why"}' }],

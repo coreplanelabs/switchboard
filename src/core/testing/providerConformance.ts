@@ -359,15 +359,20 @@ export const PROVIDER_BLOCKS: Record<string, ProviderConfig> = {
 
 const registry: CardRegistry = installedModelRegistry;
 
+// Unknown-card scenarios need a fictional id: the live catalog may learn any
+// real model from the historical trace on its next package upgrade.
+const UNKNOWN_MODEL_REF = "openrouter/deepseek/conformance-unknown-model";
+
 /** The scaffold's rows. Trace steps 2, 3, 5, 7 and 12 are the record's own
- *  trace on `openrouter/deepseek/deepseek-v4.1-flash` and the V4 Pro pair. */
+ *  trace on `openrouter/deepseek/deepseek-v4.1-flash` and the V4 Pro pair;
+ *  unknown-card rows substitute the fictional fixture for the former. */
 export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
   {
     id: "trace-2-unknown-card",
     control: "window",
     trace: 2,
     title: "a model the catalog does not know resolves every field from the wire layer, provenance wire",
-    ref: "openrouter/deepseek/deepseek-v4.1-flash",
+    ref: UNKNOWN_MODEL_REF,
     asked: {},
     expect: { outcome: "degraded", applied: "128000", vouched: false, why: "no layer names the window" },
     payload: (body, card) => {
@@ -380,7 +385,7 @@ export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
     control: "effort",
     trace: 3,
     title: "an unknown card sends the asked tier unvouched and says so before the first token",
-    ref: "openrouter/deepseek/deepseek-v4.1-flash",
+    ref: UNKNOWN_MODEL_REF,
     asked: { effort: "xhigh" },
     expect: { outcome: "degraded", applied: "xhigh", vouched: false, why: "unvouched" },
     payload: (body) => {
@@ -397,7 +402,7 @@ export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
     control: "inputs",
     trace: 5,
     title: "a document degrades to a text stub on every card until a harness carries files",
-    ref: "openrouter/deepseek/deepseek-v4.1-flash",
+    ref: UNKNOWN_MODEL_REF,
     asked: { documents: 1 },
     expect: { outcome: "degraded", applied: "text", vouched: false, why: "text stub" },
   },
@@ -406,7 +411,7 @@ export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
     control: "window",
     trace: 7,
     title: "an unknown window degrades to pi's 128000 with the note, never a silent 200k",
-    ref: "openrouter/deepseek/deepseek-v4.1-flash",
+    ref: UNKNOWN_MODEL_REF,
     asked: {},
     expect: { outcome: "degraded", applied: "128000", vouched: false },
   },
@@ -443,7 +448,7 @@ export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
     id: "cap-unvouched",
     control: "cap",
     title: "a cap field no layer names goes out under the wire's default, unvouched",
-    ref: "openrouter/deepseek/deepseek-v4.1-flash",
+    ref: UNKNOWN_MODEL_REF,
     asked: {},
     expect: { outcome: "degraded", applied: "max_completion_tokens", vouched: false },
     payload: (body) => {
