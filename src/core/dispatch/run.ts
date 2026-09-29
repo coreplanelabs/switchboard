@@ -35,7 +35,7 @@ import type {
 } from "../../execution/githubPulls.js";
 import type { DispatchIdentityRewrite } from "../../execution/identityRewrite.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
-import { workspaceBindingFor, type ExecutorSelection } from "../../execution/factory.js";
+import { checkoutOfSelection, workspaceBindingFor, type ExecutorSelection } from "../../execution/factory.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
 import type { OperationTarget, RepoContext } from "../repoContext.js";
@@ -346,7 +346,8 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     seedActors,
   } = ctx;
   const directAudience = directAudienceStampOf(msg);
-  const { resident, binding } = selection;
+  const { resident } = selection;
+  const checkout = checkoutOfSelection(selection);
   let ledgerRun = ctx.ledgerRun;
   // Where the run's workspace is (run-history item 54), on the row's state
   // beside the harness facts: the generation that resumes the run re-attaches
@@ -413,7 +414,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           ...(seed !== undefined ? { seed } : {}),
           ...(route !== undefined && !privateMain ? { route } : {}),
           selection: resident === true ? "resident" : "sandbox",
-          ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
+          ...(checkout !== undefined ? { workspace: checkout } : {}),
           ...(requestRow !== undefined ? { request: requestRow } : {}),
         },
         card: card.handle ?? null,

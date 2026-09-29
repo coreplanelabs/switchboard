@@ -236,19 +236,26 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
   };
 }
 
-/** The binding to record for a selection: the backend and, from a resident
- *  attach, the worktree, the pool user and the container. Nothing for a class
- *  without a workspace (`none`): there is nothing to re-attach. */
+/** The checkout supplied by attach or seed. A cold clone has no path until
+ * the coding run discovers it in its workspace. */
+export function checkoutOfSelection(selection: ExecutorSelection): string | undefined {
+  return selection.binding?.workspace ?? selection.seeded?.workspace;
+}
+
+/** The binding to record for a selection: the backend, any known checkout,
+ *  and a resident's pool user and container. Nothing for a class without a
+ *  workspace (`none`): there is nothing to re-attach. */
 export function workspaceBindingFor(
   selection: ExecutorSelection,
   machine: MachineClass = "repo-resident",
 ): WorkspaceBinding | undefined {
   if (machine === "none" || selection.backend === undefined) return undefined;
   const b = selection.binding;
+  const checkout = checkoutOfSelection(selection);
   return {
     backend: selection.backend,
     ...(b?.ref !== undefined ? { ref: b.ref } : {}),
-    ...(b?.workspace !== undefined ? { workspace: b.workspace } : {}),
+    ...(checkout !== undefined ? { workspace: checkout } : {}),
     ...(b?.user !== undefined ? { user: b.user } : {}),
     ...(b?.container !== undefined ? { container: b.container } : {}),
     ...(selection.backend === "sandbox" && selection.seeded

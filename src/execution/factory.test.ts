@@ -2744,6 +2744,7 @@ describe("the workspace binding on the row", () => {
       }),
     ).toEqual({
       backend: "sandbox",
+      workspace: "/workspace/checkout",
       seeded: { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout", sourceSha: "b".repeat(40) },
     });
     expect(workspaceBindingFor({ executor: new LocalExecutor("/tmp/x") })).toBeUndefined();

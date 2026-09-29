@@ -47,7 +47,7 @@ import {
 import { prepareRelaunch } from "./relaunch.js";
 import { harnessNamed } from "../harness/roster.js";
 import { harnessContainerFor } from "../harness/botHostContainer.js";
-import { workspaceBindingFor, type ReadyEnvironmentReason } from "../../execution/factory.js";
+import { checkoutOfSelection, workspaceBindingFor, type ReadyEnvironmentReason } from "../../execution/factory.js";
 import type { ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
 import { isContainerGone } from "../harness/container.js";
@@ -388,7 +388,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const { binding } = round.selection;
   // A relaunch may attach the same run at a different checkout path. Every
   // later probe, checkpoint and harness rule must use the latest attachment.
-  let currentCheckout = binding?.workspace;
+  let currentCheckout = checkoutOfSelection(round.selection);
   // The plan's base for a coordinator's child (run-history item 48a): the
   // tag's — the spawn's own, or the one the `coordinator_tag` event carried
   // across a roll — else, when the tag lost it, the second guard: the parent
@@ -2007,7 +2007,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             // row learns the binding complete, as a resumed row does.
             executor = decision.round.selection.executor;
             toolContext.executor = executor;
-            currentCheckout = decision.round.selection.binding?.workspace;
+            currentCheckout = checkoutOfSelection(decision.round.selection);
             const rebound = workspaceBindingFor(decision.round.selection, profile.machine);
             if (rebound !== undefined) {
               workspaceBinding = rebound;
