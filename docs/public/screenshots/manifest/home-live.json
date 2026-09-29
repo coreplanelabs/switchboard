@@ -63,7 +63,7 @@
     "scripts/screenshots.mts": "cf676e658502c7ad59c4b262ed878c4c7591a2f83d31bc26806e19d9c0d5493e",
     "scripts/web-preview-reading-diff.ts": "24dea75cb4b61c011fa75878b138dde75e8a260d3c5b06c05c1e6fe2f2a58649",
     "scripts/web-preview.ts": "89cdd4b3679df8dd4a879d6db28301a2551ae740f7750bac523cd7465a02bf5c",
-    "src/agents/registry.ts": "d11304fff2b02061feb3502583d1d0612696c70e530912b1e57904efae1a79bd",
+    "src/agents/registry.ts": "8734169cc44dcfcc54a66407b2783b88b9d574738dd0730924391bcd2e1e6a95",
     "src/artifacts/config.ts": "4aefd5a56a6b68599a994e31ae640e7729c3cc72221c30a1c003728a4ed35db9",
     "src/artifacts/contentType.ts": "637607106665db5fd51a526a41cbd71c4793005a8873be2cf77ca17a3bcdc23e",
     "src/artifacts/keys.ts": "c2c8a73e58339988b76d97e12602aa2265c9b274ea106dd29a669c4580476f56",

@@ -220,7 +220,7 @@ export async function observeCodingWorkspace(
   };
   const atRoot = await probesAt("git");
   if (atRoot.isRepo) return atRoot.observation;
-  const dir = parseCloneDirOutput(await probe("ls -d */.git 2>/dev/null | head -1"));
+  const dir = parseCloneDirOutput(await probe(CLONED_REPO_PROBE));
   if (dir === undefined) return atRoot.observation; // no clone anywhere → the post-step reports honestly
   return (await probesAt(`git -C ${shellQuote(dir)}`)).observation;
 }
@@ -262,6 +262,8 @@ export function salvageTargetOf(opts: {
 /** The salvage's word for a clean tree with nothing unpushed on `branch`. */
 export const nothingToSalvageNote = (branch: string): string =>
   `the budget ended with nothing to salvage: the tree is clean and \`${branch}\` holds no unpushed commits`;
+
+const CLONED_REPO_PROBE = "ls -d */.git 2>/dev/null | head -1";
 
 /** Whether the observation found work for the budget-end salvage to push:
  *  measured work — uncommitted changes or unpushed commits — wins whatever the
@@ -348,20 +350,30 @@ export async function salvageBudgetPush(
     // ignore rules still keep dependency caches, credentials and attachment
     // staging out. The measure is `run`, not `probe`: a failure is the salvage
     // failing, never a tree read as clean.
-    const status = (await run("git status --porcelain")).trim();
+    let git = "git";
+    let status: string;
+    try {
+      status = (await run(`${git} status --porcelain`)).trim();
+    } catch (err) {
+      if (!/not a git repository/i.test(err instanceof Error ? err.message : String(err))) throw err;
+      const dir = parseCloneDirOutput(await probe(CLONED_REPO_PROBE));
+      if (dir === undefined) throw err;
+      git = `git -C ${shellQuote(dir)}`;
+      status = (await run(`${git} status --porcelain`)).trim();
+    }
     const dirty = status !== "" && status !== "(no output)";
     const endingCheckpoint = opts.cue !== "compaction" && opts.cue !== "completion";
     if (dirty) {
-      await run("git add -A");
-      await run(`git commit -m ${shellQuote(words.commit)}`);
+      await run(`${git} add -A`);
+      await run(`${git} commit -m ${shellQuote(words.commit)}`);
     } else if (endingCheckpoint) {
       // A clean tree can still be unfinished: the child may have pushed an
       // ordinary intermediate commit before its abnormal ending. Give every
       // ending its own mechanical marker so the durable fold records the last
       // head as salvage and the coordinator never reviews that work as final.
-      await run(`git commit --allow-empty -m ${shellQuote(words.commit)}`);
+      await run(`${git} commit --allow-empty -m ${shellQuote(words.commit)}`);
     }
-    const unpushed = parseCountOutput(await run("git rev-list --count HEAD --not --remotes")) ?? 0;
+    const unpushed = parseCountOutput(await run(`${git} rev-list --count HEAD --not --remotes`)) ?? 0;
     if (!dirty && !endingCheckpoint && unpushed === 0) return { pushed: false, summary: words.nothing };
     if (opts.publication !== undefined && "blocked" in opts.publication)
       return {
@@ -373,7 +385,7 @@ export async function salvageBudgetPush(
         ? ` --force-with-lease=${shellQuote(`refs/heads/${opts.publication.ref}:${opts.publication.expectedHeadSha}`)}`
         : "";
     try {
-      await run(`git push${lease} origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
+      await run(`${git} push${lease} origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
     } catch (err) {
       if (opts.publication !== undefined) {
         const detail = err instanceof Error ? err.message : String(err);
@@ -386,7 +398,7 @@ export async function salvageBudgetPush(
       }
       throw err;
     }
-    const head = parseRevParseOutput(await probe("git rev-parse HEAD"));
+    const head = parseRevParseOutput(await probe(`${git} rev-parse HEAD`));
     return {
       pushed: true,
       ...(head !== undefined ? { head } : {}),

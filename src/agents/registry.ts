@@ -275,7 +275,9 @@ export const FAST_GATES_BEFORE_PUSH =
   "`npx prettier --check` on the changed files, `npm run hygiene:check` and `npm run specs:check` — " +
   "then your judgement on what else this change needs, not a longer checklist. The full verification is " +
   "CI's gate — `npm run verify` runs there on your push, never here: push a head early and let CI judge it, " +
-  "fixing forward with further commits and pushes.";
+  "fixing forward with further commits and pushes. In another repository, use its documented equivalents " +
+  "for these checks and full CI gate. An equivalent command is not a contract deviation: record the actual " +
+  "commands and results. Record a check you cannot run as unproven, never clean.";
 
 // Every coding prompt carries this verbatim, right after the fast gates
 // (agent-coding item 13; record 0071 mechanism one, issue 1747): the rebase
