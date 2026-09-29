@@ -213,6 +213,19 @@ channels:
     expect(names).not.toContain("config_set");
   });
 
+  it("an ended pipeline with an exact PR offers review and guarded continuation, never a findings command", () => {
+    const turn = input({
+      projection: projectionOf(["general", "review", "ship"]),
+      owner: { kind: "pipeline", unit: "U12", allowReview: true },
+    });
+    const tools = operatorTools(turn);
+    const bind = tools.find((tool) => tool.name === OPERATOR_BIND_TOOL)!;
+    expect(bind?.inputSchema).toMatchObject({ properties: { preset: { enum: ["review", "ship"] } } });
+    expect(tools.map((tool) => tool.name)).not.toContain("runs_list");
+    expect(buildOperatorPrompt(turn).user).toContain("A review request is new read-only work");
+    expect(answerOperatorRead(OPERATOR_READ_TOOLS.registryHelp, turn)).toContain("`review`");
+  });
+
   it("bind_preset renders the preset on the PERSON's own words — the model's request copy never rides, so a paraphrase or a doubled head is unrepresentable", () => {
     const turn = parseOperatorTurn(
       { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "some paraphrase", reason: "read ask" } },

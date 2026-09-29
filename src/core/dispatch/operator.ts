@@ -316,7 +316,9 @@ export function operatorSources(
  *  like any other decision. An ended pipeline is distinct from an idle unit:
  *  every steer decision folds so the dispatcher re-issues its durable task. */
 export type OperatorThreadOwner =
-  { kind: "live"; runId?: string } | { kind: "unit"; unit: string } | { kind: "pipeline"; unit: string };
+  | { kind: "live"; runId?: string }
+  | { kind: "unit"; unit: string }
+  | { kind: "pipeline"; unit: string; allowReview?: true };
 
 /** The projection an OWNED thread's event is shown (issue 2027;
  *  thread-admission item 9): a reply there is a follow-up for the thread's
@@ -324,8 +326,11 @@ export type OperatorThreadOwner =
  *  read commands — no preset (a run beside the owner would be a rival) and no
  *  write. The bind guard still reads the author's full projection: a bind
  *  outside this table is a decision the executor folds, never a violation the
- *  seam re-asks. */
-export function ownedProjection(p: OperatorProjection): OperatorProjection {
+ *  seam re-asks. An ended unit's exact PR additionally offers review and a
+ *  Ship bind that means guarded continuation, never a fresh writer. */
+export function ownedProjection(p: OperatorProjection, owner?: OperatorThreadOwner): OperatorProjection {
+  if (owner?.kind === "pipeline" && owner.allowReview)
+    return { presets: p.presets.filter((preset) => preset.name === "review" || preset.name === "ship"), commands: [] };
   return {
     presets: [],
     commands: p.commands.filter((c) => c.id === "steer.run" || c.effect === "read"),
@@ -345,6 +350,8 @@ export function ownerNote(owner: OperatorThreadOwner): string {
     owner.kind === "live" && owner.runId !== undefined
       ? ` bind \`steer run ${owner.runId} <words>\` to deliver it,`
       : "";
+  if (owner.kind === "pipeline" && owner.allowReview)
+    return `In this thread, ${who} retains its task, branch, pull request and spent budgets. The request explicitly names that pull request. A review request is new read-only work: bind review to inspect its current head, never replay the findings ledger. For continuation or implementation bind ship; that decision folds into the original unit's guarded continuation and cannot start a replacement writer. A round cap limits continuation, not a separately requested review.`;
   if (owner.kind === "pipeline")
     return `This thread is owned by ${who}: the request below is a continuation of that durable task. Read tools may ground the decision, but every action folds into the owner so the current pull request is re-read and the pipeline resumes; an informational command or question is not fulfillment.`;
   if (owner.kind === "unit")
@@ -440,7 +447,7 @@ export interface OperatorInput {
 export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
   // An owned thread's event is shown only what a follow-up may bind (issue
   // 2027); a decision outside that table is one the executor folds.
-  const projection = input.owner ? ownedProjection(input.projection) : input.projection;
+  const projection = input.owner ? ownedProjection(input.projection, input.owner) : input.projection;
   const commandList = projection.commands
     .map((c) => `- \`${c.tool.name}\`: ${oneLine(c.tool.description ?? c.id)}`)
     .join("\n");
@@ -555,7 +562,7 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
  *  bind the author may not run is unrepresentable, and a line to mangle never
  *  exists: the schema carries the arguments typed. */
 export function operatorTools(input: OperatorInput): ToolDef[] {
-  const projection = input.owner ? ownedProjection(input.projection) : input.projection;
+  const projection = input.owner ? ownedProjection(input.projection, input.owner) : input.projection;
   const presets = projection.presets.map((p) => p.name);
   const bind: ToolDef[] =
     presets.length > 0
@@ -700,7 +707,7 @@ export function answerOperatorRead(tool: string, input: OperatorInput): string {
     // The catalogue is asynchronous and answered by the loop itself
     // (`readProviderModels`); this branch is the no-reader fallback.
     return "The providers catalogue is not available here; the prompt's provider list is the ground truth.";
-  const projection = input.owner ? ownedProjection(input.projection) : input.projection;
+  const projection = input.owner ? ownedProjection(input.projection, input.owner) : input.projection;
   return [
     "Presets this author may run:",
     renderPresetTable(projection.presets),
@@ -1155,12 +1162,21 @@ function runnableProposal(proposal: string, ctx: OperatorTurnContext): boolean {
  *  whole message instead: the caller folds the words into the owner and posts
  *  no reply text. A question is normally the caller's to render before this
  *  is asked; an ended pipeline is the exception, because every action there
- *  folds to its one deterministic continuation. */
+ *  folds to its deterministic continuation except an explicitly enabled review. */
 function ownedDecisionRuns(event: OperatorEventFields, owner: OperatorThreadOwner, commands?: ChatCommands): boolean {
-  // An ended pipeline has one deterministic act: continue its durable task.
-  // No model-authored action — including an informational registry read — can
-  // answer the person's continuation instead of reaching that act.
-  if (owner.kind === "pipeline" || event.outcome !== "binds") return false;
+  if (event.outcome !== "binds") return false;
+  // Only an unconfirmed review of the explicitly named, ended unit's PR is
+  // independent work. Every other decision still reaches continuation's gates.
+  if (owner.kind === "pipeline") {
+    const bind = event.binds?.length === 1 ? event.binds[0] : undefined;
+    return (
+      owner.allowReview === true &&
+      bind !== undefined &&
+      !bind.confirmed &&
+      (commands === undefined || parseChatCommand(bind.line, commands) === null) &&
+      presetBindOf(bind.line, ["review"]) === "review"
+    );
+  }
   return (event.binds ?? []).every((bind) => {
     const parsed = commands ? parseChatCommand(bind.line, commands) : null;
     if (parsed?.kind !== "invoke") return false;
@@ -2018,10 +2034,9 @@ export async function executeOperatorDecision(
   const verbose = shows(verbosity, "verbose");
   const answered: OperatorExecution = { kind: "answered" };
   // Ownership already resolved this event to one ended pipeline. The operator
-  // may use read tools while deciding, but none of its action outcomes may
-  // replace continuation: a read/status command, question, refusal, preset or
-  // stale steer all fold to the dispatcher's durable continuation path.
-  if (ctx.owner?.kind === "pipeline") return { kind: "fold" };
+  // may select a separately requested review only when that owner allowed it.
+  // Reads, writes, questions and stale steers still fold to continuation.
+  if (ctx.owner?.kind === "pipeline" && !ownedDecisionRuns(event, ctx.owner, deps.commands)) return { kind: "fold" };
   if (event.outcome === "question") {
     // The `question` cell: rendered, then parked as the thread's pending
     // question on a door record — the person's next words are its answer.
