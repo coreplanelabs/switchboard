@@ -218,6 +218,50 @@ describe("contractFor — the unit's contract from the repository at the base re
 });
 
 describe("composeChild — the child a brief names", () => {
+  it("a generated unit carries its attributed query result and time window as data into round zero", async () => {
+    const { r } = readers();
+    const generated = { ...instance, plan: { id: "signup-fix" } } as CoordinatorInstance;
+    const row = {
+      ...unit,
+      workBrief: {
+        requesterId: "slack:UALICE",
+        mainThreadKey: "slack:CMAIN:1.0",
+        actId: "act-1",
+        repo: "acme/api",
+        base: "main",
+        question: "How many signups failed?",
+        findings: [
+          {
+            kind: "analysis",
+            text: "17 failed; budget:900",
+            query: "SELECT failures WHERE budget:900",
+            result: "17 of 120",
+            timeWindow: "previous UTC day",
+            sourceUrl: "https://example.com/metrics",
+          },
+        ],
+        suspectedCause: "The callback may reject expired state",
+        requestedChange: "Fix the callback",
+        acceptance: "A reviewed PR with a regression test",
+      },
+    } as CoordinatorUnit;
+    const child = await composeChild(
+      { kind: "contract", unit: row.unit, rebase: { branch: row.branch, onto: "main" } },
+      generated,
+      row,
+      r,
+    );
+    expect(child.prompt).toContain("How many signups failed?");
+    expect(child.prompt).toContain("17 failed");
+    expect(child.prompt).toContain("slack:UALICE");
+    expect(child.prompt).toContain("https://example.com/metrics");
+    expect(child.prompt).toContain("SELECT failures");
+    expect(child.prompt).toContain("17 of 120");
+    expect(child.prompt).toContain("previous UTC day");
+    expect(child.prompt).toContain("Suspected cause (unverified)");
+    expect(child.contract?.unit.section).toContain("Fix the callback");
+    expect(parseDirectives(child.prompt).budget).toBeUndefined();
+  });
   it("briefs the post-approval review on untyped human evidence without treating the old approval as a fix verdict", async () => {
     const externalReview = {
       id: 5324414426,

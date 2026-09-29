@@ -15,6 +15,7 @@ import {
   sendRunFinished,
   STEP_NAME_PATTERN,
   isCoordinatorUnit,
+  isWorkBrief,
   parseUnitKey,
   UNIT_KEY_PATTERN,
   unitKeyOf,
@@ -28,6 +29,47 @@ import {
   type CoordinatorUnit,
   type WorkflowSender,
 } from "./contract.js";
+
+describe("main-agent work brief", () => {
+  const brief = {
+    requesterId: "slack:UALICE",
+    mainThreadKey: "slack:C1:1.0",
+    actId: "act-1",
+    repo: "acme/api",
+    base: "main",
+    question: "How many signups failed?",
+    requestedChange: "Fix the callback",
+    findings: [{ text: "17 of 120 signups failed yesterday" }],
+  };
+
+  it("requires an explicit finding kind and a source for every finding", () => {
+    expect(isWorkBrief(brief)).toBe(false);
+    expect(isWorkBrief({ ...brief, findings: [{ kind: "observation", text: "17 failed" }] })).toBe(false);
+    expect(
+      isWorkBrief({
+        ...brief,
+        findings: [{ kind: "observation", text: "17 failed", sourceUrl: "https://example.com/event" }],
+      }),
+    ).toBe(true);
+  });
+
+  it("requires query, result, window and source for an analytical finding", () => {
+    const finding = {
+      kind: "analysis",
+      text: "17 of 120 failed",
+      query: "SELECT failures",
+      result: "17",
+      timeWindow: "previous UTC day",
+      sourceUrl: "https://example.com/metrics/signups",
+    };
+    expect(isWorkBrief({ ...brief, findings: [finding] })).toBe(true);
+    for (const key of ["query", "result", "timeWindow", "sourceUrl"]) {
+      const missing = { ...finding } as Record<string, unknown>;
+      delete missing[key];
+      expect(isWorkBrief({ ...brief, findings: [missing] })).toBe(false);
+    }
+  });
+});
 
 // Feature: docs/reference/specs/run-history.md items 47–48 — the coordinator's
 // node-free contract: the identity and the action the routes decide on, the

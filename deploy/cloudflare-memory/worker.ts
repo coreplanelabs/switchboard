@@ -110,6 +110,9 @@ import {
   IDEMPOTENCY_KEY_PATTERN,
   capThreadEvent,
   INSTANCE_ID_PATTERN,
+  isMainTaskKey,
+  mainTaskClaimMatches,
+  preserveWorkBrief,
   isCoordinatorInstance,
   isCoordinatorUnit,
   isThreadEvent,
@@ -1741,6 +1744,13 @@ export class RunHistoryDO extends DurableObject<Env> {
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (instance_id, unit)
       );
+      CREATE TABLE IF NOT EXISTS coordinator_main_task_links (
+        main_thread_key TEXT NOT NULL,
+        act_id TEXT NOT NULL,
+        instance_id TEXT NOT NULL UNIQUE,
+        unit TEXT NOT NULL,
+        PRIMARY KEY (main_thread_key, act_id)
+      );
       CREATE TABLE IF NOT EXISTS decision_record_reservations (
         repo TEXT NOT NULL,
         task_key TEXT NOT NULL,
@@ -2586,6 +2596,79 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   // ---- the coordinator's parent records (run-history item 49) -----------------
 
+  async getMainTask(key: {
+    mainThreadKey: string;
+    actId: string;
+  }): Promise<{ instanceId: string; unit: string } | null> {
+    return (
+      this.sql
+        .exec<{ instance_id: string; unit: string }>(
+          `SELECT instance_id, unit FROM coordinator_main_task_links WHERE main_thread_key = ? AND act_id = ?`,
+          key.mainThreadKey,
+          key.actId,
+        )
+        .toArray()
+        .map((row) => ({ instanceId: row.instance_id, unit: row.unit }))[0] ?? null
+    );
+  }
+
+  /** The main decision is only an index. Its Ship instance and unit become
+   * visible in the same transaction, so replay never points at a partial task. */
+  async claimMainTask(
+    key: { mainThreadKey: string; actId: string },
+    instance: CoordinatorInstance,
+    unit: CoordinatorUnit,
+    now: number,
+  ): Promise<
+    { ok: true; created: boolean; link: { instanceId: string; unit: string } } | { ok: false; reason: "conflict" }
+  > {
+    let out:
+      { ok: true; created: boolean; link: { instanceId: string; unit: string } } | { ok: false; reason: "conflict" } = {
+      ok: false,
+      reason: "conflict",
+    };
+    this.ctx.storage.transactionSync(() => {
+      const prior = this.sql
+        .exec<{ instance_id: string; unit: string }>(
+          `SELECT instance_id, unit FROM coordinator_main_task_links WHERE main_thread_key = ? AND act_id = ?`,
+          key.mainThreadKey,
+          key.actId,
+        )
+        .toArray()[0];
+      if (prior) {
+        out = { ok: true, created: false, link: { instanceId: prior.instance_id, unit: prior.unit } };
+        return;
+      }
+      if (
+        unit.instanceId !== instance.id ||
+        this.sql.exec(`SELECT 1 FROM coordinator_instances WHERE instance_id = ?`, instance.id).toArray().length > 0
+      )
+        return;
+      this.sql.exec(
+        `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)`,
+        instance.id,
+        JSON.stringify(instance),
+        instance.createdAt,
+      );
+      this.sql.exec(
+        `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)`,
+        unit.instanceId,
+        unit.unit,
+        JSON.stringify(unit),
+        now,
+      );
+      this.sql.exec(
+        `INSERT INTO coordinator_main_task_links (main_thread_key, act_id, instance_id, unit) VALUES (?, ?, ?, ?)`,
+        key.mainThreadKey,
+        key.actId,
+        instance.id,
+        unit.unit,
+      );
+      out = { ok: true, created: true, link: { instanceId: instance.id, unit: unit.unit } };
+    });
+    return out;
+  }
+
   /** Idempotent for the same record; a different record under a taken id is refused. */
   async putInstance(instance: CoordinatorInstance): Promise<{ ok: true } | { ok: false; reason: "exists" }> {
     let out: { ok: true } | { ok: false; reason: "exists" } = { ok: true };
@@ -2611,8 +2694,16 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** The record written over whatever the id holds and the id's unit rows
    *  dropped, in one transaction — an attempt starting over: the leftover of one
    *  whose Workflow instance was never created, once the shim said so. */
-  async replaceInstance(instance: CoordinatorInstance): Promise<{ ok: true }> {
+  async replaceInstance(instance: CoordinatorInstance): Promise<{ ok: true } | { ok: false; reason: "exists" }> {
+    let out: { ok: true } | { ok: false; reason: "exists" } = { ok: true };
     this.ctx.storage.transactionSync(() => {
+      if (
+        this.sql.exec(`SELECT 1 FROM coordinator_main_task_links WHERE instance_id = ?`, instance.id).toArray().length >
+        0
+      ) {
+        out = { ok: false, reason: "exists" };
+        return;
+      }
       this.sql.exec(
         `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)
          ON CONFLICT(instance_id) DO UPDATE SET json = excluded.json, created_at = excluded.created_at`,
@@ -2622,7 +2713,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       );
       this.sql.exec(`DELETE FROM coordinator_units WHERE instance_id = ?`, instance.id);
     });
-    return { ok: true };
+    return out;
   }
 
   async getInstance(id: string): Promise<CoordinatorInstance | null> {
@@ -2726,12 +2817,20 @@ export class RunHistoryDO extends DurableObject<Env> {
   async putUnits(units: CoordinatorUnit[], now: number): Promise<{ ok: true }> {
     this.ctx.storage.transactionSync(() => {
       for (const u of units) {
+        const row = this.sql
+          .exec<{ json: string }>(
+            `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+            u.instanceId,
+            u.unit,
+          )
+          .toArray()[0];
+        const updated = preserveWorkBrief(row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined, u);
         this.sql.exec(
           `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
            ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
           u.instanceId,
           u.unit,
-          JSON.stringify(u),
+          JSON.stringify(updated),
           now,
         );
       }
@@ -2762,7 +2861,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
       this.sql.exec(
         `UPDATE coordinator_units SET json = ?, updated_at = ? WHERE instance_id = ? AND unit = ?`,
-        JSON.stringify(replacement),
+        JSON.stringify(preserveWorkBrief(expected, replacement)),
         now,
         expected.instanceId,
         expected.unit,
@@ -2898,12 +2997,19 @@ export class RunHistoryDO extends DurableObject<Env> {
   ): Promise<{ ok: true }> {
     this.ctx.storage.transactionSync(() => {
       const updated = { ...unit, wakes: { ...(unit.wakes ?? {}), [waitId]: answer } };
+      const row = this.sql
+        .exec<{ json: string }>(
+          `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+          unit.instanceId,
+          unit.unit,
+        )
+        .toArray()[0];
       this.sql.exec(
         `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
          ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
         unit.instanceId,
         unit.unit,
-        JSON.stringify(updated),
+        JSON.stringify(preserveWorkBrief(row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined, updated)),
         now,
       );
       for (const seq of seqs)
@@ -5352,6 +5458,8 @@ export class SessionLogDO extends DurableObject<Env> {
 const LEDGER_ROUTES = new Set([
   "/runs/coordinator/put",
   "/runs/coordinator/replace",
+  "/runs/coordinator/main-task/get",
+  "/runs/coordinator/main-task/claim",
   "/runs/coordinator/get",
   "/runs/coordinator/stop",
   "/runs/coordinator/units/put",
@@ -6046,8 +6154,23 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (!isCoordinatorInstance(b.instance))
       return json({ error: "instance must be a coordinator instance record" }, 400);
     const r = await stub.replaceInstance(b.instance);
-    console.log(`[runs/coordinator/replace] ${key.value} ${b.instance.id} → replaced`);
-    return json(r);
+    console.log(`[runs/coordinator/replace] ${key.value} ${b.instance.id} → ${r.ok ? "replaced" : r.reason}`);
+    return r.ok ? json(r) : json(r, 409);
+  }
+  if (pathname === "/runs/coordinator/main-task/get") {
+    if (!isMainTaskKey(b.key)) return json({ error: "key must name a main thread and act id" }, 400);
+    return json({ link: await stub.getMainTask(b.key) });
+  }
+  if (pathname === "/runs/coordinator/main-task/claim") {
+    if (
+      !isMainTaskKey(b.key) ||
+      !isCoordinatorInstance(b.instance) ||
+      !isCoordinatorUnit(b.unit) ||
+      !mainTaskClaimMatches(b.key, b.instance, b.unit)
+    )
+      return json({ error: "claim must bind one generated unit and its attributed brief" }, 400);
+    const r = await stub.claimMainTask(b.key, b.instance, b.unit, now);
+    return r.ok ? json(r) : json(r, 409);
   }
   if (pathname === "/runs/coordinator/get") {
     if (typeof b.id !== "string" || !INSTANCE_ID_PATTERN.test(b.id))

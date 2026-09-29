@@ -41,7 +41,13 @@ import {
   type ShipCaps,
 } from "../ship/coordinator.js";
 import type { AgentSource } from "../runEvents.js";
-import type { CoordinatorInstance, CoordinatorUnit, ThreadEventAttachment } from "./contract.js";
+import type {
+  CoordinatorInstance,
+  CoordinatorUnit,
+  MainTaskKey,
+  ThreadEventAttachment,
+  WorkBrief,
+} from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
 
@@ -63,6 +69,8 @@ export interface HandOffInput {
   entry: ShipEntry;
   /** The request's directive-stripped text (the preflight's input). */
   requestText: string;
+  /** Reserved for a main-agent hand-off once its private worker route exists. */
+  mainTask?: MainTaskKey & { brief: Omit<WorkBrief, "requesterId" | "mainThreadKey" | "actId" | "repo" | "base"> };
   /** A generated plan this thread already owns and is re-issuing. Internal:
    *  the dispatcher read it from the coordinator row, so formatting in the
    *  stored request can never mint a nearby but different plan id. */
@@ -452,6 +460,10 @@ function planWhere(
  * attempts did not merge.
  */
 export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInput): Promise<HandOffOutcome> {
+  // The brief and atomic-link primitives are in place, but a Ship unit still
+  // runs in the requester's thread until the private worker route is wired.
+  if (input.mainTask !== undefined)
+    return refused("setup_failed", "⚠️ The private worker conversation is unavailable; no worker started.");
   try {
     return await handOffToCoordinatorUnchecked(deps, input);
   } catch (error) {

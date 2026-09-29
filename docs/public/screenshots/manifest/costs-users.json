@@ -101,7 +101,7 @@
     "src/core/commandSurface.ts": "17205c26a3b3c661802423e0707b1b8255ac7452f955e7d34b702bc9ed6eda54",
     "src/core/commands/plane.ts": "66eb66e395fca582315740759b608462d1b259ac7db9bcec32094a9b532948bb",
     "src/core/confirmations.ts": "2b2413344277c9c7dfc96a8d9db65b80da8571047b63b029eb53d621933d10a5",
-    "src/core/coordinator/contract.ts": "f3ef8f1d3a37fd9257313af4d6a2df9a4e745ae82c24984cbe13df2046374299",
+    "src/core/coordinator/contract.ts": "fc15e14e354800cad306ec78bb524cf975fc6e5d106f3836461fa40731d059c3",
     "src/core/costs.ts": "c387635a7d94791ae385444b664c953a04b556a27c6772981bf1cd7a9d118f18",
     "src/core/costsBy.ts": "b01e82dffd9d635701923ad3252379a28db6d19257263685d2cc59e96c721069",
     "src/core/costsService.ts": "55f165b8d981e09a8a1248a3ed150ad59d911160d0b5e26408465647ed113155",
