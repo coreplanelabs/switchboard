@@ -1,5 +1,5 @@
 import { logLineOf, type LogLine } from "./sinks.js";
-import type { SpanSink } from "./types.js";
+import type { SpanRootIdentity, SpanSink } from "./types.js";
 
 // The bot's span log, kept in the process (docs/reference/specs/tracing.md item 26): every
 // span end this process's roots see, as the same line the log sink prints,
@@ -20,6 +20,8 @@ export interface SpanLogQuery {
   sinceMs?: number;
   /** Only this trace. */
   traceId?: string;
+  /** All retained spans in the trace whose request root carried this run ID. */
+  runId?: string;
   /** Only this span name, or the family under it (`github` matches `github.rest`). */
   span?: string;
   /** At most this many lines, the newest; default `SPAN_LOG_PAGE_DEFAULT`, capped at `SPAN_LOG_PAGE_MAX`. */
@@ -55,18 +57,24 @@ export function createSpanLog(opts: { maxLines?: number; maxBytes?: number } = {
   const maxBytes = opts.maxBytes ?? SPAN_LOG_MAX_BYTES;
   const entries: SpanLogEntry[] = [];
   const sizes: number[] = [];
+  // Identity lives with span handles and retained lines, not a trace-ID index:
+  // a live root can bind after setup ended, and a late child can start after
+  // the entire trace left the ring. Eviction releases only the ring's reference.
+  const roots: Array<SpanRootIdentity | undefined> = [];
   let bytes = 0;
   let dropped = 0;
   return {
     sink: {
-      onEnd(rec) {
+      onEnd(rec, root) {
         const entry: SpanLogEntry = { ...logLineOf(rec), endedAt: rec.startedAt + (rec.durationMs ?? 0) };
         const size = JSON.stringify(entry).length;
         entries.push(entry);
         sizes.push(size);
         bytes += size;
+        roots.push(root);
         while (entries.length > 0 && (entries.length > maxLines || bytes > maxBytes)) {
           entries.shift();
+          roots.shift();
           bytes -= sizes.shift() ?? 0;
           dropped++;
         }
@@ -76,9 +84,10 @@ export function createSpanLog(opts: { maxLines?: number; maxBytes?: number } = {
       const limit = Math.min(SPAN_LOG_PAGE_MAX, Math.max(1, Math.floor(query.limit ?? SPAN_LOG_PAGE_DEFAULT)));
       const family = query.span === undefined ? undefined : `${query.span}.`;
       const matching = entries.filter(
-        (e) =>
+        (e, i) =>
           (query.sinceMs === undefined || e.endedAt >= query.sinceMs) &&
           (query.traceId === undefined || e.traceId === query.traceId) &&
+          (query.runId === undefined || (roots[i]?.name === "request" && roots[i]?.runId === query.runId)) &&
           (query.span === undefined || e.span === query.span || e.span.startsWith(family!)),
       );
       return {

@@ -45,6 +45,16 @@ export interface AttrDomain {
   refusal: string;
   /** The refusal's cause, from the one code→cause table in src/core/refusal.ts. */
   cause: "request" | "policy" | "system";
+  /** The operator's decision, separate from the request's final outcome. */
+  operatorOutcome: "binds" | "question" | "refusal" | "non_decision";
+  /** Provenance of an accepted typed repository; the slug stays on the run event. */
+  operatorRepoSource: "request" | "attachment" | "thread" | "channel";
+  operatorAttempts: number;
+  operatorRepoCatalog: "skipped" | "available" | "truncated" | "empty" | "unavailable";
+  operatorRepoCandidates: number;
+  /** Final target resolution, separate from the operator's proposed repo. */
+  repoResolution: "skipped" | "resolved" | "rejected" | "unverified" | "conflict" | "unresolved";
+  repoTargetRelation: "not_proposed" | "matched" | "overridden" | "unresolved";
   count: number;
   backend: Backend;
   // run.command
@@ -146,6 +156,11 @@ const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
   "outcome",
   "refusal",
   "cause",
+  "operatorOutcome",
+  "operatorRepoSource",
+  "operatorRepoCatalog",
+  "repoResolution",
+  "repoTargetRelation",
   "command",
   "route",
   "host",
@@ -204,6 +219,13 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   outcome: "string",
   refusal: "string",
   cause: "string",
+  operatorOutcome: "string",
+  operatorRepoSource: "string",
+  operatorAttempts: "number",
+  operatorRepoCatalog: "string",
+  operatorRepoCandidates: "number",
+  repoResolution: "string",
+  repoTargetRelation: "string",
   count: "number",
   backend: "string",
   command: "string",

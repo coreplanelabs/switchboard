@@ -6,6 +6,7 @@ import { handleAdminTraceLog, parseTraceLogQuery, TRACE_LOG_PATH } from "./admin
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import { createSpanLog } from "../core/trace/spanLog.js";
 import { createTracer } from "../core/trace/tracer.js";
+import { startRequestRoot } from "../core/requestTrace.js";
 
 const TOKENS = new Secret(
   JSON.stringify({ "tok-tracer": { subject: "tracer" }, "tok-deployer": { subject: "ops" } }),
@@ -38,6 +39,7 @@ function harness(over: { tokens?: Secret | undefined } = {}) {
   let t = 1_000;
   const tracer = createTracer({ clock: () => t });
   const root = tracer.start("request", { sinks: [spanLog.sink], attrs: { channel: "slack" } });
+  root.setAttrs({ runId: "door-a" });
   const child = root.start("github.rest", { attrs: { host: "api.github.com", route: "contents", method: "GET" } });
   t = 1_050;
   child.end("ok", { httpStatus: 200 });
@@ -74,6 +76,32 @@ describe(`GET ${TRACE_LOG_PATH}`, () => {
     handleAdminTraceLog(filtered.req, filtered.res, deps);
     expect((filtered.body().lines as unknown[]).length).toBe(1);
     expect(filtered.body()).toMatchObject({ matched: 1 });
+    const byRun = request("GET", `${TRACE_LOG_PATH}?runId=door-a`, "Bearer tok-tracer");
+    handleAdminTraceLog(byRun.req, byRun.res, deps);
+    expect(byRun.body()).toMatchObject({ matched: 2 });
+  });
+
+  it("reads a live run's setup and a late child after every earlier trace line is evicted", () => {
+    const { deps } = harness();
+    deps.spanLog = createSpanLog({ maxLines: 1 });
+    const trace = startRequestRoot(deps, { channel: "cli", receivedAt: 1_000 });
+    trace.root.start("dispatch.history").end();
+    trace.bindRun("live-run", () => {});
+    const live = request("GET", `${TRACE_LOG_PATH}?runId=live-run`, "Bearer tok-tracer");
+    handleAdminTraceLog(live.req, live.res, deps);
+    expect(live.writes.status).toBe(200);
+    expect(live.body()).toMatchObject({ matched: 1, lines: [{ span: "dispatch.history" }] });
+    expect(trace.root.ended).toBe(false);
+
+    trace.root.end();
+    startRequestRoot(deps, { channel: "cli", receivedAt: 1_000 }).root.end();
+    expect(deps.spanLog.read({ traceId: trace.root.traceId }).matched).toBe(0);
+    trace.root.start("post.history_write").end();
+    const late = request("GET", `${TRACE_LOG_PATH}?runId=live-run`, "Bearer tok-tracer");
+    handleAdminTraceLog(late.req, late.res, deps);
+    expect(late.writes.status).toBe(200);
+    expect(late.body()).toMatchObject({ matched: 1, lines: [{ span: "post.history_write" }] });
+    expect(late.body().lines).toEqual(deps.spanLog.read().lines);
   });
 
   it("no bearer → 401, a bearer without trace:read → 403, no token map → 503, a non-GET → 405, a malformed query → 400; nothing is read", () => {
@@ -92,7 +120,7 @@ describe(`GET ${TRACE_LOG_PATH}`, () => {
       expect(r.body()).not.toHaveProperty("lines");
     }
     expect(logs.filter((l) => l.startsWith("[admin/trace-log] 40"))).toHaveLength(3);
-    for (const bad of ["since=yesterday", "traceId=abc", "span=Bad%20Name", "limit=0", "limit=1.5"]) {
+    for (const bad of ["since=yesterday", "traceId=abc", "runId=bad%20id", "span=Bad%20Name", "limit=0", "limit=1.5"]) {
       const r = request("GET", `${TRACE_LOG_PATH}?${bad}`, "Bearer tok-tracer");
       handleAdminTraceLog(r.req, r.res, deps);
       expect(r.writes.status).toBe(400);
@@ -106,9 +134,9 @@ describe(`GET ${TRACE_LOG_PATH}`, () => {
 
   it("parseTraceLogQuery: every field optional, each refused when malformed rather than ignored", () => {
     expect(parseTraceLogQuery(new URLSearchParams(""))).toEqual({ ok: true, query: {} });
-    expect(parseTraceLogQuery(new URLSearchParams("since=5&limit=20&span=http.client"))).toEqual({
+    expect(parseTraceLogQuery(new URLSearchParams("since=5&limit=20&span=http.client&runId=door-a"))).toEqual({
       ok: true,
-      query: { sinceMs: 5, limit: 20, span: "http.client" },
+      query: { sinceMs: 5, limit: 20, span: "http.client", runId: "door-a" },
     });
     expect(parseTraceLogQuery(new URLSearchParams("since=-1"))).toMatchObject({ ok: false });
     expect(parseTraceLogQuery(new URLSearchParams("traceId=ZZ"))).toMatchObject({ ok: false });

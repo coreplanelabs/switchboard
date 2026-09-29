@@ -484,7 +484,14 @@ export interface RunOperatorDecision {
   mode: "shadow" | "on";
   outcome: "binds" | "question" | "refusal" | "non_decision";
   reason: string;
-  binds?: { line: string; reason: string; model?: string; repo?: string; confirmed?: true }[];
+  binds?: {
+    line: string;
+    reason: string;
+    model?: string;
+    repo?: string;
+    repoSource?: "request" | "attachment" | "thread" | "channel";
+    confirmed?: true;
+  }[];
   question?: string;
   /** A question's proposed line — what the next turn's "yes" binds. */
   proposal?: string;
@@ -497,6 +504,13 @@ export interface RunOperatorDecision {
   /** The structured seam's attempts (record 0067): what each answer violated,
    *  or that it was accepted. */
   attempts?: { outcome: "accepted" | "violation"; violation?: string }[];
+  repoContext?: {
+    organization: string;
+    threadRepo?: string;
+    channelRepo?: string;
+    candidateStatus: "skipped" | "available" | "truncated" | "empty" | "unavailable";
+    candidateCount: number;
+  };
   intake?: { verdict: string; reason: string };
   latencyMs?: number;
   outputTokens?: number;
@@ -520,6 +534,7 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
             reason: b.reason,
             ...(b.model !== undefined ? { model: b.model } : {}),
             ...(b.repo !== undefined ? { repo: b.repo } : {}),
+            ...(b.repoSource !== undefined ? { repoSource: b.repoSource } : {}),
             ...(b.confirmed ? { confirmed: true as const } : {}),
           })),
         }
@@ -538,6 +553,7 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
           })),
         }
       : {}),
+    ...(e.repoContext ? { repoContext: { ...e.repoContext } } : {}),
     ...(e.intake ? { intake: { verdict: e.intake.verdict, reason: e.intake.reason } } : {}),
     ...(e.latencyMs !== undefined ? { latencyMs: e.latencyMs } : {}),
     ...(e.outputTokens !== undefined ? { outputTokens: e.outputTokens } : {}),

@@ -40,12 +40,23 @@ export interface SpanRecord {
   attrs: SpanAttrs;
 }
 
+/** A live, read-only view of the local root's run identity. Shared by its
+ *  descendants, including late children; changing the root's runId updates
+ *  the view without changing any span record. No span, sink or payload is
+ *  retained here, so a bounded sink can keep it after the root ends. */
+export interface SpanRootIdentity {
+  readonly name: string;
+  readonly runId?: string;
+}
+
 /** Observer of span starts and ends (Observer). Sinks are attached to a root
  *  and inherited by its whole subtree; a throwing sink never reaches traced
  *  code. */
 export interface SpanSink {
   onStart?(span: SpanRecord): void;
-  onEnd(span: SpanRecord): void;
+  /** The tracer supplies root identity separately from the record snapshot;
+   *  synthetic records supplied directly by a caller may omit it. */
+  onEnd(span: SpanRecord, root?: SpanRootIdentity): void;
 }
 
 /** The seam the no-gaps test enters through (Strategy): production is the

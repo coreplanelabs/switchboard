@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { authorizeIngressBearer } from "../deploy/restart.js";
 import type { GrantsLookup } from "../core/authz/actor.js";
 import type { SpanLog, SpanLogQuery } from "../core/trace/spanLog.js";
+import { RUN_ID_PATTERN } from "../core/runRecord.js";
 import type { Secret } from "../secrets.js";
 
 // `GET /admin/trace/log` (docs/reference/specs/tracing.md item 26): the bot's own span log,
@@ -41,6 +42,11 @@ export function parseTraceLogQuery(
   if (traceId !== null) {
     if (!TRACE_ID.test(traceId)) return { ok: false, reason: "traceId must be 32 hex characters" };
     query.traceId = traceId;
+  }
+  const runId = search.get("runId");
+  if (runId !== null) {
+    if (!RUN_ID_PATTERN.test(runId)) return { ok: false, reason: "runId must be a run identifier" };
+    query.runId = runId;
   }
   const span = search.get("span");
   if (span !== null) {

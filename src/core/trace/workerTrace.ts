@@ -82,9 +82,9 @@ export function refusalFilter(sink: SpanSink): SpanSink {
   const refused = (status: unknown) => status === 401 || status === 403;
   return {
     ...(sink.onStart ? { onStart: (rec) => sink.onStart!(rec) } : {}),
-    onEnd: (rec) => {
+    onEnd: (rec, root) => {
       if (refused(rec.attrs.httpStatus)) return;
-      sink.onEnd(rec);
+      sink.onEnd(rec, root);
     },
   };
 }

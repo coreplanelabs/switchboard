@@ -55,6 +55,88 @@ describe("createSpanLog", () => {
     expect(SPAN_LOG_PAGE_DEFAULT).toBeLessThan(SPAN_LOG_PAGE_MAX);
   });
 
+  it("finds all retained spans for a door run ID through its request root", async () => {
+    const log = createSpanLog();
+    const a = traced(log);
+    const b = traced(log);
+    await a.root.span("dispatch.operator", () => a.clock.tick(10));
+    await b.root.span("dispatch.operator", () => b.clock.tick(10));
+    a.root.setAttrs({ runId: "door-a" });
+    b.root.setAttrs({ runId: "door-b" });
+    a.root.end("ok");
+    b.root.end("ok");
+    expect(log.read({ runId: "door-a" }).lines.map((line) => line.traceId)).toEqual([a.root.traceId, a.root.traceId]);
+  });
+
+  it("finds retained setup and child spans as soon as a live request binds its run ID", async () => {
+    const log = createSpanLog();
+    const a = traced(log);
+    const b = traced(log);
+    await a.root.span("dispatch.history", () => a.clock.tick(1));
+    await b.root.span("dispatch.history", () => b.clock.tick(1));
+    expect(log.read({ runId: "door-a" }).matched).toBe(0);
+
+    a.root.setAttrs({ runId: "door-a" });
+    b.root.setAttrs({ runId: "door-b" });
+    expect(a.root.ended).toBe(false);
+    expect(log.read({ runId: "door-a" }).lines.map((line) => line.traceId)).toEqual([a.root.traceId]);
+    await a.root.span("run.agent", () => a.clock.tick(1), { attrs: { runId: "not-the-request" } });
+    expect(log.read({ runId: "door-a" }).lines.map((line) => line.span)).toEqual(["dispatch.history", "run.agent"]);
+    expect(log.read({ runId: "not-the-request" }).matched).toBe(0);
+
+    a.root.setAttrs({ runId: "door-next" });
+    expect(log.read({ runId: "door-a" }).matched).toBe(0);
+    expect(log.read({ runId: "door-next" }).matched).toBe(2);
+    a.root.end();
+    b.root.end();
+  });
+
+  it("finds a late child after all earlier spans of its trace have been evicted", () => {
+    const log = createSpanLog({ maxLines: 1 });
+    const a = traced(log);
+    const late = a.root.start("post.history_write");
+    a.root.end("ok", { runId: "door-a" });
+    const b = traced(log);
+    b.root.end("ok", { runId: "door-b" });
+    expect(log.read({ traceId: a.root.traceId }).matched).toBe(0);
+
+    late.end();
+    expect(log.read({ runId: "door-a" }).lines.map((line) => line.span)).toEqual(["post.history_write"]);
+    expect(log.read({ runId: "door-b" }).matched).toBe(0);
+  });
+
+  it("finds children and grafts started after their ended request has left the ring", () => {
+    const log = createSpanLog({ maxLines: 1 });
+    const a = traced(log);
+    a.root.end("ok", { runId: "door-a" });
+    traced(log).root.end();
+    expect(log.read({ traceId: a.root.traceId }).matched).toBe(0);
+
+    const late = a.root.start("post.settled_outcome");
+    late.end();
+    expect(log.read({ runId: "door-a" }).lines.map((line) => line.span)).toEqual(["post.settled_outcome"]);
+    traced(log).root.end();
+    expect(log.read({ runId: "door-a" }).matched).toBe(0);
+
+    late.graft("post.history_write", { startedAt: 1_000, endedAt: 1_010 });
+    expect(log.read({ runId: "door-a" }).lines.map((line) => line.span)).toEqual(["post.history_write"]);
+  });
+
+  it("keeps a run lookup while child spans remain after its request root is evicted", async () => {
+    const log = createSpanLog({ maxLines: 2 });
+    const a = traced(log);
+    a.root.setAttrs({ runId: "door-a" });
+    const late = a.root.start("dispatch.operator");
+    a.root.end("ok");
+    a.clock.tick(1);
+    late.end("ok");
+    const b = traced(log);
+    await b.root.span("dispatch.history", () => b.clock.tick(1));
+    expect(log.read({ runId: "door-a" }).lines.map((line) => line.span)).toEqual(["dispatch.operator"]);
+    b.root.end("ok");
+    expect(log.read({ runId: "door-a" }).matched).toBe(0);
+  });
+
   it("is bounded by lines and by bytes: the oldest go first and the reader is told how many did", async () => {
     const byLines = createSpanLog({ maxLines: 3 });
     const { clock, root } = traced(byLines);

@@ -1,17 +1,7 @@
-// The repository facts the operator's projection carries (issue 2043; record
-// 0069's execution table): what a plain-words docs ask names. Production
-// refused three "record NNNN"/"plan …" asks in one hour as "privileged
-// administrative updates to control plane records" — an authority the model
-// invented, because nothing told it a decision record or a plan is a markdown
-// file under docs/ that a ship unit edits like any other file. The block is
-// RENDERED from this index — the docs directories AGENTS.md points at, held to
-// the repository's own tree by this module's test — never prose written by
-// hand at the prompt site: a new documented directory is one row here, and the
-// renderer says the same sentence about each. The index is Switchboard's own
-// docs layout, and the block rides every operator prompt — a request naming a
-// repo without these directories is still told they exist there; the misroute
-// costs one ship run finding no such file, and a per-repo index belongs with
-// the repository briefs when that unit lands.
+// Switchboard's source-tree facts, rendered from this index and checked
+// against its own docs directories. The operator's read tool scopes these
+// facts to Switchboard; another repository needs its own brief before its layout can
+// guide a routing decision.
 
 /** One documented docs directory a request names by noun. */
 export interface RepoDocFact {

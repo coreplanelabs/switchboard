@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   currentPrHeadSha,
+  explicitPrOf,
+  explicitRepoOf,
   PR_BODY_CAP,
   ownPrOf,
   prCommitsSince,
@@ -55,6 +57,693 @@ describe("currentPrHeadSha — the review post transition guard", () => {
 });
 
 describe("resolveRepoContext: explicit signals in the current message", () => {
+  it("a review pairs a bare PR number with a vetted repository target, without changing other agents' rule", async () => {
+    const probe = vi.fn(async () => true);
+    const sha = "e".repeat(40);
+    const { calls } = stubFetch({
+      body: { state: "open", head: { ref: "fix/pr", sha, repo: { full_name: "acme/api" } } },
+    });
+    const review = await resolveRepoContext(msg("review PR #7"), [], probe, undefined, undefined, "acme/api", true);
+    expect(review).toMatchObject({ repo: "acme/api", pr: 7, prFromMessage: true, ref: "fix/pr", headSha: sha });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
+    const coding = await resolveRepoContext(msg("fix PR #7"), [], probe, undefined, undefined, "acme/api");
+    expect(coding).toEqual({ repo: "acme/api" });
+  });
+  it.each([
+    "review PR #7; the example mentions acme/api, but I haven't named the target",
+    "review PR #7; the example mentions `acme/api`, but I haven't named the target",
+    "review PR #7; the example runs on acme/api",
+  ])("a review never pairs a bare PR with an incidental current-message slug: %s", async (text) => {
+    const probe = vi.fn(async () => true);
+    const { fn } = stubFetch();
+    await expect(resolveRepoContext(msg(text), [], probe, undefined, undefined, undefined, true)).resolves.toEqual({});
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a review pairs a bare PR with an explicit address or a vetted inherited repository despite incidental context", async () => {
+    const text = "review PR #7; the example mentions acme/api";
+    const probe = vi.fn(async () => true);
+    const { calls } = stubFetch({ body: {} }, { body: {} });
+    const addressed = await resolveRepoContext(
+      msg(`${text}; in acme/web`),
+      [],
+      probe,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    expect(addressed).toMatchObject({ repo: "acme/web", pr: 7 });
+    const inherited = await resolveRepoContext(msg(text), [], probe, undefined, undefined, "acme/web", true);
+    expect(inherited).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://api.github.com/repos/acme/web/pulls/7",
+      "https://api.github.com/repos/acme/web/pulls/7",
+    ]);
+  });
+
+  it("an addressed review target outranks a contextual repository URL beside a bare PR", async () => {
+    const probe = vi.fn(async () => true);
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(
+      msg("review PR #7 in acme/web; see https://github.com/acme/api for context"),
+      [],
+      probe,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7, prFromMessage: true });
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://api.github.com/repos/acme/web/pulls/7",
+      "https://api.github.com/repos/acme/web/git/ref/heads/fix/pr",
+    ]);
+  });
+
+  it("an addressed review PR outranks a contextual PR citation", async () => {
+    const text = "review PR #7 in acme/web; see https://github.com/acme/api/pull/12 for context";
+    expect(explicitRepoOf(text)).toBe("acme/web");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/web", number: 7 });
+    const probe = vi.fn(async () => true);
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], probe, undefined, undefined, undefined, true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7, prFromMessage: true });
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://api.github.com/repos/acme/web/pulls/7",
+      "https://api.github.com/repos/acme/web/git/ref/heads/fix/pr",
+    ]);
+  });
+
+  it("a follow-up keeps the addressed PR instead of the contextual citation", async () => {
+    const history = [
+      { role: "user", text: "review PR #7 in acme/web; see https://github.com/acme/api/pull/12 for context" },
+    ];
+    expect(repoFromThread(history, (repo) => repo === "acme/web")).toBe("acme/web");
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const followUp = await resolveRepoContext(msg("re-review"), history, async () => true);
+    expect(followUp).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a contextual PR citation cannot replace an inherited review target", async () => {
+    const text = "review PR #7; see https://github.com/acme/api/pull/9 for context";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/web", true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7, prFromMessage: true });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a contextual repository URL cannot supply a bare review PR's repository", async () => {
+    const text = "review PR #7; see https://github.com/acme/api for context";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({});
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a contextual repository URL cannot displace an inherited review target", async () => {
+    const text = "review PR #7; see https://github.com/acme/api for context";
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/web", true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a contextual repository URL in history cannot bind a later bare review PR", async () => {
+    const history = [{ role: "user", text: "review PR #7; see https://github.com/acme/api for context" }];
+    expect(repoFromThread(history)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg("review PR #7"), history, async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({});
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a contextual repository URL in history preserves a later bare review's inherited target", async () => {
+    const history = [
+      { role: "user", text: "review https://github.com/acme/web/pull/6" },
+      { role: "user", text: "review PR #7; see https://github.com/acme/api for context" },
+    ];
+    expect(repoFromThread(history)).toBe("acme/web");
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg("re-review"), history, async () => true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a preceding contextual repository URL cannot supply a bare review PR's repository", async () => {
+    const text = "See https://github.com/acme/api for context; review PR #7";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({});
+    expect(fn).not.toHaveBeenCalled();
+    expect(repoFromThread([{ role: "user", text }])).toBeUndefined();
+  });
+
+  it("a preceding contextual repository URL cannot displace an inherited bare review target", async () => {
+    const text = "See https://github.com/acme/api for context; review PR #7";
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/web", true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a preceding direct repository URL still addresses a bare review PR", async () => {
+    const text = "Review https://github.com/acme/api; PR #7";
+    expect(explicitRepoOf(text)).toBe("acme/api");
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/api" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true);
+    expect(review).toMatchObject({ repo: "acme/api", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
+  });
+
+  it("a contextual PR citation without an inherited target asks for the repository", async () => {
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(
+        msg("review PR #7; see https://github.com/acme/api/pull/9 for context"),
+        [],
+        async () => true,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      ),
+    ).resolves.toEqual({});
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a direct PR URL before a later bare reference remains the target", () => {
+    const text = "review https://github.com/acme/api/pull/9; PR #7 was earlier context";
+    expect(explicitRepoOf(text)).toBe("acme/api");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/api", number: 9 });
+  });
+
+  it("a direct PR URL outranks a later addressed bare example", async () => {
+    const text = "review https://github.com/acme/api/pull/9; PR #7 in acme/web was an earlier example";
+    expect(explicitRepoOf(text)).toBe("acme/api");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/api", number: 9 });
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/api" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true);
+    expect(review).toMatchObject({ repo: "acme/api", pr: 9 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/9");
+  });
+
+  it("a later separately requested bare PR conflicts with an earlier direct target", async () => {
+    const text = "review https://github.com/acme/api/pull/9; review PR #7 in acme/web";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({
+      prConflict: { target: "acme/api#9", cited: "PR #7" },
+    });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a preceding contextual PR URL cannot override an addressed review target", async () => {
+    const text = "See https://github.com/acme/api/pull/9 for context; review PR #7 in acme/web";
+    expect(explicitRepoOf(text)).toBe("acme/web");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/web", number: 7 });
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a preceding contextual PR URL cannot override an inherited bare review", async () => {
+    const text = "See https://github.com/acme/api/pull/9 for context; review PR #7";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/web", true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a preceding contextual PR address cannot supply a bare review PR's repository", async () => {
+    const text = "See https://github.com/acme/api/pull/9 in acme/api for context; review PR #7";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({});
+    expect(fn).not.toHaveBeenCalled();
+    expect(repoFromThread([{ role: "user", text }])).toBeUndefined();
+  });
+
+  it("a preceding contextual PR address cannot displace an inherited bare review target", async () => {
+    const text = "See https://github.com/acme/api/pull/9 in acme/api for context; review PR #7";
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/web", true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("an explicit repository URL survives a later contextual PR link", async () => {
+    const text = "review https://github.com/acme/web PR #7; see https://github.com/acme/api/pull/9 for context";
+    expect(explicitRepoOf(text)).toBe("acme/web");
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/api", true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+    expect(repoFromThread([{ role: "user", text }])).toBe("acme/web");
+  });
+
+  it("an explicit repository URL after contextual material addresses the bare review PR", async () => {
+    const text = "See https://github.com/acme/api/pull/9 for context; review https://github.com/acme/web PR #7";
+    expect(explicitRepoOf(text)).toBe("acme/web");
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("two distinct direct PR links require clarification before a head fetch", async () => {
+    const text = "review https://github.com/acme/api/pull/7 and https://github.com/acme/web/pull/8";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({
+      prConflict: { target: "acme/api#7", cited: "acme/web#8" },
+    });
+    expect(fn).not.toHaveBeenCalled();
+    expect(repoFromThread([{ role: "user", text }])).toBeUndefined();
+  });
+
+  it("two distinct direct PR shorthands require clarification", async () => {
+    const text = "review acme/api#7 and acme/web#8";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({
+      prConflict: { target: "acme/api#7", cited: "acme/web#8" },
+    });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a later direct target conflicts with a bare target despite an earlier contextual link", async () => {
+    const text =
+      "review PR #7 in acme/web; see https://github.com/acme/api/pull/9 for context; review https://github.com/acme/api/pull/8";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({
+      prConflict: { target: "PR #7", cited: "acme/api#8" },
+    });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a contextual PR link before a direct review link cannot replace it", async () => {
+    const text = "See https://github.com/acme/api/pull/9 for context; review https://github.com/acme/web/pull/7";
+    expect(explicitRepoOf(text)).toBe("acme/web");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/web", number: 7 });
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a contextual PR link after a direct review link cannot create a conflict", async () => {
+    const text = "review https://github.com/acme/api/pull/7; compare with https://github.com/acme/web/pull/8";
+    expect(explicitRepoOf(text)).toBe("acme/api");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/api", number: 7 });
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/api" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true);
+    expect(review).toMatchObject({ repo: "acme/api", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
+  });
+
+  it("an earlier see cue cannot hide a PR URL introduced by review", async () => {
+    const text = "See the CI failure and review https://github.com/acme/web/pull/7";
+    expect(explicitRepoOf(text)).toBe("acme/web");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/web", number: 7 });
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7, headSha: "e".repeat(40) });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a later review action still makes a second direct PR a conflict", async () => {
+    const text =
+      "review https://github.com/acme/api/pull/7; see the CI failure and review https://github.com/acme/web/pull/8";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({
+      prConflict: { target: "acme/api#7", cited: "acme/web#8" },
+    });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a direct repository URL before a bare PR remains the target", () => {
+    expect(explicitRepoOf("review https://github.com/acme/api PR #7")).toBe("acme/api");
+  });
+
+  it("a contextual PR shorthand after a bare review target is not the target", () => {
+    const text = "review PR #7; see acme/api#9 for context";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+  });
+
+  it("a PR URL marked as context after the link is not the bare review target", () => {
+    const text = "review PR #7; https://github.com/acme/api/pull/9 for context";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+  });
+
+  it("two different PRs with no context cue require clarification", async () => {
+    const text = "review PR #7; https://github.com/acme/api/pull/9";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/web", true),
+    ).resolves.toEqual({ prConflict: { target: "PR #7", cited: "acme/api#9" } });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a cue in an earlier clause cannot hide a later explicit PR URL", async () => {
+    const text = "review PR #7; see docs for context; review https://github.com/acme/api/pull/9";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/web", true),
+    ).resolves.toEqual({ prConflict: { target: "PR #7", cited: "acme/api#9" } });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a cue after a clause break cannot excuse a conflicting PR URL", async () => {
+    const text = "review PR #7; https://github.com/acme/api/pull/9; for context, see docs";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/web", true),
+    ).resolves.toEqual({ prConflict: { target: "PR #7", cited: "acme/api#9" } });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("an addressed bare PR does not bypass conflicting-PR clarification", async () => {
+    const text = "review PR #7 in acme/web; https://github.com/acme/api/pull/9";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({
+      prConflict: { target: "PR #7", cited: "acme/api#9" },
+    });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("an addressed bare PR conflicts with a different repository's same-number PR citation", async () => {
+    const text = "review PR #7 in acme/web; https://github.com/acme/api/pull/7";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({
+      prConflict: { target: "PR #7", cited: "acme/api#7" },
+    });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("two different bare review PR numbers require clarification before a head fetch", async () => {
+    const text = "review PR #7 in acme/web; PR #8 in acme/web";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({
+      prConflict: { target: "PR #7", cited: "PR #8" },
+    });
+    expect(fn).not.toHaveBeenCalled();
+    expect(repoFromThread([{ role: "user", text }])).toBeUndefined();
+  });
+
+  it("a second bare PR explicitly marked as context leaves the first target", async () => {
+    const text = "review PR #7 in acme/web; see PR #8 for context";
+    expect(explicitRepoOf(text)).toBe("acme/web");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/web", number: 7 });
+  });
+
+  it("compare with marks a second bare PR as contextual", async () => {
+    const text = "review PR #7 in acme/web; compare with PR #8";
+    expect(explicitRepoOf(text)).toBe("acme/web");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/web", number: 7 });
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a preceding contextual bare PR leaves the later requested PR as the target", async () => {
+    expect(explicitPrOf("review PR #7 in acme/web; see also PR #8")).toEqual({ repo: "acme/web", number: 7 });
+    const text = "see PR #7 for context; review PR #8 in acme/web";
+    expect(explicitRepoOf(text)).toBe("acme/web");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/web", number: 8 });
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 8 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/8");
+  });
+
+  it("an address on a preceding contextual bare PR cannot redirect the requested PR", async () => {
+    const text = "See PR #7 in acme/api for context; review PR #8";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/web", true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 8 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/8");
+  });
+
+  it("an address attached to a contextual bare PR cannot supply the review target", async () => {
+    const text = "review PR #7; see PR #8 in acme/api for context";
+    expect(explicitRepoOf(text)).toBeUndefined();
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toEqual({});
+    expect(fn).not.toHaveBeenCalled();
+    expect(repoFromThread([{ role: "user", text }])).toBeUndefined();
+  });
+
+  it("an address attached to a contextual bare PR cannot replace an inherited target", async () => {
+    const text = "review PR #7; see PR #8 in acme/api for context";
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/web", true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("an explicit thread repository outranks a different channel default for a bare review", async () => {
+    const history = [{ role: "user", text: "review in acme/web" }];
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(
+      msg("review PR #7"),
+      history,
+      async () => true,
+      undefined,
+      undefined,
+      "acme/api",
+      true,
+    );
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a target address after a contextual PR clause wins over a channel default", async () => {
+    const text = "review PR #7; see PR #8 in acme/api for context; target is in acme/web";
+    expect(explicitRepoOf(text)).toBe("acme/web");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/web", number: 7 });
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/api", true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a target address before a contextual bare PR still wins", () => {
+    const text = "review PR #7 in acme/web; see PR #8 in acme/api for context";
+    expect(explicitRepoOf(text)).toBe("acme/web");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/web", number: 7 });
+  });
+
+  it.each([
+    "review PR #7; see https://github.com/acme/api/pull/9 in acme/api for context",
+    "review PR #7; see in acme/api https://github.com/acme/api for context",
+    "review PR #7; see acme/api#9 in acme/api for context",
+  ])("an address in a contextual citation cannot redirect an inherited review: %s", async (text) => {
+    expect(explicitRepoOf(text)).toBeUndefined();
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, "acme/web", true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7 });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/web/pulls/7");
+  });
+
+  it("a refused addressed review target cannot fall through to a contextual URL", async () => {
+    const probe = vi.fn(async (repo: string) => repo !== "acme/web");
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(
+        msg("review PR #7 in acme/web; see https://github.com/acme/api for context"),
+        [],
+        probe,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      ),
+    ).resolves.toEqual({ rejectedRepo: "acme/web" });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("a refused addressed review PR cannot fall through to a contextual PR citation", async () => {
+    const probe = vi.fn(async (repo: string) => repo !== "acme/web");
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(
+        msg("review PR #7 in acme/web; see https://github.com/acme/api/pull/12 for context"),
+        [],
+        probe,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      ),
+    ).resolves.toEqual({ rejectedRepo: "acme/web" });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "review PR #7; the example is `https://github.com/acme/api/pull/9`",
+    "review PR #7; the example is `acme/api#9`",
+    "review PR #7; example:\n```\nhttps://github.com/acme/api/pull/9\n```",
+  ])("a quoted example cannot replace a review's bare PR target: %s", async (text) => {
+    const probe = vi.fn(async () => true);
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: "e".repeat(40), repo: { full_name: "acme/web" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], probe, undefined, undefined, "acme/web", true);
+    expect(review).toMatchObject({ repo: "acme/web", pr: 7, prFromMessage: true });
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://api.github.com/repos/acme/web/pulls/7",
+      "https://api.github.com/repos/acme/web/git/ref/heads/fix/pr",
+    ]);
+  });
+
+  it("a quoted PR URL alone never supplies a review target", async () => {
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(
+        msg("review the example `https://github.com/acme/api/pull/9`"),
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      ),
+    ).resolves.toEqual({});
+    expect(fn).not.toHaveBeenCalled();
+  });
+
   it("a typed operator repository fills an otherwise bare request and stays below an explicit current-message target", async () => {
     const probe = vi.fn(async () => true);
     await expect(resolveRepoContext(msg("review again"), [], probe, undefined, undefined, "acme/api")).resolves.toEqual(
@@ -1136,7 +1825,12 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
     ).resolves.toEqual({ repo: "acme/web" });
   });
 
-  it("`in <slug>` naming a repo the probe refuses does NOT rebind — the thread's repo stays, nothing rejected", async () => {
+  it("a refused explicit repository stops resolution before a bare PR can bind to the thread's old repository", async () => {
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg("review PR #7 in acme/nope"), boundToApi, probe, slugs, undefined, undefined, true),
+    ).resolves.toEqual({ rejectedRepo: "acme/nope" });
+    expect(fn).not.toHaveBeenCalled();
     await expect(
       resolveRepoContext(msg("agent:coding in acme/nope: fix it"), boundToApi, probe, slugs),
     ).resolves.toEqual({ repo: "acme/api" });

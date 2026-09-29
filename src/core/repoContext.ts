@@ -217,9 +217,9 @@ export interface RepoContext {
    *  not verify, try again" reply. Never set alongside `repo`; outranks `rejectedRepo`
    *  when both would apply (a registry that was down cannot have refused). */
   unverifiedRepo?: string;
-  /** A routed task opened with one PR but cited another. Refuse before the
-   *  workspace and model turn so neither a citation nor thread history can
-   *  silently replace its target. */
+  /** A routed task opened with one PR but cited another, or a review names
+   *  two different PRs without a context cue. Refuse before the workspace and
+   *  model turn so neither citation can silently replace the target. */
   prConflict?: { target: string; cited: string };
 }
 
@@ -245,13 +245,112 @@ function unwrapSlack(text: string): string {
   return text.replace(/<(https?:\/\/[^|>\s]+)(?:\|[^>]*)?>/g, " $1 ");
 }
 
-/** A current, unquoted `PR #N` reference. Its repository must still come from
- * a durable thread PR or an explicitly routed task; the number alone never
- * establishes one. */
+/** The first bare PR requested outside code or a contextual clause. */
+function requestedBarePrOf(text: string): RegExpMatchArray | undefined {
+  const clean = unwrapSlack(text).replace(CODE_SPAN, " ");
+  return [...clean.matchAll(/\b(?:PR|pull request)\s*#(\d+)\b/gi)].find(
+    (ref) =>
+      !contextCueOf({
+        before: clean.slice(0, ref.index),
+        after: clean.slice(ref.index! + ref[0].length),
+      }),
+  );
+}
+
+/** A current, requested `PR #N` reference. Its repository must still come
+ * from a durable thread PR, an explicitly routed task, or a review's vetted
+ * target; the number alone never establishes one. */
 export function barePrNumberOf(text: string): number | undefined {
-  const token = /\b(?:PR|pull request)\s*#(\d+)\b/i.exec(unwrapSlack(text).replace(CODE_SPAN, " "))?.[1];
-  const number = token === undefined ? undefined : Number(token);
-  return number !== undefined && Number.isSafeInteger(number) && number > 0 ? number : undefined;
+  const number = requestedBarePrOf(text)?.[1];
+  const parsed = number === undefined ? undefined : Number(number);
+  return parsed !== undefined && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/** Different bare PR numbers in one request need a target choice unless the
+ * later number is explicitly introduced as reference material. */
+function conflictingBarePrOf(text: string): { target: number; cited: number } | undefined {
+  const clean = unwrapSlack(text).replace(CODE_SPAN, " ");
+  const refs = [...clean.matchAll(/\b(?:PR|pull request)\s*#(\d+)\b/gi)].filter(
+    (ref) => !contextCueOf({ before: clean.slice(0, ref.index), after: clean.slice(ref.index! + ref[0].length) }),
+  );
+  const first = refs[0];
+  if (first === undefined) return undefined;
+  const target = Number(first[1]);
+  for (const cited of refs.slice(1)) {
+    const number = Number(cited[1]);
+    if (number === target) continue;
+    const between = clean.slice(first.index! + first[0].length, cited.index);
+    const after = clean.slice(cited.index! + cited[0].length);
+    const contextual = contextCueOf({ before: between, after });
+    if (!contextual) return { target, cited: number };
+  }
+  return undefined;
+}
+
+interface DirectPrDecision {
+  seen: boolean;
+  target?: { repo: string; number: number; index: number; end: number };
+  conflict?: { target: string; cited: string };
+}
+
+/** Consider every direct PR citation, not just the first URL. A contextual
+ * clause supplies evidence; two distinct requested PRs require a question. */
+function directPrDecisionOf(text: string): DirectPrDecision {
+  const clean = unwrapSlack(text).replace(CODE_SPAN, " ");
+  const decision: DirectPrDecision = { seen: false };
+  const refs =
+    /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\/pull\/(\d+)|\b([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)#(\d+)\b/gi;
+  for (const match of clean.matchAll(refs)) {
+    const repo = slugOf(match[4] ?? `${match[1]}/${match[2]}`);
+    const number = Number(match[5] ?? match[3]);
+    if (repo === undefined || !Number.isSafeInteger(number) || number < 1) continue;
+    decision.seen = true;
+    if (
+      contextCueOf({
+        before: clean.slice(0, match.index),
+        after: clean.slice(match.index + match[0].length),
+      })
+    )
+      continue;
+    const label = `${repo}#${number}`;
+    if (decision.target === undefined)
+      decision.target = { repo, number, index: match.index, end: match.index + match[0].length };
+    else if (decision.target.repo !== repo || decision.target.number !== number) {
+      decision.conflict = { target: `${decision.target.repo}#${decision.target.number}`, cited: label };
+      return decision;
+    }
+  }
+  return decision;
+}
+
+/** A contextual GitHub link cannot become a strong repository merely because
+ * signal extraction saw it first. Keep the first URL that names a target. */
+function requestedRepoUrlOf(text: string): string | undefined {
+  const clean = unwrapSlack(text).replace(CODE_SPAN, " ");
+  const refs =
+    /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)(?:\/(?:pull\/\d+|tree\/[^\s;),]+))?/gi;
+  for (const match of clean.matchAll(refs)) {
+    const repo = slugOf(`${match[1]}/${match[2]}`);
+    if (
+      repo !== undefined &&
+      !contextCueOf({ before: clean.slice(0, match.index), after: clean.slice(match.index! + match[0].length) })
+    )
+      return repo;
+  }
+  return undefined;
+}
+
+function selectedSignalsOf(text: string): { signals: Signals; direct: DirectPrDecision } {
+  const signals = extractSignals(text);
+  const direct = directPrDecisionOf(text);
+  if (signals.repoStrong) {
+    const repo = requestedRepoUrlOf(text);
+    signals.repo = repo;
+    signals.repoStrong = repo !== undefined;
+  }
+  if (direct.seen)
+    signals.pr = direct.target === undefined ? undefined : { repo: direct.target.repo, number: direct.target.number };
+  return { signals, direct };
 }
 
 /** A coordinator-style routing clause that starts its task with one PR. */
@@ -286,10 +385,200 @@ function conflictingRoutedPrOf(text: string, target: { repo: string; number: num
   return conflict === undefined ? undefined : `${conflict.repo}#${conflict.number}`;
 }
 
-/** A PR URL or `owner/name#N` in the current message, before any thread
- * history or repository fallback is considered. */
+/** An addressed bare PR outranks a PR citation supplied as context. */
+function addressedBarePrOf(s: Signals, text: string): { repo: string; number: number } | undefined {
+  // A requested direct PR before the bare mention is the target. A repository
+  // address attached to the later example cannot supersede it.
+  const bare = requestedBarePrOf(text);
+  const direct = directPrDecisionOf(text).target;
+  if (bare !== undefined && direct !== undefined && direct.index < bare.index!) return undefined;
+  const number = barePrNumberOf(text);
+  const address = reviewAddressOf(s, text);
+  return address?.slug !== undefined && number !== undefined ? { repo: address.slug, number } : undefined;
+}
+
+/** A cue in the citation's own clause marks it as reference material. */
+function contextCueOf(later: { before: string; after: string }): boolean {
+  // A cue in an earlier clause cannot turn a separately requested PR into
+  // reference material. Within a clause, the nearest action wins: "see the
+  // failure and review <PR>" requests that PR.
+  const clause = later.before.split(/[;\n]/).at(-1) ?? later.before;
+  const action = [
+    ...clause.matchAll(/\b(?:re-?review|review|see|context|example|reference|related|compare|background)\b/gi),
+  ]
+    .at(-1)?.[0]
+    .toLowerCase();
+  return (
+    (action !== undefined && !/^(?:re-?review|review)$/.test(action)) ||
+    /^[ \t]*(?:[,:][ \t]*)?(?:for|as)[ \t]+(?:context|reference|background)\b/i.test(later.after)
+  );
+}
+
+/** Only an address outside a contextual citation can qualify a bare review PR. */
+function reviewAddressOf(s: Signals, text: string): Addressed | undefined {
+  if (barePrNumberOf(text) === undefined) return s.addressed;
+  const clean = unwrapSlack(text).replace(CODE_SPAN, " ");
+  let targetText = clean;
+  const refs =
+    /\b(?:PR|pull request)\s*#\d+\b|https?:\/\/(?:www\.)?github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+(?:\/pull\/\d+)?|\b[A-Za-z0-9-]+\/[A-Za-z0-9._-]+#\d+\b/gi;
+  // A citation before the requested PR may carry its own `in owner/repo`.
+  // Remove that whole contextual clause before extracting an address.
+  for (let pass = 0; pass < 8; pass++) {
+    const bare = requestedBarePrOf(targetText);
+    if (bare === undefined) break;
+    let removed = false;
+    for (const cited of targetText.matchAll(refs)) {
+      if (cited.index! >= bare.index!) break;
+      const clauseStart =
+        Math.max(targetText.lastIndexOf(";", cited.index), targetText.lastIndexOf("\n", cited.index)) + 1;
+      const citedEnd = cited.index! + cited[0].length;
+      const between = targetText.slice(citedEnd, bare.index);
+      const separator = /[;\n]/.exec(between);
+      const clauseEnd = separator === null ? bare.index! : citedEnd + separator.index + 1;
+      if (
+        !contextCueOf({
+          before: targetText.slice(clauseStart, cited.index),
+          after: targetText.slice(citedEnd, clauseEnd),
+        })
+      )
+        continue;
+      targetText = `${targetText.slice(0, clauseStart)} ${targetText.slice(clauseEnd)}`;
+      removed = true;
+      break;
+    }
+    if (!removed) break;
+  }
+  // Remove only contextual clauses. A later `target is in owner/repo` still
+  // addresses the review even when it follows the reference material.
+  for (let pass = 0; pass < 8; pass++) {
+    const bare = requestedBarePrOf(targetText);
+    if (bare === undefined) break;
+    const bareEnd = bare.index! + bare[0].length;
+    let removed = false;
+    for (const cited of targetText.matchAll(refs)) {
+      if (cited.index! <= bare.index!) continue;
+      const before = targetText.slice(bareEnd, cited.index);
+      const citedEnd = cited.index + cited[0].length;
+      const after = targetText.slice(citedEnd);
+      if (!contextCueOf({ before, after })) continue;
+      const clauseStart = Math.max(before.lastIndexOf(";"), before.lastIndexOf("\n")) + 1;
+      const cue = /\b(?:see|context|example|reference|related|compare|background)\b/i.exec(before.slice(clauseStart));
+      const cutAt = cue === null ? cited.index : bareEnd + clauseStart + cue.index;
+      const marker = /\b(?:for|as)\s+(?:context|reference|background)\b/i.exec(after);
+      const separator = /[;\n]/.exec(after);
+      const resumeAt =
+        marker !== null && (separator === null || marker.index < separator.index)
+          ? citedEnd + marker.index + marker[0].length
+          : separator !== null
+            ? citedEnd + separator.index + 1
+            : targetText.length;
+      targetText = `${targetText.slice(0, cutAt)} ${targetText.slice(resumeAt)}`;
+      removed = true;
+      break;
+    }
+    if (!removed) break;
+  }
+  return targetText === clean ? s.addressed : extractSignals(targetText).addressed;
+}
+
+function contextualBarePrCitationOf(text: string): boolean {
+  const clean = unwrapSlack(text).replace(CODE_SPAN, " ");
+  const refs = [...clean.matchAll(/\b(?:PR|pull request)\s*#\d+\b/gi)];
+  const first = refs[0];
+  const second = refs[1];
+  return (
+    first !== undefined &&
+    second !== undefined &&
+    contextCueOf({
+      before: clean.slice(first.index! + first[0].length, second.index),
+      after: clean.slice(second.index! + second[0].length),
+    })
+  );
+}
+
+function contextualPrCitationOf(text: string): boolean {
+  const direct = directPrDecisionOf(text);
+  return direct.seen && direct.target === undefined;
+}
+
+/** A plain repository URL supplied as context cannot name a bare PR's repo. */
+function contextualRepoCitationOf(s: Signals, text: string): boolean {
+  if (s.pr !== undefined || barePrNumberOf(text) === undefined) return false;
+  const clean = unwrapSlack(text).replace(CODE_SPAN, " ");
+  const bare = requestedBarePrOf(text);
+  const cited = /https?:\/\/(?:www\.)?github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+\b/i.exec(clean);
+  if (bare === undefined || cited === null) return false;
+  return cited.index < bare.index!
+    ? contextCueOf({
+        before: clean.slice(0, cited.index),
+        after: clean.slice(cited.index + cited[0].length, bare.index),
+      })
+    : contextCueOf({
+        before: clean.slice(bare.index! + bare[0].length, cited.index),
+        after: clean.slice(cited.index + cited[0].length),
+      });
+}
+
+/** A requested direct PR after a bare target must agree with that target. */
+function ambiguousPrCitationOf(s: Signals, text: string): boolean {
+  const direct = directPrDecisionOf(text).target;
+  const bare = requestedBarePrOf(text);
+  if (bare === undefined || direct === undefined || direct.index <= bare.index!) return false;
+  const addressed = addressedBarePrOf(s, text);
+  return barePrNumberOf(text) !== direct.number || (addressed !== undefined && addressed.repo !== direct.repo);
+}
+
+/** A second requested bare target cannot be silently dropped merely because
+ * the first requested target was a direct link. */
+function directBeforeBareConflictOf(s: Signals, text: string): { target: string; cited: string } | undefined {
+  const direct = directPrDecisionOf(text).target;
+  const clean = unwrapSlack(text).replace(CODE_SPAN, " ");
+  const bare = requestedBarePrOf(text);
+  if (direct === undefined || bare === undefined || direct.index >= bare.index!) return undefined;
+  const number = Number(bare[1]);
+  const addressedRepo = reviewAddressOf(s, text)?.slug;
+  if (direct.number === number && (addressedRepo === undefined || addressedRepo === direct.repo)) return undefined;
+  const before = clean.slice(direct.end, bare.index);
+  const after = clean.slice(bare.index! + bare[0].length);
+  const clause = before.split(/[;\n]/).at(-1) ?? before;
+  const afterClause = after.split(/[;\n]/)[0] ?? after;
+  const contextual =
+    contextCueOf({ before, after }) ||
+    (!/\b(?:review|re-?review)\b/i.test(clause) && /\b(?:example|reference|background|context)\b/i.test(afterClause));
+  return contextual ? undefined : { target: `${direct.repo}#${direct.number}`, cited: `PR #${number}` };
+}
+
+/** A PR URL, `owner/name#N`, or addressed bare PR in the current message,
+ * before any thread or repository fallback is considered. */
 export function explicitPrOf(text: string): { repo: string; number: number } | undefined {
-  return extractSignals(text).pr;
+  const { signals: s, direct } = selectedSignalsOf(text);
+  if (
+    conflictingBarePrOf(text) ||
+    direct.conflict ||
+    ambiguousPrCitationOf(s, text) ||
+    directBeforeBareConflictOf(s, text)
+  )
+    return undefined;
+  return addressedBarePrOf(s, text) ?? s.pr;
+}
+
+/** A request target, not a slug merely mentioned as context: a target GitHub
+ *  URL, PR shorthand, or `in owner/name` / `on owner/name repo`
+ *  address. Addresses still need the machine-class vet during resolution.
+ *  Keep a placeholder for code so removing it cannot join `in` to a later
+ *  token and manufacture an address. */
+export function explicitRepoOf(text: string): string | undefined {
+  const { signals: s, direct } = selectedSignalsOf(text.replace(CODE_SPAN, "\u0000"));
+  if (
+    conflictingBarePrOf(text) ||
+    direct.conflict ||
+    ambiguousPrCitationOf(s, text) ||
+    directBeforeBareConflictOf(s, text)
+  )
+    return undefined;
+  const addressedPr = addressedBarePrOf(s, text);
+  if (addressedPr !== undefined) return addressedPr.repo;
+  return s.pr?.repo ?? reviewAddressOf(s, text)?.slug ?? (s.repoStrong ? s.repo : undefined);
 }
 
 /** Strip wrapping punctuation a token picks up in prose ("vary:", "(api)"). */
@@ -348,10 +637,13 @@ function headBranchRef(text: string): string | undefined {
 /** Pure, sync signal extraction from one message text (no network). */
 function extractSignals(rawText: string): Signals {
   const text = unwrapSlack(rawText);
+  // Examples in code are context, not target or ref signals. Preserve their
+  // whitespace so the token scan below can still identify code positions.
+  const signalText = text.replace(CODE_SPAN, (m) => m.replace(/\S/g, "\u0000"));
   const out: Signals = {};
 
   // PR URL → repo + PR number (head ref resolved later, via REST)
-  const prUrl = /https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+)\/pull\/(\d+)/i.exec(text);
+  const prUrl = /https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+)\/pull\/(\d+)/i.exec(signalText);
   if (prUrl) {
     const slug = slugOf(`${stripPunct(prUrl[1])}/${stripPunct(prUrl[2])}`);
     if (slug) out.pr = { repo: slug, number: Number(prUrl[3]) };
@@ -359,12 +651,12 @@ function extractSignals(rawText: string): Signals {
 
   // Typed branch forms only: the head-of-ask routing clause or a branch token.
   // A phrase with the same words after the task begins is narrative, not a ref.
-  out.ref = headBranchRef(text);
-  const branchToken = /(?:^|\s)branch:(\S+)/i.exec(text);
+  out.ref = headBranchRef(signalText);
+  const branchToken = /(?:^|\s)branch:(\S+)/i.exec(signalText);
   if (!out.ref && branchToken) out.ref = validRef(stripPunct(branchToken[1]));
 
   // Repo URL with an explicit /tree/<ref>
-  const treeUrl = /https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+)\/tree\/([^\s?#]+)/i.exec(text);
+  const treeUrl = /https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+)\/tree\/([^\s?#]+)/i.exec(signalText);
   if (treeUrl) {
     const slug = slugOf(`${stripPunct(treeUrl[1])}/${stripPunct(treeUrl[2])}`);
     if (slug) {
@@ -377,7 +669,7 @@ function extractSignals(rawText: string): Signals {
   }
 
   // Plain repo URL (also matches the repo prefix of PR/tree URLs — same slug)
-  const repoUrl = /https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+)/i.exec(text);
+  const repoUrl = /https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+)/i.exec(signalText);
   if (repoUrl && !out.repo) {
     const slug = slugOf(`${stripPunct(repoUrl[1])}/${stripPunct(repoUrl[2])}`);
     if (slug) {
@@ -391,9 +683,8 @@ function extractSignals(rawText: string): Signals {
   // `branch` is never taken as an ordinary bare repo token.
   //
   // A token inside a code span / fenced block (`like/this`) is code or a path
-  // being TALKED ABOUT, never a repo switch — it is excluded from the bare-slug
-  // branch only (see docs/reference/specs/resident-repos.md item 29). Typed
-  // branch tokens and URL/PR forms are unaffected.
+  // being TALKED ABOUT, never a repo switch. Routed-task conflict detection
+  // separately checks quoted PR citations against its durable target.
   const tokens = text.split(/\s+/).filter(Boolean);
   const inCode = text
     .replace(CODE_SPAN, (m) => m.replace(/\S/g, "\u0000"))
@@ -427,7 +718,7 @@ function extractSignals(rawText: string): Signals {
     const keywordAt =
       prev === "in" || prev === "on" ? i - 1 : DETERMINERS.has(prev) && /^(in|on)$/.test(word(i - 2)) ? i - 2 : -1;
     const addresses = keywordAt >= 0 && (word(keywordAt) === "in" || /^(repo|repository)$/.test(word(i + 1)));
-    if (addresses && !inCode[i] && !out.addressed && !DETERMINERS.has(t.toLowerCase())) {
+    if (addresses && !inCode[i] && !inCode[keywordAt] && !out.addressed && !DETERMINERS.has(t.toLowerCase())) {
       const slug = slugOf(t);
       if (slug) out.addressed = { slug };
       else if (!t.includes("/") && NAME_RE.test(t) && composePosition(keywordAt))
@@ -436,11 +727,11 @@ function extractSignals(rawText: string): Signals {
     if (prev === "on") {
       // Keep the legacy repository mention (`on owner/name`) only. A bare
       // `on <word>` or slash-shaped token is prose and never fills the ref slot.
-      if (!out.onSlug && slugOf(t) && validRef(t)) out.onSlug = t;
+      if (!inCode[i] && !out.onSlug && slugOf(t) && validRef(t)) out.onSlug = t;
       continue;
     }
     const prShort = /^([^/#\s]+)\/([^/#\s]+)#(\d+)$/.exec(t);
-    if (prShort) {
+    if (prShort && !inCode[i]) {
       const slug = slugOf(`${prShort[1]}/${prShort[2]}`);
       if (slug && !out.pr) out.pr = { repo: slug, number: Number(prShort[3]) };
       continue;
@@ -463,7 +754,8 @@ interface ThreadSignals {
   repo?: string;
   /** true once a strong signal (URL / `owner/name#N` / a vetted address) bound the repo */
   repoStrong?: boolean;
-  /** Last user-turn PR reference (URL or `owner/name#N`), any repo; the
+  /** Last user-turn PR target (URL, `owner/name#N`, or an addressed bare PR);
+   *  a contextual citation never replaces it; the
    *  resolver checks it against the resolved repo. */
   pr?: { repo: string; number: number };
   /** When the user turn that named `pr` was written (its `at`, when the
@@ -506,27 +798,50 @@ function threadSignals(
   const out: ThreadSignals = { events: [] };
   for (const h of history) {
     if (h.role !== "user") continue;
-    const s = extractSignals(h.text);
-    let strong = s.pr?.repo ?? (s.repoStrong ? s.repo : undefined);
+    const { signals: s, direct } = selectedSignalsOf(h.text);
+    const ambiguousPr =
+      conflictingBarePrOf(h.text) !== undefined ||
+      direct.conflict !== undefined ||
+      ambiguousPrCitationOf(s, h.text) ||
+      directBeforeBareConflictOf(s, h.text) !== undefined;
+    const address = reviewAddressOf(s, h.text);
+    const addressedPr = ambiguousPr ? undefined : addressedBarePrOf(s, h.text);
+    const contextualPr = contextualPrCitationOf(h.text);
+    const contextualCitation =
+      contextualPr || contextualRepoCitationOf(s, h.text) || contextualBarePrCitationOf(h.text);
+    // A contextual PR citation in the same turn cannot replace the PR and
+    // repository the person addressed. The address still needs the vet.
+    let strong =
+      addressedPr === undefined && !ambiguousPr ? (s.pr?.repo ?? (s.repoStrong ? s.repo : undefined)) : undefined;
     if (strong) out.events.push({ strong });
-    else if (s.addressed) out.events.push({ addressed: s.addressed });
+    else if (address) out.events.push({ addressed: address });
     // Sync view (repoFromThread): an addressed slug counts strong only when a
     // predicate confirms it — unvetted (no registry) it stays the weak token
     // it always was; a bare name cannot be resolved without the listing and
     // is ignored here.
-    if (!strong && s.addressed?.slug && isResident && safePredicate(isResident, s.addressed.slug))
-      strong = s.addressed.slug;
+    if (!strong && address?.slug && isResident && safePredicate(isResident, address.slug)) strong = address.slug;
     if (strong) {
       out.repo = strong;
       out.repoStrong = true;
     } else if (!out.repo) {
       // Weak signals bind only an UNBOUND thread (first bind wins — a later
       // bare token never overrides), and only when vetted by the probe.
-      const weak = s.repo ?? (s.onSlug ? slugOf(s.onSlug) : undefined);
+      const weak =
+        addressedPr === undefined && !contextualCitation && !ambiguousPr
+          ? (s.repo ?? (s.onSlug ? slugOf(s.onSlug) : undefined))
+          : undefined;
       if (weak && (!isResident || safePredicate(isResident, weak))) out.repo = weak;
     }
-    if (s.pr) {
-      out.pr = s.pr;
+    const bare = barePrNumberOf(h.text);
+    const pr =
+      addressedPr ??
+      (contextualCitation
+        ? out.repo && bare !== undefined && { repo: out.repo, number: bare }
+        : ambiguousPr
+          ? undefined
+          : s.pr);
+    if (pr) {
+      out.pr = pr;
       if (h.at !== undefined) out.prAt = h.at;
       else delete out.prAt;
     }
@@ -594,12 +909,24 @@ export async function resolveRepoContext(
    *  It is a fallback below an explicit current-message target and above the
    *  historical token scan; the same machine-class probe vets it. */
   operatorRepo?: string,
+  /** Review alone may pair a bare PR number with its vetted repository. */
+  reviewBarePr = false,
 ): Promise<RepoContext> {
-  const s = extractSignals(msg.text);
+  const selected = reviewBarePr ? selectedSignalsOf(msg.text) : undefined;
+  const s = selected?.signals ?? extractSignals(msg.text);
+  const direct = selected?.direct;
   const routedPr = routedPrTargetOf(msg.text);
   const conflictingPr = routedPr === undefined ? undefined : conflictingRoutedPrOf(msg.text, routedPr);
   if (routedPr !== undefined && conflictingPr !== undefined)
     return { prConflict: { target: `${routedPr.repo}#${routedPr.number}`, cited: conflictingPr } };
+  const bareConflict = reviewBarePr ? conflictingBarePrOf(msg.text) : undefined;
+  if (bareConflict !== undefined)
+    return { prConflict: { target: `PR #${bareConflict.target}`, cited: `PR #${bareConflict.cited}` } };
+  if (direct?.conflict !== undefined) return { prConflict: direct.conflict };
+  if (reviewBarePr && ambiguousPrCitationOf(s, msg.text))
+    return { prConflict: { target: `PR #${barePrNumberOf(msg.text)}`, cited: `${s.pr!.repo}#${s.pr!.number}` } };
+  const directBareConflict = reviewBarePr ? directBeforeBareConflictOf(s, msg.text) : undefined;
+  if (directBareConflict !== undefined) return { prConflict: directBareConflict };
   const thread = threadSignals(history);
   // The first bare candidate the probe refused, remembered so the dispatcher
   // can say why nothing was bound — only meaningful when `repo` stays
@@ -645,38 +972,69 @@ export async function resolveRepoContext(
     const matches = ((await listSlugs()) ?? []).filter((slug) => slug.split("/")[1]?.toLowerCase() === a.name);
     return matches.length === 1 ? matches[0] : undefined;
   };
-  // Strong signal in this message → it (re)binds: a URL, `owner/name#N`, or an
-  // address the registry vets. Else the thread's LAST strong signal, walking
+  // Strong target in this message → it (re)binds: a URL, `owner/name#N`, or
+  // an address the registry vets. A later contextual PR citation is excluded.
+  // Else the thread's LAST strong signal, walking
   // its turns backwards and vetting addresses the same way. Else the thread's
   // weak repo, vetted (it was itself a bare token once); only if the thread
   // has no repo at all may this message's bare slug bind — vetted too. A bare
   // slug in this message that is not addressed (a file path, a phrase) is
   // NEVER a repo switch. No probe → unvetted.
-  const strongNow =
-    s.pr?.repo ??
-    (s.repoStrong ? s.repo : undefined) ??
-    (s.addressed ? await resolveAddressed(s.addressed) : undefined);
+  const addressedPr = reviewBarePr ? addressedBarePrOf(s, msg.text) : undefined;
+  const addressedBareReview = addressedPr !== undefined;
+  const contextualPr = reviewBarePr && contextualPrCitationOf(msg.text);
+  const contextualCitation =
+    contextualPr || (reviewBarePr && (contextualRepoCitationOf(s, msg.text) || contextualBarePrCitationOf(msg.text)));
+  const address = reviewBarePr ? reviewAddressOf(s, msg.text) : s.addressed;
+  const strongNow = addressedBareReview
+    ? await resolveAddressed(address!)
+    : (s.pr?.repo ?? (address ? await resolveAddressed(address) : undefined) ?? (s.repoStrong ? s.repo : undefined));
   // An explicitly addressed slug the registry could not be asked about is a
   // stop, not a fall-through: running on the thread's old repo instead would
   // be the wrong-repo run this strength exists to end. Refuse loudly.
-  if (strongNow === undefined && s.addressed?.slug !== undefined && unverified === s.addressed.slug) {
-    return { unverifiedRepo: s.addressed.slug };
+  if ((strongNow === undefined || addressedBareReview) && address?.slug !== undefined && unverified === address.slug) {
+    return { unverifiedRepo: address.slug };
   }
+  // A refused current-message address cannot borrow the thread's old repo.
+  // In particular, a review's bare PR number must never become oldRepo#N.
+  if (
+    (strongNow === undefined || addressedBareReview) &&
+    address?.slug !== undefined &&
+    rejected === address.slug &&
+    barePrNumberOf(msg.text) !== undefined
+  ) {
+    return { rejectedRepo: address.slug };
+  }
+  if (addressedBareReview && strongNow === undefined) return { unverifiedRepo: addressedPr.repo };
   const typedRepo = operatorRepo === undefined ? undefined : slugOf(operatorRepo);
-  let repo = strongNow ?? (typedRepo !== undefined && (await vet(typedRepo)) ? typedRepo : undefined);
+  let repo = strongNow;
+  const bareCurrent = barePrNumberOf(msg.text);
+  // A review's bare number inherits the thread's explicit target before a
+  // channel-derived typed fallback. A current explicit address already won.
+  const deferTypedRepo = contextualCitation || (reviewBarePr && bareCurrent !== undefined);
+  if (!deferTypedRepo && !repo && typedRepo !== undefined && (await vet(typedRepo))) repo = typedRepo;
+  const recordPr = records?.pr;
+  if (deferTypedRepo && recordPr !== undefined && recordPr.number === bareCurrent && (await vet(recordPr.repo)))
+    repo ??= recordPr.repo;
   for (let i = thread.events.length - 1; repo === undefined && i >= 0; i--) {
     const ev = thread.events[i];
     repo = "strong" in ev ? ev.strong : await resolveAddressed(ev.addressed);
   }
+  if (deferTypedRepo && !repo && thread.repo && (await vet(thread.repo))) repo = thread.repo;
+  if (deferTypedRepo && !repo && typedRepo !== undefined && (await vet(typedRepo))) repo = typedRepo;
   if (!repo && thread.repo && (await vet(thread.repo))) repo = thread.repo;
-  if (!repo && s.repo && (await vet(s.repo))) repo = s.repo;
+  // Existence is not intent: a review's bare number cannot turn a current
+  // context path into its target just because that path is also onboarded.
+  // Inherited targets above still stand; other requests keep the legacy scan.
+  const allowWeakCurrent = !reviewBarePr || barePrNumberOf(msg.text) === undefined;
+  if (!repo && allowWeakCurrent && s.repo && (await vet(s.repo))) repo = s.repo;
   let ref = s.ref;
   let refFromPr = false;
 
   // `on <owner/name-shaped>` remains a repository mention only when no repo
   // is otherwise established. It is never a ref: refs come from the typed
   // forms above, so a path or prose phrase cannot silently choose a base.
-  if (s.onSlug && !repo) {
+  if (s.onSlug && !repo && allowWeakCurrent) {
     const cand = slugOf(s.onSlug);
     if (cand && (await vet(cand))) repo = cand;
   }
@@ -685,14 +1043,23 @@ export async function resolveRepoContext(
     unverified = undefined;
   }
 
-  // A bare PR number has a repository in a thread with a durable PR, or when
-  // an explicitly addressed repo's routed task OPENS with that PR. Spawned
+  // A bare PR number has a repository in a thread with a durable PR, when
+  // an explicitly addressed repo's routed task OPENS with that PR, or for a
+  // review whose repository was independently vetted. Spawned
   // coordinator children have no run-record signal: without the routed form,
   // an older PR in their thread can override the child contract's target.
   // The conflict check above already rejected citations of another PR.
   const bareNumber =
-    !s.pr && (repo === records?.pr?.repo || routedPr?.repo === repo) ? barePrNumberOf(msg.text) : undefined;
-  const namedPr = s.pr ?? (repo && bareNumber !== undefined ? { repo, number: bareNumber } : undefined);
+    (!s.pr || addressedBareReview || contextualPr) &&
+    (repo === records?.pr?.repo || routedPr?.repo === repo || (reviewBarePr && repo !== undefined))
+      ? barePrNumberOf(msg.text)
+      : undefined;
+  const namedPr =
+    addressedBareReview || contextualPr
+      ? repo && bareNumber !== undefined
+        ? { repo, number: bareNumber }
+        : undefined
+      : (s.pr ?? (repo && bareNumber !== undefined ? { repo, number: bareNumber } : undefined));
 
   // PR head — one REST call whenever the CURRENT message names a PR of the
   // resolved repo, regardless of any ref phrasing beside it. The PR is the

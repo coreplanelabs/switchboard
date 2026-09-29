@@ -1142,7 +1142,15 @@ export type RunEvent =
        *  `model` is the ref the run uses, resolved from a model the person
        *  named in plain words (the plain-words model unit) — applied at
        *  directive precedence. Additive: unknown → no model. */
-      binds?: ReadonlyArray<{ line: string; reason: string; model?: string; repo?: string; confirmed?: true }>;
+      binds?: ReadonlyArray<{
+        line: string;
+        reason: string;
+        model?: string;
+        repo?: string;
+        /** The admissible fact behind the model's typed repo choice. */
+        repoSource?: "request" | "attachment" | "thread" | "channel";
+        confirmed?: true;
+      }>;
       question?: string;
       /** A question's proposed line, redacted and cut like the receipt — what
        *  the next turn's "yes" binds (`bindFromAnswer`). */
@@ -1160,6 +1168,14 @@ export type RunEvent =
        * boundary. Its refusal text is always the cause-owned renderer. */
       providerFailure?: ProviderFailureCause;
       attempts?: ReadonlyArray<{ outcome: "accepted" | "violation"; violation?: string }>;
+      /** Snapshot of the factual repository context the operator received. */
+      repoContext?: {
+        organization: string;
+        threadRepo?: string;
+        channelRepo?: string;
+        candidateStatus: "skipped" | "available" | "truncated" | "empty" | "unavailable";
+        candidateCount: number;
+      };
       intake?: { verdict: string; reason: string };
       latencyMs?: number;
       outputTokens?: number;
