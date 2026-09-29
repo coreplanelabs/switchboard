@@ -306,9 +306,39 @@ describe("startMemoryRead — the memory read, started", () => {
 });
 
 describe("openAckCard — the ack card the thread sees while setup runs", () => {
+  it("keeps router reason and compound request text off a verified private main DM card from its first frame", async () => {
+    const d = deps();
+    const { message, agent, resolved: quiet, root, trace } = request(d, "private question", "orchestrator");
+    const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+    const msg = { ...message, ...dm, directAudience: { kind: "slack-unshared-im" as const, ...dm } };
+    const { io, statuses } = fakeIO();
+    const ack = await openAckCard(d, {
+      msg,
+      io,
+      agent,
+      resolved: { ...quiet, verbosity: "debug" },
+      startedAt: NOW,
+      clock: () => NOW,
+      root,
+      trace,
+      route: {
+        preset: "conductor",
+        reason: "secret-marker-17 from an earlier DM turn",
+        model: "anthropic/fast",
+        parts: [{ preset: "research", text: "secret-marker-17" }],
+      },
+    });
+    clearInterval(ack.heartbeat);
+    expect(JSON.stringify(statuses[0])).not.toContain("secret-marker-17");
+    expect(statuses[0].detail).toBeUndefined();
+    ack.card.update(ack.shell.live());
+    expect(JSON.stringify(statuses[1])).not.toContain("secret-marker-17");
+    expect(JSON.stringify(ack.shell.close({ kind: "done", icon: "✅" }))).not.toContain("secret-marker-17");
+  });
+
   it("a routed run's label carries the route reason at debug alone; a compound's card leads every frame with one line per part at every level (item 28)", async () => {
     const d = deps();
-    const { agent, resolved: quietly, root, trace } = request(d, "review #7 and also look into the outage");
+    const { message, agent, resolved: quietly, root, trace } = request(d, "review #7 and also look into the outage");
     const resolved = { ...quietly, verbosity: "debug" as const };
     const { io, statuses } = fakeIO();
     const parts = [
@@ -316,6 +346,7 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
       { preset: "research", text: "why did the staging resident go down last night" },
     ];
     const ack = await openAckCard(d, {
+      msg: message,
       io,
       agent,
       resolved,
@@ -337,6 +368,7 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
     // A single route: the routed line, no lead.
     const single = fakeIO();
     const one = await openAckCard(d, {
+      msg: message,
       io: single.io,
       agent,
       resolved,
@@ -355,6 +387,7 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
     // At quiet (the default) the same routed request paints no route reason; the parts still lead.
     const quiet = fakeIO();
     const q = await openAckCard(d, {
+      msg: message,
       io: quiet.io,
       agent,
       resolved: quietly,
@@ -374,6 +407,7 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
     // Verbose shows the run's notes and still not the route reason.
     const verbose = fakeIO();
     const v = await openAckCard(d, {
+      msg: message,
       io: verbose.io,
       agent,
       resolved: { ...quietly, verbosity: "verbose" },
@@ -389,9 +423,18 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
 
   it("posts the ack frame once, hands back the shell, the coalesced card and a heartbeat the caller owns", async () => {
     const d = deps();
-    const { agent, resolved, root, trace } = request(d, "hello there");
+    const { message, agent, resolved, root, trace } = request(d, "hello there");
     const { io, statuses } = fakeIO();
-    const ack = await openAckCard(d, { io, agent, resolved, startedAt: NOW, clock: () => NOW, root, trace });
+    const ack = await openAckCard(d, {
+      msg: message,
+      io,
+      agent,
+      resolved,
+      startedAt: NOW,
+      clock: () => NOW,
+      root,
+      trace,
+    });
     clearInterval(ack.heartbeat);
     expect(statuses).toHaveLength(1);
     // The default request is quiet: the agent alone, the model at verbose (item 28).
@@ -408,6 +451,77 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
 
 describe("registerRun — the run's row on every surface before the attach", () => {
   const repoCtx: RepoContext = { repo: "acme/api", ref: "main", pr: 41, headSha: "a".repeat(40) };
+
+  it("gives a main DM a generic run label and no private request or repo facts on the live page", async () => {
+    const d = deps();
+    const r = request(d, "private signup count: 17", "orchestrator");
+    const registry = new RunRegistry({ genId: () => "run-private", genToken: () => "tok" });
+    const message = {
+      ...r.message,
+      channelId: "slack:DMAIN",
+      userId: "slack:WALICE",
+      threadKey: "slack:DMAIN:1.0",
+      directAudience: {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:DMAIN",
+        userId: "slack:WALICE",
+        threadKey: "slack:DMAIN:1.0",
+      },
+    };
+    await registerRun(d, {
+      agentSource: "directive",
+      msg: message,
+      io: fakeIO().io,
+      agent: r.agent,
+      resolved: r.resolved,
+      directives: r.directives,
+      history: [],
+      repoCtx,
+      carriedRow: undefined,
+      resume: undefined,
+      startedAt: NOW,
+      receivedAt: NOW,
+      clock: () => NOW,
+      root: r.root,
+      trace: r.trace,
+      registry,
+      shell: r.shell,
+      admitted: r.admitted,
+    });
+    const summary = registry.getById("run-private")!;
+    expect(summary.label).toBe("main · private conversation");
+    expect(summary.repo).toBeUndefined();
+    expect(JSON.stringify(registry.snapshotById("run-private"))).not.toContain("private signup count");
+    expect(JSON.stringify(registry.snapshotById("run-private"))).not.toContain("acme/api");
+  });
+
+  it("keeps repository facts on a non-private main run's live row", async () => {
+    const d = deps();
+    const r = request(d, "Summarize acme/api", "orchestrator");
+    const registry = new RunRegistry({ genId: () => "run-public", genToken: () => "tok" });
+    await registerRun(d, {
+      agentSource: "directive",
+      msg: r.message,
+      io: fakeIO().io,
+      agent: r.agent,
+      resolved: r.resolved,
+      directives: r.directives,
+      history: [],
+      repoCtx,
+      carriedRow: undefined,
+      resume: undefined,
+      startedAt: NOW,
+      receivedAt: NOW,
+      clock: () => NOW,
+      root: r.root,
+      trace: r.trace,
+      registry,
+      shell: r.shell,
+      admitted: r.admitted,
+    });
+    expect(registry.getById("run-public")?.repo).toBe("acme/api");
+    expect(registry.getById("run-public")?.label).toContain("acme/api");
+  });
 
   it("creates the registry row under the minted id with its label and meta, links the run page, and publishes the request, the run meta and the thread context", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
@@ -623,7 +737,7 @@ describe("registerRun — the run's row on every surface before the attach", () 
       resolved: r.resolved,
       directives: r.directives,
       history: [{ role: "user", text: "earlier" }],
-      repoCtx: {},
+      repoCtx: { repo: "acme/api", ref: "main", headSha: "a".repeat(40), pr: 41 },
       carriedRow: resume.row,
       resume,
       startedAt: resume.row.startedAt,
@@ -695,6 +809,76 @@ describe("registerRun — the run's row on every surface before the attach", () 
 });
 
 describe("reserveRun — the ledger reservation before the attach", () => {
+  it("stores only a matching requester DM provenance on the reserved row", async () => {
+    const d = deps();
+    const r = request(d, "What happened?", "orchestrator");
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:WALICE",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const message = { ...r.message, ...directAudience, directAudience };
+    await reserveRun(d, {
+      msg: message,
+      agent: r.agent,
+      profile: r.profile,
+      resolved: r.resolved,
+      repoCtx: {},
+      operationTarget: { repo: "acme/api", ref: "unit/repair" },
+      channelVisibility: "dm",
+      runId: "run-private",
+      startedAt: NOW,
+      receivedAt: NOW,
+      resume: undefined,
+      restart: undefined,
+      card: { update: () => {}, done: async () => {} },
+      hooks: { onStop: () => {}, onFenced: () => {} },
+      admitted: r.admitted,
+      root: r.root,
+      route: { preset: "orchestrator", reason: "private account balance: 17", model: "anthropic/fast" },
+    });
+    expect(d.ledger.reserved[0].meta.directAudience).toEqual(directAudience);
+    expect(d.ledger.reserved[0].meta.request?.directAudience).toEqual(directAudience);
+    expect(d.ledger.reserved[0].meta.repo).toBeUndefined();
+    expect(d.ledger.reserved[0].meta.operationTarget).toBeUndefined();
+    expect(d.ledger.reserved[0].meta.ref).toBeUndefined();
+    expect(d.ledger.reserved[0].meta.headSha).toBeUndefined();
+    expect(d.ledger.reserved[0].meta.pr).toBeUndefined();
+    expect(d.ledger.reserved[0].meta.route).toBeUndefined();
+  });
+
+  it("keeps repository facts on a non-private main run's reservation", async () => {
+    const d = deps();
+    const r = request(d, "Summarize acme/api", "orchestrator");
+    const route = { preset: "orchestrator", reason: "public repository summary", model: "anthropic/fast" };
+    await reserveRun(d, {
+      msg: r.message,
+      agent: r.agent,
+      profile: r.profile,
+      resolved: r.resolved,
+      repoCtx: { repo: "acme/api", ref: "main", headSha: "a".repeat(40), pr: 41 },
+      channelVisibility: "public",
+      runId: "run-public",
+      startedAt: NOW,
+      receivedAt: NOW,
+      resume: undefined,
+      restart: undefined,
+      card: { update: () => {}, done: async () => {} },
+      hooks: { onStop: () => {}, onFenced: () => {} },
+      admitted: r.admitted,
+      root: r.root,
+      route,
+    });
+    expect(d.ledger.reserved[0].meta).toMatchObject({
+      repo: "acme/api",
+      ref: "main",
+      headSha: "a".repeat(40),
+      pr: 41,
+      route,
+    });
+  });
+
   it("a fresh request reserves its row with the run's identity, the request in the durable inbox's shape and the caller's hooks, then names the slot", async () => {
     const d = deps();
     const r = request(d, "agent:coding fix it", "coding");

@@ -15,6 +15,7 @@ import { PiAiProviders } from "./core/harness/piAi.js";
 import { createSlackApp, wireIntakeGate, type SlackIntakeGate } from "./channels/slack.js";
 import { SlackChannelDirectory } from "./channels/slackChannelDirectory.js";
 import { SlackConversationReader } from "./channels/slack/references.js";
+import { createSlackContextCapability } from "./channels/slack/context.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
 import { FAVICON_ICO_SVG, createLiveViewHandler } from "./channels/liveView.js";
@@ -989,6 +990,14 @@ export async function runBot(): Promise<void> {
   // recognises is read from `auth.test` once the socket is up.
   const conversationReader = new SlackConversationReader(app.client);
   deps.conversationReaders = [conversationReader];
+  deps.slackContextForRun = (actor, msg) =>
+    createSlackContextCapability({
+      client: app.client,
+      reader: conversationReader,
+      actor,
+      msg,
+      directory: channelDirectory,
+    });
   // Connect tickets bind to the requester's email when Slack can tell us
   // (`users:read.email`); without the scope the lookup yields undefined and the
   // ticket binds to the first Access identity that opens it instead.

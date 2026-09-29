@@ -138,6 +138,24 @@ describe("SlackConversationReader.classifyConversation — closed and fresh", ()
     });
   });
 
+  it("freshly accepts sparse public metadata but rejects an affirmative shared or DM flag", async () => {
+    const { client } = fakeClient({
+      channels: {
+        C_PUB: PUBLIC,
+        C_SHARED: { ...PUBLIC, id: "C_SHARED", is_shared: true },
+        D_DM: { id: "D_DM", is_private: false, is_member: true, is_im: true },
+      },
+    });
+    const r = new SlackConversationReader(client);
+    expect(await r.classifyConversationFresh(ref("C_PUB"))).toEqual({
+      visibility: "public",
+      botIsMember: true,
+      channelName: "frontend",
+    });
+    expect(await r.classifyConversationFresh(ref("C_SHARED"))).toEqual({ visibility: "never", botIsMember: false });
+    expect(await r.classifyConversationFresh(ref("D_DM"))).toEqual({ visibility: "never", botIsMember: false });
+  });
+
   it("every shared flag alone is `never` even when is_private is false; so are a DM, a group DM and a missing channel", async () => {
     const flags = ["is_shared", "is_ext_shared", "is_org_shared", "is_pending_ext_shared", "is_im", "is_mpim"] as const;
     const channels: Record<string, Info> = {};

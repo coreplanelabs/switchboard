@@ -7,7 +7,7 @@ import type {
   ReferencedMessage,
 } from "../../core/references/types.js";
 import { resolveTeamUrl, resolveUserName } from "./lookups.js";
-import { threadTurns } from "./threadTurns.js";
+import { threadTurns, type SlackThreadMessage } from "./threadTurns.js";
 
 // The Slack conversation reader (record 0037, the adapter contract): what the
 // core's references step needs from Slack and nothing else. The URL grammar
@@ -26,18 +26,19 @@ import { threadTurns } from "./threadTurns.js";
  *  the stale-allow window the record accepts. */
 export const CLASSIFY_CACHE_MS = 30_000;
 
-/** One `conversations.replies` page covers any thread under this many replies;
- *  the reader keeps the newest of them under the caller's caps. */
-const REPLIES_PAGE = 1000;
+/** Bounded traversal; an overlong thread is refused instead of presented as its oldest slice. */
+export const REPLIES_PAGE = 1000;
+export const REPLIES_MAX_PAGES = 10;
 
 /** The slice of the Slack Web API the reader uses — structural, so a test fake satisfies it. */
 export interface ReferenceClient {
-  auth: { test(): Promise<{ url?: string }> };
+  auth: { test(): Promise<{ url?: string; team_id?: string }> };
   conversations: {
     info(args: { channel: string }): Promise<{
       channel?: {
         id?: string;
         name?: string;
+        user?: string;
         is_private?: boolean;
         is_im?: boolean;
         is_mpim?: boolean;
@@ -46,17 +47,22 @@ export interface ReferenceClient {
         is_org_shared?: boolean;
         is_pending_ext_shared?: boolean;
         is_member?: boolean;
+        num_members?: number;
+        shared_team_ids?: string[];
+        pending_connected_team_ids?: string[];
       };
     }>;
     replies(args: {
       channel: string;
       ts: string;
       limit: number;
-    }): Promise<{ messages?: { user?: string; bot_id?: string; text?: string; ts?: string }[] }>;
+      cursor?: string;
+    }): Promise<{ messages?: SlackThreadMessage[]; has_more?: boolean; response_metadata?: { next_cursor?: string } }>;
   };
   users: {
     info(args: { user: string }): Promise<{
       user?: {
+        team_id?: string;
         name?: string;
         real_name?: string;
         profile?: { display_name?: string; real_name?: string; email?: string };
@@ -65,6 +71,36 @@ export interface ReferenceClient {
       };
     }>;
   };
+}
+
+/** Fetch the full bounded thread, or stop once an exact target message is found. */
+export async function fetchSlackReplies(
+  client: Pick<ReferenceClient, "conversations">,
+  channel: string,
+  ts: string,
+  targetTs?: string,
+): Promise<SlackThreadMessage[]> {
+  const messages: SlackThreadMessage[] = [];
+  let cursor: string | undefined;
+  const seen = new Set<string>();
+  for (let pageNumber = 0; pageNumber < REPLIES_MAX_PAGES; pageNumber++) {
+    const page = await client.conversations.replies({
+      channel,
+      ts,
+      limit: REPLIES_PAGE,
+      ...(cursor ? { cursor } : {}),
+    });
+    if ((page.messages?.length ?? 0) > REPLIES_PAGE) throw new Error("Slack replies exceeded the page size");
+    messages.push(...(page.messages ?? []));
+    if (targetTs && messages.some((message) => message.ts === targetTs)) return messages;
+    const next = page.response_metadata?.next_cursor?.trim();
+    if (page.has_more && !next) throw new Error("Slack replies omitted the next cursor");
+    if (!next) return messages;
+    if (seen.has(next)) throw new Error("Slack replies cursor repeated");
+    seen.add(next);
+    cursor = next;
+  }
+  throw new Error("Slack replies exceeded the bounded page limit");
 }
 
 const SLACK = "slack";
@@ -150,20 +186,48 @@ export class SlackConversationReader implements ConversationReader {
     return answer;
   }
 
+  /** A post-fetch authority check cannot accept the short classification cache. */
+  async classifyConversationFresh(ref: ConversationRef): Promise<ConversationClassification> {
+    const channel = ref.channelId.slice(SLACK.length + 1);
+    this.cache.delete(channel);
+    try {
+      const c = (await this.client.conversations.info({ channel })).channel;
+      if (
+        !c ||
+        c.is_im ||
+        c.is_mpim ||
+        typeof c.is_private !== "boolean" ||
+        c.is_member !== true ||
+        c.is_shared ||
+        c.is_ext_shared ||
+        c.is_org_shared ||
+        c.is_pending_ext_shared
+      )
+        return NEVER;
+      return {
+        visibility: c.is_private ? "private" : "public",
+        botIsMember: true,
+        ...(c.name ? { channelName: c.name } : {}),
+      };
+    } catch {
+      return NEVER;
+    }
+  }
+
   async readConversation(
     ref: ConversationRef,
     caps: { maxMessages: number; maxBytes: number },
   ): Promise<ReferencedConversation> {
     const channel = ref.channelId.slice(SLACK.length + 1);
     const threadTs = ref.threadKey.slice(ref.channelId.length + 1);
-    const [page, cls] = await Promise.all([
-      this.client.conversations.replies({ channel, ts: threadTs, limit: REPLIES_PAGE }),
+    const [messagesInThread, cls] = await Promise.all([
+      fetchSlackReplies(this.client, channel, threadTs, ref.messageId !== threadTs ? ref.messageId : undefined),
       this.classifyConversation(ref),
     ]);
     // The same mapping the current thread is read with: status cards dropped,
     // an empty message dropped, the author ids kept. No skip ts — a linked
     // thread has no triggering message — and no bot mention to strip.
-    let turns = threadTurns(page.messages ?? [], {});
+    let turns = threadTurns(messagesInThread, {});
     // A bare permalink to a thread's own parent reads the thread; to a reply
     // or a lone message, exactly that message by its `ts` — and a permalink to
     // a message the mapping dropped (a status card) quotes nothing, never the
@@ -176,7 +240,12 @@ export class SlackConversationReader implements ConversationReader {
       const author = t.botId
         ? "app"
         : ((t.user && (await resolveUserName(this.client, t.user))) ?? t.user ?? "unknown");
-      messages.push({ ...(t.at !== undefined ? { at: t.at } : {}), author, text: humanizeMessageText(t.text) });
+      messages.push({
+        ...(t.at !== undefined ? { at: t.at } : {}),
+        ...(t.ts ? { ts: t.ts } : {}),
+        author,
+        text: humanizeMessageText(t.text),
+      });
     }
     return {
       kind: "reference",

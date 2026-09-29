@@ -21,7 +21,16 @@ import { DECISION_RECORD_ENV } from "../decisionRecordReservation.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
 import type { ModelCard } from "../modelCard.js";
-import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
+import { mergeTools } from "../../tools/toolsets.js";
+import { toolsForSlackContextRun, type SlackContextBinding } from "./slackContextBinding.js";
+import {
+  privateAudienceRequired,
+  privateAudienceRefusal,
+  privateAudienceStillValid,
+  savedSlackSourcesStillValid,
+  samePrivateRequesterFollowUp,
+  type PrivateAudienceLatch,
+} from "./privateAudience.js";
 import {
   HarnessContainerReplacedError,
   HarnessGateBypassedError,
@@ -128,6 +137,7 @@ import { shows } from "../verbosity.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 import { buildDepotCi } from "../../execution/depotCi.js";
+import { privateMainEvent } from "../privateMainEvent.js";
 
 /** Longest note summary the loop writes for an ending (`run_failed`, `workspace_torn_down`): a reason, not a stack dump. */
 const ENDING_NOTE_MAX = 500;
@@ -241,6 +251,8 @@ export interface RunLoopContext {
    *  first open. Relaunches continue the harness's lease instead. */
   assertAdmissionBudget: () => void;
   channelVisibility: ChannelVisibility;
+  slackContext?: SlackContextBinding;
+  privateAudienceLatch?: PrivateAudienceLatch;
   /** The severity to address in force for this run (agent-review.md item 5a),
    *  resolved by the dispatcher — directive > user > channel > org — for the
    *  verdict parser: a submitted or restored approve carrying a finding at or
@@ -324,6 +336,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     root,
     startedAt,
     channelVisibility,
+    slackContext,
+    privateAudienceLatch: sharedPrivateAudienceLatch,
     publishText,
     ending,
     spawn,
@@ -336,6 +350,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     coordinator,
     seed,
   } = ctx;
+  // A private tool's result can reach model-authored progress before the final
+  // answer. Keep every card frame free of model text for the whole DM run.
+  const privateRun = privateAudienceRequired(msg) || slackContext !== undefined;
+  const privateAudienceLatch = sharedPrivateAudienceLatch ?? { revoked: false };
+  const privateRunStillValid = async () => {
+    if (privateAudienceLatch.revoked) return false;
+    if (privateAudienceRequired(msg) && !(await privateAudienceStillValid(msg, io))) return false;
+    if (slackContext && !(await slackContext.destinationStillPrivate())) return false;
+    if (!(await savedSlackSourcesStillValid(privateAudienceLatch))) return false;
+    return !privateAudienceLatch.revoked;
+  };
   const events = ctx.events ?? new RunEventLane((event) => registry.publish(run.id, event));
   // The def the runner and the post-run turns read: the preset with the
   // EFFECTIVE budget (its deadline, wrap-up warning and budget label read
@@ -508,7 +533,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // Activity and pace are internal narration: quiet keeps the checklist and
   // outcome alone, verbose keeps the existing short tool caption and pace,
   // and debug adds the full command plus wait diagnosis.
-  const showsActivity = shows(resolved.verbosity, "verbose");
+  const privateMain = agent.name === "orchestrator" && privateAudienceRequired(msg);
+  const cardNote = (...args: Parameters<CardShell["note"]>) =>
+    shell.note(args[0], privateMain ? "Private conversation activity" : args[1]);
+  const showsActivity = !privateMain && shows(resolved.verbosity, "verbose");
   const chatty = shows(resolved.verbosity, "debug");
   // The update_status round trip is bookkeeping: the checklist itself just
   // repainted the card, so below `verbose` its call/result pair never rides
@@ -523,8 +551,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           : cardPace()
         : "",
       notice: shutdownNotice(),
-      detail: [checklist],
-      activity: showsActivity ? (chatty ? lastActivity : compactActivity(lastActivity)) : undefined,
+      detail: privateMain || privateRun ? [] : [checklist],
+      activity:
+        privateMain || privateRun
+          ? undefined
+          : showsActivity
+            ? chatty
+              ? lastActivity
+              : compactActivity(lastActivity)
+            : undefined,
     });
   // The closed card keeps the run link (the run page outlives the run and
   // shows the final answer) and the agent's checklist; only the transient
@@ -532,15 +567,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the run completing IS the proof they happened, and the model rarely
   // re-posts the checklist after its last step; a stop/failure keeps the
   // honest partial state.
-  const checklistAsLeft = () => checklist;
-  const checklistCheckedOff = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
+  const checklistAsLeft = () => (privateMain || privateRun ? undefined : checklist);
+  const checklistCheckedOff = () =>
+    privateMain || privateRun ? undefined : checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
   // The runner's progress notes carry the 💭 thought line at each model turn
   // (docs/reference/specs/tracing.md): the card shows it as activity, as it showed the
   // `turn` event before spans replaced it.
   const onProgress = (note: string) => {
-    console.log(`[note] ${msg.threadKey} ${note}`);
+    console.log(`[note] ${msg.threadKey} ${privateMain ? "private conversation activity" : note}`);
     lastActivityAt = clock();
-    lastActivity = { kind: "line", text: note };
+    lastActivity = privateMain ? undefined : { kind: "line", text: note };
     card.update(currentFrame());
   };
   // Live run-visibility (Area 2): each tool call/result refreshes the card
@@ -617,8 +653,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (e.type === "tool_call") lastToolCallAt = lastActivityAt;
     const bookkeeping = (e.type === "tool_call" || e.type === "tool_result") && e.tool === "update_status";
     // The operator log keeps every event; only the card's activity is gated.
-    console.log(`[tool] ${msg.threadKey} ${activityText(cardActivity(e))}`);
-    lastActivity = bookkeeping && !showBookkeeping ? undefined : cardActivity(e);
+    console.log(`[tool] ${msg.threadKey} ${activityText(cardActivity(privateMain ? privateMainEvent(e) : e))}`);
+    lastActivity = privateMain || (bookkeeping && !showBookkeeping) ? undefined : cardActivity(e);
     card.update(currentFrame());
   };
   const updateResidentRunDeadline = (remainingMs: number) => {
@@ -668,7 +704,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               state: "working" as const,
               bound,
               detail: e.type === "tool_call" ? "running a tool" : "model turn",
-              sourceEvents: [{ ...e, seq: sourceSeq }, ...(receipt ? [{ ...receipt, seq: sourceSeq + 1, at }] : [])],
+              sourceEvents: [
+                { ...(privateMain ? privateMainEvent(e) : e), seq: sourceSeq },
+                ...(receipt
+                  ? [{ ...(privateMain ? privateMainEvent(receipt) : receipt), seq: sourceSeq + 1, at }]
+                  : []),
+              ],
               ...(receipt ? { statePatch: { publicationReceipts: [...publicationReceipts, receipt] } } : {}),
             };
             try {
@@ -730,6 +771,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // run's durable progress record, and an agent "clearing" its status as
     // it wraps up would blank it (review agents do exactly that).
     if (!trimmed) return;
+    if (privateRun) return;
     checklist = trimmed;
     ledgerRun?.setState({ checklist: trimmed });
     card.update(currentFrame());
@@ -1072,9 +1114,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // The checkpoint commit is still local. Re-read it so the record/card can
       // name what is retained, and keep this workspace attached at release.
       await observeWorkspaceNow();
-      shell.note("quiet", salvaged.summary);
+      cardNote("quiet", salvaged.summary);
     } else if ("skipped" in target || /failed|not attempted/i.test(salvaged.summary))
-      shell.note("quiet", salvaged.summary);
+      cardNote("quiet", salvaged.summary);
   };
   /** The relaunch's re-attach ended the run — a stop, or the lease spent — so
    *  no process runs and the executor is the replaced container's, whose
@@ -1237,6 +1279,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     web: webCapability(),
     skills: deps.skills,
     github: githubCapabilityFor(deps, chatActorOf(deps.config, msg)),
+    ...(slackContext ? { slackContext: slackContext.capability } : {}),
     depotCi:
       agent.name === "coding"
         ? buildDepotCi({
@@ -1320,6 +1363,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // Where the run's workspace is (run-history item 54): the dispatch's binding,
   // then the one each relaunch re-attached — what the next relaunch re-attaches.
   let workspaceBinding = workspaceBindingFor(round.selection, profile.machine);
+  if (privateRun) {
+    // Keep the latch through answer delivery; the admission slot is released
+    // only after the reply, so a late follow-up can still revoke publication.
+    const revoke = () => {
+      privateAudienceLatch.revoked = true;
+      slackContext?.revoke();
+    };
+    admitted.inbox.onUntrustedFollowUp(revoke);
+    admitted.inbox.onAccepted((followUp) => {
+      if (!samePrivateRequesterFollowUp(msg, followUp)) revoke();
+    });
+  }
   try {
     const prBase = repoCtx.baseRef ?? (await coordinatorBase);
     if (coordinator?.publication !== undefined) {
@@ -1434,7 +1489,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       )
         blockExistingPrPublication("the Git door has no durable publication recorder");
       if (!verified.ok)
-        shell.note(
+        cardNote(
           "quiet",
           `Existing-PR publication is blocked: ${verified.reason}. Work stays on the bound checkout; no alternate branch or pull request will be published.`,
         );
@@ -1663,7 +1718,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(ctx.modelCard ? { card: ctx.modelCard } : {}),
             system: publicationSystem,
             messages,
-            tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools),
+            tools: mergeTools(toolsForSlackContextRun(agent.toolset, slackContext), mcpForRun?.tools),
             toolContext,
             ...(ctx.decisionRecord !== undefined ? { environment: { [DECISION_RECORD_ENV]: ctx.decisionRecord } } : {}),
             ...(session
@@ -1919,7 +1974,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         notify: {
           reply: (text) => replyAck(io, resolved.verbosity, text),
           headMoved: (suffix) => {
-            shell.note("debug", suffix);
+            cardNote("debug", suffix);
             card.update(currentFrame());
           },
         },
@@ -2212,7 +2267,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         `${blockedCheckpoint.uncommitted} uncommitted change(s) and ${blockedCheckpoint.unpushed} unpushed commit(s) in the run workspace; ` +
         "no alternate ref or pull request was created, and retention beyond this run is unverified";
       events.publish({ type: "run_note", kind: "publication_blocked", summary: oneLine(summary), at: clock() });
-      shell.note("quiet", `⚠️ ${summary}`);
+      cardNote("quiet", `⚠️ ${summary}`);
     } else if (leftBehind) {
       events.publish({
         type: "run_note",
@@ -2221,7 +2276,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         at: clock(),
       });
       // Work the person has to go and find: on the label at every level.
-      shell.note("quiet", workLeftBehindLabel(leftBehind));
+      cardNote("quiet", workLeftBehindLabel(leftBehind));
     }
     // The accepted PrDescription is a fact of the run: publish it as a typed
     // event BEFORE the finally below finish()es the stream, string fields
@@ -2343,6 +2398,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // canonicalized ONCE here, so the event text, the channel reply, the
     // GitHub post, and memory all read one Markdown dialect; the model's raw
     // text rides on the event only when normalization changed it.
+    if (privateRun && !(await privateRunStillValid())) answer = privateAudienceRefusal(privateAudienceLatch);
     const acceptedAnswer = markdownOutput.parse(answer);
     const rawAnswer = acceptedAnswer.ok && acceptedAnswer.changed ? answer : undefined;
     if (acceptedAnswer.ok) answer = acceptedAnswer.value;
@@ -2443,7 +2499,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       await preserveCodingChildWork("ending").catch((salvageErr: unknown) => {
         const summary = `the interrupted-work checkpoint failed before teardown: ${salvageErr instanceof Error ? salvageErr.message : String(salvageErr)}`;
         events.publish({ type: "run_note", kind: "work_salvage", summary, at: clock() });
-        shell.note("quiet", summary);
+        cardNote("quiet", summary);
       });
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
     if (!interrupted) throw err;
@@ -2621,14 +2677,28 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       if (runFailed)
         await root
           .span("post.card_close", () =>
-            card.done(shell.close({ kind: "done", icon: "❌", detail: checklistAsLeft(), ...doneLines(diagnosis) })),
+            card.done(
+              shell.close({
+                kind: "done",
+                icon: "❌",
+                detail: checklistAsLeft(),
+                ...(privateMain || privateRun ? {} : doneLines(diagnosis)),
+              }),
+            ),
           )
           .catch(() => {});
       else if (interrupted) {
         const { reason } = interrupted;
         await root
           .span("post.card_close", () =>
-            card.done(shell.close({ kind: "refused", icon: "🔁", reason, ...doneLines(diagnosis) })),
+            card.done(
+              shell.close({
+                kind: "refused",
+                icon: "🔁",
+                reason: privateMain ? "Private conversation interrupted" : reason,
+                ...(privateMain || privateRun ? {} : doneLines(diagnosis)),
+              }),
+            ),
           )
           .catch(() => {});
       }

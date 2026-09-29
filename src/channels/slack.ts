@@ -62,6 +62,7 @@ import {
   wasHandledHere,
 } from "./slack/dedupe.js";
 import { resolveChannelName, resolveTeamUrl, resolveUserName, slackPermalink } from "./slack/lookups.js";
+import { verifySlackDirectAudience } from "./slack/directAudience.js";
 import {
   parseRelayFooter,
   rawTextOf,
@@ -84,6 +85,7 @@ import type {
   HistoryItem,
   ImageAttachment,
   IncomingMessage,
+  SlackDirectAudience,
   OpenedThread,
   StatusHandle,
   StatusUpdate,
@@ -198,126 +200,126 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
   let scopesChecked = false;
 
   const catchUp = deps.config.config.slack?.catchUp;
+  // Scope diagnostics and socket health must run even when catch-up is off:
+  // private DM tools need IM scopes independently of the replay scanner.
   if (catchUp?.enabled !== false) {
-    // A window shorter than the drain deadline + cold start cannot cover a
-    // full-length deploy blackout. Warn, keep the operator's value.
     const windowWarning = catchUpWindowWarning(catchUp?.windowMinutes);
     if (windowWarning) console.warn(`[catch-up] ${windowWarning}`);
-    // Socket-state record for /healthz: connected/disconnected transitions, so
-    // the cold-start window (HTTP up, Slack not yet connected) and a silently
-    // dead socket are both visible off-box (slackSocketStatus.ts).
-    receiver.client.on("disconnected", () => recordSocketDisconnected());
-    receiver.client.on("connected", () => {
-      recordSocketConnected();
-      void (async () => {
-        // `botUserId` is retried on EVERY connect until it resolves (an
-        // auth.test that answers without user_id must not no-op the catch-up
-        // for the life of the process); only the scope check latches.
-        if (!botUserId || !scopesChecked) {
-          const auth = await app.client.auth.test();
-          botUserId ??= auth.user_id ?? undefined;
-          if (!scopesChecked) {
-            scopesChecked = true;
-            // Startup scope check: every Web API result carries the token's
-            // granted scopes. Missing ones are the silent failure mode — without
-            // `channels:read`/`groups:read` the catch-up cannot list channels
-            // and its scan is a no-op that nothing reports — so they are logged
-            // loudly once and kept on the status record that /healthz reports.
-            const missing = missingBotScopes(auth.response_metadata?.scopes);
-            recordMissingScopes(missing);
-            if (missing.length > 0) {
-              console.error(
-                `[slack] bot token is MISSING required scopes: ${missing.join(", ")} — reinstall the app with them (docs/tutorials/run-it-locally.md → Connect it to Slack); until then the features needing them silently do nothing`,
-              );
-            }
+  }
+  // Socket-state record for /healthz: connected/disconnected transitions, so
+  // the cold-start window (HTTP up, Slack not yet connected) and a silently
+  // dead socket are both visible off-box (slackSocketStatus.ts).
+  receiver.client.on("disconnected", () => recordSocketDisconnected());
+  receiver.client.on("connected", () => {
+    recordSocketConnected();
+    void (async () => {
+      // `botUserId` is retried on EVERY connect until it resolves (an
+      // auth.test that answers without user_id must not no-op the catch-up
+      // for the life of the process); only the scope check latches.
+      if (!botUserId || !scopesChecked) {
+        const auth = await app.client.auth.test();
+        botUserId ??= auth.user_id ?? undefined;
+        if (!scopesChecked) {
+          scopesChecked = true;
+          // Startup scope check: every Web API result carries the token's
+          // granted scopes. Missing ones are the silent failure mode — without
+          // `channels:read`/`groups:read` the catch-up cannot list channels
+          // and its scan is a no-op that nothing reports — so they are logged
+          // loudly once and kept on the status record that /healthz reports.
+          const missing = missingBotScopes(auth.response_metadata?.scopes);
+          recordMissingScopes(missing);
+          if (missing.length > 0) {
+            console.error(
+              `[slack] bot token is MISSING required scopes: ${missing.join(", ")} — reinstall the app with them (docs/tutorials/run-it-locally.md → Connect it to Slack); until then the features needing them silently do nothing`,
+            );
           }
         }
-        if (!botUserId) return;
-        const id = botUserId;
-        // The sweep below asks `isLiveCard`; the ledger's answer is refreshed
-        // first so a generation that died since the last connect no longer
-        // shields its cards (run-history item 36).
-        await refreshForeignLiveCards();
-        // The pass is one `slack.catch_up` root on the span log (docs/reference/specs/
-        // tracing.md item 20), its counts as attrs; a throw fails it and still
-        // reaches the catch below.
-        await withProcessRoot(deps, "slack.catch_up", async (root) => {
-          // Candidates a receipt (or a fresh verdict) silenced — read, never
-          // re-run — counted here so the root says why `missed` outnumbers the
-          // runs (item 7).
-          let silenced = 0;
-          const result = await catchUpMissedMentions({
-            client: app.client,
-            botUserId: id,
-            windowMs: catchUp?.windowMinutes != null ? catchUp.windowMinutes * 60_000 : undefined,
-            alreadyHandled: wasHandledHere,
-            // Orphaned-card sweep (item 8): cards a dead process left spinning
-            // are closed as interrupted; cards this process is driving — or that
-            // the run ledger says another live generation holds — are not.
-            isLive: isLiveCard,
-            onOrphanedCard: async (card, frame) => {
-              await app.client.chat.update({ channel: card.channel, ts: card.ts, ...render(frame) });
-            },
-            // The runner awaits only the hand-off — the receipt read and the
-            // verdict — never the run: a run takes minutes and live events run
-            // concurrently too (`actOnMissedMessage`'s dispatch fires and forgets).
-            onMissed: async (m) => {
-              const act = await actOnMissedMessage(m, {
-                botUserId: id,
-                ...(intake ? { intake } : {}),
-                reply: async (text) => {
-                  await new SlackIO(app.client, {
+      }
+      if (catchUp?.enabled === false || !botUserId) return;
+      const id = botUserId;
+      // The sweep below asks `isLiveCard`; the ledger's answer is refreshed
+      // first so a generation that died since the last connect no longer
+      // shields its cards (run-history item 36).
+      await refreshForeignLiveCards();
+      // The pass is one `slack.catch_up` root on the span log (docs/reference/specs/
+      // tracing.md item 20), its counts as attrs; a throw fails it and still
+      // reaches the catch below.
+      await withProcessRoot(deps, "slack.catch_up", async (root) => {
+        // Candidates a receipt (or a fresh verdict) silenced — read, never
+        // re-run — counted here so the root says why `missed` outnumbers the
+        // runs (item 7).
+        let silenced = 0;
+        const result = await catchUpMissedMentions({
+          client: app.client,
+          botUserId: id,
+          windowMs: catchUp?.windowMinutes != null ? catchUp.windowMinutes * 60_000 : undefined,
+          alreadyHandled: wasHandledHere,
+          // Orphaned-card sweep (item 8): cards a dead process left spinning
+          // are closed as interrupted; cards this process is driving — or that
+          // the run ledger says another live generation holds — are not.
+          isLive: isLiveCard,
+          onOrphanedCard: async (card, frame) => {
+            await app.client.chat.update({ channel: card.channel, ts: card.ts, ...render(frame) });
+          },
+          // The runner awaits only the hand-off — the receipt read and the
+          // verdict — never the run: a run takes minutes and live events run
+          // concurrently too (`actOnMissedMessage`'s dispatch fires and forgets).
+          onMissed: async (m) => {
+            const act = await actOnMissedMessage(m, {
+              botUserId: id,
+              ...(intake ? { intake } : {}),
+              reply: async (text) => {
+                await new SlackIO(app.client, {
+                  channel: m.channel,
+                  user: m.user,
+                  text: m.text,
+                  ts: m.ts,
+                  threadTs: m.threadTs,
+                  botUserId: id,
+                  trigger: "thread-follow-up",
+                }).reply(text);
+              },
+              dispatch: (extra) => {
+                void handle(
+                  deps,
+                  { client: app.client, statusClient },
+                  {
                     channel: m.channel,
                     user: m.user,
-                    text: m.text,
+                    text: stripMention(m.text, id),
                     ts: m.ts,
                     threadTs: m.threadTs,
+                    files: m.files,
                     botUserId: id,
-                    trigger: "thread-follow-up",
-                  }).reply(text);
-                },
-                dispatch: (extra) => {
-                  void handle(
-                    deps,
-                    { client: app.client, statusClient },
-                    {
-                      channel: m.channel,
-                      user: m.user,
-                      text: stripMention(m.text, id),
-                      ts: m.ts,
-                      threadTs: m.threadTs,
-                      files: m.files,
-                      botUserId: id,
-                      caughtUp: true,
-                      // Truthful label: the scan replays mentions AND plain
-                      // thread replies in bot-participating threads (item 7,
-                      // `findMissed`); a gated replay carries `intakeDecided`
-                      // so the gate never decides it twice.
-                      ...extra,
-                    },
-                    intake,
-                  ).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
-                },
-              });
-              if (act === "silenced") silenced++;
-            },
-          });
-          root.setAttrs({
-            channels: result.channels,
-            missed: result.missed,
-            silenced,
-            orphans: result.orphans,
-            skipped: result.skippedChannels,
-          });
+                    caughtUp: true,
+                    // Truthful label: the scan replays mentions AND plain
+                    // thread replies in bot-participating threads (item 7,
+                    // `findMissed`); a gated replay carries `intakeDecided`
+                    // so the gate never decides it twice.
+                    ...extra,
+                  },
+                  intake,
+                ).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
+              },
+            });
+            if (act === "silenced") silenced++;
+          },
         });
-      })().catch((err: Error) => {
-        // auth.test itself failed (bad token, network): the scan never ran —
-        // record that too, or /healthz would keep showing a stale clean run.
-        console.error(`[catch-up] ${err.message}`);
-        recordCatchUpOutcome({ at: clock(), channels: 0, missed: 0, skippedChannels: 0, error: err.message });
+        root.setAttrs({
+          channels: result.channels,
+          missed: result.missed,
+          silenced,
+          orphans: result.orphans,
+          skipped: result.skippedChannels,
+        });
       });
+    })().catch((err: Error) => {
+      // auth.test itself failed (bad token, network): the scan never ran —
+      // record that too, or /healthz would keep showing a stale clean run.
+      console.error(`[catch-up] ${err.message}`);
+      recordCatchUpOutcome({ at: clock(), channels: 0, missed: 0, skippedChannels: 0, error: err.message });
     });
-  }
+  });
 
   app.event("app_mention", async ({ event, client }) => {
     botUserId ??= (await client.auth.test()).user_id ?? undefined;
@@ -1019,6 +1021,17 @@ export async function receiveSlackMessage(
     skipped.length > 0
       ? `\n\n(Note: ${skipped.length} attachment(s) could not be passed through: ${skipped.join(", ")})`
       : "";
+  const directAudience: SlackDirectAudience | undefined =
+    ev.channel.startsWith("D") && ev.user && requester.userId === `${PLATFORM}:${ev.user}` && !requester.relayedBy
+      ? {
+          kind: "slack-unshared-im",
+          channelId: `${PLATFORM}:${ev.channel}`,
+          userId: requester.userId,
+          threadKey: `${PLATFORM}:${ev.channel}:${ev.threadTs}`,
+        }
+      : undefined;
+  const verifiedAudience =
+    directAudience && (await verifySlackDirectAudience(client, directAudience)) ? directAudience : undefined;
   return {
     message: {
       channelId: `${PLATFORM}:${ev.channel}`,
@@ -1026,6 +1039,7 @@ export async function receiveSlackMessage(
       ...(requester.relayedBy !== undefined ? { relayedBy: requester.relayedBy } : {}),
       ...(requester.postedBy !== undefined ? { postedBy: requester.postedBy } : {}),
       threadKey: `${PLATFORM}:${ev.channel}:${ev.threadTs}`,
+      ...(verifiedAudience ? { directAudience: verifiedAudience } : {}),
       text: ev.text + note,
       messageId: ev.ts,
       channelName,
@@ -1419,6 +1433,25 @@ export class SlackIO implements ChannelIO {
       synthetic?: boolean;
     } = {},
   ) {}
+
+  directAudience(): { channelId: string; userId: string; threadKey: string } | undefined {
+    if (!this.ev.channel.startsWith("D") || !this.ev.user) return undefined;
+    return {
+      channelId: `${PLATFORM}:${this.ev.channel}`,
+      userId: `${PLATFORM}:${this.ev.user}`,
+      threadKey: `${PLATFORM}:${this.ev.channel}:${this.ev.threadTs}`,
+    };
+  }
+
+  async verifyDirectAudience(audience: SlackDirectAudience): Promise<boolean> {
+    const address = this.directAudience();
+    return (
+      address?.channelId === audience.channelId &&
+      address.userId === audience.userId &&
+      address.threadKey === audience.threadKey &&
+      (await verifySlackDirectAudience(this.client, audience))
+    );
+  }
 
   async reply(text: string): Promise<void> {
     const mrkdwn = mdToMrkdwn(text);

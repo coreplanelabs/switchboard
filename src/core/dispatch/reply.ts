@@ -8,6 +8,7 @@ import { buildReviewChannelReply, type ReviewPost, type ReviewVerdict } from "..
 import { shows, type Verbosity } from "../verbosity.js";
 import { visibilityOf } from "../authz/channelDirectory.js";
 import type { ChannelIO, ConfirmationOffer, DocumentAttachment, ImageAttachment } from "../types.js";
+import type { SlackContextBinding } from "./slackContextBinding.js";
 import { confirmationMessageOf, newConfirmationId, renderOffer, type ConfirmationStore } from "../confirmations.js";
 import { QUESTION_TTL_MS } from "../budgets.js";
 import type { ParsedChatCommand } from "../commandChat.js";
@@ -36,6 +37,13 @@ import type { HistoryItem, IncomingMessage, StatusActivity, StatusHandle } from 
 import { refusalLine, type Refusal } from "../refusal.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { ProviderTable } from "../harness/piAi.js";
+import {
+  privateAudienceRefusal,
+  privateAudienceRequired,
+  privateAudienceStillValid,
+  savedSlackSourcesStillValid,
+  type PrivateAudienceLatch,
+} from "./privateAudience.js";
 
 /** The external live-view capability URL for a run, or undefined when
  *  PUBLIC_BASE_URL is unset/blank — the feature degrades gracefully (no link,
@@ -661,6 +669,8 @@ export interface DeliveryContext {
   agent: AgentDef;
   run: RunHandle;
   answer: string;
+  slackContext?: SlackContextBinding;
+  privateAudienceLatch?: PrivateAudienceLatch;
   /** A review run's verdict and post outcome: the channel reply is rendered
    *  from them (agent-review.md item 5b). Absent on every other run. */
   verdict?: ReviewVerdict | undefined;
@@ -714,6 +724,15 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     releaseWorkspace,
     root,
   } = ctx;
+  const privateRun = privateAudienceRequired(msg) || ctx.slackContext !== undefined;
+  const privateCard = privateRun;
+  const privateRunStillValid = async () => {
+    if (ctx.privateAudienceLatch?.revoked) return false;
+    if (privateAudienceRequired(msg) && !(await privateAudienceStillValid(msg, io))) return false;
+    if (ctx.slackContext && !(await ctx.slackContext.destinationStillPrivate())) return false;
+    if (ctx.privateAudienceLatch && !(await savedSlackSourcesStillValid(ctx.privateAudienceLatch))) return false;
+    return !ctx.privateAudienceLatch?.revoked;
+  };
   // The coding PR post-step ran INSIDE the try above (before the stream
   // finished — its outcome is the `pr_opened` event); `prNote` carries what
   // it has to say to the thread.
@@ -745,17 +764,20 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     // write-up rides along only when no GitHub post carries it. Projection
     // only — the `answer` event published above stays the model's own words
     // and link-free.
-    const channelAnswer = ctx.reviewStoppedBeforeStart
-      ? answer
-      : agent.name === "review"
-        ? buildReviewChannelReply({
-            answer,
-            verdict: ctx.verdict,
-            posted: ctx.reviewPost?.posted ? ctx.reviewPost.target : undefined,
-            liveUrl,
-            ...(ctx.verbosity !== undefined ? { verbosity: ctx.verbosity } : {}),
-          })
-        : answer;
+    const privateAddressValid = !privateRun || (await privateRunStillValid());
+    const privateAnswer = privateAddressValid ? answer : privateAudienceRefusal(ctx.privateAudienceLatch);
+    const channelAnswer =
+      !privateAddressValid || ctx.reviewStoppedBeforeStart
+        ? privateAnswer
+        : agent.name === "review"
+          ? buildReviewChannelReply({
+              answer: privateAnswer,
+              verdict: ctx.verdict,
+              posted: ctx.reviewPost?.posted ? ctx.reviewPost.target : undefined,
+              liveUrl,
+              ...(ctx.verbosity !== undefined ? { verbosity: ctx.verbosity } : {}),
+            })
+          : privateAnswer;
     // The PR note (post-step above) is a projection too: the `answer` event
     // stays the model's own words — the PR facts live in the pr_description
     // event and the [pr-post] log line.
@@ -776,12 +798,17 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
             shell.close({
               kind: "done",
               icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
-              detail: stopped ? checklistAsLeft() : checklistCheckedOff(),
-              ...doneLines(runDiagnosis),
+              detail: privateCard ? undefined : stopped ? checklistAsLeft() : checklistCheckedOff(),
+              ...(privateCard ? {} : doneLines(runDiagnosis)),
             }),
           ),
         ),
-      () => root.span("post.reply", () => io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer)),
+      () =>
+        root.span("post.reply", async () => {
+          if (!privateAddressValid || (privateRun && !(await privateRunStillValid())))
+            return io.reply(privateAudienceRefusal(ctx.privateAudienceLatch));
+          return io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer);
+        }),
       // A null channel's reply resolves but reaches nobody: the seal says
       // `replyOk: false` with the reason (run-history.md item 38).
       io.undeliverable !== undefined ? { undelivered: io.undeliverable } : undefined,

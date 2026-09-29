@@ -31,6 +31,7 @@ import type { GithubCapability } from "./github.js";
 import type { PlaneReadCapability } from "./plane.js";
 import type { RunsReadCapability, SteerCapability } from "./runs.js";
 import type { SessionCapability } from "./session.js";
+import type { SlackContextCapability } from "./slackContext.js";
 import type { WebCapability } from "./web.js";
 
 export interface ToolContext {
@@ -92,6 +93,8 @@ export interface ToolContext {
    *  per-repo write gate. Injected by the dispatcher; absent → the tools
    *  report themselves unavailable. */
   github?: GithubCapability;
+  /** Requester-bound Slack source reads; only a Slack main run may receive it. */
+  slackContext?: SlackContextCapability;
   /** Repo-bound CI operations at the credential-holding Worker; never a Depot token. */
   depotCi?: DepotCi;
   /** The calling agent's name — scopes list_skills/use_skill so an agent only

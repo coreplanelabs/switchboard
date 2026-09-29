@@ -13,7 +13,7 @@ import type { CoreDeps, DispatchOptions } from "./dispatcher.js";
 import type { ResumeContext } from "./dispatch/admission.js";
 import type { RepoContext } from "./repoContext.js";
 import type { RehostRun, ResumableRun } from "./boot.js";
-import { messageFromInbox } from "./runLedger/inboxMessage.js";
+import { directAudienceStampOf, messageFromInbox } from "./runLedger/inboxMessage.js";
 import { planResume, type KnownTool } from "./runLedger/resume.js";
 import type { CardHandle, LiveRunRow } from "./runLedger/types.js";
 import { defaultRunRegistry, REPLAY_EVERYTHING } from "./runRegistry.js";
@@ -58,12 +58,14 @@ export function inputTextOf(events: readonly { type: string; text?: string }[]):
  *  from the configuration in force now; the transcript itself is unchanged. */
 export function resumeMessage(row: LiveRunRow, inputText: string): IncomingMessage {
   const directives = row.meta.agent ? `agent:${row.meta.agent}` : "";
+  const directAudience = directAudienceStampOf(row.meta);
   return {
     channelId: row.meta.channelId,
     userId: row.meta.userId,
     // The metadata's thread, never the ledger's key column (record 0060): a
     // hosted row's key carries the `#host` suffix no message thread can match.
     threadKey: row.meta.threadKey,
+    ...(directAudience !== undefined ? { directAudience } : {}),
     text: `${directives} ${inputText}`.trim(),
     ...(row.meta.userName !== undefined ? { userName: row.meta.userName } : {}),
     ...(row.meta.authenticatedAs !== undefined ? { authenticatedAs: row.meta.authenticatedAs } : {}),

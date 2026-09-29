@@ -24,7 +24,7 @@ import { putOnce } from "../runHistoryWriter.js";
 import type { AppendableEvent, InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
 import type { ThreadsElsewhere } from "../runLedger/threadsElsewhere.js";
 import type { ResumePlan } from "../runLedger/resume.js";
-import { durableInboxMessage, messageFromInbox } from "../runLedger/inboxMessage.js";
+import { directAudienceStampOf, durableInboxMessage, messageFromInbox } from "../runLedger/inboxMessage.js";
 import { systemClock } from "../trace/index.js";
 import type { Clock, Span } from "../trace/types.js";
 import type { RepoContext } from "../repoContext.js";
@@ -96,6 +96,7 @@ function followUpOf(
   at: number,
   opts: { io?: ChannelIO; ledgerSeq?: number; from?: { runId: string } },
 ): DispatchFollowUp {
+  const directAudience = opts.from === undefined ? directAudienceStampOf(msg) : undefined;
   return {
     text,
     userId: msg.userId,
@@ -106,6 +107,7 @@ function followUpOf(
     ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
     ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+    ...(directAudience !== undefined ? { directAudience } : {}),
     ...(msg.images !== undefined ? { images: msg.images } : {}),
     ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
     ...(msg.staged !== undefined ? { staged: msg.staged } : {}),
@@ -113,7 +115,7 @@ function followUpOf(
     at,
     ...(opts.ledgerSeq !== undefined ? { ledgerSeq: opts.ledgerSeq } : {}),
     ...(opts.from !== undefined ? { from: opts.from } : {}),
-    msg,
+    msg: msg.directAudience !== undefined ? { ...msg, directAudience } : msg,
     ...(opts.io !== undefined ? { io: opts.io } : {}),
   };
 }

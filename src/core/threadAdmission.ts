@@ -1,5 +1,5 @@
 import { attributedText, foldThreadEvents } from "./threadEvents.js";
-import type { DocumentAttachment, ImageAttachment, StagedFile } from "./types.js";
+import type { DocumentAttachment, ImageAttachment, SlackDirectAudience, StagedFile } from "./types.js";
 import { systemClock } from "./trace/clock.js";
 
 // Thread admission (docs/reference/specs/thread-admission.md): ONE live run per thread.
@@ -41,6 +41,8 @@ export interface FollowUpInput {
   authenticatedAs?: string;
   postedBy?: string;
   sourceUrl?: string;
+  /** The Slack DM claim from ingress; a consumer rechecks it before private action. */
+  directAudience?: SlackDirectAudience;
   images?: ImageAttachment[];
   documents?: DocumentAttachment[];
   /** Files left on the platform by reference (record 0033), staged into the
@@ -81,6 +83,9 @@ export function followUpMessageId(input: Pick<FollowUpInput, "messageId" | "ledg
 
 export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
   private pending: T[] = [];
+  private readonly observers = new Set<{ notify(input: T): void }>();
+  private untrustedFollowUpSeen = false;
+  private readonly untrustedObservers = new Set<() => void>();
   /** The ledger seqs ever pushed (item 5): a durable follow-up can reach the
    *  run by two paths — the reclaim's snapshot or the re-read at adopt, and a
    *  boot-gap steer that finds the run live once its push lands — and must
@@ -95,6 +100,29 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
     }
     this.pending.push(input);
     this.pushed++;
+    for (const observer of this.observers) observer.notify(input);
+  }
+
+  /** Observe accepted inputs, including ones queued before the runner opened. */
+  onAccepted(observer: (input: T) => void): () => void {
+    for (const input of this.pending) observer(input);
+    const slot = { notify: observer };
+    this.observers.add(slot);
+    return () => this.observers.delete(slot);
+  }
+
+  /** An unverified follow-up revokes a private run even when it must not enter
+   * the model inbox. Remember the signal if it arrives before the run subscribes. */
+  markUntrustedFollowUp(): void {
+    if (this.untrustedFollowUpSeen) return;
+    this.untrustedFollowUpSeen = true;
+    for (const observer of this.untrustedObservers) observer();
+  }
+
+  onUntrustedFollowUp(observer: () => void): () => void {
+    if (this.untrustedFollowUpSeen) observer();
+    this.untrustedObservers.add(observer);
+    return () => this.untrustedObservers.delete(observer);
   }
 
   /** Every follow-up ever accepted, drained or not. A wait in the run's own

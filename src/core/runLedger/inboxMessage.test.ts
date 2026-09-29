@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage, StagedFile } from "../types.js";
-import { DURABLE_INBOX_MAX_BYTES, durableInboxMessage, messageFromInbox } from "./inboxMessage.js";
+import {
+  directAudienceStampOf,
+  DURABLE_INBOX_MAX_BYTES,
+  durableInboxMessage,
+  messageFromInbox,
+} from "./inboxMessage.js";
 
 // Feature: docs/reference/specs/execution.md item 20 (record 0033) / run-history.md
 // item 40 — a steer that carries a staged reference survives the durable inbox:
@@ -23,6 +28,35 @@ const base: IncomingMessage = {
 };
 
 describe("durable inbox — staged references (record 0033)", () => {
+  it("carries a verified DM address across replay but drops malformed claims", () => {
+    const dm: IncomingMessage = {
+      channelId: "slack:DMAIN",
+      userId: "slack:UALICE",
+      threadKey: "slack:DMAIN:1.0",
+      text: "follow up",
+      directAudience: {
+        kind: "slack-unshared-im",
+        channelId: "slack:DMAIN",
+        userId: "slack:UALICE",
+        threadKey: "slack:DMAIN:1.0",
+      },
+    };
+    const stored = durableInboxMessage(dm, dm.text, 1);
+    expect(messageFromInbox(stored, 1)?.msg.directAudience).toEqual(dm.directAudience);
+    expect(
+      messageFromInbox({ ...stored, directAudience: { ...dm.directAudience, userId: "slack:UBOB" } }, 1)?.msg
+        .directAudience,
+    ).toBeUndefined();
+    expect(directAudienceStampOf({ ...dm, postedBy: "slack:bot:BOTHER" })).toBeUndefined();
+    expect(directAudienceStampOf({ ...dm, authenticatedAs: "http:relay" })).toBeUndefined();
+    expect(durableInboxMessage(dm, dm.text, 1, { runId: "parent" }).directAudience).toBeUndefined();
+    expect(messageFromInbox({ ...stored, fromRunId: "parent" }, 1)?.msg.directAudience).toBeUndefined();
+    const relayed = durableInboxMessage({ ...dm, relayedBy: "slack:bot:BOTHER" }, dm.text, 1);
+    expect(relayed.relayedBy).toBe("slack:bot:BOTHER");
+    expect(relayed.directAudience).toBeUndefined();
+    expect(messageFromInbox(relayed, 1)?.msg.relayedBy).toBe("slack:bot:BOTHER");
+    expect(messageFromInbox({ ...stored, relayedBy: "slack:bot:BOTHER" }, 1)?.msg.directAudience).toBeUndefined();
+  });
   it("a steer with a staged reference writes it on the row and reads it back as the same reference", () => {
     const row = durableInboxMessage({ ...base, staged: [clip] }, "and this video", 1_700_000_000_000);
     expect(row.staged).toEqual([clip]);

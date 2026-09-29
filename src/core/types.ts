@@ -53,6 +53,14 @@ export interface StagedFile {
   workspaceIndex?: number;
 }
 
+/** A Slack adapter claim about the reply address; consumers recheck it before use. */
+export interface SlackDirectAudience {
+  kind: "slack-unshared-im";
+  channelId: string;
+  userId: string;
+  threadKey: string;
+}
+
 export interface IncomingMessage {
   /**
    * Scope key for channel-level config. Must be globally unique across
@@ -66,6 +74,8 @@ export interface IncomingMessage {
    * workspace/sandbox. e.g. "slack:C0123:1712345.6789".
    */
   threadKey: string;
+  /** Present after Slack verifies a one-person internal DM at ingress. Replays must verify it again. */
+  directAudience?: SlackDirectAudience;
   /** The request text, already stripped of platform artifacts (mentions etc.). */
   text: string;
   /**
@@ -261,6 +271,11 @@ export interface ConfirmationOffer {
 export interface ChannelIO {
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
   reply(text: string): Promise<void>;
+  /** A one-person destination proved by the adapter's own reply address.
+   * A channel, group conversation, relay, or undeliverable handle omits it. */
+  directAudience?(): { channelId: string; userId: string; threadKey: string } | undefined;
+  /** Fresh Slack confirmation that the reply address is still an unshared requester DM. */
+  verifyDirectAudience?(audience: SlackDirectAudience): Promise<boolean>;
   /**
    * Present when this channel has nowhere to deliver a reply (the resumed-run
    * null channel, docs/reference/specs/run-history.md item 38): the reason, e.g.

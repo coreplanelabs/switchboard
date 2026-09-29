@@ -31,6 +31,8 @@ export interface ConversationClassification {
 export interface ReferencedMessage {
   /** Epoch ms; absent when the platform's stamp did not parse. */
   readonly at?: number;
+  /** Exact platform timestamp for correlating metadata without millisecond rounding. */
+  readonly ts?: string;
   /** A display name; an app's message carries its name with an `(app)` suffix. */
   readonly author: string;
   readonly text: string;

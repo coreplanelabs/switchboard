@@ -3,7 +3,42 @@
 // was admitted for in its row's `meta.request`. One writer, one reader, so a
 // row written by one generation is read the same way by the next.
 
-import type { IncomingMessage, StagedFile } from "../types.js";
+import type { IncomingMessage, SlackDirectAudience, StagedFile } from "../types.js";
+
+/** Durable provenance only; every private action still verifies Slack live. */
+export type DirectAudienceStamp = SlackDirectAudience;
+
+export function directAudienceStampOf(
+  source: Pick<IncomingMessage, "channelId" | "userId" | "threadKey"> & {
+    directAudience?: unknown;
+    relayedBy?: string;
+    postedBy?: string;
+    authenticatedAs?: string;
+    fromRunId?: string;
+  },
+): DirectAudienceStamp | undefined {
+  const value = source.directAudience;
+  if (typeof value !== "object" || value === null) return undefined;
+  const audience = value as Record<string, unknown>;
+  if (
+    audience.kind !== "slack-unshared-im" ||
+    typeof source.channelId !== "string" ||
+    typeof source.userId !== "string" ||
+    typeof source.threadKey !== "string" ||
+    audience.channelId !== source.channelId ||
+    audience.userId !== source.userId ||
+    audience.threadKey !== source.threadKey ||
+    !/^slack:D[A-Z0-9_]+$/.test(source.channelId) ||
+    !/^slack:[UW][A-Z0-9_]+$/.test(source.userId) ||
+    !source.threadKey.startsWith(`${source.channelId}:`) ||
+    source.relayedBy !== undefined ||
+    source.postedBy !== undefined ||
+    source.authenticatedAs !== undefined ||
+    source.fromRunId !== undefined
+  )
+    return undefined;
+  return { kind: "slack-unshared-im", channelId: source.channelId, userId: source.userId, threadKey: source.threadKey };
+}
 
 /** The most a durable inbox row may weigh, serialized: the state Worker caps
  *  `/runs/inbox` bodies at 512 KiB (`MAX_BODY_BYTES`), and the row travels
@@ -26,6 +61,7 @@ export function durableInboxMessage(
   at: number,
   from?: { runId: string },
 ): Record<string, unknown> {
+  const directAudience = from === undefined ? directAudienceStampOf(msg) : undefined;
   const base: Record<string, unknown> = {
     channelId: msg.channelId,
     userId: msg.userId,
@@ -37,7 +73,9 @@ export function durableInboxMessage(
     // 15): a restart must dispatch under the credential's grants, not the person's.
     ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
     ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+    ...(msg.relayedBy !== undefined ? { relayedBy: msg.relayedBy } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+    ...(directAudience !== undefined ? { directAudience } : {}),
     ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
     ...(msg.messageId !== undefined ? { messageId: msg.messageId } : {}),
     ...(from !== undefined ? { fromRunId: from.runId } : {}),
@@ -108,6 +146,7 @@ export function messageFromInbox(
   const userName = str("userName");
   const authenticatedAs = str("authenticatedAs");
   const postedBy = str("postedBy");
+  const relayedBy = str("relayedBy");
   const sourceUrl = str("sourceUrl");
   const channelName = str("channelName");
   const messageId = str("messageId");
@@ -117,6 +156,16 @@ export function messageFromInbox(
   const documents = attachmentsFromInbox(m.documents);
   const staged = stagedFromInbox(m.staged);
   const note = droppedNote(m.attachmentsDropped);
+  const directAudience = directAudienceStampOf({
+    channelId,
+    userId,
+    threadKey,
+    directAudience: m.directAudience,
+    relayedBy,
+    postedBy,
+    authenticatedAs,
+    fromRunId,
+  });
   const msg: IncomingMessage = {
     channelId,
     userId,
@@ -125,7 +174,9 @@ export function messageFromInbox(
     ...(userName !== undefined ? { userName } : {}),
     ...(authenticatedAs !== undefined ? { authenticatedAs } : {}),
     ...(postedBy !== undefined ? { postedBy } : {}),
+    ...(relayedBy !== undefined ? { relayedBy } : {}),
     ...(sourceUrl !== undefined ? { sourceUrl } : {}),
+    ...(directAudience !== undefined ? { directAudience } : {}),
     ...(channelName !== undefined ? { channelName } : {}),
     ...(messageId !== undefined ? { messageId } : {}),
     ...(images ? { images } : {}),

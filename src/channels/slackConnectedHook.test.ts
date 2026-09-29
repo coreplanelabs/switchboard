@@ -153,19 +153,24 @@ describe("connected-hook wiring (Bolt-level harness)", () => {
     expect(getSocketStatus()).toMatchObject({ connected: true, connects: 2 });
   });
 
-  it("slack.catchUp.enabled: false removes the hook — no listeners, and `connected` causes no Web API call", async () => {
+  it("slack.catchUp.enabled: false still diagnoses required IM scopes without scanning", async () => {
     const api = fakeWebApi([]);
+    api.auth.test.mockResolvedValue({
+      ok: true,
+      user_id: BOT,
+      url: "https://test.slack.com/",
+      response_metadata: { scopes: REQUIRED_BOT_SCOPES.filter((scope) => !scope.startsWith("im:")).join(",") },
+    });
     const { receiver } = makeApp({ slack: { catchUp: { enabled: false } } }, api);
 
-    expect(receiver.client.listenerCount("connected")).toBe(0);
-    expect(receiver.client.listenerCount("disconnected")).toBe(0);
+    expect(receiver.client.listenerCount("connected")).toBe(1);
+    expect(receiver.client.listenerCount("disconnected")).toBe(1);
 
     receiver.client.emit("connected");
-    await new Promise((r) => setTimeout(r, 25));
-    expect(api.auth.test).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(getCatchUpStatus().missingScopes).toEqual(["im:history", "im:read"]));
+    expect(api.auth.test).toHaveBeenCalled();
     expect(api.users.conversations).not.toHaveBeenCalled();
     expect(getCatchUpStatus().lastRunAt).toBeUndefined();
-    // The socket-state record rides the same hook, so it stays cold too.
-    expect(getSocketStatus()).toEqual({ connected: false });
+    expect(getSocketStatus()).toMatchObject({ connected: true, connects: 1 });
   });
 });

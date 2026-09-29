@@ -18,6 +18,7 @@ import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import type { ResumeContext } from "./admission.js";
+import type { IncomingMessage } from "../types.js";
 
 // Feature: docs/reference/specs/run-history.md — the records the drain deadline
 // writes for the runs it abandons: `interruptedRunRecord` is the seam (one
@@ -224,6 +225,35 @@ describe("assembleRunRecord — the handoff on the record", () => {
     expect("handoff" in record).toBe(false);
     expect("profile" in record).toBe(false);
     for (const key of ["verdict", "reviewHead", "dispositions"]) expect(key in record).toBe(false);
+  });
+
+  it("omits a private main route even when a caller or replayed event supplies its reason and compound text", () => {
+    const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+    const route = {
+      preset: "conductor",
+      reason: "private account balance: 17",
+      model: "anthropic/fast",
+      parts: [{ preset: "research", text: "private account balance: 17" }],
+    };
+    const input = {
+      ...base(),
+      agent: "orchestrator",
+      msg: { ...dm, directAudience: { kind: "slack-unshared-im" as const, ...dm } },
+      repo: "acme/private",
+      headSha: "a".repeat(40),
+      snap: {
+        events: [{ type: "route" as const, ...route, seq: 1 }],
+        startedAt: 1,
+        eventCount: 1,
+        stepCount: 0,
+      } as never,
+    };
+    expect(assembleRunRecord({ ...input, route }).route).toBeUndefined();
+    expect(assembleRunRecord(input).route).toBeUndefined();
+    expect(assembleRunRecord(input).repo).toBeUndefined();
+    expect(assembleRunRecord(input).headSha).toBeUndefined();
+    expect(JSON.stringify(assembleRunRecord(input))).not.toContain("private account balance");
+    expect(assembleRunRecord({ ...base(), agent: "orchestrator", route }).route).toEqual(route);
   });
 
   it("carries the independently observed final workspace head, validates it, and omits it when the workspace had no head", () => {
@@ -652,6 +682,47 @@ describe("assembleRunRecord — the handoff on the record", () => {
     });
     expect(isRunRecord(record)).toBe(true);
   });
+
+  it("the reclaim's close drops an older private main row's route", () => {
+    const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+    const row: LiveRunRow = {
+      runId: "run-private",
+      threadKey: dm.threadKey,
+      ownerGen: "gen-NEW",
+      leaseUntil: 9_000,
+      startedAt: 1_000,
+      phase: "live",
+      stop: null,
+      meta: {
+        agent: "orchestrator",
+        ...dm,
+        directAudience: { kind: "slack-unshared-im", ...dm },
+        repo: "acme/private",
+        route: { preset: "orchestrator", reason: "private account balance: 17", model: "anthropic/fast" },
+      },
+      card: null,
+      system: "sys",
+      tools: [],
+      state: {},
+    };
+    const record = reclaimedRunRecord({
+      row,
+      events: [
+        {
+          type: "route",
+          preset: "orchestrator",
+          reason: "private account balance: 17",
+          model: "anthropic/fast",
+          seq: 1,
+        },
+      ],
+      status: "interrupted",
+      finishedAt: 5_000,
+    });
+    expect(record.route).toBeUndefined();
+    expect(record.repo).toBeUndefined();
+    expect(JSON.stringify(record)).not.toContain("private account balance");
+  });
 });
 
 describe("registerFinishRecord — the finish record, written by the drain after the reply", () => {
@@ -659,13 +730,17 @@ describe("registerFinishRecord — the finish record, written by the drain after
   const resolved = { agentName: "general", modelRef: "anthropic/general-model" } as ResolvedRequest;
   const msg = { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0", text: "hello" };
 
-  function finished() {
+  function finished(
+    runAgent = agent,
+    runMsg: IncomingMessage = msg,
+    route?: { preset: string; reason: string; model: string },
+  ) {
     const registry = new RunRegistry({ genId: () => "run-f", genToken: () => "tok" });
-    const run = registry.create("general", {
-      agent: "general",
-      channelId: "slack:CX",
-      userId: "slack:UX",
-      threadKey: "slack:CX:1.0",
+    const run = registry.create(runAgent.name, {
+      agent: runAgent.name,
+      channelId: runMsg.channelId,
+      userId: runMsg.userId,
+      threadKey: runMsg.threadKey,
     });
     registry.publish(run.id, { type: "answer", text: "done", at: 2 });
     registry.finish(run.id, "completed");
@@ -683,18 +758,20 @@ describe("registerFinishRecord — the finish record, written by the drain after
       ending,
       run,
       snap,
-      agent,
+      agent: runAgent,
       profile: { machine: "none", identity: "none", minutes: 3, boundedBy: "channel" },
       resolved,
-      msg,
+      msg: runMsg,
       channelVisibility: "unknown",
       repoCtx: { repo: "acme/api" },
+      headSha: "a".repeat(40),
       finishedAt: snap.finishedAt!,
       status: "completed",
       diagnosis: analyzeRunFriction(snap.events, { finished: true, truncated: false }),
       root: trace.root,
       ledgerRun: undefined,
       handoff: { deviations: [], followUps: [{ what: "split the file", where: "src/x.ts" }], unproven: [] },
+      ...(route !== undefined ? { route } : {}),
     });
     return { ending, writes };
   }
@@ -725,6 +802,29 @@ describe("registerFinishRecord — the finish record, written by the drain after
     expect(writes).toHaveLength(1);
     expect(writes[0].record).toMatchObject({ id: "run-f", status: "completed", repo: "acme/api", replyOk: true });
     expect(isRunRecord(writes[0].record)).toBe(true);
+  });
+
+  it("keeps repository facts in a non-private main run's finished record", () => {
+    const { ending, writes } = finished(getAgent("orchestrator"));
+    ending.drain(true);
+    expect(writes[0].record).toMatchObject({ repo: "acme/api", headSha: "a".repeat(40) });
+  });
+
+  it("omits repository facts from a verified private main run's finished record", () => {
+    const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+    const { ending, writes } = finished(
+      getAgent("orchestrator"),
+      {
+        ...msg,
+        ...dm,
+        directAudience: { kind: "slack-unshared-im", ...dm },
+      },
+      { preset: "orchestrator", reason: "private account balance: 17", model: "anthropic/fast" },
+    );
+    ending.drain(true);
+    expect(writes[0].record.repo).toBeUndefined();
+    expect(writes[0].record.headSha).toBeUndefined();
+    expect(writes[0].record.route).toBeUndefined();
   });
 
   it("a reply that threw after the loop completed flips the record to failed: the thread never saw the answer", async () => {
