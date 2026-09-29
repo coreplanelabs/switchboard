@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.267.3](https://github.com/coreplanelabs/switchboard/compare/v1.267.2...v1.267.3) (2026-09-29)
+
+
+### Bug fixes
+
+* **dispatcher:** ground review targets and trace door decisions ([#2443](https://github.com/coreplanelabs/switchboard/issues/2443)) ([e47313c](https://github.com/coreplanelabs/switchboard/commit/e47313c1a3f2d7f1431e8b8179a5aad3f4f68a06))
+* **dispatcher:** keep PR replies on their original Ship unit ([#2459](https://github.com/coreplanelabs/switchboard/issues/2459)) ([0c35919](https://github.com/coreplanelabs/switchboard/commit/0c3591993ff2d67954d86f128a0a80a6bdfbc313))
+* **dispatcher:** keep review replies on their Ship unit ([#2463](https://github.com/coreplanelabs/switchboard/issues/2463)) ([13f8d81](https://github.com/coreplanelabs/switchboard/commit/13f8d8122c62e67faa4f1b7a77ad43760a635d33))
+* **process:** attribute slow memory Worker requests ([#2457](https://github.com/coreplanelabs/switchboard/issues/2457)) ([e38ad51](https://github.com/coreplanelabs/switchboard/commit/e38ad51606da5041c383c8492d0df273894cc2d4))
+* **resident:** fence cold fallback after ownership loss ([#2464](https://github.com/coreplanelabs/switchboard/issues/2464)) ([1337e3d](https://github.com/coreplanelabs/switchboard/commit/1337e3d9156a13abbc06f7dd955a6cd821c7888b))
+* **resident:** stop ended runs from blocking deploys ([#2454](https://github.com/coreplanelabs/switchboard/issues/2454)) ([75c40cf](https://github.com/coreplanelabs/switchboard/commit/75c40cf02b215b6a0915ff22454f3da38b0a9d51))
+* **sandbox:** allow public Git toolchain clones ([#2460](https://github.com/coreplanelabs/switchboard/issues/2460)) ([19165a2](https://github.com/coreplanelabs/switchboard/commit/19165a261ed6ecbd11142b73e60ec9a913024110))
+* **ship:** let clean coding children open pull requests ([#2461](https://github.com/coreplanelabs/switchboard/issues/2461)) ([268f18b](https://github.com/coreplanelabs/switchboard/commit/268f18bdd13052c432347ea78befeb657777dc4b))
+* **ship:** qualify spent-cap advice for merged pull requests ([#2462](https://github.com/coreplanelabs/switchboard/issues/2462)) ([048021e](https://github.com/coreplanelabs/switchboard/commit/048021e7a10d445d9a2a46dd54c1aca0b0319e6d))
+
 ## [1.267.2](https://github.com/coreplanelabs/switchboard/compare/v1.267.1...v1.267.2) (2026-09-29)
 
 
