@@ -220,6 +220,23 @@ describe("launchResumes", () => {
     expect(h.logs[0]).toMatch(/r1 slack:C1:1.0: resuming \(settling step 1, 1 call\(s\), 5 min left\)/);
   });
 
+  it("passes the stored private input id to rehosted IO so history excludes the triggering turn", async () => {
+    const h = harness();
+    const worker = resumable({
+      row: row({
+        threadKey: "worker:ship_private_1:U12",
+        meta: { ...row().meta, threadKey: "worker:ship_private_1:U12" },
+      }),
+      events: [
+        { type: "input", messageId: "ship_private_1:U12/0/coding", text: "fix signup", seq: 1 },
+        { type: "tool_call", tool: "read", summary: "x", seq: 2 },
+      ],
+    });
+    await h.run([worker]);
+    expect(h.ioRequests[0]?.messageId).toBe("ship_private_1:U12/0/coding");
+    expect(h.dispatched[0]?.msg.messageId).toBe("ship_private_1:U12/0/coding");
+  });
+
   // run-history item 37: a transcript ending on the model's answer is a `finish`
   // plan, launched like any resume, never closed.
   it("a run whose transcript ends on its final answer with nothing in flight is dispatched with a `finish` plan carrying that answer, and the log says the post-steps are what is left", async () => {

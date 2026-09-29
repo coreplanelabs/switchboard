@@ -32,6 +32,15 @@ export async function appendPrivateWorkerInput(
   await log.append(privateWorkerThreadKey(identity), { kind: "input", ...input });
 }
 
+/** A coordinator settlement is retried under the same key until its report is durable. */
+export async function appendPrivateWorkerReply(
+  log: PrivateWorkerLog,
+  identity: PrivateWorkerIdentity,
+  reply: { id: string; text: string; at: number },
+): Promise<void> {
+  await log.append(privateWorkerThreadKey(identity), { kind: "reply", ...reply });
+}
+
 /** An internal channel handle. It has no Slack client, openThread or upload method. */
 export function privateWorkerIO(
   log: PrivateWorkerLog,

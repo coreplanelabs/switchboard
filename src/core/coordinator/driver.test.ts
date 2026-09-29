@@ -1324,6 +1324,37 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(s.names()).toContain("U10/idle/2");
   });
 
+  it("retries a private wake log failure under the same wait id before advancing", async () => {
+    const { s, b } = idleWakeRun({
+      waits: { "U10/idle/1": "event", "U10/idle/2": "event" },
+      wakes: [
+        ok({ ok: false, error: "private_worker_log_unavailable" }, T0 + 46 * MIN, 503),
+        wakeReply({ kind: "answered", reply: "The answer is saved." }),
+        wakeReply({ kind: "expired" }),
+      ],
+    });
+    expect((await runPlan(s.runner, b.client, INSTANCE)).units).toEqual({ U10: "idle_expired" });
+    expect((b.of("unit-wake") as Array<{ waitId: string }>).map((body) => body.waitId)).toEqual([
+      "U10/idle/1",
+      "U10/idle/1",
+      "U10/idle/2",
+    ]);
+  });
+
+  it("does not advance to a new wait when private wake delivery stays unavailable", async () => {
+    const { s, b } = idleWakeRun({
+      waits: { "U10/idle/1": "event", "U10/idle/2": "event" },
+      wakes: Array.from({ length: STEP_RETRIES.limit + 1 }, () =>
+        ok({ ok: false, error: "private_worker_log_unavailable" }, T0 + 46 * MIN, 503),
+      ),
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("private_worker_log_unavailable");
+    expect((b.of("unit-wake") as Array<{ waitId: string }>).map((body) => body.waitId)).toEqual(
+      Array.from({ length: STEP_RETRIES.limit + 1 }, () => "U10/idle/1"),
+    );
+    expect(s.names()).not.toContain("U10/idle/2");
+  });
+
   it("later units do not start while the walk is parked behind the idle unit", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event" });
     const b = bot({

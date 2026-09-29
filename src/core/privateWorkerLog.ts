@@ -3,7 +3,7 @@ import type { StatusUpdate } from "./types.js";
 /** An internal worker's conversation and progress. No platform message id or URL is needed. */
 export type PrivateWorkerEventInput =
   | { kind: "input"; id: string; sender: string; text: string; at: number }
-  | { kind: "reply"; text: string; at: number; runId?: string }
+  | { kind: "reply"; id?: string; text: string; at: number; runId?: string }
   | { kind: "status"; phase: "start"; frame: StatusUpdate; at: number }
   | { kind: "status"; phase: "update" | "done"; statusSeq: number; frame: StatusUpdate; at: number };
 
@@ -28,7 +28,11 @@ export function isPrivateWorkerEventInput(value: unknown): value is PrivateWorke
       typeof row.text === "string"
     );
   if (row.kind === "reply")
-    return typeof row.text === "string" && (row.runId === undefined || typeof row.runId === "string");
+    return (
+      typeof row.text === "string" &&
+      (row.id === undefined || (typeof row.id === "string" && row.id.length > 0 && row.id.length <= 256)) &&
+      (row.runId === undefined || typeof row.runId === "string")
+    );
   if (row.kind === "status")
     return (
       (row.phase === "start" || row.phase === "update" || row.phase === "done") &&
@@ -50,7 +54,7 @@ export function isPrivateWorkerEvent(value: unknown): value is PrivateWorkerEven
 
 /** The production implementation must persist this log outside the bot process. */
 export interface PrivateWorkerLog {
-  /** Assigns one monotonic sequence per thread. A repeated input id returns its original row. */
+  /** Assigns one monotonic sequence per thread. A repeated input or settlement id returns its original row. */
   append(threadKey: string, event: PrivateWorkerEventInput): Promise<PrivateWorkerEvent>;
   /** Complete oldest-first thread history, including progress frames. */
   list(threadKey: string): Promise<PrivateWorkerEvent[]>;
@@ -62,11 +66,15 @@ export class InMemoryPrivateWorkerLog implements PrivateWorkerLog {
 
   async append(threadKey: string, event: PrivateWorkerEventInput): Promise<PrivateWorkerEvent> {
     const rows = this.rows.get(threadKey) ?? [];
-    if (event.kind === "input") {
-      const prior = rows.find((row) => row.kind === "input" && row.id === event.id);
-      if (prior?.kind === "input") {
-        if (prior.sender !== event.sender || prior.text !== event.text)
-          throw new Error("private worker input id reused with different content");
+    if ((event.kind === "input" || event.kind === "reply") && event.id !== undefined) {
+      const prior = rows.find((row) => (row.kind === "input" || row.kind === "reply") && row.id === event.id);
+      if (prior !== undefined) {
+        const same =
+          prior.kind === event.kind &&
+          (event.kind === "input"
+            ? prior.kind === "input" && prior.sender === event.sender && prior.text === event.text
+            : prior.kind === "reply" && prior.text === event.text && prior.runId === event.runId);
+        if (!same) throw new Error("private worker event id reused with different content");
         return structuredClone(prior);
       }
     }

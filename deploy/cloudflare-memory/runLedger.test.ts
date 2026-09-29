@@ -30,10 +30,14 @@ describe("private worker log on the state Worker", () => {
     expect(first).toMatchObject({ status: 200, data: { event: { ...input, seq: 1 } } });
     expect(await append({ ...input, at: 11 })).toEqual(first);
     expect((await append({ ...input, text: "other" })).status).toBe(409);
-    expect(await append({ kind: "reply", text: "Fixed", at: 20 })).toMatchObject({
+    const reply = { kind: "reply", id: "report-1", text: "Fixed", at: 20 };
+    const settled = await append(reply);
+    expect(settled).toMatchObject({
       status: 200,
-      data: { event: { seq: 2, kind: "reply" } },
+      data: { event: { seq: 2, id: "report-1", kind: "reply" } },
     });
+    expect(await append({ ...reply, at: 21 })).toEqual(settled);
+    expect((await append({ ...reply, text: "Changed" })).status).toBe(409);
     expect(await append({ kind: "status", phase: "start", frame: { title: "testing" }, at: 21 })).toMatchObject({
       status: 200,
       data: { event: { seq: 3, statusSeq: 3, kind: "status" } },

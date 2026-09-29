@@ -90,7 +90,12 @@ import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { PrivateWorkerLog } from "../core/privateWorkerLog.js";
-import { appendPrivateWorkerInput, privateWorkerIO, privateWorkerThreadKey } from "./privateWorker.js";
+import {
+  appendPrivateWorkerInput,
+  appendPrivateWorkerReply,
+  privateWorkerIO,
+  privateWorkerThreadKey,
+} from "./privateWorker.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../core/coordinator/instancesRoute.js";
 import type { OriginalUnitRecoveryParams } from "../core/coordinator/driver.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
@@ -4620,8 +4625,29 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
   }
   const host = await hostRunOf(deps, instance);
   if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
+  const deliverPrivateWake = async (answer: UnitWakeAnswer): Promise<boolean> => {
+    if (row.workBrief === undefined || answer.kind !== "answered") return true;
+    try {
+      await appendPrivateWorkerReply(
+        deps.privateWorkerLog!,
+        { instanceId: instance.id, unit: row.unit },
+        {
+          id: body.waitId as string,
+          text: answer.reply,
+          at,
+        },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const stored = row.wakes?.[body.waitId];
-  if (stored !== undefined) return json(200, { ok: true, answer: stored, at });
+  if (stored !== undefined) {
+    if (!(await deliverPrivateWake(stored)))
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    return json(200, { ok: true, answer: stored, at });
+  }
   if (!row.idle) {
     const answer: UnitWakeAnswer = row.ending?.kind === "stopped" ? { kind: "stopped" } : { kind: "expired" };
     await deps.instances.answerWake(row, body.waitId, answer, [], body.waitId);
@@ -4755,8 +4781,13 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
   );
   const visible = { ...updated, wakes: { ...(updated.wakes ?? {}), [body.waitId]: answer } };
   if (answer.kind === "answered") {
-    const io = unitIO(deps, instance, visible);
-    await io?.reply(answer.reply);
+    if (row.workBrief !== undefined) {
+      if (!(await deliverPrivateWake(answer)))
+        return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    } else {
+      const io = unitIO(deps, instance, visible);
+      await io?.reply(answer.reply);
+    }
   }
   await drawCard(
     deps,
@@ -4808,6 +4839,8 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   if (row.workBrief !== undefined && deps.privateWorkerLog === undefined)
     return json(503, { ok: false, error: "private_worker_log_unavailable", at });
   if (row.workBrief !== undefined) {
+    if (typeof body.deliveryId !== "string" || !STEP_NAME_PATTERN.test(body.deliveryId))
+      return json(400, { ok: false, error: "deliveryId must be a step name", at });
     try {
       await deps.privateWorkerLog!.list(privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit }));
     } catch {
@@ -5034,7 +5067,25 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       );
   }
   let told = false;
-  if (io && threadReport.length === 0)
+  if (row.workBrief !== undefined) {
+    if (threadReport.length === 0) told = true;
+    else {
+      try {
+        await appendPrivateWorkerReply(
+          deps.privateWorkerLog!,
+          { instanceId: instance.id, unit: row.unit },
+          {
+            id: body.deliveryId as string,
+            text: threadReport,
+            at,
+          },
+        );
+        told = true;
+      } catch {
+        return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+      }
+    }
+  } else if (io && threadReport.length === 0)
     told = true; // nothing owed to the thread at this level
   else if (io) {
     try {

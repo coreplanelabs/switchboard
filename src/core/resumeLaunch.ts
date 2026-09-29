@@ -52,11 +52,16 @@ export function inputTextOf(events: readonly { type: string; text?: string }[]):
   return typeof input?.text === "string" ? input.text : "";
 }
 
+function inputMessageIdOf(events: readonly { type: string; messageId?: string }[]): string | undefined {
+  const input = events.find((e) => e.type === "input");
+  return typeof input?.messageId === "string" ? input.messageId : undefined;
+}
+
 /** The message a resumed dispatch runs under: the row pins the preset and
  *  identity, while model and effort deliberately do not ride. A resumed
  *  segment is a fresh admission (record 0046), so those two values resolve
  *  from the configuration in force now; the transcript itself is unchanged. */
-export function resumeMessage(row: LiveRunRow, inputText: string): IncomingMessage {
+export function resumeMessage(row: LiveRunRow, inputText: string, messageId?: string): IncomingMessage {
   const directives = row.meta.agent ? `agent:${row.meta.agent}` : "";
   return {
     channelId: row.meta.channelId,
@@ -65,6 +70,7 @@ export function resumeMessage(row: LiveRunRow, inputText: string): IncomingMessa
     // hosted row's key carries the `#host` suffix no message thread can match.
     threadKey: row.meta.threadKey,
     text: `${directives} ${inputText}`.trim(),
+    ...(messageId !== undefined ? { messageId } : {}),
     ...(row.meta.userName !== undefined ? { userName: row.meta.userName } : {}),
     ...(row.meta.authenticatedAs !== undefined ? { authenticatedAs: row.meta.authenticatedAs } : {}),
     ...(row.meta.postedBy !== undefined ? { postedBy: row.meta.postedBy } : {}),
@@ -313,7 +319,8 @@ export async function launchResumes(
       await closeWith(run, plan.why);
       continue;
     }
-    const io = opts.ioFor(row);
+    const msg = resumeMessage(row, inputTextOf(run.events), inputMessageIdOf(run.events));
+    const io = opts.ioFor(row, msg);
     if (!io) {
       await closeWith(run, `channel ${row.meta.channelId} cannot be resumed on`);
       continue;
@@ -334,7 +341,7 @@ export async function launchResumes(
         : `[resume] ${row.runId} ${row.threadKey}: resuming (${plan.stepRecorded ? "settling" : "running fresh"} step ${plan.step}, ${plan.settlements.length} call(s), ${Math.round(plan.remainingMs / 60_000)} min left)`,
     );
     outcome.launched.push(row.runId);
-    start(row, dispatchFn(deps, resumeMessage(row, inputTextOf(run.events)), io, { resume: ctx }), "dispatch failed");
+    start(row, dispatchFn(deps, msg, io, { resume: ctx }), "dispatch failed");
   }
   return outcome;
 

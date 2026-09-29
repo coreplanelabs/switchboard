@@ -209,6 +209,7 @@ const TRANSIENT = new Set([
   "not_host",
   "queued",
   "publication_ownership_unknown",
+  "private_worker_log_unavailable",
 ]);
 export function transientRefusal(answer: BotAnswer): string | undefined {
   const { ok, error, message } = answer.body;
@@ -221,6 +222,15 @@ class UnreadableAnswer extends Error {
     super(
       `the bot's ${route} answer could not be read (${what}): HTTP ${answer.status} ${JSON.stringify(answer.body).slice(0, REASON_MAX)}`,
     );
+  }
+}
+
+class TransientBotRefusal extends Error {
+  constructor(
+    readonly code: string,
+    detail: string,
+  ) {
+    super(detail);
   }
 }
 
@@ -670,7 +680,7 @@ async function call(
     throw new Error(`the bot did not answer ${route}: ${read.reason}`);
   }
   const transient = transientRefusal(read.answer);
-  if (transient !== undefined) throw new Error(transient);
+  if (transient !== undefined) throw new TransientBotRefusal(read.answer.body.error as string, transient);
   return reply;
 }
 
@@ -982,7 +992,9 @@ async function tellStepThrew(
     ...(pr !== undefined ? { pr } : {}),
   };
   try {
-    await step.do(`${prefix}/end/threw`, STEP_CONFIG, () => call(bot, "unit-end", body));
+    await step.do(`${prefix}/end/threw`, STEP_CONFIG, () =>
+      call(bot, "unit-end", { ...body, deliveryId: `${prefix}/end/threw` }),
+    );
   } catch {
     // Best effort: the rethrow still fails the instance, and a bot that could
     // not record the ending leaves the seal's line as before.
@@ -1120,7 +1132,7 @@ async function runUnit(
             ...(state.pr !== undefined ? { pr: state.pr } : {}),
           };
           const reply = await step.do(endStep, STEP_CONFIG, async () => {
-            const candidate = await call(bot, "unit-end", body);
+            const candidate = await call(bot, "unit-end", { ...body, deliveryId: endStep });
             const answer = answerOf("unit-end", candidate);
             if (answer.status !== 200 || answer.body.ok !== true)
               throw new UnreadableAnswer("unit-end", answer, "successful settlement");
@@ -1281,7 +1293,7 @@ async function runUnit(
           const endAnswer = answerOf(
             "unit-end",
             await step.do(endStep, STEP_CONFIG, async () => {
-              const reply = await call(bot, "unit-end", body);
+              const reply = await call(bot, "unit-end", { ...body, deliveryId: endStep });
               const answer = answerOf("unit-end", reply);
               if (answer.status !== 200 || answer.body.ok !== true)
                 throw new UnreadableAnswer("unit-end", answer, "successful settlement");
@@ -1333,7 +1345,7 @@ async function endUnrunUnit(
   const tag = { parentInstanceId: instanceId, unit };
   const endStep = `${unit}/end`;
   try {
-    await step.do(endStep, STEP_CONFIG, () => call(bot, "unit-end", { ...tag, ending }));
+    await step.do(endStep, STEP_CONFIG, () => call(bot, "unit-end", { ...tag, ending, deliveryId: endStep }));
   } catch (err) {
     await tellStepThrew(step, bot, unit, tag, undefined, { step: endStep }, err);
     throw err;
@@ -1415,6 +1427,7 @@ async function waitOnIdle(
         call(bot, "unit-end", {
           parentInstanceId: instanceId,
           unit,
+          deliveryId: endStep,
           ending: {
             kind: ending.kind,
             report: "⌛ Idle expired: no reply continued this unit before its idle window closed.",
@@ -1433,7 +1446,10 @@ async function waitOnIdle(
           ),
         ),
       );
-    } catch {
+    } catch (err) {
+      // The bot has saved this answer but has not durably delivered it. A new
+      // wait id would skip that saved answer, so keep the Workflow failed.
+      if (err instanceof TransientBotRefusal && err.code === "private_worker_log_unavailable") throw err;
       // The event remains unconsumed when the wake could not store an answer.
       // A stored answer is replayed by the next identity, so either way the
       // next indexed wait is the safe place to listen again.
@@ -1448,6 +1464,7 @@ async function waitOnIdle(
         call(bot, "unit-end", {
           parentInstanceId: instanceId,
           unit,
+          deliveryId: `${waitId}/end`,
           ending: {
             kind: ending.kind,
             report: "⌛ Idle expired: the unit reached its indexed wake limit.",
@@ -1461,6 +1478,7 @@ async function waitOnIdle(
         call(bot, "unit-end", {
           parentInstanceId: instanceId,
           unit,
+          deliveryId: `${waitId}/end`,
           ending: { kind: "stopped", report: "⏹ Stopped: the idle unit was ended by an operator." },
         }),
       );

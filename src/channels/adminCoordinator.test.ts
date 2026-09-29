@@ -3379,6 +3379,101 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(offline.threadsAsked).toEqual([]);
   });
 
+  it("retries a private unit report after a transient log failure without losing or duplicating it", async () => {
+    const backing = new InMemoryPrivateWorkerLog();
+    let fail = true;
+    const log: PrivateWorkerLog = {
+      list: (threadKey) => backing.list(threadKey),
+      append: async (threadKey, event) => {
+        if (event.kind === "reply" && fail) {
+          fail = false;
+          throw new Error("temporary log failure");
+        }
+        return backing.append(threadKey, event);
+      },
+    };
+    const h = await planHarness({ privateWorkerLog: log });
+    const key = `worker:${PLAN_INSTANCE.id}:U10`;
+    await h.instances.putUnits([
+      unitRow("U10", {
+        threadKey: key,
+        workBrief: {
+          requesterId: PLAN_INSTANCE.userId,
+          mainThreadKey: PLAN_INSTANCE.threadKey,
+          actId: "act-1",
+          repo: PLAN_INSTANCE.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      }),
+      unitRow("U11"),
+    ]);
+    await hostParent(h);
+    const body = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      deliveryId: "U10/end",
+      ending: { kind: "failed", report: "The fix needs another pass" },
+    };
+    expect(await call(h, "unit-end", body)).toMatchObject({
+      status: 503,
+      body: { error: "private_worker_log_unavailable" },
+    });
+    expect(await call(h, "unit-end", body)).toMatchObject({ status: 200, body: { ok: true, told: true } });
+    expect(await call(h, "unit-end", body)).toMatchObject({ status: 200, body: { ok: true, told: true } });
+    expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
+      { kind: "reply", id: "U10/end", text: "The fix needs another pass" },
+    ]);
+  });
+
+  it("replays a saved private wake answer until its reply is durably logged once", async () => {
+    const backing = new InMemoryPrivateWorkerLog();
+    let fail = true;
+    const log: PrivateWorkerLog = {
+      list: (threadKey) => backing.list(threadKey),
+      append: async (threadKey, event) => {
+        if (event.kind === "reply" && fail) {
+          fail = false;
+          throw new Error("temporary log failure");
+        }
+        return backing.append(threadKey, event);
+      },
+    };
+    const h = await idleHarness({ privateWorkerLog: log });
+    const key = `worker:${PLAN_INSTANCE.id}:U10`;
+    const [row, sibling] = await h.instances.listUnits(PLAN_INSTANCE.id);
+    await h.instances.putUnits([
+      {
+        ...row!,
+        threadKey: key,
+        workBrief: {
+          requesterId: PLAN_INSTANCE.userId,
+          mainThreadKey: PLAN_INSTANCE.threadKey,
+          actId: "act-1",
+          repo: PLAN_INSTANCE.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      },
+      sibling!,
+    ]);
+    await hostParent(h);
+    const body = { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", waitId: "U10/idle/1" };
+    expect(await call(h, "unit-wake", body)).toMatchObject({
+      status: 503,
+      body: { error: "private_worker_log_unavailable" },
+    });
+    expect(await call(h, "unit-wake", body)).toMatchObject({ status: 200, body: { answer: { kind: "answered" } } });
+    expect(await call(h, "unit-wake", body)).toMatchObject({ status: 200, body: { answer: { kind: "answered" } } });
+    expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
+      { kind: "reply", id: "U10/idle/1", text: "Nothing new was waiting for this unit." },
+    ]);
+  });
+
   it("unit-start without a channel that can open a thread is 503; a channel whose open fails is 502 and the row is unchanged", async () => {
     const noThread = await planHarness({ ioFor: () => undefined });
     expect((await call(noThread, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).status).toBe(503);

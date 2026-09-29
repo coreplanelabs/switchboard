@@ -1763,10 +1763,10 @@ export class RunHistoryDO extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS coordinator_private_worker_events (
         thread_key TEXT NOT NULL,
         seq INTEGER NOT NULL,
-        input_id TEXT,
+        event_id TEXT,
         json TEXT NOT NULL,
         PRIMARY KEY (thread_key, seq),
-        UNIQUE (thread_key, input_id)
+        UNIQUE (thread_key, event_id)
       );
       CREATE TABLE IF NOT EXISTS decision_record_reservations (
         repo TEXT NOT NULL,
@@ -2636,17 +2636,22 @@ export class RunHistoryDO extends DurableObject<Env> {
     event: PrivateWorkerEventInput,
   ): Promise<PrivateWorkerEvent | null> {
     return this.ctx.storage.transactionSync(() => {
-      if (event.kind === "input") {
+      if ((event.kind === "input" || event.kind === "reply") && event.id !== undefined) {
         const prior = this.sql
           .exec<{ json: string }>(
-            `SELECT json FROM coordinator_private_worker_events WHERE thread_key = ? AND input_id = ?`,
+            `SELECT json FROM coordinator_private_worker_events WHERE thread_key = ? AND event_id = ?`,
             threadKey,
             event.id,
           )
           .toArray()[0];
         if (prior) {
           const row = JSON.parse(prior.json) as PrivateWorkerEvent;
-          if (row.kind !== "input" || row.sender !== event.sender || row.text !== event.text) return null;
+          const same =
+            row.kind === event.kind &&
+            (event.kind === "input"
+              ? row.kind === "input" && row.sender === event.sender && row.text === event.text
+              : row.kind === "reply" && row.text === event.text && row.runId === event.runId);
+          if (!same) return null;
           return row;
         }
       }
@@ -2663,10 +2668,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         ...(event.kind === "status" && event.phase === "start" ? { statusSeq: seq } : {}),
       };
       this.sql.exec(
-        `INSERT INTO coordinator_private_worker_events (thread_key, seq, input_id, json) VALUES (?, ?, ?, ?)`,
+        `INSERT INTO coordinator_private_worker_events (thread_key, seq, event_id, json) VALUES (?, ?, ?, ?)`,
         threadKey,
         seq,
-        event.kind === "input" ? event.id : null,
+        event.kind === "input" || event.kind === "reply" ? (event.id ?? null) : null,
         JSON.stringify(row),
       );
       return row;
