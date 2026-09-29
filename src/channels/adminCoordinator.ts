@@ -4828,6 +4828,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // renders it at the request's verbosity beside the full report the row and
   // the board keep; absent (an older driver), the full report is the thread's.
   // Empty means the level says nothing here — a quiet segment boundary.
+  const fullReport = ending.report as string;
   const threadReport = typeof ending.threadReport === "string" ? ending.threadReport : ending.report;
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
@@ -4848,12 +4849,11 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     }
   }
   const deliverPrivateReport = async (): Promise<boolean> => {
-    if (threadReport.length === 0) return true;
     try {
       await appendPrivateWorkerReply(
         deps.privateWorkerLog!,
         { instanceId: instance.id, unit: row.unit },
-        { id: body.deliveryId as string, text: threadReport, at },
+        { id: body.deliveryId as string, text: fullReport, at },
       );
       return true;
     } catch {

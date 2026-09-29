@@ -1305,6 +1305,14 @@ async function runUnit(
       }
     }
   } catch (err) {
+    // A private report can fail after unit-end committed the original result.
+    // Retrying that same step preserves it; a second failure ending would not.
+    if (
+      last.step === `${prefix}/end` &&
+      err instanceof TransientBotRefusal &&
+      err.code === "private_worker_log_unavailable"
+    )
+      throw err;
     // The walk-dies-before-unit-end path (issue 2100): the throw becomes the
     // unit's ending before it fails the instance, never the bare seal.
     await tellStepThrew(

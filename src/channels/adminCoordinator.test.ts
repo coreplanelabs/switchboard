@@ -3415,7 +3415,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       parentInstanceId: PLAN_INSTANCE.id,
       unit: "U10",
       deliveryId: "U10/end",
-      ending: { kind: "failed", report: "The fix needs another pass" },
+      ending: { kind: "failed", report: "The fix needs another pass", threadReport: "" },
     };
     expect(await call(h, "unit-end", body)).toMatchObject({
       status: 503,
