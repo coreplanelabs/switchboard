@@ -3428,6 +3428,82 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     ]);
   });
 
+  it.each(["held", "idle"] as const)(
+    "keeps a private worker's %s report out of hosted events and pull request comments",
+    async (kind) => {
+      const log = new InMemoryPrivateWorkerLog();
+      const h = await planHarness({ privateWorkerLog: log });
+      const key = `worker:${PLAN_INSTANCE.id}:U10`;
+      const pr = { number: 12, url: "https://github.com/acme/api/pull/12" };
+      await h.instances.putUnits([
+        unitRow("U10", {
+          threadKey: key,
+          pr,
+          workBrief: {
+            requesterId: PLAN_INSTANCE.userId,
+            mainThreadKey: PLAN_INSTANCE.threadKey,
+            actId: "act-1",
+            repo: PLAN_INSTANCE.repo,
+            base: "main",
+            question: "Why?",
+            findings: [],
+            requestedChange: "Fix it",
+          },
+        }),
+        unitRow("U11"),
+      ]);
+      const { run } = await hostParent(h);
+      expect((await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).status).toBe(200);
+      expect(
+        (
+          await call(h, "round", {
+            parentInstanceId: PLAN_INSTANCE.id,
+            unit: "U10",
+            index: 0,
+            agent: "coding",
+            outcome: "started",
+          })
+        ).status,
+      ).toBe(200);
+      const report = "Private finding: signup failures expose customer data";
+      expect(
+        await call(h, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          deliveryId: "U10/end",
+          ending:
+            kind === "held"
+              ? { kind, report }
+              : {
+                  kind,
+                  report,
+                  why: "held",
+                  renewalsLeft: 0,
+                  spendUsd: 1,
+                  humanGate: {
+                    pr,
+                    round: 1,
+                    findings: [
+                      { id: "F1", severity: "minor", file: "src/a.ts", title: "Needs a person", humanGated: true },
+                    ],
+                    verdict: "request_changes",
+                    reviewRunId: "run-r1",
+                  },
+                },
+          pr,
+        }),
+      ).toMatchObject({ status: 200, body: { ok: true, told: true } });
+      expect((await log.list(key)).filter((event) => event.kind === "reply")).toMatchObject([{ text: report }]);
+      const events = h.registry.snapshotById(run.id)!.events.filter((event) => event.type === "ship_unit");
+      expect(events.at(-1)).toMatchObject({ type: "ship_unit", unit: "U10", state: kind, pr: 12 });
+      expect(JSON.stringify(events.at(-1))).not.toContain(report);
+      expect(events.at(-1)).not.toHaveProperty("threadKey");
+      expect(JSON.stringify(events)).not.toContain("worker:");
+      expect(JSON.stringify(events)).not.toContain("Warm the cache");
+      expect(h.github.comments.get("acme/api#12")).toBeUndefined();
+    },
+  );
+
   it("replays a saved private wake answer until its reply is durably logged once", async () => {
     const backing = new InMemoryPrivateWorkerLog();
     let fail = true;

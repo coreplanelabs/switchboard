@@ -4270,8 +4270,8 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
           type: "ship_unit",
           unit: row.unit,
           state: "started",
-          ...(row.threadKey !== undefined ? { threadKey: row.threadKey } : {}),
-          lead: unitLead(instance, row),
+          ...(row.workBrief === undefined && row.threadKey !== undefined ? { threadKey: row.threadKey } : {}),
+          ...(row.workBrief === undefined ? { lead: unitLead(instance, row) } : {}),
           ...(row.pr !== undefined ? { pr: row.pr.number } : {}),
           at,
         },
@@ -4539,7 +4539,7 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
           type: "ship_unit",
           unit: updated.unit,
           state: body.outcome as string,
-          ...(thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
+          ...(row.workBrief === undefined && thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
           ...(updated.pr !== undefined ? { pr: updated.pr.number } : {}),
           at,
         },
@@ -5011,8 +5011,8 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
           type: "ship_unit",
           unit: updated.unit,
           state: ending.kind,
-          ...(thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
-          report: ending.report,
+          ...(row.workBrief === undefined && thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
+          ...(row.workBrief === undefined ? { report: ending.report } : {}),
           ...(updated.pr !== undefined ? { pr: updated.pr.number } : {}),
           at,
         },
@@ -5124,11 +5124,10 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         ),
       );
   }
-  // A human-gated question's next step is a person's, at either answer
-  // surface. The report lands on the pull request beside the review that named
-  // it; the bot's own comment is ignored by the human-answer intake.
+  // An ordinary human-gated unit leaves its report on the pull request beside
+  // the review. A private worker reports only to the main agent's durable log.
   const parkedHumanGate = ending.kind === "idle" && idle?.humanGate !== undefined;
-  if ((ending.kind === "held" || parkedHumanGate) && updated.pr !== undefined) {
+  if (row.workBrief === undefined && (ending.kind === "held" || parkedHumanGate) && updated.pr !== undefined) {
     const state = parkedHumanGate ? "waiting for a person" : "held";
     await deps.github
       .commentIssue(instance.repo, updated.pr.number, `**Plan runner — ${row.unit} ${state}**\n\n${ending.report}`)
