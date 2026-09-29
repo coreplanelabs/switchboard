@@ -86,10 +86,9 @@ describe("the two route gates refuse NEW work as the mirror-busy 503 shape and t
     expect(drain).toBeGreaterThan(-1);
     expect(gate).toBeGreaterThan(drain);
     expect(reconcile).toBeGreaterThan(gate);
-    // ONE registration read decides both gates: the drain's exemption and the
-    // memory gate's are the same fact (item 44's row), so they cannot drift.
+    // ONE owned, live registration decision serves the drain and memory gates.
     expect(body).toMatch(
-      /const registered = \(await this\.ctx\.storage\.get\(runRegKey\(threadKey\)\)\) !== undefined;/,
+      /const registration = await this\.ctx\.storage\.get<RunRegistration>\(runRegKey\(threadKey\)\);\s*const registered = registeredRunAllowsReattach\(\s*registration,\s*runId,\s*systemClock\(\),\s*RUN_REGISTRATION_GRACE_MS,\s*ownerGen,\s*ownerFence,\s*\);/,
     );
     expect(body).toMatch(/if \(drain && !registered\)/);
     expect(body).toMatch(

@@ -28,6 +28,25 @@ const claimReq = (runId: string, threadKey: string, gen = "g1"): ClaimRequest =>
   tools: [{ name: "bash", description: "run", inputSchema: {} }],
 });
 
+describe("resident attachment claims", () => {
+  it("mints increasing fences only for the current ledger owner, including same-second reclaims", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const thread = "slack:C1:1.0";
+    expect(await ledger.residentClaim("run-1", "same-second-a", thread)).toEqual({ ok: false, reason: "unknown-run" });
+    await ledger.claim(claimReq("run-1", thread, "same-second-a"));
+    expect(await ledger.residentClaim("run-1", "same-second-a", thread)).toEqual({ ok: true, fence: 1 });
+    expect(await ledger.residentClaim("run-1", "same-second-a", "other-thread")).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    await ledger.handoff("same-second-a", ["run-1"]);
+    await ledger.reclaim("same-second-b", 0, LEASE_MS);
+    expect(await ledger.residentClaim("run-1", "same-second-a", thread)).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.residentClaim("run-1", "same-second-b", thread)).toEqual({ ok: true, fence: 2 });
+    expect(await ledger.residentClaim("run-1", "same-second-b", thread)).toEqual({ ok: true, fence: 3 });
+  });
+});
+
 const stepRecord = (step: number, turnIndex: number, inFlight: StepRecord["inFlight"] = []): StepRecord => ({
   step,
   seq: step * 10,

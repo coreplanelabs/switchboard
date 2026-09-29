@@ -90,6 +90,17 @@ export interface SessionLog {
 const TRIM_MARKER_BYTES_ESTIMATE = 260;
 
 export class InMemoryRunLedger implements RunLedger {
+  private residentClaimFence = 0;
+  async residentClaim(
+    runId: string,
+    gen: string,
+    threadKey: string,
+  ): Promise<{ ok: true; fence: number } | { ok: false; reason: "fenced" | "unknown-run" }> {
+    const row = this.live.get(runId);
+    if (!row) return { ok: false, reason: "unknown-run" };
+    if (row.ownerGen !== gen || row.threadKey !== threadKey) return { ok: false, reason: "fenced" };
+    return { ok: true, fence: ++this.residentClaimFence };
+  }
   readonly live = new Map<string, LiveRunRow>();
   readonly steps = new Map<string, StepRecord[]>();
   readonly events = new Map<string, AppendableEvent[]>();

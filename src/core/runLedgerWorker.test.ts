@@ -70,6 +70,20 @@ const claimReq: ClaimRequest = {
 };
 
 describe("WorkerRunLedger", () => {
+  it("requests a resident fence for the ledger owner and reports stale claims", async () => {
+    const w = stubWorker((path) =>
+      path === "/runs/resident-claim"
+        ? { status: 200, data: { ok: true, fence: 4 } }
+        : { status: 200, data: { ok: true } },
+    );
+    expect(await w.ledger.residentClaim("r1", "g1", "slack:C1:1.0")).toEqual({ ok: true, fence: 4 });
+    expect(w.calls[0]).toMatchObject({
+      path: "/runs/resident-claim",
+      body: { storeKey: "runs:default", runId: "r1", gen: "g1", threadKey: "slack:C1:1.0" },
+    });
+    const stale = stubWorker(() => ({ status: 409, data: { ok: false, reason: "fenced" } }));
+    expect(await stale.ledger.residentClaim("r1", "g0", "slack:C1:1.0")).toEqual({ ok: false, reason: "fenced" });
+  });
   it("claim posts the run under the store key with the bearer and nothing else — a run's transcript object is never owned; a 409 thread-live is a result", async () => {
     const w = stubWorker();
     expect(await w.ledger.claim(claimReq)).toEqual({ ok: true });

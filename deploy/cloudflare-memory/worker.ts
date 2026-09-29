@@ -1674,6 +1674,11 @@ export class RunHistoryDO extends DurableObject<Env> {
         tools_json TEXT NOT NULL,
         state_json TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS resident_claim_clock (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        value INTEGER NOT NULL
+      );
+      INSERT OR IGNORE INTO resident_claim_clock (id, value) VALUES (1, 0);
       CREATE TABLE IF NOT EXISTS run_steps (
         run_id TEXT NOT NULL,
         step INTEGER NOT NULL,
@@ -2918,6 +2923,33 @@ export class RunHistoryDO extends DurableObject<Env> {
   private liveRow(runId: string): LiveRunRow | undefined {
     const r = this.sql.exec<LiveRow>(`SELECT * FROM live_runs WHERE run_id = ?`, runId).toArray()[0];
     return r ? rowToLive(r) : undefined;
+  }
+
+  /** A later ledger owner gets a larger attachment fence, even for the same run ID. */
+  async residentClaim(
+    runId: string,
+    gen: string,
+    threadKey: string,
+  ): Promise<{ ok: true; fence: number } | { ok: false; reason: "fenced" | "unknown-run" }> {
+    let out: { ok: true; fence: number } | { ok: false; reason: "fenced" | "unknown-run" } = {
+      ok: false,
+      reason: "unknown-run",
+    };
+    this.ctx.storage.transactionSync(() => {
+      const row = this.liveRow(runId);
+      if (!row) return;
+      if (row.ownerGen !== gen || row.threadKey !== threadKey) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      this.sql.exec(`UPDATE resident_claim_clock SET value = value + 1 WHERE id = 1`);
+      const fence = this.sql
+        .exec<{ value: number }>(`SELECT value FROM resident_claim_clock WHERE id = 1`)
+        .toArray()[0]?.value;
+      if (fence === undefined || !Number.isSafeInteger(fence)) throw new Error("resident claim fence unavailable");
+      out = { ok: true, fence };
+    });
+    return out;
   }
 
   /** The `runs` table's column migrations, run at every construction and
@@ -5318,6 +5350,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/wake",
   "/runs/decision-record/reserve",
   "/runs/claim",
+  "/runs/resident-claim",
   "/runs/heartbeat",
   "/runs/append",
   "/runs/live-state",
@@ -5923,6 +5956,16 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       `[runs/claim] ${key.value} ${req.value.runId} on ${req.value.threadKey} → ${r.ok ? "claimed" : r.reason}`,
     );
     return r.ok ? json(r) : json(r, 409);
+  }
+  if (pathname === "/runs/resident-claim") {
+    const runId = parseRunId(b.runId);
+    if (!runId.ok) return json({ error: runId.error }, 400);
+    const g = gen(b.gen);
+    if (!g.ok) return json({ error: g.error }, 400);
+    if (typeof b.threadKey !== "string" || b.threadKey.length === 0 || b.threadKey.length > 256)
+      return json({ error: "threadKey must be a non-empty string" }, 400);
+    const result = await stub.residentClaim(runId.value, g.value, b.threadKey);
+    return result.ok ? json(result) : json(result, 409);
   }
   if (pathname === "/runs/live") return json({ runs: await stub.listLive() });
   if (pathname === "/runs/reclaim") {

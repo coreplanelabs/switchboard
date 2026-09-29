@@ -152,7 +152,7 @@ describe("the `ownPr` and `refByDefault` body fields reach the binding decision"
     expect(handler).toMatch(/const refByDefault = parseRefByDefault\(body\.refByDefault\);/);
     expect(handler).toMatch(/if \("error" in refByDefault\) return json\(\{ error: refByDefault\.error \}, 400\);/);
     expect(handler).toMatch(
-      /attachThread\(\s*ctx\.threadKey,\s*refHint,\s*readonly\.readonly,\s*want\.sha,\s*reuse\.reuse,\s*ctx\.record,\s*traceparent,\s*reason,\s*githubDoor,?\s*\)/,
+      /attachThread\(\s*ctx\.threadKey,\s*refHint,\s*readonly\.readonly,\s*want\.sha,\s*reuse\.reuse,\s*ctx\.record,\s*traceparent,\s*reason,\s*githubDoor,\s*runBudgetMs,\s*runId,\s*ownerGen,\s*ownerFence,?\s*\)/,
     );
   });
 
@@ -449,27 +449,35 @@ describe("a binding whose own branch is gone from the mirror returns to the defa
   });
 });
 
-describe("the run's pushed branches survive the tree: the detach body's `pushed` lands on the binding before any eviction", () => {
+describe("the owning run's pushed branches survive release", () => {
   it("handleDetach parses `pushed` with the pure parser, checks every ref against the one ref pattern, refuses a malformed list 400, and hands it to detachThread", () => {
     expect(source).toMatch(/import \{[^}]*parsePushed[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentRebind\.js";/);
     const handler = functionOf("handleDetach");
     expect(handler).toMatch(/const pushed = parsePushed\(body\.pushed\);/);
     expect(handler).toMatch(/if \("error" in pushed\) return json\(\{ error: pushed\.error \}, 400\);/);
     expect(handler).toMatch(/parseRef\(entry\.ref, "pushed\[\]\.ref"\)/);
-    expect(handler).toMatch(/detachThread\(ctx\.threadKey, body\.force === true, pushed\.pushed\)/);
+    expect(handler).toMatch(
+      /detachThread\(\s*ctx\.threadKey,\s*body\.force === true,\s*pushed\.pushed,\s*runId,\s*ownerGen,\s*ownerFence,?\s*\)/,
+    );
   });
 
-  it("detachThread remembers the pushed branches FIRST — before the already-evicted, busy and eviction decisions — so a release that evicts, keeps, or finds the tree already gone all leave the fact behind", () => {
+  it("detachThread checks ownership before remembering pushed branches or evicting the tree", () => {
     const detach = method("detachThread");
     expect(detach).toMatch(/pushed: readonly PushedBranch\[\] = \[\],/);
-    const remember = detach.indexOf("await this.rememberOwnBranches(threadKey, pushed);");
+    const remember = detach.lastIndexOf("await this.rememberOwnBranches(threadKey, pushed);");
     const read = detach.indexOf(
       "const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));",
     );
     const evicted = detach.indexOf('return { released: false, reason: "already-evicted" };');
+    const owner = detach.indexOf("registeredRunOwnsRelease(registration, runId, ownerGen, ownerFence)");
     expect(remember).toBeGreaterThan(-1);
-    expect(read).toBeGreaterThan(remember);
+    expect(read).toBeGreaterThan(-1);
     expect(evicted).toBeGreaterThan(read);
+    expect(owner).toBeGreaterThan(evicted);
+    expect(remember).toBeGreaterThan(owner);
+    expect(detach.indexOf("registeredRunOwnsRelease(binding.lastRunOwner, runId, ownerGen, ownerFence)")).toBeLessThan(
+      evicted,
+    );
     const keep = method("rememberOwnBranches");
     expect(keep).toMatch(/ownBranches: rememberOwnBranches\(binding\.ownBranches, pushed, /);
     expect(keep).toMatch(/await this\.putThreadBinding\(/);

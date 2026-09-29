@@ -21,6 +21,8 @@ export const SECOND_MS = 1_000;
 export const secondsToMs = (seconds: number): number => seconds * SECOND_MS;
 
 export const MINUTE_MS = 60_000;
+/** Allow the run's ending to release its resident workspace after its budget ends. */
+export const RUN_REGISTRATION_GRACE_MS = MINUTE_MS;
 
 /** Minutes → milliseconds, for a duration a request names in minutes (a drain's
  *  length): the multiplication lives here so no other file holds it. */

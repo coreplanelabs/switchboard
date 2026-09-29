@@ -89,6 +89,13 @@ import {
 } from "./legacyCredentials.js";
 import { hasUnexpectedOwnedThreadDir } from "./orphanThreadUsers.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
+import {
+  registeredRunAllowsClaim,
+  registeredRunAllowsReattach,
+  registeredRunNeedsProtection,
+  registeredRunOwnsRelease,
+} from "./runRegistration.js";
+import { DAY_MS, RUN_REGISTRATION_GRACE_MS } from "../../src/core/budgets.js";
 import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { RESIDENT_MIRROR_PERMISSIONS, verifyGithubMintScope } from "../../src/execution/githubMintScope.js";
 import { selectBindingsToPurge } from "../../src/execution/bindingPurge.js";
@@ -1194,6 +1201,8 @@ interface ThreadBinding {
   lastAttachAt: string;
   evicted?: boolean;
   evictedAt?: string;
+  /** Owner of the registration removed with this tree, for a delayed push receipt. */
+  lastRunOwner?: { runId?: string; ownerGen?: string; ownerFence?: number };
   /** Why the last eviction happened (the audit trail): `ttl`, `clean-idle`,
    *  `detach`, `disk-pressure`, or a reclamation fate — `merged #N` /
    *  `closed #N` / `gone`. */
@@ -1764,9 +1773,17 @@ const parentDir = (p: string): string => p.slice(0, p.lastIndexOf("/"));
  *  a fresh isolate still counts the process that survived in the container. */
 const RUN_REG_KEY_PREFIX = "runReg:";
 const runRegKey = (threadKey: string) => `${RUN_REG_KEY_PREFIX}${threadKey}`;
+// A thread's highest accepted ledger claim survives registration release and
+// binding purge: a delayed older /attach must never reopen an evicted tree.
+const RUN_FENCE_KEY_PREFIX = "runFence:";
+const runFenceKey = (threadKey: string) => `${RUN_FENCE_KEY_PREFIX}${threadKey}`;
 interface RunRegistration {
   threadKey: string;
   registeredAt: string;
+  deadlineAt?: number;
+  runId?: string;
+  ownerGen?: string;
+  ownerFence?: number;
 }
 
 /** Deterministic per-thread+ref worktree path. Slugs replace anything outside
@@ -4644,23 +4661,21 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Whether a run may be using this disk: a live binding attached to or
    *  used (an exec bumps `lastAttachAt` too, item 21) within IDLE_AFTER_S.
-   *  The op counter is 0 between a run's tool calls, so this floor is what
-   *  stands for a run mid-flight. The one predicate behind "the disk may go
-   *  away": the idle-sleep gate (item 16b — a platform sleep destroys the
-   *  disk) and the disk-full recycle (item 54) both read it, and neither asks
-   *  what a tree holds (item 17): a dirty tree no run is using protects
-   *  nothing — the next attach wipes it. Bindings are storage, so this needs
-   *  no container. */
+   *  The run registration protects the gap between tool calls past this floor.
+   *  The idle-sleep gate (item 16b) and disk-full recycle (item 54) both read
+   *  the floor and the bounded registrations, never what a tree holds (item
+   *  17): a dirty tree no run is using protects nothing. */
   private recentlyUsed(live: ThreadBinding[]): boolean {
     const recent = systemClock() - IDLE_AFTER_S * 1000;
     return live.some((b) => Date.parse(b.lastAttachAt) >= recent);
   }
 
-  /** Idle = no live binding used within the floor and nothing in flight; the
-   *  sweep's release records what an idle tree held. */
+  /** A live run registration prevents sleep even after an hour without an op;
+   *  an expired one cannot keep the container awake. */
   private async isIdle(): Promise<boolean> {
     if (this.recentlyUsed(await this.liveBindings())) return false;
-    return this.inFlightCount() === 0;
+    if (this.inFlightCount() > 0) return false;
+    return (await this.registeredRunsBeyondOps()) === 0;
   }
 
   /** Bindings that hold a pool user and a tree on disk (not evicted). */
@@ -4698,10 +4713,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  path as a platform sleep. Only when the pure plan allows it: no recycle
    *  within the cooldown, nothing in flight (`selfInFlight` excludes the
    *  calling refresh cycle from the count) and no live binding used within
-   *  the idle floor — the idle-sleep gate's own predicate (`recentlyUsed`),
-   *  because a sleep and a recycle destroy the same disk: it may go away when
-   *  no run is using it, never for what the trees hold (item 17). A recycle
-   *  discards every live tree the way an eviction does, so each is measured
+   *  the idle floor and no live run registration — the idle-sleep gate's own
+   *  predicates, because a sleep and a recycle destroy the same disk: it may
+   *  go away when no run is using it, never for what the trees hold (item 17).
+   *  A recycle discards every live tree the way an eviction does, so each is measured
    *  first, as its thread user, and its binding records what went
    *  (`recordRecycledTree`); the plan is decided again after those awaits,
    *  right before the stop. A refused recycle is written to
@@ -4710,21 +4725,23 @@ export class ResidentDO extends Sandbox<Env> {
    *  whether the container was recycled. */
   private async recoverFromDiskFull(reason: string, selfInFlight: number): Promise<boolean> {
     const lastRecycleAt = await this.ctx.storage.get<number>(DISK_FULL_RECYCLE_KEY);
-    const plan = (live: ThreadBinding[]) =>
-      planDiskFullRecovery({
+    const plan = async (live: ThreadBinding[]) => {
+      const liveRegistrations = await this.registeredRunsBeyondOps();
+      return planDiskFullRecovery({
         now: systemClock(),
         lastRecycleAt,
         inFlight: this.inFlightCount() - selfInFlight,
-        recentlyUsed: this.recentlyUsed(live),
+        recentlyUsed: this.recentlyUsed(live) || liveRegistrations > 0,
         idleFloorS: IDLE_AFTER_S,
       });
+    };
     const kept = async (why: string) => {
       console.log(`disk-full: container kept — ${why}`);
       await this.recordRefreshError(`${reason} — container kept: ${why}`);
       return false;
     };
     const live = await this.liveBindings();
-    const first = plan(live);
+    const first = await plan(live);
     if (first.action === "wait") return kept(first.why);
     // What each live tree holds, for its record — never a reason to keep the
     // container. Concurrent: each probe touches only its own tree, one spawn
@@ -4737,7 +4754,7 @@ export class ResidentDO extends Sandbox<Env> {
       : live.map((binding) => [binding, undefined] as const);
     // The measurement awaited (the DO yields at each await): decide again over
     // fresh facts — an attach or an op that landed meanwhile keeps the container.
-    const verdict = plan(await this.liveBindings());
+    const verdict = await plan(await this.liveBindings());
     if (verdict.action === "wait") return kept(verdict.why);
     console.log(
       `disk-full: recycling the container — the next cycle restores mirror + checkout from R2 onto an empty disk (${reason})`,
@@ -5153,8 +5170,8 @@ export class ResidentDO extends Sandbox<Env> {
    *  run — stop the container so it restarts on the current image (state is DO
    *  storage + R2 — the disk is a cache). A deferred restart re-checks on
    *  every later refresh cycle until the resident is quiet; a registration
-   *  whose release never came defers it only until the clean-idle sweep drains
-   *  that registration. The attach path never stops the container (issue 2101,
+   *  whose release never came defers it only through the clean-idle window;
+   *  a later sweep removes its binding. The attach path never stops the container (issue 2101,
    *  the `stale` answer below); the stop is the refresh cycle's or the
    *  deploy's alone. Answers `restarted` when a stop was issued, else why
    *  not. */
@@ -5798,6 +5815,10 @@ export class ResidentDO extends Sandbox<Env> {
     traceparent?: string,
     reason: RefHintReason = NO_REF_HINT_REASON,
     githubDoor?: { baseUrl: string; bearer: string },
+    runBudgetMs?: number,
+    runId?: string,
+    ownerGen?: string,
+    ownerFence?: number,
   ): Promise<AttachOk | ThreadErr> {
     // One step trace per attach (docs/reference/specs/tracing.md item 19): every command
     // the attach runs lands on it, and the answer carries it.
@@ -5810,7 +5831,21 @@ export class ResidentDO extends Sandbox<Env> {
       this.attachAdmissionsInFlight++;
       try {
         res = await this.stepTrace.run(trace, () =>
-          this.attachThreadTraced(threadKey, refHint, readonly, wantSha, reuse, record, t0, reason, githubDoor),
+          this.attachThreadTraced(
+            threadKey,
+            refHint,
+            readonly,
+            wantSha,
+            reuse,
+            record,
+            t0,
+            reason,
+            githubDoor,
+            runBudgetMs,
+            runId,
+            ownerGen,
+            ownerFence,
+          ),
         );
       } finally {
         this.attachAdmissionsInFlight--;
@@ -5832,6 +5867,10 @@ export class ResidentDO extends Sandbox<Env> {
     t0: number,
     reason: RefHintReason,
     githubDoor?: { baseUrl: string; bearer: string },
+    runBudgetMs?: number,
+    runId?: string,
+    ownerGen?: string,
+    ownerFence?: number,
   ): Promise<AttachOk | ThreadErr> {
     try {
       if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
@@ -5841,13 +5880,21 @@ export class ResidentDO extends Sandbox<Env> {
       // to end, and a NEW run's attach is refused with the record the bot
       // waits on — a real 503 in the streamed document, read by the client as
       // `draining`, never as the platform's transient. A run already in flight
-      // — registered from its attach to its release (item 44) — re-attaches
+      // — with an owned, live registration (item 44) — re-attaches
       // through: a rolled container, an evicted worktree, a resumed run are
       // the runs the drain waits FOR, and refusing them would hold the fleet
       // closed on the run it is closed for. Read before the image reconcile so
       // a refused attach never restarts a container.
       const drain = await this.fleetDrain();
-      const registered = (await this.ctx.storage.get(runRegKey(threadKey))) !== undefined;
+      const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+      const registered = registeredRunAllowsReattach(
+        registration,
+        runId,
+        systemClock(),
+        RUN_REGISTRATION_GRACE_MS,
+        ownerGen,
+        ownerFence,
+      );
       if (drain && !registered) {
         const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
         return refusal;
@@ -5855,14 +5902,14 @@ export class ResidentDO extends Sandbox<Env> {
       // Item 70: above the soft memory threshold a NEW attach is refused like
       // `mirror-busy` (the bot falls back or waits, the card says why) — after
       // the drain (storage only, cheaper) and before the image reconcile, so a
-      // refused attach never restarts a container. A registered run's
+      // refused attach never restarts a container. An owned, live run's
       // re-attach passes for the same reason it passes the drain above.
       const memory = await this.memoryGate("attach", registered);
       if (memory) return memory;
       const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
       // An attach never restarts the container (issue 2101): a `stale` verdict
       // refuses the NEW run — it falls back to the seeded sandbox — while a
-      // registered run's re-attach passes exactly as it passes the drain and
+      // owned, live run's re-attach passes exactly as it passes the drain and
       // the memory gate; the restart itself is the refresh cycle's or the
       // deploy's.
       if ((await this.reconcileImage("attach")) === "stale" && !registered) {
@@ -5882,6 +5929,15 @@ export class ResidentDO extends Sandbox<Env> {
       this.attachesInFlight++;
       try {
         return await this.threadAttaches.run(threadKey, async () => {
+          const current = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+          const accepted = await this.ctx.storage.get<Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence">>(
+            runFenceKey(threadKey),
+          );
+          if (
+            !registeredRunAllowsClaim(current, runId, ownerGen, ownerFence) ||
+            !registeredRunAllowsClaim(accepted, runId, ownerGen, ownerFence)
+          )
+            return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
           const res = await this.attachThreadBody(
             threadKey,
             refHint,
@@ -5896,7 +5952,7 @@ export class ResidentDO extends Sandbox<Env> {
           );
           // The run this attach opens is now in flight until its release —
           // whatever its op counters read between the bot's calls (item 44).
-          if (!("error" in res)) await this.registerRun(threadKey);
+          if (!("error" in res)) await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence);
           return res;
         });
       } finally {
@@ -7736,6 +7792,7 @@ export class ResidentDO extends Sandbox<Env> {
       user: "",
       evicted: true,
       evictedAt: new Date(systemClock()).toISOString(),
+      lastRunOwner: await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey)),
       evictedWhy: why,
       evictedLeftBehind: tree && "leftBehind" in tree ? tree.leftBehind : undefined,
       evictedUnmeasured: tree && "unmeasured" in tree ? tree.unmeasured : undefined,
@@ -7763,65 +7820,77 @@ export class ResidentDO extends Sandbox<Env> {
     force: boolean,
     /** What the ending run pushed (item 16a): remembered on the binding first, whatever the detach then decides. */
     pushed: readonly PushedBranch[] = [],
+    runId?: string,
+    ownerGen?: string,
+    ownerFence?: number,
   ): Promise<DetachAnswer | ThreadErr> {
-    if (pushed.length > 0) await this.rememberOwnBranches(threadKey, pushed);
-    const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
-    if (!binding) return { error: `no-binding: ${threadKey} has never attached to this resident`, status: 404 };
-    if (binding.evicted || !binding.user) return { released: false, reason: "already-evicted" };
-    if (!(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`)))
-      return { error: "pool-owner-mismatch: detach refused for conflicting UID owner", status: 503 };
-    const plan = planForceDetach({
-      force,
-      inFlight: this.threadOpsInFlight.get(threadKey) ?? 0,
-      user: binding.user,
-      poolUsers: THREAD_USERS,
-    });
-    if (plan.action === "refuse") return { released: false, reason: plan.reason, user: binding.user };
-    if (plan.action === "kill") {
-      if (!(await this.killThreadUserProcesses(plan.user, threadKey)))
-        return { error: "pool-owner-mismatch: force detach refused before kill", status: 503 };
-      console.log(
-        `detach: force — killed ${plan.user}'s processes for ${threadKey} (${plan.inFlight} op(s) were in flight)`,
-      );
-      const left = await this.waitForThreadDrain(threadKey);
-      if (left > 0) return { released: false, reason: busyAfterKillReason(left), user: binding.user };
-    }
-    const active = await this.isRuntimeActive().catch(() => false);
-    // What the tree still holds, for the answer and the eviction's record —
-    // never a reason to keep it. Not measured on a force release: a read-only
-    // tree holds nothing, and a hard stop's tree is whatever the killed
-    // command left. A probe that fails names nothing in the answer (never a
-    // guess); the record and the log say it could not be measured.
-    let tree: EvictedTree | undefined;
-    if (!force && active) tree = await this.measureTreeBeforeEviction(binding);
-    // Re-check right before removal: the measurement above awaited (the DO
-    // yields at each await), so an exec that arrived mid-detach would otherwise
-    // have its tree removed under it.
-    const busyNow = this.threadOpsInFlight.get(threadKey) ?? 0;
-    if (busyNow > 0)
-      return {
-        released: false,
-        reason: `busy: ${busyNow} operation(s) started during detach — kept`,
+    return this.threadAttaches.run(threadKey, async () => {
+      const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+      if (!binding) return { error: `no-binding: ${threadKey} has never attached to this resident`, status: 404 };
+      if (binding.evicted || !binding.user) {
+        if (pushed.length > 0 && registeredRunOwnsRelease(binding.lastRunOwner, runId, ownerGen, ownerFence))
+          await this.rememberOwnBranches(threadKey, pushed);
+        return { released: false, reason: "already-evicted" };
+      }
+      const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+      if (!registeredRunOwnsRelease(registration, runId, ownerGen, ownerFence))
+        return { released: false, reason: "run-registration-mismatch: the workspace belongs to another run" };
+      if (pushed.length > 0) await this.rememberOwnBranches(threadKey, pushed);
+      if (!(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`)))
+        return { error: "pool-owner-mismatch: detach refused for conflicting UID owner", status: 503 };
+      const plan = planForceDetach({
+        force,
+        inFlight: this.threadOpsInFlight.get(threadKey) ?? 0,
         user: binding.user,
-      };
-    // Same re-read as the sweep: a re-attach during the measurement means a
-    // fresh tree we must not remove from a stale snapshot.
-    const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
-    if (!current || current.evicted) return { released: false, reason: "already-evicted" };
-    if (current.lastAttachAt !== binding.lastAttachAt)
-      return { released: false, reason: "re-attached during the detach — kept", user: current.user };
-    const user = current.user;
-    // Same as the sweep: `active` was read before the measurement's awaits; a
-    // container that woke meanwhile must get the rm, not an orphaned tree.
-    const activeNow = await this.isRuntimeActive().catch(() => true);
-    const eviction = await this.evictBinding(current, activeNow, `detach`, "detach", tree);
-    if (eviction === "cleanup-failed")
-      return { released: false, reason: "thread-cleanup-failed: pool user kept", user };
-    if (eviction === "changed") return { released: false, reason: "re-attached during eviction — kept", user };
-    // Item 55: the tree is gone; the gauge catches up at the next refresh
-    // instance's `measure` step, and the admission's `df` sees the space now.
-    const leftBehind = tree && "leftBehind" in tree ? tree.leftBehind : undefined;
-    return { released: true, user, ...(leftBehind !== undefined ? { leftBehind } : {}) };
+        poolUsers: THREAD_USERS,
+      });
+      if (plan.action === "refuse") return { released: false, reason: plan.reason, user: binding.user };
+      if (plan.action === "kill") {
+        if (!(await this.killThreadUserProcesses(plan.user, threadKey)))
+          return { error: "pool-owner-mismatch: force detach refused before kill", status: 503 };
+        console.log(
+          `detach: force — killed ${plan.user}'s processes for ${threadKey} (${plan.inFlight} op(s) were in flight)`,
+        );
+        const left = await this.waitForThreadDrain(threadKey);
+        if (left > 0) return { released: false, reason: busyAfterKillReason(left), user: binding.user };
+      }
+      const active = await this.isRuntimeActive().catch(() => false);
+      // What the tree still holds, for the answer and the eviction's record —
+      // never a reason to keep it. Not measured on a force release: a read-only
+      // tree holds nothing, and a hard stop's tree is whatever the killed
+      // command left. A probe that fails names nothing in the answer (never a
+      // guess); the record and the log say it could not be measured.
+      let tree: EvictedTree | undefined;
+      if (!force && active) tree = await this.measureTreeBeforeEviction(binding);
+      // Re-check right before removal: the measurement above awaited (the DO
+      // yields at each await), so an exec that arrived mid-detach would otherwise
+      // have its tree removed under it.
+      const busyNow = this.threadOpsInFlight.get(threadKey) ?? 0;
+      if (busyNow > 0)
+        return {
+          released: false,
+          reason: `busy: ${busyNow} operation(s) started during detach — kept`,
+          user: binding.user,
+        };
+      // Same re-read as the sweep: a re-attach during the measurement means a
+      // fresh tree we must not remove from a stale snapshot.
+      const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+      if (!current || current.evicted) return { released: false, reason: "already-evicted" };
+      if (current.lastAttachAt !== binding.lastAttachAt)
+        return { released: false, reason: "re-attached during the detach — kept", user: current.user };
+      const user = current.user;
+      // Same as the sweep: `active` was read before the measurement's awaits; a
+      // container that woke meanwhile must get the rm, not an orphaned tree.
+      const activeNow = await this.isRuntimeActive().catch(() => true);
+      const eviction = await this.evictBinding(current, activeNow, `detach`, "detach", tree);
+      if (eviction === "cleanup-failed")
+        return { released: false, reason: "thread-cleanup-failed: pool user kept", user };
+      if (eviction === "changed") return { released: false, reason: "re-attached during eviction — kept", user };
+      // Item 55: the tree is gone; the gauge catches up at the next refresh
+      // instance's `measure` step, and the admission's `df` sees the space now.
+      const leftBehind = tree && "leftBehind" in tree ? tree.leftBehind : undefined;
+      return { released: true, user, ...(leftBehind !== undefined ? { leftBehind } : {}) };
+    });
   }
 
   /** Force-detach's kill: end every process owned by the pool user —
@@ -7936,25 +8005,74 @@ export class ResidentDO extends Sandbox<Env> {
   async getInFlightCount(): Promise<number> {
     return this.inFlightCount() + (await this.registeredRunsBeyondOps());
   }
-  /** A run holds its worktree from `/attach` to its release (`/detach`, the
-   *  sweep, disk pressure — every path ends in `evictBinding`, which clears
-   *  the row). Written by the attach; idempotent, a re-attach refreshes it. */
-  private async registerRun(threadKey: string): Promise<void> {
-    await this.ctx.storage.put(runRegKey(threadKey), {
-      threadKey,
-      registeredAt: new Date(systemClock()).toISOString(),
-    } satisfies RunRegistration);
+  /** A run's registration protects its worktree until release or the bounded
+   *  deadline. `/detach`, the sweep, and disk pressure end in `evictBinding`,
+   *  which clears the row; a re-attach refreshes it. */
+  private async registerRun(
+    threadKey: string,
+    runBudgetMs?: number,
+    runId?: string,
+    ownerGen?: string,
+    ownerFence?: number,
+  ): Promise<void> {
+    const now = systemClock();
+    await this.ctx.storage.transaction(async (txn) => {
+      if (ownerFence !== undefined) await txn.put(runFenceKey(threadKey), { runId, ownerGen, ownerFence });
+      await txn.put(runRegKey(threadKey), {
+        threadKey,
+        registeredAt: new Date(now).toISOString(),
+        ...(runBudgetMs !== undefined ? { deadlineAt: now + runBudgetMs } : {}),
+        ...(runId !== undefined ? { runId } : {}),
+        ...(ownerGen !== undefined ? { ownerGen } : {}),
+        ...(ownerFence !== undefined ? { ownerFence } : {}),
+      } satisfies RunRegistration);
+    });
+  }
+  /** The harness's lease begins after attach. Tighten the provisional setup
+   * bound to its actual remaining clock, only for the run that attached. */
+  async updateRunDeadline(
+    threadKey: string,
+    runId: string,
+    remainingMs: number,
+    ownerGen?: string,
+    ownerFence?: number,
+  ): Promise<{ deadlineAt: number } | ThreadErr> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const registration = await txn.get<RunRegistration>(runRegKey(threadKey));
+      if (
+        !registration ||
+        registration.runId !== runId ||
+        registration.ownerGen !== ownerGen ||
+        registration.ownerFence !== ownerFence
+      )
+        return { error: "run-registration-mismatch: this run does not own the thread", status: 409 };
+      const deadlineAt = systemClock() + remainingMs;
+      await txn.put(runRegKey(threadKey), { ...registration, deadlineAt });
+      return { deadlineAt };
+    });
   }
   /** The registrations the op counters do not already see: a thread with an
    *  op in flight is counted by `runsInFlightCount`, so its registration is
-   *  not counted again. Deliberately NOT part of `inFlightCount()`: the
-   *  container-lifecycle predicates (isIdle, reconcileImage) must not let a
-   *  stale registration pin a container awake — the clean-idle sweep is what
-   *  drains a registration whose release never came. */
+   *  not counted again. The idle, image-reconcile and disk-recycle gates read
+   *  this bounded count alongside their op counters, so a live run protects
+   *  its container while a stale registration cannot pin it awake. */
   private async registeredRunsBeyondOps(): Promise<number> {
     const regs = await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX });
+    const cutoff = systemClock() - CLEAN_IDLE_RELEASE_S * 1000;
     let n = 0;
-    for (const r of regs.values()) if ((this.threadOpsInFlight.get(r.threadKey) ?? 0) === 0) n++;
+    for (const r of regs.values()) {
+      const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(r.threadKey));
+      if (
+        registeredRunNeedsProtection(
+          binding?.lastAttachAt,
+          this.threadOpsInFlight.get(r.threadKey) ?? 0,
+          cutoff,
+          r.deadlineAt === undefined ? undefined : r.deadlineAt + RUN_REGISTRATION_GRACE_MS,
+          systemClock(),
+        )
+      )
+        n++;
+    }
     return n;
   }
   private attachesInFlight = 0;
@@ -7983,6 +8101,15 @@ export class ResidentDO extends Sandbox<Env> {
     const idleCutoff = systemClock() - CLEAN_IDLE_RELEASE_S * 1000;
     for (const binding of all.values()) {
       if (binding.evicted || !binding.user) continue;
+      const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey));
+      if (
+        registration?.deadlineAt !== undefined &&
+        Number.isSafeInteger(registration.deadlineAt) &&
+        systemClock() <= registration.deadlineAt + RUN_REGISTRATION_GRACE_MS
+      ) {
+        kept++;
+        continue;
+      }
       const last = Date.parse(binding.lastAttachAt);
       if (last >= cutoff) {
         // Not past the TTL. Still release it if it has been idle for an hour
@@ -7991,9 +8118,9 @@ export class ResidentDO extends Sandbox<Env> {
         // a clean tree (item 17) — so there is nothing to keep it for. This is
         // what drains the bindings of runs whose release never came (a
         // resident that was sick at the run's end, a run older than
-        // `/detach`). A live run is protected by its op in flight, not by its
-        // dirt. A slept container has no tree any more anyway (sleep destroys
-        // the disk).
+        // `/detach`). A live run is protected by its budget above or an op
+        // in flight, not by its dirt. A slept container has no tree any more
+        // anyway (sleep destroys the disk).
         const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
         if (last >= idleCutoff || busy > 0) {
           kept++;
@@ -8390,13 +8517,30 @@ export class ResidentDO extends Sandbox<Env> {
         fates.set(ref, { fate: looked.fate, detail });
       }),
     );
-    // The runs registered on this resident (item 44): a run holds its tree
-    // from its attach to its release, and its process lives in the container
+    // The runs registered on this resident (item 44): a live registration
+    // holds its tree through the deadline, and its process lives in the container
     // between the bot's calls — the op counters read 0 while its model thinks.
+    const registrations = new Map(
+      [...(await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX })).values()].map((r) => [
+        r.threadKey,
+        r,
+      ]),
+    );
+    const protectsTree = (binding: ThreadBinding, registration: RunRegistration | undefined): boolean => {
+      if (!registration) return false;
+      const now = systemClock();
+      return registeredRunNeedsProtection(
+        binding.lastAttachAt,
+        0,
+        now - CLEAN_IDLE_RELEASE_S * 1000,
+        registration.deadlineAt === undefined ? undefined : registration.deadlineAt + RUN_REGISTRATION_GRACE_MS,
+        now,
+      );
+    };
     const registered = new Set(
-      [...(await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX })).values()].map(
-        (r) => r.threadKey,
-      ),
+      live
+        .filter((binding) => protectsTree(binding, registrations.get(binding.threadKey)))
+        .map((binding) => binding.threadKey),
     );
     for (const binding of live) {
       const isDefaultRef = binding.ref === defaultRef;
@@ -8423,7 +8567,8 @@ export class ResidentDO extends Sandbox<Env> {
         continue;
       }
       // A run attached while the tree was measured holds it now (item 44).
-      if ((await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey))) !== undefined) {
+      const currentRegistration = await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey));
+      if (protectsTree(current ?? binding, currentRegistration)) {
         kept.push({ threadKey: binding.threadKey, ref: binding.ref, why: "run-held" });
         continue;
       }
@@ -9249,6 +9394,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/debug": { scope: "read", method: "POST" }, // per-op: READ_DEBUG_OPS for read scope, everything for admin
   "/status": { scope: "operator", method: "GET" },
   "/attach": { scope: "operator", method: "POST" },
+  "/run-deadline": { scope: "operator", method: "POST" },
   "/detach": { scope: "operator", method: "POST" },
   "/exec": { scope: "operator", method: "POST" },
   "/read": { scope: "operator", method: "POST" },
@@ -9366,6 +9512,8 @@ export default {
             return await handleStatus(env, url);
           case "/attach":
             return await handleAttach(env, body, traceparent);
+          case "/run-deadline":
+            return await handleRunDeadline(env, body);
           case "/detach":
             return await handleDetach(env, body);
           case "/exec":
@@ -9996,6 +10144,27 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
   if ("error" in want) return json({ error: want.error }, 400);
   const reuse = parseReuse(body.reuse);
   if ("error" in reuse) return json({ error: reuse.error }, 400);
+  let runBudgetMs: number | undefined;
+  if (body.runBudgetMs !== undefined) {
+    const value = body.runBudgetMs;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > DAY_MS)
+      return json({ error: "invalid run budget" }, 400);
+    runBudgetMs = value;
+  }
+  const runId = body.runId;
+  if (runId !== undefined && (typeof runId !== "string" || runId.length === 0 || runId.length > 128))
+    return json({ error: "invalid run id" }, 400);
+  const ownerGen = body.ownerGen;
+  if (ownerGen !== undefined && (typeof ownerGen !== "string" || ownerGen.length === 0 || ownerGen.length > 128))
+    return json({ error: "invalid run generation" }, 400);
+  const ownerFence = body.ownerFence;
+  if (
+    ownerFence !== undefined &&
+    (typeof ownerFence !== "number" || !Number.isSafeInteger(ownerFence) || ownerFence <= 0)
+  )
+    return json({ error: "invalid run fence" }, 400);
+  if (ownerFence !== undefined && (runId === undefined || ownerGen === undefined))
+    return json({ error: "run fence requires a run id and generation" }, 400);
   // Why the hint is what it is (item 16): the thread's own pull request and
   // its head branch — the branch checked against the one ref pattern like
   // every ref, before it can become a git argument — and the bound-by-default flag.
@@ -10050,11 +10219,38 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
         traceparent,
         reason,
         githubDoor,
+        runBudgetMs,
+        runId,
+        ownerGen,
+        ownerFence,
       ),
     ),
     ({ result, levels }) => ({ ...(result as object), ...(levels ? { levels } : {}) }),
     (err) => catchAllErr(err),
   );
+}
+
+async function handleRunDeadline(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const ctx = await resolveThreadRoute(env, body);
+  if (ctx instanceof Response) return ctx;
+  const runId = body.runId;
+  const ownerGen = body.ownerGen;
+  const ownerFence = body.ownerFence;
+  const remainingMs = body.remainingMs;
+  if (typeof runId !== "string" || runId.length === 0 || runId.length > 128)
+    return json({ error: "invalid run id" }, 400);
+  if (ownerGen !== undefined && (typeof ownerGen !== "string" || ownerGen.length === 0 || ownerGen.length > 128))
+    return json({ error: "invalid run generation" }, 400);
+  if (
+    ownerFence !== undefined &&
+    (typeof ownerFence !== "number" || !Number.isSafeInteger(ownerFence) || ownerFence <= 0)
+  )
+    return json({ error: "invalid run fence" }, 400);
+  if (typeof remainingMs !== "number" || !Number.isSafeInteger(remainingMs) || remainingMs <= 0 || remainingMs > DAY_MS)
+    return json({ error: "invalid remaining lease" }, 400);
+  const result = await ctx.stub.updateRunDeadline(ctx.threadKey, runId, remainingMs, ownerGen, ownerFence);
+  if ("error" in result) return threadErrResponse(result);
+  return json(result);
 }
 
 /** POST /await-restore (docs/reference/specs/execution.md item 27): the bot's
@@ -10078,6 +10274,18 @@ async function handleAwaitRestore(env: Env, body: Record<string, unknown>): Prom
 async function handleDetach(env: Env, body: Record<string, unknown>): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
+  const runId = body.runId;
+  if (runId !== undefined && (typeof runId !== "string" || runId.length === 0 || runId.length > 128))
+    return json({ error: "invalid run id" }, 400);
+  const ownerGen = body.ownerGen;
+  if (ownerGen !== undefined && (typeof ownerGen !== "string" || ownerGen.length === 0 || ownerGen.length > 128))
+    return json({ error: "invalid run generation" }, 400);
+  const ownerFence = body.ownerFence;
+  if (
+    ownerFence !== undefined &&
+    (typeof ownerFence !== "number" || !Number.isSafeInteger(ownerFence) || ownerFence <= 0)
+  )
+    return json({ error: "invalid run fence" }, 400);
   // What the run pushed (item 16a), each ref through the one ref pattern
   // before it can be stored or become a git argument.
   const pushed = parsePushed(body.pushed);
@@ -10086,7 +10294,14 @@ async function handleDetach(env: Env, body: Record<string, unknown>): Promise<Re
     const ref = parseRef(entry.ref, "pushed[].ref");
     if ("error" in ref) return json({ error: ref.error }, 400);
   }
-  const result = await ctx.stub.detachThread(ctx.threadKey, body.force === true, pushed.pushed);
+  const result = await ctx.stub.detachThread(
+    ctx.threadKey,
+    body.force === true,
+    pushed.pushed,
+    runId,
+    ownerGen,
+    ownerFence,
+  );
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }

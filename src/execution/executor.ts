@@ -68,6 +68,9 @@ export interface Executor {
    *  read-only agent, a hard stop — ends what is in flight and releases now.
    *  Best-effort: implementations report, never throw. */
   release?(mode: ReleaseMode, opts?: ReleaseOptions): Promise<ReleaseResult>;
+  /** Tighten a resident registration to the harness lease once it starts.
+   * Other backends have no durable run registration to update. */
+  setRunDeadline?(remainingMs: number): Promise<void>;
   /** Optional: bring the workspace to `sha` — the PR head that moved while a
    *  review ran (agent-review.md item 12) — fetching as needed, and answer the
    *  commit the workspace is now at (which may differ if the ref moved again).

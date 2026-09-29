@@ -517,6 +517,12 @@ export async function waitOnStatus<T>(input: {
 }
 
 export interface ResidentExecutorOptions {
+  /** The run that owns this registration; an older lease update cannot renew a later run. */
+  runId?: string;
+  /** Bot generation that owns this run's current attachment. */
+  ownerGen?: string;
+  /** Monotonic claim from the run ledger, shared by attach, lease update, and release. */
+  ownerFence?: number;
   /** Base URL of the resident Worker. */
   baseUrl: string;
   /** Operator bearer (RESIDENT_OPERATOR_TOKEN secret). */
@@ -549,6 +555,11 @@ export interface ResidentExecutorOptions {
    *  the worktree with no credential file and an unfetchable origin. Sent only
    *  when true, so an older resident sees the body it always did. */
   readonly?: boolean;
+  /** Effective run budget; an abandoned registration expires after this plus
+   * the Worker's short release grace. Absent for non-run callers. */
+  runBudgetMs?: number;
+  /** Admission time left before the harness starts its separate run lease. */
+  setupRemainingMs?: () => number;
   /** The commit the caller expects the ref to be at — a PR head (docs/reference/specs/
    *  resident-repos.md item 51). The resident fetches its mirror when the ref's
    *  tip is not this commit instead of cloning a stale tip. Sent only when set,
@@ -1286,8 +1297,18 @@ export class ResidentExecutor implements Executor {
    *  request at once, and the failure is `aborted`, never the transport lost. */
   private async attachOnce(span?: Span, timeoutMs?: number, signal?: AbortSignal): Promise<AttachAnswer> {
     const body: Record<string, unknown> = {};
+    if (this.opts.runId !== undefined) body.runId = this.opts.runId;
+    if (this.opts.ownerGen !== undefined) body.ownerGen = this.opts.ownerGen;
+    if (this.opts.ownerFence !== undefined) body.ownerFence = this.opts.ownerFence;
     if (this.opts.refHint) body.refHint = this.opts.refHint;
     if (this.opts.readonly) body.readonly = true;
+    if (this.opts.runBudgetMs !== undefined) {
+      const leaseRemaining = this.opts.remainingMs?.();
+      body.runBudgetMs =
+        leaseRemaining === undefined
+          ? this.opts.runBudgetMs + Math.max(0, this.opts.setupRemainingMs?.() ?? 0)
+          : Math.max(1, Math.ceil(leaseRemaining));
+    }
     if (this.opts.sha && this.shaPending) body.sha = this.opts.sha;
     if (this.opts.reuse) body.reuse = true;
     if (this.opts.ownPr) body.ownPr = this.opts.ownPr;
@@ -1424,6 +1445,21 @@ export class ResidentExecutor implements Executor {
    *  releases now. The binding (ref) survives either way, so the next attach
    *  recreates the tree on the same ref. Best-effort by contract: never
    *  throws. */
+  async setRunDeadline(remainingMs: number): Promise<void> {
+    if (this.opts.runId === undefined) return;
+    const { status, data } = await this.call(
+      "/run-deadline",
+      {
+        runId: this.opts.runId,
+        ownerGen: this.opts.ownerGen,
+        ownerFence: this.opts.ownerFence,
+        remainingMs: Math.max(1, Math.ceil(remainingMs)),
+      },
+      DETACH_TIMEOUT_MS,
+    );
+    if (status !== 200) throw new Error(`resident run deadline: HTTP ${status}: ${String(data.error ?? "")}`);
+  }
+
   async release(mode: ReleaseMode, opts?: ReleaseOptions): Promise<ReleaseResult> {
     try {
       // What the run pushed rides along when there is something to hand over
@@ -1431,6 +1467,9 @@ export class ResidentExecutor implements Executor {
       // remembers it on the binding before the tree goes. Sent only then, so
       // an older resident sees the body it always did.
       const body: Record<string, unknown> = { force: mode === "always" };
+      if (this.opts.runId !== undefined) body.runId = this.opts.runId;
+      if (this.opts.ownerGen !== undefined) body.ownerGen = this.opts.ownerGen;
+      if (this.opts.ownerFence !== undefined) body.ownerFence = this.opts.ownerFence;
       if (opts?.pushed !== undefined && opts.pushed.length > 0) body.pushed = opts.pushed;
       const { status, data } = await this.call("/detach", body, DETACH_TIMEOUT_MS, undefined, opts?.span);
       if (status !== 200) return { released: false, reason: `HTTP ${status}: ${String(data.error ?? "")}` };

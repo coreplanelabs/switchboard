@@ -304,7 +304,7 @@ describe("the Worker's wiring (by scan)", () => {
     );
   });
 
-  it("the gate is the Durable Object's — after hydration, before the image reconcile — and refuses only a thread with NO run registration, so a run in flight re-attaches through; the Worker-level handler gates nothing; `/residents` carries `draining`", () => {
+  it("the gate is the Durable Object's — after hydration, before the image reconcile — and only a live registration owned by this run permits reattach; the Worker-level handler gates nothing; `/residents` carries `draining`", () => {
     const start = source.indexOf("private async attachThreadTraced(");
     const attach = source.slice(start, start + 4000);
     const hydrate = attach.indexOf("await this.ensureHydrated();");
@@ -313,9 +313,9 @@ describe("the Worker's wiring (by scan)", () => {
     expect(hydrate).toBeGreaterThan(-1);
     expect(gate).toBeGreaterThan(hydrate);
     expect(reconcile).toBeGreaterThan(gate);
-    // One registration read serves the drain gate and the memory gate (item 70).
+    // One owned, live registration decision serves the drain, memory, and image gates.
     expect(attach).toMatch(
-      /const registered = \(await this\.ctx\.storage\.get\(runRegKey\(threadKey\)\)\) !== undefined;/,
+      /const registration = await this\.ctx\.storage\.get<RunRegistration>\(runRegKey\(threadKey\)\);\s*const registered = registeredRunAllowsReattach\(\s*registration,\s*runId,\s*systemClock\(\),\s*RUN_REGISTRATION_GRACE_MS,\s*ownerGen,\s*ownerFence,\s*\);/,
     );
     expect(attach).toMatch(/if \(drain && !registered\) \{/);
     expect(attach).toMatch(/drainRefusal\(drain\)/);

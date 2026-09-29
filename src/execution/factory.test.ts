@@ -498,6 +498,22 @@ describe("makeExecutor resident selection", () => {
     expect(calls).toEqual(["/status", "/attach"]);
   });
 
+  it("a fenced ledger owner stops before resident attach or cold fallback", async () => {
+    stubEnvs();
+    const { calls } = stubFetch({ body: { state: "warm", reason: "" } });
+    await expect(
+      makeExecutor(residentOpts(), {
+        ...repoCtx(),
+        runId: "run-1",
+        ownerGen: "gen-old",
+        residentClaim: async () => {
+          throw new Error("resident claim refused: fenced");
+        },
+      }),
+    ).rejects.toThrow("resident claim refused: fenced");
+    expect(calls).toEqual(["/status"]);
+  });
+
   it("needs-ref WITH the resident's defaultRef → re-attach once on that ref; the note says it was the repo default", async () => {
     stubEnvs();
     const { calls, bodies } = stubFetch(
@@ -562,6 +578,7 @@ describe("makeExecutor resident selection", () => {
         refHint: "fix/x",
         sha: SHA,
         ownPr,
+        runBudgetMs: AGENTS.coding.maxMinutes * 60_000,
         githubDoor: { baseUrl: "https://door.example", bearer: "sbr_test.secret" },
       });
       await makeExecutor(residentOpts(), repoCtx());
@@ -677,6 +694,7 @@ describe("makeExecutor resident selection", () => {
     );
     await makeExecutor(residentOpts(), { ...repoCtx(), ...ctxOf(AGENTS.review) });
     expect(bodies[1]?.readonly).toBe(true);
+    expect(bodies[1]?.runBudgetMs).toBe(AGENTS.review.maxMinutes * 60_000);
     await makeExecutor(residentOpts(), repoCtx()); // AGENTS.coding
     expect(bodies[3]).not.toHaveProperty("readonly");
   });

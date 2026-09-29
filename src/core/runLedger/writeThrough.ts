@@ -315,6 +315,8 @@ export interface AdoptRunRequest {
 
 export interface LedgerWriteThrough {
   readonly gen: string;
+  /** Current ledger owner receives a monotonic fence before resident attach. */
+  claimResident(runId: string, threadKey: string): Promise<number | undefined>;
   /** Reserve the thread at admission (item 42): an `attaching` row with the
    *  request and no prompt, its heartbeat running — or why not (`ReserveOutcome`).
    *  The run is not resumable until `open` promotes it; a reclaim of the row
@@ -415,6 +417,9 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
     readonly gen: string,
     private readonly fallback: RecordSink,
   ) {}
+  async claimResident(_runId: string, _threadKey: string): Promise<number | undefined> {
+    return undefined;
+  }
   async reserve(_req: ReserveRunRequest): Promise<ReserveOutcome> {
     return { kind: "off" };
   }
@@ -1305,6 +1310,11 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
   return {
     gen,
+    async claimResident(runId, threadKey) {
+      const result = await ledger.residentClaim(runId, gen, threadKey);
+      if (!result.ok) throw new Error(`resident claim refused: ${result.reason}`);
+      return result.fence;
+    },
     async reserve(req) {
       const claimed = await claim({ ...req, system: "", tools: [], state: {} }, { phase: "attaching" });
       // Every untracked exit says why (item 54): the row a run this process

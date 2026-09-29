@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { FIRST_ATTACH_WAIT_MS } from "../core/budgets.js";
+import { FIRST_ATTACH_WAIT_MS, minutesToMs } from "../core/budgets.js";
 import { RUN_DEADLINE_RESERVE_MS, attachBoundWithinRun } from "./bashTimeout.js";
 import { oneLine } from "../core/redact.js";
 import type { Backend } from "../core/trace/attrs.js";
@@ -110,6 +110,14 @@ export interface ExecutorFactoryOptions {
  *  probe). */
 export interface ExecutorContext {
   threadKey: string;
+  /** Durable run identity; an old lease update may only change its own registration. */
+  runId?: string;
+  /** Process generation owning the durable run. */
+  ownerGen?: string;
+  /** Minted by the durable run ledger after confirming this run's current owner. */
+  residentClaim?: () => Promise<number | undefined>;
+  /** Time left for setup before the harness may start its separate run lease. */
+  setupRemainingMs?: () => number;
   /** Run-bound credential accepted only by the trusted GitHub door. */
   githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };
   /** the resolved agent (never mutated here) — named in the null executor's error */
@@ -504,6 +512,9 @@ export async function makeExecutor(
       // flow depends on it); any OTHER attach failure falls back to the
       // per-thread backend with a named note (never a silent stall or a raw
       // ⚠️ for this window).
+      // Ownership failures are not resident attach failures: a fenced run
+      // must stop before either the resident or cold fallback can do work.
+      const ownerFence = ctx.residentClaim === undefined ? undefined : await ctx.residentClaim();
       try {
         // Non-warm but serviceable: the note says so while the run
         // still gets the worktree it came for; openResident adds ref@sha.
@@ -522,8 +533,13 @@ export async function makeExecutor(
             token: token.reveal(),
             resource,
             threadKey: ctx.threadKey,
+            ...(ctx.runId !== undefined ? { runId: ctx.runId } : {}),
+            ...(ctx.ownerGen !== undefined ? { ownerGen: ctx.ownerGen } : {}),
+            ...(ownerFence !== undefined ? { ownerFence } : {}),
             refHint: ctx.ref,
             readonly,
+            runBudgetMs: minutesToMs(ctx.profile.minutes),
+            ...(ctx.setupRemainingMs !== undefined ? { setupRemainingMs: ctx.setupRemainingMs } : {}),
             sha: ctx.headSha,
             // The run bearer and commit identity pairs ride each exec. The
             // resident keeps its App credential only at the root-owned mirror.
@@ -828,6 +844,9 @@ async function reattachWorkspace(
     token: token.reveal(),
     resource,
     threadKey: ctx.threadKey,
+    ...(ctx.runId !== undefined ? { runId: ctx.runId } : {}),
+    ...(ctx.ownerGen !== undefined ? { ownerGen: ctx.ownerGen } : {}),
+    ...(ctx.residentClaim !== undefined ? { ownerFence: await ctx.residentClaim() } : {}),
     refHint: ctx.ref,
     readonly: ctx.profile.identity === "read" ? true : undefined,
     sha: ctx.headSha,
@@ -840,6 +859,8 @@ async function reattachWorkspace(
       ...(await gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx))),
     }),
     ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
+    runBudgetMs: minutesToMs(ctx.profile.minutes),
+    ...(ctx.setupRemainingMs !== undefined ? { setupRemainingMs: ctx.setupRemainingMs } : {}),
     ...(ctx.onLiveStateObservation !== undefined ? { onLiveStateObservation: ctx.onLiveStateObservation } : {}),
   });
   let binding: ResidentBinding;
