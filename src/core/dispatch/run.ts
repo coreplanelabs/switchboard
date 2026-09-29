@@ -34,7 +34,7 @@ import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import { workspaceBindingFor, type ExecutorSelection } from "../../execution/factory.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
-import type { RepoContext } from "../repoContext.js";
+import type { OperationTarget, RepoContext } from "../repoContext.js";
 import type { PrCommitList } from "../headMoved.js";
 import { REPLAY_EVERYTHING, type RunHandle, type RunRegistry } from "../runRegistry.js";
 import type { RunSeed } from "../runRecord.js";
@@ -253,6 +253,8 @@ export interface ClaimContext {
   profile: RunProfile;
   resolved: ResolvedRequest;
   repoCtx: RepoContext;
+  /** Accepted execution target; the resolved repo/ref can also come from evidence. */
+  operationTarget?: OperationTarget;
   channelVisibility: ChannelVisibility;
   run: RunHandle;
   registry: RunRegistry;
@@ -308,6 +310,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     agent,
     resolved,
     repoCtx,
+    operationTarget,
     channelVisibility,
     run,
     registry,
@@ -364,6 +367,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           threadKey: msg.threadKey,
           channelVisibility,
           ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+          ...(operationTarget !== undefined ? { operationTarget } : {}),
           ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
           ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
           ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),

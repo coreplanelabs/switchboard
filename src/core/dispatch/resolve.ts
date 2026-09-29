@@ -30,6 +30,7 @@ import { githubRepoProbe } from "../../execution/githubRepoProbe.js";
 import {
   resolveRepoContext,
   type RepoContext,
+  type OperationTarget,
   type RepoProbe,
   type ResidentSlugs,
   type RunRecordSignals,
@@ -56,8 +57,9 @@ export interface ResolveDeps {
     msg: IncomingMessage,
     history: HistoryItem[],
     records?: RunRecordSignals,
-    operatorRepo?: string,
+    fallbackRepo?: string,
     reviewBarePr?: boolean,
+    operationTarget?: OperationTarget,
   ) => Promise<RepoContext> | RepoContext;
 }
 
@@ -236,10 +238,12 @@ export interface ResolveTargetContext {
    *  request its newest finished run opened, from the dispatcher's one read
    *  of the thread's runs; absent for a message that starts a thread. */
   records?: RunRecordSignals;
-  /** The typed/factual repository inherited through the operator door. */
+  /** Thread/channel repository facts; not accepted operation authority. */
   operatorRepo?: string;
   /** A review may pair a bare PR number with the repository after vetting. */
   reviewBarePr?: boolean;
+  /** The admitted non-review operation, distinct from a review target. */
+  operationTarget?: OperationTarget;
   /** A repository resolution already started before admission. */
   repoTarget?: ResolvedRepoTarget;
 }
@@ -252,7 +256,7 @@ export function resolveRepoTarget(
   deps: ResolveDeps,
   ctx: Pick<
     ResolveTargetContext,
-    "msg" | "history" | "profile" | "resume" | "root" | "records" | "operatorRepo" | "reviewBarePr"
+    "msg" | "history" | "profile" | "resume" | "root" | "records" | "operatorRepo" | "reviewBarePr" | "operationTarget"
   >,
 ): ResolvedRepoTarget {
   const { msg, history, profile, resume, root } = ctx;
@@ -263,7 +267,14 @@ export function resolveRepoTarget(
       : needsRepo
         ? await Promise.resolve(
             deps.resolveRepoContext
-              ? deps.resolveRepoContext(msg, history, ctx.records, ctx.operatorRepo, ctx.reviewBarePr)
+              ? deps.resolveRepoContext(
+                  msg,
+                  history,
+                  ctx.records,
+                  ctx.operatorRepo,
+                  ctx.reviewBarePr,
+                  ctx.operationTarget,
+                )
               : resolveRepoContext(
                   msg,
                   history,
@@ -271,6 +282,7 @@ export function resolveRepoTarget(
                   ctx.records,
                   ctx.operatorRepo,
                   ctx.reviewBarePr,
+                  ctx.operationTarget,
                 ),
           )
         : {};
@@ -288,11 +300,11 @@ export function resolveRepoTarget(
                 ? "resolved"
                 : "unresolved",
       repoTargetRelation:
-        ctx.operatorRepo === undefined
+        (ctx.operationTarget?.repo ?? ctx.operatorRepo) === undefined
           ? "not_proposed"
           : result.repo === undefined
             ? "unresolved"
-            : result.repo.toLowerCase() === ctx.operatorRepo.toLowerCase()
+            : result.repo.toLowerCase() === (ctx.operationTarget?.repo ?? ctx.operatorRepo)!.toLowerCase()
               ? "matched"
               : "overridden",
     } as const;

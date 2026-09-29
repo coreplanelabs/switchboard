@@ -105,6 +105,26 @@ export interface RunRecordSignals {
   pr?: { repo: string; number: number; at?: number };
 }
 
+/** An admitted operation's repository and optional branch, carried by value.
+ * Unlike citations or channel defaults these fields are execution authority.
+ * A review resolves its own PR target instead of consuming this binding. */
+export interface OperationTarget {
+  repo: string;
+  ref?: string;
+}
+
+/** Validate a persisted operation target before it can regain authority. */
+export function operationTargetOf(raw: unknown): OperationTarget | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid operation target");
+  const fields = raw as Record<string, unknown>;
+  const repo = typeof fields.repo === "string" ? slugOf(fields.repo) : undefined;
+  const ref = fields.ref;
+  if (repo === undefined || (ref !== undefined && (typeof ref !== "string" || validRef(ref) === undefined)))
+    throw new Error("invalid operation target");
+  return { repo, ...(ref !== undefined ? { ref: ref as string } : {}) };
+}
+
 export interface RepoContext {
   repo?: string;
   ref?: string;
@@ -115,7 +135,8 @@ export interface RepoContext {
    *  thread (last user turn naming a PR of the resolved repo — the re-review
    *  reply in a PR thread names no PR), but only fail-closed: the PR must be
    *  fetched now, be `open`, and yield a well-formed head SHA; anything else →
-   *  no `pr`, Slack-only. */
+   *  no `pr`, Slack-only. An accepted operation treats a contextual PR as
+   *  evidence; a PR on another branch cannot become its publication target. */
   pr?: number;
   /** True when `pr` was named by the CURRENT message (a URL or `owner/name#N`),
    *  false/unset when `pr` was INHERITED from the thread. Ship reads it to tell
@@ -293,9 +314,9 @@ interface DirectPrDecision {
   conflict?: { target: string; cited: string };
 }
 
-/** Consider every direct PR citation, not just the first URL. A contextual
- * clause supplies evidence; two distinct requested PRs require a question. */
-function directPrDecisionOf(text: string): DirectPrDecision {
+/** Consider every direct PR citation, not just the first URL. An accepted
+ * repository ignores foreign citations; two requested local PRs conflict. */
+function directPrDecisionOf(text: string, acceptedRepo?: string): DirectPrDecision {
   const clean = unwrapSlack(text).replace(CODE_SPAN, " ");
   const decision: DirectPrDecision = { seen: false };
   const refs =
@@ -304,6 +325,7 @@ function directPrDecisionOf(text: string): DirectPrDecision {
     const repo = slugOf(match[4] ?? `${match[1]}/${match[2]}`);
     const number = Number(match[5] ?? match[3]);
     if (repo === undefined || !Number.isSafeInteger(number) || number < 1) continue;
+    if (acceptedRepo !== undefined && repo !== acceptedRepo) continue;
     decision.seen = true;
     if (
       contextCueOf({
@@ -362,13 +384,21 @@ function routedPrTargetOf(text: string): { repo: string; number: number } | unde
     );
   const repo = match === null ? undefined : slugOf(match[1]!);
   const number = match === null ? undefined : Number(match[2]);
-  return repo !== undefined && number !== undefined && Number.isSafeInteger(number) && number > 0
+  return repo !== undefined &&
+    number !== undefined &&
+    Number.isSafeInteger(number) &&
+    number > 0 &&
+    !contextCueOf({ before: "", after: clean.slice(match![0].length) })
     ? { repo, number }
     : undefined;
 }
 
 /** Every PR citation the resolver can bind must agree with the routed target. */
-function conflictingRoutedPrOf(text: string, target: { repo: string; number: number }): string | undefined {
+function conflictingRoutedPrOf(
+  text: string,
+  target: { repo: string; number: number },
+  operationRepo?: string,
+): string | undefined {
   const clean = unwrapSlack(text);
   const refs: Array<{ repo: string; number: number }> = [];
   for (const match of clean.replace(CODE_SPAN, " ").matchAll(/\b(?:PR|pull request)\s*#(\d+)\b/gi))
@@ -381,7 +411,11 @@ function conflictingRoutedPrOf(text: string, target: { repo: string; number: num
     const repo = slugOf(match[1]!);
     if (repo !== undefined) refs.push({ repo, number: Number(match[2]) });
   }
-  const conflict = refs.find((ref) => ref.repo !== target.repo || ref.number !== target.number);
+  const conflict = refs.find(
+    (ref) =>
+      (operationRepo === undefined || ref.repo === operationRepo) &&
+      (ref.repo !== target.repo || ref.number !== target.number),
+  );
   return conflict === undefined ? undefined : `${conflict.repo}#${conflict.number}`;
 }
 
@@ -410,7 +444,10 @@ function contextCueOf(later: { before: string; after: string }): boolean {
     .toLowerCase();
   return (
     (action !== undefined && !/^(?:re-?review|review)$/.test(action)) ||
-    /^[ \t]*(?:[,:][ \t]*)?(?:for|as)[ \t]+(?:context|reference|background)\b/i.test(later.after)
+    /\b(?:illustrated\s+by|same\s+defect\s+as)\s*$/i.test(clause) ||
+    /^[ \t]*(?:[,:][ \t]*)?(?:for|as)[ \t]+(?:(?:an?|the)[ \t]+)?(?:context|reference|background|example|illustration)\b/i.test(
+      later.after,
+    )
   );
 }
 
@@ -578,6 +615,7 @@ export function explicitRepoOf(text: string): string | undefined {
     return undefined;
   const addressedPr = addressedBarePrOf(s, text);
   if (addressedPr !== undefined) return addressedPr.repo;
+  if (contextualPrCitationOf(text)) return reviewAddressOf(s, text)?.slug ?? (s.repoStrong ? s.repo : undefined);
   return s.pr?.repo ?? reviewAddressOf(s, text)?.slug ?? (s.repoStrong ? s.repo : undefined);
 }
 
@@ -634,6 +672,13 @@ function headBranchRef(text: string): string | undefined {
   return match ? validRef(stripPunct(match[1])) : undefined;
 }
 
+/** The person's explicit branch syntax, never a ref from a cited URL. */
+function requestBranchRef(text: string): string | undefined {
+  const signalText = unwrapSlack(text).replace(CODE_SPAN, (m) => m.replace(/\S/g, "\u0000"));
+  const branchToken = /(?:^|\s)branch:(\S+)/i.exec(signalText);
+  return headBranchRef(signalText) ?? (branchToken ? validRef(stripPunct(branchToken[1])) : undefined);
+}
+
 /** Pure, sync signal extraction from one message text (no network). */
 function extractSignals(rawText: string): Signals {
   const text = unwrapSlack(rawText);
@@ -651,9 +696,7 @@ function extractSignals(rawText: string): Signals {
 
   // Typed branch forms only: the head-of-ask routing clause or a branch token.
   // A phrase with the same words after the task begins is narrative, not a ref.
-  out.ref = headBranchRef(signalText);
-  const branchToken = /(?:^|\s)branch:(\S+)/i.exec(signalText);
-  if (!out.ref && branchToken) out.ref = validRef(stripPunct(branchToken[1]));
+  out.ref = requestBranchRef(signalText);
 
   // Repo URL with an explicit /tree/<ref>
   const treeUrl = /https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s#?]+)\/tree\/([^\s?#]+)/i.exec(signalText);
@@ -908,15 +951,46 @@ export async function resolveRepoContext(
   /** A repository the operator bound from typed request/thread/channel facts.
    *  It is a fallback below an explicit current-message target and above the
    *  historical token scan; the same machine-class probe vets it. */
-  operatorRepo?: string,
+  fallbackRepo?: string,
   /** Review alone may pair a bare PR number with its vetted repository. */
   reviewBarePr = false,
+  /** Accepted non-review operation; citations remain evidence. */
+  operationTarget?: OperationTarget,
 ): Promise<RepoContext> {
+  const boundRepo = operationTargetOf(operationTarget)?.repo;
   const selected = reviewBarePr ? selectedSignalsOf(msg.text) : undefined;
   const s = selected?.signals ?? extractSignals(msg.text);
   const direct = selected?.direct;
-  const routedPr = routedPrTargetOf(msg.text);
-  const conflictingPr = routedPr === undefined ? undefined : conflictingRoutedPrOf(msg.text, routedPr);
+  const operationDirect = boundRepo === undefined ? undefined : directPrDecisionOf(msg.text, boundRepo);
+  if (operationDirect?.conflict !== undefined) return { prConflict: operationDirect.conflict };
+  const operationBareConflict = boundRepo === undefined ? undefined : conflictingBarePrOf(msg.text);
+  if (boundRepo !== undefined && operationBareConflict !== undefined)
+    return {
+      prConflict: {
+        target: `${boundRepo}#${operationBareConflict.target}`,
+        cited: `${boundRepo}#${operationBareConflict.cited}`,
+      },
+    };
+  const operationBareNumber = boundRepo === undefined ? undefined : barePrNumberOf(msg.text);
+  if (
+    boundRepo !== undefined &&
+    operationDirect?.target !== undefined &&
+    operationBareNumber !== undefined &&
+    operationDirect.target.number !== operationBareNumber
+  )
+    return {
+      prConflict: {
+        target: `${boundRepo}#${operationDirect.target.number}`,
+        cited: `${boundRepo}#${operationBareNumber}`,
+      },
+    };
+  const routed = routedPrTargetOf(msg.text);
+  const routedPr = boundRepo === undefined || routed?.repo === boundRepo ? routed : undefined;
+  // Accepted operations already checked requested direct and bare PRs above;
+  // the legacy routed gate also counts contextual citations.
+  const conflictingPr =
+    routedPr === undefined || boundRepo !== undefined ? undefined : conflictingRoutedPrOf(msg.text, routedPr);
+
   if (routedPr !== undefined && conflictingPr !== undefined)
     return { prConflict: { target: `${routedPr.repo}#${routedPr.number}`, cited: conflictingPr } };
   const bareConflict = reviewBarePr ? conflictingBarePrOf(msg.text) : undefined;
@@ -986,9 +1060,12 @@ export async function resolveRepoContext(
   const contextualCitation =
     contextualPr || (reviewBarePr && (contextualRepoCitationOf(s, msg.text) || contextualBarePrCitationOf(msg.text)));
   const address = reviewBarePr ? reviewAddressOf(s, msg.text) : s.addressed;
-  const strongNow = addressedBareReview
-    ? await resolveAddressed(address!)
-    : (s.pr?.repo ?? (address ? await resolveAddressed(address) : undefined) ?? (s.repoStrong ? s.repo : undefined));
+  const strongNow =
+    boundRepo ??
+    (addressedBareReview
+      ? await resolveAddressed(address!)
+      : (s.pr?.repo ?? (address ? await resolveAddressed(address) : undefined) ?? (s.repoStrong ? s.repo : undefined)));
+
   // An explicitly addressed slug the registry could not be asked about is a
   // stop, not a fall-through: running on the thread's old repo instead would
   // be the wrong-repo run this strength exists to end. Refuse loudly.
@@ -1006,7 +1083,7 @@ export async function resolveRepoContext(
     return { rejectedRepo: address.slug };
   }
   if (addressedBareReview && strongNow === undefined) return { unverifiedRepo: addressedPr.repo };
-  const typedRepo = operatorRepo === undefined ? undefined : slugOf(operatorRepo);
+  const typedRepo = fallbackRepo === undefined ? undefined : slugOf(fallbackRepo);
   let repo = strongNow;
   const bareCurrent = barePrNumberOf(msg.text);
   // A review's bare number inherits the thread's explicit target before a
@@ -1016,6 +1093,7 @@ export async function resolveRepoContext(
   const recordPr = records?.pr;
   if (deferTypedRepo && recordPr !== undefined && recordPr.number === bareCurrent && (await vet(recordPr.repo)))
     repo ??= recordPr.repo;
+
   for (let i = thread.events.length - 1; repo === undefined && i >= 0; i--) {
     const ev = thread.events[i];
     repo = "strong" in ev ? ev.strong : await resolveAddressed(ev.addressed);
@@ -1028,7 +1106,9 @@ export async function resolveRepoContext(
   // Inherited targets above still stand; other requests keep the legacy scan.
   const allowWeakCurrent = !reviewBarePr || barePrNumberOf(msg.text) === undefined;
   if (!repo && allowWeakCurrent && s.repo && (await vet(s.repo))) repo = s.repo;
-  let ref = s.ref;
+  // A citation cannot supply a branch for an accepted operation.
+  let ref = operationTarget === undefined ? s.ref : (operationTarget.ref ?? requestBranchRef(msg.text));
+
   let refFromPr = false;
 
   // `on <owner/name-shaped>` remains a repository mention only when no repo
@@ -1044,22 +1124,32 @@ export async function resolveRepoContext(
   }
 
   // A bare PR number has a repository in a thread with a durable PR, when
-  // an explicitly addressed repo's routed task OPENS with that PR, or for a
-  // review whose repository was independently vetted. Spawned
+  // an accepted operation supplies it, when an addressed routed task OPENS
+  // with that PR, or for a review whose repository was independently vetted. Spawned
   // coordinator children have no run-record signal: without the routed form,
   // an older PR in their thread can override the child contract's target.
-  // The conflict check above already rejected citations of another PR.
+  // An accepted operation ignores foreign evidence; conflicting local PR
+  // targets still refuse. The legacy review path keeps its existing rules.
   const bareNumber =
-    (!s.pr || addressedBareReview || contextualPr) &&
-    (repo === records?.pr?.repo || routedPr?.repo === repo || (reviewBarePr && repo !== undefined))
-      ? barePrNumberOf(msg.text)
-      : undefined;
+    boundRepo !== undefined
+      ? operationBareNumber
+      : (!s.pr || addressedBareReview || contextualPr) &&
+          (repo === records?.pr?.repo || routedPr?.repo === repo || (reviewBarePr && repo !== undefined))
+        ? barePrNumberOf(msg.text)
+        : undefined;
+  const requestedDirectPr = operationDirect?.target;
   const namedPr =
-    addressedBareReview || contextualPr
-      ? repo && bareNumber !== undefined
-        ? { repo, number: bareNumber }
-        : undefined
-      : (s.pr ?? (repo && bareNumber !== undefined ? { repo, number: bareNumber } : undefined));
+    boundRepo !== undefined
+      ? (routedPr ??
+        (requestedDirectPr?.repo === boundRepo
+          ? { repo: requestedDirectPr.repo, number: requestedDirectPr.number }
+          : undefined) ??
+        (repo && bareNumber !== undefined ? { repo, number: bareNumber } : undefined))
+      : addressedBareReview || contextualPr
+        ? repo && bareNumber !== undefined
+          ? { repo, number: bareNumber }
+          : undefined
+        : (s.pr ?? (repo && bareNumber !== undefined ? { repo, number: bareNumber } : undefined));
 
   // PR head — one REST call whenever the CURRENT message names a PR of the
   // resolved repo, regardless of any ref phrasing beside it. The PR is the
@@ -1074,8 +1164,11 @@ export async function resolveRepoContext(
   let prSize: PrSize | undefined;
   let facts: PrFacts | undefined;
   let closedPr: RepoContext["closedPr"];
+  let namedPrMatchesOperation = operationTarget?.ref === undefined;
   if (namedPr && repo === namedPr.repo) {
     const head = await prHead(namedPr).catch(() => undefined);
+    if (operationTarget?.ref !== undefined)
+      namedPrMatchesOperation = head?.state === "open" && head.ref === operationTarget.ref;
     // Only an OPEN pull request contributes the ref hint (issue 1860): a
     // merged or closed pull request cited as a receipt in a coding ask must
     // not bind the thread's branch to its dead head branch — a ship child
@@ -1085,12 +1178,12 @@ export async function resolveRepoContext(
     // (it pins no ref here, and as the attach's expected commit it could only
     // earn a `stale-tip` refusal) — and a state the answer did not carry
     // binds nothing.
-    if (head?.ref && head.state === "open") {
+    if (head?.ref && head.state === "open" && operationTarget?.ref === undefined) {
       ref = head.ref;
       refFromPr = true;
     }
     headSha = head?.sha;
-    baseRef = head?.base;
+    baseRef = operationTarget?.ref === undefined || operationTarget.ref === head?.ref ? head?.base : undefined;
     prSize = head?.size;
     facts = head?.facts;
     if (head?.state === "closed")
@@ -1118,7 +1211,7 @@ export async function resolveRepoContext(
   // ref is never rebound from a PR a person named in an earlier turn: a thread
   // redirected with "on <branch>" keeps that binding. The PR the thread's own
   // run opened does bind it (below): that branch is where the work lives.
-  if (repo && namedPr && repo === namedPr.repo) {
+  if (repo && namedPr && repo === namedPr.repo && namedPrMatchesOperation) {
     out.pr = namedPr.number;
     out.prFromMessage = true;
     // The message names the pull request the thread's own run opened or edited
@@ -1131,14 +1224,20 @@ export async function resolveRepoContext(
     if (prSize) out.prSize = prSize;
     if (facts) out.prDescription = facts;
     if (closedPr) out.closedPr = closedPr;
-  } else if (repo && !namedPr) {
+  } else if (repo) {
     const inherited = inheritedPr(thread, records, repo);
     if (inherited) {
       const head = await openPrHeadSha(inherited);
+      const inheritedRef = "ref" in head ? head.ref : undefined;
+      if (operationTarget?.ref !== undefined && inheritedRef !== operationTarget.ref) return out;
       if (!("reason" in head)) {
         out.pr = inherited.number;
-        out.headSha = head.sha;
-        if (head.base) out.baseRef = head.base;
+        if (operationTarget?.ref === undefined || operationTarget.ref === head.ref) out.headSha = head.sha;
+        if (
+          head.base &&
+          (operationTarget === undefined || (operationTarget.ref !== undefined && operationTarget.ref === head.ref))
+        )
+          out.baseRef = head.base;
         if (head.size) out.prSize = head.size;
         if (head.facts) out.prDescription = head.facts;
         // A PR the thread's own run opened is the branch the thread's work

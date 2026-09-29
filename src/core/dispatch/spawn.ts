@@ -44,6 +44,7 @@ import { defaultAdmission, steerRun, type DispatchFollowUp } from "./admission.j
 import { waitCapabilityFor, type WaitCapability } from "./awaitChildren.js";
 import { textTurnsOf, type TextTurn } from "./textTurns.js";
 import type { DispatchOutcome } from "./outcome.js";
+import type { OperationTarget } from "../repoContext.js";
 
 /** The `spawn` block of `config.yaml` (docs/reference/specs/agent-conductor.md item 5). */
 export interface SpawnConfig {
@@ -183,14 +184,16 @@ export interface SpawnDeps<D extends SpawnCoreDeps = SpawnCoreDeps> {
     deps: D,
     msg: IncomingMessage,
     io: ChannelIO,
-    opts?: { parent?: ParentRun; seed?: TextTurn[] },
+    opts?: { parent?: ParentRun; seed?: TextTurn[]; operationTarget?: OperationTarget },
   ) => Promise<DispatchOutcome>;
   registry: SpawnRegistry;
   clock: () => number;
   onChildEnded?: (child: { runId: string; threadKey: string }, outcome: DispatchOutcome) => void;
 }
 
-/** The child's request text: the preset directive, `model:` and `effort:`
+/** The child's readable request text. Its repository/branch clause is a
+ *  display of `operationTarget`, not the child's source of target authority.
+ *  The preset directive, `model:` and `effort:`
  *  directives when the parent chose the child's tier (the request slot of the
  *  resolve ladder, ahead of every scope), a `budget:` directive when
  *  the parent narrowed it, the repository as `in <owner/name>` for a preset
@@ -367,6 +370,9 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   const seed = parent.conversation ? textTurnsOf(parent.conversation) : undefined;
   const settled = deps
     .dispatch(deps.core, child, io, {
+      ...(request.repo !== undefined
+        ? { operationTarget: { repo: request.repo, ...(request.ref !== undefined ? { ref: request.ref } : {}) } }
+        : {}),
       parent: { runId: parent.runId, depth: parent.depth + 1, remainingMs: parent.remainingMs },
       ...(seed ? { seed } : {}),
     })

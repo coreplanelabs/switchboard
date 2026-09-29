@@ -265,7 +265,7 @@ export interface AdminCoordinatorDeps {
   dispatch: (
     msg: IncomingMessage,
     io: ChannelIO,
-    opts?: Pick<DispatchOptions, "coordinator" | "contract"> & { coordinator: CoordinatorTag },
+    opts?: Pick<DispatchOptions, "coordinator" | "contract" | "operationTarget"> & { coordinator: CoordinatorTag },
   ) => Promise<DispatchOutcome>;
   /** A terminal or moved pull request revokes a live child's authority. The
    * coordinator folds a fixed instruction into that run as the requester; it
@@ -1166,6 +1166,10 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   let dispatching: Promise<DispatchOutcome>;
   try {
     dispatching = deps.dispatch(msg, child, {
+      operationTarget: {
+        repo: instance.repo,
+        ...(req.preset === "coding" ? { ref: turn.ref ?? row?.branch ?? instance.branch } : {}),
+      },
       coordinator: tag,
       ...(row?.recovery !== undefined && row.publication !== undefined
         ? {

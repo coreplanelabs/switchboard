@@ -6,6 +6,7 @@
 // same run id, carrying the run's identity (`CarriedRunIdentity`) — never
 // migrated silently onto another backend.
 import { workspaceBindingOf, type WorkspaceBinding } from "../../execution/factory.js";
+import { operationTargetOf, type OperationTarget } from "../repoContext.js";
 import { sendChildSignal, type CoordinatorTag, type WorkflowSender } from "../coordinator/contract.js";
 import type { RunEvent } from "../runEvents.js";
 import { messageFromInbox } from "../runLedger/inboxMessage.js";
@@ -37,6 +38,12 @@ export function carriedWorkspaceBinding(row: LiveRunRow): WorkspaceBinding | und
     return { backend: "resident", ...(row.meta.workspace ? { workspace: row.meta.workspace } : {}) };
   if (row.meta.selection === "sandbox" || row.meta.selection === "local") return { backend: row.meta.selection };
   return undefined;
+}
+
+/** Recover only the accepted target the prior claim stored, never one inferred
+ * from the request text or the resolved repo/ref beside it. */
+export function carriedOperationTarget(row: LiveRunRow): OperationTarget | undefined {
+  return operationTargetOf(row.meta.operationTarget);
 }
 
 /**
@@ -315,7 +322,13 @@ export async function recordRestartDeath(ctx: {
  *  list it. */
 export interface RestartTurn {
   msg: IncomingMessage;
-  opts: { trace: RequestTrace; restartOf?: string; restartCarried?: CarriedRunIdentity; coordinator?: CoordinatorTag };
+  opts: {
+    trace: RequestTrace;
+    restartOf?: string;
+    restartCarried?: CarriedRunIdentity;
+    coordinator?: CoordinatorTag;
+    operationTarget?: OperationTarget;
+  };
 }
 
 export function prepareRestartTurn(
@@ -331,9 +344,11 @@ export function prepareRestartTurn(
     /** The tag the interrupted run carried (run-history item 48a): the
      *  restart is the same instance's child, or no coordinator's. */
     coordinator?: CoordinatorTag;
+    /** Accepted target recovered from the prior claim, never request text. */
+    operationTarget?: OperationTarget;
   },
 ): RestartTurn {
-  const { request, pending, clock, restartOf, carried, coordinator } = ctx;
+  const { request, pending, clock, restartOf, carried, coordinator, operationTarget } = ctx;
   const merged = mergeFollowUps(pending);
   const receivedAt = clock();
   const msg: IncomingMessage = {
@@ -367,6 +382,7 @@ export function prepareRestartTurn(
       ...(restartOf !== undefined ? { restartOf } : {}),
       ...(carried !== undefined ? { restartCarried: carried } : {}),
       ...(coordinator !== undefined ? { coordinator } : {}),
+      ...(operationTarget !== undefined ? { operationTarget } : {}),
     },
   };
 }

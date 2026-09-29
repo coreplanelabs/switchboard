@@ -12,6 +12,7 @@ import {
   abandonLostWorkspace,
   announceChildRoll,
   carriedCoordinatorTag,
+  carriedOperationTarget,
   carriedRunIdentity,
   carriedWorkspaceBinding,
   lostWorkspaceNote,
@@ -363,6 +364,29 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
 });
 
 describe("prepareRestartTurn: the request runs again as its own dispatch", () => {
+  it("retains the accepted operation target across a restart instead of parsing cited links again", () => {
+    const operationTarget = { repo: "acme/api", ref: "unit/repair" };
+    const stored = row({}, { operationTarget });
+    expect(carriedOperationTarget(stored)).toEqual(operationTarget);
+    const turn = prepareRestartTurn(
+      { clock: () => NOW },
+      {
+        request: { ...REQUEST, text: "fix the issue seen in https://github.com/acme/web/pull/7" },
+        pending: [],
+        clock: () => NOW,
+        operationTarget: carriedOperationTarget(stored),
+      },
+    );
+    expect(turn.opts.operationTarget).toEqual(operationTarget);
+    expect(carriedOperationTarget(row())).toBeUndefined();
+    expect(() => carriedOperationTarget(row({}, { operationTarget: { repo: "not-a-slug" } }))).toThrow(
+      "invalid operation target",
+    );
+    expect(() => carriedOperationTarget(row({}, { operationTarget: { repo: "acme/api", ref: "../other" } }))).toThrow(
+      "invalid operation target",
+    );
+  });
+
   it("carries the coordinator tag the interrupted run had, so a ship child restarted from its request keeps its unit branch as its own push target and the plan's base as its pull request's base (run-history item 48a)", () => {
     const coordinator = { parentInstanceId: "plan-p", idempotencyKey: "plan-p:u1/0/coding", base: "main" };
     const turn = prepareRestartTurn(

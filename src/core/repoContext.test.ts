@@ -56,6 +56,363 @@ describe("currentPrHeadSha — the review post transition guard", () => {
   });
 });
 
+describe("resolveRepoContext: accepted operation authority", () => {
+  it("a contextual foreign PR cannot replace the operator's addressed repository", () => {
+    expect(
+      explicitRepoOf("In acme/switchboard: investigate the defect illustrated by https://github.com/acme/web/pull/7"),
+    ).toBe("acme/switchboard");
+    expect(explicitRepoOf("Check the same defect as https://github.com/acme/web/pull/7")).toBeUndefined();
+  });
+
+  it.each([true, false, "unreachable"] as const)(
+    "preserves an accepted repository and ref regardless of probe outcome %s",
+    async (answer) => {
+      const probe = vi.fn(async () => answer);
+      const { fn } = stubFetch();
+      const target = { repo: "acme/api", ref: "unit/repair" };
+      await expect(
+        resolveRepoContext(
+          msg("in acme/api: use https://github.com/acme/web/pull/7 and https://github.com/acme/web/tree/foreign"),
+          [{ role: "user", text: "in acme/web: prior work" }],
+          probe,
+          undefined,
+          undefined,
+          "acme/web",
+          false,
+          target,
+        ),
+      ).resolves.toEqual(target);
+      expect(probe).not.toHaveBeenCalled();
+      expect(fn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a foreign tree citation cannot supply a missing operation ref", async () => {
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(
+        msg("compare with https://github.com/acme/web/tree/foreign"),
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { repo: "acme/api" },
+      ),
+    ).resolves.toEqual({ repo: "acme/api" });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it.each(["`use branch:experimental`", "```\nbranch:experimental\n```"])(
+    "does not resolve a repository-only target's branch from the code example %s",
+    async (example) => {
+      const { fn } = stubFetch();
+      await expect(
+        resolveRepoContext(
+          msg(`fix this in acme/api; example: ${example}`),
+          [],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          {
+            repo: "acme/api",
+          },
+        ),
+      ).resolves.toEqual({ repo: "acme/api" });
+      expect(fn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a same-repository PR cited as context cannot become the accepted operation PR", async () => {
+    const { fn } = stubFetch({
+      body: { state: "open", head: { ref: "cited", sha: "a".repeat(40), repo: { full_name: "acme/api" } } },
+    });
+    const result = await resolveRepoContext(
+      msg("compare with https://github.com/acme/api/pull/7"),
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { repo: "acme/api", ref: "unit/repair" },
+    );
+    expect(result).toEqual({ repo: "acme/api", ref: "unit/repair" });
+    expect(result.refFromPr).toBeUndefined();
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("binds the verified head of an explicitly requested PR when only its repository was accepted", async () => {
+    stubFetch({
+      body: {
+        state: "open",
+        head: { ref: "fix/signup", sha: "a".repeat(40), repo: { full_name: "acme/api" } },
+        base: { ref: "main" },
+      },
+    });
+    await expect(
+      resolveRepoContext(
+        msg("fix https://github.com/acme/api/pull/7"),
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { repo: "acme/api" },
+      ),
+    ).resolves.toEqual({
+      repo: "acme/api",
+      ref: "fix/signup",
+      refFromPr: true,
+      pr: 7,
+      prFromMessage: true,
+      headSha: "a".repeat(40),
+      baseRef: "main",
+    });
+  });
+
+  it("binds an explicitly requested bare PR through an accepted repository-only target", async () => {
+    stubFetch({
+      body: {
+        state: "open",
+        head: { ref: "fix/signup", sha: "a".repeat(40), repo: { full_name: "acme/api" } },
+        base: { ref: "main" },
+      },
+    });
+    await expect(
+      resolveRepoContext(
+        msg("agent:coding in acme/api: fix PR #7"),
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { repo: "acme/api" },
+      ),
+    ).resolves.toMatchObject({
+      repo: "acme/api",
+      ref: "fix/signup",
+      refFromPr: true,
+      pr: 7,
+      prFromMessage: true,
+      headSha: "a".repeat(40),
+      baseRef: "main",
+    });
+  });
+
+  it("keeps the verified PR head when its branch matches the accepted ref", async () => {
+    stubFetch({
+      body: {
+        state: "open",
+        head: { ref: "fix/signup", sha: "a".repeat(40), repo: { full_name: "acme/api" } },
+        base: { ref: "main" },
+      },
+    });
+    await expect(
+      resolveRepoContext(
+        msg("fix https://github.com/acme/api/pull/7"),
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { repo: "acme/api", ref: "fix/signup" },
+      ),
+    ).resolves.toEqual({
+      repo: "acme/api",
+      ref: "fix/signup",
+      pr: 7,
+      prFromMessage: true,
+      headSha: "a".repeat(40),
+      baseRef: "main",
+    });
+  });
+
+  it.each([
+    "fix https://github.com/acme/api/pull/7 and https://github.com/acme/api/pull/8",
+    "fix PR #7 and PR #8 in acme/api",
+    "fix https://github.com/acme/api/pull/7 and PR #8",
+  ])("refuses conflicting same-repository PR targets before fetching: %s", async (text) => {
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], undefined, undefined, undefined, undefined, false, { repo: "acme/api" }),
+    ).resolves.toEqual({ prConflict: { target: "acme/api#7", cited: "acme/api#8" } });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("keeps a same-repository citation as evidence beside a repository-only target", async () => {
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(
+        msg("compare with https://github.com/acme/api/pull/7"),
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { repo: "acme/api" },
+      ),
+    ).resolves.toEqual({ repo: "acme/api" });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it.each(["as context", "for context"])(
+    "keeps a routed bare PR marked %s as evidence beside a repository-only target",
+    async (qualifier) => {
+      const { fn } = stubFetch();
+      await expect(
+        resolveRepoContext(
+          msg(`in acme/api: PR #7 ${qualifier}`),
+          [],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { repo: "acme/api" },
+        ),
+      ).resolves.toEqual({ repo: "acme/api" });
+      expect(fn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a cited PR cannot set the base of a different accepted coding branch", async () => {
+    stubFetch({
+      body: {
+        state: "open",
+        head: { ref: "cited", sha: "a".repeat(40), repo: { full_name: "acme/api" } },
+        base: { ref: "release" },
+      },
+    });
+    const context = await resolveRepoContext(
+      msg("use https://github.com/acme/api/pull/7 as an example"),
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { repo: "acme/api", ref: "unit/repair" },
+    );
+    expect(context).toMatchObject({ repo: "acme/api", ref: "unit/repair" });
+    expect(context).not.toHaveProperty("pr");
+    expect(context.baseRef).toBeUndefined();
+  });
+
+  it("a requested PR on another branch cannot become the accepted operation PR", async () => {
+    stubFetch({
+      body: {
+        state: "open",
+        head: { ref: "cited", sha: "a".repeat(40), repo: { full_name: "acme/api" } },
+        base: { ref: "release" },
+      },
+    });
+    const context = await resolveRepoContext(
+      msg("fix https://github.com/acme/api/pull/7"),
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { repo: "acme/api", ref: "unit/repair" },
+    );
+    expect(context).toEqual({ repo: "acme/api", ref: "unit/repair" });
+  });
+
+  it("a foreign citation leaves the thread's own pull request available", async () => {
+    stubFetch({ body: { state: "open", head: { ref: "own", sha: "a".repeat(40), repo: { full_name: "acme/api" } } } });
+    await expect(
+      resolveRepoContext(
+        msg("copy https://github.com/acme/web/pull/7"),
+        [],
+        undefined,
+        undefined,
+        { pr: { repo: "acme/api", number: 9 } },
+        undefined,
+        false,
+        { repo: "acme/api" },
+      ),
+    ).resolves.toMatchObject({ repo: "acme/api", ref: "own", pr: 9, prFromRecord: true });
+  });
+
+  it("an explicit same-repository PR target survives foreign and local contextual evidence", async () => {
+    stubFetch({
+      body: { state: "open", head: { ref: "unit/repair", sha: "a".repeat(40), repo: { full_name: "acme/api" } } },
+    });
+    const result = await resolveRepoContext(
+      msg("in acme/api: PR #9; compare https://github.com/acme/web/pull/7"),
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { repo: "acme/api", ref: "unit/repair" },
+    );
+    expect(result).toMatchObject({ repo: "acme/api", ref: "unit/repair", pr: 9 });
+    stubFetch({
+      body: { state: "open", head: { ref: "unit/repair", sha: "a".repeat(40), repo: { full_name: "acme/api" } } },
+    });
+    await expect(
+      resolveRepoContext(
+        msg("in acme/api: PR #9; compare https://github.com/acme/api/pull/7"),
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { repo: "acme/api" },
+      ),
+    ).resolves.toMatchObject({ repo: "acme/api", ref: "unit/repair", pr: 9 });
+  });
+
+  it("a thread PR on another branch cannot pin the accepted operation to its head", async () => {
+    stubFetch({
+      body: { state: "open", head: { ref: "other", sha: "a".repeat(40), repo: { full_name: "acme/api" } } },
+    });
+    const context = await resolveRepoContext(
+      msg("continue"),
+      [],
+      undefined,
+      undefined,
+      { pr: { repo: "acme/api", number: 9 } },
+      undefined,
+      false,
+      { repo: "acme/api", ref: "unit/repair" },
+    );
+    expect(context).toEqual({ repo: "acme/api", ref: "unit/repair" });
+    expect(context.headSha).toBeUndefined();
+  });
+
+  it("invalid operation authority fails rather than falling through to a citation", async () => {
+    const { fn } = stubFetch();
+    for (const target of [{ repo: "not-a-slug" }, { repo: "acme/api", ref: "../other" }]) {
+      await expect(
+        resolveRepoContext(
+          msg("https://github.com/acme/web/pull/7"),
+          [],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          target,
+        ),
+      ).rejects.toThrow("invalid operation target");
+    }
+    expect(fn).not.toHaveBeenCalled();
+  });
+});
+
 describe("resolveRepoContext: explicit signals in the current message", () => {
   it("a review pairs a bare PR number with a vetted repository target, without changing other agents' rule", async () => {
     const probe = vi.fn(async () => true);
