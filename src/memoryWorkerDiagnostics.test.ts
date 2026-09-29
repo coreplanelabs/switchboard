@@ -54,6 +54,51 @@ describe("memory Worker diagnostics", () => {
     expect(result.stdout).toContain("green diagnostic fixture");
   });
 
+  it("records completed and pending operations when a case times out", () => {
+    const dir = fixtureDir("operations");
+    const artifact = path.join(dir, "memory-test-diagnostics.json");
+    writeFileSync(
+      path.join(dir, "setup.ts"),
+      `import { installMemoryTestDiagnostics } from ${JSON.stringify(setupPath)};\ninstallMemoryTestDiagnostics();\n`,
+    );
+    const result = runFixture(
+      dir,
+      `import { defineConfig } from "vitest/config";\nimport { MemoryDiagnosticsReporter } from ${JSON.stringify(reporterPath)};\nexport default defineConfig({ test: { include: ["fixture.test.ts"], setupFiles: ["./setup.ts"], reporters: ["default", new MemoryDiagnosticsReporter({ outputFile: ${JSON.stringify(artifact)} })] } });\n`,
+      `import { it } from "vitest";\nimport { recordMemoryTestOperation } from ${JSON.stringify(setupPath)};\nit("stalled route", async () => { await recordMemoryTestOperation("POST /ready", async () => 200); await recordMemoryTestOperation("POST /stalled", () => new Promise(() => {})); }, 30);\n`,
+    );
+
+    expect(result.status).not.toBe(0);
+    const report = JSON.parse(readFileSync(artifact, "utf8")) as {
+      tests: Array<{ operations: Array<{ label: string; state: string; durationMs?: number }> }>;
+    };
+    expect(report.tests[0]?.operations).toEqual([
+      { label: "POST /ready", state: "passed", durationMs: expect.any(Number) },
+      { label: "POST /stalled", state: "pending" },
+    ]);
+    expect(result.stdout).toContain("POST /stalled pending");
+  });
+
+  it("keeps a request pending when its response body stalls", () => {
+    const dir = fixtureDir("response-body");
+    const artifact = path.join(dir, "memory-test-diagnostics.json");
+    writeFileSync(
+      path.join(dir, "setup.ts"),
+      `import { installMemoryTestDiagnostics } from ${JSON.stringify(setupPath)};\ninstallMemoryTestDiagnostics();\n`,
+    );
+    const result = runFixture(
+      dir,
+      `import { defineConfig } from "vitest/config";\nimport { MemoryDiagnosticsReporter } from ${JSON.stringify(reporterPath)};\nexport default defineConfig({ test: { include: ["fixture.test.ts"], setupFiles: ["./setup.ts"], reporters: ["default", new MemoryDiagnosticsReporter({ outputFile: ${JSON.stringify(artifact)} })] } });\n`,
+      `import { it } from "vitest";\nimport { recordMemoryTestRequest } from ${JSON.stringify(setupPath)};\nit("stalled response body", async () => { const response = new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("partial")); } })); await recordMemoryTestRequest("POST /stalled-body", async () => response, (res) => res.text()); }, 30);\n`,
+    );
+
+    expect(result.status).not.toBe(0);
+    const report = JSON.parse(readFileSync(artifact, "utf8")) as {
+      tests: Array<{ operations: Array<{ label: string; state: string }> }>;
+    };
+    expect(report.tests[0]?.operations).toEqual([{ label: "POST /stalled-body", state: "pending" }]);
+    expect(result.stdout).toContain("POST /stalled-body pending");
+  });
+
   it("fails and clears a timer left open by its owner", () => {
     const dir = fixtureDir("timer");
     writeFileSync(

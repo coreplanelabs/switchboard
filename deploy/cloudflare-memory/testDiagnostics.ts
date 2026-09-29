@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, type TestContext } from "vitest";
+import { systemClock } from "../../src/core/trace/clock.ts";
 import {
   assertNoPendingBackgroundTasks,
   backgroundTaskDiagnostics,
   beginBackgroundTaskDiagnostics,
   endBackgroundTaskDiagnostics,
 } from "./backgroundTasks.ts";
-import { MEMORY_DIAGNOSTICS_ANNOTATION, type MemoryTestAnnotation } from "./testDiagnosticsProtocol.ts";
+import {
+  MEMORY_DIAGNOSTICS_ANNOTATION,
+  type MemoryTestAnnotation,
+  type MemoryTestOperation,
+} from "./testDiagnosticsProtocol.ts";
 
 type TimerKind = "timeout" | "interval";
 type TimerHandler = (...args: unknown[]) => unknown;
@@ -24,6 +29,7 @@ interface RunningTest {
   name: string;
   trackTimers: boolean;
   timers: Map<ReturnType<typeof setTimeout>, PendingTimer>;
+  operations: MemoryTestOperation[];
 }
 interface TimerOriginals {
   setTimeout: typeof globalThis.setTimeout;
@@ -167,6 +173,40 @@ function poolWorker(): string {
   return `pool ${poolId ?? "unknown"} / worker ${workerId ?? "unknown"}`;
 }
 
+export async function recordMemoryTestOperation<T>(label: string, run: () => Promise<T>): Promise<T> {
+  const running = diagnosticGlobal()[RUNNING];
+  const operation: MemoryTestOperation = { label, state: "pending" };
+  running?.operations.push(operation);
+  const started = systemClock();
+  try {
+    const result = await run();
+    operation.state = "passed";
+    return result;
+  } catch (error) {
+    operation.state = "failed";
+    throw error;
+  } finally {
+    operation.durationMs = Math.max(0, systemClock() - started);
+  }
+}
+
+export function recordMemoryTestRequest(label: string, fetch: () => Promise<Response>): Promise<Response>;
+export function recordMemoryTestRequest<T>(
+  label: string,
+  fetch: () => Promise<Response>,
+  consume: (response: Response) => T | Promise<T>,
+): Promise<T>;
+export function recordMemoryTestRequest<T>(
+  label: string,
+  fetch: () => Promise<Response>,
+  consume?: (response: Response) => T | Promise<T>,
+): Promise<Response | T> {
+  return recordMemoryTestOperation(label, async () => {
+    const response = await fetch();
+    return consume ? consume(response) : response;
+  });
+}
+
 function pendingTimerLabels(running: RunningTest): string[] {
   running.trackTimers = false;
   return [...running.timers.values()].map((timer) => timer.label);
@@ -191,19 +231,20 @@ export function installMemoryTestDiagnostics(): void {
   installTimerTrap();
 
   beforeEach((context) => {
-    diagnosticGlobal()[RUNNING] = { name: testName(context), trackTimers: true, timers: new Map() };
+    diagnosticGlobal()[RUNNING] = { name: testName(context), trackTimers: true, timers: new Map(), operations: [] };
     beginBackgroundTaskDiagnostics();
   });
 
   afterEach((context) => {
     const root = diagnosticGlobal();
-    const running = root[RUNNING] ?? { name: testName(context), trackTimers: false, timers: new Map() };
+    const running = root[RUNNING] ?? { name: testName(context), trackTimers: false, timers: new Map(), operations: [] };
     const background = backgroundTaskDiagnostics();
     const timers = pendingTimerLabels(running);
     const annotation: MemoryTestAnnotation = {
       poolWorker: poolWorker(),
       ...background,
       pendingTimers: timers,
+      operations: running.operations.map((operation) => ({ ...operation })),
     };
 
     const problems: Error[] = [];

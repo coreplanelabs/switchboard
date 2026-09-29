@@ -1,4 +1,5 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
@@ -21,19 +22,24 @@ const storeKey = () => `runs:ledger-${Date.now()}-${n++}`;
 
 async function post(path: string, body: unknown, headers: Record<string, string> = AUTH) {
   const raw = typeof body === "string" ? body : JSON.stringify(body);
-  const res = await SELF.fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: { ...headers, "content-length": String(new TextEncoder().encode(raw).byteLength) },
-    body: raw,
-  });
-  const text = await res.text();
-  let data: Record<string, unknown> = {};
-  try {
-    data = JSON.parse(text);
-  } catch {
-    // non-JSON: leave {}
-  }
-  return { status: res.status, data };
+  return fetchMemoryTest(
+    `${BASE}${path}`,
+    {
+      method: "POST",
+      headers: { ...headers, "content-length": String(new TextEncoder().encode(raw).byteLength) },
+      body: raw,
+    },
+    async (res) => {
+      const text = await res.text();
+      let data: Record<string, unknown> = {};
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // non-JSON: leave {}
+      }
+      return { status: res.status, data };
+    },
+  );
 }
 
 const ZERO = { count: 0, durationMs: 0 };

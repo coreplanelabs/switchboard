@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
 
 // Feature: docs/reference/specs/delivery.md item 10 — the DeliveryDO: one
@@ -14,15 +14,16 @@ let n = 0;
 const repo = () => `acme/repo-${Date.now().toString(36)}-${n++}`;
 
 async function post(path: string, body: unknown, headers: Record<string, string> = AUTH) {
-  const res = await SELF.fetch(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
-  const text = await res.text();
-  let data: Record<string, unknown> = {};
-  try {
-    data = JSON.parse(text);
-  } catch {
-    // non-JSON: leave {}
-  }
-  return { status: res.status, data };
+  return fetchMemoryTest(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) }, async (res) => {
+    const text = await res.text();
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // non-JSON: leave {}
+    }
+    return { status: res.status, data };
+  });
 }
 
 const pr = (number: number, mergedAt: string, over: Record<string, unknown> = {}) => ({
@@ -70,12 +71,12 @@ const snapshot = (r: string, over: Record<string, unknown> = {}) => ({
 
 describe("DeliveryDO routes", () => {
   it("advertises the feature; refuses unauthenticated and non-POST", async () => {
-    const health = await SELF.fetch(`${BASE}/healthz`);
-    expect(((await health.json()) as { features: string[] }).features).toContain("delivery");
+    const health = await fetchMemoryTest(`${BASE}/healthz`, undefined, (res) => res.json());
+    expect((health as { features: string[] }).features).toContain("delivery");
     expect((await post("/delivery/get", { repo: "acme/api" }, { "content-type": "application/json" })).status).toBe(
       401,
     );
-    expect((await SELF.fetch(`${BASE}/delivery/get`, { method: "GET" })).status).toBe(405);
+    expect((await fetchMemoryTest(`${BASE}/delivery/get`, { method: "GET" })).status).toBe(405);
   });
 
   it("get of an unknown repository is null; put stores the snapshot and get returns it verbatim, pull requests in number order; a later put replaces it whole", async () => {

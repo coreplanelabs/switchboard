@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
 
 // Feature: docs/reference/specs/costs.md item 6 — the CostsSnapshotDO: the
@@ -16,15 +16,16 @@ const SEP_17 = iso(2026, 9, 17);
 const AUTH = { authorization: "Bearer test-token", "content-type": "application/json" };
 
 async function post(path: string, body: unknown, headers: Record<string, string> = AUTH) {
-  const res = await SELF.fetch(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
-  const text = await res.text();
-  let data: Record<string, unknown> = {};
-  try {
-    data = JSON.parse(text);
-  } catch {
-    // non-JSON: leave {}
-  }
-  return { status: res.status, data };
+  return fetchMemoryTest(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) }, async (res) => {
+    const text = await res.text();
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // non-JSON: leave {}
+    }
+    return { status: res.status, data };
+  });
 }
 
 const snapshot = (over: Record<string, unknown> = {}) => ({
@@ -90,10 +91,10 @@ const snapshot = (over: Record<string, unknown> = {}) => ({
 // serial block: each put replaces what the previous one stored.
 describe.sequential("CostsSnapshotDO routes", () => {
   it("advertises the feature; refuses unauthenticated and non-POST", async () => {
-    const health = await SELF.fetch(`${BASE}/healthz`);
-    expect(((await health.json()) as { features: string[] }).features).toContain("costs");
+    const health = await fetchMemoryTest(`${BASE}/healthz`, undefined, (res) => res.json());
+    expect((health as { features: string[] }).features).toContain("costs");
     expect((await post("/costs/snapshot/get", {}, { "content-type": "application/json" })).status).toBe(401);
-    expect((await SELF.fetch(`${BASE}/costs/snapshot/get`, { method: "GET" })).status).toBe(405);
+    expect((await fetchMemoryTest(`${BASE}/costs/snapshot/get`, { method: "GET" })).status).toBe(405);
   });
 
   it("put stores the snapshot and get returns it verbatim — LLM rows, per-biller invoices and run usage included — and a later put replaces it whole", async () => {

@@ -19,19 +19,16 @@ export default defineConfig({
   ],
   test: {
     reporters: ["default", new MemoryDiagnosticsReporter()],
-    // Fail a request that really hangs under its own Vitest case before
-    // workerd's later hang detector can cancel a neighbouring case. Keep
-    // console writes out of Vitest's cross-DO RPC queue so teardown cannot
-    // strand an `onUserConsoleLog` call after the cases have settled.
-    testTimeout: 5_000,
+    // A new SQLite Durable Object can take seconds to start on Linux, and a
+    // case may make several requests. Leave room for that cold start; the
+    // diagnostic artifact names completed and pending requests if a case
+    // actually stalls. Console interception remains off so cross-DO logs
+    // cannot strand a teardown RPC.
+    testTimeout: 15_000,
     disableConsoleIntercept: true,
     setupFiles: ["./testSetup.ts"],
-    // One workerd runs every file: in parallel, the shrink test's 500-row
-    // delete loop (~17 s of DO work) queues the other files' requests past
-    // vitest's 5 s default and fails tests the change never touched. Serial
-    // files trade some wall time (23 s measured serial, against a 26 s wall
-    // holding 63 s of contended work) for a deterministic suite — contention,
-    // not correctness, was the only failure shape.
+    // The shrink case performs 500 SQLite deletes. Concurrent files can queue
+    // unrelated Durable Object requests behind it, so keep files serial.
     fileParallelism: false,
     include: [
       "backgroundTasks.test.ts",

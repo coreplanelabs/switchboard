@@ -1,4 +1,5 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
+import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
 import type { MemoryDO } from "./worker.ts";
 
@@ -14,15 +15,16 @@ let n = 0;
 const scope = () => `org:test-${Date.now()}-${n++}`;
 
 async function post(path: string, body: unknown, headers: Record<string, string> = AUTH) {
-  const res = await SELF.fetch(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
-  const text = await res.text();
-  let data: Record<string, unknown> = {};
-  try {
-    data = JSON.parse(text);
-  } catch {
-    // non-JSON: leave {}
-  }
-  return { status: res.status, data, text };
+  return fetchMemoryTest(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) }, async (res) => {
+    const text = await res.text();
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // non-JSON: leave {}
+    }
+    return { status: res.status, data, text };
+  });
 }
 
 const cand = (text: string, over: Record<string, unknown> = {}) => ({
@@ -35,12 +37,15 @@ const cand = (text: string, over: Record<string, unknown> = {}) => ({
 
 describe("auth + routing", () => {
   it("GET /healthz is open", async () => {
-    const res = await SELF.fetch(`${BASE}/healthz`);
-    expect(res.status).toBe(200);
+    const health = await fetchMemoryTest(`${BASE}/healthz`, undefined, async (res) => ({
+      status: res.status,
+      data: await res.json(),
+    }));
+    expect(health.status).toBe(200);
     // `features` lets the bot's boot probe see which routes this deploy carries;
     // `build` names the commit the deploy injected (docs/reference/specs/execution.md item 13) —
     // this bundle carries no `--define`, so it must say `unknown` rather than break.
-    expect(await res.json()).toEqual({
+    expect(health.data).toEqual({
       ok: true,
       build: { commit: "unknown" },
       features: ["memory", "schedules", "runs", "config", "delivery", "costs", "plane"],
@@ -56,17 +61,17 @@ describe("auth + routing", () => {
 
   it("unknown routes and non-POST methods are 404/405, even authenticated", async () => {
     expect((await post("/nope", {})).status).toBe(404);
-    const res = await SELF.fetch(`${BASE}/retrieve`, { headers: AUTH });
+    const res = await fetchMemoryTest(`${BASE}/retrieve`, { headers: AUTH });
     expect(res.status).toBe(405);
   });
 
   it("fences body size before parsing: oversized → 413, undeclared → 411, even authenticated", async () => {
     const big = JSON.stringify({ scopeKey: "org:a", records: [cand("x".repeat(600 * 1024))] });
-    const res = await SELF.fetch(`${BASE}/write`, { method: "POST", headers: AUTH, body: big });
+    const res = await fetchMemoryTest(`${BASE}/write`, { method: "POST", headers: AUTH, body: big });
     expect(res.status).toBe(413);
     // A bodiless POST declares no Content-Length in this runtime → undeclared
     // → 411 Length Required at the fence, before the parser is ever reached.
-    const empty = await SELF.fetch(`${BASE}/retrieve`, { method: "POST", headers: AUTH });
+    const empty = await fetchMemoryTest(`${BASE}/retrieve`, { method: "POST", headers: AUTH });
     expect(empty.status).toBe(411);
   });
 
@@ -81,7 +86,7 @@ describe("auth + routing", () => {
         c.close();
       },
     });
-    const res = await SELF.fetch(`${BASE}/retrieve`, {
+    const res = await fetchMemoryTest(`${BASE}/retrieve`, {
       method: "POST",
       headers: AUTH,
       body: stream,
