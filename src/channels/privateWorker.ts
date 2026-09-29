@@ -1,5 +1,9 @@
 import { INSTANCE_ID_PATTERN } from "../core/coordinator/contract.js";
-import { PRIVATE_WORKER_EVENT_MAX_CHARS, type PrivateWorkerLog } from "../core/privateWorkerLog.js";
+import {
+  PRIVATE_WORKER_EVENT_MAX_CHARS,
+  PRIVATE_WORKER_REPLY_MAX_CHARS,
+  type PrivateWorkerLog,
+} from "../core/privateWorkerLog.js";
 import type { ChannelIO, HistoryItem, StatusHandle, StatusUpdate } from "../core/types.js";
 
 export interface PrivateWorkerIdentity {
@@ -8,6 +12,24 @@ export interface PrivateWorkerIdentity {
 }
 
 const UNIT_ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+const SHORTENED_COPY = "\n\n[Private history copy shortened; original text may be longer.]";
+
+function boundedHistoryCopy<T extends { text: string }>(event: T, limit: number): T {
+  // The state Worker adds a monotonic `seq` before storing the row. Leave
+  // space for its serialized field so a read can validate the stored event.
+  const maxInputChars = limit - 64;
+  if (JSON.stringify(event).length <= maxInputChars) return event;
+  const characters = Array.from(event.text);
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidate = { ...event, text: characters.slice(0, mid).join("") + SHORTENED_COPY };
+    if (JSON.stringify(candidate).length <= maxInputChars) low = mid;
+    else high = mid - 1;
+  }
+  return { ...event, text: characters.slice(0, low).join("") + SHORTENED_COPY };
+}
 
 /** Stable across bot generations; never a Slack thread key. */
 export function privateWorkerThreadKey(identity: PrivateWorkerIdentity): string {
@@ -29,26 +51,10 @@ export async function appendPrivateWorkerInput(
   identity: PrivateWorkerIdentity,
   input: { id: string; sender: string; text: string; at: number },
 ): Promise<void> {
-  const event = { kind: "input" as const, ...input };
-  // The state Worker adds a monotonic `seq` before storing the row. Leave
-  // space for its serialized field so a read can validate the stored event.
-  const maxInputChars = PRIVATE_WORKER_EVENT_MAX_CHARS - 64;
-  if (JSON.stringify(event).length <= maxInputChars) {
-    await log.append(privateWorkerThreadKey(identity), event);
-    return;
-  }
-  const suffix = "\n\n[Private history copy shortened; original input may be longer.]";
-  const characters = Array.from(input.text);
-  let low = 0;
-  let high = characters.length;
-  while (low < high) {
-    const mid = Math.ceil((low + high) / 2);
-    const candidate = { ...event, text: characters.slice(0, mid).join("") + suffix };
-    if (JSON.stringify(candidate).length <= maxInputChars) low = mid;
-    else high = mid - 1;
-  }
-  const bounded = { ...event, text: characters.slice(0, low).join("") + suffix };
-  await log.append(privateWorkerThreadKey(identity), bounded);
+  await log.append(
+    privateWorkerThreadKey(identity),
+    boundedHistoryCopy({ kind: "input" as const, ...input }, PRIVATE_WORKER_EVENT_MAX_CHARS),
+  );
 }
 
 /** A coordinator settlement is retried under the same key until its report is durable. */
@@ -57,7 +63,10 @@ export async function appendPrivateWorkerReply(
   identity: PrivateWorkerIdentity,
   reply: { id: string; text: string; at: number },
 ): Promise<void> {
-  await log.append(privateWorkerThreadKey(identity), { kind: "reply", ...reply });
+  await log.append(
+    privateWorkerThreadKey(identity),
+    boundedHistoryCopy({ kind: "reply" as const, ...reply }, PRIVATE_WORKER_REPLY_MAX_CHARS),
+  );
 }
 
 /** An internal channel handle. It has no Slack client, openThread or upload method. */
@@ -78,7 +87,13 @@ export function privateWorkerIO(
   return {
     history,
     reply: async (text) => {
-      await log.append(threadKey, { kind: "reply", text, at: opts.clock(), ...(runId !== undefined ? { runId } : {}) });
+      await log.append(
+        threadKey,
+        boundedHistoryCopy(
+          { kind: "reply" as const, text, at: opts.clock(), ...(runId !== undefined ? { runId } : {}) },
+          PRIVATE_WORKER_REPLY_MAX_CHARS,
+        ),
+      );
     },
     status: async (initial): Promise<StatusHandle> => {
       const opened = await log.append(threadKey, { kind: "status", phase: "start", frame: initial, at: opts.clock() });

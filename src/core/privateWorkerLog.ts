@@ -10,15 +10,26 @@ export type PrivateWorkerEventInput =
 export type PrivateWorkerEvent = PrivateWorkerEventInput & { seq: number; statusSeq?: number };
 
 export const PRIVATE_WORKER_EVENT_MAX_CHARS = 32_000;
+// A coordinator unit report can contain 20,000 characters. JSON can escape
+// each control character as six characters, so its private copy needs room.
+export const PRIVATE_WORKER_REPLY_MAX_CHARS = 128_000;
 
 const frame = (value: unknown): boolean =>
   typeof value === "object" && value !== null && typeof (value as { title?: unknown }).title === "string";
 
 /** Bound stored worker prose and reject malformed rows at the persistence door. */
 export function isPrivateWorkerEventInput(value: unknown): value is PrivateWorkerEventInput {
-  if (typeof value !== "object" || value === null || JSON.stringify(value).length > PRIVATE_WORKER_EVENT_MAX_CHARS)
-    return false;
+  if (typeof value !== "object" || value === null) return false;
   const row = value as Record<string, unknown>;
+  const limit = row.kind === "reply" ? PRIVATE_WORKER_REPLY_MAX_CHARS : PRIVATE_WORKER_EVENT_MAX_CHARS;
+  // Admission must leave room for the sequence fields the state Worker adds;
+  // otherwise it could write a row that its own read path rejects.
+  const storedShape = {
+    ...row,
+    seq: Number.MAX_SAFE_INTEGER,
+    ...(row.kind === "status" && row.phase === "start" ? { statusSeq: Number.MAX_SAFE_INTEGER } : {}),
+  };
+  if (JSON.stringify(storedShape).length > limit) return false;
   if (typeof row.at !== "number" || !Number.isFinite(row.at)) return false;
   if (row.kind === "input")
     return (

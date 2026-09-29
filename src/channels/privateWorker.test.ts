@@ -6,6 +6,7 @@ import {
 } from "../core/privateWorkerLog.js";
 import {
   appendPrivateWorkerInput,
+  appendPrivateWorkerReply,
   parsePrivateWorkerThreadKey,
   privateWorkerIO,
   privateWorkerThreadKey,
@@ -60,6 +61,19 @@ describe("private worker IO — a task thread with no Slack delivery", () => {
     const stored = events[0]?.kind === "input" ? events[0].text : "";
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(stored)).toBe(false);
     expect(await privateWorkerIO(log, task, { currentInputId: "long-1", clock: now }).history()).toEqual([]);
+  });
+
+  it("bounds an oversized private reply while preserving a full valid unit report", async () => {
+    const log = new InMemoryPrivateWorkerLog();
+    const report = "\u0000".repeat(20_000);
+    await appendPrivateWorkerReply(log, task, { id: "unit-end", text: report, at: 10 });
+    await appendPrivateWorkerReply(log, task, { id: "unit-end", text: report, at: 11 });
+    await privateWorkerIO(log, task, { clock: now }).reply('"\\\n🙂'.repeat(30_000));
+    const events = await log.list(threadKey);
+    expect(events).toHaveLength(2);
+    expect(events.every(isPrivateWorkerEvent)).toBe(true);
+    expect(events[0]?.kind === "reply" ? events[0].text : "").toBe(report);
+    expect(events[1]?.kind === "reply" ? events[1].text : "").toContain("[Private history copy shortened;");
   });
 
   it("writes ordered status frames and waits for updates before closing the status", async () => {

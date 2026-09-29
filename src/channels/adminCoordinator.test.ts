@@ -3452,12 +3452,13 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(offline.threadsAsked).toEqual([]);
   });
 
-  it("retries a private unit report after a transient log failure without losing or duplicating it", async () => {
+  it("retries a long private unit report after a transient log failure without losing or duplicating it", async () => {
     const backing = new InMemoryPrivateWorkerLog();
     let fail = true;
     const log: PrivateWorkerLog = {
       list: (threadKey) => backing.list(threadKey),
       append: async (threadKey, event) => {
+        if (!isPrivateWorkerEventInput(event)) throw new Error("private log event over cap");
         if (event.kind === "reply" && fail) {
           fail = false;
           throw new Error("temporary log failure");
@@ -3484,11 +3485,12 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       unitRow("U11"),
     ]);
     await hostParent(h);
+    const report = "\u0000".repeat(20_000);
     const body = {
       parentInstanceId: PLAN_INSTANCE.id,
       unit: "U10",
       deliveryId: "U10/end",
-      ending: { kind: "failed", report: "The fix needs another pass", threadReport: "" },
+      ending: { kind: "failed", report, threadReport: "" },
     };
     expect(await call(h, "unit-end", body)).toMatchObject({
       status: 503,
@@ -3497,7 +3499,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(await call(h, "unit-end", body)).toMatchObject({ status: 200, body: { ok: true, told: true } });
     expect(await call(h, "unit-end", body)).toMatchObject({ status: 200, body: { ok: true, told: true } });
     expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
-      { kind: "reply", id: "U10/end", text: "The fix needs another pass" },
+      { kind: "reply", id: "U10/end", text: report },
     ]);
   });
 
