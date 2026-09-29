@@ -93,7 +93,7 @@
     "src/core/authz/channelDirectory.ts": "643ab914d357fdb48e2ee14633ea25748d7932706aa1b03310487619f420992a",
     "src/core/authz/grants.ts": "6d1ccf1b4acd8bb1e8d1dbece380f44e9bd93af96710d834f33dee0e5a1b56e6",
     "src/core/authz/index.ts": "636f59be1d04e3e8bb31e4f8aa9543f4bd253edc012a7f0c727643aa59f93638",
-    "src/core/authz/policy.ts": "9b682b6caa8f61c56c1449c0a309b216ede90ff2b654e7a86be755986014e632",
+    "src/core/authz/policy.ts": "c7abdb5500ae5fcb5f7baca6b2cb05d346519863f97d91584d3305a0036fc2a4",
     "src/core/authz/predicate.ts": "a700d6b197143e9a1c6729081550b00a474befacfb9faf3dd8105c1ae8edc439",
     "src/core/authz/resource.ts": "8bf899b1c2f8e8db5650042b2af0f0a2359871c12685fd7dc7eaec6e1769d931",
     "src/core/authz/types.ts": "58212afa0722cf062de5c2ef26fd356e9c3c707134e0718f0676159e680b8151",

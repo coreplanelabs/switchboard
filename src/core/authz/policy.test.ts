@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { authorize, evaluateRule } from "./authorize.js";
+import { matchesPredicate, predicateFor } from "./predicate.js";
 import { POLICY, grantPlaceholders, resolveGrant, validatePolicy } from "./policy.js";
 import { pointingActor } from "./pointingActor.js";
 import { ACTORS, CHANNELS, REPOS, run, scope } from "./testing.js";
@@ -136,6 +137,17 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
     deny: [
       [A.schedule, foreignPrivRun],
       [A.reader, run({ channel: "pub1", userId: "slack:UERIN" })],
+    ],
+  },
+  "main-task:stop run [is-self] kinds=user|agent": {
+    allow: [
+      [A.noGrants, run({ channel: "dm", userId: A.noGrants.id })],
+      [{ ...A.noGrants, kind: "agent", onBehalfOf: A.noGrants }, run({ channel: "dm", userId: A.noGrants.id })],
+    ],
+    deny: [
+      [A.noGrants, run({ channel: "dm", userId: A.admin.id })],
+      [A.admin, foreignPrivRun],
+      [{ ...A.noGrants, kind: "service" }, run({ channel: "dm", userId: A.noGrants.id })],
     ],
   },
   "runs:read command [has-grant(runs:read)]": {
@@ -794,5 +806,18 @@ describe("grant placeholders", () => {
     expect(resolveGrant("agent:run:{name}", { name: "coding" })).toBe("agent:run:coding");
     expect(resolveGrant("agent:run:{name}", {})).toBeUndefined();
     expect(resolveGrant("runs:read", {})).toBe("runs:read");
+  });
+});
+
+describe("main task stop authorization", () => {
+  it("admits only the requester without an operator grant", () => {
+    const own = run({ channel: "dm", userId: A.noGrants.id });
+    const foreign = run({ channel: "dm", userId: A.admin.id });
+    expect(authorize(A.noGrants, "main-task:stop", own).allow).toBe(true);
+    expect(authorize(A.noGrants, "main-task:stop", foreign).allow).toBe(false);
+    expect(authorize({ ...A.noGrants, kind: "service" }, "main-task:stop", own).allow).toBe(false);
+    const visibleTo = predicateFor(A.noGrants, "main-task:stop", "run");
+    expect(matchesPredicate(visibleTo, own)).toBe(true);
+    expect(matchesPredicate(visibleTo, foreign)).toBe(false);
   });
 });
