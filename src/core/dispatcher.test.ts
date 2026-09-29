@@ -10732,6 +10732,141 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     return { io, replies };
   }
 
+  it("a hard stop relayed before the registry row exists aborts setup and closes the reservation", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const message = msg("agent:coding fix it", "slack:UADMIN");
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: message.threadKey,
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      phase: "attaching",
+      meta: {
+        channelId: message.channelId,
+        userId: message.userId,
+        threadKey: message.threadKey,
+        agent: "coding",
+        model: "anthropic/coding-model",
+        request: durableInboxMessage(message, message.text, 5_000),
+      },
+      card: { channel: "CX", ts: "1.2" },
+      system: "",
+      tools: [],
+    });
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const provider = capturingProvider("must not run");
+    const { deps, registry, writer } = wired(provider, { ledger, yaml: REMOTE_YAML_FIXTURE });
+    const reserve = deps.runLedger.reserve;
+    deps.runLedger.reserve = async (req) => {
+      const result = await reserve(req);
+      if (result.kind === "tracked") {
+        await ledger.requestStop(req.runId, "hard");
+        req.onStop?.("hard"); // the heartbeat may relay before registerRun returns
+      }
+      return result;
+    };
+    vi.mocked(makeExecutor).mockImplementationOnce(async (_opts, ctx) => {
+      expect(ctx.stopSignal?.aborted).toBe(true);
+      throw classifyError(new ExecInfraError("resident /attach: stopped before setup", "aborted"), {
+        kind: "transport",
+      });
+    });
+
+    const { io, replies } = ioWithCard();
+    const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
+    const outcome = await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, inbox: [] } });
+    await writer.settled();
+    expect(outcome.status).toBe("stopped");
+    expect(replies).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(registry.listActive()).toEqual([]);
+    expect(ledger.live.size).toBe(0);
+  });
+
+  it.each(["credential cleanup", "seed request", "seed refresh"])(
+    "a hard stop during cold %s aborts the request and closes the reservation without starting the model",
+    async (stage) => {
+      vi.stubEnv("SANDBOX_TOKEN", "tok");
+      vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const provider = capturingProvider("must not run");
+      const { deps, registry, ledger, writer } = wired(provider, { yaml: RESIDENT_YAML_FIXTURE });
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+      let reached!: () => void;
+      const inFlight = new Promise<void>((resolve) => (reached = resolve));
+      const calls: string[] = [];
+      let stoppedSignal: AbortSignal | null | undefined;
+      let rejectHeld: ((error: Error) => void) | undefined;
+      vi.stubGlobal("fetch", async (url: RequestInfo | URL, init?: RequestInit) => {
+        const path = new URL(String(url)).pathname;
+        calls.push(path);
+        const hold =
+          (stage === "credential cleanup" && path === "/exec") ||
+          (stage === "seed request" && path === "/seed") ||
+          (stage === "seed refresh" && path === "/status" && calls.length > 1);
+        if (hold) {
+          stoppedSignal = init?.signal;
+          reached();
+          return new Promise<Response>((_resolve, reject) => {
+            rejectHeld = reject;
+            if (init?.signal?.aborted) reject(init.signal.reason);
+            else init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+          });
+        }
+        if (path === "/status")
+          return Response.json({
+            state: "degraded",
+            reason: "disk-pressure: no room to attach",
+            snapshot: {
+              ref: "main",
+              sha: "a".repeat(40),
+              lockfileHash: "lock",
+              createdAt: "t",
+              mirrorBackupId: "11111111-1111-1111-1111-111111111111",
+              checkoutBackupId: "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b",
+            },
+          });
+        if (path === "/exec") return Response.json({ exitCode: 0 });
+        if (path === "/seed") return Response.json({ seeded: false, reason: "seed-missing" });
+        throw new Error(`unexpected fetch: ${path}`);
+      });
+      const { io, replies, statuses } = fakeIO();
+      const running = dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+      try {
+        await inFlight;
+        expect(ledger.live.get("run-l")?.phase).toBe("attaching");
+        await ledger.requestStop("run-l", "hard");
+        expect(registry.requestStop("run-l", "tok", "hard")).toEqual({ ok: true, mode: "hard" });
+        expect(stoppedSignal?.aborted).toBe(true);
+        expect((await running).status).toBe("stopped");
+        await writer.settled();
+        expect(replies).toEqual([]);
+        expect(provider.requests).toEqual([]);
+        expect(JSON.stringify(statuses.at(-1))).toContain("stopped before the run started");
+        expect(registry.listActive()).toEqual([]);
+        expect(ledger.live.size).toBe(0);
+        expect(calls).toEqual(
+          stage === "credential cleanup"
+            ? ["/status", "/exec"]
+            : stage === "seed request"
+              ? ["/status", "/exec", "/seed"]
+              : ["/status", "/exec", "/seed", "/status"],
+        );
+      } finally {
+        rejectHeld?.(new Error("test cleanup"));
+        await running;
+        await writer.settled();
+        vi.unstubAllGlobals();
+        vi.unstubAllEnvs();
+        (await import("../execution/factory.js")).resetResidentProbeCache();
+      }
+    },
+  );
+
   it("claims the run once its prompt exists (system, tools, card, meta, seed), records each step before its tools, appends events, takes finishing before the reply and finishes through the ledger", async () => {
     const seen: {
       rowAtFirstCall?: ReturnType<InMemoryRunLedger["live"]["get"]>;

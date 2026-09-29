@@ -152,18 +152,18 @@ export function sandboxEmptyFailureMessage(route: string): string {
   return `sandbox worker ${route}: failure with an empty message (the Worker's failure shape with its text missing)`;
 }
 
-/** Resolve after `ms`, or reject with `ExecCapacityError` the moment `signal`
- *  fires — a hard stop must not sit out a fleet wait. */
-function waitForSlot(ms: number, waitedMs: number, signal?: AbortSignal): Promise<void> {
+function sandboxStopped(route: string): ExecInfraError {
+  return new ExecInfraError(`sandbox ${route}: the run was stopped`, "aborted");
+}
+
+/** A capacity or transport retry wait ends with the run's typed stop, never
+ *  a capacity refusal that setup could turn into another fallback. */
+function waitForRetry(ms: number, route: string, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const stopped = () =>
-      new ExecCapacityError(
-        `sandbox fleet busy — stopped waiting for a free per-thread sandbox after ${Math.round(waitedMs / 1000)}s: the run was stopped`,
-      );
-    if (signal?.aborted) return reject(stopped());
+    if (signal?.aborted) return reject(sandboxStopped(route));
     const onAbort = () => {
       clearTimeout(timer);
-      reject(stopped());
+      reject(sandboxStopped(route));
     };
     const timer = setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);
@@ -182,13 +182,13 @@ export class CloudflareSandboxExecutor implements Executor {
 
   /** The Worker reconnects by thread key, so scrub a reused sandbox before
    * seed, checkout, or any model-visible command can touch its old store. */
-  async prepareCredentialBoundary(): Promise<void> {
+  async prepareCredentialBoundary(opts?: { signal?: AbortSignal; span?: Span }): Promise<void> {
     const result = await this.call(
       "/exec",
       { command: legacySandboxCredentialScrub(SANDBOX_CREDENTIAL_FILE) },
+      opts?.signal,
       undefined,
-      undefined,
-      undefined,
+      opts?.span,
       true,
     );
     if (Number(result.exitCode ?? -1) !== 0)
@@ -258,8 +258,9 @@ export class CloudflareSandboxExecutor implements Executor {
     span?: Span,
     skipScrub = false,
   ): Promise<Record<string, unknown>> {
+    if (signal?.aborted) throw sandboxStopped(route);
     if (this.opts.scrubLegacyCredentials && !skipScrub) {
-      this.scrubbed ??= this.prepareCredentialBoundary();
+      this.scrubbed ??= this.prepareCredentialBoundary({ signal, span });
       await this.scrubbed;
     }
     const envs = await this.opts.resolveEnvs();
@@ -316,7 +317,7 @@ export class CloudflareSandboxExecutor implements Executor {
       }
       const delay = Math.min(plan.backoff[Math.min(attempt, plan.backoff.length - 1)], plan.budget - waited);
       attempt++;
-      await waitForSlot(delay, waited, signal);
+      await waitForRetry(delay, route, signal);
       waited += delay;
     }
   }
@@ -342,7 +343,8 @@ export class CloudflareSandboxExecutor implements Executor {
     let lastErr = "";
     let lastStatus = 0;
     for (const delay of delays) {
-      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      if (delay > 0) await waitForRetry(delay, route, signal);
+      if (signal?.aborted) throw sandboxStopped(route);
       let res: Response;
       let text: string;
       // The deadline covers the whole exchange: `/exec` answers HTTP 200 at

@@ -460,7 +460,8 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     ac.abort();
     const err = await outcome;
-    expect(err).toBeInstanceOf(ExecCapacityError);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect(err).toMatchObject({ reason: "aborted" });
     expect((err as Error).message).toMatch(/stopped/);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(calls).toHaveLength(1);
@@ -1003,6 +1004,46 @@ describe("CloudflareSandboxExecutor seed", () => {
     expect(calls[0].url).toBe("https://sandbox.example/seed");
     expect(sentBody(calls[0])).toEqual({ seed, env: { GH_ENTERPRISE_TOKEN: "run-bearer" } });
   });
+
+  it("an already stopped seed starts neither credential cleanup nor the seed request", async () => {
+    const { calls } = stubFetch({ exitCode: 0 });
+    const control = new AbortController();
+    control.abort();
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, scrubLegacyCredentials: true });
+    await expect(ex.seed(seed, { signal: control.signal })).rejects.toMatchObject({ reason: "aborted" });
+    expect(calls).toEqual([]);
+  });
+
+  it.each(["fleet-busy", "sandbox-starting", "runtime-busy", "transport retry"])(
+    "a hard stop during the seed's %s wait aborts without another send",
+    async (reason) => {
+      vi.useFakeTimers();
+      try {
+        const { calls } = stubFetch({ error: "not ready", reason });
+        if (reason === "transport retry") {
+          vi.mocked(fetch).mockImplementation(async (url, init) => {
+            calls.push({ url: String(url), init: init ?? {} });
+            return Response.json({ error: "worker unavailable" }, { status: 503 });
+          });
+        }
+        const control = new AbortController();
+        const ex = new CloudflareSandboxExecutor(OPTS);
+        let settled: unknown;
+        const outcome = ex.seed(seed, { signal: control.signal }).catch((err: unknown) => (settled = err));
+        await vi.advanceTimersByTimeAsync(100);
+        expect(calls).toHaveLength(1);
+        expect(settled).toBeUndefined();
+        control.abort();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(settled).toMatchObject({ reason: "aborted" });
+        await outcome;
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(calls).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("a refusal is an answer, not a throw: the caller decides on the reason", async () => {
     stubFetch({ seeded: false, reason: "seed-missing", detail: "restore: Backup not found: 3f2a…", step: "restore" });

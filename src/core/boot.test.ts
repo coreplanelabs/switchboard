@@ -298,6 +298,38 @@ describe("reclaimRuns", () => {
     expect(ledger.live.get("bare")).toBeUndefined();
   });
 
+  it("a hard stop recorded before reclaim closes an ordinary attaching or live row without restarting it", async () => {
+    const { ledger, run } = harness();
+    await ledger.claim(
+      claim("attaching", "slack:C1:1.0", "g1", {
+        phase: "attaching",
+        system: "",
+        meta: {
+          channelId: "slack:C1",
+          userId: "slack:UA",
+          threadKey: "slack:C1:1.0",
+          agent: "review",
+          request: { channelId: "slack:C1", userId: "slack:UA", threadKey: "slack:C1:1.0", text: "review", at: 900 },
+        },
+      }),
+    );
+    await ledger.claim(claim("live", "slack:C1:2.0"));
+    await ledger.seed("live", "g1", [{ idx: 0, message: user("go") }]);
+    await ledger.step("live", "g1", seedRecord(1), []);
+    expect(await ledger.requestStop("attaching", "hard")).toMatchObject({ ok: true });
+    expect(await ledger.requestStop("live", "hard")).toMatchObject({ ok: true });
+
+    const outcome = await run();
+    expect(outcome.resumable).toEqual([]);
+    expect(outcome.closed.map(({ runId, status }) => [runId, status])).toEqual([
+      ["attaching", "stopped_hard"],
+      ["live", "stopped_hard"],
+    ]);
+    expect(ledger.live.size).toBe(0);
+    expect(ledger.finished.get("attaching")?.status).toBe("stopped_hard");
+    expect(ledger.finished.get("live")?.status).toBe("stopped_hard");
+  });
+
   it("an interrupted closure reports only verified ship state and names a non-resumable ordinary run as a bug; a run that replied gets no note", async () => {
     const { ledger, run } = harness();
     await ledger.claim(claim("ship-pr", "slack:C1:1.0", "g1", { meta: { ...claim("x", "t").meta, agent: "ship" } }));

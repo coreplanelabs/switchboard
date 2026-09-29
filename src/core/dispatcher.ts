@@ -865,11 +865,22 @@ export async function dispatch(
       }
     | undefined;
   let releaseLegacyOwnership: (() => boolean) | undefined;
+  let pendingStop: StopMode | undefined;
+  const relayStop = (mode: StopMode) => {
+    if (registered) {
+      registered.control.requestStop(mode);
+      return;
+    }
+    // A carried row starts its heartbeat before registerRun creates a control.
+    // Keep the strongest stop until that control exists; the heartbeat relays
+    // each mode only once.
+    if (mode === "hard" || pendingStop === undefined) pendingStop = mode;
+  };
   const reservationHooks = {
-    onStop: (mode: StopMode) => void registered?.control.requestStop(mode),
+    onStop: relayStop,
     onFenced: () => {
       fencedWhileAttaching = true;
-      void registered?.control.requestStop("hard");
+      relayStop("hard");
     },
   };
   try {
@@ -1863,8 +1874,8 @@ export async function dispatch(
       hooks: {
         reservation: reservationHooks,
         adopt: {
-          onStop: (mode) => void registered?.control.requestStop(mode),
-          onFenced: () => void registered?.control.requestStop("hard"),
+          onStop: relayStop,
+          onFenced: () => relayStop("hard"),
         },
       },
     };
@@ -2415,6 +2426,10 @@ export async function dispatch(
     });
     const { run, runId, channelVisibility, liveUrl, events, publishText, publishMeta } = registration;
     registered = run;
+    if (pendingStop) {
+      run.control.requestStop(pendingStop);
+      pendingStop = undefined;
+    }
     if (coordinator) io.runStarted?.({ id: runId });
     // What the session seed could not do (session-log item 9), on the record
     // before the first turn — the run is not changed by it.
