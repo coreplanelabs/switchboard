@@ -1244,8 +1244,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let mainWorkTrusted = ctx.resume === undefined && !privateAudienceLatch.revoked;
   const mainWorkEffectGate = createMainWorkEffectGate();
   const withdrawMainWork = async () => {
-    await mainWorkEffectGate.revoke();
     mainWorkTrusted = false;
+    await mainWorkEffectGate.revoke();
   };
   const directAudience = (msg as IncomingMessage & { directAudience?: DirectAudience }).directAudience;
   const verifyDirectAudience = (
@@ -1256,10 +1256,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ? await verifyDirectAudience(directAudience).catch(() => false)
       : false;
   const stageFollowUps = async (inputs: readonly FollowUpInput[]): Promise<string> => {
+    const ready = async (line: string) => {
+      if (privateAudienceLatch.revoked) await withdrawMainWork();
+      return line;
+    };
     const requesterInputs = inputs.filter(
       (input) => !(input.userId === PLANE_ACTOR_ID && isReissueSteerText(input.text)),
     );
-    if (privateAudienceLatch.revoked && mainWorkTrusted) await withdrawMainWork();
+    if (privateAudienceLatch.revoked) await withdrawMainWork();
     if (mainWorkTrusted && requesterInputs.length > 0) {
       if (
         requesterInputs.some(
@@ -1280,9 +1284,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         if (!stillDirect) await withdrawMainWork();
       }
     }
-    if (!deps.artifacts) return "";
+    if (!deps.artifacts) return ready("");
     const files = inputs.flatMap((i) => i.staged ?? []);
-    if (files.length === 0) return "";
+    if (files.length === 0) return ready("");
     const staged = await stageIntoWorkspace(files, {
       store: deps.artifacts,
       threadKey: msg.threadKey,
@@ -1292,7 +1296,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       resident: round.selection.resident !== undefined,
     });
     ctx.workspaceFiles?.record(staged.outcomes);
-    return staged.line;
+    return ready(staged.line);
   };
   let artifactSeq = 0;
   // A ticketless channel's lead links the file itself: this run's artifact proxy
