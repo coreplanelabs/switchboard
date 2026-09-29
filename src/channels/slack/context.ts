@@ -6,14 +6,14 @@ import type { ReferencedConversation } from "../../core/references/types.js";
 import type { IncomingMessage } from "../../core/types.js";
 import type { SlackContextCapability, SlackContextRequest } from "../../tools/slackContext.js";
 import { classifyDocument, fetchDocuments, fetchImages, isSecretFile, type SlackFile } from "./attachments.js";
-import { SlackConversationReader, type ReferenceClient } from "./references.js";
+import { fetchSlackReplies, SlackConversationReader, type ReferenceClient } from "./references.js";
 import { resolveTeamUrl, slackPermalink } from "./lookups.js";
 import { threadTurns, type SlackThreadMessage, type ThreadTurn } from "./threadTurns.js";
 
 /** The bot's existing Slack Web API client, with the channel history read this tool needs. */
 export interface SlackContextClient extends Omit<ReferenceClient, "conversations"> {
   conversations: Omit<ReferenceClient["conversations"], "replies"> & {
-    replies(args: { channel: string; ts: string; limit: number }): Promise<{ messages?: SlackThreadMessage[] }>;
+    replies: ReferenceClient["conversations"]["replies"];
     history(args: { channel: string; limit: number }): Promise<{ messages?: SlackThreadMessage[] }>;
   };
 }
@@ -155,8 +155,7 @@ export function createSlackContextCapability(input: {
       try {
         if (!(await originAllowed())) return request.kind === "file" ? FILE_REFUSED : REFUSED;
         if (request.kind === "thread") {
-          const page = await client.conversations.replies({ channel: origin, ts: originThread, limit: 100 });
-          const turns = threadTurns(page.messages ?? [], {});
+          const turns = threadTurns(await fetchSlackReplies(client, origin, originThread), {});
           const teamUrl = await resolveTeamUrl(client);
           return quoted(
             `Current Slack thread · ${msg.threadKey}`,
@@ -178,8 +177,10 @@ export function createSlackContextCapability(input: {
         if (!linked && !(request.kind === "file" && request.url === undefined))
           return request.kind === "file" ? FILE_REFUSED : REFUSED;
         if (request.kind === "file" && request.url === undefined) {
-          const page = await client.conversations.replies({ channel: origin, ts: originThread, limit: 100 });
-          const message = threadTurns(page.messages ?? [], {}).find((m) => m.ts === request.messageTs);
+          const message = threadTurns(
+            await fetchSlackReplies(client, origin, originThread, request.messageTs),
+            {},
+          ).find((m) => m.ts === request.messageTs);
           const file = message?.files?.find((f) => f.id === request.fileId);
           return file ? await allowedFile(file) : FILE_REFUSED;
         }
@@ -193,16 +194,18 @@ export function createSlackContextCapability(input: {
               maxBytes: REFERENCE_MAX_BYTES,
             }));
           const teamUrl = new URL(ref.url).origin;
-          const page = await client.conversations.replies({
-            channel: ref.channelId.slice("slack:".length),
-            ts: ref.threadKey.slice(ref.channelId.length + 1),
-            limit: 100,
-          });
-          const fileLines = threadTurns(page.messages ?? [], {}).filter((t) => t.files?.length);
+          const fileLines = threadTurns(
+            await fetchSlackReplies(
+              client,
+              ref.channelId.slice("slack:".length),
+              ref.threadKey.slice(ref.channelId.length + 1),
+            ),
+            {},
+          ).filter((t) => t.files?.length);
           return quoted(
             `Linked Slack thread · ${ref.threadKey}`,
             read.messages.map((m) => {
-              const ownFiles = fileLines.find((t) => t.at === m.at);
+              const ownFiles = m.ts ? fileLines.find((t) => t.ts === m.ts) : undefined;
               return ownFiles
                 ? `${fileReferences(ownFiles, teamUrl, ref.channelId.slice("slack:".length), ref.threadKey.slice(ref.channelId.length + 1))} · ${m.author}: ${m.text}`
                 : `${m.author}: ${m.text}`;
@@ -213,8 +216,9 @@ export function createSlackContextCapability(input: {
         if (!targetTs) return FILE_REFUSED;
         const channel = ref.channelId.slice("slack:".length);
         const threadTs = ref.threadKey.slice(ref.channelId.length + 1);
-        const page = await client.conversations.replies({ channel, ts: threadTs, limit: 100 });
-        const message = threadTurns(page.messages ?? [], {}).find((m) => m.ts === targetTs);
+        const message = threadTurns(await fetchSlackReplies(client, channel, threadTs, targetTs), {}).find(
+          (m) => m.ts === targetTs,
+        );
         const file = message?.files?.find((f) => f.id === request.fileId);
         return file ? await allowedFile(file) : FILE_REFUSED;
       } catch {

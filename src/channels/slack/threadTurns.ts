@@ -1,7 +1,7 @@
 import { STATUS_PREFIXES } from "../../core/dispatch/reply.js";
 import type { SlackFile } from "./attachments.js";
 
-// The pure half of reading a Slack thread: one `conversations.replies` page in,
+// The pure half of reading a Slack thread: fetched `conversations.replies` messages in,
 // the turns a model may see out. `SlackIO.history()` applies it to the current
 // thread (then downloads the files it kept); the conversation reader of record
 // 0037 applies it to a linked thread, so both read a thread with the same rules
@@ -91,7 +91,7 @@ export function stripBotNameAddress(text: string): string {
 }
 
 /**
- * Map a thread page to turns. Drops the triggering message (by `skipTs`), the
+ * Map fetched thread messages to turns. Drops the triggering message (by `skipTs`), the
  * bot's own status cards (`STATUS_PREFIXES`), and any message left with neither
  * text nor a user's files; strips the bot mention and the app footer; stamps
  * `at` from `ts`.

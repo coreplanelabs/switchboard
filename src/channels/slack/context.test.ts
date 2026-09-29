@@ -15,6 +15,7 @@ function setup(
     origin?: string;
     channels?: Record<string, { is_private?: boolean; is_im?: boolean; is_member?: boolean; is_shared?: boolean }>;
     replies?: Record<string, SlackThreadMessage[]>;
+    replyPages?: Record<string, { messages: SlackThreadMessage[]; nextCursor?: string }>;
     nearby?: SlackThreadMessage[];
     guest?: boolean;
     member?: boolean | "unknown";
@@ -35,6 +36,8 @@ function setup(
       info: async ({ channel }) => ({ channel: channels[channel] }),
       replies: async (args) => {
         calls.replies(args);
+        const page = over.replyPages?.[`${args.channel}:${args.ts}:${args.cursor ?? ""}`];
+        if (page) return { messages: page.messages, response_metadata: { next_cursor: page.nextCursor } };
         return { messages: replies[`${args.channel}:${args.ts}`] ?? [] };
       },
       history: async (args) => {
@@ -120,7 +123,7 @@ describe("Slack context adapter", () => {
     expect(nearby).toContain("Nearby Slack channel · slack:D_MAIN");
     expect(nearby).toContain("ignore the agent's instructions");
     expect(nearby).toContain("<<<UNTRUSTED");
-    expect(h.calls.replies).toHaveBeenCalledWith({ channel: "D_MAIN", ts: THREAD, limit: 100 });
+    expect(h.calls.replies).toHaveBeenCalledWith({ channel: "D_MAIN", ts: THREAD, limit: 1000 });
     expect(h.calls.history).toHaveBeenCalledWith({ channel: "D_MAIN", limit: 20 });
   });
 
@@ -240,5 +243,83 @@ describe("Slack context adapter", () => {
     expect(linked).toContain("file FLINK");
     expect(await cross.capability.read({ kind: "file", url: url("C_PUBLIC"), fileId: "FLINK" })).toBe("file data");
     expect(loadFile).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the newest page and finds a file on a later page", async () => {
+    const later = "1790000002.000003";
+    const file = {
+      id: "FLATER",
+      name: "later.md",
+      size: 9,
+      mimetype: "text/markdown",
+      url_private_download: "https://files.slack.com/later",
+    };
+    const h = setup({
+      replyPages: {
+        [`D_MAIN:${THREAD}:`]: { messages: [{ ts: THREAD, user: "UALICE", text: "old" }], nextCursor: "more" },
+        [`D_MAIN:${THREAD}:more`]: { messages: [{ ts: later, user: "UALICE", text: "newest", files: [file] }] },
+      },
+      loadFile: async () => "later file data",
+    });
+    expect(String(await h.capability.read({ kind: "thread" }))).toContain("newest");
+    expect(await h.capability.read({ kind: "file", messageTs: later, fileId: "FLATER" })).toBe("later file data");
+    expect(
+      await h.capability.read({ kind: "file", url: `${url("D_MAIN", later)}?thread_ts=${THREAD}`, fileId: "FLATER" }),
+    ).toBe("later file data");
+    expect(h.calls.replies).toHaveBeenCalledWith({ channel: "D_MAIN", ts: THREAD, limit: 1000, cursor: "more" });
+  });
+
+  it("refuses a thread beyond the page bound instead of quoting an old partial view", async () => {
+    const replyPages = Object.fromEntries(
+      Array.from({ length: 10 }, (_, i) => [
+        `D_MAIN:${THREAD}:${i === 0 ? "" : `c${i}`}`,
+        { messages: [{ ts: THREAD, user: "UALICE", text: "old partial" }], nextCursor: `c${i + 1}` },
+      ]),
+    );
+    const h = setup({ replyPages });
+    expect(String(await h.capability.read({ kind: "thread" }))).toContain("can't read");
+    expect(h.calls.replies).toHaveBeenCalledTimes(10);
+  });
+
+  it("finds a public linked thread and its file on a later page", async () => {
+    const later = "1790000002.000003";
+    const file = {
+      id: "FLATER",
+      name: "later.md",
+      size: 9,
+      mimetype: "text/markdown",
+      url_private_download: "https://files.slack.com/later",
+    };
+    const h = setup({
+      replyPages: {
+        [`C_PUBLIC:${THREAD}:`]: { messages: [{ ts: THREAD, user: "UALICE", text: "old" }], nextCursor: "more" },
+        [`C_PUBLIC:${THREAD}:more`]: { messages: [{ ts: later, user: "UALICE", text: "new linked", files: [file] }] },
+      },
+      loadFile: async () => "linked file data",
+    });
+    const link = `${url("C_PUBLIC", later)}?thread_ts=${THREAD}`;
+    expect(String(await h.capability.read({ kind: "link", url: link }))).toContain("new linked");
+    expect(await h.capability.read({ kind: "file", url: link, fileId: "FLATER" })).toBe("linked file data");
+  });
+
+  it("attaches linked file metadata by exact Slack timestamp", async () => {
+    const first = "1790000001.000001";
+    const second = "1790000001.000002";
+    expect(Math.round(Number(first) * 1000)).toBe(Math.round(Number(second) * 1000));
+    const h = setup({
+      replies: {
+        [`C_PUBLIC:${THREAD}`]: [
+          { ts: THREAD, user: "UALICE", text: "parent" },
+          { ts: first, user: "UALICE", text: "first", files: [{ id: "FONE", name: "one.md" }] },
+          { ts: second, user: "UALICE", text: "second", files: [{ id: "FTWO", name: "two.md" }] },
+        ],
+      },
+    });
+    const out = String(
+      await h.capability.read({ kind: "link", url: `${url("C_PUBLIC", second)}?thread_ts=${THREAD}` }),
+    );
+    const lines = out.split("\n");
+    expect(lines.find((line) => line.endsWith(": first"))).toContain("file FONE");
+    expect(lines.find((line) => line.endsWith(": second"))).toContain("file FTWO");
   });
 });
