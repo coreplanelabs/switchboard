@@ -616,6 +616,7 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
       resume: over.resume,
       selection: sel,
       repoCtx,
+      githubDoor: { baseUrl: "https://door.example" },
       root: s.root,
     };
   }
@@ -747,7 +748,8 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
       headAdopted: false,
     });
     expect(atHead.commands).toHaveLength(2);
-    expect(atHead.commands[0]).toContain("https://github.com/acme/api.git");
+    expect(atHead.commands[0]).toContain("git remote add origin 'https://door.example/git/acme/api.git'");
+    expect(atHead.commands[0]).not.toContain("https://github.com/acme/api.git");
     expect(atHead.commands[0]).toContain("refs/pull/41/head");
     expect(atHead.commands[0]).toContain(SHA_A);
     expect(atHead.commands[1]).toBe("git rev-parse HEAD");
@@ -780,6 +782,15 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
     expect(elsewhere.releases).toEqual(["always"]);
     expect(mismatched.replies[0]).toContain(`workspace-observed HEAD for feature/x is at ${SHA_B}`);
     expect(mismatched.replies[0]).toContain(`expected reviewed head is ${SHA_A}`);
+  });
+
+  it("a cold PR review with no Git door refuses before creating a GitHub checkout", async () => {
+    const s = setup();
+    const cold = selection({ resident: false, observed: `${SHA_A}\n` });
+    await expect(authorizeAttachedHead(s.deps, { ...ctx(s, cold.selection), githubDoor: undefined })).rejects.toThrow(
+      "cold PR review requires a Git door",
+    );
+    expect(cold.commands).toEqual([]);
   });
 
   it("an unreadable workspace head is refused fail-closed; only non-review and resumed runs skip the first-turn guard", async () => {

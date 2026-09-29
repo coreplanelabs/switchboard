@@ -12,6 +12,7 @@ import {
   SEED_RESTORE_MAX_MS,
   SEED_ABANDONED_RESTORE_WAIT_MS,
   seedFixupScript,
+  seedDoorRemote,
   seedForThread,
   seedMarkerText,
   seedRetryDecision,
@@ -65,9 +66,21 @@ describe("parseSeed", () => {
 });
 
 describe("seedFixupScript", () => {
+  const fixup = { ...seed, doorOrigin: "https://door.example" };
+
+  it("uses the exact bound Git door URL and rejects malformed destinations", () => {
+    expect(seedDoorRemote("https://door.example/anything", "acme/widgets")).toBe(
+      "https://door.example/git/acme/widgets.git",
+    );
+    expect(() => seedDoorRemote("https://door.example", "acme/widgets.git-tools")).not.toThrow();
+    expect(() => seedDoorRemote("https://door.example", "../widgets")).toThrow();
+    expect(() => seedDoorRemote("file:///tmp/door", "acme/widgets")).toThrow();
+    expect(() => seedDoorRemote("https://user:password@door.example", "acme/widgets")).toThrow();
+  });
+
   it("runs as one failing-fast script: ownership, origin, the deps view moved in, the thread's ref fetched and checked out, the head printed last", () => {
     const script = seedFixupScript({
-      ...seed,
+      ...fixup,
       fetchRef: "feat/x",
       fetchSha: "89abcdef0123456789abcdef0123456789abcdef",
       checkoutDir: SEED_CHECKOUT_DIR,
@@ -77,7 +90,7 @@ describe("seedFixupScript", () => {
       "set -e",
       "cd '/workspace/checkout'",
       "chown -R 0:0 .",
-      "git remote set-url origin 'https://github.com/acme/widgets.git'",
+      "git remote set-url origin 'https://door.example/git/acme/widgets.git'",
       "rm -rf node_modules",
       "mv '/workspace/.seed-deps' node_modules",
       "git fetch --no-tags origin '+refs/heads/feat/x:refs/remotes/origin/feat/x'",
@@ -87,7 +100,7 @@ describe("seedFixupScript", () => {
   });
 
   it("without a thread ref the checkout stays on the snapshot's branch; without a deps entry nothing is moved", () => {
-    const script = seedFixupScript({ ...seed, checkoutDir: SEED_CHECKOUT_DIR });
+    const script = seedFixupScript({ ...fixup, checkoutDir: SEED_CHECKOUT_DIR });
     expect(script).not.toContain("git fetch");
     expect(script).not.toContain("node_modules");
     expect(script).toContain("git checkout -q -B 'main'");
@@ -95,13 +108,13 @@ describe("seedFixupScript", () => {
   });
 
   it("quotes the values it interpolates: a ref with shell metacharacters never reaches the shell bare", () => {
-    const script = seedFixupScript({ ...seed, fetchRef: "feat/$x", checkoutDir: SEED_CHECKOUT_DIR });
+    const script = seedFixupScript({ ...fixup, fetchRef: "feat/$x", checkoutDir: SEED_CHECKOUT_DIR });
     expect(script).toContain("'feat/$x'");
     expect(script).not.toMatch(/(^|\s)feat\/\$x(\s|$)/m);
   });
 
   it("carries no credential: the fetch authenticates through the image's credential helper and the exec env", () => {
-    const script = seedFixupScript({ ...seed, fetchRef: "feat/x", checkoutDir: SEED_CHECKOUT_DIR });
+    const script = seedFixupScript({ ...fixup, fetchRef: "feat/x", checkoutDir: SEED_CHECKOUT_DIR });
     expect(script).not.toMatch(/GH_TOKEN|x-access-token|ghs_/);
   });
 });
@@ -157,8 +170,10 @@ describe("the seeded sandbox wiring (static)", () => {
 
   it("the marker is read before any restore and written after the fix-up; the same handle answers cached", () => {
     const seedNow = worker.slice(worker.indexOf("private async seedNow("), worker.indexOf("private seedSweep("));
+    expect(seedNow).toContain('seedDoorRemote(envVars.GIT_DOOR_ORIGIN ?? "", seed.slug)');
     expect(seedNow.indexOf('["cat", SEED_MARKER]')).toBeLessThan(seedNow.indexOf("restoreSeedInto("));
     expect(seedNow).toContain("marker.stdout.trim() === seedMarkerText(seed)");
+    expect(seedNow).toContain('["git", "-C", SEED_CHECKOUT_DIR, "remote", "set-url", "origin", doorRemote]');
     expect(seedNow).toContain("cached: true");
     expect(seedNow.indexOf("printf %s ${shellQuote(seedMarkerText(seed))}")).toBeGreaterThan(
       seedNow.indexOf("seedFixupScript("),
@@ -223,7 +238,9 @@ describe("the seeded sandbox wiring (static)", () => {
     expect(dockerfile).toMatch(/apt-get install -y --no-install-recommends [^\n]*ripgrep/);
     expect(dockerfile).toContain("command -v rg >/dev/null");
     expect(worker).not.toMatch(/(?:curl|wget|npm|pnpm|bun)[^\n]*(?:ripgrep|BurntSushi)/i);
-    expect(seedFixupScript({ ...seed, checkoutDir: SEED_CHECKOUT_DIR })).not.toMatch(/\brg\b|ripgrep/i);
+    expect(
+      seedFixupScript({ ...seed, doorOrigin: "https://door.example", checkoutDir: SEED_CHECKOUT_DIR }),
+    ).not.toMatch(/\brg\b|ripgrep/i);
   });
 
   it("the template binds the resident's cache bucket and names it, inside a block a profile without a resident drops", () => {

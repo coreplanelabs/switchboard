@@ -95,6 +95,7 @@ import {
   SEED_MARKER,
   SEED_RESTORE_MAX_MS,
   SEED_ABANDONED_RESTORE_WAIT_MS,
+  seedDoorRemote,
   seedFixupScript,
   seedMarkerText,
   type RestorePhases,
@@ -451,12 +452,25 @@ export class SwitchboardSandbox extends Sandbox<Env> {
         detail: `presigned R2 transfer needs ${transfer.missing.join(", ")}`,
       };
     }
+    let doorRemote: string;
+    try {
+      doorRemote = seedDoorRemote(envVars.GIT_DOOR_ORIGIN ?? "", seed.slug);
+    } catch {
+      return { seeded: false, reason: "seed-failed", detail: "Git door origin unavailable", step: "fixup" };
+    }
     // The marker names the seed this container carries — the handle and the
     // ref and head checked out: the same seed again is the run's second
     // request (a retry, a re-attach), and a restore over the live tree would
     // destroy the run's work; a seed naming another ref is a new seed.
     const marker = await this.runRoot(["cat", SEED_MARKER], 30_000);
     if (marker.exitCode === 0 && marker.stdout.trim() === seedMarkerText(seed)) {
+      const origin = await this.runRoot(
+        ["git", "-C", SEED_CHECKOUT_DIR, "remote", "set-url", "origin", doorRemote],
+        30_000,
+        envVars,
+      );
+      if (origin.exitCode !== 0)
+        return { seeded: false, reason: "seed-failed", detail: "seed origin refresh failed", step: "fixup" };
       const head = await this.runRoot(["git", "-C", SEED_CHECKOUT_DIR, "rev-parse", "HEAD"], 30_000);
       return {
         seeded: true,
@@ -490,14 +504,15 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       t = systemClock();
       const script = seedFixupScript({
         slug: seed.slug,
+        doorOrigin: envVars.GIT_DOOR_ORIGIN ?? "",
         ref: seed.ref,
         ...(seed.fetchRef ? { fetchRef: seed.fetchRef } : {}),
         ...(seed.fetchSha ? { fetchSha: seed.fetchSha } : {}),
         checkoutDir: SEED_CHECKOUT_DIR,
         ...(seed.depsBackupId ? { depsDir: SEED_DEPS_STAGING_DIR } : {}),
       });
-      // The fix-up's fetch authenticates through the image's credential helper
-      // with the exec env's GH_TOKEN — the same channel every command uses.
+      // The fix-up's fetch authenticates through the door-scoped helper using
+      // the run bearer in the command environment.
       const fix = await this.runRoot(["bash", "-c", script], SEED_FIXUP_TIMEOUT_MS, envVars);
       if (fix.exitCode !== 0) throw new Error(`fix-up exited ${fix.exitCode}: ${tail(fix.stderr || fix.stdout)}`);
       steps.fixup = systemClock() - t;

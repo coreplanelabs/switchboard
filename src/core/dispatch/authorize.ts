@@ -19,13 +19,14 @@ import { nearMatch } from "../nearMatch.js";
 import { residentSlugsLister } from "../../execution/factory.js";
 import { BASH_TIMEOUT_MAX_MS } from "../../execution/bashTimeout.js";
 import { shellQuote } from "../../execution/shellQuote.js";
+import { seedDoorRemote } from "../../execution/seedPlan.js";
 import { parseRevParseOutput } from "../reviewedHead.js";
 import { checkPrHeadPreflight, guardAttachedHead } from "../reviewRound.js";
 import type { CardShell } from "../statusCardFrame.js";
 import type { Clock, Span } from "../trace/types.js";
 import type { ChannelIO, IncomingMessage, StatusHandle } from "../types.js";
 import type { ResumeContext } from "./admission.js";
-import { refusalOf, type Guess, type Refusal } from "../refusal.js";
+import { RefusalError, refusalOf, type Guess, type Refusal } from "../refusal.js";
 import { hasAction } from "../authz/authorize.js";
 import type { Grants } from "../authz/types.js";
 import { REFUSAL_SENTENCES } from "./reply.js";
@@ -414,12 +415,10 @@ export type AttachedHeadGate =
  * against those remote-tracking refs.
  */
 function reviewCheckoutFacts(repoCtx: RepoContext & { repo: string; pr: number }): {
-  remote: string;
   helper: string;
   refspecs: string[];
 } {
   return {
-    remote: `https://github.com/${repoCtx.repo}.git`,
     helper: `!f() { test -n "$GH_ENTERPRISE_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_ENTERPRISE_TOKEN"; }; f`,
     refspecs: [
       "+HEAD:refs/remotes/origin/HEAD",
@@ -429,8 +428,13 @@ function reviewCheckoutFacts(repoCtx: RepoContext & { repo: string; pr: number }
   };
 }
 
-function coldReviewCheckoutCommand(repoCtx: RepoContext & { repo: string; pr: number; headSha: string }): string {
-  const { remote, helper, refspecs } = reviewCheckoutFacts(repoCtx);
+function coldReviewCheckoutCommand(
+  repoCtx: RepoContext & { repo: string; pr: number; headSha: string },
+  doorBaseUrl: string | undefined,
+): string {
+  if (!doorBaseUrl) throw new RefusalError(refusalOf("setup_failed", "cold PR review requires a Git door"));
+  const remote = seedDoorRemote(doorBaseUrl, repoCtx.repo);
+  const { helper, refspecs } = reviewCheckoutFacts(repoCtx);
   return [
     "set -eu",
     "find . -mindepth 1 -maxdepth 1 ! -name attachments -exec rm -rf -- {} +",
@@ -472,6 +476,7 @@ export async function authorizeAttachedHead(
       /** The attach's answer: the executor to release on a refusal, the resident flag, the binding's sha and ref. */
       selection: ExecutorSelection;
       repoCtx: RepoContext;
+      githubDoor?: { baseUrl: string };
       root: Span;
     },
 ): Promise<AttachedHeadGate> {
@@ -494,7 +499,10 @@ export async function authorizeAttachedHead(
         : "git rev-parse HEAD";
       if (!resident && selection.seeded === undefined && expectedHeadSha !== undefined) {
         await executor.exec(
-          coldReviewCheckoutCommand({ ...repoCtx, repo: pr.repo, pr: pr.number, headSha: expectedHeadSha }),
+          coldReviewCheckoutCommand(
+            { ...repoCtx, repo: pr.repo, pr: pr.number, headSha: expectedHeadSha },
+            ctx.githubDoor?.baseUrl,
+          ),
           { timeoutMs: BASH_TIMEOUT_MAX_MS },
         );
       }
@@ -536,10 +544,10 @@ export async function authorizeAttachedHead(
               { timeoutMs: BASH_TIMEOUT_MAX_MS, span },
             );
           } else {
-            await executor.exec(coldReviewCheckoutCommand({ ...repoCtx, repo: pr.repo, pr: pr.number, headSha }), {
-              timeoutMs: BASH_TIMEOUT_MAX_MS,
-              span,
-            });
+            await executor.exec(
+              coldReviewCheckoutCommand({ ...repoCtx, repo: pr.repo, pr: pr.number, headSha }, ctx.githubDoor?.baseUrl),
+              { timeoutMs: BASH_TIMEOUT_MAX_MS, span },
+            );
           }
           const retried = await observeHead();
           return { sha: retried, ref: repoCtx.ref, source: "workspace-observed" as const };

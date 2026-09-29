@@ -11,8 +11,8 @@ export { isGithubDoorPath } from "./githubDoorPaths.js";
 
 type Scope = "read" | "write";
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
-// `gh repo clone` emits /owner/repo.git; a pre-existing github.com remote is
-// rewritten by the executor to /git/owner/repo.git. Both reach one policy.
+// `gh repo clone` emits /owner/repo.git; provisioned checkouts and
+// GIT_DOOR_REMOTE use /git/owner/repo.git. Both reach one policy.
 const COMMAND_LIMIT = 64 * 1024;
 const RECEIVE_REPORT_LIMIT = 1024 * 1024;
 

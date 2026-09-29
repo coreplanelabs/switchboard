@@ -16,6 +16,7 @@ import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import {
   SEED_CHECKOUT_DIR,
   seedForThread,
+  seedDoorRemote,
   seedRetryDecision,
   seededSandboxNote,
   type SandboxSeed,
@@ -731,15 +732,26 @@ async function reattachWorkspace(
       executor.exec(`${git} ${command}`, { timeoutMs: 30_000, span }).catch(() => undefined);
     const ref = await observed("rev-parse --abbrev-ref HEAD");
     const headOutput = await observed("rev-parse HEAD");
-    // Read the stored origin, not `remote get-url`: the Git door's insteadOf rewrite changes the latter.
+    // Read the stored origin: a seeded checkout must name only its bound repository.
     const origin = await observed("config --get remote.origin.url");
     const sha = headOutput === undefined ? undefined : parseRevParseOutput(headOutput);
+    const doorRemote = ctx.githubDoor ? seedDoorRemote(ctx.githubDoor.baseUrl, recorded.seeded.slug) : undefined;
+    const storedOrigin = origin?.trim();
+    const legacyOrigin = `https://github.com/${recorded.seeded.slug}.git`;
     if (
       ref?.trim() !== recorded.seeded.ref ||
       sha === undefined ||
-      origin?.trim().toLowerCase() !== `https://github.com/${recorded.seeded.slug}.git`.toLowerCase()
+      doorRemote === undefined ||
+      (storedOrigin?.toLowerCase() !== doorRemote.toLowerCase() &&
+        storedOrigin?.toLowerCase() !== legacyOrigin.toLowerCase())
     )
       throw refuse("the seeded checkout's origin, ref or head could not be verified");
+    if (storedOrigin?.toLowerCase() === legacyOrigin.toLowerCase()) {
+      await observed(`remote set-url origin ${shellQuote(doorRemote)}`);
+      const moved = await observed("config --get remote.origin.url");
+      if (moved?.trim().toLowerCase() !== doorRemote.toLowerCase())
+        throw refuse("the seeded checkout's origin could not be moved to the Git door");
+    }
     return {
       executor,
       backend: perThreadBackend(opts),
@@ -1229,40 +1241,45 @@ function perThreadCheckout(opts: ExecutorFactoryOptions, ctx: ExecutorContext): 
   return { threadKey: ctx.threadKey, repo: ctx.repo, ref: ctx.ref, resolveEnvs: async () => ({}) };
 }
 
-/** Every model command gets a revocable run bearer and a Git/gh route to the
- * trusted door, never an installation token or a credential-store copy of it. */
-function githubDoorEnvs(door: NonNullable<ExecutorContext["githubDoor"]>, repo?: string): Record<string, string> {
+/** Every model command gets a revocable run bearer for the trusted door,
+ * never an installation token or a credential-store copy of it. The checkout
+ * itself carries the exact door URL; public GitHub clones stay direct. */
+function githubDoorEnvs(
+  door: NonNullable<ExecutorContext["githubDoor"]>,
+  repo?: string,
+  credentialHelper = "!gh auth git-credential",
+): Record<string, string> {
   const base = new URL(door.baseUrl);
-  const gitBase = `${base.origin}/git/`;
-  const localRewrite: Record<string, string> =
-    base.protocol === "http:"
-      ? { GIT_CONFIG_KEY_4: `url.${base.origin}/.insteadOf`, GIT_CONFIG_VALUE_4: `https://${base.host}/` }
-      : {};
+  const entries = [
+    ["credential.helper", ""],
+    [`credential.${base.origin}.helper`, credentialHelper],
+    ...(base.protocol === "http:" ? [[`url.${base.origin}/.insteadOf`, `https://${base.host}/`]] : []),
+  ];
+  const gitConfig = Object.fromEntries(
+    entries.flatMap(([key, value], index) => [
+      [`GIT_CONFIG_KEY_${index}`, key],
+      [`GIT_CONFIG_VALUE_${index}`, value],
+    ]),
+  );
   return {
     GH_HOST: base.host,
     GH_ENTERPRISE_TOKEN: door.bearer,
-    ...(repo ? { GH_REPO: `${base.host}/${repo}` } : {}),
+    GIT_DOOR_ORIGIN: base.origin,
+    ...(repo ? { GH_REPO: `${base.host}/${repo}`, GIT_DOOR_REMOTE: seedDoorRemote(base.origin, repo) } : {}),
     ...(door.ghConfigDir ? { GH_CONFIG_DIR: door.ghConfigDir } : {}),
-    GIT_CONFIG_COUNT: base.protocol === "http:" ? "5" : "4",
-    GIT_CONFIG_KEY_0: `url.${gitBase}.insteadOf`,
-    GIT_CONFIG_VALUE_0: "https://github.com/",
-    GIT_CONFIG_KEY_1: `url.${gitBase}.insteadOf`,
-    GIT_CONFIG_VALUE_1: "git@github.com:",
-    GIT_CONFIG_KEY_2: "credential.helper",
-    GIT_CONFIG_VALUE_2: "",
-    GIT_CONFIG_KEY_3: "credential.helper",
-    GIT_CONFIG_VALUE_3: "!gh auth git-credential",
-    ...localRewrite,
+    GIT_CONFIG_COUNT: String(entries.length),
+    ...gitConfig,
   };
 }
 
 function residentDoorEnvs(door: NonNullable<ExecutorContext["githubDoor"]>, repo?: string): Record<string, string> {
-  return {
-    ...githubDoorEnvs(door, repo),
-    // The resident image has git but does not require gh. This helper reads
-    // only the run bearer from the command's own environment.
-    GIT_CONFIG_VALUE_3: `!f() { test -n "$GH_ENTERPRISE_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_ENTERPRISE_TOKEN"; }; f`,
-  };
+  // The resident image has git but does not require gh. This helper reads
+  // only the run bearer from the command's own environment, for the door.
+  return githubDoorEnvs(
+    door,
+    repo,
+    `!f() { test -n "$GH_ENTERPRISE_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_ENTERPRISE_TOKEN"; }; f`,
+  );
 }
 
 /** Profile validation stays separate from the GitHub door's trusted-side mint.
