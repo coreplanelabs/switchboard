@@ -18,6 +18,9 @@ import type { PreviousRun } from "./seed.js";
 /** How many of the thread's newest runs one read brings back: enough to find
  *  the previous run of the resolved agent behind a few runs of another. */
 export const THREAD_READ_LIMIT = 8;
+/** An explicit Ship PR may belong to an earlier unit behind newer attempts. */
+export const THREAD_PR_OWNER_READ_LIMIT = 100;
+const THREAD_PR_OWNER_MAX_PAGES = 10;
 
 /** The thread's newest runs, newest first (a live one ahead of the finished);
  *  undefined when the read failed — the request runs as if the thread were
@@ -25,19 +28,60 @@ export const THREAD_READ_LIMIT = 8;
 export async function readThread(
   service: Pick<RunsService, "listRuns">,
   threadKey: string,
+  limit = THREAD_READ_LIMIT,
 ): Promise<RunView[] | undefined> {
   try {
     const page = await service.listRuns({
       status: "all",
       visibleTo: { kind: "all" },
       threadKey,
-      limit: THREAD_READ_LIMIT,
+      limit,
     });
+    if (page.storeUnavailable || page.ledgerUnavailable) return undefined;
     return page.runs;
   } catch (err) {
     console.warn(`[thread] ${threadKey}: thread read failed — ${err instanceof Error ? err.message : String(err)}`);
     return undefined;
   }
+}
+
+/** An explicit PR reply needs the complete thread history before it can
+ * choose an ended Ship unit. A missing store page or an exhausted bound is
+ * unknown ownership, so the dispatcher refuses to start replacement work. */
+export async function readPrOwnerThread(
+  service: Pick<RunsService, "listRuns">,
+  threadKey: string,
+): Promise<RunView[] | undefined> {
+  const runs: RunView[] = [];
+  const seen = new Set<string>();
+  const cursors = new Set<string>();
+  let before: { finishedAt: number; id: string } | undefined;
+  try {
+    for (let pageIndex = 0; pageIndex < THREAD_PR_OWNER_MAX_PAGES; pageIndex += 1) {
+      const page = await service.listRuns({
+        status: "all",
+        visibleTo: { kind: "all" },
+        threadKey,
+        limit: THREAD_PR_OWNER_READ_LIMIT,
+        ...(before !== undefined ? { before: before.finishedAt, beforeId: before.id } : {}),
+      });
+      if (page.storeUnavailable || page.ledgerUnavailable) return undefined;
+      for (const run of page.runs) {
+        if (seen.has(run.id)) return undefined;
+        seen.add(run.id);
+        runs.push(run);
+      }
+      const next = page.nextBefore;
+      if (next === undefined) return page.runs.length < THREAD_PR_OWNER_READ_LIMIT ? runs : undefined;
+      const cursor = `${next.finishedAt}:${next.id}`;
+      if (cursors.has(cursor)) return undefined;
+      cursors.add(cursor);
+      before = next;
+    }
+  } catch (err) {
+    console.warn(`[thread] ${threadKey}: PR owner read failed — ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return undefined;
 }
 
 /** A finished run whose transcript can be continued: its record names its
@@ -280,6 +324,62 @@ export async function ownerOf(
   const agent = stickyAgentOf(runs);
   if (agent !== undefined) return { kind: "session", agent, ...(releasedPr ? { releasedPr } : {}) };
   return { kind: "none", ...(releasedPr ? { releasedPr } : {}) };
+}
+
+/** An unfinished unit on the named PR blocks an older unit's continuation. */
+export class PrOwnerConflictError extends Error {}
+
+/** Select the one ended unit for an explicitly named PR across attempts in
+ * this thread. A later held plan may have no PR and must not hide the original
+ * unit. Multiple matches stay ambiguous; an unfinished claimant refuses it. */
+export async function endedPipelineForPrOf(
+  runs: readonly RunView[],
+  unitsOf: (instanceId: string) => Promise<CoordinatorUnit[]>,
+  threadKey: string,
+  target: { repo: string; number: number },
+): Promise<ThreadOwner | undefined> {
+  const ids = [
+    ...new Set(
+      runs.flatMap((run) => [run.instanceId, run.parentInstanceId].filter((id): id is string => id !== undefined)),
+    ),
+  ];
+  const matches = (
+    await Promise.all(
+      ids.map(async (instanceId) => {
+        const run = runs.find(
+          (candidate) =>
+            candidate.instanceId === instanceId &&
+            candidate.agent === "ship" &&
+            candidate.finished &&
+            candidate.repo?.toLowerCase() === target.repo,
+        );
+        if (run === undefined) return [];
+        const units = await unitsOf(instanceId);
+        const claims = units.filter(
+          (unit) => unit.instanceId === instanceId && unit.threadKey === threadKey && unit.pr?.number === target.number,
+        );
+        if (claims.some((unit) => unit.ending === undefined)) throw new PrOwnerConflictError();
+        return claims
+          .filter(
+            (unit) =>
+              unit.ending !== undefined &&
+              unit.ending.kind !== "merged" &&
+              unit.ending.kind !== "already_landed" &&
+              (unit.ending.kind !== "merge_ready" || unit.publication === undefined),
+          )
+          .map((unit) => ({ instanceId, run, unit }));
+      }),
+    )
+  ).flat();
+  if (matches.length === 0) return undefined;
+  const first = matches[0]!;
+  if (matches.length === 1) return { kind: "pipeline", ...first };
+  return {
+    kind: "pipeline_ambiguous",
+    instanceId: first.instanceId,
+    run: first.run,
+    units: matches.map((m) => m.unit),
+  };
 }
 
 /** The original task a generated ship parent recorded as its first input.

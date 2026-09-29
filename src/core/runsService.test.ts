@@ -660,6 +660,33 @@ describe("RunsService.listRuns — read merge", () => {
     expect(liveOnly.nextBefore).toBeUndefined();
   });
 
+  it("keeps a store cursor when filtering a provisional tombstone makes a fetched page short", async () => {
+    const { reg, svc, store } = setup();
+    const threadKey = "slack:C1:target";
+    const live = reg.create("live", {
+      agent: "ship",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:other",
+    });
+    await store!.put(record(live.id, NOW, { threadKey, status: "interrupted", provisional: true }));
+    await store!.put(record("newer", NOW - 1_000, { threadKey }));
+    await store!.put(record("older", NOW - 2_000, { threadKey }));
+
+    const first = await svc.listRuns({ visibleTo: ALL, status: "all", threadKey, limit: 2 });
+    expect(first.runs.map((run) => run.id)).toEqual(["newer"]);
+    expect(first.nextBefore).toEqual({ finishedAt: NOW - 1_000, id: "newer" });
+    const second = await svc.listRuns({
+      visibleTo: ALL,
+      status: "all",
+      threadKey,
+      limit: 2,
+      before: first.nextBefore!.finishedAt,
+      beforeId: first.nextBefore!.id,
+    });
+    expect(second.runs.map((run) => run.id)).toEqual(["older"]);
+  });
+
   it("filters by agent, channel and sinceMs on live rows too — a live run carries the RunMeta given at create()", async () => {
     const { reg, svc, store } = setup();
     await store!.put(record("c1", NOW - DAY, { agent: "coding", channelId: "slack:C1" }));

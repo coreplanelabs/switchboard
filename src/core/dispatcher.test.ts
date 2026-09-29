@@ -17230,6 +17230,289 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     return { ...s, branch, recordedHead, operator, shipBranch, shipParent };
   }
 
+  it("an explicit ship reply naming the owned PR checks the original unit before starting work", async () => {
+    const s = await endedPrContinuationSetup();
+    const movedHead = "2222222222222222222222222222222222222222";
+    s.deps.fetchPrFacts = vi.fn(async () => ({
+      state: "open" as const,
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: s.branch,
+      headSha: movedHead,
+      verifiedHead: { repo: "acme/api", ref: s.branch, sha: movedHead },
+      baseRef: "main",
+      htmlUrl: "https://github.com/acme/api/pull/7",
+    }));
+    const { io, replies } = fakeIO();
+
+    await dispatch(
+      s.deps,
+      msg("agent:ship in acme/api: Continue https://github.com/acme/api/pull/7", "slack:UADMIN"),
+      io,
+      { thread: [s.shipParent] },
+    );
+
+    expect(replies).toEqual([
+      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
+    ]);
+    expect(s.deps.fetchPrFacts).toHaveBeenCalledExactlyOnceWith({ repo: "acme/api", number: 7 });
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.deps.invoked).toEqual([]);
+  });
+
+  it("a typed new Ship task on the owned PR starts fresh work instead of reissuing the old task", async () => {
+    const s = await endedPrContinuationSetup();
+    const movedHead = "2222222222222222222222222222222222222222";
+    s.deps.fetchPrFacts = vi.fn(async () => ({
+      state: "open" as const,
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: s.branch,
+      headSha: movedHead,
+      verifiedHead: { repo: "acme/api", ref: s.branch, sha: movedHead },
+      baseRef: "main",
+      htmlUrl: "https://github.com/acme/api/pull/7",
+    }));
+    const { io, replies } = fakeIO();
+
+    await dispatch(
+      s.deps,
+      msg("agent:ship in acme/api: Add an endpoint on https://github.com/acme/api/pull/7", "slack:UADMIN"),
+      io,
+    );
+
+    expect(s.shipBranch).toHaveBeenCalledTimes(1);
+    expect(s.shipBranch.mock.calls[0]?.[3]).toMatchObject({
+      directives: { text: "in acme/api: Add an endpoint on https://github.com/acme/api/pull/7" },
+      repoCtx: { repo: "acme/api", pr: 7, prIsThreadOwn: true },
+    });
+    expect(s.deps.runs!.getRun).not.toHaveBeenCalled();
+    expect(replies.join(" ")).not.toContain("continuation did not start");
+  });
+
+  it("an exact PR reply selects its original unit behind a later held plan", async () => {
+    const s = await endedPrContinuationSetup();
+    const laterId = "plan-continue-pr-7";
+    await s.instances.putUnits([
+      unitRow({
+        instanceId: laterId,
+        branch: "plan/continue-pr-7/u12",
+        ending: { kind: "held", report: "publication blocked", at: 2_000 },
+      }),
+    ]);
+    const later = {
+      ...s.shipParent,
+      id: "later-ship-parent",
+      instanceId: laterId,
+      startedAt: 1_500,
+      finishedAt: 2_000,
+    } satisfies RunView;
+    const movedHead = "2222222222222222222222222222222222222222";
+    s.deps.fetchPrFacts = vi.fn(async () => ({
+      state: "open" as const,
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: s.branch,
+      headSha: movedHead,
+      verifiedHead: { repo: "acme/api", ref: s.branch, sha: movedHead },
+      baseRef: "main",
+      htmlUrl: "https://github.com/acme/api/pull/7",
+    }));
+    for (const request of [
+      "agent:ship in acme/api: Continue https://github.com/acme/api/pull/7",
+      "Continue https://github.com/acme/api/pull/7",
+    ]) {
+      const { io, replies } = fakeIO();
+      await dispatch(s.deps, msg(request, "slack:UADMIN"), io, { thread: [later, s.shipParent] });
+      expect(replies).toEqual([
+        `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
+      ]);
+    }
+    expect(s.deps.fetchPrFacts).toHaveBeenCalledTimes(2);
+    expect(s.deps.fetchPrFacts).toHaveBeenCalledWith({ repo: "acme/api", number: 7 });
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.operator).not.toHaveBeenCalled();
+  });
+
+  it("an exact PR reply ignores a prefetched short page and reaches its original unit", async () => {
+    const s = await endedPrContinuationSetup();
+    const laterId = "plan-continue-pr-7";
+    await s.instances.putUnits([
+      unitRow({ instanceId: laterId, ending: { kind: "held", report: "publication blocked", at: 2_000 } }),
+    ]);
+    const newer = {
+      ...s.shipParent,
+      id: "later-ship-parent",
+      instanceId: laterId,
+      startedAt: 1_500,
+      finishedAt: 2_000,
+    } satisfies RunView;
+    const filler = Array.from({ length: 99 }, (_, index) => ({
+      ...s.shipParent,
+      id: `filler-${index}`,
+      agent: "general",
+      instanceId: undefined,
+      finishedAt: 1_999 - index,
+    })) satisfies RunView[];
+    s.deps.runs!.listRuns = vi.fn(async (opts: { before?: number }) =>
+      opts.before === undefined
+        ? { runs: [newer, ...filler], nextBefore: { finishedAt: 1_901, id: "filler-98" } }
+        : { runs: [s.shipParent] },
+    ) as never;
+    const movedHead = "2222222222222222222222222222222222222222";
+    s.deps.fetchPrFacts = vi.fn(async () => ({
+      state: "open" as const,
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: s.branch,
+      headSha: movedHead,
+      verifiedHead: { repo: "acme/api", ref: s.branch, sha: movedHead },
+      baseRef: "main",
+      htmlUrl: "https://github.com/acme/api/pull/7",
+    }));
+    const { io, replies } = fakeIO([{ role: "user", text: "earlier work" }]);
+
+    await dispatch(s.deps, msg("Continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io, {
+      thread: [newer, ...filler.slice(0, 7)],
+    });
+
+    expect(replies).toEqual([
+      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
+    ]);
+    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.deps.runs!.listRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it("an exact PR reply selects its ended PR owner behind a newer idle unit", async () => {
+    const s = await endedPrContinuationSetup();
+    const laterId = "plan-continue-pr-7";
+    await s.instances.putUnits([unitRow({ instanceId: laterId, branch: "plan/continue-pr-7/u12" })]);
+    const later = {
+      ...s.shipParent,
+      id: "later-ship-parent",
+      instanceId: laterId,
+      startedAt: 1_500,
+      finishedAt: 2_000,
+    } satisfies RunView;
+    s.deps.runs!.listRuns = vi.fn(async () => ({ runs: [later, s.shipParent] })) as never;
+    const movedHead = "2222222222222222222222222222222222222222";
+    s.deps.fetchPrFacts = vi.fn(async () => ({
+      state: "open" as const,
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: s.branch,
+      headSha: movedHead,
+      verifiedHead: { repo: "acme/api", ref: s.branch, sha: movedHead },
+      baseRef: "main",
+      htmlUrl: "https://github.com/acme/api/pull/7",
+    }));
+    const { io, replies } = fakeIO([{ role: "user", text: "earlier work" }]);
+
+    await dispatch(
+      s.deps,
+      msg("agent:ship in acme/api: Continue https://github.com/acme/api/pull/7", "slack:UADMIN"),
+      io,
+    );
+
+    expect(replies).toEqual([
+      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
+    ]);
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.operator).not.toHaveBeenCalled();
+  });
+
+  it("an exact PR reply refuses an ended owner when a newer unfinished unit owns the same PR", async () => {
+    const s = await endedPrContinuationSetup();
+    const laterId = "plan-continue-pr-7";
+    await s.instances.putUnits([
+      unitRow({
+        instanceId: laterId,
+        branch: "plan/continue-pr-7/u12",
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      }),
+    ]);
+    const later = {
+      ...s.shipParent,
+      id: "later-ship-parent",
+      instanceId: laterId,
+      startedAt: 1_500,
+      finishedAt: 2_000,
+    } satisfies RunView;
+    s.deps.runs!.listRuns = vi.fn(async () => ({ runs: [later, s.shipParent] })) as never;
+    for (const request of [
+      "agent:ship in acme/api: Continue https://github.com/acme/api/pull/7",
+      "Continue https://github.com/acme/api/pull/7",
+    ]) {
+      const { io, replies } = fakeIO([{ role: "user", text: "earlier work" }]);
+      await dispatch(s.deps, msg(request, "slack:UADMIN"), io);
+      expect(replies).toEqual([
+        "acme/api#7 already has an unfinished unit in this thread, so continuation did not start. Nothing else ran.",
+      ]);
+    }
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.operator).not.toHaveBeenCalled();
+  });
+
+  it("an exact PR reply keeps its run-history owner when channel history is empty", async () => {
+    const s = await endedPrContinuationSetup();
+    const movedHead = "2222222222222222222222222222222222222222";
+    s.deps.fetchPrFacts = vi.fn(async () => ({
+      state: "open" as const,
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: s.branch,
+      headSha: movedHead,
+      verifiedHead: { repo: "acme/api", ref: s.branch, sha: movedHead },
+      baseRef: "main",
+      htmlUrl: "https://github.com/acme/api/pull/7",
+    }));
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg("Continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
+
+    expect(replies).toEqual([
+      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
+    ]);
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.operator).not.toHaveBeenCalled();
+  });
+
+  it("an exact PR reply starts no Ship plan when the thread's run history is unreadable", async () => {
+    const s = await endedPrContinuationSetup();
+    s.deps.runs!.listRuns = vi.fn(async () => {
+      throw new Error("run history unavailable");
+    });
+    const { io, replies } = fakeIO([{ role: "user", text: "earlier work" }]);
+
+    await dispatch(
+      s.deps,
+      msg("agent:ship in acme/api: Continue https://github.com/acme/api/pull/7", "slack:UADMIN"),
+      io,
+    );
+
+    expect(replies).toEqual(["This thread's earlier Ship runs could not be verified, so no new plan started."]);
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.operator).not.toHaveBeenCalled();
+  });
+
+  it("an exact PR reply starts no Ship plan when the history store silently degrades", async () => {
+    const s = await endedPrContinuationSetup();
+    s.deps.runs!.listRuns = vi.fn(async () => ({ runs: [s.shipParent], storeUnavailable: true as const }));
+    const { io, replies } = fakeIO([{ role: "user", text: "earlier work" }]);
+
+    await dispatch(
+      s.deps,
+      msg("agent:ship in acme/api: Continue https://github.com/acme/api/pull/7", "slack:UADMIN"),
+      io,
+    );
+
+    expect(replies).toEqual(["This thread's earlier Ship runs could not be verified, so no new plan started."]);
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.operator).not.toHaveBeenCalled();
+  });
+
   it("a task after a completed merge-ready pipeline routes through the operator as fresh ship work on its PR", async () => {
     const s = await endedPrContinuationSetup();
     const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
