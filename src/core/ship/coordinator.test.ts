@@ -568,6 +568,241 @@ describe("completed findings recovery — typed completion plus independently ve
       ...over,
     });
 
+  it("restarts review at a verified foreign head when a findings writer loses its lease", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({ status: "completed", headSha: HEAD_C }),
+      pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 30 * MIN,
+    });
+
+    expect(d.action).toMatchObject({ type: "pr-check", step: "U10/1/findings/superseded/pr-check", pr: 7 });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 31 * MIN,
+    });
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      step: "U10/1/review/a2",
+      brief: { kind: "review", headSha: HEAD_B, round: 1 },
+    });
+    expect(d.state.ending).toBeUndefined();
+    expect(d.state.dispositionsByRound[1]).toBeUndefined();
+  });
+
+  it("honors a parent hard stop before foreign-head findings recovery", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({ status: "completed", headSha: HEAD_C }),
+      pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      stopped: true,
+      at: T0 + 30 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "stopped", mode: "hard" } });
+    expect(d.notes).toContainEqual(expect.objectContaining({ type: "round", outcome: "stopped" }));
+  });
+
+  it("honors a parent hard stop when a superseded findings child finishes draining", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: { finished: false },
+      pullRequest: {
+        state: "merged",
+        prNumber: 7,
+        url: PR_URL,
+        headSha: HEAD_B,
+        sha: HEAD_B,
+        mergedAt: "2026-09-29T00:00:00Z",
+      },
+      at: T0 + 30 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "steer", runId: "run-f1", reason: "merged" });
+    d.answer({ type: "steer", outcome: "steered", at: T0 + 30 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({ status: "completed", headSha: HEAD_C }),
+      stopped: true,
+      at: T0 + 31 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "stopped", mode: "hard" } });
+  });
+
+  it("does not bypass missing findings results when the pull request holds the child's own head", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({ status: "completed", headSha: HEAD_B }),
+      pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 30 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { findingsStop: "incomplete_outputs" } });
+  });
+
+  it("reapplies the findings gate when the second read returns to the child's head", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    d.state = { ...d.state, spendUsd: 0 };
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({ status: "completed", headSha: HEAD_C, costUsd: 1 }),
+      pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 30 * MIN,
+    });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_C, headBranchExists: true },
+      at: T0 + 31 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { findingsStop: "incomplete_outputs" } });
+    expect(d.state.spendUsd).toBe(1);
+  });
+
+  it("uses completed findings only when the second read verifies the child's exact head", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    d.state = { ...d.state, spendUsd: 0 };
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: completeFindings(d, { headSha: HEAD_C, pushed: [], costUsd: 1 }),
+      pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 30 * MIN,
+    });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_C, headBranchExists: true },
+      at: T0 + 31 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "spawn", brief: { kind: "review", headSha: HEAD_C, round: 2 } });
+    expect(d.state.dispositionsByRound[1]).toEqual([FIXED]);
+    expect(d.state.spendUsd).toBe(1);
+  });
+
+  it("does not claim a merge at a foreign head as the completed findings child's result", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: completeFindings(d, { headSha: HEAD_C, pushed: [] }),
+      pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 30 * MIN,
+    });
+    d.answer({
+      type: "pr-check",
+      pr: {
+        state: "merged",
+        prNumber: 7,
+        url: PR_URL,
+        headSha: HEAD_B,
+        sha: HEAD_A,
+        mergedAt: "2026-09-29T00:00:00Z",
+      },
+      at: T0 + 31 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted", findingsStop: "head_mismatch" } });
+  });
+
+  it("does not restart review when the foreign branch becomes unreadable after findings", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: completeFindings(d, { headSha: HEAD_C, pushed: [] }),
+      pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 30 * MIN,
+    });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B },
+      at: T0 + 31 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    expect(renderUnitReport(d.state)).toContain("could not be verified");
+  });
+
+  it("does not redirect the review to another pull request after a foreign head is read", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({ status: "completed", headSha: HEAD_C }),
+      pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 30 * MIN,
+    });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 8, url: "https://github.com/o/r/pull/8", headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 31 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    expect(renderUnitReport(d.state)).toContain("did not match the adopted pull request");
+  });
+
+  it("charges a superseded findings child before deciding whether another review fits the cost cap", () => {
+    const d = new Driver(
+      openRecoveredUnitPipeline(
+        input({
+          merge: "person",
+          generated: true,
+          grant: { renewals: 0, costCapUsd: 2 },
+          recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+        }),
+        T0,
+        {
+          kind: "findings",
+          round: 1,
+          pr: { number: 7, url: PR_URL },
+          expectedHeadSha: HEAD_A,
+          reviewRunId: "run-original-review",
+          findings: [FINDING],
+          spendUsd: 1,
+        },
+      ),
+    );
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: finished({ status: "completed", headSha: HEAD_C, costUsd: 1 }),
+      pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 30 * MIN,
+    });
+    expect(d.state.spendUsd).toBe(2);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 31 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    expect(renderUnitReport(d.state)).toContain("cost cap");
+  });
+
   it("advances a completed findings run without a round-zero handoff only after the open pull request and branch independently show its exact observed head, and a duplicate check cannot start a second review", () => {
     const d = fresh(input({ merge: "person" }));
     throughFindingsRequest(d);

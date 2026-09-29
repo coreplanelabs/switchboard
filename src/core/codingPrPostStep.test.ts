@@ -1406,6 +1406,19 @@ function workspace(answers: Array<[RegExp, string]>) {
 }
 
 describe("observeCodingWorkspace", () => {
+  it("reads a resident checkout from its bound path without probing the executor's cwd", async () => {
+    const exec = vi.fn(async (cmd: string) => {
+      if (!cmd.startsWith("git -C '/workspace/checkout'")) return "fatal: not a git repository\n";
+      if (/abbrev-ref/.test(cmd)) return "feat/x\n";
+      if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+      if (/ls-remote/.test(cmd)) return `${HEAD}\trefs/heads/feat/x\n`;
+      return "";
+    });
+    const observed = await observeCodingWorkspace({ exec }, { probeRemote: false, checkout: "/workspace/checkout" });
+    expect(observed).toMatchObject({ head: HEAD, branch: "feat/x", remoteHead: HEAD });
+    expect(exec.mock.calls.every(([command]) => command.startsWith("git -C '/workspace/checkout'"))).toBe(true);
+  });
+
   it("every probe carries the caller's span to the executor, and none without one (docs/reference/specs/tracing.md item 17)", async () => {
     const seen: unknown[] = [];
     const exec = vi.fn(async (_cmd: string, opts?: { span?: unknown }) => {
@@ -1998,6 +2011,22 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     expect(w.commands).toContain("git -C 'sample' add -A");
     expect(w.commands.some((command) => command.startsWith("git -C 'sample' commit -m"))).toBe(true);
     expect(w.commands).toContain("git -C 'sample' push origin 'HEAD:refs/heads/plan/p/u1'");
+  });
+
+  it("checkpoints a resident checkout from its bound path even when the executor starts elsewhere", async () => {
+    const w = fakeExecutor({
+      "git -C '/workspace/checkout' status": "\n",
+      "git -C '/workspace/checkout' rev-list": "1\n",
+      "git -C '/workspace/checkout' rev-parse HEAD": "abc123def456abc123def456abc123def456ab12\n",
+    });
+    const out = await salvageBudgetPush(w.executor, {
+      branch: "plan/p/u1",
+      checkout: "/workspace/checkout",
+      cue: "completion",
+    });
+    expect(out).toMatchObject({ pushed: true, head: "abc123def456abc123def456abc123def456ab12" });
+    expect(w.commands[0]).toBe("git -C '/workspace/checkout' status --porcelain");
+    expect(w.commands).toContain("git -C '/workspace/checkout' push origin 'HEAD:refs/heads/plan/p/u1'");
   });
 
   it("a compaction checkpoint pushes the unpushed commits without committing when the tree is clean", async () => {

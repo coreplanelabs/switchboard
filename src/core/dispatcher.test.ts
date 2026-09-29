@@ -4810,7 +4810,10 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
         order.push(`exec:${cmd}`);
         if (cmd.startsWith("ls -d */.git")) return opts.cloneDir ? `${opts.cloneDir}/.git\n` : "";
         const inDir = /^git -C '([^']+)' (.*)$/.exec(cmd);
-        if (inDir) return inDir[1] === opts.cloneDir ? git(`git ${inDir[2]}`) : notARepo;
+        if (inDir)
+          return inDir[1] === opts.cloneDir || (opts.bindingRef && inDir[1] === "/workspace/threads/t/x")
+            ? git(`git ${inDir[2]}`)
+            : notARepo;
         return opts.cloneDir ? notARepo : git(cmd);
       },
       readFile: async () => "",
