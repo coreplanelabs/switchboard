@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.267.2](https://github.com/coreplanelabs/switchboard/compare/v1.267.1...v1.267.2) (2026-09-29)
+
+
+### Bug fixes
+
+* **docs:** restore screenshot goldens after host raster drift ([#2455](https://github.com/coreplanelabs/switchboard/issues/2455)) ([03ec5a0](https://github.com/coreplanelabs/switchboard/commit/03ec5a0021711cfbae0b5bd1e4907dd9d1f7c104))
+* **ship:** explain exhausted original-unit recovery ([#2452](https://github.com/coreplanelabs/switchboard/issues/2452)) ([0a3a7b6](https://github.com/coreplanelabs/switchboard/commit/0a3a7b6b13cd6c63e0570166d6c3d9552164b410))
+* **ship:** preserve PR publication through Git door and sandbox ([#2453](https://github.com/coreplanelabs/switchboard/issues/2453)) ([9a6fae2](https://github.com/coreplanelabs/switchboard/commit/9a6fae293b6f52d56356c2e6fd3814af364ea1b8))
+
 ## [1.267.1](https://github.com/coreplanelabs/switchboard/compare/v1.267.0...v1.267.1) (2026-09-28)
 
 
