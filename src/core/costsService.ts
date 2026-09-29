@@ -21,6 +21,7 @@ import { buildCostsSnapshotStore, type CostsSnapshot } from "./costsSnapshotStor
 import type { ProviderConfig } from "./provider.js";
 import type { RunStore } from "./runStore.js";
 import type { SecretReader, StateWorkerBlocks } from "./stateWorkerRef.js";
+import { buildShipSpendReport } from "./shipSpend.js";
 
 // The costs service (docs/reference/specs/costs.md): what the page, its JSON
 // twins and the `costs` commands talk to. Every report is arithmetic over the
@@ -161,7 +162,14 @@ export function createCostsService(
     groups: () => Object.keys(cfg.groups),
     async report(group, daysParam) {
       const g = groupOf(group);
-      return reportFromSnapshot(await snapshotOrThrow(), group, g, daysParam, meta, deps.billers);
+      const snapshot = await snapshotOrThrow();
+      const daily = reportFromSnapshot(snapshot, group, g, daysParam, meta, deps.billers);
+      return {
+        ...daily,
+        ...(snapshot.runUsage?.shipRuns
+          ? { shipSpend: buildShipSpendReport(snapshot.runUsage.shipRuns, daily.range) }
+          : {}),
+      };
     },
     async byReport(group, daysParam, dimension, viewer) {
       const g = groupOf(group);

@@ -516,6 +516,8 @@ export interface CostReport {
   /** Each biller's daily invoice tie-out (item 4d); absent when no provider block is known
    *  (a report built without the wiring) or run history is off. */
   billers?: BillerTieOut[];
+  /** Ship children across this bot's runs, independent of the Cloudflare group. */
+  shipSpend?: import("./shipSpend.js").ShipSpendReport;
 }
 
 /** What the report carries beyond the priced rows: the account behind the

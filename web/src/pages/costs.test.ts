@@ -151,6 +151,37 @@ const usersSeed = (by: CostsByReport | null = byReport()): CostsSeed => ({
 });
 
 describe("CostsPage", () => {
+  it("shows Ship child cost over time against the unit cap", () => {
+    const r = report({
+      shipSpend: {
+        range: { from: "2026-08-27", to: "2026-08-29", days: 3, partialLastDay: true },
+        units: [
+          {
+            key: "plan-example-1:U12",
+            capUsd: 50,
+            totalUsd: 29,
+            runs: [
+              { id: "run-first", finishedAt: Date.parse("2026-08-28T10:00:00Z"), usd: 12, cumulativeUsd: 12 },
+              { id: "run-second", finishedAt: Date.parse("2026-08-29T10:00:00Z"), usd: 17, cumulativeUsd: 29 },
+            ],
+          },
+        ],
+      },
+    });
+    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed(r) });
+    expect(w.find("[data-ship-spend]").text()).toContain("Ship run cost over time");
+    expect(w.find("[data-ship-spend]").text()).toContain("earlier runs are not included");
+    expect(w.find("[data-ship-spend]").text()).toContain("retention may have removed runs within the range");
+    expect(w.find("[data-ship-spend]").text()).toContain("retained-run total");
+    expect(w.find("[data-ship-spend]").text()).toContain("Ship runs are shared across cost groups");
+    expect(w.find("[data-ship-cap-line]").exists()).toBe(true);
+    expect(w.find("[data-ship-spend]").text()).toContain("unit cap $50.00");
+    expect((w.find("[data-ship-spend] select").element as HTMLSelectElement).value).toBe("plan-example-1:U12");
+    expect(w.findAll("[data-ship-runs] tbody tr")).toHaveLength(2);
+    expect(w.find("[data-ship-runs]").text()).toContain("$17.00");
+    expect(w.find("[data-ship-runs]").text()).toContain("$29.00");
+    expect(w.find('a[href="/runs/run-second"]').exists()).toBe(true);
+  });
   it("renders a hostile label as text, never as markup", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     expect(w.find("h1 .title").text()).toContain("Switchboard <b> spend");

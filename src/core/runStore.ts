@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type { RunEvent } from "./runEvents.js";
 import {
   aggregateUsage,
+  shipRunsOf,
   usageOfEvents,
   type RunUsageQuery,
   type RunUsageReport,
@@ -124,6 +125,9 @@ export function usageReportOfRecords(
     userId: r.userId,
     ...(r.userName ? { userName: r.userName } : {}),
     ...(r.parentRunId ? { parentRunId: r.parentRunId } : {}),
+    ...(r.parentInstanceId ? { parentInstanceId: r.parentInstanceId } : {}),
+    ...(r.idempotencyKey ? { idempotencyKey: r.idempotencyKey } : {}),
+    ...(r.costCapUsd !== undefined ? { costCapUsd: r.costCapUsd } : {}),
     threadKey: r.threadKey,
     channelId: r.channelId,
     ...(r.agent ? { agent: r.agent } : {}),
@@ -136,7 +140,13 @@ export function usageReportOfRecords(
     (m, r) => (m === undefined || r.finishedAt < m ? r.finishedAt : m),
     undefined,
   );
-  return { rows, pending, ...(earliest !== undefined ? { earliestFinishedAt: earliest } : {}), retentionDays };
+  return {
+    rows,
+    shipRuns: shipRunsOf(runs),
+    pending,
+    ...(earliest !== undefined ? { earliestFinishedAt: earliest } : {}),
+    retentionDays,
+  };
 }
 
 /** The store of a process without run history (docs/reference/specs/routing-and-config.md

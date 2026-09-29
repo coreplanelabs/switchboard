@@ -53,6 +53,8 @@ export interface RunMeta {
    *  finds its run without the record. */
   parentInstanceId?: string;
   idempotencyKey?: string;
+  /** Original dollar cap of this coordinator unit, when one was granted. */
+  costCapUsd?: number;
   /** Where the run's conversation started (run-history item 52): `parent` for
    *  a spawned child seeded from its parent's turns, `channel` otherwise —
    *  stamped by the dispatcher, so the summary and the drain's record keep it. */

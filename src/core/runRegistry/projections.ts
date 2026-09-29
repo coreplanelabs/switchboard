@@ -79,6 +79,8 @@ export interface RunSummary {
    *  instance a child belongs to and the key its spawn carried (item 48). */
   parentInstanceId?: string;
   idempotencyKey?: string;
+  /** The admitted Ship unit cap, retained for an interrupted child's record. */
+  costCapUsd?: number;
   /** `RunMeta.seed`: where the run's conversation started (run-history item 52). */
   seed?: RunSeed;
   /** `RunMeta.hosted`: a ship pipeline's parent, occupying no thread (record 0060). */
@@ -175,6 +177,7 @@ export function summaryOf(run: RunState, now: number): RunSummary {
     ...(m?.parentRunId !== undefined ? { parentRunId: m.parentRunId } : {}),
     ...(m?.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
     ...(m?.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),
+    ...(m?.costCapUsd !== undefined ? { costCapUsd: m.costCapUsd } : {}),
     ...(m?.seed !== undefined ? { seed: m.seed } : {}),
     ...(m?.hosted ? { hosted: true as const } : {}),
     ...(run.instanceId !== undefined ? { instanceId: run.instanceId } : {}),

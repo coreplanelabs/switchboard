@@ -99,6 +99,8 @@ export interface LiveRunMeta {
    *  still sends the parent its event and a retried spawn finds its run. */
   parentInstanceId?: string;
   idempotencyKey?: string;
+  /** The original Ship unit cap carried by the claim, available before its tag event is retained. */
+  costCapUsd?: number;
   /** Where the run's conversation started (item 52), so a reclaimed run's
    *  record still says so: `parent` for a spawned child, `channel` otherwise. */
   seed?: RunSeed;

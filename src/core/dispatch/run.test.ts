@@ -187,6 +187,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     const coordinator = {
       parentInstanceId: "plan-p-2",
       idempotencyKey: "plan-p-2:U16/1/coding",
+      costCapUsd: 50,
       branch: "plan/p/u16",
       base: "feat/trunk",
     };
@@ -195,6 +196,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
       {
         type: "coordinator_tag",
         parentInstanceId: "plan-p-2",
+        costCapUsd: 50,
         unit: "U16",
         branch: "plan/p/u16",
         base: "feat/trunk",

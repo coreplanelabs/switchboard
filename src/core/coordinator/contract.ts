@@ -307,12 +307,13 @@ export interface ExistingPrPublicationBinding {
   owner: { instanceId: string; unit: string };
 }
 
-/** What a coordinator's spawn stamps on the child's every row: the instance
- *  the child belongs to and the key the spawn carried — and, for the child's
- *  own post-step, the base its pull request targets. */
+/** What a coordinator's spawn stamps on the child's every row: its instance,
+ *  spawn key and admitted cost cap, plus the base for its PR post-step. */
 export interface CoordinatorTag {
   parentInstanceId: string;
   idempotencyKey: string;
+  /** The unit's original dollar limit, fixed at admission; absent means no cost cap. */
+  costCapUsd?: number;
   /** The unit's durable write branch, read from its row at child admission. */
   branch?: string;
   /** Workflow transport for a recovered child. Identity and idempotency remain
@@ -346,15 +347,20 @@ export interface CoordinatorTag {
   publication?: ExistingPrPublicationBinding;
 }
 
-/** The tag as the two flat record fields, or nothing — so a row, a summary
- *  and a record spread the same thing and a run with no coordinator carries no
- *  key. The base never rides here: rows and records keep the shape written
- *  before it existed. */
+/** The tag's identity and optional cap as flat record fields, or nothing — so
+ *  a row, summary and record agree. The base never rides here. */
 export function coordinatorFields(tag: CoordinatorTag | undefined): {
   parentInstanceId?: string;
   idempotencyKey?: string;
+  costCapUsd?: number;
 } {
-  return tag ? { parentInstanceId: tag.parentInstanceId, idempotencyKey: tag.idempotencyKey } : {};
+  return tag
+    ? {
+        parentInstanceId: tag.parentInstanceId,
+        idempotencyKey: tag.idempotencyKey,
+        ...(tag.costCapUsd !== undefined ? { costCapUsd: tag.costCapUsd } : {}),
+      }
+    : {};
 }
 
 /** The parent ship record: what the bot writes at an instance's creation and

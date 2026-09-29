@@ -462,6 +462,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     registry.publish(run.id, {
       type: "coordinator_tag",
       parentInstanceId: coordinator.parentInstanceId,
+      ...(coordinator.costCapUsd !== undefined ? { costCapUsd: coordinator.costCapUsd } : {}),
       ...(unit !== undefined ? { unit } : {}),
       ...(coordinator.branch !== undefined ? { branch: coordinator.branch } : {}),
       ...(coordinator.transportWorkflowId !== undefined

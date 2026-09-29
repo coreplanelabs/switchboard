@@ -6,6 +6,7 @@ import type { CostsSnapshotStatus } from "@core/core/costsSnapshot.js";
 import type { CostsView } from "@core/channels/costsView.js";
 import AppShell from "../components/AppShell.vue";
 import CostChart from "../components/costs/CostChart.vue";
+import ShipSpendChart from "../components/costs/ShipSpendChart.vue";
 import CostsByDimension from "../components/costs/CostsByDimension.vue";
 import { useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
 import { useSeed } from "../lib/seed";
@@ -39,6 +40,15 @@ import {
 const seed = useSeed("costs");
 /** The report and the open dimension's report start as the seed's and are replaced when a new snapshot lands (below). */
 const report = ref<CostReport | null>(seed?.report ?? null);
+const selectedShipKey = ref("");
+const shipUnits = computed(() => report.value?.shipSpend?.units ?? []);
+const shipKey = computed({
+  get: () => shipUnits.value.find((unit) => unit.key === selectedShipKey.value)?.key ?? shipUnits.value[0]?.key ?? "",
+  set: (key: string) => {
+    selectedShipKey.value = key;
+  },
+});
+const selectedShipUnit = computed(() => shipUnits.value.find((unit) => unit.key === shipKey.value));
 const groups = computed(() => seed?.groups ?? []);
 /** The group the page is for — from the seed even when there is no report yet to name it. */
 const group = computed(() => seed?.group ?? report.value?.group ?? "");
@@ -429,6 +439,72 @@ function monthDay(date: string): string {
           Some tokens ran under a model this page has no price for and are not in the estimate.
         </template>
       </p>
+    </section>
+
+    <section
+      v-if="report.shipSpend"
+      class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4"
+      data-ship-spend
+    >
+      <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
+        <div>
+          <h2 class="text-[0.9375rem] font-medium">Ship run cost over time</h2>
+          <p class="text-sm text-muted">
+            Each point is a retained finished child run. The line adds retained costs in this date range; earlier runs
+            are not included, and retention may have removed runs within the range. The dashed line is the unit's
+            admitted cap. Ship runs are shared across cost groups.
+          </p>
+        </div>
+        <label v-if="shipUnits.length" class="flex items-center gap-2 text-xs text-muted">
+          Unit
+          <select
+            v-model="shipKey"
+            class="max-w-[22rem] rounded-md border border-default bg-default px-2 py-1 font-mono text-xs text-default"
+          >
+            <option v-for="unit in shipUnits" :key="unit.key" :value="unit.key">{{ unit.key }}</option>
+          </select>
+        </label>
+      </div>
+      <p v-if="!shipUnits.length" class="text-sm text-muted">No retained Ship child runs in this range.</p>
+      <template v-else-if="selectedShipUnit">
+        <ShipSpendChart :unit="selectedShipUnit" />
+        <p class="text-xs text-muted">
+          {{ selectedShipUnit.runs.length }} child run{{ selectedShipUnit.runs.length === 1 ? "" : "s" }} · retained-run
+          total {{ selectedShipUnit.totalUsd === null ? "unknown (unpriced usage)" : usd(selectedShipUnit.totalUsd) }} ·
+          {{ selectedShipUnit.capUsd === null ? "no recorded unit cap" : `unit cap ${usd(selectedShipUnit.capUsd)}` }}
+          · from the costs snapshot
+        </p>
+        <div class="overflow-x-auto">
+          <table class="data w-full min-w-[30rem] border-collapse font-mono text-xs tabular-nums" data-ship-runs>
+            <thead>
+              <tr>
+                <th class="border-b border-muted px-2 py-1.5 text-left">Finished UTC</th>
+                <th class="border-b border-muted px-2 py-1.5 text-left">Run</th>
+                <th class="border-b border-muted px-2 py-1.5 text-right">Child cost</th>
+                <th class="border-b border-muted px-2 py-1.5 text-right">Shown total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="run in selectedShipUnit.runs" :key="run.id">
+                <td class="border-b border-muted px-2 py-1.5">
+                  {{ new Date(run.finishedAt).toISOString().replace("T", " ").slice(0, 16) }}
+                </td>
+                <td class="border-b border-muted px-2 py-1.5">
+                  <a :href="`/runs/${encodeURIComponent(run.id)}`" class="no-underline hover:underline">{{
+                    run.id.slice(0, 8)
+                  }}</a>
+                </td>
+                <td class="border-b border-muted px-2 py-1.5 text-right">
+                  {{ run.usd === null ? "unknown" : usd(run.usd) }}
+                </td>
+                <td class="border-b border-muted px-2 py-1.5 text-right">
+                  {{ run.cumulativeUsd === null ? "unknown" : usd(run.cumulativeUsd) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
     </section>
 
     <!-- The tabs above the tables: the group's day-by-day figures, or the same

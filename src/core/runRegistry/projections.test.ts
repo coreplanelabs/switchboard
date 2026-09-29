@@ -116,7 +116,7 @@ describe("RunRegistry.snapshot — record inputs", () => {
   // docs/reference/specs/run-history.md item 48: a coordinator's child names its
   // instance and its spawn's key on the live summary too, so the spawn route
   // reads them from a live run without the record.
-  it("carries parentInstanceId and idempotencyKey from the RunMeta onto the summary and the index feed, and omits them when absent", () => {
+  it("carries coordinator identity and cap from RunMeta onto the summary and index feed, and omits them when absent", () => {
     const { reg } = testRegistry();
     const events: IndexEvent[] = [];
     reg.subscribeIndex((e) => events.push(e));
@@ -126,16 +126,19 @@ describe("RunRegistry.snapshot — record inputs", () => {
       threadKey: "slack:C1:9",
       parentInstanceId: "ship_acme_1",
       idempotencyKey: "ship_acme_1:u/0/coding",
+      costCapUsd: 50,
     });
     const plain = reg.create("p", { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:2" });
     expect(reg.getById(child.id)).toMatchObject({
       parentInstanceId: "ship_acme_1",
       idempotencyKey: "ship_acme_1:u/0/coding",
+      costCapUsd: 50,
     });
     expect(events.find((e) => e.type === "upsert" && e.run.id === child.id)).toMatchObject({
-      run: { parentInstanceId: "ship_acme_1", idempotencyKey: "ship_acme_1:u/0/coding" },
+      run: { parentInstanceId: "ship_acme_1", idempotencyKey: "ship_acme_1:u/0/coding", costCapUsd: 50 },
     });
     expect("parentInstanceId" in (reg.getById(plain.id) ?? {})).toBe(false);
     expect("idempotencyKey" in (reg.getById(plain.id) ?? {})).toBe(false);
+    expect("costCapUsd" in (reg.getById(plain.id) ?? {})).toBe(false);
   });
 });

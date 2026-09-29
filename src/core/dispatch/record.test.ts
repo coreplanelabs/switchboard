@@ -577,12 +577,14 @@ describe("assembleRunRecord — the handoff on the record", () => {
       threadKey: "slack:CX:2.0",
       parentInstanceId: "ship_acme_1",
       idempotencyKey: "ship_acme_1:u12/0/coding",
+      costCapUsd: 50,
     });
     const record = interruptedRunRecord(registry.getById(run.id)!, registry.snapshotById(run.id)!, 5000);
     expect(record).toMatchObject({
       status: "interrupted",
       parentInstanceId: "ship_acme_1",
       idempotencyKey: "ship_acme_1:u12/0/coding",
+      costCapUsd: 50,
     });
     expect(isRunRecord(record)).toBe(true);
   });
@@ -633,6 +635,7 @@ describe("assembleRunRecord — the handoff on the record", () => {
         threadKey: "slack:CX:2.0",
         parentInstanceId: "ship_acme_1",
         idempotencyKey: "ship_acme_1:u12/0/coding",
+        costCapUsd: 50,
       },
       card: null,
       system: "sys",
@@ -645,6 +648,7 @@ describe("assembleRunRecord — the handoff on the record", () => {
       status: "interrupted",
       parentInstanceId: "ship_acme_1",
       idempotencyKey: "ship_acme_1:u12/0/coding",
+      costCapUsd: 50,
     });
     expect(isRunRecord(record)).toBe(true);
   });

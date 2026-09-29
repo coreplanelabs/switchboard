@@ -126,6 +126,7 @@ describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
       {
         type: "coordinator_tag",
         parentInstanceId: "plan-p-2",
+        costCapUsd: 50,
         unit: "U16",
         branch: "plan/p/u16",
         transportWorkflowId: "recovery-review-1",
@@ -137,6 +138,7 @@ describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
     expect(tag).toEqual({
       parentInstanceId: "plan-p-2",
       idempotencyKey: "plan-p-2:U16/1/coding",
+      costCapUsd: 50,
       branch: "plan/p/u16",
       transportWorkflowId: "recovery-review-1",
       recovery,
@@ -149,6 +151,11 @@ describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
       parentInstanceId: "plan-p-2",
       idempotencyKey: "plan-p-2:U16/1/coding",
     });
+  });
+
+  it("restores the admitted cap from row meta when the tag event is missing", () => {
+    const capped = row({}, { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding", costCapUsd: 50 });
+    expect(carriedCoordinatorTag(capped, [])).toMatchObject({ costCapUsd: 50 });
   });
 
   it("a run no coordinator spawned carries nothing, even when an event is present", () => {

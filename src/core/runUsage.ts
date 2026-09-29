@@ -1,4 +1,5 @@
 import type { RunEvent } from "./runEvents.js";
+import { unitOfIdempotencyKey } from "./coordinator/contract.js";
 
 // What a run cost in tokens, and who it belongs to — the data behind the cost
 // dimensions of the costs page (docs/reference/specs/costs.md items 10–10a) and
@@ -200,6 +201,9 @@ export interface UsageRun {
   userName?: string;
   /** A child run is billed to whoever started its parent (run-history item 46). */
   parentRunId?: string;
+  parentInstanceId?: string;
+  idempotencyKey?: string;
+  costCapUsd?: number;
   /** The thread the run ran in and the channel it belongs to (platform-namespaced, invariant 4). */
   threadKey: string;
   channelId: string;
@@ -258,11 +262,40 @@ export interface UsageRow {
 
 export interface RunUsageReport {
   rows: UsageRow[];
+  /** Individual Ship children retained for the unit-spend trend; old snapshots omit this. */
+  shipRuns?: ShipRunUsage[];
   /** Runs in range whose usage is not known yet (written before the field; backfill outstanding). */
   pending: number;
   /** The oldest finish the store still holds, so a page can bound its range to the data. */
   earliestFinishedAt?: number;
   retentionDays: number;
+}
+
+export interface ShipRunUsage {
+  id: string;
+  unitKey: string;
+  finishedAt: number;
+  costCapUsd?: number;
+  /** Missing while an older record is still being backfilled. */
+  usage?: RunUsage;
+}
+
+/** The unit identity comes from the coordinator's durable key, never a thread or branch guess. */
+export function shipRunsOf(runs: readonly UsageRun[]): ShipRunUsage[] {
+  return runs.flatMap((run) => {
+    if (!run.parentInstanceId || !run.idempotencyKey) return [];
+    const unit = unitOfIdempotencyKey(run.idempotencyKey);
+    if (!unit) return [];
+    return [
+      {
+        id: run.id,
+        unitKey: `${run.parentInstanceId}:${unit}`,
+        finishedAt: run.finishedAt,
+        ...(run.costCapUsd !== undefined ? { costCapUsd: run.costCapUsd } : {}),
+        ...(run.usage !== undefined ? { usage: run.usage } : {}),
+      },
+    ];
+  });
 }
 
 export const dayOf = (epochMs: number): string => new Date(epochMs).toISOString().slice(0, 10);
@@ -334,6 +367,7 @@ export function reportOfUsageRows(rows: RunUsageRows): RunUsageReport {
   const { rows: cells, pending } = aggregateUsage(rows.runs, (id) => rows.parents[id]);
   return {
     rows: cells,
+    shipRuns: shipRunsOf(rows.runs),
     // The store counts what it could not price; the fold sees the same runs without `usage`.
     pending: Math.max(pending, rows.pending),
     ...(rows.earliestFinishedAt !== undefined ? { earliestFinishedAt: rows.earliestFinishedAt } : {}),
@@ -356,6 +390,10 @@ function isUsageRun(v: unknown): v is UsageRun {
     typeof r.channelId === "string" &&
     (r.agent === undefined || typeof r.agent === "string") &&
     (r.parentRunId === undefined || typeof r.parentRunId === "string") &&
+    (r.parentInstanceId === undefined || typeof r.parentInstanceId === "string") &&
+    (r.idempotencyKey === undefined || typeof r.idempotencyKey === "string") &&
+    (r.costCapUsd === undefined ||
+      (typeof r.costCapUsd === "number" && Number.isFinite(r.costCapUsd) && r.costCapUsd > 0)) &&
     typeof r.startedAt === "number" &&
     typeof r.finishedAt === "number" &&
     (r.usage === undefined || isRunUsage(r.usage))
@@ -382,6 +420,7 @@ export function isRunUsageReport(v: unknown): v is RunUsageReport {
   if (typeof v !== "object" || v === null) return false;
   const r = v as Record<string, unknown>;
   if (!Array.isArray(r.rows) || !hasReportTail(r)) return false;
+  if (r.shipRuns !== undefined && (!Array.isArray(r.shipRuns) || !r.shipRuns.every(isShipRunUsage))) return false;
   return r.rows.every(
     (row) =>
       isIdentity(row) &&
@@ -392,5 +431,19 @@ export function isRunUsageReport(v: unknown): v is RunUsageReport {
       typeof (row as UsageRow).runs === "number" &&
       typeof (row as UsageRow).wallMs === "number" &&
       isRunUsage((row as UsageRow).usage),
+  );
+}
+
+function isShipRunUsage(v: unknown): v is ShipRunUsage {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as ShipRunUsage;
+  return (
+    typeof r.id === "string" &&
+    typeof r.unitKey === "string" &&
+    typeof r.finishedAt === "number" &&
+    Number.isFinite(r.finishedAt) &&
+    (r.costCapUsd === undefined ||
+      (typeof r.costCapUsd === "number" && Number.isFinite(r.costCapUsd) && r.costCapUsd > 0)) &&
+    (r.usage === undefined || isRunUsage(r.usage))
   );
 }

@@ -819,10 +819,10 @@ describe("run ledger — the coordinator's event and the key (items 47–48)", (
 
   it("the claim stores the key on the row and a second claim on the thread is refused naming it; a malformed key or instance id in the meta is 400", async () => {
     const key = storeKey();
-    const meta = { ...claimBody(key, "r1", "slack:C1:1.0").run.meta, ...TAG };
+    const meta = { ...claimBody(key, "r1", "slack:C1:1.0").run.meta, ...TAG, costCapUsd: 50 };
     expect((await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0", "g1", { meta }))).status).toBe(200);
     const live = (await post("/runs/live", { storeKey: key })).data.runs as Array<{ meta: Record<string, unknown> }>;
-    expect(live[0].meta).toMatchObject(TAG);
+    expect(live[0].meta).toMatchObject({ ...TAG, costCapUsd: 50 });
     const busy = await post("/runs/claim", claimBody(key, "r2", "slack:C1:1.0"));
     expect(busy).toEqual({
       status: 409,
@@ -847,6 +847,10 @@ describe("run ledger — the coordinator's event and the key (items 47–48)", (
           claimBody(key, "r3", "slack:C1:3.0", "g1", { meta: { ...meta, parentInstanceId: "has:colon" } }),
         )
       ).status,
+    ).toBe(400);
+    expect(
+      (await post("/runs/claim", claimBody(key, "r3", "slack:C1:3.0", "g1", { meta: { ...meta, costCapUsd: 0 } })))
+        .status,
     ).toBe(400);
     // The tag is both fields or neither: one alone is refused before it reaches a row.
     const { idempotencyKey: _k, ...instanceOnly } = meta;
