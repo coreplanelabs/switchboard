@@ -17351,6 +17351,38 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.deps.invoked).toEqual([]);
   });
 
+  it("stacked connector footers on a review continuation keep the original unit", async () => {
+    const s = await endedPrContinuationSetup();
+    const movedHead = "2222222222222222222222222222222222222222";
+    s.deps.fetchPrFacts = vi.fn(async () => ({
+      state: "open" as const,
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: s.branch,
+      headSha: movedHead,
+      verifiedHead: { repo: "acme/api", ref: s.branch, sha: movedHead },
+      baseRef: "main",
+      htmlUrl: "https://github.com/acme/api/pull/7",
+    }));
+    const { io, replies } = fakeIO();
+
+    await dispatch(
+      s.deps,
+      msg(
+        "agent:ship in acme/api: Please continue the review of https://github.com/acme/api/pull/7 _Sent using_ ChatGPT Connector (Local MCP) **Sent using** ChatGPT Connector (Local MCP)",
+        "slack:UADMIN",
+      ),
+      io,
+    );
+
+    expect(replies).toEqual([
+      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
+    ]);
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.deps.invoked).toEqual([]);
+  });
+
   it("a typed new Ship task on the owned PR starts fresh work instead of reissuing the old task", async () => {
     const s = await endedPrContinuationSetup();
     const movedHead = "2222222222222222222222222222222222222222";
