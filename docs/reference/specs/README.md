@@ -36,6 +36,7 @@ Rename a test and the build is red until the spec changes with it. Adopting the 
 |---|---|
 | [routing-and-config.md](routing-and-config.md) | Directives, config layers, [thread](../vocabulary.md#thread) stickiness, permission gates, config commands, config awareness, custom instructions, durable runtime overrides (the `OverridesBacking` seam → the state Worker's `ConfigDO` in prod) |
 | [slack-channel.md](slack-channel.md) | Triggers (mention/DM/[follow-up](../vocabulary.md#follow-up)), ack reaction, status [cards](../vocabulary.md#card), formatting, attachments |
+| [slack-context-tools.md](slack-context-tools.md) | Bounded, requester-scoped Slack thread, channel, permalink and attached-file reads for the main agent |
 | [llm-output.md](llm-output.md) | Typed LLM output contract: per-datatype request/response modules (`OutputType` seam), markdown canonicalization at the answer boundary, raw+canonical in the run record, deterministic retry loop |
 | [run-visibility.md](run-visibility.md) | Typed run-event stream (tool calls + redacted result summaries); live in-channel status card |
 | [live-view.md](live-view.md) | External run page: per-run capability token + SSE stream while a run is live (in-memory registry), the same page served tokenless from run history once it has finished; Access-gated `/runs` index with an active-only default and `?all=1`; the `/runs` "Scheduled" panel — schedule registry, next fire, last firing + run link |
