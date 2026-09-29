@@ -16,9 +16,13 @@ import {
   capThreadEvent,
   isCoordinatorInstance,
   isCoordinatorUnit,
+  isMainTaskKey,
+  mainTaskClaimMatches,
+  preserveWorkBrief,
   isThreadEvent,
   type CoordinatorInstance,
   type CoordinatorUnit,
+  type MainTaskKey,
   type ThreadEvent,
   type UnitWakeAnswer,
 } from "./contract.js";
@@ -33,6 +37,12 @@ export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailabl
 export type AnswerWakeResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type MarkStoppedResult = { ok: true } | { ok: false; reason: "unknown_instance" | "unavailable" };
 export type ReserveDecisionRecordResult = { ok: true; number: string } | { ok: false; reason: "unavailable" };
+export interface MainTaskLink {
+  instanceId: string;
+  unit: string;
+}
+export type ClaimMainTaskResult =
+  { ok: true; created: boolean; link: MainTaskLink } | { ok: false; reason: "conflict" | "unavailable" };
 
 /** The (instance, unit) a thread event belongs to. */
 export interface UnitEventKey {
@@ -45,6 +55,11 @@ export interface UnitEventKey {
 export type ThreadEventInput = Omit<ThreadEvent, "seq" | "consumedBy">;
 
 export interface CoordinatorInstanceStore {
+  /** An index from one main-agent decision to the existing Ship unit. */
+  getMainTask(key: MainTaskKey): Promise<MainTaskLink | null>;
+  /** Atomically claim the index, instance and first unit. A replay returns the
+   * original link; another key cannot take an existing instance id. */
+  claimMainTask(key: MainTaskKey, instance: CoordinatorInstance, unit: CoordinatorUnit): Promise<ClaimMainTaskResult>;
   put(instance: CoordinatorInstance): Promise<PutInstanceResult>;
   /** The record written over whatever the id holds and the id's unit rows
    *  dropped — an attempt starting over: the leftover of one whose Workflow
@@ -109,8 +124,36 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   /** Insertion-ordered, so a replace keeps a row's place. */
   private readonly units = new Map<string, string>();
   private readonly decisionRecords = new Map<string, string>();
+  private readonly mainTasks = new Map<string, MainTaskLink>();
   /** The unit event lists, by unit key — the Worker's `coordinator_unit_events` table mirrored. */
   private readonly events = new Map<string, ThreadEvent[]>();
+  private mainTaskKey(key: MainTaskKey): string {
+    return `${key.mainThreadKey}\0${key.actId}`;
+  }
+  async getMainTask(key: MainTaskKey): Promise<MainTaskLink | null> {
+    return this.mainTasks.get(this.mainTaskKey(key)) ?? null;
+  }
+  async claimMainTask(
+    key: MainTaskKey,
+    instance: CoordinatorInstance,
+    unit: CoordinatorUnit,
+  ): Promise<ClaimMainTaskResult> {
+    if (
+      !isMainTaskKey(key) ||
+      !isCoordinatorInstance(instance) ||
+      !isCoordinatorUnit(unit) ||
+      !mainTaskClaimMatches(key, instance, unit)
+    )
+      return { ok: false, reason: "conflict" };
+    const prior = this.mainTasks.get(this.mainTaskKey(key));
+    if (prior !== undefined) return { ok: true, created: false, link: prior };
+    if (this.rows.has(instance.id) || this.units.has(unitKey(unit))) return { ok: false, reason: "conflict" };
+    const link = { instanceId: instance.id, unit: unit.unit };
+    this.rows.set(instance.id, JSON.stringify(instance));
+    this.units.set(unitKey(unit), JSON.stringify(unit));
+    this.mainTasks.set(this.mainTaskKey(key), link);
+    return { ok: true, created: true, link };
+  }
   async put(instance: CoordinatorInstance): Promise<PutInstanceResult> {
     const text = JSON.stringify(instance);
     const existing = this.rows.get(instance.id);
@@ -119,6 +162,8 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     return { ok: true };
   }
   async replace(instance: CoordinatorInstance): Promise<PutInstanceResult> {
+    if ([...this.mainTasks.values()].some((link) => link.instanceId === instance.id))
+      return { ok: false, reason: "exists" };
     this.rows.set(instance.id, JSON.stringify(instance));
     for (const key of [...this.units.keys()]) if (key.startsWith(`${instance.id}\0`)) this.units.delete(key);
     return { ok: true };
@@ -128,7 +173,10 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     return text === undefined ? null : (JSON.parse(text) as CoordinatorInstance);
   }
   async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
-    for (const u of units) this.units.set(unitKey(u), JSON.stringify(u));
+    for (const u of units) {
+      const current = this.units.get(unitKey(u));
+      this.units.set(unitKey(u), JSON.stringify(preserveWorkBrief(current ? JSON.parse(current) : undefined, u)));
+    }
     return { ok: true };
   }
   async compareAndReplaceUnit(
@@ -138,7 +186,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     const key = unitKey(expected);
     if (unitKey(replacement) !== key || this.units.get(key) !== JSON.stringify(expected))
       return { ok: false, reason: "stale" };
-    this.units.set(key, JSON.stringify(replacement));
+    this.units.set(key, JSON.stringify(preserveWorkBrief(expected, replacement)));
     return { ok: true };
   }
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
@@ -211,7 +259,11 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     by: string,
   ): Promise<AnswerWakeResult> {
     const updated = { ...unit, wakes: { ...(unit.wakes ?? {}), [waitId]: answer } };
-    this.units.set(unitKey(updated), JSON.stringify(updated));
+    const current = this.units.get(unitKey(updated));
+    this.units.set(
+      unitKey(updated),
+      JSON.stringify(preserveWorkBrief(current ? JSON.parse(current) : undefined, updated)),
+    );
     const list = this.events.get(unitKey(unit)) ?? [];
     for (const e of list) if (seqs.includes(e.seq) && e.consumedBy === undefined) e.consumedBy = by;
     return { ok: true };
@@ -221,6 +273,16 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
 /** The store of a process without a durable state Worker: no instance exists
  *  and none can be written, so every coordinator route answers by name. */
 export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async getMainTask(_key: MainTaskKey): Promise<MainTaskLink | null> {
+    return null;
+  }
+  async claimMainTask(
+    _key: MainTaskKey,
+    _instance: CoordinatorInstance,
+    _unit: CoordinatorUnit,
+  ): Promise<ClaimMainTaskResult> {
+    return { ok: false, reason: "unavailable" };
+  }
   async put(_instance: CoordinatorInstance): Promise<PutInstanceResult> {
     return { ok: false, reason: "unavailable" };
   }
@@ -315,6 +377,40 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     return { status: res.status, data };
   }
 
+  async getMainTask(key: MainTaskKey): Promise<MainTaskLink | null> {
+    const r = await this.post("/runs/coordinator/main-task/get", { key });
+    const d = r.data as { link?: unknown };
+    if (d.link === null) return null;
+    if (
+      typeof d.link === "object" &&
+      d.link !== null &&
+      typeof (d.link as MainTaskLink).instanceId === "string" &&
+      typeof (d.link as MainTaskLink).unit === "string"
+    )
+      return d.link as MainTaskLink;
+    throw new Error(`coordinator store /runs/coordinator/main-task/get: unexpected answer (HTTP ${r.status})`);
+  }
+
+  async claimMainTask(
+    key: MainTaskKey,
+    instance: CoordinatorInstance,
+    unit: CoordinatorUnit,
+  ): Promise<ClaimMainTaskResult> {
+    const r = await this.post("/runs/coordinator/main-task/claim", { key, instance, unit });
+    const d = r.data as { ok?: unknown; created?: unknown; link?: unknown; reason?: unknown };
+    if (r.status === 409 && d.reason === "conflict") return { ok: false, reason: "conflict" };
+    if (
+      d.ok === true &&
+      typeof d.created === "boolean" &&
+      typeof d.link === "object" &&
+      d.link !== null &&
+      typeof (d.link as MainTaskLink).instanceId === "string" &&
+      typeof (d.link as MainTaskLink).unit === "string"
+    )
+      return { ok: true, created: d.created, link: d.link as MainTaskLink };
+    throw new Error(`coordinator store /runs/coordinator/main-task/claim: unexpected answer (HTTP ${r.status})`);
+  }
+
   async put(instance: CoordinatorInstance): Promise<PutInstanceResult> {
     const r = await this.post("/runs/coordinator/put", { instance });
     const d = r.data as { ok?: unknown; reason?: unknown };
@@ -325,7 +421,8 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
 
   async replace(instance: CoordinatorInstance): Promise<PutInstanceResult> {
     const r = await this.post("/runs/coordinator/replace", { instance });
-    const d = r.data as { ok?: unknown };
+    const d = r.data as { ok?: unknown; reason?: unknown };
+    if (r.status === 409 && d.reason === "exists") return { ok: false, reason: "exists" };
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/replace: unexpected answer (HTTP ${r.status})`);
   }

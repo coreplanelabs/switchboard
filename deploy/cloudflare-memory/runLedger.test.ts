@@ -983,6 +983,139 @@ describe("run ledger — the coordinator instance record (item 49)", () => {
 // Feature: docs/reference/specs/agent-ship.md item 16 and run-history.md item 50 —
 // decision-record reservations survive bot-process restarts in the state Worker,
 // with already-persisted unit and run rows included in the claim set.
+describe("run ledger — main-agent task claims", () => {
+  it("claims the link with its instance and unit and replays it after a new request", async () => {
+    const key = storeKey();
+    const firstUnit = ["U", "1"].join("");
+    const instance: CoordinatorInstance = {
+      id: "plan_main_act_1",
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:CMAIN",
+      threadKey: "slack:CMAIN:1.0",
+      repo: "acme/api",
+      branch: "plan/main-act/u1",
+      base: "main",
+      plan: { id: "main-act" },
+      merge: "person",
+      createdAt: 1_000,
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: firstUnit,
+      slug: "u1",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: "slack:CMAIN:1.0",
+        actId: "act-1",
+        repo: instance.repo,
+        base: instance.base!,
+        question: "What failed?",
+        findings: [],
+        requestedChange: "Fix it",
+      },
+    };
+    const link = { mainThreadKey: "slack:CMAIN:1.0", actId: "act-1" };
+    expect(await post("/runs/coordinator/main-task/claim", { storeKey: key, key: link, instance, unit })).toEqual({
+      status: 200,
+      data: { ok: true, created: true, link: { instanceId: instance.id, unit: firstUnit } },
+    });
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data).toEqual({ instance });
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data).toEqual({
+      units: [unit],
+    });
+    expect(
+      (await post("/runs/coordinator/units/put", { storeKey: key, units: [{ ...unit, workBrief: undefined }] })).status,
+    ).toBe(200);
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data).toEqual({
+      units: [unit],
+    });
+    expect(
+      (
+        await post("/runs/coordinator/units/claim-legacy-continuation", {
+          storeKey: key,
+          expected: unit,
+          recovered: { ...unit, title: "Progressed", workBrief: undefined },
+        })
+      ).status,
+    ).toBe(200);
+    const progressed = { ...unit, title: "Progressed" };
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data).toEqual({
+      units: [progressed],
+    });
+    const answer = { kind: "segment", index: 1, spendUsd: null, texts: [], senders: [] } as const;
+    const waitId = `${firstUnit}/idle/1`;
+    expect(
+      (
+        await post("/runs/coordinator/wake", {
+          storeKey: key,
+          unit: { ...progressed, workBrief: undefined },
+          waitId,
+          answer,
+          seqs: [],
+          by: "segment:1",
+        })
+      ).status,
+    ).toBe(200);
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data).toEqual({
+      units: [{ ...progressed, wakes: { [waitId]: answer } }],
+    });
+    expect((await post("/runs/coordinator/main-task/get", { storeKey: key, key: link })).data).toEqual({
+      link: { instanceId: instance.id, unit: firstUnit },
+    });
+    expect(
+      (
+        await post("/runs/coordinator/main-task/claim", {
+          storeKey: key,
+          key: link,
+          instance: { ...instance, id: "plan_other" },
+          unit: { ...unit, instanceId: "plan_other" },
+        })
+      ).data,
+    ).toEqual({ ok: true, created: false, link: { instanceId: instance.id, unit: firstUnit } });
+    expect(
+      (
+        await post("/runs/coordinator/main-task/claim", {
+          storeKey: key,
+          key: { ...link, actId: "act-2" },
+          instance,
+          unit: { ...unit, workBrief: { ...unit.workBrief!, actId: "act-2" } },
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await post("/runs/coordinator/main-task/claim", {
+          storeKey: key,
+          key: { mainThreadKey: "slack:COTHER:2.0", actId: "act-3" },
+          instance: { ...instance, id: "plan_other_thread" },
+          unit: {
+            ...unit,
+            instanceId: "plan_other_thread",
+            workBrief: { ...unit.workBrief!, mainThreadKey: "slack:COTHER:2.0", actId: "act-3" },
+          },
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (await post("/runs/coordinator/replace", { storeKey: key, instance: { ...instance, branch: "other" } })).status,
+    ).toBe(409);
+    expect(
+      (
+        await post("/runs/coordinator/main-task/claim", {
+          storeKey: key,
+          key: link,
+          instance,
+          unit: { ...unit, workBrief: { ...unit.workBrief!, question: "x".repeat(5000) } },
+        })
+      ).status,
+    ).toBe(400);
+  });
+});
+
 describe("run ledger — durable decision-record reservations (agent-ship item 16)", () => {
   it("advances past reservations persisted on unit and run rows, and reuses a task key after a process restart", async () => {
     const key = storeKey();

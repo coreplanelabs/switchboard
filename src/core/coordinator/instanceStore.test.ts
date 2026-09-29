@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { secretsFrom } from "../../secrets.js";
-import { capThreadEvent, type CoordinatorInstance, type CoordinatorUnit, type ThreadEvent } from "./contract.js";
+import {
+  capThreadEvent,
+  isCoordinatorInstance,
+  isCoordinatorUnit,
+  isMainTaskKey,
+  mainTaskClaimMatches,
+  preserveWorkBrief,
+  type CoordinatorInstance,
+  type CoordinatorUnit,
+  type ThreadEvent,
+} from "./contract.js";
 import {
   buildCoordinatorInstanceStore,
   InMemoryCoordinatorInstanceStore,
@@ -22,6 +32,9 @@ const instance: CoordinatorInstance = {
   threadKey: "slack:C1:1.0",
   repo: "acme/api",
   branch: "plan/orchestration/u12",
+  base: "main",
+  plan: { id: "orchestration" },
+  merge: "person",
   createdAt: 1_000,
 };
 
@@ -29,6 +42,7 @@ const instance: CoordinatorInstance = {
 function workerDouble() {
   const rows = new Map<string, string>();
   const units = new Map<string, string>();
+  const mainTasks = new Map<string, { instanceId: string; unit: string }>();
   const events = new Map<string, ThreadEvent[]>();
   const calls: Array<{ path: string; body: Record<string, unknown>; auth: string | null }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -36,6 +50,31 @@ function workerDouble() {
     const path = new URL(url).pathname;
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     calls.push({ path, body, auth: new Headers(init?.headers).get("authorization") });
+    if (path === "/runs/coordinator/main-task/get") {
+      const key = body.key as { mainThreadKey: string; actId: string };
+      return Response.json({ link: mainTasks.get(`${key.mainThreadKey}\0${key.actId}`) ?? null });
+    }
+    if (path === "/runs/coordinator/main-task/claim") {
+      const key = body.key as { mainThreadKey: string; actId: string };
+      if (
+        !isMainTaskKey(key) ||
+        !isCoordinatorInstance(body.instance) ||
+        !isCoordinatorUnit(body.unit) ||
+        !mainTaskClaimMatches(key, body.instance, body.unit)
+      )
+        return Response.json({ error: "invalid claim" }, { status: 400 });
+      const id = `${key.mainThreadKey}\0${key.actId}`;
+      const prior = mainTasks.get(id);
+      if (prior) return Response.json({ ok: true, created: false, link: prior });
+      const inst = body.instance as CoordinatorInstance;
+      const unit = body.unit as CoordinatorUnit;
+      if (rows.has(inst.id)) return Response.json({ ok: false, reason: "conflict" }, { status: 409 });
+      rows.set(inst.id, JSON.stringify(inst));
+      units.set(`${unit.instanceId}/${unit.unit}`, JSON.stringify(unit));
+      const link = { instanceId: inst.id, unit: unit.unit };
+      mainTasks.set(id, link);
+      return Response.json({ ok: true, created: true, link });
+    }
     if (path === "/runs/coordinator/put") {
       const inst = body.instance as CoordinatorInstance;
       const text = JSON.stringify(inst);
@@ -47,6 +86,8 @@ function workerDouble() {
     }
     if (path === "/runs/coordinator/replace") {
       const inst = body.instance as CoordinatorInstance;
+      if ([...mainTasks.values()].some((link) => link.instanceId === inst.id))
+        return Response.json({ ok: false, reason: "exists" }, { status: 409 });
       rows.set(inst.id, JSON.stringify(inst));
       for (const key of [...units.keys()]) if (key.startsWith(`${inst.id}/`)) units.delete(key);
       return Response.json({ ok: true });
@@ -64,7 +105,11 @@ function workerDouble() {
       return Response.json({ ok: true });
     }
     if (path === "/runs/coordinator/units/put") {
-      for (const u of body.units as CoordinatorUnit[]) units.set(`${u.instanceId}/${u.unit}`, JSON.stringify(u));
+      for (const u of body.units as CoordinatorUnit[]) {
+        const key = `${u.instanceId}/${u.unit}`;
+        const prior = units.get(key);
+        units.set(key, JSON.stringify(preserveWorkBrief(prior ? JSON.parse(prior) : undefined, u)));
+      }
       return Response.json({ ok: true });
     }
     if (path === "/runs/coordinator/units/claim-legacy-continuation") {
@@ -77,7 +122,7 @@ function workerDouble() {
         units.get(key) !== JSON.stringify(expected)
       )
         return Response.json({ ok: false, reason: "stale" }, { status: 409 });
-      units.set(key, JSON.stringify(replacement));
+      units.set(key, JSON.stringify(preserveWorkBrief(expected, replacement)));
       return Response.json({ ok: true });
     }
     if (path === "/runs/coordinator/units/list") {
@@ -302,6 +347,84 @@ contract(
       fetch: workerDouble().fetchImpl,
     }),
 );
+
+describe("main-agent task claims", () => {
+  for (const [name, make] of [
+    ["memory", () => new InMemoryCoordinatorInstanceStore()],
+    [
+      "Worker wire",
+      () =>
+        new WorkerCoordinatorInstanceStore({
+          baseUrl: "https://memory.test",
+          token: "t",
+          storeKey: "runs:default",
+          fetch: workerDouble().fetchImpl,
+        }),
+    ],
+  ] as const) {
+    it(`one act atomically records a link and unit and refuses a conflicting instance (${name})`, async () => {
+      const store = make();
+      const key = { mainThreadKey: instance.threadKey, actId: "act-1" };
+      const firstUnit = ["U", "1"].join("");
+      const row = unitRow(firstUnit, {
+        branch: instance.branch,
+        workBrief: {
+          requesterId: instance.userId,
+          mainThreadKey: key.mainThreadKey,
+          actId: key.actId,
+          repo: instance.repo,
+          base: instance.base!,
+          question: "What failed?",
+          findings: [],
+          requestedChange: "Fix the failure",
+        },
+      });
+      expect(await store.getMainTask(key)).toBeNull();
+      expect(await store.claimMainTask(key, instance, row)).toEqual({
+        ok: true,
+        created: true,
+        link: { instanceId: instance.id, unit: firstUnit },
+      });
+      expect(await store.getMainTask(key)).toEqual({ instanceId: instance.id, unit: firstUnit });
+      expect(await store.get(instance.id)).toEqual(instance);
+      expect(await store.listUnits(instance.id)).toEqual([row]);
+      await store.putUnits([{ ...row, workBrief: undefined }]);
+      expect(await store.listUnits(instance.id)).toEqual([row]);
+      await store.putUnits([{ ...row, workBrief: { ...row.workBrief!, question: "Changed later" } }]);
+      expect(await store.listUnits(instance.id)).toEqual([row]);
+      expect(await store.compareAndReplaceUnit(row, { ...row, workBrief: undefined })).toEqual({ ok: true });
+      expect(await store.listUnits(instance.id)).toEqual([row]);
+      const raced = await Promise.all([
+        store.claimMainTask(
+          { ...key, actId: "act-race" },
+          { ...instance, id: "ship_race_a" },
+          { ...row, instanceId: "ship_race_a", workBrief: { ...row.workBrief!, actId: "act-race" } },
+        ),
+        store.claimMainTask(
+          { ...key, actId: "act-race" },
+          { ...instance, id: "ship_race_b" },
+          { ...row, instanceId: "ship_race_b", workBrief: { ...row.workBrief!, actId: "act-race" } },
+        ),
+      ]);
+      expect(raced.filter((result) => result.ok && result.created)).toHaveLength(1);
+      expect(await store.getMainTask({ ...key, actId: "act-race" })).toMatchObject({ instanceId: "ship_race_a" });
+      expect(
+        await store.claimMainTask(key, { ...instance, id: "ship_other" }, { ...row, instanceId: "ship_other" }),
+      ).toEqual({ ok: true, created: false, link: { instanceId: instance.id, unit: firstUnit } });
+      expect(
+        await store.claimMainTask({ ...key, actId: "act-2" }, instance, {
+          ...row,
+          workBrief: { ...row.workBrief!, actId: "act-2" },
+        }),
+      ).toEqual({
+        ok: false,
+        reason: "conflict",
+      });
+      expect(await store.replace({ ...instance, branch: "other" })).toEqual({ ok: false, reason: "exists" });
+      expect(await store.listUnits(instance.id)).toEqual([row]);
+    });
+  }
+});
 
 describe("WorkerCoordinatorInstanceStore — the wire", () => {
   it("caps an attachment event before the Worker's request-body fence, so accepted over-cap media becomes a dropped-count row instead of HTTP 413", async () => {

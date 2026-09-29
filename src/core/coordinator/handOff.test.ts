@@ -98,6 +98,33 @@ function harness(
   return { deps, instances, created, statusAsked, reads };
 }
 
+describe("main-agent work hand-off", () => {
+  it("holds a main task before any claim or Workflow until private worker routing exists", async () => {
+    const h = harness();
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "fix failed signups",
+        mainTask: {
+          mainThreadKey: "slack:C1:1.0",
+          actId: "act-private",
+          brief: {
+            question: "How many signups failed?",
+            findings: [],
+            requestedChange: "Fix the failure",
+          },
+        },
+      }),
+    );
+    expect(out).toMatchObject({ status: "aborted", refusal: { code: "setup_failed" } });
+    expect(out.reply).toContain("private worker");
+    expect(h.created).toEqual([]);
+    expect(h.reads).toEqual([]);
+    expect(await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-private" })).toBeNull();
+  });
+});
+
 describe("handOffToCoordinator — the ship request as a plan runner instance (item 16)", () => {
   it("a hand-off refusal before the final start gate never reserves a legacy transition", async () => {
     const h = harness();

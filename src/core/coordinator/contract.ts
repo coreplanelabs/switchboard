@@ -55,6 +55,111 @@ export const UNIT_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
  *  An instance id has no colon, so the first colon splits the two halves. */
 export const UNIT_KEY_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}:[A-Za-z0-9_-]{1,32}$/;
 
+/** A main agent's stable decision id, scoped to its channel thread. */
+export const MAIN_TASK_ACT_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/;
+export interface MainTaskKey {
+  mainThreadKey: string;
+  actId: string;
+}
+
+export function isMainTaskKey(v: unknown): v is MainTaskKey {
+  const thread = (v as MainTaskKey | null)?.mainThreadKey;
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    !Array.isArray(v) &&
+    typeof thread === "string" &&
+    /^[a-z][a-z0-9_-]*:\S{1,500}$/.test(thread) &&
+    [...thread].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127) &&
+    typeof (v as MainTaskKey).actId === "string" &&
+    MAIN_TASK_ACT_ID_PATTERN.test((v as MainTaskKey).actId)
+  );
+}
+
+/** Attributed findings handed from a main conversation to its existing Ship unit.
+ * The linked unit, not this context, remains the task and publication authority. */
+export type WorkFinding =
+  | { kind: "analysis"; text: string; query: string; result: string; timeWindow: string; sourceUrl: string }
+  | {
+      kind: "observation";
+      text: string;
+      sourceUrl: string;
+      query?: undefined;
+      result?: undefined;
+      timeWindow?: undefined;
+    };
+
+export interface WorkBrief {
+  requesterId: string;
+  mainThreadKey: string;
+  actId: string;
+  repo: string;
+  base: string;
+  question: string;
+  findings: WorkFinding[];
+  suspectedCause?: string;
+  requestedChange: string;
+  acceptance?: string;
+}
+
+export function isWorkBrief(v: unknown): v is WorkBrief {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  const b = v as Record<string, unknown>;
+  const text = (s: unknown, cap: number) => typeof s === "string" && s.trim().length > 0 && s.length <= cap;
+  const httpsSource = (s: unknown): boolean => {
+    if (!text(s, 2048)) return false;
+    try {
+      const url = new URL(s as string);
+      return url.protocol === "https:" && url.hostname.length > 0 && !url.username && !url.password;
+    } catch {
+      return false;
+    }
+  };
+  return (
+    text(b.requesterId, 512) &&
+    isMainTaskKey({ mainThreadKey: b.mainThreadKey, actId: b.actId }) &&
+    text(b.repo, 256) &&
+    text(b.base, 512) &&
+    text(b.question, 1000) &&
+    Array.isArray(b.findings) &&
+    b.findings.length <= 6 &&
+    b.findings.every((finding) => {
+      if (typeof finding !== "object" || finding === null) return false;
+      const f = finding as Record<string, unknown>;
+      return (
+        text(f.text, 1000) &&
+        httpsSource(f.sourceUrl) &&
+        (f.kind === "analysis"
+          ? text(f.query, 3000) && text(f.result, 1000) && text(f.timeWindow, 256)
+          : f.kind === "observation" && f.query === undefined && f.result === undefined && f.timeWindow === undefined)
+      );
+    }) &&
+    (b.suspectedCause === undefined || text(b.suspectedCause, 1000)) &&
+    text(b.requestedChange, 1000) &&
+    (b.acceptance === undefined || text(b.acceptance, 1000)) &&
+    JSON.stringify(v).length <= 12_000
+  );
+}
+
+/** The indexed main decision must point at the generated unit whose existing
+ * instance supplies the requester and target; the brief cannot change them. */
+export function mainTaskClaimMatches(key: MainTaskKey, instance: CoordinatorInstance, unit: CoordinatorUnit): boolean {
+  return (
+    unit.instanceId === instance.id &&
+    unit.branch === instance.branch &&
+    unit.dependsOn.length === 0 &&
+    instance.plan !== undefined &&
+    instance.plan?.path === undefined &&
+    instance.merge === "person" &&
+    instance.threadKey === key.mainThreadKey &&
+    unit.workBrief?.mainThreadKey === key.mainThreadKey &&
+    unit.workBrief.actId === key.actId &&
+    unit.workBrief.requesterId === instance.userId &&
+    unit.workBrief.repo === instance.repo &&
+    unit.workBrief.base === instance.base
+  );
+}
+
 export function unitKeyOf(unit: { instanceId: string; unit: string }): string {
   return `${unit.instanceId}:${unit.unit}`;
 }
@@ -577,6 +682,8 @@ export interface CoordinatorUnit {
   /** `plan/<plan-id>/<unit-slug>` (a resume's is the pull request's own head branch). */
   branch: string;
   dependsOn: string[];
+  /** The optional main conversation's evidence and request, frozen at admission. */
+  workBrief?: WorkBrief;
   /** The unit's thread, once opened; a generated plan's is the requesting thread from the start. */
   threadKey?: string;
   sourceUrl?: string;
@@ -645,6 +752,11 @@ export interface CoordinatorUnit {
    *  rethrows (issue 2100); unit-start has no round yet. */
   ending?: { kind: string; report: string; at: number; cause?: string; step?: string; round?: number };
   startedAt?: number;
+}
+
+/** A claimed unit's original evidence survives every later whole-row update. */
+export function preserveWorkBrief(current: CoordinatorUnit | undefined, replacement: CoordinatorUnit): CoordinatorUnit {
+  return current?.workBrief === undefined ? replacement : { ...replacement, workBrief: current.workBrief };
 }
 
 const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -819,6 +931,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (typeof r.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(r.instanceId)) return false;
   if (!isText(r.unit, 32) || !isText(r.slug) || !isText(r.branch) || !isOptionalText(r.title)) return false;
   if (!Array.isArray(r.dependsOn) || !r.dependsOn.every((d) => isText(d, 32))) return false;
+  if (r.workBrief !== undefined && !isWorkBrief(r.workBrief)) return false;
   if (!isOptionalText(r.threadKey) || !isOptionalText(r.sourceUrl)) return false;
   if (r.reviewThread !== undefined && !isThread(r.reviewThread)) return false;
   if (r.issue !== undefined && !isFinite(r.issue)) return false;
