@@ -99,6 +99,30 @@ function harness(
 }
 
 describe("main-agent work hand-off", () => {
+  it("describes a private worker without promising a requester-thread unit or card", async () => {
+    const h = harness();
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "fix failed signups",
+        mainTask: {
+          mainThreadKey: "slack:C1:1.0",
+          actId: "act-private",
+          brief: { question: "How many signups failed?", findings: [], requestedChange: "Fix the failure" },
+        },
+        privateWorkerReady: true,
+        stillLive: () => true,
+        stillPrivate: async () => true,
+      }),
+    );
+    expect(out.status).toBe("completed");
+    expect(out.reply).toContain("private work log");
+    expect(out.reply).not.toContain("in this thread");
+    expect(out.reply).not.toContain("this card follows");
+    expect(h.created).toHaveLength(1);
+  });
+
   it("holds a main task before any claim or Workflow until private worker routing exists", async () => {
     const h = harness();
     const out = await handOffToCoordinator(
@@ -121,6 +145,49 @@ describe("main-agent work hand-off", () => {
     expect(out.reply).toContain("private worker");
     expect(h.created).toEqual([]);
     expect(h.reads).toEqual([]);
+    expect(await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-private" })).toBeNull();
+  });
+
+  it("requires a live main-run fence even when private worker routing exists", async () => {
+    const h = harness();
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "fix failed signups",
+        mainTask: {
+          mainThreadKey: "slack:C1:1.0",
+          actId: "act-private",
+          brief: { question: "How many signups failed?", findings: [], requestedChange: "Fix the failure" },
+        },
+        privateWorkerReady: true,
+        stillPrivate: async () => true,
+      }),
+    );
+    expect(out).toMatchObject({ status: "aborted", refusal: { code: "setup_failed" } });
+    expect(h.created).toEqual([]);
+    expect(await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-private" })).toBeNull();
+  });
+
+  it("refuses a caller-selected branch for a fresh main task", async () => {
+    const h = harness();
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main", branch: "attacker/chosen" },
+        requestText: "fix failed signups",
+        mainTask: {
+          mainThreadKey: "slack:C1:1.0",
+          actId: "act-private",
+          brief: { question: "How many signups failed?", findings: [], requestedChange: "Fix the failure" },
+        },
+        privateWorkerReady: true,
+        stillLive: () => true,
+        stillPrivate: async () => true,
+      }),
+    );
+    expect(out).toMatchObject({ status: "aborted", refusal: { code: "setup_failed" } });
+    expect(h.created).toEqual([]);
     expect(await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-private" })).toBeNull();
   });
 });

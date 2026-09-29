@@ -134,6 +134,15 @@ export interface HandOffInput {
   now: number;
 }
 
+function mainRunLiveAtGate(input: HandOffInput): boolean {
+  if (input.mainTask === undefined) return input.stillLive?.() !== false;
+  try {
+    return input.stillLive?.() === true;
+  } catch {
+    return false;
+  }
+}
+
 export interface HandOffDeps {
   /** The repository's file at a ref — the App's read, with the caller's bound
    *  on its length (`ReadFileOptions`): the plan is read whole up to
@@ -486,6 +495,12 @@ function planWhere(
     return lines;
   }
   const branch = units[0]?.branch ?? "";
+  if (p.workBrief !== undefined) {
+    lines.push(
+      `the coding worker runs privately on \`${branch}\` under your grants; its progress and report stay in a private work log`,
+    );
+    return lines;
+  }
   const url = (of: { pr: number; url?: string } | undefined) =>
     of?.url ?? (of !== undefined ? `https://github.com/${p.identity.repo}/pull/${of.pr}` : undefined);
   const runs =
@@ -514,6 +529,8 @@ function planWhere(
 export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInput): Promise<HandOffOutcome> {
   if (input.mainTask !== undefined && (!input.privateWorkerReady || input.stillPrivate === undefined))
     return refused("setup_failed", "⚠️ The private worker conversation is unavailable; no worker started.");
+  if (input.mainTask !== undefined && !mainRunLiveAtGate(input))
+    return refused("setup_failed", "The main run stopped or could not be verified; no worker started.");
   try {
     return await handOffToCoordinatorUnchecked(deps, input);
   } catch (error) {
@@ -534,6 +551,7 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
       input.beforeStart !== undefined ||
       input.entry.resume !== undefined ||
       input.entry.adopt !== undefined ||
+      input.entry.branch !== undefined ||
       (input.msg.images?.length ?? 0) > 0 ||
       (input.msg.documents?.length ?? 0) > 0
     )
@@ -718,11 +736,11 @@ async function linkedTask(
       `⚠️ The linked worker's state could not be read (${answer.reason}); no new worker started.`,
     );
   if (answer.kind === "absent") {
-    if (input.stillLive?.() === false)
+    if (!mainRunLiveAtGate(input))
       return refused("setup_failed", "The main run stopped; its linked worker was not started.");
     if (!(await privateAtGate(input)))
       return refused("setup_failed", "This is no longer a private conversation; no worker started.");
-    if (input.stillLive?.() === false)
+    if (!mainRunLiveAtGate(input))
       return refused("setup_failed", "The main run stopped; its linked worker was not started.");
     let created: CreateInstanceAnswer;
     try {
@@ -769,10 +787,10 @@ async function start(
   let started = false;
   try {
     let mainClaim;
-    if (input.stillLive?.() === false) return refused("setup_failed", "The main run stopped; no worker started.");
+    if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
     if (!(await privateAtGate(input)))
       return refused("setup_failed", "This is no longer a private conversation; no worker started.");
-    if (input.stillLive?.() === false) return refused("setup_failed", "The main run stopped; no worker started.");
+    if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
     try {
       mainClaim =
         input.mainTask !== undefined
@@ -863,11 +881,11 @@ async function start(
       }
     }
     let answer: CreateInstanceAnswer;
-    if (input.stillLive?.() === false)
+    if (!mainRunLiveAtGate(input))
       return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
     if (!(await privateAtGate(input)))
       return refused("setup_failed", "This is no longer a private conversation; its task is saved for a safe retry.");
-    if (input.stillLive?.() === false)
+    if (!mainRunLiveAtGate(input))
       return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
     try {
       answer = await deps.create(instance.id);

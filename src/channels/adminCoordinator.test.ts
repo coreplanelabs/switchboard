@@ -3287,11 +3287,14 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       },
       msg,
       mainRunId: "main-active-run",
+      stillLive: () => true,
       stillPrivate: async () => true,
       repo: INSTANCE.repo,
       brief: {
         question: "Why did signup fail?",
-        findings: [{ kind: "observation", text: "Five failures in the last hour", sourceUrl: "https://example.com/signups" }],
+        findings: [
+          { kind: "observation", text: "Five failures in the last hour", sourceUrl: "https://example.com/signups" },
+        ],
         requestedChange: "Fix the signup path and add a regression test",
       },
     });

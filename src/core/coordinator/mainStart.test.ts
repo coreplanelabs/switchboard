@@ -3,7 +3,7 @@ import { ALL_GRANTS } from "../authz/grants.js";
 import type { Actor } from "../authz/types.js";
 import type { IncomingMessage } from "../types.js";
 import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
-import { createMainTaskStarter, type MainStartDeps } from "./mainStart.js";
+import { createMainTaskStarter, type MainStartDeps, type MainStartInput } from "./mainStart.js";
 
 const msg: IncomingMessage = {
   channelId: "slack:D123",
@@ -55,7 +55,15 @@ function harness(over: Partial<MainStartDeps> = {}) {
     ...over,
   };
   const start = createMainTaskStarter(deps);
-  const input = { actor, msg, mainRunId: "main-run-1", repo: "acme/api", brief, stillPrivate: async () => true };
+  const input = {
+    actor,
+    msg,
+    mainRunId: "main-run-1",
+    repo: "acme/api",
+    brief,
+    stillLive: () => true,
+    stillPrivate: async () => true,
+  };
   return { start, input, instances, created };
 }
 
@@ -134,5 +142,52 @@ describe("main-agent private worker start", () => {
       expect((await h.start(input)).kind).toBe("refused");
       expect(h.created).toEqual([]);
     }
+  });
+
+  it("refuses a stopped main run or lost private audience before claiming", async () => {
+    const h = harness();
+    expect((await h.start({ ...h.input, stillLive: () => false })).kind).toBe("refused");
+    expect((await h.start({ ...h.input, stillPrivate: async () => false })).kind).toBe("refused");
+    expect(
+      (
+        await h.start({
+          ...h.input,
+          stillPrivate: async () => {
+            throw new Error("offline");
+          },
+        })
+      ).kind,
+    ).toBe("refused");
+    expect(h.created).toEqual([]);
+  });
+
+  it("refuses a missing or indeterminate main-run fence before claiming", async () => {
+    const h = harness();
+    const { stillLive: _omitted, ...withoutFence } = h.input;
+    for (const input of [
+      withoutFence as MainStartInput,
+      { ...h.input, stillLive: () => undefined as unknown as boolean },
+      {
+        ...h.input,
+        stillLive: () => {
+          throw new Error("run status unavailable");
+        },
+      },
+    ]) {
+      expect((await h.start(input)).kind).toBe("refused");
+      expect(h.created).toEqual([]);
+    }
+  });
+
+  it("rechecks the main-run fence after async preflight before claiming", async () => {
+    let live = true;
+    const h = harness({
+      repoInfo: async () => {
+        live = false;
+        return { defaultBranch: "main" };
+      },
+    });
+    expect((await h.start({ ...h.input, stillLive: () => live })).kind).toBe("refused");
+    expect(h.created).toEqual([]);
   });
 });

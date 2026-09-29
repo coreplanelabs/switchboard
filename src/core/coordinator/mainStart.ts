@@ -25,7 +25,7 @@ export interface MainStartInput {
   msg: IncomingMessage;
   mainRunId: string;
   /** A trusted run fence checked again after async preflight and before start. */
-  stillLive?: () => boolean;
+  stillLive: () => boolean;
   /** Freshly proves the original Slack DM is still a one-person internal audience. */
   stillPrivate: () => Promise<boolean>;
   repo: string;
@@ -40,6 +40,14 @@ const refuse = (reply: string): MainStartResult => ({ kind: "refused", reply });
 export function createMainTaskStarter(deps: MainStartDeps) {
   return async (input: MainStartInput): Promise<MainStartResult> => {
     const { actor, msg, brief } = input;
+    const stillLive = () => {
+      if (typeof input.stillLive !== "function") return false;
+      try {
+        return input.stillLive() === true;
+      } catch {
+        return false;
+      }
+    };
     // A message id survives process restarts. One user request owns one act,
     // even if the model repeats this tool call with different wording.
     if (
@@ -52,6 +60,8 @@ export function createMainTaskStarter(deps: MainStartDeps) {
       !deps.privateWorkerAvailable
     )
       return refuse("I can't start private work from this conversation right now.");
+    if (!stillLive())
+      return refuse("I couldn't confirm this main run is active, so no work started. Ask me again here.");
     if (typeof brief?.requestedChange !== "string" || brief.requestedChange.trim().length === 0)
       return refuse("I need a clear change to make before starting the fix.");
     const actId = `m_${createHash("sha256").update(`${msg.threadKey}\n${msg.messageId}`).digest("hex").slice(0, 32)}`;
@@ -73,7 +83,7 @@ export function createMainTaskStarter(deps: MainStartDeps) {
       prFacts: async () => undefined,
     });
     if (!pre.ok) return refuse(pre.reply);
-    if (input.stillLive?.() === false) return refuse("The main run stopped, so no work started.");
+    if (!stillLive()) return refuse("The main run stopped, so no work started.");
     try {
       if (!(await input.stillPrivate())) return refuse("This is no longer a private conversation; no work started.");
     } catch {
@@ -102,7 +112,7 @@ export function createMainTaskStarter(deps: MainStartDeps) {
         label: `main agent · ${repo}`,
         caps: deps.caps,
         now: deps.clock(),
-        ...(input.stillLive ? { stillLive: input.stillLive } : {}),
+        stillLive,
         stillPrivate: input.stillPrivate,
       });
       return out.status === "completed" && out.instanceId
