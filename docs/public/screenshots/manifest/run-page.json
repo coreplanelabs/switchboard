@@ -227,7 +227,7 @@
     "src/core/trace/tracedFetch.ts": "3b1892ebde9697eb89913453a1c9c4d7652757d6171e362d829a769f22856a06",
     "src/core/trace/traceparent.ts": "3e63f95e96e89a140e134ef6788b93848f0e96dc5644f440ec2f83738b9ea2a1",
     "src/core/trace/tracer.ts": "d54d179ed09b84d5d3c4da31f98a6679a7032c7b224af248523d764912fcc705",
-    "src/core/unitRuns.ts": "60b94f4468a4946bbff7524964888256dcb43a3a05fc312ae32de8c818c5d47e",
+    "src/core/unitRuns.ts": "2bf6efc020eb6e2dbfd3101b4da2c4738b35e1a16ea487d9c7f9f990921d0d07",
     "src/core/untrusted.ts": "06ac32478e599b0fd581718429dd1592a4b19384976a536bc4fc03a2d56fbf69",
     "src/core/verbosity.ts": "99768cb56250361938f269e1a0d221f63abb8971aa9e42a61ccdbdb420f2ca08",
     "src/core/workerError.ts": "04df9712c2e46335123e441c064a0316a561e763410e8fb6d2c9b33ab49a54ac",

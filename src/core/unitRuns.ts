@@ -37,7 +37,7 @@ export interface UnitFacts {
   pr?: { number: number; url: string };
   issue?: number;
   rounds: CoordinatorUnit["rounds"];
-  ending?: CoordinatorUnit["ending"];
+  ending?: { kind: string; at: number; report?: string; cause?: string; step?: string; round?: number };
   /** The unit idles (record 0051): the old kind as `why`, when, what the grant
    *  still holds and the wakes answered — the page's `idle · <why>` fact. The
    *  row's continuation facts (`from`, `runId`, the handoff) stay machine
@@ -90,24 +90,27 @@ export function unitSessionKeys(view: {
 
 /** The row's readable facts (`UnitFacts`), each optional field present only when the row has it. */
 export function unitFactsOf(unit: CoordinatorUnit): UnitFacts {
+  const privateWorker = unit.workBrief !== undefined;
   return {
     unit: unitKeyOf(unit),
     instanceId: unit.instanceId,
     id: unit.unit,
-    ...(unit.title !== undefined ? { title: unit.title } : {}),
+    ...(!privateWorker && unit.title !== undefined ? { title: unit.title } : {}),
     branch: unit.branch,
     threads: {
-      ...(unit.threadKey !== undefined ? { coding: unit.threadKey } : {}),
-      ...(unit.reviewThread !== undefined ? { review: unit.reviewThread.threadKey } : {}),
+      ...(!privateWorker && unit.threadKey !== undefined ? { coding: unit.threadKey } : {}),
+      ...(!privateWorker && unit.reviewThread !== undefined ? { review: unit.reviewThread.threadKey } : {}),
     },
     sourceUrls: {
-      ...(unit.sourceUrl !== undefined ? { coding: unit.sourceUrl } : {}),
-      ...(unit.reviewThread?.sourceUrl !== undefined ? { review: unit.reviewThread.sourceUrl } : {}),
+      ...(!privateWorker && unit.sourceUrl !== undefined ? { coding: unit.sourceUrl } : {}),
+      ...(!privateWorker && unit.reviewThread?.sourceUrl !== undefined ? { review: unit.reviewThread.sourceUrl } : {}),
     },
     ...(unit.pr !== undefined ? { pr: unit.pr } : {}),
     ...(unit.issue !== undefined ? { issue: unit.issue } : {}),
     rounds: unit.rounds,
-    ...(unit.ending !== undefined ? { ending: unit.ending } : {}),
+    ...(unit.ending !== undefined
+      ? { ending: privateWorker ? { kind: unit.ending.kind, at: unit.ending.at } : unit.ending }
+      : {}),
     ...(unit.idle !== undefined
       ? {
           idle: {
