@@ -3886,7 +3886,10 @@ function renderUnitReportWithWake(
   const spentCapAction = (): string | undefined => {
     const cap = s.input.grant?.costCapUsd;
     if (cap === undefined || s.spendUsd === null || s.spendUsd < cap) return undefined;
-    return `Next action: $${s.spendUsd.toFixed(2)} spent against the original $${cap.toFixed(2)} cost cap; this unit cannot start another child. Continue ${prUrl ? `the existing pull request (${prUrl})` : "the saved branch"} only under separate authorization, then request review of its exact head.`;
+    const next = prUrl
+      ? `If the pull request (${prUrl}) is still open, continue it only under separate authorization, then request review of its exact head. If it has merged, no recovery is needed.`
+      : "If work remains on the saved branch, continue it only under separate authorization, then request review of its exact head.";
+    return `Next action: $${s.spendUsd.toFixed(2)} spent against the original $${cap.toFixed(2)} cost cap; this unit cannot start another child. ${next}`;
   };
   const nextAction = (checkpoint?: { branch: string; sha: string }): string => {
     if (durableWake)

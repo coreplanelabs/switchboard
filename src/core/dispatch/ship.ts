@@ -261,7 +261,7 @@ export async function runShipBranch(
         Number.isFinite(spent) &&
         typeof cap === "number" &&
         Number.isFinite(cap)
-          ? `Original-unit recovery refused: $${spent.toFixed(2)} spent against the original $${cap.toFixed(2)} cost cap. Continue the existing pull request only under separate authorization, then request review of its exact head.`
+          ? `Original-unit recovery refused: $${spent.toFixed(2)} spent against the original $${cap.toFixed(2)} cost cap. If its pull request is still open, continue it only under separate authorization, then request review of its exact head. If it has merged, no recovery is needed.`
           : error === "recovery_budget_unknown" && typeof answer.body.reason === "string"
             ? `${error}: ${answer.body.reason}`
             : error;
