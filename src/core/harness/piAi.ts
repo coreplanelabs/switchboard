@@ -9,12 +9,14 @@
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
+import { normalizeContext } from "@earendil-works/pi-ai";
 import type {
   AnthropicEffort,
   AnthropicOptions,
   AssistantMessage as PiAssistantMessage,
   Context,
   ImageContent,
+  JsonObject,
   Message,
   Model,
   OpenAICompletionsOptions,
@@ -189,9 +191,10 @@ export class PiAiProvider implements Provider {
       const context = toPiContext(req, model, this.clock);
       const wire = this.api === "openai-completions" ? "openai-chat" : this.api;
       const shaped = shapeToolSchemasForWire(wire, context as unknown as Record<string, unknown>);
-      const message = await this.api$()
-        .stream(model, shaped.body as unknown as Context, options)
-        .result();
+      // Direct API modules take pi's normalized transcript, not the public
+      // Context shorthand. Shape tools before moving them into its system message.
+      const transcript = normalizeContext(shaped.body as unknown as Context);
+      const message = await this.api$().stream(model, transcript, options).result();
       return fromPiMessage(message, this.name, req.tools);
     } catch (err) {
       // Pi's `aborted` stop reason is local cancellation, not provider health.
@@ -353,9 +356,12 @@ function assistantMessage(turn: ChatMessage, model: Model<PiApi>, timestamp: num
   };
 }
 
-/** A tool call's input as pi's arguments: the object it is, or none. */
-function argumentsOf(input: unknown): Record<string, unknown> {
-  return typeof input === "object" && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+/** Pi requires JSON-valued arguments. Apply the wire's JSON serialization at
+ *  this boundary, without mutating the caller's input or admitting a scalar. */
+function argumentsOf(input: unknown): JsonObject {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return {};
+  const json: unknown = JSON.parse(JSON.stringify(input));
+  return typeof json === "object" && json !== null && !Array.isArray(json) ? (json as JsonObject) : {};
 }
 
 function userMessages(turn: ChatMessage, callNames: ReadonlyMap<string, string>, timestamp: number): Message[] {

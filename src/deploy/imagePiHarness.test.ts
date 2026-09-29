@@ -22,7 +22,7 @@ const ALL_IMAGES = [...EXECUTION_IMAGES, BOT] as const;
 // the run bearer is pi's only key.
 
 export const PI_PACKAGE = "@earendil-works/pi-coding-agent";
-export const PI_VERSION = "0.85.1";
+export const PI_VERSION = "0.87.0";
 const PI_PROOF = `pi --version | grep -qx '${PI_VERSION}'`;
 
 /** The instruction lines of a Dockerfile, continuations joined, comments dropped. */
@@ -101,6 +101,7 @@ describe("the resident image proves pi as a thread user", () => {
     const asWorker = lines.findIndex((l) => /^RUN su -s \/bin\/bash worker1 -c ".*pi --version \| grep -qx/.test(l));
     expect(pool).toBeGreaterThan(-1);
     expect(asWorker).toBeGreaterThan(pool);
+    expect(lines[asWorker]).toContain(PI_PROOF);
   });
 });
 

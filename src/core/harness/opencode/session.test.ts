@@ -10,7 +10,7 @@ import {
 
 // Feature: docs/reference/specs/harness.md item 5 — seed and rebuild are an
 // import. The runner's `ChatMessage[]` (plus compactions and settlements)
-// becomes the `POST /api/session/import` body: one store message per seed turn,
+// becomes the `POST /api/experimental/session/import` body: one store message per seed turn,
 // each compaction a compaction message, a settled in-flight call a completed
 // tool content carrying its note. The shapes are what `@opencode/cli@2.0.3`
 // accepted in the spike.

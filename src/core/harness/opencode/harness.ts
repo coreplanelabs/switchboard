@@ -69,7 +69,7 @@ import {
   OPENCODE_ROUTES,
   OPENCODE_VERSION,
   openCodeSessionRoutes,
-  parseHealth,
+  parseServerInfo,
   parseAnswerId,
   parsePermissionList,
   readSessionStore,
@@ -138,7 +138,7 @@ export class OpenCodeHarness implements Harness {
    *  probed: another harness's facts answer `another-harness` with no command;
    *  a row naming another container than this run was handed is
    *  `another-container` (a pid here is a stranger's); else the recorded port is
-   *  probed — any HTTP answer (even the 401 the password-guarded health returns
+   *  probed — any HTTP answer (even the 401 the password-guarded info returns
    *  without the bearer, which `find` does not hold) means the server is up
    *  (`alive-here`), a connection that reaches no server means `dead`. A
    *  container gone under the probe is the typed error, as pi's `find` rethrows. */
@@ -149,7 +149,7 @@ export class OpenCodeHarness implements Harness {
     if (oc.container !== undefined && here !== undefined && oc.container !== here) return "another-container";
     try {
       const paths = openCodeRunPathsAt(oc.root);
-      await container.request(paths, { method: "GET", port: oc.port, path: OPENCODE_ROUTES["health.get"].path });
+      await container.request(paths, { method: "GET", port: oc.port, path: OPENCODE_ROUTES["server.info"].path });
       return "alive-here";
     } catch (err) {
       if (isContainerGone(err)) throw err;
@@ -357,8 +357,8 @@ export async function openOpenCodeRun(
           `resumed after a restart: the row's OpenCode (pid ${resumeFacts.pid}) ran in container ${resumeFacts.container}, not the one this run was handed (${here}); it was neither probed nor ended here, and a fresh server was started on the record`,
         );
       } else {
-        const health = await probeRecordedServer(deps.container, resumeFacts);
-        if (health === "dead") {
+        const info = await probeRecordedServer(deps.container, resumeFacts);
+        if (info === "dead") {
           // The row's server is gone: its root on this container's disk, when it
           // is another than the fresh start's, goes with it (as a dead pi's does);
           // nothing is ended, since a pid that does not answer is nobody's here.
@@ -372,7 +372,7 @@ export async function openOpenCodeRun(
           const attempt = await reattachOpenCode(
             { container: deps.container, runId: run.runId, ...(deps.bearers ? { bearers: deps.bearers } : {}) },
             resumeFacts,
-            health,
+            info,
           );
           if (attempt.ok) {
             server = attempt.server;
@@ -643,7 +643,7 @@ async function probeRecordedServer(
     return await container.request(openCodeRunPathsAt(facts.root), {
       method: "GET",
       port: facts.port,
-      path: OPENCODE_ROUTES["health.get"].path,
+      path: OPENCODE_ROUTES["server.info"].path,
       ...(facts.bearerHash !== undefined
         ? { secretHeaders: { Authorization: openCodeAuthHeader(facts.bearerHash) } }
         : {}),
@@ -664,7 +664,7 @@ type ReattachAttempt =
  *  Nothing is changed until every check passes: the row's `bearerHash` is the
  *  server's password (`openCodePassword` derived it from the bearer, so a row
  *  without one names a server whose password nobody here can derive); the
- *  health answered with it must be the pin's version; this generation's proxy
+ *  info answered with it must be the pin's version; this generation's proxy
  *  adopts the bearer the server keeps presenting (a store that refuses names a
  *  grant gone or expired); the session's store is read back whole, page by
  *  page, and its pending asks listed (a session the server refuses is not
@@ -682,16 +682,16 @@ type ReattachAttempt =
 async function reattachOpenCode(
   deps: { container: HarnessContainer; runId: string; bearers?: RunBearerStore },
   facts: OpenCodeHarnessFacts,
-  health: HarnessResponse,
+  info: HarnessResponse,
 ): Promise<ReattachAttempt> {
   const refuse = (why: string): ReattachAttempt => ({ ok: false, why });
   const password = facts.bearerHash;
   if (password === undefined)
     return refuse("the row carries no bearer hash, so the server's password cannot be derived");
-  if (health.status === 401) return refuse("the server refused the run's password");
-  if (health.status !== 200) return refuse(`the health answered ${health.status}`);
-  const parsed = parseHealth(health.body);
-  if (parsed === undefined) return refuse("the health answered something that is not the health shape");
+  if (info.status === 401) return refuse("the server refused the run's password");
+  if (info.status !== 200) return refuse(`the info answered ${info.status}`);
+  const parsed = parseServerInfo(info.body);
+  if (parsed === undefined) return refuse("the info answered something that is not the info shape");
   if (parsed.version !== OPENCODE_VERSION)
     return refuse(`the server is opencode ${parsed.version}; this build drives ${OPENCODE_VERSION}`);
 

@@ -118,10 +118,10 @@ export function tailerReconnectRecords(sessionID: string, store: readonly unknow
 }
 
 /** A server event that names no session — the catalogue refreshes the real
- *  server emits at startup and on its own schedule (`catalog.updated`,
+ *  server emits at startup and on its own schedule (`provider.updated`,
  *  `config.updated`, …): feed traffic that is not the run's session's. */
 export function globalFeedEvent(at: number): unknown {
-  return { feed: "event", at, event: { id: "evt_catalog_global", type: "catalog.updated", created: at, data: {} } };
+  return { feed: "event", at, event: { id: "evt_provider_global", type: "provider.updated", created: at, data: {} } };
 }
 
 /** What the feed carries after a prompt the server admitted and never acted on
@@ -1063,13 +1063,18 @@ class ScriptedServe {
         return { status: 401, headers: { "www-authenticate": 'Basic realm="Secure Area"' }, body: "" };
       // The run is registered again by the time the harness probes: the plugin's re-ask reaches the relay.
       this.reaskRelayed();
-      if (req.method === "GET" && req.path === "/api/health")
-        return j(200, { healthy: true, version: this.reattach.otherVersion ?? OPENCODE_VERSION, pid: 77 });
+      if (req.method === "GET" && req.path === "/api/info")
+        return j(200, {
+          version: this.reattach.otherVersion ?? OPENCODE_VERSION,
+          pid: 77,
+          urls: [],
+          paths: { tmp: "/tmp/opencode" },
+        });
       if (this.reattach.refuseSession && req.path.startsWith(`/api/session/${this.sessionID}/`))
         return j(404, { error: "no such session" });
     }
-    if (req.method === "GET" && req.path === "/api/health")
-      return j(200, { healthy: true, version: OPENCODE_VERSION, pid: 77 });
+    if (req.method === "GET" && req.path === "/api/info")
+      return j(200, { version: OPENCODE_VERSION, pid: 77, urls: [], paths: { tmp: "/tmp/opencode" } });
     // The store and the pending asks as the server holds them: what a re-attach
     // and a reset's resolution read back. Measured against the pinned binary:
     // the listing's order is the server's insertion order (not the rows' ids,
@@ -1123,9 +1128,19 @@ class ScriptedServe {
       const info = written ? (JSON.parse(written) as Record<string, unknown>) : {};
       return j(200, [{ type: "document", path: this.configPath(), info }]);
     }
-    if (req.method === "POST" && req.path === "/api/plugin/await-activation")
-      return { status: 204, headers: {}, body: "" };
-    if (req.method === "POST" && req.path === "/api/session/import") {
+    if (req.method === "GET" && req.path === "/api/plugin")
+      return j(200, {
+        location: { directory: "/tmp" },
+        data: [
+          {
+            id: "switchboard",
+            source: { type: "local", path: "/tmp/plugins/switchboard" },
+            features: { server: true },
+            state: { status: "active" },
+          },
+        ],
+      });
+    if (req.method === "POST" && req.path === "/api/experimental/session/import") {
       if (this.primePostFails) return j(500, { error: "the store hiccuped" });
       const body = parseBody(req.body);
       // The binary decodes the body against its session-message schema before
@@ -1312,8 +1327,9 @@ class ScriptedServe {
         return j(404, { error: "permission not found" });
       }
       const body = parseBody(req.body);
+      if (body.decision !== "once" && body.decision !== "reject") return j(400, { error: "invalid decision" });
       const decision: Decision = {
-        reply: body.reply === "reject" ? "reject" : "once",
+        reply: body.decision,
         ...(typeof body.message === "string" ? { message: body.message } : {}),
       };
       // The resident's control plane resets under the reply (`controlResetOnReply`):

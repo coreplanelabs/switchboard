@@ -36,7 +36,10 @@ describe("the pi registry as a catalog", () => {
   it("reads no card for a catalog that does not exist or a model the catalog does not list", () => {
     expect(installedModelRegistry.card("none", "openai-chat", "deepseek/deepseek-v4-pro")).toBeUndefined();
     expect(installedModelRegistry.card("no-such-catalog", "openai-chat", "x")).toBeUndefined();
-    expect(installedModelRegistry.card("openrouter", "openai-chat", "deepseek/deepseek-v4.1-flash")).toBeUndefined();
+    // A real model can enter the catalog on any pi upgrade; this fixture never should.
+    expect(
+      installedModelRegistry.card("openrouter", "openai-chat", "deepseek/conformance-unknown-model"),
+    ).toBeUndefined();
   });
 
   it("reads the files once per process — two reads hand back the same card object", () => {

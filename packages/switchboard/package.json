@@ -34,10 +34,10 @@
     "verify": "npm run build && npm run typecheck && npm run licenses:check && npm test"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-ai": "0.87.0",
     "@slack/bolt": "^5.1.0",
     "aws4fetch": "^1.0.20",
-    "e2b": "^2.49.1",
+    "e2b": "^2.51.0",
     "mdast-util-from-markdown": "^2.0.3",
     "undici": "^8.10.2",
     "yaml": "^2.9.1",
@@ -45,7 +45,7 @@
   },
   "devDependencies": {
     "esbuild": "^0.28.2",
-    "tsx": "^4.23.13",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vitest": "^5.0.0"
   }

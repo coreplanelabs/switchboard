@@ -90,7 +90,7 @@ export const OPENCODE_EVENT_DISPOSITION: Readonly<Record<string, Disposition>> =
   "session.inbox.cancelled": "structure",
   "session.inbox.delivery.changed": "structure",
   "session.instructions.updated": "structure",
-  "session.permissions.updated": "structure",
+  "session.permissions": "structure",
   "session.synthetic": "structure",
   "session.viewed": "structure",
 
@@ -123,11 +123,16 @@ export const OPENCODE_EVENT_DISPOSITION: Readonly<Record<string, Disposition>> =
 
   // ── The server's global catalogues and status (structure) ────────────────
   "agent.updated": "structure",
-  "catalog.updated": "structure",
+  "provider.updated": "structure",
+  "model.updated": "structure",
   "command.updated": "structure",
   "config.updated": "structure",
   "filesystem.changed": "structure",
   "integration.updated": "structure",
+  // The location's cached services shut down (`@opencode/schema` 2.0.12,
+  // `location-event.js`); not a session terminal event. Store reads remain
+  // authoritative, as after the other server-level cache changes here.
+  "location.shutdown": "structure",
   "mcp.resources.changed": "structure",
   "mcp.status.changed": "structure",
   "plugin.updated": "structure",

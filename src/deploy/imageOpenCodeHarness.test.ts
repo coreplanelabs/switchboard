@@ -107,6 +107,11 @@ describe("the three images carry one OpenCode", () => {
       expect(openCodeLayer(instructions(read(path)))).toContain(`'opencode v${OPENCODE_VERSION}'`);
   });
 
+  it("the CLI used outside the images is a devDependency at the same exact pin, so local runs and real-binary tests drive the deployed version", () => {
+    const pkg = JSON.parse(read("package.json")) as { devDependencies?: Record<string, string> };
+    expect(pkg.devDependencies?.[OPENCODE_PACKAGE]).toBe(OPENCODE_VERSION);
+  });
+
   it("the protocol and schema packages the client is derived from are devDependencies at the same exact pin, so a bump moves the client's test with the images", () => {
     const pkg = JSON.parse(read("package.json")) as { devDependencies?: Record<string, string> };
     expect(pkg.devDependencies?.["@opencode/protocol"]).toBe(OPENCODE_VERSION);

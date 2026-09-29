@@ -208,6 +208,24 @@ describe("the provider table", () => {
     expect(providerGaps(withoutControl, full, PROVIDER_BLOCKS)).toEqual(["control inputs"]);
   });
 
+  it("catalog growth does not turn unknown-card scenarios into known-card scenarios", () => {
+    for (const driver of PROVIDER_DRIVERS) {
+      const grownCatalog = {
+        ...driver,
+        registry: {
+          card: (catalog: string | undefined, wire: (typeof WIRES)[number], model: string) =>
+            model === "deepseek/deepseek-v4.1-flash"
+              ? { contextWindow: 1_000_000, reasoning: true, thinkingLevelMap: { high: "high" } }
+              : driver.registry.card(catalog, wire, model),
+        },
+      };
+      for (const id of ["trace-2-unknown-card", "trace-3-effort-unvouched", "trace-7-window-degraded"]) {
+        const row = PROVIDER_ROWS.find((row) => row.id === id)!;
+        expect(providerRowVerdict(grownCatalog, row), `${driver.harness}: ${id}`).toMatchObject({ outcome: "pass" });
+      }
+    }
+  });
+
   it("a row that reads no decision fails rather than passing silently", () => {
     const row: ProviderScenarioRow = {
       id: "reads-nothing",

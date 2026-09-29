@@ -1,6 +1,6 @@
 import { ConfigGroup } from "@opencode/protocol/groups/config";
 import { EventGroup } from "@opencode/protocol/groups/event";
-import { HealthGroup } from "@opencode/protocol/groups/health";
+import { ServerGroup } from "@opencode/protocol/groups/server";
 import { MessageGroup } from "@opencode/protocol/groups/message";
 import { makePermissionGroup } from "@opencode/protocol/groups/permission";
 import { PluginGroup } from "@opencode/protocol/groups/plugin";
@@ -19,8 +19,9 @@ import {
   openCodeSessionRoutes,
   parseConfigEntries,
   parseFeedRecord,
-  parseHealth,
-  type OpenCodeHealth,
+  parseServerInfo,
+  parsePluginStates,
+  type OpenCodeServerInfo,
   type OpenCodeInboxUser,
   type OpenCodeMessage,
   type OpenCodePermissionRequest,
@@ -29,19 +30,19 @@ import {
 
 // Feature: docs/reference/specs/harness.md, the OpenCode process item — the
 // client is derived from the pinned protocol, not from prose: every route this
-// harness calls is read back from `@opencode/protocol@2.0.3`'s own endpoint
+// harness calls is read back from the pinned `@opencode/protocol`'s own endpoint
 // definitions, built here exactly as the server builds them, and the shapes
-// the harness reads are decoded by the pinned schemas from samples a live
-// `serve` at the pin answered. A bump of the pin that moves a route or a field
-// fails here, not in a run.
+// the harness reads are decoded by the pinned schemas from server response
+// samples (historical live responses updated to the 2.0.12 schemas).
+// A bump of the pin that moves a route or a field fails here, not in a run.
 
-// The session and permission groups take the server's location middleware;
-// any middleware service stands in for it — the paths do not depend on it.
-// (The published package's `makeSessionGroup` takes the session middleware
-// alone, where the tag's source takes two: the package is the pin.)
+// The pinned session group takes both session and form location middleware;
+// the permission group takes location and session location middleware. Any
+// middleware service stands in for each — the paths do not depend on it.
 class Location extends HttpApiMiddleware.Service<Location>()("test/Location") {}
 class SessionLocation extends HttpApiMiddleware.Service<SessionLocation>()("test/SessionLocation") {}
-const session = makeSessionGroup(SessionLocation);
+class FormLocation extends HttpApiMiddleware.Service<FormLocation>()("test/FormLocation") {}
+const session = makeSessionGroup(SessionLocation, FormLocation);
 const permission = makePermissionGroup(Location, SessionLocation);
 
 /** An endpoint as the pinned package holds it: the success schemas as a set
@@ -77,9 +78,9 @@ const decodes = (schema: Schema.Top | undefined, value: unknown): string | undef
 
 describe("the routes are the pinned protocol's", () => {
   it.each([
-    ["health.get", HealthGroup],
+    ["server.info", ServerGroup],
     ["config.get", ConfigGroup],
-    ["plugin.awaitActivation", PluginGroup],
+    ["plugin.list", PluginGroup],
     ["event.subscribe", EventGroup],
     ["session.create", session],
     ["session.import", session],
@@ -110,30 +111,54 @@ describe("the routes are the pinned protocol's", () => {
     });
   });
 
-  it("the version the client drives is the pin the protocol package was installed at", async () => {
-    const manifest = new URL("../../../../node_modules/@opencode/protocol/package.json", import.meta.url);
-    const pkg = JSON.parse(readFileSync(manifest, "utf8")) as { version: string };
-    expect(pkg.version).toBe(OPENCODE_VERSION);
-  });
+  it.each(["cli", "protocol", "schema"])(
+    "the version the client drives is the pin the %s package was installed at",
+    (name) => {
+      const manifest = new URL(`../../../../node_modules/@opencode/${name}/package.json`, import.meta.url);
+      const pkg = JSON.parse(readFileSync(manifest, "utf8")) as { version: string };
+      expect(pkg.version).toBe(OPENCODE_VERSION);
+    },
+  );
 });
 
-describe("the shapes are the pinned schemas', from what a live server answered", () => {
-  it("the health answer, as the readiness probe reads it", () => {
-    const sample: OpenCodeHealth = { healthy: true, version: "2.0.3", pid: 43067 };
-    expect(decodes(successOf(pinned(HealthGroup, "health.get")), sample)).toBeUndefined();
-    expect(parseHealth(JSON.stringify(sample))).toEqual(sample);
-    expect(parseHealth(JSON.stringify({ healthy: true, version: "2.0.3" }))).toEqual({
-      healthy: true,
-      version: "2.0.3",
-      pid: 0,
-    });
+describe("the shapes are the pinned schemas', from server response samples", () => {
+  it("the server info answer, as the readiness probe reads it", () => {
+    const identity: OpenCodeServerInfo = { version: OPENCODE_VERSION, pid: 43067 };
+    const sample = { ...identity, urls: ["http://127.0.0.1:41000"], paths: { tmp: "/tmp/opencode" } };
+    const schema = successOf(pinned(ServerGroup, "server.info"));
+    expect(decodes(schema, sample)).toBeUndefined();
+    expect(parseServerInfo(JSON.stringify(sample))).toEqual(identity);
+    expect(parseServerInfo(JSON.stringify({ ...sample, pid: 0 }))).toEqual({ ...identity, pid: 0 });
     for (const bad of [
-      "<html>",
-      "{}",
-      JSON.stringify({ healthy: false, version: "2.0.3" }),
-      JSON.stringify({ healthy: true }),
-    ])
-      expect(parseHealth(bad)).toBeUndefined();
+      { version: OPENCODE_VERSION },
+      { pid: 43067 },
+      { ...sample, version: 12 },
+      { ...sample, pid: "43067" },
+      { ...sample, pid: -1 },
+      { ...sample, pid: 0.5 },
+    ]) {
+      expect(decodes(schema, bad)).toBeDefined();
+      expect(parseServerInfo(JSON.stringify(bad))).toBeUndefined();
+    }
+    for (const bad of ["<html>", "{}", "null", "[]"]) expect(parseServerInfo(bad)).toBeUndefined();
+  });
+
+  it("the plugin inventory exposes the relay's activation state", () => {
+    const sample = {
+      location: { directory: "/tmp" },
+      data: [
+        {
+          id: "switchboard",
+          source: { type: "local", path: "/tmp/plugins/switchboard" },
+          features: { server: true },
+          state: { status: "active" },
+        },
+      ],
+    };
+    expect(decodes(successOf(pinned(PluginGroup, "plugin.list")), sample)).toBeUndefined();
+    expect(parsePluginStates(JSON.stringify(sample))).toEqual([
+      { id: "switchboard", sourcePath: "/tmp/plugins/switchboard", status: "active" },
+    ]);
   });
 
   it("the ask, as the gate will read it: the action, the resources, and the source naming the tool call", () => {
@@ -148,12 +173,13 @@ describe("the shapes are the pinned schemas', from what a live server answered",
     expect(decodes(successOf(pinned(permission, "session.permission.list")), { data: [sample] })).toBeUndefined();
     // The reply: `once` and `reject` are what the harness sends; `always` exists at the pin and is never sent by policy.
     const reply = payloadOf(pinned(permission, "session.permission.reply"));
-    expect(decodes(reply, { reply: "once" })).toBeUndefined();
+    expect(decodes(reply, { decision: "once" })).toBeUndefined();
     expect(
-      decodes(reply, { reply: "reject", message: "the rules refuse a push to the protected branch" }),
+      decodes(reply, { decision: "reject", message: "the rules refuse a push to the protected branch" }),
     ).toBeUndefined();
-    expect(decodes(reply, { reply: "always" })).toBeUndefined();
-    expect(decodes(reply, { reply: "maybe" })).toBeDefined();
+    expect(decodes(reply, { decision: "always" })).toBeUndefined();
+    expect(decodes(reply, { decision: "maybe" })).toBeDefined();
+    expect(decodes(reply, { reply: "once" })).toBeDefined();
     expect(Schema.decodeUnknownResult(Permission.Reply)("always")._tag).toBe("Success");
   });
 
@@ -165,7 +191,7 @@ describe("the shapes are the pinned schemas', from what a live server answered",
     const answer: OpenCodeInboxUser = {
       id: "msg_0ab31d0ab001rcwXPFuI3njUaD",
       sessionID: "ses_f54ce2f60fferPNusHOuMp25dU",
-      timeCreated: 1789578563757,
+      time: { created: 1789578563757 },
       type: "user",
       payload: { text: "please run the shell" },
       delivery: "queue",
@@ -236,6 +262,34 @@ describe("the shapes are the pinned schemas', from what a live server answered",
 describe("the parsers", () => {
   it("openCodeAuthHeader is Basic with the fixed user", () => {
     expect(openCodeAuthHeader("pw")).toBe(`Basic ${Buffer.from("opencode:pw").toString("base64")}`);
+  });
+
+  it("parsePluginStates rejects malformed inventories and preserves failure without exposing error text", () => {
+    expect(parsePluginStates(JSON.stringify({ data: [] }))).toEqual([]);
+    expect(
+      parsePluginStates(
+        JSON.stringify({
+          data: [
+            {
+              source: { type: "local", path: "/run/plugins/switchboard" },
+              state: { status: "failed", error: "private detail" },
+            },
+          ],
+        }),
+      ),
+    ).toEqual([{ sourcePath: "/run/plugins/switchboard", status: "failed" }]);
+    for (const body of [
+      "bad",
+      "null",
+      "[]",
+      "{}",
+      JSON.stringify({ data: [null] }),
+      JSON.stringify({ data: [{ id: 7, state: { status: "active" } }] }),
+      JSON.stringify({ data: [{ source: { type: "local", path: 7 }, state: { status: "failed" } }] }),
+      JSON.stringify({ data: [{ id: "switchboard" }] }),
+      JSON.stringify({ data: [{ state: { status: "starting" } }] }),
+    ])
+      expect(parsePluginStates(body)).toBeUndefined();
   });
 
   it("parseConfigEntries reads the entry list a live server answered and refuses anything else", () => {

@@ -51,6 +51,7 @@ declare module 'vue' {
     SettingSelect: typeof import('./src/components/SettingSelect.vue')['default']
     SettingsLink: typeof import('./src/components/SettingsLink.vue')['default']
     SettingsTabs: typeof import('./src/components/settings/SettingsTabs.vue')['default']
+    ShipSpendChart: typeof import('./src/components/costs/ShipSpendChart.vue')['default']
     SilentTurn: typeof import('./src/components/home/SilentTurn.vue')['default']
     SlackMark: typeof import('./src/components/SlackMark.vue')['default']
     SourceMark: typeof import('./src/components/runs/SourceMark.vue')['default']

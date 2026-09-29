@@ -1,7 +1,7 @@
 // Seed and rebuild are an import (docs/reference/specs/harness.md item 5; the
 // survival word for OpenCode is `authored-session`). A run's conversation
 // is handed to OpenCode by writing it as a session OpenCode accepts as its own
-// — `POST /api/session/import { info, messages }` into a fresh store — and then
+// — `POST /api/experimental/session/import { info, messages }` into a fresh store — and then
 // prompting the request. This module builds that body from the runner's
 // vocabulary (`ChatMessage[]` plus the ledger's compaction entries and the
 // settlements of calls in flight at a death):

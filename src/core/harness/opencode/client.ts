@@ -1,16 +1,16 @@
 // OpenCode's server API as this harness speaks it (docs/reference/specs/harness.md,
 // the OpenCode process item): the routes and the request and response shapes
 // of the calls the process unit makes and the units after it will, each
-// hand-derived from the pinned `@opencode/protocol@2.0.3` and `@opencode/schema@2.0.3`
-// sources and named with its file and line there, never from the docs (the
-// API reference pages do not exist at this pin). The runtime imports nothing
+// originally derived from `@opencode/protocol@2.0.3` and `@opencode/schema@2.0.3`
+// sources and named with their file and line there, never from the docs (the
+// API reference pages did not exist at that pin). The runtime imports nothing
 // from those packages: they are devDependencies the test (`client.test.ts`)
 // builds the pinned groups from, so a route or a field that drifts from the
 // pin fails the test and not a run. Thin on purpose: a field a unit does not
 // read is not here.
 
 /** The version this build drives; the image pin and the readiness probe both name it. */
-export const OPENCODE_VERSION = "2.0.3";
+export const OPENCODE_VERSION = "2.0.12";
 
 /** What `opencode --version` prints at the pin, exactly (measured; the image's grep names it). */
 export const OPENCODE_VERSION_TEXT = `opencode v${OPENCODE_VERSION}`;
@@ -34,18 +34,18 @@ export interface OpenCodeRoute {
  *  endpoints (`<group>.<endpoint>`), with the source of each. A route with a
  *  session id is a function of it. */
 export const OPENCODE_ROUTES = {
-  /** `packages/protocol/src/groups/health.ts:16` — answers `Health`; behind the password like every route (`packages/server/src/process.ts:189-192`). */
-  "health.get": { method: "GET", path: "/api/health" },
+  /** `@opencode/protocol@2.0.12`, `dist/groups/server.js` — answers `ServerInfo`; behind the server password. */
+  "server.info": { method: "GET", path: "/api/info" },
   /** `packages/protocol/src/groups/config.ts:9` — the loaded configuration entries, the readiness proof that the run's file took. */
   "config.get": { method: "GET", path: "/api/config" },
-  /** `packages/protocol/src/groups/plugin.ts:24` — settles plugin activation (the relay plugin) before the first session; 204. */
-  "plugin.awaitActivation": { method: "POST", path: "/api/plugin/await-activation" },
+  /** `@opencode/protocol@2.0.12`, `dist/groups/plugin.js` — the inventory reports each plugin's activation state. */
+  "plugin.list": { method: "GET", path: "/api/plugin" },
   /** `packages/protocol/src/groups/event.ts:43` — the SSE stream the tailer subscribes to; volatile by contract. */
   "event.subscribe": { method: "GET", path: "/api/event" },
   /** `packages/protocol/src/groups/session.ts:172`. */
   "session.create": { method: "POST", path: "/api/session" },
-  /** `packages/protocol/src/groups/session.ts:192` — the authored session (the survival word). */
-  "session.import": { method: "POST", path: "/api/session/import" },
+  /** `@opencode/protocol@2.0.12`, `dist/groups/session.js` — the authored session (the survival word). */
+  "session.import": { method: "POST", path: "/api/experimental/session/import" },
 } as const satisfies Record<string, OpenCodeRoute>;
 
 /** The routes under one session, by its id. */
@@ -53,9 +53,9 @@ export const openCodeSessionRoutes = (sessionID: string) =>
   ({
     /** `packages/protocol/src/groups/session.ts:339` — admits one input; async: the answer is the inbox item, not the turn. */
     "session.prompt": { method: "POST", path: `/api/session/${sessionID}/prompt` },
-    /** `packages/protocol/src/groups/session.ts:464` — BLOCKS until the agent loop is idle, then 204 (measured: a 239 s wait held open). */
-    "session.wait": { method: "POST", path: `/api/session/${sessionID}/wait` },
-    /** `packages/protocol/src/groups/session.ts:692` — `?continue=true|false`; answers `{ interrupted }`. */
+    /** `@opencode/protocol@2.0.12`, `dist/groups/session.js` — waits until the agent loop is idle, then 204. */
+    "session.wait": { method: "POST", path: `/api/experimental/session/${sessionID}/wait` },
+    /** `@opencode/protocol@2.0.12`, `dist/groups/session.js` — `?resume=true|false`; answers `{ interrupted }`. */
     "session.interrupt": { method: "POST", path: `/api/session/${sessionID}/interrupt` },
     /** `packages/protocol/src/groups/message.ts:43` — `?order=asc|desc&limit=1..200&cursor=&type=`; the store, the record's truth. */
     "session.messages": { method: "GET", path: `/api/session/${sessionID}/message` },
@@ -69,12 +69,11 @@ export const openCodePermissionReplyRoute = (sessionID: string, requestID: strin
   path: `/api/session/${sessionID}/permission/${requestID}/reply`,
 });
 
-/** `GET /api/health` (`packages/protocol/src/groups/health.ts:5-9`): `healthy` is
- *  the literal `true`, `pid` is 0 on a runtime without a process identity. The
- *  status is 200 ready, 503 starting or stopping (`retry-after: 1`), 500 failed
- *  (`packages/server/src/process.ts:214-224`). */
-export interface OpenCodeHealth {
-  healthy: true;
+/** The fields read from `GET /api/info` (`@opencode/protocol@2.0.12`,
+ *  `dist/groups/server.js`, `ServerInfo`); `pid` is 0 on a runtime without a
+ *  process identity. The response also carries `urls` and `paths.tmp`, which
+ *  the harness does not read. There is no `healthy` flag. */
+export interface OpenCodeServerInfo {
   version: string;
   pid: number;
 }
@@ -145,7 +144,7 @@ export interface OpenCodePrompt {
 export interface OpenCodeInboxUser {
   id: string;
   sessionID: string;
-  timeCreated: number;
+  time: { created: number };
   type: "user";
   payload: { text: string };
   delivery: "steer" | "queue";
@@ -165,10 +164,11 @@ export interface OpenCodePermissionRequest {
   message?: string;
 }
 
-/** `POST …/permission/:id/reply` payload (`packages/protocol/src/groups/permission.ts:115-118`).
- *  `always` persists a project rule (`packages/core/src/permission/saved.ts`) and is never sent. */
+/** `POST …/permission/:id/reply` payload (`@opencode/protocol@2.0.12`, `dist/groups/permission.js`).
+ *  The request calls it `decision`; the `permission.replied` event still calls it `reply`.
+ *  `always` persists a project rule and is never sent. */
 export interface OpenCodePermissionReply {
-  reply: "once" | "reject";
+  decision: "once" | "reject";
   message?: string;
 }
 
@@ -289,8 +289,8 @@ export function parseFeedRecord(line: string): OpenCodeFeedRecord | undefined {
     : undefined;
 }
 
-/** The health answer parsed, or nothing for a body of another shape. */
-export function parseHealth(body: string): OpenCodeHealth | undefined {
+/** The server identity parsed, or nothing for a body without those fields. */
+export function parseServerInfo(body: string): OpenCodeServerInfo | undefined {
   let value: unknown;
   try {
     value = JSON.parse(body);
@@ -299,8 +299,41 @@ export function parseHealth(body: string): OpenCodeHealth | undefined {
   }
   if (typeof value !== "object" || value === null) return undefined;
   const v = value as Record<string, unknown>;
-  if (v.healthy !== true || typeof v.version !== "string") return undefined;
-  return { healthy: true, version: v.version, pid: typeof v.pid === "number" ? v.pid : 0 };
+  if (typeof v.version !== "string" || typeof v.pid !== "number" || !Number.isInteger(v.pid) || v.pid < 0)
+    return undefined;
+  return { version: v.version, pid: v.pid };
+}
+
+/** The plugin inventory's activation states (`@opencode/schema@2.0.12`,
+ *  `dist/plugin.js`). A plugin whose discovery failed may have no id. */
+export function parsePluginStates(
+  body: string,
+): Array<{ id?: string; sourcePath?: string; status: "active" | "failed" }> | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null || !("data" in value) || !Array.isArray(value.data)) return undefined;
+  const plugins: Array<{ id?: string; sourcePath?: string; status: "active" | "failed" }> = [];
+  for (const entry of value.data) {
+    if (typeof entry !== "object" || entry === null) return undefined;
+    const { id, source, state } = entry as { id?: unknown; source?: unknown; state?: unknown };
+    if (id !== undefined && typeof id !== "string") return undefined;
+    if (source !== undefined && (typeof source !== "object" || source === null)) return undefined;
+    const local = source as { type?: unknown; path?: unknown } | undefined;
+    if (local?.type === "local" && typeof local.path !== "string") return undefined;
+    const sourcePath = local?.type === "local" ? (local.path as string) : undefined;
+    if (typeof state !== "object" || state === null || !("status" in state)) return undefined;
+    if (state.status !== "active" && state.status !== "failed") return undefined;
+    plugins.push({
+      ...(id === undefined ? {} : { id }),
+      ...(sourcePath === undefined ? {} : { sourcePath }),
+      status: state.status,
+    });
+  }
+  return plugins;
 }
 
 /** One page of `GET …/message` parsed — the messages and the cursor of the

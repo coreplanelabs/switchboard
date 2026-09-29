@@ -3,8 +3,8 @@
 // text the harness writes into the run's plugin directory before `opencode
 // serve` starts. Plain JavaScript that imports nothing: OpenCode's own loader
 // runs the directory's `index.js` as written, with no `bun install` and no
-// package (proven against `@opencode/cli@2.0.3`: a configured plugin directory
-// loads and `POST /api/plugin/await-activation` settles it). It does one
+// package (directory loading was proven against `@opencode/cli@2.0.3`;
+// the 2.0.12 protocol exposes activation through `GET /api/plugin`). It does one
 // thing. At load it fetches the run's relayed tools from `GET /harness/tools`
 // and registers each through the v2 `tool.transform` editor with its JSON
 // Schema — registered as a DIRECT tool (`options.codemode: false`) so the

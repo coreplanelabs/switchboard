@@ -633,7 +633,8 @@ function harness(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  const health = (version = OPENCODE_VERSION) => json(200, { healthy: true, version, pid: 77 });
+  const info = (version = OPENCODE_VERSION) =>
+    json(200, { version, pid: 77, urls: ["http://127.0.0.1:41000"], paths: { tmp: "/tmp/opencode" } });
   /** The configuration route echoing what the launch wrote, as the server would after parsing it. */
   const configEcho = (
     c: FakeHarnessContainer,
@@ -651,10 +652,20 @@ function harness(
   const serverFor = (s: OpenCodeLaunchSpec) => (req: HarnessRequest, c: FakeHarnessContainer) => {
     if (req.secretHeaders?.Authorization !== auth)
       return { status: 401, headers: { "www-authenticate": 'Basic realm="Secure Area"' }, body: "" };
-    if (req.method === "GET" && req.path === "/api/health") return health();
+    if (req.method === "GET" && req.path === "/api/info") return info();
     if (req.method === "GET" && req.path === "/api/config") return configEcho(c, s);
-    if (req.method === "POST" && req.path === "/api/plugin/await-activation")
-      return { status: 204, headers: {}, body: "" };
+    if (req.method === "GET" && req.path === "/api/plugin")
+      return json(200, {
+        location: { directory: "/tmp" },
+        data: [
+          {
+            id: "switchboard",
+            source: { type: "local", path: s.paths.pluginDir },
+            features: { server: true },
+            state: { status: "active" },
+          },
+        ],
+      });
     return json(404, { error: "no such route" });
   };
   container.onRequest = opts.onRequest ?? serverFor(spec);
@@ -677,7 +688,7 @@ function harness(
     password,
     auth,
     json,
-    health,
+    info,
     configEcho,
     serverFor,
     feedConnected,
@@ -688,7 +699,7 @@ function harness(
 }
 
 describe("launchOpenCode — the server started through the seam and found ready", () => {
-  it("writes the files, starts opencode serve on a free port with the run's environment, probes its health with the password as Basic auth, checks the configuration took, settles the plugin, and starts the tailer beside it", async () => {
+  it("writes the files, starts opencode serve on a free port with the run's environment, probes its info with the password as Basic auth, checks the configuration took, settles the plugin, and starts the tailer beside it", async () => {
     const h = harness();
     const started = await launchOpenCode(h.deps, spec, BEARER);
     expect(started).toMatchObject({
@@ -723,9 +734,9 @@ describe("launchOpenCode — the server started through the seam and found ready
     expect(tailer.paths.log).toBe(spec.paths.feed);
     // The readiness requests, in order, each carrying the password as a secret header and nothing in the plain ones.
     expect(h.container.requests.map((r) => `${r.method} ${r.path}`)).toEqual([
-      "GET /api/health",
+      "GET /api/info",
       "GET /api/config",
-      "POST /api/plugin/await-activation",
+      "GET /api/plugin",
     ]);
     for (const r of h.container.requests) {
       expect(r.port).toBe(41000);
@@ -785,7 +796,7 @@ describe("launchOpenCode — the server started through the seam and found ready
     let calls = 0;
     const ready = h.serverFor(spec);
     h.container.onRequest = (req, c) => {
-      if (req.path === "/api/health" && ++calls <= 3) {
+      if (req.path === "/api/info" && ++calls <= 3) {
         if (calls <= 2)
           throw new HarnessContainerError("request", "curl: (7) Failed to connect to 127.0.0.1 port 41000");
         return h.json(503, { code: "service_starting" });
@@ -794,11 +805,11 @@ describe("launchOpenCode — the server started through the seam and found ready
     };
     const started = await launchOpenCode(h.deps, spec, BEARER);
     expect(started.port).toBe(41000);
-    expect(h.container.requests.filter((r) => r.path === "/api/health")).toHaveLength(4);
+    expect(h.container.requests.filter((r) => r.path === "/api/info")).toHaveLength(4);
     expect(h.clock()).toBe(1_000_000 + 3 * 250);
   });
 
-  it("fails loudly by name when the health never answers within the bound, with the server's stderr tail", async () => {
+  it("fails loudly by name when the info never answers within the bound, with the server's stderr tail", async () => {
     const h = harness();
     h.container.onRequest = () => {
       throw new HarnessContainerError("request", "curl: (7) Failed to connect to 127.0.0.1 port 41000");
@@ -807,13 +818,13 @@ describe("launchOpenCode — the server started through the seam and found ready
     const promise = launchOpenCode({ ...h.deps, readyMs: 1000 }, spec, BEARER);
     await expect(promise).rejects.toBeInstanceOf(OpenCodeNotReadyError);
     await expect(promise).rejects.toThrow(
-      /did not answer its health within 1000 ms \(harness container: request failed — curl: \(7\)/,
+      /did not answer its info within 1000 ms \(harness container: request failed — curl: \(7\)/,
     );
     await expect(promise).rejects.toThrow(/stderr: error: EADDRINUSE/);
     expect(h.container.starts).toHaveLength(1);
   });
 
-  it("fails at once, by name, when the server refuses the password, when the binary on PATH is not the pin, when the health is not the health shape, and when the server exited first", async () => {
+  it("fails at once, by name, when the server refuses the password, when the binary on PATH is not the pin, when the info is not the info shape, and when the server exited first", async () => {
     const refused = harness({ onRequest: () => ({ status: 401, headers: {}, body: "" }) });
     await expect(launchOpenCode(refused.deps, spec, BEARER)).rejects.toThrow(/refused the run's password/);
     expect(refused.container.requests).toHaveLength(1);
@@ -822,22 +833,22 @@ describe("launchOpenCode — the server started through the seam and found ready
       onRequest: () => ({
         status: 200,
         headers: {},
-        body: JSON.stringify({ healthy: true, version: "2.0.4", pid: 1 }),
+        body: JSON.stringify({ version: "2.0.3", pid: 1, urls: [], paths: { tmp: "/tmp/opencode" } }),
       }),
     });
     await expect(launchOpenCode(other.deps, spec, BEARER)).rejects.toThrow(
-      /the opencode on PATH is 2\.0\.4; this build drives 2\.0\.3/,
+      `the opencode on PATH is 2.0.3; this build drives ${OPENCODE_VERSION}`,
     );
 
     const shape = harness({ onRequest: () => ({ status: 200, headers: {}, body: "<html>" }) });
-    await expect(launchOpenCode(shape.deps, spec, BEARER)).rejects.toThrow(/not the health shape/);
+    await expect(launchOpenCode(shape.deps, spec, BEARER)).rejects.toThrow(/not the info shape/);
 
     // 500 is the server saying its start failed: named at once, never polled to the deadline.
     const failedStart = harness({
       onRequest: () => ({ status: 500, headers: {}, body: JSON.stringify({ code: "service_failed" }) }),
     });
     await expect(launchOpenCode(failedStart.deps, spec, BEARER)).rejects.toThrow(
-      /reported that its start failed \(health answered 500\)/,
+      /reported that its start failed \(info answered 500\)/,
     );
     expect(failedStart.container.requests).toHaveLength(1);
     expect(failedStart.clock()).toBe(1_000_000);
@@ -851,7 +862,7 @@ describe("launchOpenCode — the server started through the seam and found ready
     };
     dead.container.files.set(spec.paths.errLog, "opencode: command not found\n");
     await expect(launchOpenCode(dead.deps, spec, BEARER)).rejects.toThrow(
-      /exited before it answered its health.*opencode: command not found/,
+      /exited before it answered its info.*opencode: command not found/,
     );
     expect(dead.container.requests).toHaveLength(0);
   });
@@ -887,9 +898,67 @@ describe("launchOpenCode — the server started through the seam and found ready
     const activation = harness();
     const serve4 = activation.serverFor(spec);
     activation.container.onRequest = (req, c) =>
-      req.path === "/api/plugin/await-activation" ? activation.json(500, { error: "boom" }) : serve4(req, c);
-    await expect(launchOpenCode(activation.deps, spec, BEARER)).rejects.toThrow(/plugin activation answered 500/);
+      req.path === "/api/plugin" ? activation.json(500, { error: "boom" }) : serve4(req, c);
+    await expect(launchOpenCode(activation.deps, spec, BEARER)).rejects.toThrow(/plugin inventory answered 500/);
     expect(activation.container.starts).toHaveLength(1);
+  });
+
+  it("waits for the relay's own active inventory entry, never another plugin's", async () => {
+    const h = harness();
+    const ready = h.serverFor(spec);
+    let polls = 0;
+    h.container.onRequest = (req, c) => {
+      if (req.path === "/api/plugin" && ++polls <= 2)
+        return h.json(200, {
+          data: [
+            { id: "other", state: { status: "active" } },
+            { source: { type: "local", path: "/other/plugins/broken" }, state: { status: "failed", error: "private" } },
+          ],
+        });
+      return ready(req, c);
+    };
+    await launchOpenCode(h.deps, spec, BEARER);
+    expect(polls).toBe(3);
+    expect(h.clock()).toBe(1_000_000 + 2 * 250);
+    expect(h.container.starts).toHaveLength(2);
+  });
+
+  it("fails at once when the relay's local plugin discovery fails before it receives an id", async () => {
+    const h = harness();
+    const ready = h.serverFor(spec);
+    h.container.onRequest = (req, c) =>
+      req.path === "/api/plugin"
+        ? h.json(200, {
+            data: [
+              {
+                source: { type: "local", path: spec.paths.pluginDir },
+                state: { status: "failed", error: "private detail" },
+              },
+            ],
+          })
+        : ready(req, c);
+    await expect(launchOpenCode(h.deps, spec, BEARER)).rejects.toThrow(/relay plugin failed to activate/);
+    expect(h.clock()).toBe(1_000_000);
+    expect(h.container.starts).toHaveLength(1);
+  });
+
+  it("fails closed when the relay fails, its inventory is malformed, or it never activates", async () => {
+    for (const [body, reason] of [
+      [
+        { data: [{ id: "switchboard", state: { status: "failed", error: "a-private-detail" } }] },
+        /relay plugin failed/,
+      ],
+      [{ wrong: [] }, /not the inventory shape/],
+      [{ data: [] }, /relay plugin did not activate within 1000 ms/],
+    ] as const) {
+      const h = harness();
+      const ready = h.serverFor(spec);
+      h.container.onRequest = (req, c) => (req.path === "/api/plugin" ? h.json(200, body) : ready(req, c));
+      const started = launchOpenCode({ ...h.deps, readyMs: 1000 }, spec, BEARER);
+      await expect(started).rejects.toThrow(reason);
+      await expect(started).rejects.not.toThrow(/a-private-detail/);
+      expect(h.container.starts).toHaveLength(1);
+    }
   });
 
   it("readiness ends only when the tailer says it is connected: a feed without the note within the bound is a named failure with the tailer's stderr, a tailer that exited first is another, and the feed offset answered is the byte after the note", async () => {
