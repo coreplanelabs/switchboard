@@ -1455,6 +1455,93 @@ describe("run ledger — the coordinator's unit events (record 0051's reply-as-e
     expect((await post("/runs/coordinator/events/list", body)).data).toMatchObject({ events: [{ text: "first" }] });
   });
 
+  it("atomically refuses main-task steer and stop after the claimed branch changes", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: INSTANCE_ID,
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+      repo: "acme/api",
+      branch: "plan/steer/u12",
+      base: "main",
+      plan: { id: "main-steer" },
+      merge: "person",
+      createdAt: 1_000,
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: INSTANCE_ID,
+      unit: "U12",
+      slug: "u12",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: instance.threadKey,
+        actId: "act-steer",
+        repo: instance.repo,
+        base: instance.base!,
+        question: "What failed?",
+        findings: [],
+        requestedChange: "Fix it",
+      },
+    };
+    const binding = {
+      key: { mainThreadKey: instance.threadKey, actId: "act-steer" },
+      instanceId: instance.id,
+      unit: unit.unit,
+      branch: instance.branch,
+      channelId: instance.channelId,
+      requesterId: instance.userId,
+    };
+    expect(
+      (await post("/runs/coordinator/main-task/claim", { storeKey: key, key: binding.key, instance, unit })).status,
+    ).toBe(200);
+    const first = event("first steer", { id: "steer-first" });
+    const firstAppend = {
+      storeKey: key,
+      instanceId: instance.id,
+      unit: unit.unit,
+      requireActive: true,
+      binding,
+    };
+    expect(await post("/runs/coordinator/events/append", { ...firstAppend, event: first })).toEqual({
+      status: 200,
+      data: { ok: true, seq: 1, event: { ...first, seq: 1 } },
+    });
+    expect(
+      await post("/runs/coordinator/events/append", {
+        ...firstAppend,
+        event: event("changed words", { id: "steer-first" }),
+      }),
+    ).toEqual({ status: 200, data: { ok: true, seq: 1, event: { ...first, seq: 1 } } });
+    expect(
+      (await post("/runs/coordinator/units/put", { storeKey: key, units: [{ ...unit, branch: "plan/other" }] })).status,
+    ).toBe(200);
+    expect(
+      await post("/runs/coordinator/events/append", {
+        storeKey: key,
+        instanceId: instance.id,
+        unit: unit.unit,
+        event: event("stale steer", { id: "steer-stale" }),
+        requireActive: true,
+        binding,
+      }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "stale" } });
+    expect(
+      await post("/runs/coordinator/stop", { storeKey: key, instanceId: instance.id, at: 6_000, binding }),
+    ).toEqual({
+      status: 409,
+      data: { ok: false, reason: "stale" },
+    });
+    expect(
+      (await post("/runs/coordinator/events/list", { storeKey: key, instanceId: instance.id, unit: unit.unit })).data,
+    ).toEqual({ events: [{ ...first, seq: 1 }] });
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data).toEqual({ instance });
+  });
+
   it("append assigns sequences in order and caps per event; list filters unconsumed; mark-consumed is idempotent; a put of the unit row leaves the events untouched", async () => {
     const key = storeKey();
     const body = { storeKey: key, instanceId: INSTANCE_ID, unit: "U12" };

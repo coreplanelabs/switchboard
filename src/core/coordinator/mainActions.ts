@@ -12,6 +12,7 @@ import {
   unitKeyOf,
   type CoordinatorInstance,
   type CoordinatorUnit,
+  type MainTaskBinding,
   type WorkflowSender,
 } from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
@@ -19,7 +20,7 @@ import type { CoordinatorInstanceStore } from "./instanceStore.js";
 /** The tool integration supplies only a resolved actor and a stable act id.
  * The actor's origin, never model text, selects the main conversation. */
 export interface MainTaskActionsDeps {
-  instances: Pick<CoordinatorInstanceStore, "getMainTask" | "get" | "listUnits" | "appendEvent" | "listEvents">;
+  instances: Pick<CoordinatorInstanceStore, "getMainTask" | "get" | "listUnits" | "appendEvent">;
   workflow?: WorkflowSender;
   plane: Pick<PlaneService, "stop">;
   clock: () => number;
@@ -44,6 +45,17 @@ type StopResult =
 interface BoundUnit {
   instance: CoordinatorInstance;
   unit: CoordinatorUnit;
+}
+
+function bindingOf(instance: CoordinatorInstance, unit: CoordinatorUnit, actId: string): MainTaskBinding {
+  return {
+    key: { mainThreadKey: instance.threadKey, actId },
+    instanceId: instance.id,
+    unit: unit.unit,
+    branch: instance.branch,
+    channelId: instance.channelId,
+    requesterId: instance.userId,
+  };
 }
 type Binding = { kind: "bound"; value: BoundUnit } | { kind: "not_found" | "unavailable" };
 
@@ -98,6 +110,7 @@ export function createMainTaskActions(deps: MainTaskActionsDeps) {
         instance.channelId !== origin.channelId ||
         !selfIdsOf(actor).includes(instance.userId) ||
         unit.instanceId !== instance.id ||
+        unit.branch !== instance.branch ||
         unit.dependsOn.length !== 0 ||
         brief.mainThreadKey !== origin.threadKey ||
         brief.actId !== actId ||
@@ -164,12 +177,16 @@ export function createMainTaskActions(deps: MainTaskActionsDeps) {
     if (!isThreadEvent({ ...event, seq: 1 })) return { kind: "invalid" };
     const key = { instanceId: instance.id, unit: unit.unit };
     try {
-      const appended = await deps.instances.appendEvent(key, event, true);
-      if (!appended.ok) return { kind: appended.reason === "ended" ? "ended" : "unavailable" };
-      const persisted = (await deps.instances.listEvents(key)).find((row) => row.id === id);
+      const appended = await deps.instances.appendEvent(key, event, true, bindingOf(instance, unit, input.actId));
+      if (!appended.ok)
+        return {
+          kind: appended.reason === "stale" ? "not_found" : appended.reason === "ended" ? "ended" : "unavailable",
+        };
+      const persisted = appended.event;
       // An id is a replay key, never permission to silently replace a prior steer.
       if (!persisted) return { kind: "unavailable" };
-      if (persisted.sender !== event.sender || persisted.text !== event.text) return { kind: "conflict" };
+      if (persisted.id !== id || persisted.sender !== event.sender || persisted.text !== event.text)
+        return { kind: "conflict" };
       const nudge = await sendUnitNudge(deps.workflow, key);
       return { kind: "queued", seq: appended.seq, nudge: nudge.kind === "sent" ? "sent" : "pending" };
     } catch {
@@ -180,7 +197,7 @@ export function createMainTaskActions(deps: MainTaskActionsDeps) {
   async function stop(actor: Actor, actId: string): Promise<StopResult> {
     const found = await bound(actor, actId);
     if (found.kind !== "bound") return found;
-    const { instance } = found.value;
+    const { instance, unit } = found.value;
     if (actor.viewingAs || !authorize(actor, "main-task:stop", runResource(instance)).allow)
       return { kind: "forbidden" };
     try {
@@ -188,11 +205,12 @@ export function createMainTaskActions(deps: MainTaskActionsDeps) {
         instance.id,
         runActorOf(actor),
         predicateFor(actor, "main-task:stop", "run"),
+        bindingOf(instance, unit, actId),
       );
       if (report.kind === "unknown_instance") return { kind: "not_found" };
       if (report.kind === "unavailable") return { kind: "unavailable" };
       return {
-        kind: report.runnerStopped ? "stopped" : "partial",
+        kind: report.runnerStopped && report.stopsSucceeded ? "stopped" : "partial",
         runnerStopped: report.runnerStopped,
         ...(report.parent ? { parentOutcome: report.parent.outcome } : {}),
         childOutcomes: report.children.map((child) => child.outcome),

@@ -200,6 +200,7 @@ describe("plane.stop — the runner_stop move in one command (record 0064)", () 
       kind: "stopped" as const,
       instanceId: "plan-x",
       runnerStopped: true,
+      stopsSucceeded: true,
       parent: { id: "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa", outcome: "stopping" },
       children: [{ id: "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb", outcome: "stopping" }],
     };
@@ -276,7 +277,7 @@ describe("a move from the orchestrator thread is fenced like the Slack door", ()
       table: async () => TABLE,
       stop: async (instanceId) => {
         stops.push(instanceId);
-        return { kind: "stopped", instanceId, runnerStopped: true, children: [] };
+        return { kind: "stopped", instanceId, runnerStopped: true, stopsSucceeded: true, children: [] };
       },
     };
     const registry = new CommandRegistry<PlaneCommandDeps>({ audit: () => {} });

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Actor } from "../authz/types.js";
-import type { PlaneService } from "../planeService.js";
+import { createPlaneService, type PlaneService } from "../planeService.js";
 import { unitNudgeEventType, type CoordinatorInstance, type CoordinatorUnit, type WorkflowSender } from "./contract.js";
 import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
 import { createMainTaskActions } from "./mainActions.js";
@@ -84,6 +84,7 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
     kind: "stopped",
     instanceId: id,
     runnerStopped: true,
+    stopsSucceeded: true,
     parent: { id: "run-parent", outcome: "aborted" },
     children: [{ id: "run-child", outcome: "aborted" }],
   }));
@@ -183,6 +184,35 @@ describe("main task actions", () => {
     expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: "task" })).toHaveLength(1);
   });
 
+  it("a persisted steer is nudged without reading the unit's full event history", async () => {
+    const { instances, sent } = await fixture();
+    const history = vi.spyOn(instances, "listEvents").mockRejectedValue(new Error("history unavailable"));
+    const actions = createMainTaskActions({
+      instances: {
+        getMainTask: instances.getMainTask.bind(instances),
+        get: instances.get.bind(instances),
+        listUnits: instances.listUnits.bind(instances),
+        appendEvent: instances.appendEvent.bind(instances),
+      },
+      workflow: {
+        get: async (id) => ({
+          sendEvent: async ({ type }) => {
+            sent.push({ instance: id, type });
+          },
+        }),
+      },
+      plane: { stop: vi.fn() },
+      clock: () => 2_000,
+    });
+    expect(await actions.steer(actor(), { actId: ACT, eventId: "bounded-1", words: "Continue" })).toEqual({
+      kind: "queued",
+      seq: 1,
+      nudge: "sent",
+    });
+    expect(sent).toHaveLength(1);
+    expect(history).not.toHaveBeenCalled();
+  });
+
   it("terminal units refuse a steer and a later brief rewrite cannot change the binding", async () => {
     const ended = await fixture({ ending: { kind: "merge_ready", report: "private report", at: 2_000 } });
     expect(await ended.actions.steer(actor(), { actId: ACT, eventId: "call-44", words: "Do more" })).toEqual({
@@ -224,7 +254,6 @@ describe("main task actions", () => {
           await instances.markStopped(INSTANCE.id, 2_000);
           return instances.appendEvent(key, event, guard);
         },
-        listEvents: instances.listEvents.bind(instances),
       },
       plane: { stop: vi.fn() },
       clock: () => 2_000,
@@ -233,6 +262,55 @@ describe("main task actions", () => {
       kind: "ended",
     });
     expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: "task" })).toEqual([]);
+  });
+
+  it("a branch change racing the append leaves no steer on the former claimed unit", async () => {
+    const { instances } = await fixture();
+    const actions = createMainTaskActions({
+      instances: {
+        getMainTask: instances.getMainTask.bind(instances),
+        get: instances.get.bind(instances),
+        listUnits: instances.listUnits.bind(instances),
+        appendEvent: async (key, event, active, binding) => {
+          await instances.putUnits([{ ...UNIT, branch: "ship/other-work" }]);
+          return instances.appendEvent(key, event, active, binding);
+        },
+      },
+      plane: { stop: vi.fn() },
+      clock: () => 2_000,
+    });
+    expect(await actions.steer(actor(), { actId: ACT, eventId: "race-branch", words: "Continue" })).toEqual({
+      kind: "not_found",
+    });
+    expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: "task" })).toEqual([]);
+  });
+
+  it("a branch change racing the stop leaves the former claimed instance running", async () => {
+    const { instances } = await fixture();
+    const stoppedRuns: string[] = [];
+    const plane = createPlaneService({
+      instances: {
+        get: instances.get.bind(instances),
+        listUnits: instances.listUnits.bind(instances),
+        markStopped: async (id, at, binding) => {
+          await instances.putUnits([{ ...UNIT, branch: "ship/other-work" }]);
+          return instances.markStopped(id, at, binding);
+        },
+      },
+      runs: {
+        listRuns: async () => ({ runs: [] }),
+        listInstanceUnits: async () => [],
+        stopRun: async (id: string) => {
+          stoppedRuns.push(id);
+          return { ok: true, value: { state: "stopping" } };
+        },
+      } as unknown as Parameters<typeof createPlaneService>[0]["runs"],
+      clock: () => 2_000,
+    });
+    const actions = createMainTaskActions({ instances, plane, clock: () => 2_000 });
+    expect(await actions.stop(actor(), ACT)).toEqual({ kind: "not_found" });
+    expect((await instances.get(INSTANCE.id))?.stop).toBeUndefined();
+    expect(stoppedRuns).toEqual([]);
   });
 
   it("a mismatched stored brief refuses a steer before writing an event", async () => {
@@ -247,7 +325,6 @@ describe("main task actions", () => {
             workBrief: { ...unit.workBrief!, repo: "other/repo" },
           })),
         appendEvent: instances.appendEvent.bind(instances),
-        listEvents: instances.listEvents.bind(instances),
       },
       plane: { stop: vi.fn() },
       clock: () => 2_000,
@@ -256,6 +333,17 @@ describe("main task actions", () => {
       kind: "not_found",
     });
     expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: "task" })).toHaveLength(0);
+  });
+
+  it("a changed unit branch revokes status, steer, and stop for the claimed task", async () => {
+    const { instances, actions, stop } = await fixture({ branch: "another-task-branch" });
+    expect(await actions.status(actor(), ACT)).toEqual({ kind: "not_found" });
+    expect(await actions.steer(actor(), { actId: ACT, eventId: "call-branch", words: "Do more" })).toEqual({
+      kind: "not_found",
+    });
+    expect(await actions.stop(actor(), ACT)).toEqual({ kind: "not_found" });
+    expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: "task" })).toHaveLength(0);
+    expect(stop).not.toHaveBeenCalled();
   });
 
   it("stop preserves exact ownership and reports the plane outcome", async () => {
@@ -278,7 +366,31 @@ describe("main task actions", () => {
     expect(stop.mock.calls[0]?.[1]).toEqual({ kind: "chat", id: "slack:UALICE" });
     expect(stop.mock.calls[0]?.[2]).not.toEqual({ kind: "all" });
 
-    stop.mockResolvedValueOnce({ kind: "stopped", instanceId: INSTANCE.id, runnerStopped: false, children: [] });
+    stop.mockResolvedValueOnce({
+      kind: "stopped",
+      instanceId: INSTANCE.id,
+      runnerStopped: false,
+      stopsSucceeded: true,
+      children: [],
+    });
     expect(await actions.stop(actor(), ACT)).toEqual({ kind: "partial", runnerStopped: false, childOutcomes: [] });
+  });
+
+  it("a failed child stop reports partial even when the runner mark succeeded", async () => {
+    const { actions, stop } = await fixture();
+    stop.mockResolvedValueOnce({
+      kind: "stopped",
+      instanceId: INSTANCE.id,
+      runnerStopped: true,
+      stopsSucceeded: false,
+      parent: { id: "run-parent", outcome: "stopping" },
+      children: [{ id: "run-child", outcome: "unavailable" }],
+    });
+    expect(await actions.stop(actor(), ACT)).toEqual({
+      kind: "partial",
+      runnerStopped: true,
+      parentOutcome: "stopping",
+      childOutcomes: ["unavailable"],
+    });
   });
 });

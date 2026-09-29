@@ -221,7 +221,9 @@ describe("createPlaneService — the table over the stores that exist", () => {
 });
 
 describe("plane stop — the runner_stop move (record 0064; issue 1924)", () => {
-  function stopHarness(over: { markFails?: boolean; liveByThread?: Record<string, RunView[]> } = {}) {
+  function stopHarness(
+    over: { markFails?: boolean; failStopIds?: string[]; liveByThread?: Record<string, RunView[]> } = {},
+  ) {
     const store = new InMemoryCoordinatorInstanceStore();
     const stops: Array<{ id: string; mode: string; actor: { kind: string; id: string } }> = [];
     const marks: string[] = [];
@@ -241,6 +243,7 @@ describe("plane stop — the runner_stop move (record 0064; issue 1924)", () => 
       listInstanceUnits: async () => [],
       stopRun: async (id: string, mode: "soft" | "hard", actor: { kind: string; id: string }) => {
         stops.push({ id, mode, actor });
+        if (over.failStopIds?.includes(id)) return { ok: false as const, error: "conflict" as const };
         return { ok: true as const, value: { id, mode, state: "stopping" } };
       },
     };
@@ -273,6 +276,7 @@ describe("plane stop — the runner_stop move (record 0064; issue 1924)", () => 
       kind: "stopped",
       instanceId: INSTANCE.id,
       runnerStopped: true,
+      stopsSucceeded: true,
       parent: { id: "parent-1", outcome: "stopping" },
       children: [
         { id: "child-1", outcome: "stopping" },
@@ -286,6 +290,30 @@ describe("plane stop — the runner_stop move (record 0064; issue 1924)", () => 
       ["child-2", "hard"],
     ]);
     expect(h.stops.every((s) => s.actor.id === "slack:U_ALICE")).toBe(true);
+  });
+
+  it("reports a failed child stop while still attempting the other children", async () => {
+    const h = stopHarness({
+      failStopIds: ["child-1"],
+      liveByThread: {
+        "slack:C_PUB:2.0": [
+          view({ id: "child-1", parentInstanceId: INSTANCE.id }),
+          view({ id: "child-2", parentInstanceId: INSTANCE.id }),
+        ],
+      },
+    });
+    await h.store.put(INSTANCE);
+    await h.store.putUnits([unit("U12", { threadKey: "slack:C_PUB:2.0" })]);
+    expect(await h.service.stop(INSTANCE.id, actor, ALL)).toMatchObject({
+      kind: "stopped",
+      runnerStopped: true,
+      stopsSucceeded: false,
+      children: [
+        { id: "child-1", outcome: "conflict" },
+        { id: "child-2", outcome: "stopping" },
+      ],
+    });
+    expect(h.stops.map((stop) => stop.id)).toEqual(["parent-1", "child-1", "child-2"]);
   });
 
   it("a stop mark that could not be written still ends the runs and says so; an instance the viewer's predicate does not admit is unknown, and an unknown id stops nothing", async () => {
