@@ -13,29 +13,74 @@ const url = (channel: string, ts = THREAD) => `https://team.example/archives/${c
 function setup(
   over: {
     origin?: string;
-    channels?: Record<string, { is_private?: boolean; is_im?: boolean; is_member?: boolean; is_shared?: boolean }>;
+    channels?: Record<
+      string,
+      {
+        user?: string;
+        is_private?: boolean;
+        is_im?: boolean;
+        is_mpim?: boolean;
+        is_member?: boolean;
+        is_shared?: boolean;
+        is_ext_shared?: boolean;
+        is_org_shared?: boolean;
+        is_pending_ext_shared?: boolean;
+      }
+    >;
     replies?: Record<string, SlackThreadMessage[]>;
     replyPages?: Record<string, { messages: SlackThreadMessage[]; nextCursor?: string }>;
     nearby?: SlackThreadMessage[];
     guest?: boolean;
     member?: boolean | "unknown";
     loadFile?: (file: { id?: string }) => Promise<string>;
+    onReplies?: () => void;
   } = {},
 ) {
   resetReferenceRate();
   const origin = over.origin ?? "D_MAIN";
-  const channels = over.channels ?? {
-    C_PUBLIC: { is_private: false, is_member: true },
-    C_PRIVATE: { is_private: true, is_member: true },
+  const channels: NonNullable<typeof over.channels> = {
+    D_MAIN: {
+      user: "UALICE",
+      is_im: true,
+      is_mpim: false,
+      is_private: true,
+      is_member: true,
+      is_shared: false,
+      is_ext_shared: false,
+      is_org_shared: false,
+      is_pending_ext_shared: false,
+    },
+    C_PUBLIC: {
+      is_im: false,
+      is_mpim: false,
+      is_private: false,
+      is_member: true,
+      is_shared: false,
+      is_ext_shared: false,
+      is_org_shared: false,
+      is_pending_ext_shared: false,
+    },
+    C_PRIVATE: {
+      is_im: false,
+      is_mpim: false,
+      is_private: true,
+      is_member: true,
+      is_shared: false,
+      is_ext_shared: false,
+      is_org_shared: false,
+      is_pending_ext_shared: false,
+    },
+    ...over.channels,
   };
   const replies = over.replies ?? {};
   const calls = { replies: vi.fn(), history: vi.fn() };
   const client: SlackContextClient = {
-    auth: { test: async () => ({ url: "https://team.example/" }) },
+    auth: { test: async () => ({ url: "https://team.example/", team_id: "TLOCAL" }) },
     conversations: {
       info: async ({ channel }) => ({ channel: channels[channel] }),
       replies: async (args) => {
         calls.replies(args);
+        over.onReplies?.();
         const page = over.replyPages?.[`${args.channel}:${args.ts}:${args.cursor ?? ""}`];
         if (page) return { messages: page.messages, response_metadata: { next_cursor: page.nextCursor } };
         return { messages: replies[`${args.channel}:${args.ts}`] ?? [] };
@@ -46,7 +91,7 @@ function setup(
       },
     },
     users: {
-      info: async () => ({ user: { is_restricted: over.guest ?? false, name: "alice" } }),
+      info: async () => ({ user: { team_id: "TLOCAL", is_restricted: over.guest ?? false, name: "alice" } }),
     },
   };
   const actor: Actor = {
@@ -69,10 +114,57 @@ function setup(
     directory: { isMember: async () => over.member ?? "unknown" },
     ...(over.loadFile ? { loadFile: over.loadFile } : {}),
   });
-  return { capability, calls, actor, client, msg };
+  return { capability, calls, actor, client, msg, channels };
 }
 
 describe("Slack context adapter", () => {
+  it("refuses an external or unverifiable D origin before reading and after it changes", async () => {
+    const external = setup({
+      channels: { D_MAIN: { user: "UALICE", is_im: true, is_shared: true, is_ext_shared: true } },
+      replies: { [`D_MAIN:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "external secret" }] },
+    });
+    expect(String(await external.capability.read({ kind: "thread" }))).not.toContain("external secret");
+    expect(external.calls.replies).not.toHaveBeenCalled();
+    const unverifiable = setup({ channels: { D_MAIN: { is_im: true, user: "UALICE" } } });
+    expect(await unverifiable.capability.read({ kind: "nearby" })).toContain("can't read");
+    expect(unverifiable.calls.history).not.toHaveBeenCalled();
+    const changed = setup({
+      replies: { [`D_MAIN:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "newly shared secret" }] },
+      onReplies: () => {
+        changed.channels.D_MAIN.is_ext_shared = true;
+      },
+    });
+    expect(String(await changed.capability.read({ kind: "thread" }))).not.toContain("newly shared secret");
+  });
+
+  it("drops linked thread and file results when fresh source eligibility changes during the fetch", async () => {
+    const linked = setup({
+      replies: { [`C_PUBLIC:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "private after read" }] },
+      onReplies: () => {
+        linked.channels.C_PUBLIC.is_private = true;
+      },
+    });
+    expect(String(await linked.capability.read({ kind: "link", url: url("C_PUBLIC") }))).not.toContain(
+      "private after read",
+    );
+    const file = {
+      id: "FLINK",
+      name: "private.md",
+      size: 9,
+      mimetype: "text/markdown",
+      url_private_download: "https://files.slack.com/private",
+    };
+    const downloaded = setup({
+      replies: { [`C_PUBLIC:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "file", files: [file] }] },
+      loadFile: async () => {
+        downloaded.channels.C_PUBLIC.is_shared = true;
+        return "file became private";
+      },
+    });
+    expect(
+      String(await downloaded.capability.read({ kind: "file", url: url("C_PUBLIC"), fileId: "FLINK" })),
+    ).not.toContain("file became private");
+  });
   it("requires the authenticated Slack requester at capability construction", () => {
     const h = setup();
     expect(() =>
@@ -159,6 +251,20 @@ describe("Slack context adapter", () => {
     });
     expect(String(await botOutside.capability.read({ kind: "link", url: url("C_PUBLIC") }))).toContain("can't read");
     expect(botOutside.calls.replies).not.toHaveBeenCalled();
+  });
+
+  it("rechecks a saved linked source after ordinary reference reads exhaust their quota", async () => {
+    const h = setup({
+      replies: { [`C_PUBLIC:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "public fact" }] },
+    });
+    const request = { kind: "link" as const, url: url("C_PUBLIC") };
+    for (let i = 0; i < 12; i++)
+      expect(String(await h.capability.read(request, "revalidate"))).toContain("public fact");
+    for (let i = 0; i < 10; i++) expect(String(await h.capability.read(request))).toContain("public fact");
+    expect(String(await h.capability.read(request))).toContain("can't read");
+    expect(String(await h.capability.read(request, "revalidate"))).toContain("public fact");
+    h.channels.C_PUBLIC.is_ext_shared = true;
+    expect(String(await h.capability.read(request, "revalidate"))).toContain("can't read");
   });
 
   it("reads only a file attached to the authorized message under caps", async () => {

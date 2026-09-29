@@ -194,6 +194,8 @@ export interface ReadReferencesInput {
   msg: IncomingMessage;
   /** The request's principal (the chat actor); the step builds the pointing actor from it. */
   actor: Actor;
+  /** A saved-source recheck repeats the full authority and fetch path without charging a new user read. */
+  purpose?: "revalidate";
   /** Clock, for the per-user window; tests set it. Default `Date.now`. */
   now?: () => number;
 }
@@ -238,7 +240,7 @@ export async function readReferences(deps: ReferenceDeps, input: ReadReferencesI
       refuse(ref, "over-cap");
       continue;
     }
-    if (!admitOne(msg.userId, now())) {
+    if (input.purpose !== "revalidate" && !admitOne(msg.userId, now())) {
       refuse(ref, "rate-limited");
       continue;
     }

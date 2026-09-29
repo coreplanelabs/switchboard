@@ -34,8 +34,14 @@ describe("the toolset table", () => {
   // reads and the thread's own session tools — and nothing that writes: no
   // shell relay, no submit_*, no issue writes, no spawn. The boundary is the
   // tool list, not prose discipline.
-  it("orchestrator: the plane's read, the session tools and the status card — and nothing that writes, no run tool (the conductor's alone)", () => {
-    expect(TOOLSETS.orchestrator!.map((t) => t.name)).toEqual(["update_status", "plane_show", "recall", "notes"]);
+  it("orchestrator: the plane and opt-in Slack reads, session tools and status card — nothing that writes or starts a run", () => {
+    expect(TOOLSETS.orchestrator!.map((t) => t.name)).toEqual([
+      "update_status",
+      "plane_show",
+      "slack_context",
+      "recall",
+      "notes",
+    ]);
   });
 
   it("every preset's key indexes a toolset, and every tool has one name across the table", () => {

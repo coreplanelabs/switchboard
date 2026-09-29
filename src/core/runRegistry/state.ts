@@ -5,6 +5,7 @@ import type { InFlightCall } from "../runPace.js";
 import type { RunSeed, RunStatus } from "../runRecord.js";
 import type { RunLiveState } from "../runLiveState.js";
 import type { RunControl } from "./runControl.js";
+import type { SlackDirectAudience } from "../types.js";
 
 // The row a run occupies in the registry while it is live (`RunState`), the
 // identity the dispatcher hands `create()` for it (`RunMeta`), and the contract
@@ -24,6 +25,8 @@ export interface RunMeta {
   channelId: string;
   userId: string;
   threadKey: string;
+  /** Verified direct Slack DM provenance; private run views are gated on it. */
+  directAudience?: SlackDirectAudience;
   /** The channel's visibility as the `ChannelDirectory` reported it at dispatch
    *  (authorization) — what `member-of` reads on a live run. The dispatcher
    *  always stamps it; a hand-built run without it is `unknown`, never public. */

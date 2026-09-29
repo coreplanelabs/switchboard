@@ -109,9 +109,18 @@ import {
 } from "./dispatch/provision.js";
 import type { FrictionDiagnosis } from "./runFriction.js";
 import { claimRun, type RunDeps } from "./dispatch/run.js";
+import { bindSlackContext, type SlackContextBinding } from "./dispatch/slackContextBinding.js";
+import {
+  privateAudienceRequired,
+  privateAudienceStillValid,
+  recoveredPrivateAudienceLatch,
+  revalidateSavedSlackContext,
+  savedSlackContextNeedsRecheck,
+} from "./dispatch/privateAudience.js";
+import { directAudienceStampOf } from "./runLedger/inboxMessage.js";
 import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
-import { finishChildSetup, writeTombstone } from "./dispatch/record.js";
+import { channelVisibilityOf, finishChildSetup, writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipContext, type ShipDeps } from "./dispatch/ship.js";
 import { fetchInstanceStatusViaShim, processShimOptions } from "./coordinator/instancesClient.js";
 import { shipPresetFor } from "./shipPipeline.js";
@@ -915,6 +924,27 @@ export async function dispatch(
     },
   };
   try {
+    // A later DM turn may inherit private tool results from its session log.
+    // Stop before the operator, history or seed can read that log unless Slack
+    // still proves this is the same requester's private conversation.
+    const directDm = /^slack:D[A-Z0-9_]+$/.test(msg.channelId);
+    // An indirect reply to a live private run must revoke that run before this
+    // turn is refused. It cannot enter the model inbox or read the saved session.
+    const revokePrivateLive = () => {
+      const live = admission.get(msg.threadKey);
+      if (live?.agent === "orchestrator") live.inbox.markUntrustedFollowUp();
+    };
+    if (directDm && directAudienceStampOf(msg) === undefined) revokePrivateLive();
+    if (directDm && !(await privateAudienceStillValid(msg, io))) {
+      revokePrivateLive();
+      await refuse(
+        refusalOf(
+          "slack_direct_audience_unverified",
+          "I can't verify that this Slack DM is private. Use a private DM with the bot, or ask an admin to check the app's Slack permissions.",
+        ),
+      );
+      return ended;
+    }
     // The operator (record 0057; routing-and-config item 29): under
     // `routing.operator: shadow` or `on`, ONE operator turn per admitted chat
     // event — here, ahead of stage A and outside the deterministic live-thread
@@ -2042,7 +2072,7 @@ export async function dispatch(
     // A restart that carries its predecessor's identity keeps the original
     // start too (run-history item 54): the card and the record span one run.
     const startedAt = carriedRow?.startedAt ?? opts.restartCarried?.startedAt ?? receivedAt;
-    const ack = await openAckCard(deps, { io, agent, resolved, startedAt, clock, root, trace, route });
+    const ack = await openAckCard(deps, { msg, io, agent, resolved, startedAt, clock, root, trace, route });
     const { shell, card } = ack;
     setupCard = card;
     setupShell = shell;
@@ -2334,6 +2364,49 @@ export async function dispatch(
     ]);
     const session = fromSession?.seed;
     const seedNotes = [...(fromSession?.notes ?? []), ...(threadArtifacts?.notes ?? [])];
+    const recovered = resume !== undefined || restart !== undefined || opts.restartOf !== undefined;
+    // Recovery cannot prove whether an indirect source was consumed before the
+    // crash. Refuse before a saved plan or session can reach the model.
+    if (recovered && privateAudienceRequired(msg)) {
+      await refuse(refusalOf("setup_failed", "This run restarted, so please ask again in a private DM."));
+      return ended;
+    }
+    const needsSavedSlackRecheck =
+      agent.name === "orchestrator" &&
+      /^slack:D[A-Z0-9_]+$/.test(msg.channelId) &&
+      savedSlackContextNeedsRecheck(session, history);
+    const savedSlackVisibility = needsSavedSlackRecheck
+      ? await root.span("dispatch.channel_visibility", () => channelVisibilityOf(deps, msg.channelId))
+      : undefined;
+    const savedSlackBinding: SlackContextBinding | undefined = needsSavedSlackRecheck
+      ? await bindSlackContext({
+          agentName: agent.name,
+          actor: chatActorOf(deps.config, msg),
+          msg,
+          io,
+          visibility: savedSlackVisibility!,
+          recovered,
+          create: deps.slackContextForRun,
+        })
+      : undefined;
+    const revalidateSavedSources = (binding: SlackContextBinding) =>
+      revalidateSavedSlackContext(session, binding.capability, async (url) => {
+        const fresh = await readReferences(deps, {
+          msg: { ...msg, text: url },
+          actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)),
+          purpose: "revalidate",
+        });
+        return fresh.refused.length === 0 && fresh.blocks.length === 1 ? fresh.blocks[0] : undefined;
+      });
+    if (needsSavedSlackRecheck && (!savedSlackBinding || !(await revalidateSavedSources(savedSlackBinding)))) {
+      await refuse(
+        refusalOf(
+          "setup_failed",
+          "I need to check the Slack source again before using earlier details. Please start a new DM message with the source.",
+        ),
+      );
+      return ended;
+    }
     const seed: RunSeed = opts.seed ? "parent" : session ? "session" : "channel";
     const seedTurns: TextTurn[] | undefined =
       opts.seed ?? (session ? textTurnsOf(session.messages.slice(0, -1)) : undefined);
@@ -2507,6 +2580,7 @@ export async function dispatch(
       root,
       trace,
       registry,
+      ...(savedSlackVisibility !== undefined ? { channelVisibility: savedSlackVisibility } : {}),
       shell,
       admitted,
       parentRunId,
@@ -3208,6 +3282,23 @@ export async function dispatch(
     }
     // The ledger claim (dispatch/run.ts), once the prompt exists: the reserved
     // row promoted, or a resume's adopted row re-subscribed.
+    // A prior generation may have consumed an indirect follow-up before its
+    // source-revocation latch was saved. Recovery cannot prove that source
+    // history, so neither private reads nor private publication resume.
+    const slackContext =
+      savedSlackBinding ??
+      (await bindSlackContext({
+        agentName: agent.name,
+        actor: chatActorOf(deps.config, msg),
+        msg,
+        io,
+        visibility: channelVisibility,
+        recovered,
+        create: deps.slackContextForRun,
+      }));
+    const privateAudienceLatch = recoveredPrivateAudienceLatch(msg, recovered);
+    if (needsSavedSlackRecheck && slackContext)
+      privateAudienceLatch.revalidateSources = () => revalidateSavedSources(slackContext);
     ledgerRun = await claimRun(deps, {
       msg,
       agent,
@@ -3216,6 +3307,7 @@ export async function dispatch(
       repoCtx,
       ...(agent.name !== "review" && operationTarget !== undefined ? { operationTarget } : {}),
       channelVisibility,
+      slackContext,
       run,
       registry,
       selection: round.selection,
@@ -3368,6 +3460,8 @@ export async function dispatch(
       loopStartedAt,
       assertAdmissionBudget,
       channelVisibility,
+      slackContext,
+      privateAudienceLatch,
       publishText,
       ending,
       spawn,
@@ -3453,6 +3547,8 @@ export async function dispatch(
       agent,
       run,
       answer,
+      slackContext,
+      privateAudienceLatch,
       verdict: ran.verdict,
       reviewPost: ran.reviewPost,
       reviewStoppedBeforeStart: ran.reviewStoppedBeforeStart,
@@ -3466,7 +3562,7 @@ export async function dispatch(
       shell,
       checklistAsLeft,
       checklistCheckedOff,
-      doneLines,
+      doneLines: privateAudienceRequired(msg) || slackContext !== undefined ? () => ({}) : doneLines,
       runDiagnosis,
       releaseWorkspace,
       root,

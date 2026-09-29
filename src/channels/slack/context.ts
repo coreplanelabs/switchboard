@@ -4,8 +4,9 @@ import { wrapUntrusted } from "../../core/commandRegistry.js";
 import { readReferences, REFERENCE_MAX_BYTES, REFERENCE_MAX_MESSAGES } from "../../core/dispatch/references.js";
 import type { ReferencedConversation } from "../../core/references/types.js";
 import type { IncomingMessage } from "../../core/types.js";
-import type { SlackContextCapability, SlackContextRequest } from "../../tools/slackContext.js";
+import type { SlackContextRequest, VerifiedSlackContextCapability } from "../../tools/slackContext.js";
 import { classifyDocument, fetchDocuments, fetchImages, isSecretFile, type SlackFile } from "./attachments.js";
+import { verifySlackDirectAudience } from "./directAudience.js";
 import { fetchSlackReplies, SlackConversationReader, type ReferenceClient } from "./references.js";
 import { resolveTeamUrl, slackPermalink } from "./lookups.js";
 import { threadTurns, type SlackThreadMessage, type ThreadTurn } from "./threadTurns.js";
@@ -108,7 +109,7 @@ export function createSlackContextCapability(input: {
   directory?: Pick<ChannelDirectory, "isMember">;
   /** Tests replace the existing attachment loader without reaching Slack. */
   loadFile?: (file: SlackFile) => Promise<ToolResultContent | undefined>;
-}): SlackContextCapability {
+}): VerifiedSlackContextCapability {
   const { client, reader, actor, msg } = input;
   if (!/^slack:[CGD][A-Z0-9_]+$/.test(msg.channelId) || actor.kind !== "user" || actor.id !== msg.userId)
     throw new Error("Slack context needs the resolved requester and Slack origin");
@@ -121,9 +122,18 @@ export function createSlackContextCapability(input: {
     return reader.parseConversationUrl(url);
   };
 
+  const verifyDirectOrigin = async (): Promise<boolean> => {
+    if (!origin.startsWith("D")) return false;
+    return verifySlackDirectAudience(client, {
+      kind: "slack-unshared-im",
+      channelId: msg.channelId,
+      userId: actor.id,
+      threadKey: msg.threadKey,
+    });
+  };
+
   const originAllowed = async (): Promise<boolean> => {
-    // A DM's exact source was delivered by Slack to this requester and bot.
-    if (origin.startsWith("D")) return true;
+    if (origin.startsWith("D")) return verifyDirectOrigin();
     const ref = { channelId: msg.channelId, threadKey: msg.threadKey, url: msg.sourceUrl ?? msg.threadKey };
     const cls = await reader.classifyConversation(ref);
     if (cls.visibility === "never" || !cls.botIsMember) return false;
@@ -131,8 +141,24 @@ export function createSlackContextCapability(input: {
     return reader.requesterIsFullMember(actor.id);
   };
 
+  const originAllowedFresh = async (): Promise<boolean> => {
+    if (origin.startsWith("D")) return verifyDirectOrigin();
+    const ref = { channelId: msg.channelId, threadKey: msg.threadKey, url: msg.sourceUrl ?? msg.threadKey };
+    const cls = await reader.classifyConversationFresh(ref);
+    if (cls.visibility === "never" || !cls.botIsMember) return false;
+    if (cls.visibility === "private") return (await input.directory?.isMember(actor.id, msg.channelId)) === true;
+    return reader.requesterIsFullMember(actor.id);
+  };
+
+  const linkedStillAllowed = async (ref: NonNullable<ReturnType<typeof reader.parseConversationUrl>>) => {
+    if (ref.channelId === msg.channelId) return originAllowedFresh();
+    const cls = await reader.classifyConversationFresh(ref);
+    return cls.visibility === "public" && cls.botIsMember && (await reader.requesterIsFullMember(actor.id));
+  };
+
   const allowedLink = async (
     url: string,
+    purpose?: "revalidate",
   ): Promise<
     | { ref: NonNullable<ReturnType<typeof reader.parseConversationUrl>>; conversation?: ReferencedConversation }
     | undefined
@@ -144,19 +170,24 @@ export function createSlackContextCapability(input: {
     // membership alone says nothing about everyone in the destination.
     const cls = await reader.classifyConversation(ref);
     if (cls.visibility !== "public" || !cls.botIsMember) return undefined;
-    const checked = await readReferences({ conversationReaders: [reader] }, { actor, msg: { ...msg, text: url } });
+    const checked = await readReferences(
+      { conversationReaders: [reader] },
+      { actor, msg: { ...msg, text: url }, purpose },
+    );
     return checked.conversations.length === 1 && checked.refused.length === 0
       ? { ref, conversation: checked.conversations[0] }
       : undefined;
   };
 
   return {
-    async read(request: SlackContextRequest): Promise<ToolResultContent> {
+    verifyDirectOrigin,
+    async read(request: SlackContextRequest, purpose?: "revalidate"): Promise<ToolResultContent> {
       try {
         if (!(await originAllowed())) return request.kind === "file" ? FILE_REFUSED : REFUSED;
         if (request.kind === "thread") {
           const turns = threadTurns(await fetchSlackReplies(client, origin, originThread), {});
           const teamUrl = await resolveTeamUrl(client);
+          if (!(await originAllowedFresh())) return REFUSED;
           return quoted(
             `Current Slack thread · ${msg.threadKey}`,
             turns.map((t) => turnLine(t, teamUrl, origin, originThread)),
@@ -167,13 +198,14 @@ export function createSlackContextCapability(input: {
           // Slack history is newest-first; normalize so the cap drops oldest.
           const turns = threadTurns(page.messages ?? [], {}).reverse();
           const teamUrl = await resolveTeamUrl(client);
+          if (!(await originAllowedFresh())) return REFUSED;
           return quoted(
             `Nearby Slack channel · ${msg.channelId}`,
             turns.map((t) => turnLine(t, teamUrl, origin, t.ts ?? "")),
           );
         }
         const linked =
-          request.kind === "file" && request.url === undefined ? undefined : await allowedLink(request.url!);
+          request.kind === "file" && request.url === undefined ? undefined : await allowedLink(request.url!, purpose);
         if (!linked && !(request.kind === "file" && request.url === undefined))
           return request.kind === "file" ? FILE_REFUSED : REFUSED;
         if (request.kind === "file" && request.url === undefined) {
@@ -182,7 +214,9 @@ export function createSlackContextCapability(input: {
             {},
           ).find((m) => m.ts === request.messageTs);
           const file = message?.files?.find((f) => f.id === request.fileId);
-          return file ? await allowedFile(file) : FILE_REFUSED;
+          if (!file) return FILE_REFUSED;
+          const result = await allowedFile(file);
+          return (await originAllowedFresh()) ? result : FILE_REFUSED;
         }
         if (!linked) return REFUSED;
         const { ref } = linked;
@@ -202,6 +236,7 @@ export function createSlackContextCapability(input: {
             ),
             {},
           ).filter((t) => t.files?.length);
+          if (!(await linkedStillAllowed(ref))) return REFUSED;
           return quoted(
             `Linked Slack thread · ${ref.threadKey}`,
             read.messages.map((m) => {
@@ -220,7 +255,9 @@ export function createSlackContextCapability(input: {
           (m) => m.ts === targetTs,
         );
         const file = message?.files?.find((f) => f.id === request.fileId);
-        return file ? await allowedFile(file) : FILE_REFUSED;
+        if (!file) return FILE_REFUSED;
+        const result = await allowedFile(file);
+        return (await linkedStillAllowed(ref)) ? result : FILE_REFUSED;
       } catch {
         return request.kind === "file" ? FILE_REFUSED : REFUSED;
       }

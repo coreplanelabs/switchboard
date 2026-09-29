@@ -17,7 +17,9 @@ import {
 } from "../coordinator/contract.js";
 import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { RunProfile } from "../../config/profile.js";
-import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
+import { mergeTools } from "../../tools/toolsets.js";
+import { toolsForSlackContextRun, type SlackContextBinding } from "./slackContextBinding.js";
+import type { VerifiedSlackContextCapability } from "../../tools/slackContext.js";
 import { makeWebCapability } from "../../tools/web.js";
 import { RestGithubApi, type GithubApi } from "../../execution/githubApi.js";
 import type { GithubCapability } from "../../tools/github.js";
@@ -42,6 +44,7 @@ import type { RunStore } from "../runStore.js";
 import type { PlaneService } from "../planeService.js";
 import type { RunsService } from "../runsService.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
+import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
 import type { Actor, ChannelVisibility } from "../authz/types.js";
 import type { Clock, Span } from "../trace/types.js";
 import type { IncomingMessage, StatusHandle } from "../types.js";
@@ -164,6 +167,8 @@ export interface RunDeps
    * `runs:read` predicate. Absent → the tool reports the tables unavailable.
    */
   plane?: () => Promise<PlaneService>;
+  /** Slack adapter's requester-bound read. Only a verified direct main run receives it. */
+  slackContextForRun?: (actor: Actor, msg: IncomingMessage) => VerifiedSlackContextCapability;
   /**
    * The artifact store (docs/reference/specs/execution.md item 20): where a
    * run's files move by reference when `artifacts:` is configured. Absent →
@@ -256,6 +261,7 @@ export interface ClaimContext {
   /** Accepted execution target; the resolved repo/ref can also come from evidence. */
   operationTarget?: OperationTarget;
   channelVisibility: ChannelVisibility;
+  slackContext?: SlackContextBinding;
   run: RunHandle;
   registry: RunRegistry;
   selection: ExecutorSelection;
@@ -353,6 +359,8 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
   // already made this run untracked, with the one warning; asking again
   // would only warn again.
   if (!resume && reserved) {
+    const directAudience = directAudienceStampOf(msg);
+    const privateMain = agent.name === "orchestrator" && directAudience !== undefined;
     const ledger = deps.runLedger;
     const opened = await root.span("dispatch.ledger_claim", () =>
       ledger.open({
@@ -365,22 +373,23 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           channelId: msg.channelId,
           userId: msg.userId,
           threadKey: msg.threadKey,
+          ...(directAudience !== undefined ? { directAudience } : {}),
           channelVisibility,
-          ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-          ...(operationTarget !== undefined ? { operationTarget } : {}),
+          ...(repoCtx.repo !== undefined && !privateMain ? { repo: repoCtx.repo } : {}),
+          ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
           ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
           ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
           ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
-          ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
-          ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
-          ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
+          ...(repoCtx.ref !== undefined && !privateMain ? { ref: repoCtx.ref } : {}),
+          ...(repoCtx.headSha !== undefined && !privateMain ? { headSha: repoCtx.headSha } : {}),
+          ...(repoCtx.pr !== undefined && !privateMain ? { pr: repoCtx.pr } : {}),
           readonly: profile.identity === "read",
           profile,
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
           ...coordinatorFields(coordinator),
           ...(seed !== undefined ? { seed } : {}),
-          ...(route !== undefined ? { route } : {}),
+          ...(route !== undefined && !privateMain ? { route } : {}),
           selection: resident === true ? "resident" : "sandbox",
           ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
           ...(requestRow !== undefined ? { request: requestRow } : {}),
@@ -391,7 +400,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         // its hooks (a stop, a fence) were wired at the reservation and stay.
         reservation: reserved,
         system,
-        tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools).map(
+        tools: mergeTools(toolsForSlackContextRun(agent.toolset, ctx.slackContext), mcpForRun?.tools).map(
           ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
         ),
         // The seed carries the EFFECTIVE budget, so a resume runs on what

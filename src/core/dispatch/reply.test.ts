@@ -523,6 +523,9 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       // dispatcher.test.ts quotes the typed budget outcome and its reply at
       // every expired setup boundary; this refusal is not silent.
       "run_budget_exhausted",
+      // dispatcher.test.ts proves this DM refusal runs before history and
+      // session reads and names the verification remedy.
+      "slack_direct_audience_unverified",
     ];
     const silent: RefusalCode[] = ["coordinator_thread_live", "workspace_lost", "setup_failed", "uncaught"];
     const covered = new Set<RefusalCode>([...table.map((r) => r.code), ...provenElsewhere, ...silent]);
@@ -834,6 +837,166 @@ describe("deliverAnswer — the answer reaches the thread", () => {
     expect(s.replies).toEqual(["the findings\n\n[Live run](https://sb.example/runs/run-d?t=tok)"]);
     expect(s.sealed).toEqual(["replyOk=true"]);
     expect(s.releases).toEqual([1]);
+  });
+
+  it("keeps the checklist and diagnostics on a non-private main run's completed card", async () => {
+    const s = finishedRun();
+    await deliverAnswer({
+      ...s.ctx,
+      agent: getAgent("orchestrator"),
+      shell: createCardShell({ label: "*main*", startedAt: NOW, now: () => NOW, verbosity: "debug" }),
+      doneLines: () => ({ shape: "3 steps · 2 calls", queued: "queued 1m" }),
+    });
+    expect(s.closes[0].detail).toContain("✓ step");
+    expect(s.closes[0].detail).toContain("3 steps · 2 calls");
+    expect(s.closes[0].detail).toContain("queued 1m");
+  });
+
+  it("rechecks a Slack read destination immediately before the channel reply", async () => {
+    const s = finishedRun();
+    await deliverAnswer({
+      ...s.ctx,
+      agent: getAgent("orchestrator"),
+      answer: "private fact",
+      slackContext: {
+        capability: { read: async () => "private fact" },
+        destinationStillPrivate: async () => false,
+        revoke: () => {},
+      },
+    });
+    expect(s.replies).toHaveLength(1);
+    expect(s.replies[0]).not.toContain("private fact");
+  });
+
+  it("drops the private answer if the DM becomes shared while the card closes", async () => {
+    const s = finishedRun();
+    let checks = 0;
+    await deliverAnswer({
+      ...s.ctx,
+      agent: getAgent("orchestrator"),
+      answer: "private fact",
+      slackContext: {
+        capability: { read: async () => "private fact" },
+        destinationStillPrivate: async () => ++checks === 1,
+        revoke: () => {},
+      },
+    });
+    expect(checks).toBe(2);
+    expect(s.replies).toHaveLength(1);
+    expect(s.replies[0]).not.toContain("private fact");
+  });
+
+  it("rechecks a stamped private run without a Slack context binding before its reply", async () => {
+    const s = finishedRun();
+    const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+    let checks = 0;
+    await deliverAnswer({
+      ...s.ctx,
+      agent: getAgent("orchestrator"),
+      msg: { ...s.ctx.msg, ...dm, directAudience: { kind: "slack-unshared-im", ...dm } },
+      io: {
+        ...s.ctx.io,
+        directAudience: () => dm,
+        verifyDirectAudience: async () => ++checks === 1,
+      },
+      answer: "private worker fact",
+      prNote: "private worker detail",
+      shell: createCardShell({ label: "*main*", startedAt: NOW, now: () => NOW, verbosity: "debug" }),
+      doneLines: () => ({ shape: "private timing", queued: "private queue" }),
+    });
+    expect(checks).toBe(2);
+    expect(s.replies).toHaveLength(1);
+    expect(s.replies[0]).not.toContain("private worker");
+    expect(JSON.stringify(s.closes)).not.toContain("step");
+    expect(JSON.stringify(s.closes)).not.toContain("private timing");
+  });
+
+  it("seals the card and reply if source trust is revoked during audience verification", async () => {
+    const s = finishedRun();
+    const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+    const privateAudienceLatch = { revoked: false };
+    let verifierStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      verifierStarted = resolve;
+    });
+    let finishVerification!: (value: boolean) => void;
+    const verifying = new Promise<boolean>((resolve) => {
+      finishVerification = resolve;
+    });
+    const delivering = deliverAnswer({
+      ...s.ctx,
+      agent: getAgent("orchestrator"),
+      msg: { ...s.ctx.msg, ...dm, directAudience: { kind: "slack-unshared-im", ...dm } },
+      io: {
+        ...s.ctx.io,
+        directAudience: () => dm,
+        verifyDirectAudience: () => {
+          verifierStarted();
+          return verifying;
+        },
+      },
+      privateAudienceLatch,
+      answer: "private worker fact",
+      prNote: "private worker detail",
+    });
+    await started;
+    privateAudienceLatch.revoked = true;
+    finishVerification(true);
+    await delivering;
+    expect(JSON.stringify({ replies: s.replies, closes: s.closes })).not.toContain("private worker");
+  });
+
+  it("seals the final reply if source trust is revoked during its last audience verification", async () => {
+    const s = finishedRun();
+    const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+    const privateAudienceLatch = { revoked: false };
+    let verifierStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      verifierStarted = resolve;
+    });
+    let finishVerification!: (value: boolean) => void;
+    const verifying = new Promise<boolean>((resolve) => {
+      finishVerification = resolve;
+    });
+    let checks = 0;
+    const delivering = deliverAnswer({
+      ...s.ctx,
+      agent: getAgent("orchestrator"),
+      msg: { ...s.ctx.msg, ...dm, directAudience: { kind: "slack-unshared-im", ...dm } },
+      io: {
+        ...s.ctx.io,
+        directAudience: () => dm,
+        verifyDirectAudience: () => (++checks === 1 ? Promise.resolve(true) : (verifierStarted(), verifying)),
+      },
+      privateAudienceLatch,
+      answer: "private worker fact",
+      prNote: "private worker detail",
+    });
+    await started;
+    privateAudienceLatch.revoked = true;
+    finishVerification(true);
+    await delivering;
+    expect(checks).toBe(2);
+    expect(JSON.stringify(s.replies)).not.toContain("private worker");
+  });
+
+  it("keeps a revoked private run sealed even if the DM verifier later answers true", async () => {
+    const s = finishedRun();
+    const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+    let checks = 0;
+    await deliverAnswer({
+      ...s.ctx,
+      msg: { ...s.ctx.msg, ...dm, directAudience: { kind: "slack-unshared-im", ...dm } },
+      io: { ...s.ctx.io, directAudience: () => dm, verifyDirectAudience: async () => ++checks > 1 },
+      answer: "private finding",
+      prNote: "private PR note",
+      verdict: { verdict: "request_changes", summary: "private review summary" },
+    });
+    expect(checks).toBe(1);
+    expect(s.replies).toHaveLength(1);
+    expect(s.replies[0]).not.toContain("private finding");
+    expect(s.replies[0]).not.toContain("private PR note");
+    expect(s.replies[0]).not.toContain("private review summary");
   });
 
   // docs/reference/specs/run-history.md item 38: a resumed ingress run's reply

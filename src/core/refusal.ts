@@ -58,6 +58,7 @@ const CAUSE_OF = {
   pipeline_thread_owned: "request",
   elsewhere_agent_allowlist: "policy",
   elsewhere_follow_up_refused: "request",
+  slack_direct_audience_unverified: "system",
   which_branch: "request",
   workspace_lost: "system",
   ship_budget: "request",

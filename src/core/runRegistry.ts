@@ -35,10 +35,16 @@ import { IndexFeed, type IndexSubscriber } from "./runRegistry/indexFeed.js";
 import { PACE_WINDOW_MS } from "./runPace.js";
 import { foldRunLiveState, type RunLiveStateMaterialized } from "./runLiveState.js";
 import type { LiveStateAssignResult } from "./runLedger/types.js";
+import { privateMainEvent } from "./privateMainEvent.js";
+import { directAudienceStampOf } from "./runLedger/inboxMessage.js";
 
 /** Hard cap on the pace ring (item 32): the window's stamps for a run far
  *  chattier than any real one; past it the oldest go first, like the backlog. */
 const PACE_RING_CAP = 1_200;
+
+function privateMainRun(meta: RunMeta | undefined): boolean {
+  return meta?.agent === "orchestrator" && directAudienceStampOf(meta) !== undefined;
+}
 
 // The run registry is the unit-testable core of the external live-view page
 // (docs/reference/specs/live-view.md) and the ONE per-run event store while a run is live
@@ -229,6 +235,8 @@ export class RunRegistry {
     const id = opts.id ?? this.genId();
     const token = opts.token ?? this.genToken();
     const stored = label === undefined ? undefined : redactAndCap(label, RUN_LABEL_MAX);
+    const privateMain = privateMainRun(meta);
+    const replay = privateMain ? opts.replay?.map(privateMainEvent) : opts.replay;
     const run: RunState = {
       id,
       token,
@@ -255,15 +263,18 @@ export class RunRegistry {
     // appended as if published (bounded like any backlog, no subscribers yet)
     // and the counter continues past the highest, so the record assembled at
     // finish and the seqs appended to the ledger stay one contiguous stream.
-    for (const event of [...(opts.replay ?? [])].sort((x, y) => (x.seq ?? 0) - (y.seq ?? 0))) {
+    for (const event of [...(replay ?? [])].sort((x, y) => (x.seq ?? 0) - (y.seq ?? 0))) {
       const seq = event.seq ?? run.eventCount + 1;
       run.eventCount = Math.max(run.eventCount, seq);
       if (!isSpanRecord(event)) run.stepCount++;
       appendToBacklog(run, this.bounds, { ...event, seq });
     }
-    const replayedLiveState = foldRunLiveState(opts.replay ?? [], opts.liveState);
+    const replayedLiveState = foldRunLiveState(replay ?? [], opts.liveState);
     const folded = opts.resetLiveState ? { liveStateSeq: replayedLiveState.liveStateSeq } : replayedLiveState;
-    run.liveState = folded.liveState;
+    run.liveState =
+      privateMain && folded.liveState
+        ? { ...folded.liveState, detail: "Private conversation activity" }
+        : folded.liveState;
     run.liveStateSeq = folded.liveStateSeq;
     this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
     return { id, token, control: run.control, ...(stored !== undefined ? { label: stored } : {}) };
@@ -329,6 +340,7 @@ export class RunRegistry {
   publish(id: string, event: RunEvent): void {
     const run = this.runs.get(id);
     if (!run || run.sealedAt !== undefined) return;
+    if (privateMainRun(run.meta)) event = privateMainEvent(event);
     const span = isSpanRecord(event);
     if (run.finished && !span) return;
     // ONE counter: `eventCount` is the monotonic published total AND the `seq`
@@ -385,7 +397,7 @@ export class RunRegistry {
       if (seq === undefined || seq !== run.eventCount + 1) return false;
       run.eventCount = seq;
       run.stepCount++;
-      const stamped: RunEvent = { ...event, seq };
+      const stamped: RunEvent = { ...(privateMainRun(run.meta) ? privateMainEvent(event) : event), seq };
       appendToBacklog(run, this.bounds, stamped);
       for (const sub of run.subscribers) {
         try {
@@ -395,7 +407,9 @@ export class RunRegistry {
         }
       }
     }
-    run.liveState = committed.liveState;
+    run.liveState = privateMainRun(run.meta)
+      ? { ...committed.liveState, detail: "Private conversation activity" }
+      : committed.liveState;
     run.liveStateSeq = committed.liveStateSeq;
     this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
     return true;

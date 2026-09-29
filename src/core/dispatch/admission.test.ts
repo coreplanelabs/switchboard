@@ -304,6 +304,52 @@ describe("admit — the thread admission claim", () => {
     expect(admission.get(THREAD)).toBe(claim.live); // still the live run's slot
   });
 
+  it("a requester DM question followed by fix it keeps one live run and its private address through durable delivery", async () => {
+    const dm = {
+      channelId: "slack:DMAIN",
+      userId: "slack:WALICE",
+      threadKey: "slack:DMAIN:1.0",
+      text: "How many users failed to sign up?",
+      directAudience: {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:DMAIN",
+        userId: "slack:WALICE",
+        threadKey: "slack:DMAIN:1.0",
+      },
+    };
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    let nextSeq = 6;
+    const ledger = new RecordingLedger({ pushSeq: () => ++nextSeq });
+    const first = setup(dm.text, { admission, ledger });
+    first.ctx.msg = dm;
+    const admitted = await admit(first.deps, first.ctx);
+    expect(admitted.kind).toBe("proceed");
+    if (admitted.kind !== "proceed") return;
+    admitted.admitted.runId = "run-1";
+    const later = setup("fix it", { admission, ledger });
+    later.ctx.msg = { ...dm, text: "fix it" };
+    expect(await admit(later.deps, later.ctx)).toEqual({ kind: "steered", where: "here" });
+    expect(admission.get(dm.threadKey)).toBe(admitted.admitted);
+    const [live] = admitted.admitted.inbox.drain();
+    expect(live.text).toBe("fix it");
+    expect(live.directAudience).toEqual(dm.directAudience);
+    expect(live.msg.directAudience).toEqual(dm.directAudience);
+    const stored = ledger.pushes[0].message;
+    expect(stored.text).toBe("fix it");
+    expect(stored.directAudience).toEqual(dm.directAudience);
+    const resumed = followUpFromInbox({ seq: 7, message: stored }, later.io, 0);
+    expect(resumed?.directAudience).toEqual(dm.directAudience);
+    expect(resumed?.msg.directAudience).toEqual(dm.directAudience);
+
+    const relayed = setup("fix it again", { admission, ledger });
+    relayed.ctx.msg = { ...dm, text: "fix it again", relayedBy: "slack:bot:BOTHER" };
+    expect(await admit(relayed.deps, relayed.ctx)).toEqual({ kind: "steered", where: "here" });
+    const [indirect] = admitted.admitted.inbox.drain();
+    expect(indirect.directAudience).toBeUndefined();
+    expect(indirect.msg.directAudience).toBeUndefined();
+    expect(ledger.pushes[1].message.directAudience).toBeUndefined();
+  });
+
   it("a steered follow-up is acked at verbose — the message's own `verbosity:` directive is read before the request resolves (item 28)", async () => {
     const admission = new ThreadAdmission<DispatchFollowUp>();
     const claim = admission.claim(THREAD, { agent: "general", now: 4_000 });

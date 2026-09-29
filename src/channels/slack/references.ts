@@ -32,12 +32,13 @@ export const REPLIES_MAX_PAGES = 10;
 
 /** The slice of the Slack Web API the reader uses — structural, so a test fake satisfies it. */
 export interface ReferenceClient {
-  auth: { test(): Promise<{ url?: string }> };
+  auth: { test(): Promise<{ url?: string; team_id?: string }> };
   conversations: {
     info(args: { channel: string }): Promise<{
       channel?: {
         id?: string;
         name?: string;
+        user?: string;
         is_private?: boolean;
         is_im?: boolean;
         is_mpim?: boolean;
@@ -46,6 +47,9 @@ export interface ReferenceClient {
         is_org_shared?: boolean;
         is_pending_ext_shared?: boolean;
         is_member?: boolean;
+        num_members?: number;
+        shared_team_ids?: string[];
+        pending_connected_team_ids?: string[];
       };
     }>;
     replies(args: {
@@ -58,6 +62,7 @@ export interface ReferenceClient {
   users: {
     info(args: { user: string }): Promise<{
       user?: {
+        team_id?: string;
         name?: string;
         real_name?: string;
         profile?: { display_name?: string; real_name?: string; email?: string };
@@ -179,6 +184,34 @@ export class SlackConversationReader implements ConversationReader {
     }
     this.cache.set(channel, { at: this.now(), answer });
     return answer;
+  }
+
+  /** A post-fetch authority check cannot accept the short classification cache. */
+  async classifyConversationFresh(ref: ConversationRef): Promise<ConversationClassification> {
+    const channel = ref.channelId.slice(SLACK.length + 1);
+    this.cache.delete(channel);
+    try {
+      const c = (await this.client.conversations.info({ channel })).channel;
+      if (
+        !c ||
+        c.is_im ||
+        c.is_mpim ||
+        typeof c.is_private !== "boolean" ||
+        c.is_member !== true ||
+        c.is_shared ||
+        c.is_ext_shared ||
+        c.is_org_shared ||
+        c.is_pending_ext_shared
+      )
+        return NEVER;
+      return {
+        visibility: c.is_private ? "private" : "public",
+        botIsMember: true,
+        ...(c.name ? { channelName: c.name } : {}),
+      };
+    } catch {
+      return NEVER;
+    }
   }
 
   async readConversation(

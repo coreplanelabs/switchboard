@@ -51,6 +51,8 @@ export interface LiveRunMeta {
   channelId: string;
   userId: string;
   threadKey: string;
+  /** Intake's verified DM provenance; a resumed run rechecks the live audience. */
+  directAudience?: import("./inboxMessage.js").DirectAudienceStamp;
   channelVisibility?: ChannelVisibility;
   repo?: string;
   /** Accepted execution target, distinct from resolved citation and channel facts. */

@@ -16,6 +16,7 @@ import {
   resumeMessage,
 } from "./resumeLaunch.js";
 import type { RunEvent } from "./runEvents.js";
+import { durableInboxMessage } from "./runLedger/inboxMessage.js";
 import type { AdoptRunRequest } from "./runLedger/writeThrough.js";
 import type { AppendableEvent, LiveRunRow, StepRecord } from "./runLedger/types.js";
 import { RunRegistry } from "./runRegistry.js";
@@ -147,6 +148,29 @@ describe("the pure pieces", () => {
       },
     });
     expect(resumeMessage(relayed, "")).toMatchObject({ userId: "slack:UALICE", postedBy: "slack:bot:B0CLAUDE" });
+  });
+
+  it("resumeMessage restores only a matching private DM provenance from the durable run row", () => {
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:WALICE",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const original = { ...directAudience, directAudience, text: "What happened?" };
+    const meta = {
+      ...row().meta,
+      ...original,
+      agent: "orchestrator",
+      request: durableInboxMessage(original, original.text, 1_000),
+    };
+    expect(resumeMessage(row({ meta }), "What happened?").directAudience).toEqual(directAudience);
+    expect(
+      resumeMessage(
+        row({ meta: { ...meta, directAudience: { ...directAudience, userId: "slack:WBOB" } } }),
+        "What happened?",
+      ).directAudience,
+    ).toBeUndefined();
   });
 
   // record 0060: a hosted row's key column carries `#host`, which no channel's

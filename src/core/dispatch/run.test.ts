@@ -192,6 +192,62 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     await claimed?.close();
   });
 
+  it("keeps verified requester DM provenance on the live row", async () => {
+    const { deps, ledger, base } = setup();
+    const agent = getAgent("orchestrator");
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:WALICE",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const msg = { ...base.msg, ...directAudience, directAudience };
+    const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
+    await claimRun(deps, {
+      ...base,
+      msg,
+      agent,
+      profile: declaredProfile(agent),
+      repoCtx: { repo: "acme/api", ref: "main", headSha: "a".repeat(40), pr: 41 },
+      operationTarget: { repo: "acme/api", ref: "unit/repair" },
+      reserved,
+      resume: undefined,
+      ledgerRun: undefined,
+      route: { preset: "orchestrator", reason: "private account balance: 17", model: "anthropic/fast" },
+    });
+    expect(ledger.opened[0].meta.directAudience).toEqual(directAudience);
+    expect(ledger.opened[0].meta.repo).toBeUndefined();
+    expect(ledger.opened[0].meta.operationTarget).toBeUndefined();
+    expect(ledger.opened[0].meta.ref).toBeUndefined();
+    expect(ledger.opened[0].meta.headSha).toBeUndefined();
+    expect(ledger.opened[0].meta.pr).toBeUndefined();
+    expect(ledger.opened[0].meta.route).toBeUndefined();
+  });
+
+  it("keeps repository facts when a non-private main run claims its row", async () => {
+    const { deps, ledger, base } = setup();
+    const agent = getAgent("orchestrator");
+    const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
+    const route = { preset: "orchestrator", reason: "public repository summary", model: "anthropic/fast" };
+    await claimRun(deps, {
+      ...base,
+      agent,
+      profile: declaredProfile(agent),
+      repoCtx: { repo: "acme/api", ref: "main", headSha: "a".repeat(40), pr: 41 },
+      reserved,
+      resume: undefined,
+      ledgerRun: undefined,
+      route,
+    });
+    expect(ledger.opened[0].meta).toMatchObject({
+      repo: "acme/api",
+      ref: "main",
+      headSha: "a".repeat(40),
+      pr: 41,
+      route,
+    });
+  });
+
   it("a reserved fresh run promotes its reservation: the row carries the identity, the prompt and tools verbatim, the seed, the card, and the hooks; every event from here on is mirrored", async () => {
     const { deps, ledger, registry, run, base } = setup();
     const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });

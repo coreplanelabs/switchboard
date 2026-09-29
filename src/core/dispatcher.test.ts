@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { processSecrets, Secret } from "../secrets.js";
+import { wrapUntrusted } from "./untrusted.js";
 import { ConfigStore } from "../config.js";
 import { MAX_INSTRUCTIONS_LENGTH } from "../config/validate.js";
 import type { ChatMessage } from "./chatMessage.js";
@@ -24,6 +25,7 @@ import { CONFIG_AWARENESS_HEADER } from "./configAwareness.js";
 import { planResume } from "./runLedger/resume.js";
 import { actorOfStoredRow } from "./runLedger/sessionLog.js";
 import { knownToolsFor, launchResumes, resumeMessage } from "./resumeLaunch.js";
+import { bindSlackContext } from "./dispatch/slackContextBinding.js";
 import { reclaimRuns } from "./boot.js";
 import { piRunPaths, RUN_BEARER_ENV } from "./harness/pi/process.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
@@ -66,7 +68,7 @@ import { createAlsContext, createTickingClock, timedFakes, type Tick } from "./t
 import { ThreadAdmission } from "./threadAdmission.js";
 import { isHeadMaterial, isSpanRecord, type RunEvent } from "./runEvents.js";
 import type { ConversationReader } from "./references/types.js";
-import { REFERENCE_REFUSAL } from "./dispatch/references.js";
+import { quotedBlock, REFERENCE_REFUSAL } from "./dispatch/references.js";
 import type { ContentPart } from "./chatMessage.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
@@ -6394,6 +6396,21 @@ describe("closed-card checklist and review verdict run link", () => {
     expect(replies.some((r) => r.includes("Live run"))).toBe(false);
   });
 
+  it("keeps a non-private main run's queued detail on its completed card", async () => {
+    const yaml = YAML_FIXTURE.replace("  agent: general", "  agent: orchestrator").replace(
+      "    coding: anthropic/coding-model",
+      "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+    );
+    const deps = makeDeps(yaml, capturingProvider());
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("verbosity:debug Summarize the work", "slack:UADMIN"), io, {
+      queuedBehindMs: 70_000,
+    });
+    const last = statuses.at(-1);
+    expect(last?.title).toContain("✅");
+    expect(last?.detail).toContain("queued 1m 10s behind the previous run");
+  });
+
   it("a failed run's error reply carries the run link — the transcript is one click from the thread", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
     const provider: Provider = {
@@ -7023,10 +7040,11 @@ describe("cross-session memory WRITE path", () => {
     const store = new InMemoryMemoryStore();
     const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const dm = { channelId: "slack:D0AB", userId: "slack:UALICE", threadKey: "slack:D0AB:1.0" };
     await dispatch(
       deps,
-      { ...msg("how do we deploy?", "slack:UALICE"), channelId: "slack:D0AB", threadKey: "slack:D0AB:1.0" },
-      fakeIO(longHistory).io,
+      { ...msg("how do we deploy?", "slack:UALICE"), ...dm, directAudience: { kind: "slack-unshared-im", ...dm } },
+      { ...fakeIO(longHistory).io, directAudience: () => dm, verifyDirectAudience: async () => true },
     );
     await drainReflections();
     expect((await store.list("org:acme", 10)).map((r) => r.text)).toEqual([]);
@@ -8463,7 +8481,12 @@ describe("run history write path", () => {
     const dm = wired(capturingProvider(), {
       registry: new RunRegistry({ genId: () => "run-dm", genToken: () => "tok" }),
     });
-    await dispatch(dm.deps, { ...msg("hello there"), channelId: "slack:D0AB", threadKey: "slack:D0AB:1" }, fakeIO().io);
+    const dmAddress = { channelId: "slack:D0AB", userId: "slack:UX", threadKey: "slack:D0AB:1" };
+    await dispatch(
+      dm.deps,
+      { ...msg("hello there"), ...dmAddress, directAudience: { kind: "slack-unshared-im", ...dmAddress } },
+      { ...fakeIO().io, directAudience: () => dmAddress, verifyDirectAudience: async () => true },
+    );
     await dm.writer.settled();
     expect((await dm.store.get("run-dm"))!.channelVisibility).toBe("dm");
 
@@ -17407,7 +17430,22 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
   });
 
   /** A thread whose newest run is a finished coding run: its record in the store, its rows in the session log. */
-  async function threadWithSession(yaml: string) {
+  async function threadWithSession(
+    yaml: string,
+    options: {
+      channelId?: string;
+      userId?: string;
+      threadKey?: string;
+      agent?: string;
+      tail?: ChatMessage[];
+    } = {},
+  ) {
+    const channelId = options.channelId ?? "slack:CX";
+    const userId = options.userId ?? "slack:UADMIN";
+    const threadKey = options.threadKey ?? THREAD;
+    const agent = options.agent ?? "coding";
+    const key = `${threadKey}:${agent}`;
+    const sessionTail = options.tail ?? tail;
     const registry = new RunRegistry({ genId: () => "run-next", genToken: () => "tok" });
     const store = new InMemoryRunStore();
     const ledger = new InMemoryRunLedger();
@@ -17434,28 +17472,29 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       harnesses: { pi: piHarness, opencode: openCodeHarness },
       registry: new HarnessRegistry(),
       harnessUrl: "https://bot.test",
+      loopbackUrl: "http://127.0.0.1:8080",
     };
     deps.runBearers = new RunBearerStore({ clock: () => NOW });
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
-    await ledger.claimSession(KEY, "run-prev", "gen-R");
+    await ledger.claimSession(key, "run-prev", "gen-R");
     await ledger.seed(
       "run-prev",
       "gen-R",
-      tail.map((message, idx) => ({ idx, message })),
-      KEY,
+      sessionTail.map((message, idx) => ({ idx, message })),
+      key,
     );
     // The previous run kept notes (session-log item 10): they ride the next run's prompt.
-    await ledger.writeNotepad(KEY, "gen-R", "decided: keep the helper; head green at abc123");
-    await ledger.releaseSession(KEY, "run-prev", "gen-R");
+    await ledger.writeNotepad(key, "gen-R", "decided: keep the helper; head green at abc123");
+    await ledger.releaseSession(key, "run-prev", "gen-R");
     await store.put({
       id: "run-prev",
-      label: "coding · acme/api",
-      agent: "coding",
-      model: "anthropic/coding-model",
-      channelId: "slack:CX",
-      userId: "slack:UADMIN",
-      threadKey: THREAD,
-      channelVisibility: "public",
+      label: `${agent} · acme/api`,
+      agent,
+      model: `anthropic/${agent}-model`,
+      channelId,
+      userId,
+      threadKey,
+      channelVisibility: channelId.startsWith("slack:D") ? "dm" : "public",
       startedAt: NOW - 20_000,
       finishedAt: PREVIOUS_END,
       status: "completed",
@@ -17466,7 +17505,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       diagnosis: analyzeRunFriction([]),
       repo: "acme/api",
       seed: "channel",
-      session: { key: KEY, seedFrom: 0, request: 0, range: { from: 0, to: 3 } },
+      session: { key, seedFrom: 0, request: 0, range: { from: 0, to: 3 } },
       // The run's post-step opened a pull request (run-history item 2): the
       // fact a follow-up's target resolution reads (resident-repos item 29).
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
@@ -17479,6 +17518,498 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
   beforeEach(() => {
     vi.mocked(runPiHarnessOpen).mockClear();
     vi.mocked(makeExecutor).mockClear();
+  });
+
+  it("stops an unverified later Slack DM before reading a prior private session", async () => {
+    const channelId = "slack:DMAIN";
+    const threadKey = `${channelId}:1.0`;
+    const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
+    const prior = await bindSlackContext({
+      agentName: "orchestrator",
+      actor: {
+        kind: "user",
+        id: directAudience.userId,
+        grants: { actions: new Set(), channels: new Set(), repos: new Set() },
+      },
+      msg: { ...directAudience, text: "How many users failed to sign up?", directAudience },
+      io: {
+        directAudience: () => directAudience,
+        verifyDirectAudience: async () => true,
+      } as unknown as ChannelIO,
+      visibility: "dm",
+      create: () => ({ read: async () => "private sign-up count: 17", verifyDirectOrigin: async () => true }),
+    });
+    expect(prior).toBeDefined();
+    const privateResult = await prior!.capability.read({ kind: "thread" });
+    expect(privateResult).toBe("private sign-up count: 17");
+    const privateText = typeof privateResult === "string" ? privateResult : JSON.stringify(privateResult);
+    const yaml =
+      PI_YAML.replace(
+        "    coding: anthropic/coding-model",
+        "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+      ) + "  orchestrator: pi\n";
+    const t = await threadWithSession(yaml, {
+      channelId,
+      userId: "slack:UADMIN",
+      threadKey,
+      agent: "orchestrator",
+      tail: [
+        user("How many users failed to sign up?"),
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "c1", name: "slack_context", input: { kind: "thread" } }],
+        },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: privateResult }] },
+        assistant("I found the count."),
+      ],
+    });
+    const { io, replies, statuses } = fakeIO([
+      { role: "user", text: "How many users failed to sign up?", at: NOW - 20_000 },
+      { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
+    ]);
+    io.verifyDirectAudience = async () => false;
+    const historyRead = vi.spyOn(io, "history");
+    const sessionRead = vi.spyOn(t.deps.runLedger, "readSessionTail");
+    let seeded: ChatMessage[] | undefined;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered(privateText);
+      },
+      async () => dispatch(t.deps, { channelId, userId: "slack:UADMIN", threadKey, text: "What should we fix?" }, io),
+    );
+    expect(JSON.stringify(seeded ?? [])).not.toContain(privateText);
+    expect(sessionRead).not.toHaveBeenCalled();
+    expect(seeded).toBeUndefined();
+    expect(historyRead).not.toHaveBeenCalled();
+    expect(replies.join(" ")).toContain("can't verify that this Slack DM is private");
+    expect(JSON.stringify({ replies, statuses })).not.toContain(privateText);
+  });
+
+  it("revokes a live private run for relayed and app-authored DM follow-ups before refusing session reads", async () => {
+    for (const indirect of [{ relayedBy: "slack:bot:BOTHER" }, { postedBy: "slack:bot:BOTHER" }]) {
+      const dm = { channelId: "slack:DMAIN", userId: "slack:UADMIN", threadKey: "slack:DMAIN:1.0" };
+      const directAudience = { kind: "slack-unshared-im" as const, ...dm };
+      const provider = capturingProvider();
+      const deps = makeDeps(YAML_FIXTURE, provider);
+      const admission = new ThreadAdmission<DispatchFollowUp>();
+      deps.admission = admission;
+      const live = admission.claim(dm.threadKey, { agent: "orchestrator" }).live;
+      const revoked = vi.fn();
+      live.inbox.onUntrustedFollowUp(revoked);
+      const { io, replies } = fakeIO();
+      io.directAudience = () => directAudience;
+      io.verifyDirectAudience = async () => true;
+      const historyRead = vi.spyOn(io, "history");
+      const sessionRead = vi.spyOn(deps.runLedger, "readSessionTail");
+      await dispatch(deps, { ...dm, ...indirect, text: "private account balance: 17" }, io);
+      expect(revoked).toHaveBeenCalledTimes(1);
+      expect(live.inbox.drain()).toEqual([]);
+      expect(historyRead).not.toHaveBeenCalled();
+      expect(sessionRead).not.toHaveBeenCalled();
+      expect(provider.requests).toHaveLength(0);
+      expect(replies.join(" ")).toContain("can't verify that this Slack DM is private");
+      expect(replies.join(" ")).not.toContain("private account balance");
+    }
+  });
+
+  it("refuses a verified DM turn before replaying a saved Slack source whose access may have changed", async () => {
+    const channelId = "slack:DMAIN";
+    const threadKey = `${channelId}:1.0`;
+    const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
+    const privateText = "linked thread private sign-up count: 17";
+    const yaml =
+      PI_YAML.replace(
+        "    coding: anthropic/coding-model",
+        "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+      ) + "  orchestrator: pi\n";
+    const t = await threadWithSession(yaml, {
+      channelId,
+      userId: directAudience.userId,
+      threadKey,
+      agent: "orchestrator",
+      tail: [
+        user("Read this linked thread"),
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "c1",
+              name: "slack_context",
+              input: { kind: "link", url: "https://workspace.slack.com/archives/CPUBLIC/p1790000000000001" },
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: privateText }] },
+        assistant("I found the count."),
+      ],
+    });
+    const freshRead = vi.fn(async () => "slack_context: I can't read that Slack source.");
+    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
+    const { io, replies, statuses } = fakeIO([
+      { role: "user", text: "Read this linked thread", at: NOW - 20_000 },
+      { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
+    ]);
+    io.directAudience = () => directAudience;
+    io.verifyDirectAudience = async () => true;
+    let seeded: ChatMessage[] | undefined;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered(privateText);
+      },
+      async () => dispatch(t.deps, { ...directAudience, text: "What changed?", directAudience }, io),
+    );
+    expect(seeded).toBeUndefined();
+    expect(freshRead).toHaveBeenCalledOnce();
+    expect(replies.join(" ")).toContain("check the Slack source again");
+    expect(JSON.stringify({ replies, statuses })).not.toContain(privateText);
+  });
+
+  it("refuses a private follow-up before replaying a saved reference whose source access was revoked", async () => {
+    const channelId = "slack:DMAIN";
+    const threadKey = `${channelId}:1.0`;
+    const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
+    const permalink = "https://workspace.slack.com/archives/CPUBLIC/p1790000000000001";
+    const privateText = "linked channel private sign-up count: 17";
+    const block = `Referenced thread · #frontend · 1 message · ${permalink}\n${wrapUntrusted(`09:00 · teammate: ${privateText}`)}`;
+    const yaml =
+      PI_YAML.replace(
+        "    coding: anthropic/coding-model",
+        "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+      ) + "  orchestrator: pi\nreferences: { enabled: true }\n";
+    const t = await threadWithSession(yaml, {
+      channelId,
+      userId: directAudience.userId,
+      threadKey,
+      agent: "orchestrator",
+      tail: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: `What happened? ${permalink}` },
+            { type: "text", text: block },
+          ],
+        },
+        assistant("I found the count."),
+      ],
+    });
+    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: async () => "" });
+    const classify = vi.fn(async () => ({ visibility: "never" as const, botIsMember: false }));
+    const read = vi.fn();
+    t.deps.conversationReaders = [
+      {
+        platform: "slack",
+        parseConversationUrl: (url) =>
+          url === permalink
+            ? { channelId: "slack:CPUBLIC", threadKey: "slack:CPUBLIC:1790000000.000001", url }
+            : undefined,
+        classifyConversation: classify,
+        readConversation: read,
+        requesterIsFullMember: async () => true,
+      },
+    ];
+    const { io, replies, statuses } = fakeIO([
+      { role: "user", text: `What happened? ${permalink}`, at: NOW - 20_000 },
+      { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
+    ]);
+    io.directAudience = () => directAudience;
+    io.verifyDirectAudience = async () => true;
+    let seeded: ChatMessage[] | undefined;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered(privateText);
+      },
+      async () => dispatch(t.deps, { ...directAudience, text: "Fix it", directAudience }, io),
+    );
+    expect(seeded).toBeUndefined();
+    expect(classify).toHaveBeenCalledOnce();
+    expect(read).not.toHaveBeenCalled();
+    expect(replies.join(" ")).toContain("check the Slack source again");
+    expect(JSON.stringify({ replies, statuses })).not.toContain(privateText);
+  });
+
+  it("continues a private follow-up when a saved reference still matches the authorized source", async () => {
+    const channelId = "slack:DMAIN";
+    const threadKey = `${channelId}:1.0`;
+    const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
+    const permalink = "https://workspace.slack.com/archives/CPUBLIC/p1790000000000001";
+    const ref = { channelId: "slack:CPUBLIC", threadKey: "slack:CPUBLIC:1790000000.000001", url: permalink };
+    const conversation = {
+      kind: "reference" as const,
+      ref,
+      channelName: "frontend",
+      permalink,
+      messages: [{ at: 1_790_000_000_000, author: "teammate", text: "private sign-up count: 17" }],
+    };
+    const block = quotedBlock(conversation);
+    const yaml =
+      PI_YAML.replace(
+        "    coding: anthropic/coding-model",
+        "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+      ) + "  orchestrator: pi\nreferences: { enabled: true }\n";
+    const t = await threadWithSession(yaml, {
+      channelId,
+      userId: directAudience.userId,
+      threadKey,
+      agent: "orchestrator",
+      tail: [
+        { role: "user", content: [{ type: "text", text: `What happened? ${permalink}\n\n${block}` }] },
+        assistant("I found the count."),
+      ],
+    });
+    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: async () => "" });
+    const read = vi.fn(async () => conversation);
+    t.deps.conversationReaders = [
+      {
+        platform: "slack",
+        parseConversationUrl: (url) => (url === permalink ? ref : undefined),
+        classifyConversation: async () => ({ visibility: "public", botIsMember: true, channelName: "frontend" }),
+        readConversation: read,
+        requesterIsFullMember: async () => true,
+      },
+    ];
+    const { io, replies } = fakeIO([
+      { role: "user", text: `What happened? ${permalink}`, at: NOW - 20_000 },
+      { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
+    ]);
+    io.directAudience = () => directAudience;
+    io.verifyDirectAudience = async () => true;
+    let seeded: ChatMessage[] | undefined;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered("I will fix it.");
+      },
+      async () => dispatch(t.deps, { ...directAudience, text: "Fix it", directAudience }, io),
+    );
+    expect(seeded?.[0]?.content.find((part) => part.type === "text")?.text).toContain(block);
+    expect(read.mock.calls.length).toBeGreaterThan(1);
+    expect(replies.at(-1)).toContain("I will fix it.");
+  });
+
+  it("refuses a verified DM history fallback when its prior bot answer has no source proof", async () => {
+    const channelId = "slack:DMAIN";
+    const threadKey = `${channelId}:1.0`;
+    const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
+    const privateText = "linked thread private sign-up count: 17";
+    const yaml =
+      PI_YAML.replace(
+        "    coding: anthropic/coding-model",
+        "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+      ) + "  orchestrator: pi\n";
+    const t = await threadWithSession(yaml, {
+      channelId,
+      userId: directAudience.userId,
+      threadKey,
+      agent: "orchestrator",
+    });
+    t.deps.runLedger.readSessionTail = async () => {
+      throw new Error("ledger unavailable");
+    };
+    const { io, replies, statuses } = fakeIO([
+      { role: "user", text: "Read this linked thread", at: NOW - 20_000 },
+      { role: "assistant", text: privateText, at: NOW - 11_000 },
+    ]);
+    io.directAudience = () => directAudience;
+    io.verifyDirectAudience = async () => true;
+    let seeded: ChatMessage[] | undefined;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered(privateText);
+      },
+      async () => dispatch(t.deps, { ...directAudience, text: "Fix it", directAudience }, io),
+    );
+    expect(seeded).toBeUndefined();
+    expect(replies.join(" ")).toContain("check the Slack source again");
+    expect(JSON.stringify({ replies, statuses })).not.toContain(privateText);
+  });
+
+  it("refuses a recovered private DM before a model can replay its saved conversation", async () => {
+    const channelId = "slack:DMAIN";
+    const threadKey = `${channelId}:1.0`;
+    const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
+    const yaml =
+      PI_YAML.replace(
+        "    coding: anthropic/coding-model",
+        "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+      ) + "  orchestrator: pi\n";
+    const t = await threadWithSession(yaml, {
+      channelId,
+      userId: directAudience.userId,
+      threadKey,
+      agent: "orchestrator",
+    });
+    const { io, replies } = fakeIO([]);
+    io.directAudience = () => directAudience;
+    io.verifyDirectAudience = async () => true;
+    let seeded: ChatMessage[] | undefined;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered("an old private result");
+      },
+      async () =>
+        dispatch(t.deps, { ...directAudience, text: "Continue", directAudience }, io, { restartOf: "run-old" }),
+    );
+    expect(seeded).toBeUndefined();
+    expect(replies.join(" ")).toContain("run restarted");
+  });
+
+  it("continues a same-thread fix after a bounded fresh read matches the saved Slack source", async () => {
+    const channelId = "slack:DMAIN";
+    const threadKey = `${channelId}:1.0`;
+    const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
+    const privateText = "linked thread private sign-up count: 17";
+    const yaml =
+      PI_YAML.replace(
+        "    coding: anthropic/coding-model",
+        "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+      ) + "  orchestrator: pi\n";
+    const t = await threadWithSession(yaml, {
+      channelId,
+      userId: directAudience.userId,
+      threadKey,
+      agent: "orchestrator",
+      tail: [
+        user("Read this linked thread"),
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "c1",
+              name: "slack_context",
+              input: { kind: "link", url: "https://workspace.slack.com/archives/CPUBLIC/p1790000000000001" },
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: privateText }] },
+        assistant("I found the count."),
+      ],
+    });
+    const freshRead = vi.fn(async () => privateText);
+    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
+    const { io, replies } = fakeIO([
+      { role: "user", text: "Read this linked thread", at: NOW - 20_000 },
+      { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
+    ]);
+    io.directAudience = () => directAudience;
+    io.verifyDirectAudience = async () => true;
+    let seeded: ChatMessage[] | undefined;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered("I will fix it.");
+      },
+      async () => dispatch(t.deps, { ...directAudience, text: "Fix it", directAudience }, io),
+    );
+    expect(seeded).toBeDefined();
+    expect(JSON.stringify(seeded)).toContain(privateText);
+    expect(replies.at(-1)).toContain("I will fix it.");
+    expect(freshRead.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("continues a verified DM fix when its earlier thread read only gained a later message", async () => {
+    const channelId = "slack:DMAIN";
+    const threadKey = `${channelId}:1.0`;
+    const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
+    const saved = `Current Slack thread · ${threadKey} · 1 message\n${wrapUntrusted("1.0 · UADMIN: signup failures: 17")}`;
+    const appended = `Current Slack thread · ${threadKey} · 2 messages\n${wrapUntrusted("1.0 · UADMIN: signup failures: 17\n2.0 · UADMIN: fix it")}`;
+    const yaml =
+      PI_YAML.replace(
+        "    coding: anthropic/coding-model",
+        "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+      ) + "  orchestrator: pi\n";
+    const t = await threadWithSession(yaml, {
+      channelId,
+      userId: directAudience.userId,
+      threadKey,
+      agent: "orchestrator",
+      tail: [
+        user("How many users failed to sign up?"),
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "c1", name: "slack_context", input: { kind: "thread" } }],
+        },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: saved }] },
+        assistant("I found the count."),
+      ],
+    });
+    const freshRead = vi.fn(async () => appended);
+    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
+    const { io, replies } = fakeIO([
+      { role: "user", text: "How many users failed to sign up?", at: NOW - 20_000 },
+      { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
+    ]);
+    io.directAudience = () => directAudience;
+    io.verifyDirectAudience = async () => true;
+    let seeded: ChatMessage[] | undefined;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered("I will fix it.");
+      },
+      async () => dispatch(t.deps, { ...directAudience, text: "Fix it", directAudience }, io),
+    );
+    expect(seeded?.[2]).toMatchObject({ role: "user", content: [{ type: "tool_result", content: saved }] });
+    expect(replies.at(-1)).toContain("I will fix it.");
+    expect(freshRead.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("seals a saved linked result if its source is revoked after the new model turn starts", async () => {
+    const channelId = "slack:DMAIN";
+    const threadKey = `${channelId}:1.0`;
+    const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
+    const privateText = "linked thread private sign-up count: 17";
+    const yaml =
+      PI_YAML.replace(
+        "    coding: anthropic/coding-model",
+        "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+      ) + "  orchestrator: pi\n";
+    const t = await threadWithSession(yaml, {
+      channelId,
+      userId: directAudience.userId,
+      threadKey,
+      agent: "orchestrator",
+      tail: [
+        user("Read this linked thread"),
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "c1",
+              name: "slack_context",
+              input: { kind: "link", url: "https://workspace.slack.com/archives/CPUBLIC/p1790000000000001" },
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: privateText }] },
+        assistant("I found the count."),
+      ],
+    });
+    const freshRead = vi
+      .fn()
+      .mockResolvedValueOnce(privateText)
+      .mockResolvedValue("slack_context: I can't read that Slack source.");
+    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
+    const { io, replies, statuses } = fakeIO([
+      { role: "user", text: "Read this linked thread", at: NOW - 20_000 },
+      { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
+    ]);
+    io.directAudience = () => directAudience;
+    io.verifyDirectAudience = async () => true;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async () => piAnswered(privateText),
+      async () => dispatch(t.deps, { ...directAudience, text: "Fix it", directAudience }, io),
+    );
+    expect(freshRead.mock.calls.length).toBeGreaterThan(1);
+    expect(replies.at(-1)).toContain("check the Slack source again");
+    expect(JSON.stringify({ replies, statuses })).not.toContain(privateText);
   });
 
   it("a follow-up in a thread whose newest run is a coding run on pi continues coding without a directive and seeds from the session log: the pi harness is handed the log's tail, the line written since and the request; the record says seed: session with seedFrom inside the earlier run's range and range.from at the tail, and its context events are the tail's text turns", async () => {

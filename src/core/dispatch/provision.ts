@@ -52,7 +52,7 @@ import { MAX_EVENT_BYTES, utf8ByteLength, type RunSeed } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { LiveRunRow } from "../runLedger/types.js";
-import { durableInboxMessage } from "../runLedger/inboxMessage.js";
+import { directAudienceStampOf, durableInboxMessage } from "../runLedger/inboxMessage.js";
 import type { Clock, Span } from "../trace/types.js";
 import type { RequestTrace } from "../requestTrace.js";
 import { createCardShell, type CardShell } from "../statusCardFrame.js";
@@ -213,6 +213,7 @@ export interface AckCard {
 
 /** What `openAckCard` reads off the dispatch. */
 export interface AckCardContext {
+  msg: IncomingMessage;
   io: ChannelIO;
   agent: AgentDef;
   resolved: ResolvedRequest;
@@ -234,7 +235,8 @@ export interface AckCardContext {
  * finally clears the heartbeat.
  */
 export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Promise<AckCard> {
-  const { io, agent, resolved, startedAt, clock, root, trace, route } = ctx;
+  const { msg, io, agent, resolved, startedAt, clock, root, trace, route } = ctx;
+  const privateMain = agent.name === "orchestrator" && directAudienceStampOf(msg) !== undefined;
   // One builder for every paint of this card (statusCardFrame.ts): the ack,
   // the spinner frames, the closes before the run starts, the done frame. The
   // card speaks at the request's verbosity (routing-and-config item 28): the
@@ -250,9 +252,9 @@ export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Pro
     startedAt,
     now: clock,
     verbosity: resolved.verbosity,
-    ...(route?.parts ? { lead: routedPartLines(route.parts) } : {}),
+    ...(route?.parts && !privateMain ? { lead: routedPartLines(route.parts) } : {}),
   });
-  if (route) shell.note("debug", routeReasonLabel(route.reason, route.collapsed));
+  if (route && !privateMain) shell.note("debug", routeReasonLabel(route.reason, route.collapsed));
   // Coalesced: the run below refreshes it on every event, the channel sees at
   // most one edit per STATUS_UPDATE_MIN_MS, always the newest frame.
   const card = coalesceStatus(
@@ -325,6 +327,8 @@ export interface RegisteredRun {
 export interface RegisterRunContext {
   /** A child must be durably reserved before any surface can discover its id. */
   beforeRegister?: (identity: { runId: string; channelVisibility: ChannelVisibility }) => Promise<void>;
+  /** Reuse the one visibility lookup when a saved private source needed it before registration. */
+  channelVisibility?: ChannelVisibility;
   msg: IncomingMessage;
   io: ChannelIO;
   agent: AgentDef;
@@ -448,9 +452,9 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   const runId = carriedRow?.runId ?? (ctx.restartCarried ? ctx.restartOf : undefined) ?? registry.mintId();
   // Asked once per run (the authorization spec's channel-visibility rule):
   // the registry row, the reservation and the claim reuse it.
-  const channelVisibility = await root.span("dispatch.channel_visibility", () =>
-    channelVisibilityOf(deps, msg.channelId),
-  );
+  const channelVisibility =
+    ctx.channelVisibility ??
+    (await root.span("dispatch.channel_visibility", () => channelVisibilityOf(deps, msg.channelId)));
   if (ctx.beforeRegister) await ctx.beforeRegister({ runId, channelVisibility });
   // The registry row, created NOW — after a child's strict reservation,
   // before an ordinary request's reservation and before either attach —
@@ -459,6 +463,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // page serves it, a stop during the attach latches in its control. Before
   // this the row came after the attach, and the runs index showed the
   // reservation meanwhile as a labelless ledger row with a tokenless link.
+  // A verified private main DM uses a generic label because its question can
+  // cite a private source before the final answer's audience is rechecked.
   // Its stream stays empty until the run loop binds the trace below (the
   // request is the first event of the record, live-view item 12).
   // A human-first label for the Access-gated runs index (`GET /runs`): agent +
@@ -468,15 +474,19 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // model:) never clutter the snippet. The registry redacts and caps it;
   // `run.label` is the one the record and the friction row carry (never
   // `runLabel`, which may hold a pasted secret).
-  const runLabel = composeRunLabel({
-    agent: agent.name,
-    repo: repoCtx.repo,
-    channelId: msg.channelId,
-    userId: msg.userId,
-    channelName: msg.channelName,
-    userName: msg.userName,
-    text: directives.text,
-  });
+  const directAudience = directAudienceStampOf(msg);
+  const privateMain = agent.name === "orchestrator" && directAudience !== undefined;
+  const runLabel = privateMain
+    ? "main · private conversation"
+    : composeRunLabel({
+        agent: agent.name,
+        repo: repoCtx.repo,
+        channelId: msg.channelId,
+        userId: msg.userId,
+        channelName: msg.channelName,
+        userName: msg.userName,
+        text: directives.text,
+      });
   const run = registry.create(
     runLabel,
     {
@@ -485,9 +495,10 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       channelId: msg.channelId,
       userId: msg.userId,
       threadKey: msg.threadKey,
+      ...(directAudience !== undefined ? { directAudience } : {}),
       channelVisibility,
       ...(carriedRow ? {} : { receivedAt }), // the window opens at receipt (docs/reference/specs/tracing.md); a resume or restart keeps its original stamps
-      ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+      ...(repoCtx.repo !== undefined && !privateMain ? { repo: repoCtx.repo } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
       ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
@@ -760,6 +771,8 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
   } = ctx;
   if (!resume && !restart) {
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
+    const directAudience = directAudienceStampOf(msg);
+    const privateMain = agent.name === "orchestrator" && directAudience !== undefined;
     const reserved = await root
       .span("dispatch.ledger_reserve", () =>
         deps.runLedger.reserve({
@@ -772,9 +785,10 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
             channelId: msg.channelId,
             userId: msg.userId,
             threadKey: msg.threadKey,
+            ...(directAudience !== undefined ? { directAudience } : {}),
             channelVisibility,
-            ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-            ...(operationTarget !== undefined ? { operationTarget } : {}),
+            ...(repoCtx.repo !== undefined && !privateMain ? { repo: repoCtx.repo } : {}),
+            ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
             ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
             ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
             ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
@@ -782,16 +796,16 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
             ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
             ...(decisionRecord !== undefined ? { record: decisionRecord } : {}),
             ...(decisionRecordTask !== undefined ? { recordTaskKey: decisionRecordTask } : {}),
-            ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
-            ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
-            ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
+            ...(repoCtx.ref !== undefined && !privateMain ? { ref: repoCtx.ref } : {}),
+            ...(repoCtx.headSha !== undefined && !privateMain ? { headSha: repoCtx.headSha } : {}),
+            ...(repoCtx.pr !== undefined && !privateMain ? { pr: repoCtx.pr } : {}),
             readonly: profile.identity === "read",
             profile,
             ...(parentRunId !== undefined ? { parentRunId } : {}),
             ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
             ...coordinatorFields(coordinator),
             ...(seed !== undefined ? { seed } : {}),
-            ...(route !== undefined ? { route } : {}),
+            ...(route !== undefined && !privateMain ? { route } : {}),
             request: requestRow,
           },
           card: card.handle ?? null,

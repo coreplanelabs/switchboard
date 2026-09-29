@@ -17,6 +17,8 @@ import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { RunRegistry } from "../runRegistry.js";
+import type { RunEvent } from "../runEvents.js";
+import { createRunsService } from "../runsService.js";
 import { createLedgerWriteThrough, NullLedgerRun, NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { planResume, transcriptSource } from "../runLedger/resume.js";
@@ -48,6 +50,10 @@ import { buildMessages } from "./messages.js";
 import { resolveRun } from "./resolve.js";
 import type { HarnessProcessDeps, RunDeps } from "./run.js";
 import { runLoop, type RunLoopOutcome, type RunOutcome } from "./runLoop.js";
+import { bindSlackContext } from "./slackContextBinding.js";
+import { deliverAnswer } from "./reply.js";
+import { resumeMessage } from "../resumeLaunch.js";
+import { recoveredPrivateAudienceLatch } from "./privateAudience.js";
 
 /** The loop's answered outcome; an interruption fails the test naming its note. */
 function answered(out: RunLoopOutcome): RunOutcome {
@@ -395,6 +401,660 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it("keeps a web main agent's tool result in the durable event stream", async () => {
+    const harness = watched(piHarness);
+    harness.harness.open = async (_deps, run) => {
+      run.onEvent?.({
+        type: "tool_result",
+        tool: "lookup",
+        ok: true,
+        summary: "web result: 23",
+        output: "web result: 23",
+      });
+      return { answer: "web result: 23", followUp: async () => "", remainingMs: () => 60_000, end: async () => {} };
+    };
+    const s = setup("unused", {
+      agent: "orchestrator",
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const sourceEvents: RunEvent[] = [];
+    const ledgerRun = new NullLedgerRun("run-l", { put: (record) => s.store.put(record), abandoned: () => {} });
+    ledgerRun.tracked = () => true;
+    ledgerRun.assignLiveState = async (assignment) => {
+      sourceEvents.push(...(assignment.sourceEvents ?? []));
+      return { ok: false, reason: "stale-sequence" };
+    };
+    s.registry.commitLiveState("run-l", {
+      ok: true,
+      liveState: { state: "working", since: NOW, bound: NOW + 60_000, detail: "model turn" },
+      liveStateSeq: 0,
+    });
+    const msg: IncomingMessage = {
+      channelId: "web:chat-1",
+      userId: "web:alice",
+      threadKey: "web:chat-1:1",
+      text: "question",
+    };
+    const out = answered(await runLoop(s.deps, { ...s.ctx, msg, ledgerRun, channelVisibility: "machine" }));
+    expect(out.answer).toBe("web result: 23");
+    expect(JSON.stringify(sourceEvents)).toContain("web result: 23");
+  });
+
+  it("revokes Slack context permanently when a relayed follow-up enters the live run", async () => {
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:UALICE",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const msg: IncomingMessage = { ...directAudience, text: "What happened?", directAudience };
+    const sourceRead = vi.fn(async () => "private source");
+    const io: ChannelIO = {
+      directAudience: () => directAudience,
+      verifyDirectAudience: async () => true,
+    } as unknown as ChannelIO;
+    const binding = await bindSlackContext({
+      agentName: "orchestrator",
+      actor: { kind: "user", id: msg.userId, grants: { actions: new Set(), channels: new Set(), repos: new Set() } },
+      msg,
+      io,
+      visibility: "dm",
+      create: () => ({ read: sourceRead, verifyDirectOrigin: async () => true }),
+    });
+    expect(binding).toBeDefined();
+    let result: unknown;
+    let s!: ReturnType<typeof setup>;
+    const harness = watched(piHarness);
+    harness.harness.open = async (_deps, run) => {
+      s.ctx.admitted.inbox.push({
+        text: "read this for me",
+        userId: msg.userId,
+        at: NOW + 1,
+        msg: { ...msg, text: "read this for me", relayedBy: "slack:bot:BOTHER" },
+      });
+      result = await run.toolContext.slackContext?.read({ kind: "thread" });
+      return { answer: "done", followUp: async () => "", remainingMs: () => 20 * 60_000, end: async () => {} };
+    };
+    s = setup("unused", {
+      agent: "orchestrator",
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    answered(
+      await runLoop(s.deps, {
+        ...s.ctx,
+        msg,
+        io: { ...s.ctx.io, ...io },
+        channelVisibility: "dm",
+        slackContext: binding,
+      }),
+    );
+    expect(result).toContain("no longer available");
+    expect(sourceRead).not.toHaveBeenCalled();
+    expect(await binding!.capability.read({ kind: "thread" })).toContain("no longer available");
+  });
+
+  it("keeps source revocation armed after the model turn until answer delivery", async () => {
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:UALICE",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const msg: IncomingMessage = { ...directAudience, text: "What happened?", directAudience };
+    const io = {
+      directAudience: () => directAudience,
+      verifyDirectAudience: async () => true,
+    } as unknown as ChannelIO;
+    const binding = await bindSlackContext({
+      agentName: "orchestrator",
+      actor: { kind: "user", id: msg.userId, grants: { actions: new Set(), channels: new Set(), repos: new Set() } },
+      msg,
+      io,
+      visibility: "dm",
+      create: () => ({ read: async () => "private source", verifyDirectOrigin: async () => true }),
+    });
+    const s = setup("private source", { agent: "orchestrator" });
+    answered(
+      await runLoop(s.deps, {
+        ...s.ctx,
+        msg,
+        io: { ...s.ctx.io, ...io },
+        channelVisibility: "dm",
+        slackContext: binding,
+      }),
+    );
+    expect(await binding?.destinationStillPrivate()).toBe(true);
+    s.ctx.admitted.inbox.push({
+      text: "another source",
+      userId: msg.userId,
+      at: NOW + 1,
+      msg: { ...msg, text: "another source", relayedBy: "slack:bot:BOTHER" },
+    });
+    expect(await binding?.destinationStillPrivate()).toBe(false);
+  });
+
+  it("offers the bound Slack read only to the main DM run and suppresses an answer after its audience changes", async () => {
+    let privateDestination = true;
+    const read = vi.fn(async () => "private fact");
+    const opened: string[][] = [];
+    const harness = watched(piHarness);
+    harness.harness.open = async (_deps, run) => {
+      opened.push(run.tools.map((tool) => tool.name));
+      expect(run.toolContext.slackContext?.read).toBeDefined();
+      expect(await run.toolContext.slackContext!.read({ kind: "thread" })).toBe("private fact");
+      run.toolContext.reportProgress?.("✓ private fact from update_status");
+      privateDestination = false;
+      return { answer: "private fact", followUp: async () => "", remainingMs: () => 20 * 60_000, end: async () => {} };
+    };
+    const s = setup("unused", {
+      agent: "orchestrator",
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const out = answered(
+      await runLoop(s.deps, {
+        ...s.ctx,
+        channelVisibility: "dm",
+        slackContext: {
+          capability: { read },
+          destinationStillPrivate: async () => privateDestination,
+          revoke: () => {},
+        },
+      }),
+    );
+    expect(opened[0]).toContain("slack_context");
+    expect(read).toHaveBeenCalledOnce();
+    expect(out.answer).not.toContain("private fact");
+    expect(s.published.at(-1)).not.toContain("private fact");
+    expect(JSON.stringify(s.frames)).not.toContain("private fact");
+    expect(JSON.stringify(s.closes)).not.toContain("private fact");
+  });
+
+  it("keeps a resumed private Slack result out of cards, answer and reply after its DM becomes shared", async () => {
+    const audience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:WALICE",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const row: LiveRunRow = {
+      runId: "run-l",
+      threadKey: audience.threadKey,
+      ownerGen: "old",
+      leaseUntil: 0,
+      startedAt: NOW,
+      phase: "live",
+      stop: null,
+      meta: {
+        channelId: audience.channelId,
+        userId: audience.userId,
+        threadKey: audience.threadKey,
+        agent: "orchestrator",
+        directAudience: audience,
+      },
+      card: null,
+      system: "private context",
+      tools: [],
+      state: {},
+    };
+    const resumed = resumeMessage(row, "What happened?");
+    const harness = watched(piHarness);
+    harness.harness.open = async (_deps, run) => {
+      run.toolContext.reportProgress?.("✓ private result from update_status");
+      return {
+        answer: "private result",
+        followUp: async () => "",
+        remainingMs: () => 20 * 60_000,
+        end: async () => {},
+      };
+    };
+    const s = setup("unused", {
+      agent: "orchestrator",
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const io: ChannelIO = {
+      ...s.ctx.io,
+      directAudience: () => audience,
+      verifyDirectAudience: async () => false,
+    };
+    const out = answered(
+      await runLoop(s.deps, {
+        ...s.ctx,
+        msg: resumed,
+        io,
+        channelVisibility: "dm",
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "old-read", name: "slack_context", input: { kind: "thread" } }],
+          },
+          { role: "user", content: [{ type: "tool_result", toolUseId: "old-read", content: "private result" }] },
+        ],
+      }),
+    );
+    expect(out.answer).not.toContain("private result");
+    expect(s.published.at(-1)).not.toContain("private result");
+    expect(JSON.stringify(s.frames)).not.toContain("private result");
+    await deliverAnswer({
+      msg: resumed,
+      io,
+      agent: s.ctx.agent,
+      run: s.run,
+      answer: out.answer,
+      liveUrl: undefined,
+      prNote: out.prNote,
+      stopped: undefined,
+      ledgerRun: undefined,
+      ending: s.ending,
+      card: s.ctx.card,
+      shell: s.ctx.shell,
+      checklistAsLeft: out.checklistAsLeft,
+      checklistCheckedOff: out.checklistCheckedOff,
+      doneLines: s.ctx.doneLines,
+      runDiagnosis: out.runDiagnosis,
+      releaseWorkspace: out.releaseWorkspace,
+      root: s.ctx.root,
+    });
+    expect(s.replies.at(-1)).not.toContain("private result");
+    expect(JSON.stringify(s.closes)).not.toContain("private result");
+  });
+
+  it("seals a resumed private result after a relayed follow-up even while the DM stays private", async () => {
+    const audience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:WALICE",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const row: LiveRunRow = {
+      runId: "run-l",
+      threadKey: audience.threadKey,
+      ownerGen: "old",
+      leaseUntil: 0,
+      startedAt: NOW,
+      phase: "live",
+      stop: null,
+      meta: { ...audience, agent: "orchestrator", directAudience: audience },
+      card: null,
+      system: "private context",
+      tools: [],
+      state: {},
+    };
+    const resumed = resumeMessage(row, "What happened?");
+    const harness = watched(piHarness);
+    let s!: ReturnType<typeof setup>;
+    harness.harness.open = async (_deps, run) => {
+      s.ctx.admitted.inbox.push({
+        text: "another source",
+        userId: resumed.userId,
+        at: NOW + 1,
+        msg: { ...resumed, text: "another source", relayedBy: "slack:bot:BOTHER" },
+      });
+      run.toolContext.reportProgress?.("✓ private result from update_status");
+      return {
+        answer: "private result",
+        followUp: async () => "",
+        remainingMs: () => 20 * 60_000,
+        end: async () => {},
+      };
+    };
+    s = setup("unused", {
+      agent: "orchestrator",
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const io: ChannelIO = {
+      ...s.ctx.io,
+      directAudience: () => audience,
+      verifyDirectAudience: async () => true,
+    };
+    const privateAudienceLatch = { revoked: false };
+    const out = answered(
+      await runLoop(s.deps, {
+        ...s.ctx,
+        msg: resumed,
+        io,
+        privateAudienceLatch,
+        channelVisibility: "dm",
+        messages: [
+          { role: "assistant", content: [{ type: "tool_use", id: "old-read", name: "slack_context", input: {} }] },
+          { role: "user", content: [{ type: "tool_result", toolUseId: "old-read", content: "private result" }] },
+        ],
+      }),
+    );
+    expect(out.answer).not.toContain("private result");
+    expect(JSON.stringify(s.published)).not.toContain("private result");
+    expect(JSON.stringify(s.frames)).not.toContain("private result");
+    expect(privateAudienceLatch.revoked).toBe(true);
+    await deliverAnswer({
+      msg: resumed,
+      io,
+      agent: s.ctx.agent,
+      run: s.run,
+      answer: "private result",
+      privateAudienceLatch,
+      liveUrl: undefined,
+      prNote: out.prNote,
+      stopped: undefined,
+      ledgerRun: undefined,
+      ending: s.ending,
+      card: s.ctx.card,
+      shell: s.ctx.shell,
+      checklistAsLeft: out.checklistAsLeft,
+      checklistCheckedOff: out.checklistCheckedOff,
+      doneLines: s.ctx.doneLines,
+      runDiagnosis: out.runDiagnosis,
+      releaseWorkspace: out.releaseWorkspace,
+      root: s.ctx.root,
+    });
+    expect(JSON.stringify({ replies: s.replies, closes: s.closes })).not.toContain("private result");
+  });
+
+  it("seals a resumed private answer when an unverified follow-up is refused during audience verification", async () => {
+    const audience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:WALICE",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const row: LiveRunRow = {
+      runId: "run-l",
+      threadKey: audience.threadKey,
+      ownerGen: "old",
+      leaseUntil: 0,
+      startedAt: NOW,
+      phase: "live",
+      stop: null,
+      meta: { ...audience, agent: "orchestrator", directAudience: audience },
+      card: null,
+      system: "private context",
+      tools: [],
+      state: {},
+    };
+    const resumed = resumeMessage(row, "What happened?");
+    const harness = watched(piHarness);
+    harness.harness.open = async () => ({
+      answer: "private result",
+      followUp: async () => "",
+      remainingMs: () => 20 * 60_000,
+      end: async () => {},
+    });
+    const s = setup("unused", {
+      agent: "orchestrator",
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    let verifierStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      verifierStarted = resolve;
+    });
+    let finishVerification!: (value: boolean) => void;
+    const verifying = new Promise<boolean>((resolve) => {
+      finishVerification = resolve;
+    });
+    const io: ChannelIO = {
+      ...s.ctx.io,
+      directAudience: () => audience,
+      verifyDirectAudience: () => {
+        verifierStarted();
+        return verifying;
+      },
+    };
+    const privateAudienceLatch = { revoked: false };
+    const running = runLoop(s.deps, {
+      ...s.ctx,
+      msg: resumed,
+      io,
+      privateAudienceLatch,
+      channelVisibility: "dm",
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "old-read", name: "slack_context", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "old-read", content: "private result" }] },
+      ],
+    });
+    await started;
+    s.ctx.admitted.inbox.markUntrustedFollowUp();
+    expect(s.ctx.admitted.inbox.drain()).toEqual([]);
+    finishVerification(true);
+    const out = answered(await running);
+    expect(privateAudienceLatch.revoked).toBe(true);
+    expect(out.answer).not.toContain("private result");
+    expect(JSON.stringify({ published: s.published, frames: s.frames, closes: s.closes })).not.toContain(
+      "private result",
+    );
+  });
+
+  it("seals a recovered private result when a prior indirect follow-up was already consumed", async () => {
+    const audience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:WALICE",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const row: LiveRunRow = {
+      runId: "run-l",
+      threadKey: audience.threadKey,
+      ownerGen: "old",
+      leaseUntil: 0,
+      startedAt: NOW,
+      phase: "live",
+      stop: null,
+      meta: { ...audience, agent: "orchestrator", directAudience: audience },
+      card: null,
+      system: "private context",
+      tools: [],
+      state: {},
+    };
+    const resumed = resumeMessage(row, "What happened?");
+    const harness = watched(piHarness);
+    harness.harness.open = async () => ({
+      answer: "private result from consumed follow-up",
+      followUp: async () => "",
+      remainingMs: () => 20 * 60_000,
+      end: async () => {},
+    });
+    const s = setup("unused", {
+      agent: "orchestrator",
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const io: ChannelIO = {
+      ...s.ctx.io,
+      directAudience: () => audience,
+      verifyDirectAudience: async () => true,
+    };
+    const privateAudienceLatch = recoveredPrivateAudienceLatch(resumed, true);
+    const out = answered(
+      await runLoop(s.deps, {
+        ...s.ctx,
+        msg: resumed,
+        io,
+        privateAudienceLatch,
+        channelVisibility: "dm",
+        messages: [
+          { role: "assistant", content: [{ type: "tool_use", id: "old-read", name: "slack_context", input: {} }] },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", toolUseId: "old-read", content: "private result from consumed follow-up" },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(privateAudienceLatch.revoked).toBe(true);
+    expect(out.answer).not.toContain("private result");
+    expect(out.answer).toContain("run restarted");
+    expect(out.answer).not.toContain("verify this private conversation");
+    expect(JSON.stringify({ published: s.published, frames: s.frames, closes: s.closes })).not.toContain(
+      "private result",
+    );
+    await deliverAnswer({
+      msg: resumed,
+      io,
+      agent: s.ctx.agent,
+      run: s.run,
+      answer: "private result from consumed follow-up",
+      privateAudienceLatch,
+      liveUrl: undefined,
+      prNote: out.prNote,
+      stopped: undefined,
+      ledgerRun: undefined,
+      ending: s.ending,
+      card: s.ctx.card,
+      shell: s.ctx.shell,
+      checklistAsLeft: out.checklistAsLeft,
+      checklistCheckedOff: out.checklistCheckedOff,
+      doneLines: s.ctx.doneLines,
+      runDiagnosis: out.runDiagnosis,
+      releaseWorkspace: out.releaseWorkspace,
+      root: s.ctx.root,
+    });
+    expect(JSON.stringify({ replies: s.replies, closes: s.closes })).not.toContain("private result");
+    expect(s.replies.at(-1)).toContain("run restarted");
+  });
+
+  it("keeps a live Slack context result out of durable source events and the finished run record", async () => {
+    const audience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:WALICE",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const msg: IncomingMessage = { ...audience, text: "How many signups failed?", directAudience: audience };
+    const harness = watched(piHarness);
+    harness.harness.open = async (_deps, run) => {
+      run.onEvent?.({
+        type: "tool_call",
+        tool: "slack_context",
+        summary: "read private signup count",
+        callId: "private-read",
+      });
+      run.onEvent?.({
+        type: "tool_result",
+        tool: "slack_context",
+        ok: true,
+        summary: "private signup count: 17",
+        output: "private signup count: 17",
+        callId: "private-read",
+      });
+      return {
+        answer: "private signup count: 17",
+        followUp: async () => "",
+        remainingMs: () => 20 * 60_000,
+        end: async () => {},
+      };
+    };
+    const s = setup("unused", {
+      agent: "orchestrator",
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    // The setup default is a channel run; this case binds the run to the verified DM.
+    s.registry.create(
+      "main · private conversation",
+      { ...audience, agent: "orchestrator", directAudience: audience },
+      {
+        id: s.run.id,
+        token: s.run.token,
+      },
+    );
+    const io: ChannelIO = {
+      ...s.ctx.io,
+      directAudience: () => audience,
+      verifyDirectAudience: async () => true,
+    };
+    const sourceEvents: RunEvent[] = [];
+    const ledgerRun = new NullLedgerRun("run-l", { put: (record) => s.store.put(record), abandoned: () => {} });
+    ledgerRun.tracked = () => true;
+    ledgerRun.assignLiveState = async (assignment) => {
+      sourceEvents.push(...(assignment.sourceEvents ?? []));
+      return { ok: false, reason: "stale-sequence" };
+    };
+    expect(
+      s.registry.commitLiveState("run-l", {
+        ok: true,
+        liveState: { state: "working", since: NOW, bound: NOW + 60_000, detail: "model turn" },
+        liveStateSeq: 0,
+      }),
+    ).toBe(true);
+    const out = answered(await runLoop(s.deps, { ...s.ctx, msg, io, ledgerRun, channelVisibility: "dm" }));
+    expect(out.answer).toBe("private signup count: 17");
+    expect(JSON.stringify(sourceEvents)).not.toContain("private signup count");
+    expect(JSON.stringify(s.registry.snapshotById(s.run.id))).not.toContain("private signup count");
+    expect(JSON.stringify(s.frames)).not.toContain("private signup count");
+    await deliverAnswer({
+      msg,
+      io,
+      agent: s.ctx.agent,
+      run: s.run,
+      answer: out.answer,
+      liveUrl: undefined,
+      prNote: out.prNote,
+      stopped: undefined,
+      ledgerRun,
+      ending: s.ending,
+      card: s.ctx.card,
+      shell: s.ctx.shell,
+      checklistAsLeft: out.checklistAsLeft,
+      checklistCheckedOff: out.checklistCheckedOff,
+      doneLines: s.ctx.doneLines,
+      runDiagnosis: out.runDiagnosis,
+      releaseWorkspace: out.releaseWorkspace,
+      root: s.ctx.root,
+    });
+    await s.writer.settled();
+    expect(s.replies.at(-1)).toBe("private signup count: 17");
+    expect(JSON.stringify(s.closes)).not.toContain("private signup count");
+    expect(JSON.stringify(await s.store.get(s.run.id))).not.toContain("private signup count");
+    const afterRehost = createRunsService({ registry: new RunRegistry(), store: s.store });
+    const finished = await afterRehost.getRun(s.run.id, { include: "messages" });
+    expect(finished.ok).toBe(true);
+    expect(JSON.stringify(finished)).not.toContain("private signup count");
+  });
   const WIP_COORDINATOR: CoordinatorTag = {
     parentInstanceId: "instance",
     idempotencyKey: "key",

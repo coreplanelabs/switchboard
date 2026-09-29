@@ -13,6 +13,67 @@ import { call, result, seq, spanEnd, testRegistry } from "./runRegistry/testing.
 // deterministic here.
 
 describe("RunRegistry.create", () => {
+  it("keeps a main agent's Slack read private in live, replayed and finished views", () => {
+    const { reg } = testRegistry();
+    const meta = {
+      agent: "orchestrator",
+      channelId: "slack:DMAIN",
+      userId: "slack:UALICE",
+      threadKey: "slack:DMAIN:1.0",
+      directAudience: {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:DMAIN",
+        userId: "slack:UALICE",
+        threadKey: "slack:DMAIN:1.0",
+      },
+    };
+    const run = reg.create("private question", meta, {
+      replay: [
+        {
+          type: "tool_result",
+          tool: "slack_context",
+          ok: true,
+          summary: "private signup count: 17",
+          output: "private signup count: 17",
+          seq: 1,
+        },
+      ],
+    });
+    const index: IndexEvent[] = [];
+    reg.subscribeIndex((event) => index.push(event));
+    const seen: RunEvent[] = [];
+    reg.subscribe(run.id, run.token, { onEvent: (event) => seen.push(event) });
+    reg.publish(run.id, {
+      type: "tool_result",
+      tool: "slack_context",
+      ok: true,
+      summary: "private signup count: 18",
+      output: "private signup count: 18",
+    });
+    reg.publish(run.id, { type: "answer", text: "private signup count: 18" });
+    expect(JSON.stringify({ live: reg.snapshot(run.id, run.token), seen, index })).not.toContain(
+      "private signup count",
+    );
+    reg.finish(run.id, "completed");
+    expect(JSON.stringify(reg.snapshotById(run.id))).not.toContain("private signup count");
+  });
+
+  it("keeps a web main agent's answer in live, replayed and finished views", () => {
+    const { reg } = testRegistry();
+    const meta = {
+      agent: "orchestrator",
+      channelId: "web:chat-1",
+      userId: "web:alice",
+      threadKey: "web:chat-1:1",
+    };
+    const run = reg.create("main web chat", meta, { replay: [{ type: "answer", text: "first answer", seq: 1 }] });
+    expect(JSON.stringify(reg.snapshot(run.id, run.token))).toContain("first answer");
+    reg.publish(run.id, { type: "answer", text: "current answer" });
+    expect(JSON.stringify(reg.snapshot(run.id, run.token))).toContain("current answer");
+    reg.finish(run.id, "completed");
+    expect(JSON.stringify(reg.snapshotById(run.id))).toContain("current answer");
+  });
+
   it("mints a distinct id and token per run", () => {
     const { reg } = testRegistry();
     const a = reg.create();

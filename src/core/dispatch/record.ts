@@ -4,6 +4,8 @@
 // `runHistoryWriter.write` — an agent run at its finish, an inline command run,
 // a run the drain deadline abandons, a run a booting generation reclaims.
 import type { IncomingMessage } from "../types.js";
+import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
+import { privateMainEvent } from "../privateMainEvent.js";
 import { refusalLine, type Refusal } from "../refusal.js";
 import { redactAndCap } from "../runEvents.js";
 import type { ChannelDirectory, ChannelVisibility } from "../authz/types.js";
@@ -222,6 +224,7 @@ export function reclaimedRunRecord(input: {
       // hosted row is claimed under the host key, and its record files under
       // its conversation like every run's.
       threadKey: row.meta.threadKey,
+      ...(row.meta.directAudience !== undefined ? { directAudience: row.meta.directAudience } : {}),
       sourceUrl: row.meta.sourceUrl,
       userName: row.meta.userName,
       authenticatedAs: row.meta.authenticatedAs,
@@ -382,7 +385,9 @@ export function assembleRunRecord(input: {
 }): RunRecord {
   const { run, snap, msg, seal } = input;
   const atFinish = snap?.events ?? [];
-  const events = seal && seal.events.length > 0 ? [...atFinish, ...seal.events] : atFinish;
+  const privateMain = input.agent === "orchestrator" && directAudienceStampOf(msg) !== undefined;
+  const rawEvents = seal && seal.events.length > 0 ? [...atFinish, ...seal.events] : atFinish;
+  const events = privateMain ? rawEvents.map(privateMainEvent) : rawEvents;
   // The pull request the run reached (run-history item 2): the post-step's
   // `pr_opened`, published before the stream finished, so it is in the events.
   const pr = prOfEvents(events);
@@ -392,7 +397,7 @@ export function assembleRunRecord(input: {
   const pushed = pushedHeadsOf(events);
   // The route the run ran under: the caller's (a sticky-carried decision has
   // no `route` event), else what the events say.
-  const route = input.route ?? routeOfEvents(events);
+  const route = privateMain ? undefined : (input.route ?? routeOfEvents(events));
   // The operator's shadow decision beside the routed request (record 0057;
   // run-history item 60): the `operator` event, already redacted at publish —
   // the bound line like the receipt, never the message text.
@@ -416,7 +421,7 @@ export function assembleRunRecord(input: {
     ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
     threadKey: msg.threadKey,
     channelVisibility: input.channelVisibility,
-    ...(input.repo !== undefined ? { repo: input.repo } : {}),
+    ...(input.repo !== undefined && !privateMain ? { repo: input.repo } : {}),
     // The window's opening rides the record (docs/reference/specs/tracing.md): every
     // duration surface and the diagnosis's window start here, not at create.
     ...(snap?.receivedAt !== undefined ? { receivedAt: snap.receivedAt } : {}),
@@ -441,7 +446,7 @@ export function assembleRunRecord(input: {
     ...(referencesOfEvents(events).length > 0 ? { references: referencesOfEvents(events) } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-    ...(input.headSha !== undefined ? { headSha: input.headSha } : {}),
+    ...(input.headSha !== undefined && !privateMain ? { headSha: input.headSha } : {}),
     ...(input.doorPublicationPending !== undefined ? { doorPublicationPending: input.doorPublicationPending } : {}),
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
     ...(input.verdict !== undefined ? { verdict: redactVerdict(input.verdict) } : {}),
@@ -524,6 +529,7 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
     coordinator,
     seed,
   } = ctx;
+  const privateMain = agent.name === "orchestrator" && directAudienceStampOf(msg) !== undefined;
   // Tombstone-first: a provisional TERMINAL record — status
   // `interrupted`, `finishedAt` = `startedAt` — goes to the store now, built
   // from the events published so far (the setup spans, request, run_meta,
@@ -557,9 +563,9 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
             model: resolved.modelRef,
             msg,
             channelVisibility,
-            repo: repoCtx.repo,
+            ...(!privateMain && repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
             profile: profileRecordOf(agent, profile),
-            ...(route !== undefined ? { route } : {}),
+            ...(route !== undefined && !privateMain ? { route } : {}),
             ...(parentRunId !== undefined ? { parentRunId } : {}),
             ...(coordinator !== undefined ? { coordinator } : {}),
             ...(seed !== undefined ? { seed } : {}),
@@ -606,6 +612,7 @@ export function finishChildSetup(
   ending.finished(runId);
   const snap = registry.snapshotById(runId);
   const label = registry.getById(runId)?.label;
+  const privateMain = ctx.agent.name === "orchestrator" && directAudienceStampOf(ctx.msg) !== undefined;
   ending.register({
     runId,
     flipOnPostFinishFailure: false,
@@ -618,7 +625,7 @@ export function finishChildSetup(
           model: ctx.resolved.modelRef,
           msg: ctx.msg,
           channelVisibility: ctx.channelVisibility,
-          repo: ctx.repoCtx.repo,
+          ...(!privateMain && ctx.repoCtx.repo !== undefined ? { repo: ctx.repoCtx.repo } : {}),
           profile: profileRecordOf(ctx.agent, ctx.profile),
           coordinator: ctx.coordinator,
           parentRunId: ctx.parentRunId,
@@ -711,6 +718,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     seed,
     failure,
   } = ctx;
+  const privateMain = agent.name === "orchestrator" && directAudienceStampOf(msg) !== undefined;
   // A tracked run finishes through the ledger: the record replaces its
   // live rows in one transaction (a refused finish falls back to the store).
   ending.register({
@@ -725,20 +733,20 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           model: resolved.modelRef,
           msg,
           channelVisibility,
-          repo: repoCtx.repo,
+          ...(!privateMain && repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
           profile: profileRecordOf(agent, profile),
           finishedAt,
           status: failedAfterFinish && status === "completed" ? "failed" : status,
           diagnosis,
           seal,
-          ...(headSha !== undefined ? { headSha } : {}),
+          ...(headSha !== undefined && !privateMain ? { headSha } : {}),
           ...(doorPublicationPending !== undefined ? { doorPublicationPending } : {}),
           ...(handoff !== undefined ? { handoff } : {}),
           ...(verdict !== undefined ? { verdict } : {}),
           ...(reviewHead !== undefined ? { reviewHead } : {}),
           ...(dispositions !== undefined ? { dispositions } : {}),
           ...(reviewPost !== undefined ? { reviewPost } : {}),
-          ...(route !== undefined ? { route } : {}),
+          ...(route !== undefined && !privateMain ? { route } : {}),
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...(coordinator !== undefined ? { coordinator } : {}),
           ...(seed !== undefined ? { seed } : {}),

@@ -62,6 +62,8 @@ describe("missingBotScopes (pure comparison against the adapter's required set)"
       "chat:write",
       "channels:history",
       "groups:history",
+      "im:history",
+      "im:read",
       "files:read",
       "files:write",
       "reactions:write",

@@ -83,6 +83,18 @@ describe("followUpMessageId", () => {
 });
 
 describe("FollowUpInbox", () => {
+  it("observes accepted follow-ups before and after subscription, including only one copy of a durable item", () => {
+    const inbox = new FollowUpInbox();
+    inbox.push(input("first", { ledgerSeq: 1 }));
+    const seen: string[] = [];
+    const stop = inbox.onAccepted((item) => seen.push(item.text));
+    inbox.push(input("duplicate", { ledgerSeq: 1 }));
+    inbox.push(input("second", { ledgerSeq: 2 }));
+    stop();
+    inbox.push(input("third", { ledgerSeq: 3 }));
+    expect(seen).toEqual(["first", "second"]);
+  });
+
   it("drain returns pushes oldest-first and empties the inbox; a second drain is empty", () => {
     const inbox = new FollowUpInbox();
     expect(inbox.drain()).toEqual([]);
@@ -106,6 +118,20 @@ describe("FollowUpInbox — one durable follow-up folds in once (thread-admissio
     inbox.push(input("a once more", { at: 5, ledgerSeq: 1 })); // drained already: still ignored
     inbox.push(input("c", { at: 6, ledgerSeq: 2 }));
     expect(inbox.drain().map((i) => i.text)).toEqual(["c"]);
+  });
+});
+
+describe("FollowUpInbox — an untrusted follow-up revokes private publication", () => {
+  it("signals current and later observers once without feeding the model or a fresh turn", () => {
+    const inbox = new FollowUpInbox();
+    const seen: string[] = [];
+    inbox.onUntrustedFollowUp(() => seen.push("current"));
+    inbox.markUntrustedFollowUp();
+    inbox.markUntrustedFollowUp();
+    inbox.onUntrustedFollowUp(() => seen.push("later"));
+    expect(seen).toEqual(["current", "later"]);
+    expect(inbox.drain()).toEqual([]);
+    expect(inbox.arrived).toBe(0);
   });
 });
 

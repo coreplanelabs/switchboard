@@ -9,7 +9,13 @@ export type SlackContextRequest =
 
 /** Bound by the channel adapter to one requester's actor and origin thread. */
 export interface SlackContextCapability {
-  read(request: SlackContextRequest): Promise<ToolResultContent>;
+  /** Revalidation repeats every authority check without spending a new user read. */
+  read(request: SlackContextRequest, purpose?: "revalidate"): Promise<ToolResultContent>;
+}
+
+/** Slack adapter proof required before this read can enter a main-agent run. */
+export interface VerifiedSlackContextCapability extends SlackContextCapability {
+  verifyDirectOrigin(): Promise<boolean>;
 }
 
 export const slackContextTool: RunnableTool = {

@@ -13,15 +13,17 @@
 // state a restart loses SILENTLY — holds: an empty record after a restart is
 // the truth, not a loss.
 
-/** Bot-token scopes the Slack adapter needs to work as designed. Mirrors the
- *  install list in docs/tutorials/run-it-locally.md minus the `im:*` set (DMs
- *  are off in the recommended rollout). `channels:read`/`groups:read` are what
+/** Bot-token scopes the Slack adapter needs to work as designed. `im:read`
+ *  verifies a private requester DM and `im:history` reads its context;
+ *  `channels:read`/`groups:read` are what
  *  the catch-up's channel listing needs; without them the scan cannot start. */
 export const REQUIRED_BOT_SCOPES: readonly string[] = [
   "app_mentions:read",
   "chat:write",
   "channels:history",
   "groups:history",
+  "im:history",
+  "im:read",
   "files:read",
   "files:write", // long command output attached as a snippet (ChannelIO.attach); without it the adapter falls back to chunked messages
   "reactions:write",

@@ -49,6 +49,75 @@ const dispatchClickMock = vi.mocked(dispatchClick);
 
 const BOT = "U0BOT";
 
+describe("SlackIO direct audience", () => {
+  it("names only the requester's direct-message destination", () => {
+    const client = guardOutbound({} as ConstructorParameters<typeof SlackIO>[0]);
+    const direct = new SlackIO(client, {
+      channel: "DMAIN",
+      user: "UALICE",
+      text: "",
+      ts: "1.2",
+      threadTs: "1.0",
+      trigger: "dm",
+    });
+    expect(direct.directAudience()).toEqual({
+      channelId: "slack:DMAIN",
+      userId: "slack:UALICE",
+      threadKey: "slack:DMAIN:1.0",
+    });
+    expect(
+      new SlackIO(client, {
+        channel: "CMAIN",
+        user: "UALICE",
+        text: "",
+        ts: "1.2",
+        threadTs: "1.0",
+        trigger: "mention",
+      }).directAudience(),
+    ).toBeUndefined();
+    expect(
+      new SlackIO(client, {
+        channel: "DMAIN",
+        text: "",
+        ts: "1.2",
+        threadTs: "1.0",
+        trigger: "dm",
+      }).directAudience(),
+    ).toBeUndefined();
+  });
+
+  it("revalidates its exact requester DM before private output", async () => {
+    const channel = {
+      user: "UALICE",
+      is_im: true,
+      is_mpim: false,
+      is_private: true,
+      is_member: true,
+      is_shared: false,
+      is_ext_shared: false,
+      is_org_shared: false,
+      is_pending_ext_shared: false,
+    };
+    const client = guardOutbound({
+      auth: { test: async () => ({ team_id: "TLOCAL" }) },
+      users: { info: async () => ({ user: { team_id: "TLOCAL" } }) },
+      conversations: { info: async () => ({ channel }) },
+    } as unknown as ConstructorParameters<typeof SlackIO>[0]);
+    const io = new SlackIO(client, {
+      channel: "DMAIN",
+      user: "UALICE",
+      text: "",
+      ts: "1.2",
+      threadTs: "1.0",
+      trigger: "dm",
+    });
+    const audience = { kind: "slack-unshared-im" as const, ...io.directAudience()! };
+    expect(await io.verifyDirectAudience(audience)).toBe(true);
+    channel.is_ext_shared = true;
+    expect(await io.verifyDirectAudience(audience)).toBe(false);
+  });
+});
+
 describe("classifyMessage (trigger gating)", () => {
   it("skips bot messages — no bot-loop", () => {
     expect(classifyMessage({ bot_id: "B1", channel_type: "channel", thread_ts: "1.0" }, BOT)).toBe("skip");
@@ -1413,6 +1482,42 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
       ...over,
     };
   }
+
+  it("stamps only a freshly verified requester DM at intake", async () => {
+    const s = gateClient();
+    const safe = {
+      user: "UASKER",
+      is_im: true,
+      is_mpim: false,
+      is_private: true,
+      is_member: true,
+      is_shared: false,
+      is_ext_shared: false,
+      is_org_shared: false,
+      is_pending_ext_shared: false,
+    };
+    const metadata = vi.spyOn(s.client.conversations, "info").mockResolvedValue({ ok: true, channel: safe });
+    vi.spyOn(s.client.auth, "test").mockResolvedValue({ ok: true, team_id: "TLOCAL" });
+    vi.spyOn(s.client.users, "info").mockResolvedValue({ ok: true, user: { team_id: "TLOCAL" } });
+    const event = {
+      channel: "DMAIN",
+      user: "UASKER",
+      text: "hello",
+      ts: "120.000001",
+      threadTs: "120.000001",
+      trigger: "dm" as const,
+    };
+    const accepted = await receiveSlackMessage(s.client, event, spanStub().span, POLICY, []);
+    expect(accepted?.message.directAudience).toEqual({
+      kind: "slack-unshared-im",
+      channelId: "slack:DMAIN",
+      userId: "slack:UASKER",
+      threadKey: "slack:DMAIN:120.000001",
+    });
+    metadata.mockResolvedValue({ ok: true, channel: { ...safe, is_shared: true } });
+    const refused = await receiveSlackMessage(s.client, { ...event, ts: "121.000001" }, spanStub().span, POLICY, []);
+    expect(refused?.message.directAudience).toBeUndefined();
+  });
 
   it("an app mention missing file metadata reads its exact Slack message before the operator sees the request", async () => {
     const ts = nextTs();
