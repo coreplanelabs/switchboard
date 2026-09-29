@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 import { OPENCODE_VERSION, OPENCODE_VERSION_TEXT } from "../core/harness/opencode/client.js";
 import { imagePins } from "./imagePins.js";
 
@@ -110,6 +111,33 @@ describe("the three images carry one OpenCode", () => {
     const pkg = JSON.parse(read("package.json")) as { devDependencies?: Record<string, string> };
     expect(pkg.devDependencies?.["@opencode/protocol"]).toBe(OPENCODE_VERSION);
     expect(pkg.devDependencies?.["@opencode/schema"]).toBe(OPENCODE_VERSION);
+  });
+});
+
+describe("OpenCode's schema decoder pin", () => {
+  it("the root Effect decoder matches the exact Effect dependency of both pinned OpenCode packages", () => {
+    const pkg = JSON.parse(read("package.json")) as { devDependencies: Record<string, string> };
+    const lock = JSON.parse(read("package-lock.json")) as {
+      packages: Record<string, { version?: string; dependencies?: Record<string, string> }>;
+    };
+    const effect = pkg.devDependencies.effect;
+    expect(effect).toMatch(/^\d+\.\d+\.\d+(?:-[\w.]+)?$/);
+    for (const name of ["@opencode/protocol", "@opencode/schema"]) {
+      const pinned = lock.packages[`node_modules/${name}`];
+      expect(pinned.version, name).toBe(OPENCODE_VERSION);
+      expect(effect, `${name}'s schema and the test decoder must use the same Effect`).toBe(
+        pinned.dependencies?.effect,
+      );
+    }
+    expect(lock.packages["node_modules/effect"].version).toBe(effect);
+  });
+
+  it("Dependabot leaves Effect upgrades to the OpenCode pin change rather than bumping the decoder alone", () => {
+    const config = parse(read(".github/dependabot.yml")) as {
+      updates: Array<{ "package-ecosystem": string; directory?: string; ignore?: unknown[] }>;
+    };
+    const npm = config.updates.find((update) => update["package-ecosystem"] === "npm" && update.directory === "/");
+    expect(npm?.ignore).toContainEqual({ "dependency-name": "effect" });
   });
 });
 

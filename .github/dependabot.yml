@@ -49,6 +49,12 @@ updates:
       # bump the memory Worker and lift this.
       - dependency-name: "vitest"
         update-types: ["version-update:semver-major"]
+      # Effect decodes the pinned @opencode/schema and @opencode/protocol in
+      # the harness tests. Its schema representation is version-specific:
+      # move it with those packages' exact Effect dependency, never alone.
+      # Revisit when the OpenCode pin moves; imageOpenCodeHarness.test.ts
+      # checks the decoder against both packages' declared dependency.
+      - dependency-name: "effect"
       # The @cloudflare/sandbox SDK and the container image it drives are one
       # protocol in two artifacts; `check:sandbox-pair` fails verify when a
       # package pin and its Dockerfile tag differ. They move together, by hand,
