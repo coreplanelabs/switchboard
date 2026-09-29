@@ -84,7 +84,6 @@ Both lists are optional and independent. An agent or repo **not** listed is open
 
 ## See also
 
-- [How-to: connect to Switchboard over MCP](../how-to/connect-to-switchboard-over-mcp.md) — issue and enroll a bearer, then configure a client.
 - [How-to: restrict who can do what](../how-to/restrict-who-can-do-what.md) — the narrative version, building up from open to locked down.
 - [Explanation: execution and trust](../explanation/execution-and-trust.md) — why `repo:write` in particular is never a baseline.
 - [Spec: authorization](specs/authorization.md) — the policy table, the actor model, and the proofs.

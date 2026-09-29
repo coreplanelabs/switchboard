@@ -4,12 +4,6 @@
 # in a comment above the entry. An entry is stale — and fails `npm run hygiene:check` — when its line is gone or no
 # longer matches any class.
 
-# The MCP guide names this installation's host and private configuration repo so users can find their setup.
-docs/how-to/connect-to-switchboard-over-mcp.md	Production URL: `https://switchboard.coreplanelabs.dev/mcp`. Example subject: `matanya`.
-docs/how-to/connect-to-switchboard-over-mcp.md	In [coreplanelabs/infrastructure](https://github.com/coreplanelabs/infrastructure), open a PR editing [switchboard/config.production.yaml](https://github.com/coreplanelabs/infrastructure/blob/main/switchboard/config.production.yaml). Add under `grants`:
-docs/how-to/connect-to-switchboard-over-mcp.md	After the PR merges, open [Sync MCP access](https://github.com/coreplanelabs/switchboard/actions/workflows/sync-mcp-access.yml) in GitHub Actions and click **Run workflow**. It uploads the map, pushes the grant, and restarts the bot. Wait for the run to pass.
-docs/how-to/connect-to-switchboard-over-mcp.md	`url = "https://switchboard.coreplanelabs.dev/mcp"`
-
 # The spec names the plan vocabulary it forbids.
 docs/reference/specs/public-hygiene.md	A repository that grew inside one company is full of that company: its name in URLs and workflow files, its people in comments, its private issue numbers as provenance, its planning vocabulary (`KTD16`, `U3`) in docstrings, its Slack and account ids in fixtures, and dated retellings of incidents where a timeless rule should stand. None of it helps a reader who is not that company, and some of it is a leak. The policy is that every comment, docstring, fixture and prose line in the public tree is answerable from the repo alone; the mechanism is a check, because a policy held by discipline lasts one busy week.
 

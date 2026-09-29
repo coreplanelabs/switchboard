@@ -2,7 +2,7 @@
 
 Give an agent tools from an external service over the Model Context Protocol, with the credential entered on a one-time link, never in chat.
 
-To connect an MCP client **to Switchboard**, see [Connect to Switchboard over MCP](connect-to-switchboard-over-mcp.md).
+This guide covers Switchboard calling an external MCP server.
 
 **You need:**
 
