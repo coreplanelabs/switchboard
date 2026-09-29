@@ -235,6 +235,44 @@ describe("resident prompt variants", () => {
     expect(sys).not.toMatch(/compare URL/i);
   });
 
+  it("resident coding sends Git through the run-bearer door, never the legacy credential store", () => {
+    const sys = AGENTS.coding.residentSystem!;
+    expect(sys).toMatch(/Git door/);
+    expect(sys).toMatch(/run bearer/);
+    expect(sys).toMatch(/reads to the run's bound repository and writes to one owned branch/);
+    expect(sys).not.toMatch(/github-credentials|x-access-token|credential store/);
+    expect(sys).not.toMatch(/curl.*GitHub REST API/);
+  });
+
+  it("resident coding names relayed GitHub read tools instead of a shell API call", () => {
+    const notes = AGENTS.coding.residentSystem!.split("Environment notes:")[1]!.split("Workflow for shipping")[0]!;
+    expect(notes).toContain("github_issue_get");
+    expect(notes).toContain("github_pull_get");
+    expect(notes).toContain("github_file");
+    expect(notes).not.toMatch(/curl|GH_ENTERPRISE_TOKEN|direct.*API/);
+  });
+
+  it("resident coding creates a new branch without trusted publication authority", () => {
+    const sys = AGENTS.coding.residentSystem!;
+    expect(sys).toMatch(/If a trusted publication binding names an owned ref/);
+    expect(sys).toMatch(
+      /If the task targets an existing pull request without that binding, do not create another branch/,
+    );
+    expect(sys).toMatch(/Otherwise, create one new branch from the ready checkout/);
+    expect(sys).toMatch(/Do not infer authority from the current branch name/);
+    expect(sys).toMatch(/push the branch you stayed on or created through origin/);
+    expect(sys).not.toMatch(/1\. Create a branch with a descriptive name off the bound branch/);
+  });
+
+  it("resident coding uses the exact leased push for an existing PR", () => {
+    const sys = AGENTS.coding.residentSystem!;
+    expect(sys).toContain("git push -u origin <branch>");
+    expect(sys).toContain("--force-with-lease=refs/heads/<branch>:<authorized-old-head-sha>");
+    expect(sys).toContain("<branch>:refs/heads/<branch>");
+    expect(sys).toMatch(/standalone git push command/);
+    expect(sys).toMatch(/without trusted publication authority, keep the commit local/);
+  });
+
   it("fallback prompt still clones; review still reads the diff with gh", () => {
     expect(AGENTS.coding.system).toContain("clone the relevant repository");
     expect(AGENTS.review.system).toContain("gh pr diff");
@@ -787,7 +825,7 @@ describe("coding prompts: the PR-description content contract (submitted object)
       expect(sys).toMatch(/already exists when you push/i);
       expect(sys).toMatch(/dependabot/i); // the author never exempts the PR
       expect(sys).toMatch(/after EVERY push/i);
-      expect(sys).toContain("github_issue_get"); // how to read the current title/body without gh (resident)
+      expect(sys).toContain("github_pull_get"); // how to read the current title/body without gh (resident)
       expect(sys).toMatch(/current title and body/i);
       expect(sys).toMatch(/earlier state of its branch is a bug/i);
       expect(sys).toMatch(/someone else's PR/i);

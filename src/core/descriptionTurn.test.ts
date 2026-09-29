@@ -168,7 +168,7 @@ describe("descriptionFollowUp — the user turn the model is given", () => {
     expect(text).toContain("acme/api#700");
     expect(text).toContain(`\`${HEAD.slice(0, 7)}\``);
     expect(text).toContain(HEAD); // the full sha for the pointer anchors
-    expect(text).toContain("github_issue_get with repo `acme/api` and number 700");
+    expect(text).toContain("github_pull_get with repo `acme/api` and number 700");
     expect(text).toContain("submit_pr_description");
     expect(text).toMatch(/Do not push again/);
     expect(text).toMatch(/do not open a PR/);

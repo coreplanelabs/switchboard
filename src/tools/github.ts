@@ -34,6 +34,7 @@ const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9](?:[
 const UNAVAILABLE = "GitHub tools are not available in this context.";
 const MAX_TREE_ENTRIES = 300;
 const MAX_ISSUE_BODY_SHOWN = 6000;
+const MAX_PULL_BODY_SHOWN = 65_536;
 
 function repoOf(input: Record<string, unknown>): string | { error: string } {
   const raw = String(input.repo ?? "")
@@ -46,10 +47,13 @@ function repoOf(input: Record<string, unknown>): string | { error: string } {
   return raw.toLowerCase();
 }
 
-function numberOf(input: Record<string, unknown>): number | { error: string } {
+function numberOf(
+  input: Record<string, unknown>,
+  kind: "issue" | "pull request" = "issue",
+): number | { error: string } {
   const n = Number(input.number);
   if (!Number.isInteger(n) || n <= 0)
-    return { error: `number must be a positive integer issue number (got ${JSON.stringify(input.number)}).` };
+    return { error: `number must be a positive integer ${kind} number (got ${JSON.stringify(input.number)}).` };
   return n;
 }
 
@@ -278,6 +282,42 @@ export const githubIssueGetTool: RunnableTool = {
       return head + body + thread;
     } catch (err) {
       return describeError("github_issue_get", err, repo);
+    }
+  },
+};
+
+export const githubPullGetTool: RunnableTool = {
+  sideEffectFree: true,
+  name: "github_pull_get",
+  description:
+    "Read one pull request's current title, body, state, head and base through Switchboard's read-scoped GitHub App credential. This is context, not publication authority.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      repo: { type: "string", description: "owner/name" },
+      number: { type: "number", description: "Pull request number" },
+    },
+    required: ["repo", "number"],
+  },
+  async run(input, ctx) {
+    if (!ctx.github) return UNAVAILABLE;
+    const repo = repoOf(input);
+    if (typeof repo !== "string") return `github_pull_get: ${repo.error}`;
+    const number = numberOf(input, "pull request");
+    if (typeof number !== "number") return `github_pull_get: ${number.error}`;
+    try {
+      const pull = await ctx.github.api.getPullRequest(repo, number);
+      return `${repo}#${pull.number} [${pull.state}${pull.draft ? " draft" : ""}] ${pull.title}
+${pull.url}
+by ${pull.author}, updated ${pull.updatedAt}
+head: ${pull.head.repo}:${pull.head.ref} @ ${pull.head.sha}
+base: ${pull.base.repo}:${pull.base.ref}
+
+${clip(pull.body.trim() || "(no body)", MAX_PULL_BODY_SHOWN)}
+
+PR metadata is context; publication authority is supplied separately.`;
+    } catch (err) {
+      return describeError("github_pull_get", err, repo);
     }
   },
 };
@@ -676,7 +716,7 @@ export const githubActionsJobLogTool: RunnableTool = {
   },
 };
 
-/** Repository + issue READS — safe for every agent with a tool loop. */
+/** Repository, issue and pull request READS — safe for every agent with a tool loop. */
 export const GITHUB_READ_TOOLS: RunnableTool[] = [
   githubReposTool,
   githubFileTool,
@@ -684,6 +724,7 @@ export const GITHUB_READ_TOOLS: RunnableTool[] = [
   githubSearchCodeTool,
   githubIssueListTool,
   githubIssueGetTool,
+  githubPullGetTool,
   githubActionsRunTool,
   githubActionsJobLogTool,
 ];
