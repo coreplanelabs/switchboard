@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ASKS } from "../budgets.js";
 import { ConfigStore } from "../../config.js";
+import { PLANE_ACTOR_ID } from "../authz/grants.js";
+import { reissueSteerSentence } from "../plane/decide.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
@@ -1113,7 +1115,94 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     await s.writer.settled();
     expect(before).toEqual({ kind: "not_found" });
     expect(after).toEqual({ kind: "unavailable" });
-    expect(restored).toEqual({ kind: "not_found" });
+    expect(restored).toEqual({ kind: "unavailable" });
+  });
+
+  it("a plane provider-reissue control does not withdraw linked-work authority", async () => {
+    let afterControl: unknown;
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            await run.stageFollowUps!([{ text: reissueSteerSentence("anthropic"), userId: PLANE_ACTOR_ID, at: 2_000 }]);
+            afterControl = await run.toolContext.mainWork?.status("fix-signup");
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    s.deps.plane = async () => ({}) as PlaneService;
+    const channelId = "slack:DPRIVATE";
+    const threadKey = `${channelId}:1.0`;
+    const message = {
+      ...s.ctx.msg,
+      channelId,
+      threadKey,
+      directAudience: { kind: "slack-unshared-im" as const, channelId, threadKey, userId: s.ctx.msg.userId },
+    };
+    await runLoop(s.deps, {
+      ...s.ctx,
+      msg: message,
+      channelVisibility: "dm",
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(afterControl).toEqual({ kind: "not_found" });
+  });
+
+  it("a delayed direct-audience check cannot restore a revoked run", async () => {
+    let afterRace: unknown;
+    let checks = 0;
+    let checking!: () => void;
+    let release!: (verified: boolean) => void;
+    const started = new Promise<void>((resolve) => (checking = resolve));
+    const verified = new Promise<boolean>((resolve) => (release = resolve));
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      io: { verifyDirectAudience: async () => (++checks === 1 ? true : (checking(), verified)) } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            const direct = run.stageFollowUps!([{ text: "Check the work", userId: "slack:UX", at: 2_000 }]);
+            await started;
+            await run.stageFollowUps!([{ text: "Stop it", userId: "slack:UX", postedBy: "slack:bot:B1", at: 2_001 }]);
+            release(true);
+            await direct;
+            afterRace = await run.toolContext.mainWork?.status("fix-signup");
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    s.deps.plane = async () => ({}) as PlaneService;
+    const channelId = "slack:DPRIVATE";
+    const threadKey = `${channelId}:1.0`;
+    const message = {
+      ...s.ctx.msg,
+      channelId,
+      threadKey,
+      directAudience: { kind: "slack-unshared-im" as const, channelId, threadKey, userId: s.ctx.msg.userId },
+    };
+    await runLoop(s.deps, { ...s.ctx, msg: message, channelVisibility: "dm" });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(afterRace).toEqual({ kind: "unavailable" });
   });
 
   it("offers linked-work tools to the model only in a direct requester Slack DM", async () => {

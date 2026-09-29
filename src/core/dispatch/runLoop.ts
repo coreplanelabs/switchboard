@@ -15,11 +15,13 @@ import { GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
+import { PLANE_ACTOR_ID } from "../authz/grants.js";
 import { predicateFor } from "../authz/predicate.js";
 import { unitOfIdempotencyKey, type CoordinatorTag } from "../coordinator/contract.js";
 import { DECISION_RECORD_ENV } from "../decisionRecordReservation.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
+import { isReissueSteerText } from "../plane/decide.js";
 import type { ModelCard } from "../modelCard.js";
 import { mergeTools, toolsForRun } from "../../tools/toolsets.js";
 import { mainWorkForRun, type DirectAudience } from "../../tools/mainWork.js";
@@ -1234,11 +1236,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const nextStagedIndex = ctx.stagingIndex ?? stagingIndex();
   // A steered follow-up's staged files (record 0033): copied into the store and
   // pulled into this workspace before the model reads the turn — the same hook
-  // for the native loop and the pi harness. The current admitted follow-up
-  // batch controls requester-bound work before its words reach the model. A
-  // later direct requester turn can restore the capability.
+  // for the native loop and the pi harness. A relayed follow-up withdraws
+  // requester-bound work for the remainder of this live run: earlier model
+  // tool calls can still be in flight when a later follow-up is staged.
   // A reclaimed run cannot reconstruct the last consumed sender from its
-  // prompt. Wait for a fresh, directly attributed follow-up before acting.
+  // prompt, so linked-work authority stays withdrawn in that run too.
   let mainWorkTrusted = ctx.resume === undefined;
   const directAudience = (msg as IncomingMessage & { directAudience?: DirectAudience }).directAudience;
   const verifyDirectAudience = (
@@ -1249,16 +1251,24 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ? await verifyDirectAudience(directAudience).catch(() => false)
       : false;
   const stageFollowUps = async (inputs: readonly FollowUpInput[]): Promise<string> => {
-    if (inputs.length > 0) {
-      mainWorkTrusted = inputs.every(
-        (input) =>
-          input.userId === msg.userId &&
-          input.postedBy === undefined &&
-          input.authenticatedAs === undefined &&
-          input.from === undefined,
-      );
-      if (mainWorkTrusted && directAudience && verifyDirectAudience)
-        mainWorkTrusted = await verifyDirectAudience(directAudience).catch(() => false);
+    const requesterInputs = inputs.filter(
+      (input) => !(input.userId === PLANE_ACTOR_ID && isReissueSteerText(input.text)),
+    );
+    if (mainWorkTrusted && requesterInputs.length > 0) {
+      if (
+        requesterInputs.some(
+          (input) =>
+            input.userId !== msg.userId ||
+            input.postedBy !== undefined ||
+            input.authenticatedAs !== undefined ||
+            input.from !== undefined,
+        )
+      )
+        mainWorkTrusted = false;
+      if (mainWorkTrusted && directAudience && verifyDirectAudience) {
+        const stillDirect = await verifyDirectAudience(directAudience).catch(() => false);
+        if (!stillDirect) mainWorkTrusted = false;
+      }
     }
     if (!deps.artifacts) return "";
     const files = inputs.flatMap((i) => i.staged ?? []);

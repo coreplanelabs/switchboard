@@ -87,7 +87,7 @@ export function mainWorkForRun(
   const canAct = async () => {
     if (!trusted()) return false;
     try {
-      return await verify(audience);
+      return (await verify(audience)) && trusted();
     } catch {
       return false;
     }
@@ -99,7 +99,11 @@ export function mainWorkForRun(
     clock: deps.clock,
   });
   return {
-    status: async (actId) => ((await canAct()) ? actions.status(deps.actor, actId) : { kind: "unavailable" as const }),
+    status: async (actId) => {
+      if (!(await canAct())) return { kind: "unavailable" as const };
+      const result = await actions.status(deps.actor, actId);
+      return (await canAct()) ? result : { kind: "unavailable" as const };
+    },
     steer: async (actId, words, toolCallId) => {
       if (!(await canAct())) return { kind: "unavailable" as const };
       // A provider call id may repeat in another run. Both durable identities

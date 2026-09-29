@@ -111,6 +111,50 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
 }
 
 describe("main work tools", () => {
+  it("a deferred steer cannot cross a relayed follow-up", async () => {
+    const { bind, instances } = await fixture();
+    let trusted = true;
+    let started!: () => void;
+    let release!: (verified: boolean) => void;
+    const checking = new Promise<void>((resolve) => (started = resolve));
+    const verified = new Promise<boolean>((resolve) => (release = resolve));
+    const capability = bind(
+      requester(),
+      "run-deferred",
+      undefined,
+      () => trusted,
+      async () => {
+        started();
+        return verified;
+      },
+    );
+    const steering = capability!.steer(ACT, "Stop now", "call-deferred");
+    await checking;
+    trusted = false;
+    release(true);
+    expect(await steering).toEqual({ kind: "unavailable" });
+    expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: UNIT.unit })).toEqual([]);
+  });
+
+  it("a channel flip during status read withholds private facts", async () => {
+    const { bind, instances } = await fixture();
+    let shared = false;
+    const getMainTask = instances.getMainTask.bind(instances);
+    vi.spyOn(instances, "getMainTask").mockImplementation(async (key) => {
+      const link = await getMainTask(key);
+      shared = true;
+      return link;
+    });
+    const capability = bind(
+      requester(),
+      "run-status-flip",
+      undefined,
+      () => true,
+      async () => !shared,
+    );
+    expect(await capability!.status(ACT)).toEqual({ kind: "unavailable" });
+  });
+
   it("refuses a Slack Connect D-channel or missing and failed action-time verification", async () => {
     const { bind, instances } = await fixture();
     const shared = mainWorkForRun({
