@@ -7,7 +7,11 @@ import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { parseDirectives } from "../../directives.js";
-import { WorkspaceReattachRefusedError, type WorkspaceBinding } from "../../execution/factory.js";
+import {
+  ReadyEnvironmentError,
+  WorkspaceReattachRefusedError,
+  type WorkspaceBinding,
+} from "../../execution/factory.js";
 import { ExecInfraError } from "../../execution/executor.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { NullMemoryStore } from "../memory/index.js";
@@ -52,6 +56,8 @@ import {
 } from "./provision.js";
 import { RunBearerStore } from "../modelProxy/runBearers.js";
 
+const PILOT_READY = { testCommand: "npm test", dependencyDir: "node_modules", requiredTools: ["node", "npm"] };
+
 // The attach itself is the executor factory's (src/execution/factory.ts); the
 // one refusal the stage decides — ask-once, when the resident has no ref
 // binding and none was named — is reached by making the attach throw it.
@@ -61,8 +67,10 @@ import { RunBearerStore } from "../modelProxy/runBearers.js";
 // refusal — and the round input the factory was handed is kept for the test.
 const attachState = vi.hoisted(() => ({
   needsRef: undefined as string | undefined,
+  attached: undefined as import("../reviewRound.js").RoundWorkspace | undefined,
   reattached: undefined as import("../reviewRound.js").RoundWorkspace | undefined,
   refuseReattach: undefined as string | undefined,
+  failReady: false,
   /** The run's stop ended the re-attach's wait: the factory rethrows the executor's typed `aborted` error. */
   stopReattach: false,
   rounds: [] as Array<Parameters<typeof import("../reviewRound.js").attachRoundWorkspace>[0]["round"]>,
@@ -74,7 +82,10 @@ vi.mock("../reviewRound.js", async (importOriginal) => {
     attachRoundWorkspace: async (input: Parameters<typeof mod.attachRoundWorkspace>[0]) => {
       attachState.rounds.push(input.round);
       if (attachState.needsRef !== undefined) throw new ResidentNeedsRefError(attachState.needsRef);
+      if (attachState.attached !== undefined) return attachState.attached;
       if (input.round.reattach !== undefined) {
+        if (attachState.failReady)
+          throw new ReadyEnvironmentError("dependencies_missing", "Restore dependencies, then retry this task.");
         if (attachState.refuseReattach !== undefined)
           throw new WorkspaceReattachRefusedError(input.round.reattach, attachState.refuseReattach);
         if (attachState.stopReattach)
@@ -275,8 +286,10 @@ async function resumeOf(runId: string, system?: string): Promise<ResumeContext> 
 beforeEach(() => {
   vi.stubEnv("PUBLIC_BASE_URL", "");
   attachState.needsRef = undefined;
+  attachState.attached = undefined;
   attachState.reattached = undefined;
   attachState.refuseReattach = undefined;
+  attachState.failReady = false;
   attachState.stopReattach = false;
   attachState.rounds = [];
 });
@@ -820,6 +833,285 @@ describe("budgetClipLabel — the card's budget line", () => {
 });
 
 describe("attachWorkspace — the workspace attach and the ask-once refusal", () => {
+  it("a configured pilot writer resolves the exact base head and supplies the declared readiness check before its first model turn", async () => {
+    const d = deps(
+      `\nexecution:\n  type: cloudflare\n  url: https://sandbox.example.com\n  resident:\n    baseUrl: https://resident.example.com\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]\n`,
+    );
+    const head = "a".repeat(40);
+    const binding = vi.fn(async () => ({ ref: "main", headSha: head }));
+    d.readyEnvironmentBinding = binding;
+    attachState.attached = {
+      selection: { executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" } },
+      release: async () => {},
+    };
+    const r = request(d, "agent:coding fix signup in acme/api", "coding");
+    const out = await attachWorkspace(d, {
+      msg: r.message,
+      io: fakeIO().io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async () => {} },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx: { repo: "acme/api" },
+      root: r.root,
+    });
+    expect(out.kind).toBe("attached");
+    expect(binding).toHaveBeenCalledWith("acme/api", undefined);
+    expect(attachState.rounds.at(-1)).toMatchObject({
+      repo: "acme/api",
+      ref: "main",
+      headSha: head,
+      readyEnvironment: { testCommand: "npm test", dependencyDir: "node_modules", requiredTools: ["node", "npm"] },
+    });
+  });
+
+  it("pins an explicitly selected branch to that branch's current head, not an inherited PR head", async () => {
+    const d = deps(
+      `\nexecution:\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]\n`,
+    );
+    const binding = vi.fn(async () => ({ ref: "feature", headSha: "a".repeat(40) }));
+    d.readyEnvironmentBinding = binding;
+    attachState.attached = {
+      selection: { executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" } },
+      release: async () => {},
+    };
+    const r = request(d, "agent:coding fix signup in acme/api on feature", "coding");
+    const out = await attachWorkspace(d, {
+      msg: r.message,
+      io: fakeIO().io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async () => {} },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx: { repo: "acme/api", ref: "feature", headSha: "b".repeat(40), pr: 7 },
+      root: r.root,
+    });
+    expect(out.kind).toBe("attached");
+    expect(binding).toHaveBeenCalledWith("acme/api", "feature");
+    expect(attachState.rounds.at(-1)).toMatchObject({ ref: "feature", headSha: "a".repeat(40) });
+  });
+
+  it("reattaches a pilot unit to its recorded workspace without reading a new remote head", async () => {
+    const d = deps(
+      `\nexecution:\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]\n`,
+    );
+    const binding = vi.fn(async () => ({ ref: "feature", headSha: "a".repeat(40) }));
+    d.readyEnvironmentBinding = binding;
+    attachState.attached = {
+      selection: { executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" } },
+      release: async () => {},
+    };
+    const r = request(d, "agent:coding continue acme/api", "coding");
+    const out = await attachWorkspace(d, {
+      msg: r.message,
+      io: fakeIO().io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async () => {} },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx: { repo: "acme/api", ref: "feature", headSha: "b".repeat(40) },
+      reattach: { backend: "resident", workspace: "/workspace/threads/x/feature", user: "user" },
+      preserveOnReattachRefusal: true,
+      readyRequirementOverride: PILOT_READY,
+      root: r.root,
+    });
+    expect(out.kind).toBe("attached");
+    expect(binding).not.toHaveBeenCalled();
+    expect(attachState.rounds.at(-1)).toMatchObject({
+      ref: "feature",
+      headSha: undefined,
+      readyEnvironment: expect.any(Object),
+    });
+  });
+
+  it("keeps a failed resumed pilot readiness check attached for the same workspace retry", async () => {
+    const d = deps(
+      `\nexecution:\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]\n`,
+    );
+    attachState.failReady = true;
+    const r = request(d, "agent:coding continue acme/api", "coding");
+    const reattach = {
+      backend: "resident" as const,
+      ref: "feature",
+      workspace: "/workspace/threads/x/feature",
+      user: "user",
+    };
+    const out = await attachWorkspace(d, {
+      msg: r.message,
+      io: fakeIO().io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async () => {} },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx: { repo: "acme/api", ref: "feature" },
+      reattach,
+      preserveOnReattachRefusal: true,
+      readyRequirementOverride: PILOT_READY,
+      root: r.root,
+    });
+    expect(out).toMatchObject({ kind: "reattach_unready", reason: "dependencies_missing", reattach });
+    expect(attachState.rounds).toHaveLength(1);
+    expect(attachState.rounds[0]?.reattach).toEqual(reattach);
+  });
+
+  it("holds a pilot run on its recorded binding when reuse-only reattach refuses", async () => {
+    const d = deps(
+      `\nexecution:\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]\n`,
+    );
+    attachState.refuseReattach = "the recorded worktree is unavailable";
+    const r = request(d, "agent:coding continue acme/api", "coding");
+    const reattach = {
+      backend: "resident" as const,
+      ref: "feature",
+      workspace: "/workspace/threads/x/feature",
+      user: "user",
+    };
+    const out = await attachWorkspace(d, {
+      msg: r.message,
+      io: fakeIO().io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async () => {} },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx: { repo: "acme/api", ref: "feature" },
+      reattach,
+      preserveOnReattachRefusal: true,
+      readyRequirementOverride: PILOT_READY,
+      root: r.root,
+    });
+    expect(out).toMatchObject({ kind: "reattach_unready", reason: "backend_unavailable", reattach });
+    expect(attachState.rounds).toHaveLength(1);
+  });
+
+  it("keeps a recorded coding workspace when pilot configuration changed before recovery", async () => {
+    const d = deps();
+    attachState.refuseReattach = "the recorded worktree is unavailable";
+    const r = request(d, "agent:coding continue acme/api", "coding");
+    const reattach = {
+      backend: "resident" as const,
+      ref: "feature",
+      workspace: "/workspace/threads/x/feature",
+      user: "user",
+    };
+    const out = await attachWorkspace(d, {
+      msg: r.message,
+      io: fakeIO().io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async () => {} },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx: { repo: "acme/api", ref: "feature" },
+      reattach,
+      preserveOnReattachRefusal: true,
+      readyRequirementOverride: PILOT_READY,
+      root: r.root,
+    });
+    expect(out).toMatchObject({ kind: "reattach_unready", reason: "backend_unavailable", reattach });
+  });
+
+  it("honors a hard stop before holding a pilot whose ready settings changed", async () => {
+    const d = { ...deps(), hostedRuns: true };
+    const r = request(d, "agent:coding continue acme/api", "coding");
+    const stopped = new AbortController();
+    stopped.abort();
+    const out = await attachWorkspace(d, {
+      msg: r.message,
+      io: fakeIO().io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async () => {} },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx: { repo: "acme/api", ref: "feature" },
+      reattach: { backend: "resident", workspace: "/workspace/threads/x/feature", user: "worker2" },
+      preserveOnReattachRefusal: true,
+      readyRequirementVerified: false,
+      stopSignal: stopped.signal,
+      root: r.root,
+    });
+    expect(out).toEqual({ kind: "stopped" });
+    expect(attachState.rounds).toEqual([]);
+  });
+
+  it("resumes a default-branch pilot unit from the recorded ref when the new request has no branch", async () => {
+    const d = deps(
+      `\nexecution:\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]\n`,
+    );
+    const binding = vi.fn(async () => ({ ref: "main", headSha: "a".repeat(40) }));
+    d.readyEnvironmentBinding = binding;
+    attachState.attached = {
+      selection: { executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" } },
+      release: async () => {},
+    };
+    const r = request(d, "agent:coding continue acme/api", "coding");
+    const out = await attachWorkspace(d, {
+      msg: r.message,
+      io: fakeIO().io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async () => {} },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx: { repo: "acme/api" },
+      reattach: { backend: "resident", ref: "main", workspace: "/workspace/threads/x/main", user: "user" },
+      root: r.root,
+    });
+    expect(out.kind).toBe("attached");
+    expect(binding).not.toHaveBeenCalled();
+    expect(attachState.rounds.at(-1)).toMatchObject({ ref: "main", headSha: undefined });
+  });
+
+  it("keeps a pilot writer out of the executor when its branch head cannot be verified", async () => {
+    const d = deps(
+      `\nexecution:\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]\n`,
+    );
+    d.readyEnvironmentBinding = async () => undefined;
+    const r = request(d, "agent:coding fix signup in acme/api", "coding");
+    await expect(
+      attachWorkspace(d, {
+        msg: r.message,
+        io: fakeIO().io,
+        refuse: r.refuse,
+        card: { update: () => {}, done: async () => {} },
+        shell: r.shell,
+        closeLines: () => ({}),
+        clock: () => NOW,
+        agent: r.agent,
+        profile: r.profile,
+        repoCtx: { repo: "acme/api" },
+        root: r.root,
+      }),
+    ).rejects.toMatchObject({
+      refusal: {
+        code: "setup_failed",
+        text: expect.stringMatching(/coding environment is not ready.*current branch and commit/i),
+      },
+    });
+    expect(attachState.rounds).toHaveLength(0);
+  });
+
   it("a hosted process with local execution refuses a workspace preset by name in one sentence before attach", async () => {
     const d = { ...deps(), hostedRuns: true };
     const r = request(d, "agent:review acme/api#41", "review");
@@ -904,6 +1196,50 @@ describe("attachWorkspace — the workspace attach and the ask-once refusal", ()
 // factory's refusal read by name. The gate — the ask-once question, the card,
 // the reply — is the dispatch-time caller's alone.
 describe("reattachWorkspace — the run's recorded workspace re-attached without the gate", () => {
+  it("uses the run's original ready requirement when live pilot config changes", async () => {
+    const d = deps();
+    const r = request(d, "agent:coding continue acme/api", "coding");
+    const readyRequirementOverride = {
+      testCommand: "npm test",
+      dependencyDir: "node_modules",
+      requiredTools: ["node", "npm"],
+    };
+    attachState.reattached = {
+      selection: { executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" } },
+      release: async () => {},
+    } as import("../reviewRound.js").RoundWorkspace;
+    const out = await reattachWorkspace(d, {
+      threadKey: THREAD,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx: { repo: "acme/api", ref: "main" },
+      root: r.root,
+      clock: () => NOW,
+      reattach: binding,
+      preserveOnReattachRefusal: true,
+      readyRequirementOverride,
+    });
+    expect(out.kind).toBe("attached");
+    expect(attachState.rounds[0]?.readyEnvironment).toEqual(readyRequirementOverride);
+  });
+
+  it("pauses a stamped pilot writer when its mid-run reattach loses dependencies", async () => {
+    const d = deps();
+    const r = request(d, "agent:coding continue acme/api", "coding");
+    attachState.failReady = true;
+    const out = await reattachWorkspace(d, {
+      threadKey: THREAD,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx: { repo: "acme/api", ref: "main" },
+      root: r.root,
+      clock: () => NOW,
+      reattach: binding,
+      preserveOnReattachRefusal: true,
+      readyRequirementOverride: PILOT_READY,
+    });
+    expect(out).toMatchObject({ kind: "reattach_unready", reason: "dependencies_missing", reattach: binding });
+  });
   const binding: WorkspaceBinding = {
     backend: "resident",
     workspace: "/workspace/threads/t/main",

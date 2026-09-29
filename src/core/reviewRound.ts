@@ -24,6 +24,7 @@ import {
   type WorkspaceBinding,
 } from "../execution/factory.js";
 import type { Executor, ReleaseMode, ReleaseOptions } from "../execution/executor.js";
+import type { ReadyEnvironmentRequirement } from "../execution/seedPlan.js";
 import { leftBehindSentence } from "../execution/residentCleanliness.js";
 import type { ToolContext } from "../tools/runnableTool.js";
 import type { Span } from "../core/trace/types.js";
@@ -135,6 +136,7 @@ export async function attachRoundWorkspace(input: {
     repo?: string;
     ref?: string;
     headSha?: string;
+    readyEnvironment?: ReadyEnvironmentRequirement;
     /** The pull request the thread's own run opened, whose head `ref` is
      *  (resident-repos item 16): the resident may move a default-bound thread onto it. */
     ownPr?: { number: number; ref: string };
@@ -174,6 +176,7 @@ export async function attachRoundWorkspace(input: {
       repo: input.round.repo,
       ref: input.round.ref,
       headSha: input.round.headSha,
+      ...(input.round.readyEnvironment !== undefined ? { readyEnvironment: input.round.readyEnvironment } : {}),
       ...(input.round.ownPr !== undefined ? { ownPr: input.round.ownPr } : {}),
       ...(input.round.reattach !== undefined ? { reattach: input.round.reattach } : {}),
       ...(input.round.stopSignal !== undefined ? { stopSignal: input.round.stopSignal } : {}),

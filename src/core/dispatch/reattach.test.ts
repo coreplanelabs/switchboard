@@ -15,6 +15,7 @@ import {
   carriedOperationTarget,
   carriedRunIdentity,
   carriedWorkspaceBinding,
+  hasPilotWorkspaceBinding,
   lostWorkspaceNote,
   prepareRestartTurn,
   recordRestartDeath,
@@ -102,6 +103,55 @@ describe("carriedWorkspaceBinding: where the row says the run's workspace is", (
     expect(carriedWorkspaceBinding(row({}, { selection: "none" }))).toBeUndefined();
     expect(carriedWorkspaceBinding(row())).toBeUndefined();
     expect(carriedWorkspaceBinding(row({ state: { binding: { backend: "mainframe" } } }))).toBeUndefined();
+  });
+});
+
+describe("hasPilotWorkspaceBinding", () => {
+  it("rejects missing, malformed and legacy-only bindings before a pilot can provision again", () => {
+    expect(hasPilotWorkspaceBinding(row())).toBe(false);
+    expect(hasPilotWorkspaceBinding(row({}, { selection: "resident", workspace: "/workspace/old" }))).toBe(false);
+    expect(hasPilotWorkspaceBinding(row({ state: { binding: { backend: "unknown" } } }))).toBe(false);
+    expect(
+      hasPilotWorkspaceBinding(row({ state: { binding: { backend: "resident", workspace: "/workspace/old" } } })),
+    ).toBe(false);
+    expect(hasPilotWorkspaceBinding(row({ state: { binding: { backend: "sandbox" } } }))).toBe(false);
+    expect(
+      hasPilotWorkspaceBinding(
+        row({
+          state: {
+            binding: {
+              backend: "sandbox",
+              seeded: { slug: "acme/api", ref: "main", workspace: "/workspace/checkout" },
+            },
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts only a complete resident or seeded sandbox binding", () => {
+    expect(
+      hasPilotWorkspaceBinding(
+        row({ state: { binding: { backend: "resident", ref: "main", workspace: "/workspace/old", user: "worker2" } } }),
+      ),
+    ).toBe(true);
+    expect(
+      hasPilotWorkspaceBinding(
+        row({
+          state: {
+            binding: {
+              backend: "sandbox",
+              seeded: {
+                slug: "acme/api",
+                ref: "main",
+                workspace: "/workspace/checkout",
+                sourceSha: "a".repeat(40),
+              },
+            },
+          },
+        }),
+      ),
+    ).toBe(true);
   });
 });
 

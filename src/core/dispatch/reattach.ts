@@ -40,6 +40,15 @@ export function carriedWorkspaceBinding(row: LiveRunRow): WorkspaceBinding | und
   return undefined;
 }
 
+/** A stamped pilot may only resume from its complete state binding. Legacy
+ * meta fallbacks and a bare sandbox backend cannot identify its dirty tree. */
+export function hasPilotWorkspaceBinding(row: LiveRunRow): boolean {
+  const binding = workspaceBindingOf(row.state.binding);
+  if (binding?.backend === "resident") return !!(binding.workspace && binding.user && binding.ref);
+  if (binding?.backend === "sandbox") return !!binding.seeded?.sourceSha;
+  return false;
+}
+
 /** Recover only the accepted target the prior claim stored, never one inferred
  * from the request text or the resolved repo/ref beside it. */
 export function carriedOperationTarget(row: LiveRunRow): OperationTarget | undefined {

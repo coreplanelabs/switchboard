@@ -324,6 +324,15 @@ execution:
   #   tokenEnv: RESIDENT_OPERATOR_TOKEN  # operator bearer secret (default)
   #   adminTokenEnv: RESIDENT_ADMIN_TOKEN # admin bearer for `repo ...` commands (default)
   #   probeTimeoutMs: 8000               # /status probe deadline; a miss = not warm for that dispatch, never an outage
+  # Pilot coding admission: an operator declares the test command and tools
+  # for each repository. The bot pins the current branch commit with its
+  # GitHub App before the worker gets a model turn; the executor then checks
+  # the dependency view and command availability on that checkout.
+  # readyPilotRepos:
+  #   acme/api:
+  #     testCommand: npm test
+  #     dependencyDir: node_modules
+  #     requiredTools: [node, npm]
 
 # Where per-conversation agent workspaces are created (local execution only).
 # Under docker compose this directory is a named volume, so checkouts survive a restart.

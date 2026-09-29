@@ -35,7 +35,8 @@ import {
 import { prepareRelaunch } from "./relaunch.js";
 import { harnessNamed } from "../harness/roster.js";
 import { harnessContainerFor } from "../harness/botHostContainer.js";
-import { workspaceBindingFor } from "../../execution/factory.js";
+import { workspaceBindingFor, type ReadyEnvironmentReason } from "../../execution/factory.js";
+import type { ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
 import { isContainerGone } from "../harness/container.js";
 import {
@@ -183,7 +184,16 @@ export interface RunInterrupted {
   restart: { request: IncomingMessage; restartOf: string; coordinator?: CoordinatorTag };
 }
 
-export type RunLoopOutcome = RunOutcome | RunInterrupted;
+/** The model's container was replaced and the recorded coding checkout could
+ * not be reattached. The durable row and binding remain for the same run. */
+export interface RunPaused {
+  kind: "paused";
+  reason: ReadyEnvironmentReason | "relaunch_ceiling";
+  message: string;
+  handedOff: boolean;
+}
+
+export type RunLoopOutcome = RunOutcome | RunInterrupted | RunPaused;
 
 /** What `runLoop` reads off the dispatch. */
 export interface RunLoopContext {
@@ -203,6 +213,8 @@ export interface RunLoopContext {
   round: RoundWorkspace;
   admitted: LiveThread<DispatchFollowUp>;
   ledgerRun: LedgerRun | undefined;
+  preserveOnReattachRefusal?: boolean;
+  readyRequirementOverride?: ReadyEnvironmentRequirement;
   resume: ResumeContext | undefined;
   repoCtx: RepoContext;
   githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };
@@ -896,6 +908,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // runs the request again once the thread is free, the path a refused
   // re-attach takes (run-history item 54).
   let interrupted: HarnessInterruptedError | undefined;
+  let pausedForRetry = false;
   /** The run's terminal status as of now: what the finish hands the registry,
    *  and what the record read deciding the workspace's release goes by. */
   const statusNow = (): RunStatus => {
@@ -1721,11 +1734,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // process from the record in the container the run holds: the bound
       // read off the row's facts, the workspace re-attached or refused by
       // name, the bearer rotated with the row written inside the rotation,
-      // then the harness's own rebuild through the same door. A refusal is an
-      // interruption like the floor's: the relay registration the harness left
-      // standing for the relaunch is forgotten, the record says why, and the
-      // catch below finishes the run `interrupted` for the dispatcher's
-      // restart. Every other throw is the run's, as before.
+      // then the harness's own rebuild through the same door. A stamped pilot
+      // writer pauses on its original binding if re-attach fails. Other
+      // refusals interrupt the run for the dispatcher's restart.
       ctx.assertAdmissionBudget();
       for (;;) {
         try {
@@ -1750,6 +1761,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               replaced: err,
               facts: lastFacts,
               binding: workspaceBinding,
+              ...(ctx.preserveOnReattachRefusal ? { preserveOnReattachRefusal: true } : {}),
+              ...(ctx.readyRequirementOverride !== undefined
+                ? { readyRequirementOverride: ctx.readyRequirementOverride }
+                : {}),
               stopSignal: run.control.hardSignal,
               remainingMs: () => run.control.remainingMs(),
               saveFacts,
@@ -1768,6 +1783,20 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             harnessDeps.registry.forget(run.id);
             onEvent({ type: "run_note", kind: "sandbox_restarted", summary: decision.interruption.message });
             throw decision.interruption;
+          }
+          if (decision.kind === "paused") {
+            harnessDeps.registry.forget(run.id);
+            onEvent({ type: "run_note", kind: "sandbox_restarted", summary: decision.message });
+            if (ctx.githubDoor && deps.githubBindings) {
+              if (existingPrPublication !== undefined) blockExistingPrPublication("the run is pausing");
+              else deps.githubBindings.blockBranch(run.id, "the run is pausing");
+              await deps.githubBindings.waitForPublication(run.id, GIT_PUBLICATION_SETTLE_TIMEOUT_MS);
+            }
+            await events.drain();
+            const handedOff = (await ledgerRun?.pauseForRetry().catch(() => false)) ?? false;
+            pausedForRetry = true;
+            registry.discard(run.id);
+            return { kind: "paused", reason: decision.reason, message: decision.message, handedOff };
           }
           if (decision.kind === "stopped") {
             // An operator's hard stop ended the re-attach's wait: the run ends
@@ -2427,167 +2456,169 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     };
   } finally {
     clearInterval(heartbeat);
-    if (ctx.githubDoor && deps.githubBindings) {
-      // Stop new admissions first. A previously forwarded request still owns
-      // one pending intent; its report must reach this run's durable record
-      // before registry.finish takes the final snapshot and the ledger seals.
-      if (existingPrPublication !== undefined) blockExistingPrPublication("the run is ending");
-      else deps.githubBindings.blockBranch(run.id, "the run is ending");
-      await deps.githubBindings.waitForPublication(run.id, GIT_PUBLICATION_SETTLE_TIMEOUT_MS);
-      if (activeDoorPublication || resumedDoorPublication)
-        events.publish({
-          type: "run_note",
-          kind: "publication_blocked",
-          summary: "a Git write remains uncertain; reconcile the recorded ref transition before retrying",
-          at: clock(),
-        });
-    }
-    await events.drain();
-    retainPublicationReceipts();
-    retainBranchReceipts();
-    const status = statusNow();
-    // The two final boundaries land before the registry closes. A tracked run
-    // commits each boundary durably before fan-out; an untracked run keeps the
-    // same local projection so every admitted run still has one condition.
-    if (typeof registry.commitLiveState === "function") {
-      const commitBoundary = async (state: "wrapping_up" | "ended", at: number): Promise<void> => {
-        const summary = registry.getById(run.id);
-        if (!summary) return;
-        const eventSeq = summary.eventCount + 1;
-        const assignment =
-          state === "ended"
-            ? {
-                expectedSeq: summary.liveStateSeq ?? 0,
-                eventSeq,
-                at,
-                state,
-                cause: causeOfClose(status, interrupted !== undefined),
-              }
-            : {
-                expectedSeq: summary.liveStateSeq ?? 0,
-                eventSeq,
-                at,
-                state,
-                bound: summary.liveState?.bound ?? at,
-                detail: "writing the final answer",
-              };
-        if (ledgerRun?.tracked()) {
-          const committed = await ledgerRun.assignLiveState(assignment);
-          if (committed.ok) registry.commitLiveState(run.id, committed);
-          return;
-        }
-        const local = assignRunLiveState(summary.liveState, summary.liveStateSeq ?? 0, assignment);
-        if (!local.ok || !local.event) return;
-        registry.commitLiveState(run.id, {
-          ...local,
-          event: { ...local.event, seq: eventSeq },
-          liveStateSeq: eventSeq,
-        });
-      };
-      const at = clock();
-      await commitBoundary("wrapping_up", at);
-      await commitBoundary("ended", clock());
-    }
-    // Close the live-view stream and start the TTL, handing the registry the
-    // terminal status so every summary projects it (the index, `runs list`)
-    // instead of re-deriving it. The one status the registry cannot know is
-    // `failedAfterFinish` (a reply that throws AFTER the loop): the record
-    // says `failed`, the registry row keeps `completed` for its TTL.
-    registry.finish(run.id, status);
-    // The registry backlog is read back ONCE here, synchronously at finish
-    // (docs/decisions/0006-runs-have-two-lives.md): it feeds both the friction diagnosis and the run
-    // record. Reading it now, not after the reply, is what makes a slow reply
-    // safe — the registry evicts a finished run after its TTL, and the record
-    // must not depend on winning that race. Skipped entirely when neither
-    // consumer is wired (nothing to diagnose for, nothing to persist). The
-    // backlog is byte-bounded (oldest evicted), so the diagnosis is told when
-    // it is looking at a head-truncated stream. Read with or without a
-    // writer: the closed card's shape line comes from this diagnosis too.
-    const snap = registry.snapshot(run.id, run.token);
-    const recordEventList = snap?.events ?? [];
-    const finishedAt = snap?.finishedAt ?? clock(); // the registry's finish clock: row and record agree
-    // The diagnosis over the run's window (docs/reference/specs/tracing.md): its shape is
-    // what the closed card and the record carry.
-    const diagnosis = analyzeRunFriction(recordEventList, {
-      finished: true,
-      truncated: snap?.truncated ?? false,
-      window: { start: snap?.receivedAt ?? startedAt, end: finishedAt },
-    });
-    runDiagnosis = diagnosis;
-    // The channel's receipt (id + terminal status, never the token): a
-    // single-shot channel hands it to its caller — the Worker shim records a
-    // scheduled firing's run from it.
-    io.runFinished?.({ id: run.id, status });
-    // The run finished: it is sealed by the next drain (after the reply), and
-    // its record — everything captured now, assembled after the seal — is
-    // written by that drain. The card's total stops at the finish stamp.
-    ending.finished(run.id);
-    shell.freeze(finishedAt);
-    registerFinishRecord(deps, {
-      ending,
-      run,
-      snap,
-      agent,
-      profile,
-      resolved,
-      msg,
-      channelVisibility,
-      repoCtx,
-      finishedAt,
-      status,
-      diagnosis,
-      root,
-      ledgerRun,
-      ...(observedHead !== undefined ? { headSha: observedHead } : {}),
-      ...((activeDoorPublication ?? resumedDoorPublication) !== undefined &&
-      (coordinator?.publication?.repo ?? repoCtx.repo ?? deps.githubBindings?.get(run.id)?.repo) !== undefined
-        ? {
-            doorPublicationPending: {
-              ...(activeDoorPublication ?? resumedDoorPublication)!,
-              repo: (coordinator?.publication?.repo ?? repoCtx.repo ?? deps.githubBindings?.get(run.id)?.repo)!,
-              ...(coordinator?.publication !== undefined ? { pr: coordinator.publication.pr } : {}),
-              ...(coordinator !== undefined && unitOfIdempotencyKey(coordinator.idempotencyKey) !== undefined
-                ? {
-                    owner: {
-                      instanceId: coordinator.parentInstanceId,
-                      unit: unitOfIdempotencyKey(coordinator.idempotencyKey)!,
-                    },
-                  }
-                : {}),
-            },
+    if (!pausedForRetry) {
+      if (ctx.githubDoor && deps.githubBindings) {
+        // Stop new admissions first. A previously forwarded request still owns
+        // one pending intent; its report must reach this run's durable record
+        // before registry.finish takes the final snapshot and the ledger seals.
+        if (existingPrPublication !== undefined) blockExistingPrPublication("the run is ending");
+        else deps.githubBindings.blockBranch(run.id, "the run is ending");
+        await deps.githubBindings.waitForPublication(run.id, GIT_PUBLICATION_SETTLE_TIMEOUT_MS);
+        if (activeDoorPublication || resumedDoorPublication)
+          events.publish({
+            type: "run_note",
+            kind: "publication_blocked",
+            summary: "a Git write remains uncertain; reconcile the recorded ref transition before retrying",
+            at: clock(),
+          });
+      }
+      await events.drain();
+      retainPublicationReceipts();
+      retainBranchReceipts();
+      const status = statusNow();
+      // The two final boundaries land before the registry closes. A tracked run
+      // commits each boundary durably before fan-out; an untracked run keeps the
+      // same local projection so every admitted run still has one condition.
+      if (typeof registry.commitLiveState === "function") {
+        const commitBoundary = async (state: "wrapping_up" | "ended", at: number): Promise<void> => {
+          const summary = registry.getById(run.id);
+          if (!summary) return;
+          const eventSeq = summary.eventCount + 1;
+          const assignment =
+            state === "ended"
+              ? {
+                  expectedSeq: summary.liveStateSeq ?? 0,
+                  eventSeq,
+                  at,
+                  state,
+                  cause: causeOfClose(status, interrupted !== undefined),
+                }
+              : {
+                  expectedSeq: summary.liveStateSeq ?? 0,
+                  eventSeq,
+                  at,
+                  state,
+                  bound: summary.liveState?.bound ?? at,
+                  detail: "writing the final answer",
+                };
+          if (ledgerRun?.tracked()) {
+            const committed = await ledgerRun.assignLiveState(assignment);
+            if (committed.ok) registry.commitLiveState(run.id, committed);
+            return;
           }
-        : {}),
-      ...(handoff !== undefined ? { handoff } : {}),
-      ...(verdict !== undefined ? { verdict } : {}),
-      ...(reviewHead !== undefined ? { reviewHead } : {}),
-      ...(dispositions !== undefined ? { dispositions } : {}),
-      ...(reviewPost !== undefined ? { reviewPost } : {}),
-      ...(route !== undefined ? { route } : {}),
-      ...(parentRunId !== undefined ? { parentRunId } : {}),
-      ...(coordinator !== undefined ? { coordinator } : {}),
-      ...(seed !== undefined ? { seed } : {}),
-      ...(failure !== undefined ? { failure } : {}),
-    });
-    // The diagnosis rides the run record (above): the friction ledger the
-    // cross-run proposer reads is run history, so nothing is written twice.
-    // A run whose loop threw closes its card here, after the finish, so the
-    // card's total is the run's; the outer catch replies and drains. A run
-    // interrupted — a replaced container (harness-pi item 16), another
-    // harness's row (harness.md item 7) — closes saying it restarts from its
-    // request: the fresh run's card follows this one.
-    if (runFailed)
-      await root
-        .span("post.card_close", () =>
-          card.done(shell.close({ kind: "done", icon: "❌", detail: checklistAsLeft(), ...doneLines(diagnosis) })),
-        )
-        .catch(() => {});
-    else if (interrupted) {
-      const { reason } = interrupted;
-      await root
-        .span("post.card_close", () =>
-          card.done(shell.close({ kind: "refused", icon: "🔁", reason, ...doneLines(diagnosis) })),
-        )
-        .catch(() => {});
+          const local = assignRunLiveState(summary.liveState, summary.liveStateSeq ?? 0, assignment);
+          if (!local.ok || !local.event) return;
+          registry.commitLiveState(run.id, {
+            ...local,
+            event: { ...local.event, seq: eventSeq },
+            liveStateSeq: eventSeq,
+          });
+        };
+        const at = clock();
+        await commitBoundary("wrapping_up", at);
+        await commitBoundary("ended", clock());
+      }
+      // Close the live-view stream and start the TTL, handing the registry the
+      // terminal status so every summary projects it (the index, `runs list`)
+      // instead of re-deriving it. The one status the registry cannot know is
+      // `failedAfterFinish` (a reply that throws AFTER the loop): the record
+      // says `failed`, the registry row keeps `completed` for its TTL.
+      registry.finish(run.id, status);
+      // The registry backlog is read back ONCE here, synchronously at finish
+      // (docs/decisions/0006-runs-have-two-lives.md): it feeds both the friction diagnosis and the run
+      // record. Reading it now, not after the reply, is what makes a slow reply
+      // safe — the registry evicts a finished run after its TTL, and the record
+      // must not depend on winning that race. Skipped entirely when neither
+      // consumer is wired (nothing to diagnose for, nothing to persist). The
+      // backlog is byte-bounded (oldest evicted), so the diagnosis is told when
+      // it is looking at a head-truncated stream. Read with or without a
+      // writer: the closed card's shape line comes from this diagnosis too.
+      const snap = registry.snapshot(run.id, run.token);
+      const recordEventList = snap?.events ?? [];
+      const finishedAt = snap?.finishedAt ?? clock(); // the registry's finish clock: row and record agree
+      // The diagnosis over the run's window (docs/reference/specs/tracing.md): its shape is
+      // what the closed card and the record carry.
+      const diagnosis = analyzeRunFriction(recordEventList, {
+        finished: true,
+        truncated: snap?.truncated ?? false,
+        window: { start: snap?.receivedAt ?? startedAt, end: finishedAt },
+      });
+      runDiagnosis = diagnosis;
+      // The channel's receipt (id + terminal status, never the token): a
+      // single-shot channel hands it to its caller — the Worker shim records a
+      // scheduled firing's run from it.
+      io.runFinished?.({ id: run.id, status });
+      // The run finished: it is sealed by the next drain (after the reply), and
+      // its record — everything captured now, assembled after the seal — is
+      // written by that drain. The card's total stops at the finish stamp.
+      ending.finished(run.id);
+      shell.freeze(finishedAt);
+      registerFinishRecord(deps, {
+        ending,
+        run,
+        snap,
+        agent,
+        profile,
+        resolved,
+        msg,
+        channelVisibility,
+        repoCtx,
+        finishedAt,
+        status,
+        diagnosis,
+        root,
+        ledgerRun,
+        ...(observedHead !== undefined ? { headSha: observedHead } : {}),
+        ...((activeDoorPublication ?? resumedDoorPublication) !== undefined &&
+        (coordinator?.publication?.repo ?? repoCtx.repo ?? deps.githubBindings?.get(run.id)?.repo) !== undefined
+          ? {
+              doorPublicationPending: {
+                ...(activeDoorPublication ?? resumedDoorPublication)!,
+                repo: (coordinator?.publication?.repo ?? repoCtx.repo ?? deps.githubBindings?.get(run.id)?.repo)!,
+                ...(coordinator?.publication !== undefined ? { pr: coordinator.publication.pr } : {}),
+                ...(coordinator !== undefined && unitOfIdempotencyKey(coordinator.idempotencyKey) !== undefined
+                  ? {
+                      owner: {
+                        instanceId: coordinator.parentInstanceId,
+                        unit: unitOfIdempotencyKey(coordinator.idempotencyKey)!,
+                      },
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(handoff !== undefined ? { handoff } : {}),
+        ...(verdict !== undefined ? { verdict } : {}),
+        ...(reviewHead !== undefined ? { reviewHead } : {}),
+        ...(dispositions !== undefined ? { dispositions } : {}),
+        ...(reviewPost !== undefined ? { reviewPost } : {}),
+        ...(route !== undefined ? { route } : {}),
+        ...(parentRunId !== undefined ? { parentRunId } : {}),
+        ...(coordinator !== undefined ? { coordinator } : {}),
+        ...(seed !== undefined ? { seed } : {}),
+        ...(failure !== undefined ? { failure } : {}),
+      });
+      // The diagnosis rides the run record (above): the friction ledger the
+      // cross-run proposer reads is run history, so nothing is written twice.
+      // A run whose loop threw closes its card here, after the finish, so the
+      // card's total is the run's; the outer catch replies and drains. A run
+      // interrupted — a replaced container (harness-pi item 16), another
+      // harness's row (harness.md item 7) — closes saying it restarts from its
+      // request: the fresh run's card follows this one.
+      if (runFailed)
+        await root
+          .span("post.card_close", () =>
+            card.done(shell.close({ kind: "done", icon: "❌", detail: checklistAsLeft(), ...doneLines(diagnosis) })),
+          )
+          .catch(() => {});
+      else if (interrupted) {
+        const { reason } = interrupted;
+        await root
+          .span("post.card_close", () =>
+            card.done(shell.close({ kind: "refused", icon: "🔁", reason, ...doneLines(diagnosis) })),
+          )
+          .catch(() => {});
+      }
     }
   }
   return {

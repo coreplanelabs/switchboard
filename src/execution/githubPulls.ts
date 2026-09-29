@@ -327,7 +327,7 @@ export async function resolveBaseRefLazy(
 /** GET /repos/{repo} → the ship-gate facts, or undefined when the credential
  *  is missing, the fetch fails, or the answer is malformed. Never throws. */
 export async function fetchRepoShipInfo(repo: string): Promise<RepoShipInfo | undefined> {
-  const token = await resolveGithubToken().catch(() => null);
+  const token = await resolveGithubToken("read").catch(() => null);
   if (!token) return undefined;
   let res: Response;
   try {
@@ -480,6 +480,15 @@ async function readHeadRef(repo: string, branch: string, headers: Record<string,
   return data?.object?.type === "commit" && typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha)
     ? { kind: "verified", sha }
     : { kind: "unverified" };
+}
+
+/** Bind a pilot writer to a branch's current commit using the trusted App
+ * credential. A failed or malformed read supplies no head to the model. */
+export async function fetchBranchHeadSha(repo: string, branch: string): Promise<string | undefined> {
+  const token = await resolveGithubToken("read").catch(() => null);
+  if (!token) return undefined;
+  const read = await readHeadRef(repo, branch, apiHeaders(token));
+  return read.kind === "verified" ? read.sha : undefined;
 }
 
 /**
