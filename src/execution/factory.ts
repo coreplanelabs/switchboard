@@ -30,6 +30,7 @@ import {
   ResidentExecutor,
   ResidentLeaseSpentError,
   ResidentNeedsRefError,
+  ResidentRegistrationMismatchError,
   waitOnStatus,
   wakeStopped,
   type ResidentBinding,
@@ -442,6 +443,12 @@ export async function makeExecutor(
     };
   }
 
+  // The same ledger owner must authorize both resident attach and every cold
+  // fallback. A stale generation cannot bypass the fence when the probe fails.
+  if (ctx.residentClaim !== undefined) await ctx.residentClaim();
+  const recheckOwner = async (): Promise<number | undefined> =>
+    ctx.residentClaim === undefined ? undefined : ctx.residentClaim();
+
   // `repo-resident`. Resident selection: only when a target repo was resolved
   // AND the resident backend is configured. A SERVICEABLE state → ResidentExecutor;
   // anything else (engine-owned state, probe timeout, outage) → the per-thread
@@ -508,13 +515,13 @@ export async function makeExecutor(
     } else if (probe.kind === "status" && isServiceable(probe.state, probe.reason)) {
       // The resident can degrade between the /status probe and /attach: 503
       // (mirror-busy) or 429 (pool-exhausted) surface only at attach time.
-      // ResidentNeedsRefError must still propagate (the dispatcher's ask-once
-      // flow depends on it); any OTHER attach failure falls back to the
-      // per-thread backend with a named note (never a silent stall or a raw
-      // ⚠️ for this window).
-      // Ownership failures are not resident attach failures: a fenced run
-      // must stop before either the resident or cold fallback can do work.
-      const ownerFence = ctx.residentClaim === undefined ? undefined : await ctx.residentClaim();
+      // Needs-ref keeps the dispatcher's ask-once flow. A registration
+      // mismatch is an ownership fence. Other attach failures may use the
+      // per-thread fallback, with the failure named on the card.
+      // The probe (and optional restore wait) may have outlived this ledger
+      // owner. Claim again outside the fallback catch and send the new fence.
+      const ownerFence = await recheckOwner();
+      let selection: ExecutorSelection | undefined;
       try {
         // Non-warm but serviceable: the note says so while the run
         // still gets the worktree it came for; openResident adds ref@sha.
@@ -527,7 +534,7 @@ export async function makeExecutor(
         // The resolved PR head rides along so the resident fetches a mirror
         // whose ref tip lags it (item 51) instead of cloning a stale tip; the
         // thread's own PR rides along as the reason for the hint (item 16).
-        const selection = await openResident(
+        selection = await openResident(
           {
             baseUrl: resident.baseUrl,
             token: token.reveal(),
@@ -567,15 +574,8 @@ export async function makeExecutor(
             drainBoundMs: DRAIN_FALLBACK_WAIT_MS,
           },
         );
-        // Item 27: the wait is on the card whichever state the restore landed on.
-        return waitedForRestore
-          ? {
-              ...selection,
-              note: oneLine(`${selection.note ?? "resident"} · after waiting for the resident's restore`),
-            }
-          : selection;
       } catch (err) {
-        if (err instanceof ResidentNeedsRefError) throw err;
+        if (err instanceof ResidentNeedsRefError || err instanceof ResidentRegistrationMismatchError) throw err;
         // A stopped run is not a run to provision cold for: the stop that ended
         // the attach's wait ends the dispatch, as the runner's stop path would.
         // Read by the error's typed shape: another failure beside a pending stop
@@ -590,6 +590,25 @@ export async function makeExecutor(
         reason = oneLine(
           `resident attach failed (${err instanceof Error ? err.message : String(err)})${waitedNote(probeWaitMs)}${restoreWait}`,
         );
+      }
+      if (selection) {
+        // Attach can wait while a newer generation reclaims the run. A claim
+        // after it settles stops this generation before it can use the tree.
+        // The executor keeps the fence sent at attach for a guarded release;
+        // a newer owner's registration cannot be detached by this cleanup.
+        try {
+          await recheckOwner();
+        } catch (err) {
+          await selection.executor.release?.("always");
+          throw err;
+        }
+        // Item 27: the wait is on the card whichever state the restore landed on.
+        return waitedForRestore
+          ? {
+              ...selection,
+              note: oneLine(`${selection.note ?? "resident"} · after waiting for the resident's restore`),
+            }
+          : selection;
       }
     } else if (probe.kind === "unreachable") {
       // A probe waited through a typed blip that never cleared names the wait.
@@ -619,12 +638,15 @@ export async function makeExecutor(
       // resident answers no body; a Worker that is not the cloudflare one has
       // no /seed) → the cold path as before, and so does a refused seed, with
       // the refusal on the note.
+      await recheckOwner();
       const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx));
+      await recheckOwner();
       const handle = probe.kind === "status" ? probe.seed : undefined;
       const outcome =
         handle && executor instanceof CloudflareSandboxExecutor
           ? await seedSandbox(executor, handle, ctx, () => probeResident(resident, token, resource, span), span)
           : undefined;
+      if (outcome !== undefined) await recheckOwner();
       if (outcome && "seeded" in outcome) {
         return {
           executor,
@@ -645,8 +667,11 @@ export async function makeExecutor(
     }
   }
 
+  await recheckOwner();
+  const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx));
+  await recheckOwner();
   return {
-    executor: await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx)),
+    executor,
     note,
     backend: perThreadBackend(opts),
     ...(failedAttach ? { trace: failedAttach.steps } : {}),
