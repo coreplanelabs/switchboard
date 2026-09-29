@@ -1049,6 +1049,9 @@ async function waitForResident(
   const bearer = RESIDENT_BEARER_ENVS.map((name) => deps.env[name]).find((value) => value?.trim());
   if (resources && !bearer) return `registry unreadable: no ${RESIDENT_BEARER_ENVS.join(" / ")}`;
   let problem = "readiness deadline expired before readback";
+  let lastLoggedProblem = "";
+  let lastLoggedAt = -Infinity;
+  let nextReconcileAt = 0;
   while (deps.now() < deadline) {
     const timeoutMs = Math.min(LIVE_GATE_POLL_MS, deadline - deps.now());
     const [health, registry] = await Promise.all([
@@ -1061,7 +1064,24 @@ async function waitForResident(
     ].filter(Boolean);
     if (problems.length === 0 && deps.now() <= deadline) return undefined;
     problem = problems.join("; ") || "readback arrived after the readiness deadline";
-    io.log(`[deploy:all] resident: waiting for readiness — ${problem}`);
+    if (problem !== lastLoggedProblem || deps.now() - lastLoggedAt >= MINUTE_MS) {
+      io.log(`[deploy:all] resident: waiting for readiness — ${problem}`);
+      lastLoggedProblem = problem;
+      lastLoggedAt = deps.now();
+    }
+    // A stopped, idle container cannot report until asked again. Reconcile
+    // retries the pending fleet on the same Worker build, without re-uploading
+    // the Worker or cycling residents whose reports are already current.
+    if (
+      resources &&
+      deps.now() >= nextReconcileAt &&
+      deadline - deps.now() > 2 * LIVE_GATE_POLL_MS &&
+      !residentWorkerProblem(health, expectedCommit)
+    ) {
+      const retry = await reconcileFleet(step, io, deps, false);
+      if (retry && !reconciledResources(retry)) io.log(reconcileLine(step.name, retry));
+      nextReconcileAt = deps.now() + MINUTE_MS;
+    }
     const left = deadline - deps.now();
     if (left > 0) await deps.sleep(Math.min(LIVE_GATE_POLL_MS, left));
   }
@@ -1102,11 +1122,12 @@ async function reconcileFleet(
   step: DeployStep,
   io: DeployRunnerIO,
   deps: SandboxGateDeps,
+  log = true,
 ): Promise<PostAnswer | undefined> {
   const bearer = step.drain ? deps.env[step.drain.tokenEnv] : undefined;
   if (!step.drain || !bearer || !deps.postJson) return;
   const answer = await deps.postJson(reconcileUrl(step.drain.url), bearer, {});
-  io.log(reconcileLine(step.name, answer));
+  if (log) io.log(reconcileLine(step.name, answer));
   return answer;
 }
 

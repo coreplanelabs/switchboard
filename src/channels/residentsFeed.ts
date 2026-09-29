@@ -7,8 +7,9 @@ import type { ResidentListing } from "./residentsModel.js";
 import type { ResidentsFeedFrame } from "./webSeed.js";
 
 // The residents index feed (`GET /residents?stream=1`, resident-repos item
-// 42): what keeps the folds on the residents index current without a timer.
-// Two buses carry everything the page needs, and both already exist:
+// 42): what keeps the folds on the residents index current. Two buses carry
+// run and tree changes; a periodic listing read also carries deploy image
+// reports, which may change while the drain prevents any run event:
 //
 //  - the registry's index feed says which runs are live and on which repo —
 //    forwarded as the same `upsert` / `removed` frames the runs index gets,
@@ -54,10 +55,14 @@ export function isAttachEnd(event: RunEvent): boolean {
  * current live set synchronously (as `upsert` frames) before the head is
  * written, so those frames are buffered and flushed after the 200 — the same
  * order `serveIndexEvents` keeps. Every subscription taken is released when
- * the client disconnects. `onLive` fires once the stream is open (the caller
- * starts its keepalive there).
+ * the client disconnects. `onLive` fires once the stream is open with the
+ * coalesced listing read (the caller starts its keepalive and periodic read).
  */
-export function serveResidentsFeed(source: ResidentsFeedSource, sink: SseSink, onLive?: () => void): void {
+export function serveResidentsFeed(
+  source: ResidentsFeedSource,
+  sink: SseSink,
+  onLive?: (reread: () => void) => void,
+): void {
   const buffered: string[] = [];
   let live = false;
   let closed = false;
@@ -79,7 +84,8 @@ export function serveResidentsFeed(source: ResidentsFeedSource, sink: SseSink, o
     reading = true;
     void source.listing().then((r) => {
       reading = false;
-      if (!("error" in r)) send(frame({ type: "residents", cap: r.cap, count: r.count, residents: r.residents }));
+      if (!("error" in r))
+        send(frame({ type: "residents", cap: r.cap, count: r.count, draining: r.draining, residents: r.residents }));
       if (queued) {
         queued = false;
         reread();
@@ -137,5 +143,5 @@ export function serveResidentsFeed(source: ResidentsFeedSource, sink: SseSink, o
     for (const off of watched.values()) off();
     watched.clear();
   });
-  onLive?.();
+  onLive?.(reread);
 }

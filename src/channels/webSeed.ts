@@ -365,6 +365,7 @@ export interface ResidentsIndexSeed {
   page: "residents";
   cap?: unknown;
   count?: unknown;
+  draining?: unknown;
   residents: unknown[];
   now: number;
   runs: RunIndexRowSeed[];
@@ -378,7 +379,7 @@ export interface ResidentsIndexSeed {
 export type ResidentsFeedFrame =
   | { type: "upsert"; run: RunIndexRowSeed }
   | { type: "removed"; id: string }
-  | { type: "residents"; cap?: unknown; count?: unknown; residents: unknown[] };
+  | { type: "residents"; cap?: unknown; count?: unknown; draining?: unknown; residents: unknown[] };
 
 export interface ResidentDetailSeed {
   page: "resident";

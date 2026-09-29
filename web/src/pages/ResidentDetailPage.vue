@@ -8,6 +8,7 @@ import {
   RESIDENT_SLUG_RE,
   rec,
   residentDisk,
+  residentImageReport,
   residentLive,
   residentSlug,
   residentStateTone,
@@ -24,6 +25,7 @@ import { formatDiskGauge, formatGiB, projectThreadCostKiB } from "@core/executio
 const seed = useSeed("resident");
 const record = computed<ResidentRecordView>(() => (seed?.record ?? {}) as ResidentRecordView);
 const live = computed(() => residentLive(record.value));
+const imageReport = computed(() => residentImageReport(record.value));
 const slug = computed(() => residentSlug(record.value) || (seed?.slug ?? ""));
 const sha = computed(() => str(live.value.sha));
 const ghRepo = computed(() => (RESIDENT_SLUG_RE.test(slug.value) ? `https://github.com/${slug.value}` : undefined));
@@ -134,6 +136,15 @@ const diskParts = computed(() => {
             <td class="break-all px-2 py-1 align-top">
               <span v-if="live.reason">{{ live.reason }}</span
               ><span v-else class="text-dimmed">—</span>
+            </td>
+          </tr>
+          <tr class="border-t border-muted">
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">container image</td>
+            <td class="image-report px-2 py-1 align-top">
+              <span :class="imageReport === 'pending' ? 'font-medium text-warn' : ''">{{ imageReport }}</span>
+              <span v-if="imageReport === 'pending'" class="ml-2 text-xs text-muted"
+                >waiting for the deployed image report</span
+              >
             </td>
           </tr>
           <tr class="border-t border-muted">

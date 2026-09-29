@@ -100,6 +100,32 @@ describe("isAttachEnd", () => {
 });
 
 describe("serveResidentsFeed", () => {
+  it("publishes a drain and image change on a scheduled listing read without any run event", async () => {
+    const registry = new RunRegistry();
+    const reads = manualListing();
+    const io = fakeSink();
+    let refresh: (() => void) | undefined;
+    serveResidentsFeed(sourceOver(registry, reads.listing), io.sink, (reread) => {
+      refresh = reread;
+    });
+    refresh?.();
+    expect(reads.pending).toHaveLength(1);
+    const draining = { reason: "deploy abc1234", holds: ["repo:acme/web"] };
+    await reads.resolve({
+      ...LISTING,
+      draining,
+      residents: [{ ...LISTING.residents[0], live: { state: "warm", imageReport: "pending" } }],
+    });
+    expect(io.frames().at(-1)).toMatchObject({
+      type: "residents",
+      draining,
+      residents: [{ live: { imageReport: "pending" } }],
+    });
+    io.close();
+    refresh?.();
+    expect(reads.pending).toHaveLength(0);
+  });
+
   it("opens with the SSE head, replays the live repo runs as upserts and never a run without a repo", () => {
     const registry = new RunRegistry();
     const onRepo = registry.create("coding · acme/web", meta("acme/web"));

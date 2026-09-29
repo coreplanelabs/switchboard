@@ -1,5 +1,6 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { matchesPredicate, type Actor } from "../core/authz/index.js";
+import { RESIDENT_LISTING_POLL_MS } from "../core/budgets.js";
 import type { ResidentAdminClient } from "../core/residentAdmin.js";
 import type { RunRegistry } from "../core/runRegistry.js";
 import { startProcessRoot, type RequestTraceDeps } from "../core/requestTrace.js";
@@ -22,7 +23,8 @@ import type { ResidentsIndexSeed } from "./webSeed.js";
 // runs on it, joined to their worktrees. The runs come from the run registry
 // — seeded here under the viewer's `runs:read` predicate, then kept current by
 // the `?stream=1` feed (residentsFeed.ts), which also re-reads the listing at
-// the two moments a tree changes hands.
+// the two moments a tree changes hands and periodically while the page is open
+// so a deploy's image reports move even when the drain blocks run events.
 //
 // Auth: like the runs index, this surface has no token of its own — Cloudflare
 // Access is the "who" gate in front of `/residents*`, re-verified fail-closed
@@ -127,7 +129,7 @@ async function readListing(client: ResidentAdminClient): Promise<ListingResult> 
     return { status: 502, reason: `resident Worker answered ${r.status} to /residents: ${reason}` };
   }
   const residents = Array.isArray(r.data.residents) ? (r.data.residents as ResidentRecordView[]) : [];
-  return { listing: { cap: r.data.cap, count: r.data.count, residents } };
+  return { listing: { cap: r.data.cap, count: r.data.count, draining: r.data.draining, residents } };
 }
 
 /**
@@ -179,7 +181,11 @@ export function createResidentsViewHandler(
           },
         },
         nodeSseSink(req, res),
-        () => startSseHeartbeat(req, res),
+        (reread) => {
+          startSseHeartbeat(req, res);
+          const timer = setInterval(reread, RESIDENT_LISTING_POLL_MS);
+          req.on("close", () => clearInterval(timer));
+        },
       );
       return true;
     }
@@ -214,6 +220,7 @@ export function createResidentsViewHandler(
           page: "residents",
           cap: listing.cap,
           count: listing.count,
+          draining: listing.draining,
           residents: listing.residents,
           now: now(),
           runs: live,
