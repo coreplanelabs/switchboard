@@ -200,7 +200,7 @@
     "src/core/schedules.ts": "c67d8fad132186568cd747d5ee2990931720dea8d6bd89e13b3d7b217f78788b",
     "src/core/selfDescription.ts": "44e67304310fb50d6e6fa367c4c9d004ea6a60003a02abb61b15a9ee506087fd",
     "src/core/ship/contract.ts": "47e44f630c66affa7847cc0c90163f267621ca52486dbd7f8d067e4814429102",
-    "src/core/ship/coordinator.ts": "e5bb11e93c631b838e381ce1f3bef6cc120b63a109c52f39ce480c5e5fa22643",
+    "src/core/ship/coordinator.ts": "d06f1ca1a5b2c436d2450ce55072c2652b77ea9e18703dd556160ad2de0bcf86",
     "src/core/ship/handoff.ts": "e059cbf249dbf6af286503704dfe9dcc74d2664d169cd82ba7069ffd7ef2ffae",
     "src/core/ship/renewal.ts": "640dc8434bc88879a6a08b0706bc1d40503c3422cfa5198ef1bee1c8341e25d8",
     "src/core/shipPipeline.ts": "ef406059e33bdaad764e5fca803e0ed9fd4009e5ce740d82580dd23e00cbc0bd",

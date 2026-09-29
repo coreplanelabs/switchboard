@@ -262,7 +262,8 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
 
     expect(s.replies.join(" ")).toContain("$108.90 spent against the original $50.00 cost cap");
-    expect(s.replies.join(" ")).toContain("existing pull request");
+    expect(s.replies.join(" ")).toContain("If its pull request is still open");
+    expect(s.replies.join(" ")).toContain("If it has merged, no recovery is needed.");
     expect(s.replies.join(" ")).not.toContain("start ship again");
     expect(s.created).toEqual([]);
   });

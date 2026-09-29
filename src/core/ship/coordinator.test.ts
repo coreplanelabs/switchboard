@@ -339,11 +339,13 @@ describe("original-unit recovery accounting", () => {
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "no_verdict" } });
     const report = renderUnitReport(d.state);
     expect(report).toContain("$51.00 spent against the original $50.00 cost cap");
-    expect(report).toContain(`existing pull request (${PR_URL})`);
+    expect(report).toContain(`If the pull request (${PR_URL}) is still open`);
+    expect(report).toContain("If it has merged, no recovery is needed.");
     expect(report).toContain("separate authorization");
     const quiet = renderUnitReport(d.state, undefined, "quiet");
     expect(quiet).toContain("$51.00 spent against the original $50.00 cost cap");
-    expect(quiet).toContain(`existing pull request (${PR_URL})`);
+    expect(quiet).toContain(`If the pull request (${PR_URL}) is still open`);
+    expect(quiet).toContain("If it has merged, no recovery is needed.");
   });
 
   it("reads a completed findings push at its exact remote head before ending an exhausted recovery", () => {
@@ -2168,7 +2170,8 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(report).not.toContain("start ship again");
     const quiet = renderUnitReport(d.state, undefined, "quiet");
     expect(quiet).toContain("$55.00 spent against the original $50.00 cost cap");
-    expect(quiet).toContain(`existing pull request (${PR_URL})`);
+    expect(quiet).toContain(`If the pull request (${PR_URL}) is still open`);
+    expect(quiet).toContain("If it has merged, no recovery is needed.");
   });
 
   it("an approve whose post did not land is an honest abort, never merge-ready — the report carries the child's recorded reason and says how to continue in the runner's words", () => {
