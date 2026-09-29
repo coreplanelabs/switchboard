@@ -91,6 +91,7 @@ import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
 import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
+import type { PlaneService } from "../planeService.js";
 import type { RepoContext } from "../repoContext.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
 import type { ResidentBinding } from "../../execution/resident.js";
@@ -1055,6 +1056,132 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(finished.ok).toBe(true);
     expect(JSON.stringify(finished)).not.toContain("private signup count");
   });
+  const WIP_COORDINATOR: CoordinatorTag = {
+    parentInstanceId: "instance",
+    idempotencyKey: "key",
+    base: "main",
+  };
+  it("withdraws linked-work authority before a relayed follow-up reaches the model", async () => {
+    let before: unknown;
+    let after: unknown;
+    let restored: unknown;
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            before = await run.toolContext.mainWork?.status("fix-signup");
+            expect(run.stageFollowUps).toBeDefined();
+            await run.stageFollowUps!([
+              { text: "stop that work", userId: "slack:UX", postedBy: "slack:bot:B1", at: 2_000 },
+            ]);
+            after = await run.toolContext.mainWork?.status("fix-signup");
+            await run.stageFollowUps!([{ text: "What happened?", userId: "slack:UX", at: 2_001 }]);
+            restored = await run.toolContext.mainWork?.status("fix-signup");
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    s.deps.plane = async () => ({}) as PlaneService;
+    const channelId = "slack:DPRIVATE";
+    const message = {
+      ...s.ctx.msg,
+      channelId,
+      threadKey: `${channelId}:1.0`,
+      directAudience: {
+        kind: "slack-unshared-im" as const,
+        channelId,
+        threadKey: `${channelId}:1.0`,
+        userId: s.ctx.msg.userId,
+      },
+    };
+    await runLoop(s.deps, {
+      ...s.ctx,
+      msg: message,
+      channelVisibility: "dm",
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(before).toEqual({ kind: "not_found" });
+    expect(after).toEqual({ kind: "unavailable" });
+    expect(restored).toEqual({ kind: "not_found" });
+  });
+
+  it("offers linked-work tools to the model only in a direct requester Slack DM", async () => {
+    const toolNames = async (
+      channelId: string,
+      visibility: "public" | "dm",
+      postedBy?: string,
+      attested = true,
+      verify: "ok" | "deny" | "error" = "ok",
+    ) => {
+      const observed: string[] = [];
+      const watchedPi = watched(piHarness);
+      const s = setup("Done.", {
+        agent: "orchestrator",
+        io: {
+          verifyDirectAudience: async () => {
+            if (verify === "error") throw new Error("Slack lookup unavailable");
+            return verify === "ok";
+          },
+        } as Partial<ChannelIO>,
+        harness: {
+          harnesses: roster({
+            ...watchedPi.harness,
+            open: async (deps, run) => {
+              observed.push(...run.tools.map((tool) => tool.name));
+              return watchedPi.harness.open(deps, run);
+            },
+          }),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+      s.deps.plane = async () => ({}) as PlaneService;
+      const message = {
+        ...s.ctx.msg,
+        channelId,
+        threadKey: `${channelId}:1.0`,
+        ...(postedBy ? { postedBy } : {}),
+        ...(attested
+          ? {
+              directAudience: {
+                kind: "slack-unshared-im" as const,
+                channelId,
+                threadKey: `${channelId}:1.0`,
+                userId: s.ctx.msg.userId,
+              },
+            }
+          : {}),
+      };
+      await runLoop(s.deps, { ...s.ctx, msg: message, channelVisibility: visibility });
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      return observed;
+    };
+
+    expect(await toolNames("slack:CPUB", "public")).not.toContain("work_status");
+    expect(await toolNames("slack:DPRIVATE", "dm", "slack:bot:B1")).not.toContain("work_steer");
+    expect(await toolNames("slack:DSHARED", "dm", undefined, false)).not.toContain("work_status");
+    expect(await toolNames("slack:DPRIVATE", "dm", undefined, true, "deny")).not.toContain("work_status");
+    expect(await toolNames("slack:DPRIVATE", "dm", undefined, true, "error")).not.toContain("work_stop");
+    expect(await toolNames("slack:DPRIVATE", "dm")).toEqual(
+      expect.arrayContaining(["work_status", "work_steer", "work_stop"]),
+    );
+  });
+
   const WIP_COORDINATOR: CoordinatorTag = {
     parentInstanceId: "instance",
     idempotencyKey: "key",

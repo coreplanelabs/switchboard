@@ -1298,6 +1298,8 @@ describe("orchestrator agent (record 0070 — the plane's chat preset)", () => {
     expect(sys).toContain("`work_status`");
     expect(sys).toContain("`work_steer`");
     expect(sys).toContain("`work_stop`");
+    expect(sys).toMatch(/A direct requester Slack DM also offers/);
+    expect(sys).toMatch(/never try them in a shared channel or web chat/);
     expect(sys).toMatch(/`work_status` is the current source; cite its unit key/);
     expect(sys).toMatch(/These tools bind the person and this thread/);
     expect(sys).toMatch(/Do not ask the person to type a command or special syntax/);

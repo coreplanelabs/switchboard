@@ -6,13 +6,13 @@ import type { PlaneService } from "../core/planeService.js";
 import { mainWorkForRun, workStatusTool, workSteerTool, workStopTool, type MainWorkCapability } from "./mainWork.js";
 import type { ToolContext } from "./runnableTool.js";
 
-const THREAD = "slack:CMAIN:1.0";
+const THREAD = "slack:DMAIN:1.0";
 const ACT = "fix-signup";
 const INSTANCE: CoordinatorInstance = {
   id: "ship_signup_1",
   kind: "ship",
   userId: "slack:UALICE",
-  channelId: "slack:CMAIN",
+  channelId: "slack:DMAIN",
   threadKey: THREAD,
   repo: "acme/api",
   branch: "ship/signup",
@@ -42,18 +42,11 @@ const UNIT: CoordinatorUnit = {
 };
 
 function requester(over: Partial<Actor> = {}): Actor {
-  const principal: Actor = {
+  return {
     kind: "user",
     id: INSTANCE.userId,
     origin: { channelId: INSTANCE.channelId, threadKey: THREAD },
     grants: { actions: new Set(["steer:write"]), channels: new Set([INSTANCE.channelId]), repos: "all" },
-  };
-  return {
-    kind: "agent",
-    id: "agent:orchestrator",
-    origin: principal.origin,
-    grants: principal.grants,
-    onBehalfOf: principal,
     ...over,
   };
 }
@@ -80,8 +73,35 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
     children: [],
   }));
   const plane = async () => ({ stop }) as Pick<PlaneService, "stop">;
-  const bind = (actor: Actor = requester(), runId = "run-main-1") =>
-    mainWorkForRun({ agentName: "orchestrator", actor, runId, instances, workflow, plane, clock: () => 2_000 });
+  const bind = (
+    actor: Actor = requester(),
+    runId = "run-main-1",
+    message = { channelId: INSTANCE.channelId, threadKey: THREAD, userId: INSTANCE.userId },
+    trusted = () => true,
+    verify = async () => true,
+  ) =>
+    mainWorkForRun({
+      agentName: "orchestrator",
+      actor,
+      message: {
+        ...message,
+        directAudience: {
+          kind: "slack-unshared-im" as const,
+          channelId: message.channelId,
+          threadKey: message.threadKey,
+          userId: message.userId,
+        },
+      },
+      channelVisibility: "dm",
+      runId,
+      instances,
+      workflow,
+      plane,
+      clock: () => 2_000,
+      trusted,
+      verifiedAtOpen: true,
+      verify,
+    });
   const context = (capability: MainWorkCapability | null = bind() ?? null, callId = "tool-call-1"): ToolContext => ({
     executor: {} as ToolContext["executor"],
     ...(capability ? { mainWork: capability } : {}),
@@ -91,6 +111,113 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
 }
 
 describe("main work tools", () => {
+  it("refuses a Slack Connect D-channel or missing and failed action-time verification", async () => {
+    const { bind, instances } = await fixture();
+    const shared = mainWorkForRun({
+      agentName: "orchestrator",
+      actor: requester(),
+      message: { channelId: INSTANCE.channelId, threadKey: THREAD, userId: INSTANCE.userId },
+      channelVisibility: "dm",
+      runId: "run-shared",
+      instances,
+      plane: async () => ({ stop: vi.fn() }),
+      clock: () => 2_000,
+      trusted: () => true,
+      verifiedAtOpen: true,
+      verify: async () => true,
+    });
+    expect(shared).toBeUndefined();
+    const denied = bind(
+      requester(),
+      "run-denied",
+      undefined,
+      () => true,
+      async () => false,
+    );
+    expect(await denied!.status(ACT)).toEqual({ kind: "unavailable" });
+    const unavailable = bind(
+      requester(),
+      "run-unavailable",
+      undefined,
+      () => true,
+      async () => {
+        throw new Error("Slack lookup unavailable");
+      },
+    );
+    expect(await unavailable!.stop(ACT)).toEqual({ kind: "unavailable" });
+  });
+
+  it("refuses linked-work reads and effects during an untrusted follow-up turn", async () => {
+    const { bind, context, stop, sent } = await fixture();
+    let trusted = true;
+    const capability = bind(requester(), "run-main-1", undefined, () => trusted);
+    expect(capability).toBeDefined();
+    trusted = false;
+    expect(await capability!.status(ACT)).toEqual({ kind: "unavailable" });
+    expect(await capability!.steer(ACT, "change scope", "call-1")).toEqual({ kind: "unavailable" });
+    expect(await capability!.stop(ACT)).toEqual({ kind: "unavailable" });
+    expect(await workStatusTool.run({ actId: ACT }, context(capability))).toMatch(/^error: Saved work is unavailable/);
+    expect(stop).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+    trusted = true;
+    expect(await capability!.status(ACT)).toMatchObject({ kind: "found" });
+  });
+
+  it("does not bind linked-work controls for a shared channel even when the requester owns the unit", async () => {
+    const { instances } = await fixture();
+    const capability = mainWorkForRun({
+      agentName: "orchestrator",
+      actor: requester({ origin: { channelId: "slack:CPUB", threadKey: "slack:CPUB:1.0" } }),
+      runId: "run-public",
+      instances,
+      plane: async () => ({ stop: vi.fn() }),
+      clock: () => 2_000,
+      message: { channelId: "slack:CPUB", threadKey: "slack:CPUB:1.0", userId: INSTANCE.userId },
+      channelVisibility: "public",
+    });
+    expect(capability).toBeUndefined();
+  });
+
+  it("keeps linked-work controls unavailable in group DM, web chat, relay, or uncertain audience", async () => {
+    const { instances, bind } = await fixture();
+    expect(bind()).toBeDefined();
+    for (const [channelId, visibility] of [
+      ["slack:GTEAM", "dm"],
+      ["web:alice", "dm"],
+      [INSTANCE.channelId, "unknown"],
+    ] as const) {
+      expect(
+        mainWorkForRun({
+          agentName: "orchestrator",
+          actor: requester({ origin: { channelId, threadKey: `${channelId}:1.0` } }),
+          message: { channelId, threadKey: `${channelId}:1.0`, userId: INSTANCE.userId },
+          channelVisibility: visibility,
+          runId: "run-other-audience",
+          instances,
+          plane: async () => ({ stop: vi.fn() }),
+          clock: () => 2_000,
+        }),
+      ).toBeUndefined();
+    }
+    expect(
+      mainWorkForRun({
+        agentName: "orchestrator",
+        actor: requester({ kind: "agent", id: "slack:bot:B1", onBehalfOf: requester() }),
+        message: {
+          channelId: INSTANCE.channelId,
+          threadKey: THREAD,
+          userId: INSTANCE.userId,
+          postedBy: "slack:bot:B1",
+        },
+        channelVisibility: "dm",
+        runId: "run-relay",
+        instances,
+        plane: async () => ({ stop: vi.fn() }),
+        clock: () => 2_000,
+      }),
+    ).toBeUndefined();
+  });
+
   it("reads only the current requester's linked unit and never reveals the private brief", async () => {
     const { bind, context } = await fixture({ threadKey: "private:worker:secret", startedAt: 1_500 });
     const own = await workStatusTool.run(
@@ -104,22 +231,24 @@ describe("main work tools", () => {
       await workStatusTool.run(
         { actId: ACT },
         context(
-          bind(
-            requester({
-              id: "agent:other",
-              onBehalfOf: {
-                ...requester().onBehalfOf!,
-                id: "slack:UBOB",
-              },
-            }),
-          ),
+          bind(requester({ id: "slack:UBOB" }), "run-bob", {
+            channelId: INSTANCE.channelId,
+            threadKey: THREAD,
+            userId: "slack:UBOB",
+          }),
         ),
       ),
     ).toMatch(/^error: I couldn't find that work in this conversation/);
     expect(
       await workStatusTool.run(
         { actId: ACT },
-        context(bind(requester({ origin: { channelId: INSTANCE.channelId, threadKey: "slack:CMAIN:other" } }))),
+        context(
+          bind(
+            requester({ origin: { channelId: INSTANCE.channelId, threadKey: "slack:DMAIN:other" } }),
+            "run-other-thread",
+            { channelId: INSTANCE.channelId, threadKey: "slack:DMAIN:other", userId: INSTANCE.userId },
+          ),
+        ),
       ),
     ).toMatch(/^error: I couldn't find that work in this conversation/);
   });
@@ -153,7 +282,13 @@ describe("main work tools", () => {
     expect(
       await workStopTool.run(
         { actId: ACT },
-        context(bind(requester({ origin: { channelId: INSTANCE.channelId, threadKey: "slack:CMAIN:other" } }))),
+        context(
+          bind(
+            requester({ origin: { channelId: INSTANCE.channelId, threadKey: "slack:DMAIN:other" } }),
+            "run-other-thread",
+            { channelId: INSTANCE.channelId, threadKey: "slack:DMAIN:other", userId: INSTANCE.userId },
+          ),
+        ),
       ),
     ).toMatch(/^error: I couldn't find that work in this conversation/);
     expect(stop).not.toHaveBeenCalled();
@@ -176,6 +311,8 @@ describe("main work tools", () => {
       mainWorkForRun({
         agentName: "review",
         actor: requester(),
+        message: { channelId: INSTANCE.channelId, threadKey: THREAD, userId: INSTANCE.userId },
+        channelVisibility: "dm",
         runId: "run-x",
         instances: (await fixture()).instances,
         plane: async () => ({ stop: vi.fn() }),

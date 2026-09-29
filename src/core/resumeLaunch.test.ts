@@ -148,6 +148,21 @@ describe("the pure pieces", () => {
       },
     });
     expect(resumeMessage(relayed, "")).toMatchObject({ userId: "slack:UALICE", postedBy: "slack:bot:B0CLAUDE" });
+    const audience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:D1",
+      userId: "slack:UALICE",
+      threadKey: "slack:D1:1.0",
+    };
+    const direct = row({
+      meta: {
+        channelId: audience.channelId,
+        userId: audience.userId,
+        threadKey: audience.threadKey,
+        directAudience: audience,
+      },
+    });
+    expect(resumeMessage(direct, "")).toMatchObject({ directAudience: audience });
   });
 
   it("resumeMessage restores only a matching private DM provenance from the durable run row", () => {

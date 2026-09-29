@@ -21,6 +21,8 @@ import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { createLedgerWriteThrough } from "../runLedger/writeThrough.js";
 import type { IncomingMessage } from "../types.js";
 import { chatActorOf } from "../authz/actor.js";
+import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
+import type { PlaneService } from "../planeService.js";
 import type { ResumeContext } from "./admission.js";
 import { resolveRun } from "./resolve.js";
 import { carriedOperationTarget } from "./reattach.js";
@@ -246,6 +248,96 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
       pr: 41,
       route,
     });
+  });
+
+  it("keeps the relaying app and bound credential identities on the promoted row for restart", async () => {
+    for (const identity of [{ postedBy: "slack:bot:B1" }, { authenticatedAs: "mcp:caller" }]) {
+      const { deps, ledger, base } = setup();
+      const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
+      await claimRun(deps, {
+        ...base,
+        msg: { ...base.msg, ...identity },
+        reserved,
+        resume: undefined,
+        ledgerRun: undefined,
+      });
+      expect(ledger.opened[0]!.meta).toMatchObject(identity);
+    }
+  });
+
+  it("persists linked-work tool definitions only for a direct requester Slack DM", async () => {
+    const namesFor = async (
+      channelId: string,
+      channelVisibility: "dm" | "public",
+      postedBy?: string,
+      attested = true,
+    ) => {
+      const { deps, ledger, base } = setup();
+      deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+      deps.plane = async () => ({}) as PlaneService;
+      const agent = getAgent("orchestrator");
+      const message = {
+        ...base.msg,
+        channelId,
+        threadKey: `${channelId}:1.0`,
+        userId: "slack:UDEV",
+        ...(postedBy ? { postedBy } : {}),
+        ...(attested
+          ? {
+              directAudience: {
+                kind: "slack-unshared-im" as const,
+                channelId,
+                userId: "slack:UDEV",
+                threadKey: `${channelId}:1.0`,
+              },
+            }
+          : {}),
+      };
+      const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
+      await claimRun(deps, {
+        ...base,
+        msg: message,
+        agent,
+        profile: declaredProfile(agent),
+        channelVisibility,
+        reserved,
+        resume: undefined,
+        ledgerRun: undefined,
+      });
+      return ledger.opened[0]!.tools.map((tool) => tool.name);
+    };
+
+    expect(await namesFor("slack:CPUB", "public")).not.toContain("work_status");
+    expect(await namesFor("slack:DPRIVATE", "dm", "slack:bot:B1")).not.toContain("work_steer");
+    expect(await namesFor("slack:DSHARED", "dm", undefined, false)).not.toContain("work_status");
+    expect(await namesFor("slack:DPRIVATE", "dm")).toEqual(
+      expect.arrayContaining(["work_status", "work_steer", "work_stop"]),
+    );
+  });
+
+  it("keeps a verified direct audience stamp on the promoted row for safe rechecks after restart", async () => {
+    const { deps, ledger, base } = setup();
+    const audience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DPRIVATE",
+      userId: "slack:UX",
+      threadKey: "slack:DPRIVATE:1.0",
+    };
+    const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
+    const message = {
+      ...base.msg,
+      channelId: audience.channelId,
+      threadKey: audience.threadKey,
+      directAudience: audience,
+    };
+    await claimRun(deps, {
+      ...base,
+      msg: message,
+      reserved,
+      resume: undefined,
+      ledgerRun: undefined,
+    });
+    expect(ledger.opened[0]!.meta.directAudience).toEqual(audience);
   });
 
   it("a reserved fresh run promotes its reservation: the row carries the identity, the prompt and tools verbatim, the seed, the card, and the hooks; every event from here on is mirrored", async () => {

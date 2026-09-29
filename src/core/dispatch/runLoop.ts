@@ -21,9 +21,9 @@ import { DECISION_RECORD_ENV } from "../decisionRecordReservation.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
 import type { ModelCard } from "../modelCard.js";
-import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
-import { mainWorkForRun } from "../../tools/mainWork.js";
-import { toolsForSlackContextRun, type SlackContextBinding } from "./slackContextBinding.js";
+import { mergeTools, toolsForRun } from "../../tools/toolsets.js";
+import { mainWorkForRun, type DirectAudience } from "../../tools/mainWork.js";
+import { type SlackContextBinding } from "./slackContextBinding.js";
 import {
   privateAudienceRequired,
   privateAudienceRefusal,
@@ -125,11 +125,11 @@ import { inFlightCallAfter, quietSuffix, type InFlightTool } from "../statusCard
 import { eventsInWindow, paceText, PACE_WINDOW_MS } from "../runPace.js";
 import { activityText, type CardShell } from "../statusCardFrame.js";
 import type { RunEnding } from "../runEnding.js";
-import type { LiveThread } from "../threadAdmission.js";
+import type { FollowUpInput, LiveThread } from "../threadAdmission.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { Clock, Span } from "../trace/types.js";
 import { publicEnv } from "../../secrets.js";
-import type { ChannelIO, IncomingMessage, StagedFile, StatusActivity, StatusHandle } from "../types.js";
+import type { ChannelIO, IncomingMessage, StatusActivity, StatusHandle } from "../types.js";
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
@@ -1234,23 +1234,46 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const nextStagedIndex = ctx.stagingIndex ?? stagingIndex();
   // A steered follow-up's staged files (record 0033): copied into the store and
   // pulled into this workspace before the model reads the turn — the same hook
-  // for the native loop and the pi harness, bound only when a store exists.
-  const stageFollowUps = deps.artifacts
-    ? async (inputs: readonly { staged?: readonly StagedFile[] }[]): Promise<string> => {
-        const files = inputs.flatMap((i) => i.staged ?? []);
-        if (files.length === 0) return "";
-        const staged = await stageIntoWorkspace(files, {
-          store: deps.artifacts!,
-          threadKey: msg.threadKey,
-          publish: (event) => events.publish(event),
-          nextIndex: nextStagedIndex,
-          executor,
-          resident: round.selection.resident !== undefined,
-        });
-        ctx.workspaceFiles?.record(staged.outcomes);
-        return staged.line;
-      }
-    : undefined;
+  // for the native loop and the pi harness. The current admitted follow-up
+  // batch controls requester-bound work before its words reach the model. A
+  // later direct requester turn can restore the capability.
+  // A reclaimed run cannot reconstruct the last consumed sender from its
+  // prompt. Wait for a fresh, directly attributed follow-up before acting.
+  let mainWorkTrusted = ctx.resume === undefined;
+  const directAudience = (msg as IncomingMessage & { directAudience?: DirectAudience }).directAudience;
+  const verifyDirectAudience = (
+    io as ChannelIO & { verifyDirectAudience?: (audience: DirectAudience) => Promise<boolean> }
+  ).verifyDirectAudience?.bind(io);
+  const verifiedAtOpen =
+    agent.name === "orchestrator" && directAudience && verifyDirectAudience
+      ? await verifyDirectAudience(directAudience).catch(() => false)
+      : false;
+  const stageFollowUps = async (inputs: readonly FollowUpInput[]): Promise<string> => {
+    if (inputs.length > 0) {
+      mainWorkTrusted = inputs.every(
+        (input) =>
+          input.userId === msg.userId &&
+          input.postedBy === undefined &&
+          input.authenticatedAs === undefined &&
+          input.from === undefined,
+      );
+      if (mainWorkTrusted && directAudience && verifyDirectAudience)
+        mainWorkTrusted = await verifyDirectAudience(directAudience).catch(() => false);
+    }
+    if (!deps.artifacts) return "";
+    const files = inputs.flatMap((i) => i.staged ?? []);
+    if (files.length === 0) return "";
+    const staged = await stageIntoWorkspace(files, {
+      store: deps.artifacts,
+      threadKey: msg.threadKey,
+      publish: (event) => events.publish(event),
+      nextIndex: nextStagedIndex,
+      executor,
+      resident: round.selection.resident !== undefined,
+    });
+    ctx.workspaceFiles?.record(staged.outcomes);
+    return staged.line;
+  };
   let artifactSeq = 0;
   // A ticketless channel's lead links the file itself: this run's artifact proxy
   // under its live token (the same capability the status card's link carries).
@@ -1274,11 +1297,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const mainWork = mainWorkForRun({
     agentName: agent.name,
     actor: chatActorOf(deps.config, msg),
+    message: msg,
+    channelVisibility,
     runId: run.id,
     ...(deps.coordinatorInstances ? { instances: deps.coordinatorInstances } : {}),
     ...(deps.workflow ? { workflow: deps.workflow } : {}),
     ...(deps.plane ? { plane: deps.plane } : {}),
     clock,
+    trusted: () => mainWorkTrusted,
+    verifiedAtOpen,
+    ...(verifyDirectAudience ? { verify: verifyDirectAudience } : {}),
   });
   const toolContext = {
     executor,
@@ -1729,7 +1757,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(ctx.modelCard ? { card: ctx.modelCard } : {}),
             system: publicationSystem,
             messages,
-            tools: mergeTools(toolsForSlackContextRun(agent.toolset, slackContext), mcpForRun?.tools),
+            tools: mergeTools(
+              toolsForRun(agent.toolset, mainWork !== undefined).filter(
+                (tool) => slackContext !== undefined || tool.name !== "slack_context",
+              ),
+              mcpForRun?.tools,
+            ),
             toolContext,
             ...(ctx.decisionRecord !== undefined ? { environment: { [DECISION_RECORD_ENV]: ctx.decisionRecord } } : {}),
             ...(session
@@ -1781,7 +1814,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             span: root,
             control: run.control,
             inbox: admitted.inbox,
-            ...(stageFollowUps ? { stageFollowUps } : {}),
+            stageFollowUps,
             onEvent,
             onProgress,
             // The provider park's capability (model-proxy item 12a; record

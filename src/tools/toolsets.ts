@@ -109,6 +109,15 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
   none: [],
 };
 
+/** Keep linked-work names out of a model's tool list when its conversation
+ * audience cannot receive the tool call and result in private. */
+export function toolsForRun(toolset: string, linkedWorkAllowed: boolean): RunnableTool[] {
+  const tools = TOOLSETS[toolset] ?? [];
+  return linkedWorkAllowed || toolset !== "orchestrator"
+    ? tools
+    : tools.filter((tool) => !MAIN_WORK_TOOLS.includes(tool));
+}
+
 /** The static toolset plus this run's extra tools (the bridged MCP tools,
  *  docs/reference/specs/mcp-tools.md item 12). A duplicate name is a programming
  *  error (an extra tool shadowing a built-in, or two extras with one name) and

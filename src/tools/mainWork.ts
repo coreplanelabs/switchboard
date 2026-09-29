@@ -1,12 +1,55 @@
 import { createHash } from "node:crypto";
-import type { Actor } from "../core/authz/types.js";
+import type { Actor, ChannelVisibility } from "../core/authz/types.js";
 import { MAIN_TASK_ACT_ID_PATTERN, type WorkflowSender } from "../core/coordinator/contract.js";
 import { createMainTaskActions } from "../core/coordinator/mainActions.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { PlaneService } from "../core/planeService.js";
+import type { IncomingMessage } from "../core/types.js";
 import type { RunnableTool } from "./runnableTool.js";
 
 type Actions = ReturnType<typeof createMainTaskActions>;
+
+/** Slack's fresh channel lookup, stamped by the adapter on one unshared IM. */
+export interface DirectAudience {
+  kind: "slack-unshared-im";
+  channelId: string;
+  userId: string;
+  threadKey: string;
+}
+
+export interface MainWorkAudience {
+  agentName: string;
+  actor: Actor;
+  message: Pick<IncomingMessage, "channelId" | "threadKey" | "userId" | "postedBy" | "authenticatedAs"> & {
+    directAudience?: DirectAudience;
+  };
+  channelVisibility: ChannelVisibility;
+}
+
+/** Tool calls and results enter the run log. Only a verified, unshared Slack
+ * IM with this requester can expose linked-work tools. */
+export function mainWorkAudienceAllowed({ agentName, actor, message, channelVisibility }: MainWorkAudience): boolean {
+  const audience = message.directAudience;
+  return (
+    agentName === "orchestrator" &&
+    channelVisibility === "dm" &&
+    /^slack:D[A-Z0-9]+$/.test(message.channelId) &&
+    /^slack:[UW][A-Z0-9]+$/.test(message.userId) &&
+    message.threadKey.startsWith(`${message.channelId}:`) &&
+    audience?.kind === "slack-unshared-im" &&
+    audience.channelId === message.channelId &&
+    audience.userId === message.userId &&
+    audience.threadKey === message.threadKey &&
+    message.postedBy === undefined &&
+    message.authenticatedAs === undefined &&
+    actor.kind === "user" &&
+    actor.id === message.userId &&
+    actor.onBehalfOf === undefined &&
+    actor.viewingAs === undefined &&
+    actor.origin?.channelId === message.channelId &&
+    actor.origin.threadKey === message.threadKey
+  );
+}
 
 /** The run has already fixed the requester, current thread and run id. Model
  * input supplies only an act address and the words to add. */
@@ -16,16 +59,39 @@ export interface MainWorkCapability {
   stop(actId: string): ReturnType<Actions["stop"]>;
 }
 
-export function mainWorkForRun(deps: {
-  agentName: string;
-  actor: Actor;
-  runId: string;
-  instances?: CoordinatorInstanceStore;
-  workflow?: WorkflowSender;
-  plane?: () => Promise<Pick<PlaneService, "stop">>;
-  clock: () => number;
-}): MainWorkCapability | undefined {
-  if (deps.agentName !== "orchestrator" || !deps.instances || !deps.plane) return undefined;
+export function mainWorkForRun(
+  deps: MainWorkAudience & {
+    runId: string;
+    instances?: CoordinatorInstanceStore;
+    workflow?: WorkflowSender;
+    plane?: () => Promise<Pick<PlaneService, "stop">>;
+    clock: () => number;
+    trusted?: () => boolean;
+    verifiedAtOpen?: boolean;
+    verify?: (audience: DirectAudience) => Promise<boolean>;
+  },
+): MainWorkCapability | undefined {
+  if (
+    !mainWorkAudienceAllowed(deps) ||
+    !deps.instances ||
+    !deps.plane ||
+    !deps.trusted ||
+    !deps.verifiedAtOpen ||
+    !deps.verify ||
+    !deps.message.directAudience
+  )
+    return undefined;
+  const trusted = deps.trusted;
+  const verify = deps.verify;
+  const audience = deps.message.directAudience;
+  const canAct = async () => {
+    if (!trusted()) return false;
+    try {
+      return await verify(audience);
+    } catch {
+      return false;
+    }
+  };
   const actions = createMainTaskActions({
     instances: deps.instances,
     ...(deps.workflow ? { workflow: deps.workflow } : {}),
@@ -33,14 +99,15 @@ export function mainWorkForRun(deps: {
     clock: deps.clock,
   });
   return {
-    status: (actId) => actions.status(deps.actor, actId),
-    steer: (actId, words, toolCallId) => {
+    status: async (actId) => ((await canAct()) ? actions.status(deps.actor, actId) : { kind: "unavailable" as const }),
+    steer: async (actId, words, toolCallId) => {
+      if (!(await canAct())) return { kind: "unavailable" as const };
       // A provider call id may repeat in another run. Both durable identities
       // enter the hash so one call replays once and a later call stays distinct.
       const eventId = createHash("sha256").update(deps.runId).update("\0").update(toolCallId).digest("hex");
       return actions.steer(deps.actor, { actId, words, eventId });
     },
-    stop: (actId) => actions.stop(deps.actor, actId),
+    stop: async (actId) => ((await canAct()) ? actions.stop(deps.actor, actId) : { kind: "unavailable" as const }),
   };
 }
 

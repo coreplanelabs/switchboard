@@ -17,9 +17,11 @@ import {
 } from "../coordinator/contract.js";
 import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { RunProfile } from "../../config/profile.js";
-import { mergeTools } from "../../tools/toolsets.js";
-import { toolsForSlackContextRun, type SlackContextBinding } from "./slackContextBinding.js";
+import { mergeTools, toolsForRun } from "../../tools/toolsets.js";
+import type { SlackContextBinding } from "./slackContextBinding.js";
 import type { VerifiedSlackContextCapability } from "../../tools/slackContext.js";
+import { mainWorkAudienceAllowed, type DirectAudience } from "../../tools/mainWork.js";
+import { chatActorOf } from "../authz/actor.js";
 import { makeWebCapability } from "../../tools/web.js";
 import { RestGithubApi, type GithubApi } from "../../execution/githubApi.js";
 import type { GithubCapability } from "../../tools/github.js";
@@ -339,6 +341,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     markUntracked,
     seedActors,
   } = ctx;
+  const directAudience = (msg as IncomingMessage & { directAudience?: DirectAudience }).directAudience;
   const { resident, binding } = selection;
   let ledgerRun = ctx.ledgerRun;
   // Where the run's workspace is (run-history item 54), on the row's state
@@ -379,6 +382,9 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
           ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
           ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+          ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+          ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+          ...(directAudience !== undefined ? { directAudience } : {}),
           ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
           ...(repoCtx.ref !== undefined && !privateMain ? { ref: repoCtx.ref } : {}),
           ...(repoCtx.headSha !== undefined && !privateMain ? { headSha: repoCtx.headSha } : {}),
@@ -400,9 +406,20 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         // its hooks (a stop, a fence) were wired at the reservation and stay.
         reservation: reserved,
         system,
-        tools: mergeTools(toolsForSlackContextRun(agent.toolset, ctx.slackContext), mcpForRun?.tools).map(
-          ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
-        ),
+        tools: mergeTools(
+          toolsForRun(
+            agent.toolset,
+            deps.coordinatorInstances !== undefined &&
+              deps.plane !== undefined &&
+              mainWorkAudienceAllowed({
+                agentName: agent.name,
+                actor: chatActorOf(deps.config, msg),
+                message: msg,
+                channelVisibility,
+              }),
+          ).filter((tool) => ctx.slackContext !== undefined || tool.name !== "slack_context"),
+          mcpForRun?.tools,
+        ).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
         // The seed carries the EFFECTIVE budget, so a resume runs on what
         // this run was admitted with, not on the preset's own number — and,
         // for a seed read from the log, the rows it reuses (session-log item 9).
