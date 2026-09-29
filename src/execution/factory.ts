@@ -19,6 +19,9 @@ import {
   seedDoorRemote,
   seedRetryDecision,
   seededSandboxNote,
+  readyEnvironmentCommand,
+  readyEnvironmentOutcome,
+  type ReadyEnvironmentRequirement,
   type SandboxSeed,
   type SeedAnswer,
   type SeedHandle,
@@ -134,6 +137,10 @@ export interface ExecutorContext {
   /** the commit `ref` is expected to be at (a resolved PR head) — the resident
    *  fetches a mirror whose tip lags it (docs/reference/specs/resident-repos.md item 51) */
   headSha?: string;
+  /** An opt-in pilot write gate, supplied by trusted admission from the
+   * onboarded repository's test command. It runs before the model. A refused
+   * gate is a typed hold for the caller to retain its original unit/brief. */
+  readyEnvironment?: ReadyEnvironmentRequirement;
   /** The pull request the thread's OWN run opened, whose head branch `ref` is
    *  (`ownPrOf`; docs/reference/specs/resident-repos.md item 16): the one reason
    *  the resident may move a default-bound thread onto `ref` — the tree is
@@ -255,6 +262,83 @@ export class WorkspaceReattachRefusedError extends Error {
   ) {
     super(`the run's workspace on the ${recorded.backend} backend could not be re-attached: ${why}`);
     this.name = "WorkspaceReattachRefusedError";
+  }
+}
+
+export type ReadyEnvironmentReason =
+  | "repository_unresolved"
+  | "repository_not_onboarded"
+  | "backend_unavailable"
+  | "snapshot_missing"
+  | "dependencies_missing"
+  | "binding_mismatch"
+  | "seed_failed"
+  | "tool_missing"
+  | "test_command_invalid"
+  | "check_failed";
+
+/** This refusal happens before a model turn. The delegation caller retains
+ * the original task and brief, then retries this same admission after setup. */
+export class ReadyEnvironmentError extends Error {
+  readonly retryable = true;
+  readonly beforeModel = true;
+
+  constructor(
+    readonly reason: ReadyEnvironmentReason,
+    readonly nextAction: string,
+  ) {
+    super(`The coding environment is not ready (${reason.replaceAll("_", " ")}). ${nextAction}`);
+    this.name = "ReadyEnvironmentError";
+  }
+}
+
+const readyFailure = (reason: ReadyEnvironmentReason, nextAction: string): ReadyEnvironmentError =>
+  new ReadyEnvironmentError(reason, nextAction);
+
+/** The declared test command is parsed but never run here. Fixed markers keep
+ * shell output, including possible workspace content, out of the refusal. */
+async function checkReadyEnvironment(
+  executor: Executor,
+  workspace: string,
+  requirement: ReadyEnvironmentRequirement,
+  signal?: AbortSignal,
+): Promise<void> {
+  let command: string;
+  try {
+    command = readyEnvironmentCommand(workspace, requirement);
+  } catch {
+    throw readyFailure(
+      "test_command_invalid",
+      "Correct the pilot repository's declared test command and tools, then retry this task.",
+    );
+  }
+  let output: string;
+  try {
+    output = await executor.exec(command, { timeoutMs: 10_000, ...(signal ? { signal } : {}) });
+  } catch (err) {
+    if (isRunStopError(err)) throw err;
+    throw readyFailure("check_failed", "Check the repository environment and retry this task on the same unit.");
+  }
+  const outcome = readyEnvironmentOutcome(output);
+  if (outcome.ready) return;
+  switch (outcome.reason) {
+    case "dependencies_missing":
+      throw readyFailure(
+        "dependencies_missing",
+        "Restore or install the repository dependencies, then retry this task.",
+      );
+    case "tool_missing":
+      throw readyFailure(
+        "tool_missing",
+        `Make ${outcome.tool} available in the repository image, then retry this task.`,
+      );
+    case "test_command_invalid":
+      throw readyFailure(
+        "test_command_invalid",
+        "Correct the repository's declared test command, then retry this task.",
+      );
+    default:
+      throw readyFailure("check_failed", "Check the repository environment and retry this task on the same unit.");
   }
 }
 
@@ -409,6 +493,30 @@ export async function makeExecutor(
   // dir, no sandbox created or reconnected, no credential required. The
   // general and research agents land here.
   const machine = ctx.profile.machine;
+  const ready = ctx.readyEnvironment;
+  if (ready !== undefined) {
+    if (
+      ctx.profile.identity !== "write" ||
+      machine !== "repo-resident" ||
+      !ctx.repo ||
+      !ctx.ref ||
+      !ctx.headSha ||
+      !/^[0-9a-f]{40}$/.test(ctx.headSha)
+    )
+      throw readyFailure(
+        "repository_unresolved",
+        "Resolve the pilot repository, branch, exact head and write profile, then retry this task.",
+      );
+    if (
+      opts.execution?.type !== "cloudflare" ||
+      !opts.execution.resident ||
+      !opts.execution.resident.baseUrl ||
+      !opts.execution.url ||
+      !processSecrets.named(opts.execution.apiKeyEnv ?? "SANDBOX_TOKEN") ||
+      !processSecrets.named(opts.execution.resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN")
+    )
+      throw readyFailure("backend_unavailable", "Configure the pilot resident and sandbox, then retry this task.");
+  }
   if (machine === "none") {
     return { executor: new NullExecutor(ctx.agent.name), backend: "local" };
   }
@@ -420,7 +528,14 @@ export async function makeExecutor(
     throw new Error(`profile identity "${ctx.profile.identity}" requires the GitHub App for the trusted door`);
   // A resume re-attaches where the row says the run ran (run-history item 54)
   // and never provisions again: the branches below are a fresh run's.
-  if (ctx.reattach !== undefined) return reattachWorkspace(opts, ctx, ctx.reattach, span);
+  if (ctx.reattach !== undefined) {
+    if (ready !== undefined)
+      throw readyFailure(
+        "binding_mismatch",
+        "Recheck the pilot task's recorded checkout and dependencies before resuming its model turn.",
+      );
+    return reattachWorkspace(opts, ctx, ctx.reattach, span);
+  }
   // `blank` → the per-thread backend with an empty workspace: no repository,
   // whatever the context carries (a blank run never resolves one), and no
   // credential (nothing says this run acts as anyone). No resident probe.
@@ -512,7 +627,7 @@ export async function makeExecutor(
     if (reason !== undefined) {
       // The wait ended cold: the sandbox fallback below decides between a seed
       // from the probe's handle (item 26) and a fresh sandbox, the wait named.
-    } else if (probe.kind === "status" && isServiceable(probe.state, probe.reason)) {
+    } else if (probe.kind === "status" && (ready ? probe.state === "warm" : isServiceable(probe.state, probe.reason))) {
       // The resident can degrade between the /status probe and /attach: 503
       // (mirror-busy) or 429 (pool-exhausted) surface only at attach time.
       // Needs-ref keeps the dispatcher's ask-once flow. A registration
@@ -602,6 +717,37 @@ export async function makeExecutor(
           await selection.executor.release?.("always");
           throw err;
         }
+        if (ready !== undefined) {
+          try {
+            if (!probe.seed)
+              throw readyFailure("snapshot_missing", "Refresh the pilot resident snapshot, then retry this task.");
+            if (!probe.seed.depsBackupId)
+              throw readyFailure(
+                "dependencies_missing",
+                "Refresh the pilot dependency snapshot, then retry this task.",
+              );
+            if (
+              !selection.binding ||
+              selection.binding.ref !== ctx.ref ||
+              (ctx.headSha !== undefined && selection.binding.sha !== ctx.headSha) ||
+              !selection.binding.workspace
+            )
+              throw readyFailure(
+                "binding_mismatch",
+                "Verify the original task's repository branch and head, then retry it.",
+              );
+            if (selection.binding.deps === undefined || selection.binding.deps === "none")
+              throw readyFailure(
+                "dependencies_missing",
+                "Restore or install the resident's dependency view, then retry this task.",
+              );
+            await checkReadyEnvironment(selection.executor, selection.binding.workspace ?? "", ready, ctx.stopSignal);
+            await recheckOwner();
+          } catch (err) {
+            await selection.executor.release?.("always").catch(() => undefined);
+            throw err;
+          }
+        }
         // Item 27: the wait is on the card whichever state the restore landed on.
         return waitedForRestore
           ? {
@@ -624,6 +770,11 @@ export async function makeExecutor(
       // fix it. Routing is unchanged; only the note is added. Record 0054: the
       // note names the resident they probably meant, when the registry answers
       // with one near match (one bounded read; silence changes nothing).
+      if (ready !== undefined)
+        throw readyFailure(
+          "repository_not_onboarded",
+          "Onboard the pilot repository as a resident, then retry this task.",
+        );
       const near = await nearOnboarded(resident, ctx.repo);
       note =
         `repo not onboarded as a resident — running in a cold per-thread sandbox; ` +
@@ -639,9 +790,16 @@ export async function makeExecutor(
       // no /seed) → the cold path as before, and so does a refused seed, with
       // the refusal on the note.
       await recheckOwner();
+      const handle = probe.kind === "status" ? probe.seed : undefined;
+      if (ready !== undefined && (!handle || !handle.depsBackupId))
+        throw readyFailure(
+          handle ? "dependencies_missing" : "snapshot_missing",
+          handle
+            ? "Refresh the pilot dependency snapshot, then retry this task."
+            : "Restore or onboard the pilot repository, then retry this task.",
+        );
       const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx));
       await recheckOwner();
-      const handle = probe.kind === "status" ? probe.seed : undefined;
       const outcome =
         handle && executor instanceof CloudflareSandboxExecutor
           ? await seedSandbox(
@@ -654,6 +812,10 @@ export async function makeExecutor(
           : undefined;
       if (outcome !== undefined) await recheckOwner();
       if (outcome && "seeded" in outcome) {
+        if (ready !== undefined) {
+          await checkReadyEnvironment(executor, outcome.seeded.workspace, ready, ctx.stopSignal);
+          await recheckOwner();
+        }
         return {
           executor,
           note: seededSandboxNote(reason, outcome.seeded),
@@ -663,6 +825,15 @@ export async function makeExecutor(
           ...(drainWaitMs !== undefined ? { drainWaitMs } : {}),
         };
       }
+      if (ready !== undefined && outcome?.why === "seed source did not match the bound snapshot")
+        throw readyFailure("binding_mismatch", "Verify the original task's repository branch and head, then retry it.");
+      if (ready !== undefined && outcome?.why === "dependency snapshot missing on seed retry")
+        throw readyFailure("dependencies_missing", "Refresh the pilot dependency snapshot, then retry this task.");
+      if (ready !== undefined)
+        throw readyFailure(
+          "seed_failed",
+          "Restore the pilot sandbox from its resident snapshot, then retry this task.",
+        );
       return {
         executor,
         note: `${reason} — using fresh sandbox${outcome ? ` (${outcome.why})` : ""}`,
@@ -673,6 +844,8 @@ export async function makeExecutor(
     }
   }
 
+  if (ready !== undefined)
+    throw readyFailure("repository_not_onboarded", "Onboard the pilot repository as a resident, then retry this task.");
   await recheckOwner();
   const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx));
   await recheckOwner();
@@ -714,6 +887,18 @@ async function seedSandbox(
       return { why: oneLine(`seed failed (${err instanceof Error ? err.message : String(err)})`) };
     }
     if (answer.seeded) {
+      if (
+        ctx.readyEnvironment !== undefined &&
+        (answer.slug !== seed.slug ||
+          answer.ref !== (seed.fetchRef ?? seed.ref) ||
+          !/^[0-9a-f]{40}$/.test(answer.sha) ||
+          (seed.fetchSha !== undefined && answer.sha !== seed.fetchSha) ||
+          answer.from?.checkoutBackupId !== seed.checkoutBackupId ||
+          answer.from?.depsBackupId !== seed.depsBackupId ||
+          answer.from?.ref !== seed.ref ||
+          answer.from?.sha !== seed.sha)
+      )
+        return { why: "seed source did not match the bound snapshot" };
       return {
         seeded: {
           slug: answer.slug,
@@ -736,6 +921,8 @@ async function seedSandbox(
       alreadyRetried: retried,
     });
     if (decision.action === "cold") return { why: oneLine(decision.why) };
+    if (ctx.readyEnvironment !== undefined && !decision.seed.depsBackupId)
+      return { why: "dependency snapshot missing on seed retry" };
     seed = decision.seed;
   }
 }

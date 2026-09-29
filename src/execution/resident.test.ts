@@ -89,6 +89,7 @@ describe("ResidentExecutor.attach over a heartbeat stream (item 59: an attach th
       sha: "1220b9c4",
       workspace: ATTACH_OK.workspace,
       user: "worker2",
+      deps: "hardlink",
       attachMs: 2500,
     });
   });
@@ -899,6 +900,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
       sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05",
       workspace: "/workspace/threads/t/master",
       user: "worker2",
+      deps: "hardlink",
     });
   });
 

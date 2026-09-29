@@ -17,6 +17,8 @@ import {
   seedMarkerText,
   seedRetryDecision,
   seededSandboxNote,
+  readyEnvironmentCommand,
+  readyEnvironmentOutcome,
   type SandboxSeed,
 } from "./seedPlan.js";
 
@@ -62,6 +64,52 @@ describe("parseSeed", () => {
     expect(bad({ ...seed, fetchRef: "a..b" })).toBe("seed: fetchRef is not a branch name");
     expect(bad({ ...seed, sha: "abc" })).toBe("seed: sha is not a commit sha");
     expect(bad({ ...seed, fetchSha: "ABC" })).toBe("seed: fetchSha is not a commit sha");
+  });
+});
+
+describe("pilot ready environment check", () => {
+  const requirement = { testCommand: "npm test", requiredTools: ["npm", "node"], dependencyDir: "node_modules" };
+
+  it("checks the declared command and dependencies without running the test suite", () => {
+    const command = readyEnvironmentCommand("/workspace/checkout", requirement);
+    expect(command).toContain("cd '/workspace/checkout'");
+    expect(command).toContain("test -d 'node_modules'");
+    expect(command).toContain("command -v 'npm'");
+    expect(command).toContain("command -v 'node'");
+    expect(command).toContain("command -v 'bash'");
+    expect(command).toContain("bash -n -c 'npm test'");
+    expect(command).not.toContain("\nnpm test\n");
+  });
+
+  it("refuses malformed tool, dependency path and test command before shell construction", () => {
+    expect(() =>
+      readyEnvironmentCommand("/workspace/checkout", { ...requirement, requiredTools: ["npm; echo x"] }),
+    ).toThrow();
+    expect(() =>
+      readyEnvironmentCommand("/workspace/checkout", { ...requirement, dependencyDir: "../secret" }),
+    ).toThrow();
+    expect(() => readyEnvironmentCommand("/workspace/checkout", { ...requirement, testCommand: "" })).toThrow();
+    expect(() =>
+      readyEnvironmentCommand("/workspace/checkout", { ...requirement, testCommand: "FOO=bar npm test" }),
+    ).toThrow();
+  });
+
+  it("types the fixed check markers and leaves arbitrary output opaque", () => {
+    expect(readyEnvironmentOutcome("READY")).toEqual({ ready: true });
+    expect(readyEnvironmentOutcome("exit 2:\nMISSING_DEPENDENCIES")).toEqual({
+      ready: false,
+      reason: "dependencies_missing",
+    });
+    expect(readyEnvironmentOutcome("exit 2:\nMISSING_TOOL:npm")).toEqual({
+      ready: false,
+      reason: "tool_missing",
+      tool: "npm",
+    });
+    expect(readyEnvironmentOutcome("exit 2:\nINVALID_TEST_COMMAND")).toEqual({
+      ready: false,
+      reason: "test_command_invalid",
+    });
+    expect(readyEnvironmentOutcome("exit 127:\nprivate output")).toEqual({ ready: false, reason: "check_failed" });
   });
 });
 
