@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
@@ -300,6 +300,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
         agent,
         profile: declaredProfile(agent),
         channelVisibility,
+        verifyDirectAudience: async () => true,
         reserved,
         resume: undefined,
         ledgerRun: undefined,
@@ -313,6 +314,41 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     expect(await namesFor("slack:DPRIVATE", "dm")).toEqual(
       expect.arrayContaining(["work_status", "work_steer", "work_stop"]),
     );
+  });
+
+  it("does not record linked-work tools when the direct audience fails a fresh claim-time check", async () => {
+    const { deps, ledger, base } = setup();
+    deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    deps.plane = async () => ({}) as PlaneService;
+    const agent = getAgent("orchestrator");
+    const audience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DPRIVATE",
+      userId: "slack:UDEV",
+      threadKey: "slack:DPRIVATE:1.0",
+    };
+    const verified = vi.fn(async () => false);
+    const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
+    const message = {
+      ...base.msg,
+      channelId: audience.channelId,
+      threadKey: audience.threadKey,
+      userId: audience.userId,
+      directAudience: audience,
+    };
+    await claimRun(deps, {
+      ...base,
+      msg: message,
+      agent,
+      profile: declaredProfile(agent),
+      channelVisibility: "dm",
+      verifyDirectAudience: verified,
+      reserved,
+      resume: undefined,
+      ledgerRun: undefined,
+    });
+    expect(verified).toHaveBeenCalledWith(audience);
+    expect(ledger.opened[0]!.tools.map((tool) => tool.name).filter((name) => name.startsWith("work_"))).toEqual([]);
   });
 
   it("keeps a verified direct audience stamp on the promoted row for safe rechecks after restart", async () => {

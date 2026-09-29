@@ -59,6 +59,41 @@ export interface MainWorkCapability {
   stop(actId: string): ReturnType<Actions["stop"]>;
 }
 
+export interface MainWorkEffectGate {
+  run<T>(effect: () => Promise<T>): Promise<T | undefined>;
+  revoke(): Promise<void>;
+}
+
+/** A follow-up closes admission immediately, then waits for the already
+ * admitted effect before changing the run's authority. */
+export function createMainWorkEffectGate(): MainWorkEffectGate {
+  let closed = false;
+  let tail: Promise<void> = Promise.resolve();
+  return {
+    async run(effect) {
+      if (closed) return undefined;
+      let done!: () => void;
+      const current = new Promise<void>((resolve) => (done = resolve));
+      const previous = tail;
+      tail = previous.then(() => current);
+      await previous;
+      if (closed) {
+        done();
+        return undefined;
+      }
+      try {
+        return await effect();
+      } finally {
+        done();
+      }
+    },
+    async revoke() {
+      closed = true;
+      await tail;
+    },
+  };
+}
+
 export function mainWorkForRun(
   deps: MainWorkAudience & {
     runId: string;
@@ -66,6 +101,7 @@ export function mainWorkForRun(
     workflow?: WorkflowSender;
     plane?: () => Promise<Pick<PlaneService, "stop">>;
     clock: () => number;
+    effectGate: MainWorkEffectGate;
     trusted?: () => boolean;
     verifiedAtOpen?: boolean;
     verify?: (audience: DirectAudience) => Promise<boolean>;
@@ -95,8 +131,16 @@ export function mainWorkForRun(
   const actions = createMainTaskActions({
     instances: deps.instances,
     ...(deps.workflow ? { workflow: deps.workflow } : {}),
-    plane: { stop: async (id, actor, visibleTo) => (await deps.plane!()).stop(id, actor, visibleTo) },
+    plane: {
+      stop: async (id, actor, visibleTo, binding) => {
+        const plane = await deps.plane!();
+        if (!(await canAct()) || !trusted())
+          return { kind: "unavailable" as const, reason: "direct audience changed before stop" };
+        return plane.stop(id, actor, visibleTo, binding);
+      },
+    },
     clock: deps.clock,
+    liveAuthority: { verify: canAct, active: trusted },
   });
   return {
     status: async (actId) => {
@@ -109,9 +153,16 @@ export function mainWorkForRun(
       // A provider call id may repeat in another run. Both durable identities
       // enter the hash so one call replays once and a later call stays distinct.
       const eventId = createHash("sha256").update(deps.runId).update("\0").update(toolCallId).digest("hex");
-      return actions.steer(deps.actor, { actId, words, eventId });
+      return (
+        (await deps.effectGate.run(() => actions.steer(deps.actor, { actId, words, eventId }))) ?? {
+          kind: "unavailable" as const,
+        }
+      );
     },
-    stop: async (actId) => ((await canAct()) ? actions.stop(deps.actor, actId) : { kind: "unavailable" as const }),
+    stop: async (actId) => {
+      if (!(await canAct())) return { kind: "unavailable" as const };
+      return (await deps.effectGate.run(() => actions.stop(deps.actor, actId))) ?? { kind: "unavailable" as const };
+    },
   };
 }
 
@@ -220,7 +271,9 @@ export const workStopTool: RunnableTool = {
       case "stopped":
         return `Stop mark saved for this work. ${result.childOutcomes.length} child stop result(s) returned; check status for their final state.`;
       case "partial":
-        return "error: Stop incomplete. The runner's stop mark did not save, so it may continue. Check status before assuming this work stopped.";
+        return result.runnerStopped
+          ? "error: Stop incomplete. The stop mark saved, but a worker did not confirm it stopped. Check status before assuming this work stopped."
+          : "error: Stop incomplete. The runner's stop mark did not save, so it may continue. Check status before assuming this work stopped.";
       case "not_found":
         return NOT_FOUND;
       case "forbidden":

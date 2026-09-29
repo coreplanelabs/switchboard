@@ -24,6 +24,8 @@ export interface MainTaskActionsDeps {
   workflow?: WorkflowSender;
   plane: Pick<PlaneService, "stop">;
   clock: () => number;
+  /** A live model turn may lose requester authority while joined records load. */
+  liveAuthority?: { verify(): Promise<boolean>; active(): boolean };
 }
 
 export interface MainTaskStatus {
@@ -177,6 +179,10 @@ export function createMainTaskActions(deps: MainTaskActionsDeps) {
     if (!isThreadEvent({ ...event, seq: 1 })) return { kind: "invalid" };
     const key = { instanceId: instance.id, unit: unit.unit };
     try {
+      if (deps.liveAuthority) {
+        const verified = await deps.liveAuthority.verify();
+        if (!verified || !deps.liveAuthority.active()) return { kind: "unavailable" };
+      }
       const appended = await deps.instances.appendEvent(key, event, true, bindingOf(instance, unit, input.actId));
       if (!appended.ok)
         return {
@@ -201,6 +207,10 @@ export function createMainTaskActions(deps: MainTaskActionsDeps) {
     if (actor.viewingAs || !authorize(actor, "main-task:stop", runResource(instance)).allow)
       return { kind: "forbidden" };
     try {
+      if (deps.liveAuthority) {
+        const verified = await deps.liveAuthority.verify();
+        if (!verified || !deps.liveAuthority.active()) return { kind: "unavailable" };
+      }
       const report = await deps.plane.stop(
         instance.id,
         runActorOf(actor),

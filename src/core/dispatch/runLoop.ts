@@ -24,7 +24,7 @@ import { parseModelRef } from "../provider.js";
 import { isReissueSteerText } from "../plane/decide.js";
 import type { ModelCard } from "../modelCard.js";
 import { mergeTools, toolsForRun } from "../../tools/toolsets.js";
-import { mainWorkForRun, type DirectAudience } from "../../tools/mainWork.js";
+import { createMainWorkEffectGate, mainWorkForRun, type DirectAudience } from "../../tools/mainWork.js";
 import { type SlackContextBinding } from "./slackContextBinding.js";
 import {
   privateAudienceRequired,
@@ -1242,6 +1242,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // A reclaimed run cannot reconstruct the last consumed sender from its
   // prompt, so linked-work authority stays withdrawn in that run too.
   let mainWorkTrusted = ctx.resume === undefined;
+  const mainWorkEffectGate = createMainWorkEffectGate();
+  const withdrawMainWork = async () => {
+    await mainWorkEffectGate.revoke();
+    mainWorkTrusted = false;
+  };
   const directAudience = (msg as IncomingMessage & { directAudience?: DirectAudience }).directAudience;
   const verifyDirectAudience = (
     io as ChannelIO & { verifyDirectAudience?: (audience: DirectAudience) => Promise<boolean> }
@@ -1264,10 +1269,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             input.from !== undefined,
         )
       )
-        mainWorkTrusted = false;
+        await withdrawMainWork();
       if (mainWorkTrusted && directAudience && verifyDirectAudience) {
         const stillDirect = await verifyDirectAudience(directAudience).catch(() => false);
-        if (!stillDirect) mainWorkTrusted = false;
+        if (!stillDirect) await withdrawMainWork();
       }
     }
     if (!deps.artifacts) return "";
@@ -1314,6 +1319,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(deps.workflow ? { workflow: deps.workflow } : {}),
     ...(deps.plane ? { plane: deps.plane } : {}),
     clock,
+    effectGate: mainWorkEffectGate,
     trusted: () => mainWorkTrusted,
     verifiedAtOpen,
     ...(verifyDirectAudience ? { verify: verifyDirectAudience } : {}),

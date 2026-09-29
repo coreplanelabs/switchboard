@@ -2,8 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import type { Actor } from "../core/authz/types.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "../core/coordinator/contract.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import { createPlaneService } from "../core/planeService.js";
 import type { PlaneService } from "../core/planeService.js";
-import { mainWorkForRun, workStatusTool, workSteerTool, workStopTool, type MainWorkCapability } from "./mainWork.js";
+import {
+  createMainWorkEffectGate,
+  mainWorkForRun,
+  workStatusTool,
+  workSteerTool,
+  workStopTool,
+  type MainWorkCapability,
+} from "./mainWork.js";
 import type { ToolContext } from "./runnableTool.js";
 
 const THREAD = "slack:DMAIN:1.0";
@@ -36,7 +44,16 @@ const UNIT: CoordinatorUnit = {
     repo: INSTANCE.repo,
     base: INSTANCE.base!,
     question: "How many users failed to sign up?",
-    findings: [{ text: "12 failures", query: "count failed signups", result: "12", timeWindow: "last day" }],
+    findings: [
+      {
+        kind: "analysis",
+        text: "12 failures",
+        query: "count failed signups",
+        result: "12",
+        timeWindow: "last day",
+        sourceUrl: "https://example.com/signups",
+      },
+    ],
     requestedChange: "Fix signups",
   },
 };
@@ -70,6 +87,7 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
     kind: "stopped",
     instanceId: id,
     runnerStopped: true,
+    stopsSucceeded: true,
     children: [],
   }));
   const plane = async () => ({ stop }) as Pick<PlaneService, "stop">;
@@ -79,6 +97,8 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
     message = { channelId: INSTANCE.channelId, threadKey: THREAD, userId: INSTANCE.userId },
     trusted = () => true,
     verify = async () => true,
+    loadPlane: typeof plane = plane,
+    effectGate = createMainWorkEffectGate(),
   ) =>
     mainWorkForRun({
       agentName: "orchestrator",
@@ -96,8 +116,9 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
       runId,
       instances,
       workflow,
-      plane,
+      plane: loadPlane,
       clock: () => 2_000,
+      effectGate,
       trusted,
       verifiedAtOpen: true,
       verify,
@@ -111,6 +132,78 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
 }
 
 describe("main work tools", () => {
+  it("a delayed unit lookup cannot steer after authority is revoked", async () => {
+    const { bind, instances, sent } = await fixture();
+    let trusted = true;
+    let lookupStarted!: () => void;
+    let releaseLookup!: () => void;
+    const started = new Promise<void>((resolve) => (lookupStarted = resolve));
+    const held = new Promise<void>((resolve) => (releaseLookup = resolve));
+    const getMainTask = instances.getMainTask.bind(instances);
+    vi.spyOn(instances, "getMainTask").mockImplementation(async (key) => {
+      lookupStarted();
+      await held;
+      return getMainTask(key);
+    });
+    const capability = bind(requester(), "run-steer-lookup", undefined, () => trusted);
+    const steering = capability!.steer(ACT, "Stop this work", "call-after-lookup");
+    await started;
+    trusted = false;
+    releaseLookup();
+    expect(await steering).toEqual({ kind: "unavailable" });
+    expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: UNIT.unit })).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
+  it("a delayed unit lookup cannot stop after authority is revoked", async () => {
+    const { bind, instances, stop } = await fixture();
+    let trusted = true;
+    let lookupStarted!: () => void;
+    let releaseLookup!: () => void;
+    const started = new Promise<void>((resolve) => (lookupStarted = resolve));
+    const held = new Promise<void>((resolve) => (releaseLookup = resolve));
+    const getMainTask = instances.getMainTask.bind(instances);
+    vi.spyOn(instances, "getMainTask").mockImplementation(async (key) => {
+      lookupStarted();
+      await held;
+      return getMainTask(key);
+    });
+    const capability = bind(requester(), "run-stop-lookup", undefined, () => trusted);
+    const stopping = capability!.stop(ACT);
+    await started;
+    trusted = false;
+    releaseLookup();
+    expect(await stopping).toEqual({ kind: "unavailable" });
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("a delayed plane lookup cannot stop after authority is revoked", async () => {
+    const { bind, stop } = await fixture();
+    let trusted = true;
+    let lookupStarted!: () => void;
+    let releaseLookup!: () => void;
+    const started = new Promise<void>((resolve) => (lookupStarted = resolve));
+    const held = new Promise<void>((resolve) => (releaseLookup = resolve));
+    const capability = bind(
+      requester(),
+      "run-stop-plane",
+      undefined,
+      () => trusted,
+      async () => true,
+      async () => {
+        lookupStarted();
+        await held;
+        return { stop };
+      },
+    );
+    const stopping = capability!.stop(ACT);
+    await started;
+    trusted = false;
+    releaseLookup();
+    expect(await stopping).toEqual({ kind: "unavailable" });
+    expect(stop).not.toHaveBeenCalled();
+  });
+
   it("a deferred steer cannot cross a relayed follow-up", async () => {
     const { bind, instances } = await fixture();
     let trusted = true;
@@ -166,6 +259,7 @@ describe("main work tools", () => {
       instances,
       plane: async () => ({ stop: vi.fn() }),
       clock: () => 2_000,
+      effectGate: createMainWorkEffectGate(),
       trusted: () => true,
       verifiedAtOpen: true,
       verify: async () => true,
@@ -216,6 +310,7 @@ describe("main work tools", () => {
       instances,
       plane: async () => ({ stop: vi.fn() }),
       clock: () => 2_000,
+      effectGate: createMainWorkEffectGate(),
       message: { channelId: "slack:CPUB", threadKey: "slack:CPUB:1.0", userId: INSTANCE.userId },
       channelVisibility: "public",
     });
@@ -240,6 +335,7 @@ describe("main work tools", () => {
           instances,
           plane: async () => ({ stop: vi.fn() }),
           clock: () => 2_000,
+          effectGate: createMainWorkEffectGate(),
         }),
       ).toBeUndefined();
     }
@@ -258,6 +354,7 @@ describe("main work tools", () => {
         instances,
         plane: async () => ({ stop: vi.fn() }),
         clock: () => 2_000,
+        effectGate: createMainWorkEffectGate(),
       }),
     ).toBeUndefined();
   });
@@ -339,8 +436,123 @@ describe("main work tools", () => {
     expect(await workStopTool.run({ actId: ACT }, context())).toContain("Stop mark saved");
     expect(stop).toHaveBeenCalledOnce();
     expect(stop.mock.calls[0]?.[0]).toBe(INSTANCE.id);
-    stop.mockResolvedValueOnce({ kind: "stopped", instanceId: INSTANCE.id, runnerStopped: false, children: [] });
+    expect(stop.mock.calls[0]?.[3]).toMatchObject({
+      instanceId: INSTANCE.id,
+      branch: INSTANCE.branch,
+      key: { mainThreadKey: THREAD, actId: ACT },
+    });
+    stop.mockResolvedValueOnce({
+      kind: "stopped",
+      instanceId: INSTANCE.id,
+      runnerStopped: false,
+      stopsSucceeded: true,
+      children: [],
+    });
     expect(await workStopTool.run({ actId: ACT }, context())).toMatch(/^error: Stop incomplete/);
+    stop.mockResolvedValueOnce({
+      kind: "stopped",
+      instanceId: INSTANCE.id,
+      runnerStopped: true,
+      stopsSucceeded: false,
+      children: [{ id: "child-1", outcome: "conflict" }],
+    });
+    expect(await workStopTool.run({ actId: ACT }, context())).toContain("a worker did not confirm it stopped");
+  });
+
+  it("a branch change during the work_stop tool cannot stop the former claimed unit", async () => {
+    const { instances, bind, context } = await fixture();
+    const stoppedRuns: string[] = [];
+    const plane = createPlaneService({
+      instances: {
+        get: instances.get.bind(instances),
+        listUnits: instances.listUnits.bind(instances),
+        markStopped: async (id, at, binding) => {
+          await instances.putUnits([{ ...UNIT, branch: "ship/other-work" }]);
+          return instances.markStopped(id, at, binding);
+        },
+      },
+      runs: {
+        listRuns: async () => ({ runs: [] }),
+        listInstanceUnits: async () => [],
+        stopRun: async (id: string) => {
+          stoppedRuns.push(id);
+          return { ok: true, value: { state: "stopping" } };
+        },
+      } as unknown as Parameters<typeof createPlaneService>[0]["runs"],
+      clock: () => 2_000,
+    });
+    const capability = bind(
+      requester(),
+      "run-branch-race",
+      undefined,
+      () => true,
+      async () => true,
+      async () => plane,
+    );
+    expect(await workStopTool.run({ actId: ACT }, context(capability))).toMatch(
+      /^error: I couldn't find that work in this conversation/,
+    );
+    expect((await instances.get(INSTANCE.id))?.stop).toBeUndefined();
+    expect(stoppedRuns).toEqual([]);
+  });
+
+  it("closes new effects before waiting for an in-flight effect to settle", async () => {
+    const gate = createMainWorkEffectGate();
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => (entered = resolve));
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const first = gate.run(async () => {
+      entered();
+      await held;
+      return "written";
+    });
+    await started;
+    let withdrawn = false;
+    const revoke = gate.revoke().then(() => (withdrawn = true));
+    expect(await gate.run(async () => "late write")).toBeUndefined();
+    expect(withdrawn).toBe(false);
+    release();
+    expect(await first).toBe("written");
+    await revoke;
+    expect(withdrawn).toBe(true);
+    expect(await gate.run(async () => "another write")).toBeUndefined();
+  });
+
+  it("a relayed follow-up closes the gate while a durable steer is in flight", async () => {
+    const { instances, bind } = await fixture();
+    const gate = createMainWorkEffectGate();
+    let trusted = true;
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => (entered = resolve));
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const append = instances.appendEvent.bind(instances);
+    vi.spyOn(instances, "appendEvent").mockImplementation(async (...args) => {
+      entered();
+      await held;
+      return append(...args);
+    });
+    const capability = bind(
+      requester(),
+      "run-race",
+      undefined,
+      () => trusted,
+      async () => true,
+      undefined,
+      gate,
+    )!;
+    const first = capability.steer(ACT, "Do the fix", "call-1");
+    await started;
+    const withdrawal = gate.revoke().then(() => (trusted = false));
+    expect(await capability.steer(ACT, "Late change", "call-2")).toEqual({ kind: "unavailable" });
+    release();
+    expect(await first).toMatchObject({ kind: "queued" });
+    await withdrawal;
+    expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: UNIT.unit })).toMatchObject([
+      { text: "Do the fix" },
+    ]);
+    expect(await capability.steer(ACT, "Another change", "call-3")).toEqual({ kind: "unavailable" });
   });
 
   it("fails by name when the capability is missing and never offers a start tool", async () => {
@@ -361,6 +573,7 @@ describe("main work tools", () => {
         instances: (await fixture()).instances,
         plane: async () => ({ stop: vi.fn() }),
         clock: () => 1,
+        effectGate: createMainWorkEffectGate(),
       }),
     ).toBeUndefined();
   });

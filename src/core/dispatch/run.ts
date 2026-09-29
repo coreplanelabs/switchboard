@@ -264,6 +264,8 @@ export interface ClaimContext {
   operationTarget?: OperationTarget;
   channelVisibility: ChannelVisibility;
   slackContext?: SlackContextBinding;
+  /** A fresh channel-side check before private tool definitions enter the durable run row. */
+  verifyDirectAudience?: (audience: DirectAudience) => Promise<boolean>;
   run: RunHandle;
   registry: RunRegistry;
   selection: ExecutorSelection;
@@ -341,7 +343,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     markUntracked,
     seedActors,
   } = ctx;
-  const directAudience = (msg as IncomingMessage & { directAudience?: DirectAudience }).directAudience;
+  const directAudience = directAudienceStampOf(msg);
   const { resident, binding } = selection;
   let ledgerRun = ctx.ledgerRun;
   // Where the run's workspace is (run-history item 54), on the row's state
@@ -362,8 +364,20 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
   // already made this run untracked, with the one warning; asking again
   // would only warn again.
   if (!resume && reserved) {
-    const directAudience = directAudienceStampOf(msg);
     const privateMain = agent.name === "orchestrator" && directAudience !== undefined;
+    const workAudienceCandidate =
+      deps.coordinatorInstances !== undefined &&
+      deps.plane !== undefined &&
+      mainWorkAudienceAllowed({
+        agentName: agent.name,
+        actor: chatActorOf(deps.config, msg),
+        message: msg,
+        channelVisibility,
+      });
+    const verifiedWorkAudience =
+      workAudienceCandidate && directAudience !== undefined && ctx.verifyDirectAudience !== undefined
+        ? await ctx.verifyDirectAudience(directAudience).catch(() => false)
+        : false;
     const ledger = deps.runLedger;
     const opened = await root.span("dispatch.ledger_claim", () =>
       ledger.open({
@@ -376,7 +390,6 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           channelId: msg.channelId,
           userId: msg.userId,
           threadKey: msg.threadKey,
-          ...(directAudience !== undefined ? { directAudience } : {}),
           channelVisibility,
           ...(repoCtx.repo !== undefined && !privateMain ? { repo: repoCtx.repo } : {}),
           ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
@@ -407,17 +420,9 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         reservation: reserved,
         system,
         tools: mergeTools(
-          toolsForRun(
-            agent.toolset,
-            deps.coordinatorInstances !== undefined &&
-              deps.plane !== undefined &&
-              mainWorkAudienceAllowed({
-                agentName: agent.name,
-                actor: chatActorOf(deps.config, msg),
-                message: msg,
-                channelVisibility,
-              }),
-          ).filter((tool) => ctx.slackContext !== undefined || tool.name !== "slack_context"),
+          toolsForRun(agent.toolset, verifiedWorkAudience).filter(
+            (tool) => ctx.slackContext !== undefined || tool.name !== "slack_context",
+          ),
           mcpForRun?.tools,
         ).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
         // The seed carries the EFFECTIVE budget, so a resume runs on what
