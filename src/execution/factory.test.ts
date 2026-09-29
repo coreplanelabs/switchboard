@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -185,12 +186,49 @@ describe("makeExecutor per-agent provisioning", () => {
     expect((await envOf(review.executor)).GH_TOKEN).toBeUndefined();
     expect((await envOf(coding.executor)).GH_TOKEN).toBeUndefined();
     expect(await envOf(coding.executor)).toMatchObject({
-      GIT_CONFIG_KEY_2: "credential.helper",
-      GIT_CONFIG_VALUE_2: "",
-      GIT_CONFIG_KEY_3: "credential.helper",
-      GIT_CONFIG_VALUE_3: "!gh auth git-credential",
+      GIT_CONFIG_KEY_0: "credential.helper",
+      GIT_CONFIG_VALUE_0: "",
+      GIT_CONFIG_KEY_1: "credential.https://door.example.helper",
+      GIT_CONFIG_VALUE_1: "!gh auth git-credential",
     });
     expect(resolveGithubToken).not.toHaveBeenCalled();
+  });
+
+  it("leaves GitHub clones direct even when their names extend the bound repository", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    const cf: ExecutorFactoryOptions = {
+      execution: { type: "cloudflare", url: "https://sandbox.example" },
+      ...dirs(),
+    };
+    const coding = await makeExecutor(cf, { ...ctx("coding"), repo: "acme/api" });
+    const env = {
+      ...process.env,
+      ...(await envOf(coding.executor)),
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+    };
+    const git = (...args: string[]) => execFileSync("git", args, { env, encoding: "utf8" }).trim();
+
+    for (const url of [
+      "https://github.com/acme/api.git",
+      "git@github.com:acme/api.git",
+      "https://github.com/acme/api.git-tools.git",
+      "git@github.com:acme/api.git-tools.git",
+      "https://github.com/cashapp/hermit-packages.git",
+    ])
+      expect(git("ls-remote", "--get-url", url)).toBe(url);
+    expect((await envOf(coding.executor)).GIT_DOOR_ORIGIN).toBe("https://door.example");
+    expect((await envOf(coding.executor)).GIT_DOOR_REMOTE).toBe("https://door.example/git/acme/api.git");
+    expect((await envOf(coding.executor)).GH_REPO).toBe("door.example/acme/api");
+    expect(git("ls-remote", "--get-url", (await envOf(coding.executor)).GIT_DOOR_REMOTE)).toBe(
+      "https://door.example/git/acme/api.git",
+    );
+    expect(git("config", "--get-urlmatch", "credential.helper", "https://door.example/git/acme/api.git")).toBe(
+      "!gh auth git-credential",
+    );
+    expect(git("config", "--get-urlmatch", "credential.helper", "https://github.com/cashapp/hermit-packages.git")).toBe(
+      "",
+    );
   });
 
   it("the sandbox env resolves the run bearer for each command without minting App tokens", async () => {
@@ -437,6 +475,22 @@ describe("makeExecutor resident selection", () => {
     // The attach answer rides along for the dispatcher: the worktree
     // path for the prompt, the attached sha for the pre-run head check.
     expect(binding).toMatchObject({ ref: "master", sha: "abc", workspace: "/workspace/threads/x/master" });
+    const env = await (
+      executor as unknown as { opts: { resolveEnvs: () => Promise<Record<string, string>> } }
+    ).opts.resolveEnvs();
+    expect(env.GIT_CONFIG_KEY_1).toBe("credential.https://door.example.helper");
+    expect(env.GIT_CONFIG_VALUE_1).toContain("password=$GH_ENTERPRISE_TOKEN");
+    const gitEnv = { ...process.env, ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+    expect(
+      execFileSync(
+        "git",
+        ["config", "--get-urlmatch", "credential.helper", "https://github.com/cashapp/hermit-packages.git"],
+        {
+          env: gitEnv,
+          encoding: "utf8",
+        },
+      ).trim(),
+    ).toBe("");
     // The discriminant is the backend signal the dispatcher branches its
     // resident system-prompt on (never an executor `instanceof`): true ONLY on
     // the warm-resident branch.
@@ -2108,15 +2162,20 @@ describe("makeExecutor resident selection", () => {
       expect(fn).not.toHaveBeenCalled();
     });
 
-    it("a seeded sandbox re-attach observes the owned checkout before restoring its publication facts", async () => {
+    it("a seeded sandbox re-attach moves a legacy origin to the exact door URL before restoring publication facts", async () => {
       stubEnvs();
       const { fn } = stubFetch();
       const seed = { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout" };
       const head = "b".repeat(40);
+      let origin = `https://github.com/${seed.slug}.git\n`;
       const observe = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockImplementation(async (command) => {
         if (command.includes("rev-parse --abbrev-ref HEAD")) return `${seed.ref}\n`;
         if (command.includes("rev-parse HEAD")) return `${head}\n`;
-        if (command.includes("config --get remote.origin.url")) return `https://github.com/${seed.slug}.git\n`;
+        if (command.includes("config --get remote.origin.url")) return origin;
+        if (command.includes("remote set-url origin")) {
+          origin = "https://door.example/git/jshttp/vary.git\n";
+          return "";
+        }
         return "";
       });
       const sel = await makeExecutor(residentOpts(), {
@@ -2124,6 +2183,7 @@ describe("makeExecutor resident selection", () => {
         reattach: { backend: "sandbox", seeded: seed },
       });
       expect(sel.seeded).toEqual({ ...seed, sha: head, cached: true, ms: 0 });
+      expect(origin).toBe("https://door.example/git/jshttp/vary.git\n");
       expect(fn).not.toHaveBeenCalled();
       observe.mockRestore();
     });
@@ -2134,7 +2194,7 @@ describe("makeExecutor resident selection", () => {
       const seed = { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout" };
       let ref = "other-branch";
       let head = `${"b".repeat(40)}\n`;
-      let origin = `https://github.com/${seed.slug}.git\n`;
+      let origin = `https://door.example/git/${seed.slug}.git\n`;
       const observe = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockImplementation(async (command) => {
         if (command.includes("rev-parse --abbrev-ref HEAD")) return ref;
         if (command.includes("rev-parse HEAD")) return head;
@@ -2147,7 +2207,7 @@ describe("makeExecutor resident selection", () => {
       ref = seed.ref;
       origin = "https://github.com/other/repo.git\n";
       await expect(reattach()).rejects.toThrow(WorkspaceReattachRefusedError);
-      origin = `https://github.com/${seed.slug}.git\n`;
+      origin = `https://door.example/git/${seed.slug}.git\n`;
       head = "exit 128: not a git repository";
       await expect(reattach()).rejects.toThrow(WorkspaceReattachRefusedError);
       observe.mockRestore();

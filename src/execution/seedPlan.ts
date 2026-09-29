@@ -106,7 +106,7 @@ export type SeedAnswer =
 /** A backup id as the SDK mints it (a UUID: hex and hyphens) — it becomes a
  *  path and a glob on the container, so nothing else may. */
 const BACKUP_ID_RE = /^(?=.*[0-9a-fA-F])[0-9a-fA-F-]{8,64}$/;
-const SLUG_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const SLUG_RE = /^(?!\.{1,2}\/)[A-Za-z0-9_.-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/;
 const SHA_RE = /^[0-9a-f]{40}$/;
 /** A branch name git accepts (`check-ref-format --branch`, in the shape a
  *  Slack thread binds): printable, no leading `-`/`/`/`.`, no `..`, no
@@ -148,8 +148,8 @@ export function parseSeed(v: unknown): { ok: true; seed: SandboxSeed } | { ok: f
  *   1. the tree becomes root's — the archive came from the resident's build
  *      user, and a sandbox runs everything as root, so git would otherwise
  *      refuse the "dubious ownership" and every write would need a chown;
- *   2. origin points at GitHub — the resident's checkout fetched from its
- *      local mirror;
+ *   2. origin points at this run's exact repository on the Git door — the
+ *      resident's checkout fetched from its local mirror;
  *   3. the deps view, when one was restored, replaces whatever `node_modules`
  *      the checkout carries (older snapshots still hold one);
  *   4. the thread's ref is fetched from origin (the credential is the exec
@@ -158,8 +158,17 @@ export function parseSeed(v: unknown): { ok: true; seed: SandboxSeed } | { ok: f
  *      fetch holds it, else at the fetched tip; without a thread ref the
  *      checkout stays on the snapshot's branch;
  *   5. the head is printed last: the answer's `sha`. */
+export function seedDoorRemote(baseUrl: string, slug: string): string {
+  if (!SLUG_RE.test(slug)) throw new Error("seed door remote needs owner/name");
+  const base = new URL(baseUrl);
+  if ((base.protocol !== "https:" && base.protocol !== "http:") || base.username || base.password)
+    throw new Error("seed door remote needs an HTTP origin");
+  return `${base.origin}/git/${slug}.git`;
+}
+
 export function seedFixupScript(input: {
   slug: string;
+  doorOrigin: string;
   ref: string;
   fetchRef?: string;
   fetchSha?: string;
@@ -170,7 +179,7 @@ export function seedFixupScript(input: {
     "set -e",
     `cd ${shellQuote(input.checkoutDir)}`,
     "chown -R 0:0 .",
-    `git remote set-url origin ${shellQuote(`https://github.com/${input.slug}.git`)}`,
+    `git remote set-url origin ${shellQuote(seedDoorRemote(input.doorOrigin, input.slug))}`,
   ];
   if (input.depsDir) {
     lines.push("rm -rf node_modules", `mv ${shellQuote(input.depsDir)} node_modules`);

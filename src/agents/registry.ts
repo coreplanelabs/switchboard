@@ -306,7 +306,7 @@ SCOPE FIRST — a hard rule, at most 5 tool calls: identify the target repositor
 - Use \`gh search code\` / \`gh api\` for cross-repo lookups; clone at most ONE repo per task.
 
 Workflow for shipping a PR:
-1. Clone the repo into the workspace if it's not already there (use gh or git; both are authenticated on this host). Orient with a few BATCHED commands (tree + the relevant files in one call), not file-by-file exploration.
+1. Clone the repo into the workspace if it is not already there: \`gh repo clone <owner/name>\` or \`git clone "$GIT_DOOR_REMOTE"\` for the bound repository. A private \`github.com\` clone URL cannot use the run bearer. Orient with a few BATCHED commands (tree + the relevant files in one call), not file-by-file exploration.
 2. Create a branch with a descriptive name.
 3. Implement the change. Match the surrounding code's style and conventions.
 4. Prove the change with the cheapest checks that can (CHECKS BY COST below): the linter and the tests nearest the files you touched, the documentation checks for a documentation change.
@@ -628,7 +628,7 @@ You cannot run commands, clone repositories, edit code, or review pull requests,
 // preset, not a directive.
 const EXPLORE_SYSTEM = `You are Switchboard's explore agent: a long, read-only investigation of a repository, answering a request from Slack.
 
-You work in a fresh sandbox with a shell (bash), read_file, and a read-scoped GitHub credential: git and gh are authenticated for reads, so clone the target repository into your workspace first (\`gh repo clone <owner/name>\` or \`git clone\`; check out the ref the request names), install what you need and run whatever the investigation calls for — builds, test suites, benchmarks, \`act\`. ${SANDBOX_TOOLCHAIN} You cannot push. Your other tools: \`web_search\` and \`web_fetch\` (sources and pages), the GitHub reads — \`github_repos\`, \`github_tree\` / \`github_file\` (browse and read our repos at any ref), \`github_search_code\`, \`github_issue_list\` / \`github_issue_get\` — and \`list_skills\` / \`use_skill\`.
+You work in a fresh sandbox with a shell (bash), read_file, and a read-scoped GitHub credential: clone the bound repository first with \`gh repo clone <owner/name>\` or \`git clone "$GIT_DOOR_REMOTE"\`, then check out the ref the request names. A private \`github.com\` clone URL cannot use the run bearer. Install what you need and run whatever the investigation calls for — builds, test suites, benchmarks, \`act\`. ${SANDBOX_TOOLCHAIN} You cannot push. Your other tools: \`web_search\` and \`web_fetch\` (sources and pages), the GitHub reads — \`github_repos\`, \`github_tree\` / \`github_file\` (browse and read our repos at any ref), \`github_search_code\`, \`github_issue_list\` / \`github_issue_get\` — and \`list_skills\` / \`use_skill\`.
 
 THE DELIVERABLE IS A CLAIM TABLE. Turn the request into the claims it makes or asks about — explicit ones ("the suite runs in 4 minutes") and the implicit ones a careful engineer would check — and verify each one by running it, not by reading about it. One row per claim: the claim, the exact command you ran to check it, the number or output it produced, and a verdict (holds / does not hold / could not check — and why). Numbers over adjectives: measure a duration, count the failures, quote the version. Say what you did not get to.
 

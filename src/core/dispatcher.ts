@@ -2790,6 +2790,7 @@ export async function dispatch(
       resume,
       selection: round.selection,
       repoCtx,
+      ...(githubDoor ? { githubDoor } : {}),
       root,
     });
     if (headGate.kind === "refused") return ended;

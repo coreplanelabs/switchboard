@@ -441,6 +441,13 @@ describe("review post-step: prompts defer posting to the system", () => {
 // the bot process renders the body at the pushed head and opens/edits the PR.
 // The prompts must instruct push-then-submit and never open-the-PR-yourself.
 describe("coding prompts: push then submit_pr_description (opening the PR is the system's job)", () => {
+  it("cold coding and explore clone the bound private repository through its exact door remote", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.explore.system]) {
+      expect(sys).toContain('git clone "$GIT_DOOR_REMOTE"');
+      expect(sys).toContain("gh repo clone");
+    }
+  });
+
   it("both coding prompts instruct pushing the branch, then submitting the typed description", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
       expect(sys).toMatch(/push the branch/i);
