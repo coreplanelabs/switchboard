@@ -567,6 +567,22 @@ describe("run ledger — finishing, finish, handoff, reclaim (items 31, 33)", ()
     expect(live.find((x) => x.runId === "mine")?.ownerGen).toBe("g2"); // untouched by its own generation's reclaim
   });
 
+  it("reclaim offers this generation's expired hard-stopped row for closure, but keeps its other rows", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "stopped", "slack:C1:stopped", "g1", { phase: "attaching" }));
+    await post("/runs/claim", claimBody(key, "working", "slack:C1:working", "g1"));
+    await post("/runs/stop", { storeKey: key, runId: "stopped", mode: "hard" });
+    const future = Date.now() + LEASE_MS + 1_000;
+    const r = await post("/runs/reclaim", { storeKey: key, gen: "g1", now: future, leaseMs: LEASE_MS });
+    expect(r.status).toBe(200);
+    expect((r.data.runs as Array<{ row: { runId: string; stop: string } }>).map((x) => x.row)).toMatchObject([
+      { runId: "stopped", stop: "hard" },
+    ]);
+    expect(
+      ((await post("/runs/live", { storeKey: key })).data.runs as Array<{ runId: string }>).map((x) => x.runId),
+    ).toEqual(["stopped", "working"]);
+  });
+
   it("reclaim offers the deferred rows at or below the cursor with every row past it; a malformed deferred list is refused", async () => {
     const key = storeKey();
     await post("/runs/claim", claimBody(key, "parked", "slack:C1:1.0"));

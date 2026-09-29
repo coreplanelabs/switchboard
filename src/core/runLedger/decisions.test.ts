@@ -77,7 +77,7 @@ describe("selectReclaim — expired leases and handed-off runs", () => {
     );
   });
 
-  it("never takes a row the reclaiming generation owns itself, however stale its lease or whatever its phase: a lapsed lease on our own row is a heartbeat that could not land (a state Worker blip), not a dead owner — taking it would run the same run twice in one process", () => {
+  it("never takes an unstopped row the reclaiming generation owns itself, however stale its lease or whatever its phase: a lapsed lease on our own row may be a state Worker blip", () => {
     const mine = [
       { runId: "mine-expired", leaseUntil: 0, phase: "live" as const, ownerGen: "g1" },
       { runId: "mine-handoff", leaseUntil: 0, phase: "handoff" as const, ownerGen: "g1" },
@@ -85,6 +85,31 @@ describe("selectReclaim — expired leases and handed-off runs", () => {
       { runId: "theirs-expired", leaseUntil: 0, phase: "live" as const, ownerGen: "g0" },
     ];
     expect(selectReclaim(mine, 1_000, "g1").map((r) => r.runId)).toEqual(["theirs-expired"]);
+  });
+
+  it("takes an expired hard-stopped row even from this generation, but leaves an unexpired stopped row to its owner", () => {
+    const rows = [
+      { runId: "stopped-expired", leaseUntil: 900, phase: "attaching" as const, ownerGen: "g1", stop: "hard" as const },
+      { runId: "stopped-live", leaseUntil: 2_000, phase: "live" as const, ownerGen: "g1", stop: "hard" as const },
+      { runId: "soft-expired", leaseUntil: 900, phase: "attaching" as const, ownerGen: "g1", stop: "soft" as const },
+      {
+        runId: "hosted-expired",
+        leaseUntil: 900,
+        phase: "live" as const,
+        ownerGen: "g1",
+        stop: "hard" as const,
+        meta: { hosted: true },
+      },
+      {
+        runId: "legacy-hosted-expired",
+        leaseUntil: 900,
+        phase: "live" as const,
+        ownerGen: "g1",
+        stop: "hard" as const,
+        state: { hosting: { instanceId: "pipeline", until: 2_000 } },
+      },
+    ];
+    expect(selectReclaim(rows, 1_000, "g1").map((r) => r.runId)).toEqual(["stopped-expired"]);
   });
 });
 

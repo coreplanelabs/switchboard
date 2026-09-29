@@ -109,6 +109,18 @@ const hostedClaim = (runId: string, thread: string, gen = "g1"): ClaimRequest =>
 });
 
 describe("reclaimRuns", () => {
+  it("closes an expired hard-stopped attaching row owned by this generation instead of restarting it", async () => {
+    const { ledger, run } = harness(undefined, { gen: "g1" });
+    const ask = claim("stopped", "slack:C1:stopped", "g1", { phase: "attaching" });
+    await ledger.claim({ ...ask, meta: { ...ask.meta, request: { text: "review this" } } });
+    await ledger.requestStop("stopped", "hard");
+    const outcome = await run();
+    expect(outcome.resumable).toEqual([]);
+    expect(outcome.closed).toMatchObject([{ runId: "stopped", status: "stopped_hard" }]);
+    expect(ledger.finished.get("stopped")).toMatchObject({ status: "stopped_hard" });
+    expect(ledger.live.has("stopped")).toBe(false);
+  });
+
   it("a run whose transcript and last step record the completeness rule accepts is handed to the launcher untouched — row, steps, transcript and events all still there", async () => {
     const { ledger, run, logs } = harness();
     await ledger.claim(claim("r1", "slack:C1:1.0"));

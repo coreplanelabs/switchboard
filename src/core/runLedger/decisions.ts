@@ -2,7 +2,15 @@
 // Durable Object applies them inside one transaction; the in-memory ledger
 // applies them in tests; both agree because this is the only copy.
 
-import type { ClaimResult, FenceResult, IntakeReceipt, IntakeWriteResult, LivePhase, StepRecord } from "./types.js";
+import type {
+  ClaimResult,
+  FenceResult,
+  IntakeReceipt,
+  IntakeWriteResult,
+  LivePhase,
+  StepRecord,
+  StopMode,
+} from "./types.js";
 
 /** One live run per thread. The existing row, if any, is what `live_runs` holds
  *  for the thread; the same run re-claimed by its owner is idempotent (a retry
@@ -66,18 +74,29 @@ export function checkFence(row: { ownerGen: string } | undefined, gen: string): 
 
 /** What a reclaiming generation takes over: every run whose lease has expired
  *  (a heartbeat lands strictly before `leaseUntil`, so equal is expired) and
- *  every run the previous generation handed off — **never a row it owns
- *  itself**. The reclaim runs on a sweep inside the live process too, and a
- *  lapsed lease on our own row means a heartbeat that could not land (a state
- *  Worker blip), not a dead owner: taking it would launch the run a second
- *  time in the same process, and the fence, which compares generations, would
- *  never stop the first. */
-export function selectReclaim<T extends { leaseUntil: number; phase: LivePhase; ownerGen: string }>(
-  rows: readonly T[],
-  now: number,
-  gen: string,
-): T[] {
-  return rows.filter((r) => r.ownerGen !== gen && (r.phase === "handoff" || r.leaseUntil <= now));
+ *  every run the previous generation handed off. A row this generation owns
+ *  is normally left alone: taking it could launch the run twice after a state
+ *  Worker blip. An expired, hard-stopped non-hosted row is safe to take because
+ *  reclaim closes it instead of launching it. */
+export function selectReclaim<
+  T extends {
+    leaseUntil: number;
+    phase: LivePhase;
+    ownerGen: string;
+    stop?: StopMode | null;
+    meta?: { hosted?: boolean };
+    state?: { hosting?: unknown };
+  },
+>(rows: readonly T[], now: number, gen: string): T[] {
+  return rows.filter(
+    (r) =>
+      (r.ownerGen !== gen && (r.phase === "handoff" || r.leaseUntil <= now)) ||
+      (r.ownerGen === gen &&
+        r.leaseUntil <= now &&
+        r.stop === "hard" &&
+        r.meta?.hosted !== true &&
+        r.state?.hosting === undefined),
+  );
 }
 
 /** Which inbox rows a reclaim hands the next generation (run-history item 40):
