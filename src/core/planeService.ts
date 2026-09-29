@@ -240,7 +240,7 @@ export function createPlaneService(deps: PlaneServiceDeps): PlaneService {
           limit: RUN_LIST_MAX_LIMIT,
         });
         for (const run of runs) {
-          if (run.id === instance.runId) continue;
+          if (run.id === instance.runId || run.parentInstanceId !== instanceId) continue;
           children.push({ id: run.id, outcome: await outcomeOf(run.id) });
         }
       }

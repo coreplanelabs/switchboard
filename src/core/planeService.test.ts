@@ -256,8 +256,12 @@ describe("plane stop — the runner_stop move (record 0064; issue 1924)", () => 
   it("terminates the instance and ends its live children in one move: the stop mark first, the hosted parent hard-stopped, then every live child in a unit thread — never the parent twice", async () => {
     const h = stopHarness({
       liveByThread: {
-        "slack:C_PUB:2.0": [view({ id: "child-1" })],
-        "slack:C_PUB:3.0": [view({ id: "child-2" })],
+        "slack:C_PUB:2.0": [
+          view({ id: "child-1", parentInstanceId: INSTANCE.id }),
+          view({ id: "unrelated", parentInstanceId: "another-instance" }),
+          view({ id: "manual" }),
+        ],
+        "slack:C_PUB:3.0": [view({ id: "child-2", parentInstanceId: INSTANCE.id })],
       },
     });
     await h.store.put(INSTANCE);
