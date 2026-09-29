@@ -64,6 +64,7 @@ Rename a test and the build is red until the spec changes with it. Adopting the 
 | [pr-images.md](pr-images.md) | Explicit PNG publication for inline PR display, thread delivery, private-bucket isolation, retention and revocation |
 | [agent-ship.md](agent-ship.md) | Ship [pipeline](../vocabulary.md#pipeline) (coding → review → fix to LGTM); the child contract and handoff; the plan runner's state machine over the coordinator's step returns; every request handed to the runner (a task, a plan, a resume at review) |
 | [main-agent-actions.md](main-agent-actions.md) | Main agent status, steer and stop for one durable linked Ship unit |
+| [main-agent-start.md](main-agent-start.md) | Main agent starts one private Ship worker from a sourced fix request |
 | [pull-requests.md](pull-requests.md) | Rebase ownership between a live pipeline runner and the operator's `pulls rebase` sweep |
 | [orchestration-plane.md](orchestration-plane.md) | The orchestration plane's table: every live and recently ended run, every ship unit and every tracked pull request with its owner and health, as `plane show` on every surface and the Access-gated `/plane` panel; read-only over the stores that exist |
 | [agent-explore.md](agent-explore.md) | The long, read-only investigation: a cold sandbox with the checkout on a read credential, two hours, web search, a claim table with commands and numbers, `setsid -f` for a job past the command cap, never a pull request; the first `repo-cold` preset |
