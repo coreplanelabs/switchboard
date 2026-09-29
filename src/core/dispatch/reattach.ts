@@ -46,7 +46,7 @@ export function carriedWorkspaceBinding(row: LiveRunRow): WorkspaceBinding | und
  * at dispatch, so a coding child re-attached after a bot roll still knows the
  * branch its pull request targets instead of calling the unit branch its own
  * base. Undefined for a run no coordinator spawned; a row written before the
- * event existed carries the two meta fields and no base — the post-step's
+ * event existed carries the meta fields, including its cap, but no base — the post-step's
  * second guard (the coordinator store) covers it.
  */
 export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent[]): CoordinatorTag | undefined {
@@ -57,10 +57,12 @@ export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent
   const publication = tag?.type === "coordinator_tag" ? tag.publication : undefined;
   const transportWorkflowId = tag?.type === "coordinator_tag" ? tag.transportWorkflowId : undefined;
   const recovery = tag?.type === "coordinator_tag" ? tag.recovery : undefined;
+  const costCapUsd = (tag?.type === "coordinator_tag" ? tag.costCapUsd : undefined) ?? row.meta.costCapUsd;
   const branch = (tag?.type === "coordinator_tag" ? tag.branch : undefined) ?? row.meta.ref;
   return {
     parentInstanceId,
     idempotencyKey,
+    ...(costCapUsd !== undefined ? { costCapUsd } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(transportWorkflowId !== undefined ? { transportWorkflowId } : {}),
     ...(recovery !== undefined ? { recovery } : {}),

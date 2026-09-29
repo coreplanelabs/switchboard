@@ -156,6 +156,9 @@ describe("run usage", () => {
       record: record("child-1", T + 20_000, {
         userId: "http:coordinator",
         parentRunId: "alice-1",
+        parentInstanceId: "plan-example-1",
+        idempotencyKey: "plan-example-1:U12/0/coding",
+        costCapUsd: 50,
         threadKey: "slack:C1:9",
         agent: "coding",
         usage: usage(1, 1),
@@ -189,6 +192,11 @@ describe("run usage", () => {
     ]);
     const child = runs[0] as { parentRunId: string; usage: { turns: number }; startedAt: number; finishedAt: number };
     expect(child.parentRunId).toBe("alice-1");
+    expect(child).toMatchObject({
+      parentInstanceId: "plan-example-1",
+      idempotencyKey: "plan-example-1:U12/0/coding",
+      costCapUsd: 50,
+    });
     expect(child.usage.turns).toBe(1);
     expect(child.finishedAt - child.startedAt).toBe(5000); // each fixture run is 5 s wall clock
     // The parent outside the range is named so the bot can bill the child to alice.

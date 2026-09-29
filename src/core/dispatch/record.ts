@@ -168,7 +168,13 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
       ...(summary.parentRunId !== undefined ? { parentRunId: summary.parentRunId } : {}),
       ...(summary.seed !== undefined ? { seed: summary.seed } : {}),
       ...(summary.parentInstanceId !== undefined && summary.idempotencyKey !== undefined
-        ? { coordinator: { parentInstanceId: summary.parentInstanceId, idempotencyKey: summary.idempotencyKey } }
+        ? {
+            coordinator: {
+              parentInstanceId: summary.parentInstanceId,
+              idempotencyKey: summary.idempotencyKey,
+              ...(summary.costCapUsd !== undefined ? { costCapUsd: summary.costCapUsd } : {}),
+            },
+          }
         : {}),
       ...(summary.hosted ? { hosted: true as const } : {}),
       finishedAt,
@@ -234,7 +240,13 @@ export function reclaimedRunRecord(input: {
     // A coordinator's child keeps its instance and key on the close (item 48),
     // so the state Worker's finish still sends the parent its event.
     ...(row.meta.parentInstanceId !== undefined && row.meta.idempotencyKey !== undefined
-      ? { coordinator: { parentInstanceId: row.meta.parentInstanceId, idempotencyKey: row.meta.idempotencyKey } }
+      ? {
+          coordinator: {
+            parentInstanceId: row.meta.parentInstanceId,
+            idempotencyKey: row.meta.idempotencyKey,
+            ...(row.meta.costCapUsd !== undefined ? { costCapUsd: row.meta.costCapUsd } : {}),
+          },
+        }
       : {}),
     ...(row.meta.hosted ? { hosted: true as const } : {}),
     finishedAt,

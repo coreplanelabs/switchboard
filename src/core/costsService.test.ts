@@ -54,6 +54,27 @@ const LLM: LlmCostRow[] = [{ date: AUG_28, workspaceId: null, amountUsd: 40 }];
 /** The one thread every Slack cell of the fixture is in. */
 const WHERE = { threadKey: "slack:C1:1.0", channelId: "slack:C1", agent: "general" };
 const usageReport: RunUsageReport = {
+  shipRuns: [
+    {
+      id: "ship-child-1",
+      unitKey: "plan-example-1:U12",
+      finishedAt: Date.parse("2026-08-29T10:00:00Z"),
+      costCapUsd: 50,
+      usage: {
+        turns: 1,
+        byModel: {
+          "openai/gpt-6-sol": {
+            turns: 1,
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            usd: 4.5,
+          },
+        },
+      },
+    },
+  ],
   rows: [
     {
       userId: "slack:UALICE",
@@ -164,6 +185,7 @@ describe("createCostsService", () => {
       nextAt: new Date(T0 + 86_400_000).toISOString(),
     });
     const r = await service.report("switchboard", "3");
+    expect(r.shipSpend?.units[0]).toMatchObject({ key: "plan-example-1:U12", capUsd: 50, totalUsd: 4.5 });
     expect(r.range).toEqual({ from: AUG_28, to: AUG_30, days: 3, partialLastDay: true });
     expect(r.snapshot).toEqual(stamp);
     expect(r.days.map((d) => d.date)).toEqual([AUG_28, AUG_29, AUG_30]);
@@ -171,6 +193,13 @@ describe("createCostsService", () => {
     const week = await service.report("switchboard", "7");
     expect(week.range.days).toBe(7);
     expect(week.range.to).toBe(AUG_30);
+  });
+
+  it("omits Ship spend for legacy run usage without child points", async () => {
+    const snapshots = snapshotterWith({ ...usageReport, shipRuns: undefined });
+    await snapshots.refresh("schedule");
+    const report = await createCostsService(cfg, snapshots).report("switchboard", "3");
+    expect(report).not.toHaveProperty("shipSpend");
   });
 
   it("the by-user report prices and allocates over the snapshot's run usage for the range and matches the viewer to their run ids by email (one lookup per distinct Slack user, cached)", async () => {

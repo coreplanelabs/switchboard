@@ -88,12 +88,22 @@ describe("the coordinator's names", () => {
     expect(childResumedEventType(runId)).toMatch(platform);
   });
 
-  it("coordinatorFields spreads a tag into the two record fields and nothing without one", () => {
+  it("coordinatorFields spreads identity fields and nothing without a coordinator", () => {
     expect(coordinatorFields({ parentInstanceId: "inst_1", idempotencyKey: "inst_1:s" })).toEqual({
       parentInstanceId: "inst_1",
       idempotencyKey: "inst_1:s",
     });
     expect(coordinatorFields(undefined)).toEqual({});
+  });
+
+  it("carries an admitted unit cost cap into its child record", () => {
+    expect(
+      coordinatorFields({ parentInstanceId: "inst_1", idempotencyKey: "inst_1:U12/0/coding", costCapUsd: 50 }),
+    ).toEqual({
+      parentInstanceId: "inst_1",
+      idempotencyKey: "inst_1:U12/0/coding",
+      costCapUsd: 50,
+    });
   });
 
   it("the tag's base is an instruction to the child's post-step, not a record field: coordinatorFields leaves it out, so rows and records keep the shape written before it existed", () => {

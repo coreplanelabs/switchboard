@@ -4131,6 +4131,9 @@ export class RunHistoryDO extends DurableObject<Env> {
         userId: row.user_id,
         ...(who.userName ? { userName: who.userName } : {}),
         ...(who.parentRunId ? { parentRunId: who.parentRunId } : {}),
+        ...(who.parentInstanceId ? { parentInstanceId: who.parentInstanceId } : {}),
+        ...(who.idempotencyKey ? { idempotencyKey: who.idempotencyKey } : {}),
+        ...(who.costCapUsd !== undefined ? { costCapUsd: who.costCapUsd } : {}),
         threadKey: row.thread_key,
         channelId: row.channel_id,
         ...(row.agent ? { agent: row.agent } : {}),
@@ -4379,12 +4382,23 @@ function parseUsageJson(raw: string | null): RunUsage | undefined {
 }
 
 /** The two identity fields the by-user aggregate needs off a summary, read leniently. */
-function identityOfSummary(raw: string): { userName?: string; parentRunId?: string } {
+function identityOfSummary(raw: string): {
+  userName?: string;
+  parentRunId?: string;
+  parentInstanceId?: string;
+  idempotencyKey?: string;
+  costCapUsd?: number;
+} {
   try {
     const s = JSON.parse(raw) as Record<string, unknown>;
     return {
       ...(typeof s.userName === "string" && s.userName ? { userName: s.userName } : {}),
       ...(typeof s.parentRunId === "string" && s.parentRunId ? { parentRunId: s.parentRunId } : {}),
+      ...(typeof s.parentInstanceId === "string" && s.parentInstanceId ? { parentInstanceId: s.parentInstanceId } : {}),
+      ...(typeof s.idempotencyKey === "string" && s.idempotencyKey ? { idempotencyKey: s.idempotencyKey } : {}),
+      ...(typeof s.costCapUsd === "number" && Number.isFinite(s.costCapUsd) && s.costCapUsd > 0
+        ? { costCapUsd: s.costCapUsd }
+        : {}),
     };
   } catch {
     return {};
@@ -5689,6 +5703,14 @@ function parseClaim(b: Record<string, unknown>): Validated<ClaimRequest> {
     if (typeof meta.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(meta.idempotencyKey))
       return invalid("run.meta.idempotencyKey must be <parentInstanceId>:<step>");
   }
+  if (
+    meta.costCapUsd !== undefined &&
+    (meta.parentInstanceId === undefined ||
+      typeof meta.costCapUsd !== "number" ||
+      !Number.isFinite(meta.costCapUsd) ||
+      meta.costCapUsd <= 0)
+  )
+    return invalid("run.meta.costCapUsd must be a positive coordinator cap");
   // The restart tag (record 0064) names the predecessor run whose windows the
   // claim reuses and rides the `child-resumed` event's reason: a run id or
   // absent, never another shape.

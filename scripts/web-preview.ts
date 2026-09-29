@@ -1178,6 +1178,36 @@ const COSTS: CostReport = {
     r2Buckets: { "switchboard-resident-cache": "switchboard-resident-cache" },
     workflows: {},
   },
+  shipSpend: {
+    range: { from: COSTS_DAYS[0].date, to: COSTS_DAYS[29].date, days: 30, partialLastDay: true },
+    units: [
+      {
+        key: "ship_example_1:U12",
+        capUsd: 50,
+        totalUsd: 38,
+        runs: [
+          {
+            id: "demo-ship-coding",
+            finishedAt: Date.parse(`${COSTS_DAYS[27].date}T10:00:00Z`),
+            usd: 12,
+            cumulativeUsd: 12,
+          },
+          {
+            id: "demo-ship-review",
+            finishedAt: Date.parse(`${COSTS_DAYS[28].date}T12:00:00Z`),
+            usd: 18,
+            cumulativeUsd: 30,
+          },
+          {
+            id: "demo-ship-fix",
+            finishedAt: Date.parse(`${COSTS_DAYS[29].date}T14:00:00Z`),
+            usd: 8,
+            cumulativeUsd: 38,
+          },
+        ],
+      },
+    ],
+  },
 };
 
 // The snapshot the page says its figures are from (costs.md item 6): taken on

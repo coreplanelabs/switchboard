@@ -227,6 +227,8 @@ export interface RunRecord {
    *  item 48), stored at the claim so a retried spawn finds its run. Present
    *  exactly when `parentInstanceId` is — both or neither, never one alone. */
   idempotencyKey?: string;
+  /** The coordinator unit's original cost cap, carried by each child. */
+  costCapUsd?: number;
   /** The plan runner instance this run's hand-off created (record 0051 R2;
    *  item 2): the last `ship_handoff` event, folded at the assembly like the
    *  coordinator tag. Present only on a ship run whose hand-off succeeded;
@@ -1193,6 +1195,14 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (
     r.idempotencyKey !== undefined &&
     (typeof r.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(r.idempotencyKey))
+  )
+    return false;
+  if (
+    r.costCapUsd !== undefined &&
+    (r.parentInstanceId === undefined ||
+      typeof r.costCapUsd !== "number" ||
+      !Number.isFinite(r.costCapUsd) ||
+      r.costCapUsd <= 0)
   )
     return false;
   // The instance a ship run's hand-off created (record 0051 R2; item 2).

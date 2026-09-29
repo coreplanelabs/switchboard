@@ -1145,6 +1145,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const tag: CoordinatorTag = {
     parentInstanceId: instance.id,
     idempotencyKey: key,
+    ...(instance.grant?.costCapUsd !== undefined ? { costCapUsd: instance.grant.costCapUsd } : {}),
     ...((row?.branch ?? instance.branch) !== undefined ? { branch: row?.branch ?? instance.branch } : {}),
     ...(row?.recovery !== undefined ? { transportWorkflowId: row.recovery.workflowId } : {}),
     ...(row?.recovery !== undefined && row.publication !== undefined
