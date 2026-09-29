@@ -56,6 +56,7 @@ import {
 } from "./executor.js";
 import { isDeadlineMiss, type ExecTraceOptions, type MoveOptions, type ReleaseOptions } from "./executor.js";
 import type { LeftBehind } from "./residentCleanliness.js";
+import type { ThreadDepsMechanism } from "./residentDepCache.js";
 
 // Remote execution against a resident repo environment — the always-warm
 // per-repo service behind the resident Worker (deploy/cloudflare-resident/).
@@ -597,6 +598,10 @@ export interface ResidentExecutorOptions {
 export interface ResidentBinding {
   ref: string;
   sha: string;
+  /** The successful attach's dependency materialization, and the exact
+   * lockfile key when an install-backed view was attached. */
+  deps?: ThreadDepsMechanism;
+  depsKey?: string;
   /** Absolute path of the thread's worktree inside the resident — the cwd of
    *  every /exec. Advisory (named to the model so it never goes looking for
    *  the repository); undefined if the attach answer lacked it. */
@@ -1360,6 +1365,10 @@ export class ResidentExecutor implements Executor {
     this.lastBinding = {
       ref: data.ref,
       sha: data.sha,
+      ...(["hardlink", "copy", "reconcile", "none"].includes(String(data.deps))
+        ? { deps: data.deps as ThreadDepsMechanism }
+        : {}),
+      ...(typeof data.depsKey === "string" && data.depsKey ? { depsKey: data.depsKey } : {}),
       ...(typeof data.workspace === "string" && data.workspace ? { workspace: data.workspace } : {}),
       ...(typeof data.user === "string" && data.user ? { user: data.user } : {}),
       ...(typeof data.container === "string" && data.container ? { container: data.container } : {}),

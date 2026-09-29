@@ -23,11 +23,104 @@ export const SEED_DEPS_STAGING_DIR = "/workspace/.seed-deps";
  *  head is a new seed. */
 export const SEED_MARKER = "/workspace/.switchboard-seed";
 
-/** The marker's one line: the checkout handle, the ref the tree is on, the head asked
- *  for (or `-`). Two seeds are the same seed exactly when these agree; a retry carries
- *  the identical seed, a re-attach on another branch does not. */
-export function seedMarkerText(seed: Pick<SandboxSeed, "checkoutBackupId" | "ref" | "fetchRef" | "fetchSha">): string {
-  return `${seed.checkoutBackupId} ${seed.fetchRef ?? seed.ref} ${seed.fetchSha ?? "-"}`;
+/** A trusted pilot admission supplies the repository's declared test command
+ * and the tools it needs. This is a check of availability, not a test run. */
+export interface ReadyEnvironmentRequirement {
+  testCommand: string;
+  requiredTools: readonly string[];
+  dependencyDir: string;
+}
+
+export type ReadyEnvironmentOutcome =
+  | { ready: true }
+  | {
+      ready: false;
+      reason: "dependencies_missing" | "dependencies_stale" | "tool_missing" | "test_command_invalid" | "check_failed";
+      tool?: string;
+    };
+
+const READY_TOOL = /^[A-Za-z_][A-Za-z0-9_.+-]*$/;
+const READY_DEPENDENCY_DIR = new RegExp("^[A-Za-z0-9_./-]+$");
+/** The root lockfiles the resident keys its dependency archive on. */
+const READY_LOCKFILES = [
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "bun.lock",
+  "bun.lockb",
+  "go.sum",
+  "Cargo.lock",
+  "uv.lock",
+  "poetry.lock",
+  "requirements.txt",
+  "Gemfile.lock",
+  "composer.lock",
+];
+
+/** Model-free, fixed-output probe on the bound checkout. `bash -n` parses the
+ * declared test command but does not run the suite or install packages. */
+export function readyEnvironmentCommand(
+  workspace: string,
+  requirement: ReadyEnvironmentRequirement,
+  seededFromSha?: string,
+): string {
+  const command = requirement.testCommand;
+  const program = /^([A-Za-z_][A-Za-z0-9_.+-]*)(?:\s|$)/.exec(command)?.[1];
+  if (!program || command.length > 512 || [...command].some((ch) => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127))
+    throw new Error("ready environment: declared test command is missing or unsupported");
+  if (
+    !READY_DEPENDENCY_DIR.test(requirement.dependencyDir) ||
+    requirement.dependencyDir.startsWith("/") ||
+    requirement.dependencyDir === "." ||
+    requirement.dependencyDir.split("/").some((part) => part === "." || part === ".." || part === "")
+  )
+    throw new Error("ready environment: dependency directory is invalid");
+  if (
+    !Array.isArray(requirement.requiredTools) ||
+    requirement.requiredTools.some((tool) => typeof tool !== "string" || !READY_TOOL.test(tool))
+  )
+    throw new Error("ready environment: required tool is invalid");
+  if (seededFromSha !== undefined && !/^[0-9a-f]{40}$/.test(seededFromSha))
+    throw new Error("ready environment: snapshot head is invalid");
+  const tools = [...new Set(["bash", ...(seededFromSha ? ["git"] : []), program, ...requirement.requiredTools])];
+  return [
+    "set -eu",
+    `cd ${shellQuote(workspace)}`,
+    `if ! test -d ${shellQuote(requirement.dependencyDir)}; then printf MISSING_DEPENDENCIES; exit 2; fi`,
+    ...tools.map(
+      (tool) =>
+        `if ! command -v ${shellQuote(tool)} >/dev/null 2>&1; then printf ${shellQuote(`MISSING_TOOL:${tool}`)}; exit 2; fi`,
+    ),
+    ...(seededFromSha
+      ? [
+          `if ! git diff --quiet ${shellQuote(seededFromSha)} HEAD -- ${READY_LOCKFILES.map(shellQuote).join(" ")}; then printf LOCKFILE_MISMATCH; exit 0; fi`,
+        ]
+      : []),
+    `if ! bash -n -c ${shellQuote(command)} >/dev/null 2>&1; then printf INVALID_TEST_COMMAND; exit 2; fi`,
+    "printf READY",
+  ].join("\n");
+}
+
+/** The shell emits fixed markers only. An infra/error body is not repeated in
+ * the user-facing failure; it may contain material from a dirty workspace. */
+export function readyEnvironmentOutcome(output: string): ReadyEnvironmentOutcome {
+  const text = output.trim();
+  if (text === "READY") return { ready: true };
+  if (/(?:^|\n)MISSING_DEPENDENCIES$/.test(text)) return { ready: false, reason: "dependencies_missing" };
+  if (/(?:^|\n)LOCKFILE_MISMATCH$/.test(text)) return { ready: false, reason: "dependencies_stale" };
+  const missingTool = /(?:^|\n)MISSING_TOOL:([A-Za-z_][A-Za-z0-9_.+-]*)$/.exec(text);
+  if (missingTool) return { ready: false, reason: "tool_missing", tool: missingTool[1] };
+  if (/(?:^|\n)INVALID_TEST_COMMAND$/.test(text)) return { ready: false, reason: "test_command_invalid" };
+  return { ready: false, reason: "check_failed" };
+}
+
+/** The marker names both restored archives and the checkout target. A changed
+ * dependency archive cannot reuse a tree holding the old dependency view. */
+export function seedMarkerText(
+  seed: Pick<SandboxSeed, "checkoutBackupId" | "depsBackupId" | "ref" | "fetchRef" | "fetchSha">,
+): string {
+  return `${seed.checkoutBackupId} ${seed.depsBackupId ?? "-"} ${seed.fetchRef ?? seed.ref} ${seed.fetchSha ?? "-"}`;
 }
 
 /** One cap shared by both restores, judged by bytes arriving (the SDK's

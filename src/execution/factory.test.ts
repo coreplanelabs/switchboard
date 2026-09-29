@@ -25,6 +25,7 @@ import {
   workspaceBindingOf,
   WorkspaceReattachLeaseSpentError,
   WorkspaceReattachRefusedError,
+  ReadyEnvironmentError,
   type ExecutorFactoryOptions,
   type WorkspaceBinding,
 } from "./factory.js";
@@ -2988,5 +2989,287 @@ describe("makeExecutor seeded sandbox", () => {
     expect(calls).toEqual(["/status"]);
     expect(sel.executor).toBeInstanceOf(LocalExecutor);
     expect(sel.seeded).toBeUndefined();
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 31 — an opted-in write unit
+// starts only after a dependency-ready resident or seeded sandbox passes a
+// model-free check of the declared test tool.
+describe("makeExecutor pilot ready environment", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    resetResidentProbeCache();
+  });
+
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const DEPS = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+  const CHECKOUT = "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b";
+  const ready = { testCommand: "npm test", requiredTools: ["npm"], dependencyDir: "node_modules" };
+  const opts = (): ExecutorFactoryOptions => ({
+    execution: {
+      type: "cloudflare",
+      url: "https://sandbox.example",
+      resident: { baseUrl: "https://resident.example" },
+    },
+    ...dirs(),
+  });
+  const context = () => ({
+    ...ctxOf(AGENTS.coding),
+    repo: "jshttp/vary",
+    ref: "master",
+    headSha: SHA,
+    readyEnvironment: ready,
+  });
+  const envs = () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+  };
+  function fetches(...answers: Array<{ status?: number; body: unknown }>) {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/exec") return new Response(JSON.stringify({ exitCode: 0, stdout: "" }), { status: 200 });
+        calls.push(path);
+        const answer = answers.shift();
+        if (!answer) throw new Error(`unexpected fetch ${String(url)}`);
+        return new Response(JSON.stringify(answer.body), { status: answer.status ?? 200 });
+      }),
+    );
+    return calls;
+  }
+  const snapshot = (depsBackupId: string | null = DEPS) => ({
+    ref: "master",
+    sha: SHA,
+    checkoutBackupId: CHECKOUT,
+    ...(depsBackupId ? { depsBackupId } : {}),
+  });
+
+  it("refuses an opt-in write without a resolved repository or resident before provisioning", async () => {
+    envs();
+    const calls = fetches();
+    await expect(makeExecutor(opts(), { ...context(), repo: undefined })).rejects.toMatchObject({
+      name: "ReadyEnvironmentError",
+      reason: "repository_unresolved",
+    });
+    await expect(
+      makeExecutor({ ...opts(), execution: { type: "cloudflare", url: "https://sandbox.example" } }, context()),
+    ).rejects.toBeInstanceOf(ReadyEnvironmentError);
+    await expect(
+      makeExecutor({ ...opts(), execution: { type: "cloudflare", resident: opts().execution?.resident } }, context()),
+    ).rejects.toMatchObject({ reason: "backend_unavailable", beforeModel: true });
+    vi.stubEnv("SANDBOX_TOKEN", "");
+    await expect(makeExecutor(opts(), context())).rejects.toMatchObject({
+      reason: "backend_unavailable",
+      beforeModel: true,
+    });
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "");
+    await expect(makeExecutor(opts(), context())).rejects.toMatchObject({
+      reason: "backend_unavailable",
+      beforeModel: true,
+    });
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    await expect(
+      makeExecutor(
+        { ...opts(), execution: { ...opts().execution, resident: { baseUrl: "" }, type: "cloudflare" } },
+        context(),
+      ),
+    ).rejects.toMatchObject({ reason: "backend_unavailable", beforeModel: true });
+    await expect(makeExecutor(opts(), { ...context(), headSha: undefined })).rejects.toMatchObject({
+      reason: "repository_unresolved",
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a resumed pilot write before a model or backend can bypass readiness", async () => {
+    envs();
+    const calls = fetches();
+    await expect(
+      makeExecutor(opts(), {
+        ...context(),
+        reattach: {
+          backend: "sandbox",
+          seeded: { slug: "jshttp/vary", ref: "master", workspace: "/workspace/checkout" },
+        },
+      }),
+    ).rejects.toMatchObject({ name: "ReadyEnvironmentError", reason: "binding_mismatch", beforeModel: true });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a repository without a warm snapshot instead of provisioning cold", async () => {
+    envs();
+    const calls = fetches({ body: { state: "not-onboarded", reason: "", snapshot: null } });
+    await expect(makeExecutor(opts(), context())).rejects.toMatchObject({
+      reason: "repository_not_onboarded",
+      beforeModel: true,
+    });
+    expect(calls).toEqual(["/status"]);
+  });
+
+  it("admits a warm bound resident only after installed deps and the declared tool pass a model-free check", async () => {
+    envs();
+    const calls = fetches(
+      { body: { state: "warm", reason: "", snapshot: snapshot() } },
+      {
+        body: { workspace: "/workspace/threads/x/master", ref: "master", sha: SHA, deps: "hardlink", depsKey: "lock" },
+      },
+    );
+    const check = vi.spyOn(ResidentExecutor.prototype, "exec").mockResolvedValue("READY");
+    const selection = await makeExecutor(opts(), context());
+    expect(selection.backend).toBe("resident");
+    expect(check).toHaveBeenCalledOnce();
+    expect(check.mock.calls[0]?.[0]).toContain("command -v 'npm'");
+    expect(check.mock.calls[0]?.[0]).toContain("node_modules");
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
+  it("admits a reused resident dependency view only when the resident verifies its key", async () => {
+    envs();
+    const calls = fetches(
+      { body: { state: "warm", reason: "", snapshot: snapshot() } },
+      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: SHA, deps: "none", depsKey: "lock" } },
+    );
+    const check = vi.spyOn(ResidentExecutor.prototype, "exec").mockResolvedValue("READY");
+    const selection = await makeExecutor(opts(), context());
+    expect(selection.backend).toBe("resident");
+    expect(check).toHaveBeenCalledOnce();
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
+  it("holds the unit before the model when the resident has no dependency view or the tool is missing", async () => {
+    envs();
+    const calls = fetches(
+      { body: { state: "warm", reason: "", snapshot: snapshot() } },
+      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: SHA, deps: "none" } },
+      { body: { ok: true } },
+    );
+    const check = vi.spyOn(ResidentExecutor.prototype, "exec").mockResolvedValue("READY");
+    await expect(makeExecutor(opts(), context())).rejects.toMatchObject({ reason: "dependencies_missing" });
+    expect(check).not.toHaveBeenCalled();
+    expect(calls).toEqual(["/status", "/attach", "/detach"]);
+
+    const other = fetches(
+      { body: { state: "warm", reason: "", snapshot: snapshot() } },
+      {
+        body: { workspace: "/workspace/threads/x/master", ref: "master", sha: SHA, deps: "hardlink", depsKey: "lock" },
+      },
+      { body: { ok: true } },
+    );
+    check.mockResolvedValue("exit 2:\nMISSING_TOOL:npm");
+    await expect(makeExecutor(opts(), context())).rejects.toMatchObject({ reason: "tool_missing" });
+    expect(other).toEqual(["/status", "/attach", "/detach"]);
+  });
+
+  it("admits a seeded sandbox only with a dependency archive, matching source, and a passed tool check", async () => {
+    envs();
+    const calls = fetches(
+      { body: { state: "degraded", reason: "install-failed", snapshot: snapshot() } },
+      {
+        body: {
+          seeded: true,
+          cached: false,
+          slug: "jshttp/vary",
+          ref: "master",
+          sha: SHA,
+          from: { ref: "master", sha: SHA, checkoutBackupId: CHECKOUT, depsBackupId: DEPS },
+          steps: { restore: 1, deps: 1, fixup: 1 },
+          ms: 3,
+        },
+      },
+    );
+    const check = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockResolvedValue("READY");
+    const selection = await makeExecutor(opts(), context());
+    expect(selection.backend).toBe("sandbox");
+    expect(selection.seeded).toMatchObject({ slug: "jshttp/vary", ref: "master", sha: SHA });
+    expect(check.mock.calls[0]?.[0]).toContain("/workspace/checkout");
+    expect(calls).toEqual(["/status", "/seed"]);
+  });
+
+  it("refuses a seeded target whose lockfile changed after the dependency snapshot", async () => {
+    envs();
+    const target = "89abcdef0123456789abcdef0123456789abcdef";
+    const calls = fetches(
+      { body: { state: "degraded", reason: "install-failed", snapshot: snapshot() } },
+      {
+        body: {
+          seeded: true,
+          cached: false,
+          slug: "jshttp/vary",
+          ref: "feature/new-deps",
+          sha: target,
+          from: { ref: "master", sha: SHA, checkoutBackupId: CHECKOUT, depsBackupId: DEPS },
+          steps: { restore: 1, deps: 1, fixup: 1 },
+          ms: 3,
+        },
+      },
+    );
+    const check = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockResolvedValue("LOCKFILE_MISMATCH");
+    await expect(
+      makeExecutor(opts(), { ...context(), ref: "feature/new-deps", headSha: target }),
+    ).rejects.toMatchObject({ reason: "dependencies_stale", beforeModel: true });
+    expect(check.mock.calls[0]?.[0]).toContain(`git diff --quiet '${SHA}' HEAD --`);
+    expect(calls).toEqual(["/status", "/seed"]);
+  });
+
+  it("never falls through to fresh cold when the snapshot lacks deps or the seed fails", async () => {
+    envs();
+    const calls = fetches({ body: { state: "degraded", reason: "install-failed", snapshot: snapshot(null) } });
+    await expect(makeExecutor(opts(), context())).rejects.toMatchObject({ reason: "dependencies_missing" });
+    expect(calls).toEqual(["/status"]);
+
+    const retry = fetches(
+      { body: { state: "degraded", reason: "install-failed", snapshot: snapshot() } },
+      { body: { seeded: false, reason: "seed-failed", detail: "restore failed" } },
+    );
+    await expect(makeExecutor(opts(), context())).rejects.toMatchObject({ reason: "seed_failed" });
+    expect(retry).toEqual(["/status", "/seed"]);
+
+    const wrongSource = fetches(
+      { body: { state: "degraded", reason: "install-failed", snapshot: snapshot() } },
+      {
+        body: {
+          seeded: true,
+          cached: false,
+          slug: "jshttp/vary",
+          ref: "master",
+          sha: SHA,
+          from: {
+            ref: "master",
+            sha: SHA,
+            checkoutBackupId: CHECKOUT,
+            depsBackupId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+          },
+          steps: { restore: 1, deps: 1, fixup: 1 },
+          ms: 3,
+        },
+      },
+    );
+    await expect(makeExecutor(opts(), context())).rejects.toMatchObject({ reason: "binding_mismatch" });
+    expect(wrongSource).toEqual(["/status", "/seed"]);
+  });
+
+  it("refuses a rotated seed without a dependency archive before restoring its checkout", async () => {
+    envs();
+    const calls = fetches(
+      { body: { state: "degraded", reason: "install-failed", snapshot: snapshot() } },
+      { body: { seeded: false, reason: "seed-missing", detail: "checkout rotated" } },
+      {
+        body: {
+          state: "degraded",
+          reason: "install-failed",
+          snapshot: { ...snapshot(null), checkoutBackupId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee" },
+        },
+      },
+    );
+    await expect(makeExecutor(opts(), context())).rejects.toMatchObject({
+      reason: "dependencies_missing",
+      beforeModel: true,
+    });
+    expect(calls).toEqual(["/status", "/seed", "/status"]);
   });
 });
