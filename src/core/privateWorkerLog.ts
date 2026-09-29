@@ -9,12 +9,15 @@ export type PrivateWorkerEventInput =
 
 export type PrivateWorkerEvent = PrivateWorkerEventInput & { seq: number; statusSeq?: number };
 
+export const PRIVATE_WORKER_EVENT_MAX_CHARS = 32_000;
+
 const frame = (value: unknown): boolean =>
   typeof value === "object" && value !== null && typeof (value as { title?: unknown }).title === "string";
 
 /** Bound stored worker prose and reject malformed rows at the persistence door. */
 export function isPrivateWorkerEventInput(value: unknown): value is PrivateWorkerEventInput {
-  if (typeof value !== "object" || value === null || JSON.stringify(value).length > 32_000) return false;
+  if (typeof value !== "object" || value === null || JSON.stringify(value).length > PRIVATE_WORKER_EVENT_MAX_CHARS)
+    return false;
   const row = value as Record<string, unknown>;
   if (typeof row.at !== "number" || !Number.isFinite(row.at)) return false;
   if (row.kind === "input")

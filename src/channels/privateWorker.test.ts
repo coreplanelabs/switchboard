@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { InMemoryPrivateWorkerLog, UnavailablePrivateWorkerLog } from "../core/privateWorkerLog.js";
+import {
+  InMemoryPrivateWorkerLog,
+  UnavailablePrivateWorkerLog,
+  isPrivateWorkerEvent,
+} from "../core/privateWorkerLog.js";
 import {
   appendPrivateWorkerInput,
   parsePrivateWorkerThreadKey,
@@ -42,6 +46,20 @@ describe("private worker IO — a task thread with no Slack delivery", () => {
     ]);
     expect((await log.list(threadKey)).filter((event) => event.kind === "input")).toHaveLength(2);
     expect((await log.list(threadKey)).find((event) => event.kind === "reply")).toMatchObject({ runId: "run-1" });
+  });
+
+  it("bounds escaped long input without splitting a code point or duplicating its retry", async () => {
+    const log = new InMemoryPrivateWorkerLog();
+    const text = `Fix this: ${'"\\\n🙂'.repeat(12_000)}`;
+    await appendPrivateWorkerInput(log, task, { id: "long-1", sender: "slack:UA", text, at: 10 });
+    await appendPrivateWorkerInput(log, task, { id: "long-1", sender: "slack:UA", text, at: 11 });
+    const events = await log.list(threadKey);
+    expect(events).toHaveLength(1);
+    expect(isPrivateWorkerEvent(events[0])).toBe(true);
+    expect(events[0]?.kind === "input" ? events[0].text : "").toContain("[Private history copy shortened;");
+    const stored = events[0]?.kind === "input" ? events[0].text : "";
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(stored)).toBe(false);
+    expect(await privateWorkerIO(log, task, { currentInputId: "long-1", clock: now }).history()).toEqual([]);
   });
 
   it("writes ordered status frames and waits for updates before closing the status", async () => {

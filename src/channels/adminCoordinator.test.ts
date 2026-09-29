@@ -8,6 +8,7 @@ import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceSt
 import {
   InMemoryPrivateWorkerLog,
   UnavailablePrivateWorkerLog,
+  isPrivateWorkerEventInput,
   type PrivateWorkerLog,
 } from "../core/privateWorkerLog.js";
 import {
@@ -3333,6 +3334,78 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       body: { error: "private_worker_thread_conflict" },
     });
     expect(h.threadsAsked).toEqual([]);
+  });
+
+  it("admits a valid long worker request while bounding only its private history copy", async () => {
+    const backing = new InMemoryPrivateWorkerLog();
+    const log: PrivateWorkerLog = {
+      list: (threadKey) => backing.list(threadKey),
+      append: (threadKey, event) => {
+        if (!isPrivateWorkerEventInput(event)) throw new Error("private log event over cap");
+        return backing.append(threadKey, event);
+      },
+    };
+    const longTask = `Fix signup ${"x".repeat(40_000)}`;
+    const instance: CoordinatorInstance = {
+      ...INSTANCE,
+      plan: { id: "private-task" },
+      branch: "plan/private-task/u12",
+      merge: "person",
+      runId: "run-private-parent",
+    };
+    const h = harness({
+      privateWorkerLog: log,
+      files: { "AGENTS.md": "# Rules" },
+      ioFor: () => {
+        throw new Error("worker tried to use Slack");
+      },
+      script: async (_msg, io) => {
+        io.runStarted?.({ id: "run-private-long" });
+        return { status: "completed" };
+      },
+    });
+    await h.instances.put(instance);
+    await h.store.put(
+      record(instance.runId!, {
+        events: [{ type: "input", messageId: "long-task", text: longTask, seq: 1 }],
+        eventCount: 1,
+        storedEventCount: 1,
+      }),
+    );
+    await h.instances.putUnits([
+      {
+        instanceId: instance.id,
+        unit: "U12",
+        slug: "u12",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        workBrief: {
+          requesterId: instance.userId,
+          mainThreadKey: instance.threadKey,
+          actId: "act-1",
+          repo: instance.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      },
+    ]);
+    expect(await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" })).toMatchObject({ status: 200 });
+    const spawned = await call(h, "spawn", {
+      parentInstanceId: instance.id,
+      step: "U12/0/coding",
+      preset: "coding",
+      brief: { kind: "contract", unit: "U12", rebase: { branch: instance.branch, onto: "main" } },
+    });
+    expect(spawned.status, JSON.stringify(spawned.body)).toBe(200);
+    expect(h.dispatched[0]?.msg.text.length).toBeGreaterThan(32_000);
+    expect(h.dispatched[0]?.msg.text.includes(longTask)).toBe(true);
+    const [input] = await backing.list(`worker:${instance.id}:U12`);
+    expect(input?.kind).toBe("input");
+    expect(isPrivateWorkerEventInput(input)).toBe(true);
+    expect(input?.kind === "input" ? input.text : "").toContain("[Private history copy shortened;");
   });
 
   it("a main-agent worker refuses admission when its durable log is missing", async () => {
