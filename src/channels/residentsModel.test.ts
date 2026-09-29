@@ -3,6 +3,8 @@ import {
   applyResidentsFrame,
   bindingFor,
   diskHeadroom,
+  residentImageReport,
+  residentsFleetTone,
   residentThreads,
   runsOnResident,
   threadTreeKiB,
@@ -47,6 +49,15 @@ const run = (id: string, over: Partial<RunIndexRowSeed> = {}): RunIndexRowSeed =
   eventCount: 1,
   token: `tok-${id}`,
   ...over,
+});
+
+describe("residents image readiness", () => {
+  it("reads current, pending and missing reports without equating warm with current", () => {
+    expect(residentImageReport({ ...RECORD, live: { state: "warm", imageReport: "pending" } })).toBe("pending");
+    expect(residentImageReport({ ...RECORD, live: { state: "warm", imageReport: "current" } })).toBe("current");
+    expect(residentImageReport(RECORD)).toBe("unknown");
+    expect(residentsFleetTone([{ ...RECORD, live: { state: "warm", imageReport: "pending" } }])).toBe("amber");
+  });
 });
 
 describe("residentThreads", () => {
@@ -149,6 +160,7 @@ describe("applyResidentsFrame", () => {
   const state = (): ResidentsIndexState => ({
     cap: 5,
     count: 1,
+    draining: null,
     residents: [RECORD],
     runs: new Map([["a", run("a", { repo: "jshttp/vary" })]]),
   });
@@ -168,9 +180,11 @@ describe("applyResidentsFrame", () => {
   it("a residents frame replaces the listing whole — cap, count and every record", () => {
     const s = state();
     const fresh = { resource: "repo:jshttp/vary", live: { state: "refreshing", threads: [] } };
-    applyResidentsFrame(s, { type: "residents", cap: 6, count: 2, residents: [fresh, RECORD] });
+    const draining = { reason: "deploy abc1234", holds: ["repo:jshttp/vary"] };
+    applyResidentsFrame(s, { type: "residents", cap: 6, count: 2, draining, residents: [fresh, RECORD] });
     expect(s.cap).toBe(6);
     expect(s.count).toBe(2);
+    expect(s.draining).toEqual(draining);
     expect(s.residents).toEqual([fresh, RECORD]);
     expect(s.runs.size).toBe(1); // the runs are the registry's, untouched by a listing
   });

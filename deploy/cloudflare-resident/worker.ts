@@ -90,6 +90,11 @@ import {
 import { hasUnexpectedOwnedThreadDir } from "./orphanThreadUsers.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
 import {
+  nextDeployImageReconcile,
+  replacementContainerStarted,
+  type DeployImageReconcileState,
+} from "./imageReconcileState.js";
+import {
   registeredRunAllowsClaim,
   registeredRunAllowsReattach,
   registeredRunNeedsProtection,
@@ -1478,6 +1483,7 @@ const DRAIN_KEY = "drain";
  *  verify this resident's container on the new image; the next reconcile that
  *  finds it current reports to the registry and clears it. */
 const IMAGE_REPORT_PENDING_KEY = "imageReportPending";
+const IMAGE_RECONCILE_KEY = "imageReconcile";
 
 type OnboardResult = { ok: true; record: ResidentRecord } | { ok: false; status: number; error: string };
 
@@ -5250,7 +5256,12 @@ export class ResidentDO extends Sandbox<Env> {
     }
     console.log(`image-stale (${where}): ${stale} — stopping so it restarts on the current image`);
     this.swapIncarnation(); // deliberate incarnation swap
-    await this.stop().catch((err) => console.log(`image-stale: stop failed: ${errMsg(err)}`));
+    try {
+      await this.stop();
+    } catch (err) {
+      console.log(`image-stale: stop failed: ${errMsg(err)}`);
+      if (where === "deploy") return "deferred";
+    }
     // A successful stop proves only that the old process is gone. The pending
     // marker deliberately survives it: the replacement's own hydration reports
     // after reaching `warm`, so `imageReport: current` can never precede a
@@ -5306,9 +5317,55 @@ export class ResidentDO extends Sandbox<Env> {
    *  added afterwards would wait for a report nothing sends (until the drain's
    *  `until`). Held first, every report finds its hold. */
   async reconcileForDeploy(resource: string): Promise<{ result: ImageReconcileResult; verified: boolean }> {
-    await registryStub(this.env).holdDrainFor([resource]);
-    await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource });
+    const progress = await this.ctx.storage.get<DeployImageReconcileState>(IMAGE_RECONCILE_KEY);
+    const pending = await this.ctx.storage.get<{ resource: string }>(IMAGE_REPORT_PENDING_KEY);
+    const action = nextDeployImageReconcile(BUILD.commit, progress, pending !== undefined);
+    if (action === "verified") return { result: "current", verified: true };
+    if (action === "start") {
+      await registryStub(this.env).holdDrainFor([resource]);
+      await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource });
+      await this.ctx.storage.put(IMAGE_RECONCILE_KEY, { build: BUILD.commit, cycleIssued: false });
+    }
+    if (action === "await-report") {
+      const active = await this.isRuntimeActive().catch(() => null);
+      if (active === false) await this.reportPendingImageCurrent("deploy");
+      else if (active === true) {
+        const [state, facts] = await Promise.all([
+          this.ctx.storage.get<ResidentState>(STATE_KEY),
+          this.ctx.storage.get<RepoFacts>(FACTS_KEY),
+        ]);
+        // A replacement can reuse the disk and leave `warm` unchanged; that
+        // hydrate shortcut does not send a report. A different boot after the
+        // successful stop is proof that a replacement started. Finish its
+        // hydration before reporting; an old warm state alone proves nothing.
+        if (replacementContainerStarted(progress?.containerBeforeCycle, await this.containerIdentity())) {
+          await this.ensureHydrated();
+          await this.reportPendingImageCurrent("deploy");
+        } else if (
+          state === "warm" &&
+          facts?.lastRestore?.at &&
+          Date.parse(facts.lastRestore.at) >= Date.parse(progress?.cycleStoppedAt ?? "")
+        ) {
+          await this.reportPendingImageCurrent("deploy");
+        }
+      }
+      return {
+        result: active === false ? "inactive" : "deferred",
+        verified: (await this.ctx.storage.get(IMAGE_REPORT_PENDING_KEY)) === undefined,
+      };
+    }
+    // Reading the boot ID runs a command and would wake a sleeping resident.
+    // Preserve the inactive path's report-without-start behavior.
+    const activeBeforeCycle = await this.isRuntimeActive().catch(() => null);
+    const containerBeforeCycle = activeBeforeCycle === true ? await this.containerIdentity() : undefined;
     const result = await this.reconcileImage("deploy", true);
+    if (result === "restarted")
+      await this.ctx.storage.put(IMAGE_RECONCILE_KEY, {
+        build: BUILD.commit,
+        cycleIssued: true,
+        cycleStoppedAt: new Date(systemClock()).toISOString(),
+        containerBeforeCycle,
+      } satisfies DeployImageReconcileState);
     if (result === "deferred") return { result, verified: false };
     // Inactivity reports synchronously; a successful stop does not. A
     // concurrent fresh start may also have hydrated while this reconcile

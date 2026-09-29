@@ -19,6 +19,7 @@ import {
   diskHeadroom,
   RESIDENT_SLUG_RE,
   residentDisk,
+  residentImageReport,
   residentLive,
   residentSlug,
   residentStateTone,
@@ -65,7 +66,10 @@ function onToggle(ev: Event): void {
 const slug = computed(() => residentSlug(props.record));
 const display = computed(() => slug.value || str(props.record.resource) || "?");
 const live = computed(() => residentLive(props.record));
-const tone = computed(() => residentStateTone(live.value.state));
+const imageReport = computed(() => residentImageReport(props.record));
+const tone = computed(() =>
+  live.value.state === "warm" && imageReport.value === "pending" ? "amber" : residentStateTone(live.value.state),
+);
 const href = computed(() => (RESIDENT_SLUG_RE.test(slug.value) ? `/residents/${slug.value}` : null));
 const ghRepo = computed(() => (RESIDENT_SLUG_RE.test(slug.value) ? `https://github.com/${slug.value}` : undefined));
 const commitHref = (sha: string): string | undefined =>
@@ -194,6 +198,12 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
         <span class="self-center"><StatusDot :tone="tone" :label="live.state" :tip="live.state" /></span>
         <span class="font-mono text-[0.9375rem] font-medium text-highlighted">{{ display }}</span>
         <span class="text-sm text-toned">{{ live.state }}</span>
+        <span
+          class="image-report text-xs"
+          :class="imageReport === 'pending' ? 'font-medium text-warn' : 'text-muted'"
+          :title="imageReport === 'pending' ? 'This container has not reported the deployed image yet' : undefined"
+          >image {{ imageReport }}</span
+        >
         <span
           v-if="runs.length > 0"
           class="running shrink-0 rounded border border-ok/25 bg-ok/8 px-1.5 font-mono text-[0.68rem] font-medium tabular-nums text-ok"

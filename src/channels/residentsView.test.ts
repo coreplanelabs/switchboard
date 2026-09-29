@@ -220,6 +220,15 @@ describe("createResidentsViewHandler", () => {
     expect(calls).toBe(2);
   });
 
+  it("carries the live deploy drain into the index seed", async () => {
+    const draining = { reason: "deploy abc1234", holds: ["repo:acme/api"], holdsUntil: "2026-09-29T07:00:00Z" };
+    const h = handler(fakeClient(() => Promise.resolve(ok({ ...LISTING, draining } as never))));
+    const io = fakeReqRes("GET", "/residents");
+    h(io.req, io.res, ADMIN);
+    await new Promise((r) => setTimeout(r, 0));
+    expect((seedOf(io.body()) as ResidentsIndexSeed).draining).toEqual(draining);
+  });
+
   it("a hostile record is inert in the page (the seed island escapes every angle bracket) and survives as data", async () => {
     const hostile = { ...DOWN, live: { ...DOWN.live, reason: '"><script>alert(1)</script>' } };
     const h = handler(fakeClient(() => Promise.resolve(ok({ cap: 5, count: 1, residents: [hostile] }))));

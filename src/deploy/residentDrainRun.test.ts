@@ -297,6 +297,36 @@ describe("deployStep (resident) drains the fleet", () => {
 });
 
 describe("resident deployment readiness", () => {
+  it("an inactive held container reports on the runner's reconcile retry without another upload", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, pendingReconcile, held]);
+    const post = h.deps.postJson!;
+    let reconciles = 0;
+    h.deps.postJson = async (...args) => {
+      if (args[0].endsWith("/reconcile") && ++reconciles === 2) return reconciled;
+      return post(...args);
+    };
+    const health = h.deps.readHealth;
+    h.deps.readHealth = async (url, bearer, timeoutMs) =>
+      url.endsWith("/residents")
+        ? { status: 200, body: reconciles < 2 ? pendingRegistry : currentRegistry }
+        : health(url, bearer, timeoutMs);
+
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: true, live: "live" });
+    expect(reconciles).toBe(2);
+    expect(h.calls.filter((c) => c.dep === "exec")).toHaveLength(1);
+    expect(h.deps.now()).toBeLessThan(10 * 60_000);
+  });
+
+  it("identical pending readbacks do not flood the deploy log", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, pendingReconcile, held]);
+    const health = h.deps.readHealth;
+    h.deps.readHealth = async (url, bearer, timeoutMs) =>
+      url.endsWith("/residents") ? { status: 200, body: pendingRegistry } : health(url, bearer, timeoutMs);
+    await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(h.plain().filter((line) => line.includes("waiting for readiness"))).toHaveLength(10);
+  });
+
   it.each([false, true])(
     "a current registry without a drain bearer cannot prove image readiness (force=%s)",
     async (force) => {
@@ -370,7 +400,7 @@ describe("resident deployment readiness", () => {
     h.deps.readHealth = async (url, bearer) => {
       if (!url.endsWith("/residents")) return health(url, bearer);
       expect(bearer).toBe("read");
-      expect(h.calls.at(-1)?.args[0]).toContain("/undrain");
+      expect(h.calls.some((call) => call.args[0] === "https://switchboard-resident.example.test/undrain")).toBe(true);
       reads++;
       return {
         status: 200,

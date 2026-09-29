@@ -244,6 +244,21 @@ describe("drainRefusal — what /attach answers while drained", () => {
 describe("the Worker's wiring (by scan)", () => {
   const source = readSource("worker.ts");
 
+  it("repeated deploy reconcile preserves the image report and only retries a cycle that was not issued", () => {
+    const method = source.slice(source.indexOf("async reconcileForDeploy("), source.indexOf("// -- watchdog"));
+    expect(method).toContain("nextDeployImageReconcile");
+    expect(method).toMatch(/action === "verified"[\s\S]*verified: true/);
+    expect(method).toMatch(/action === "await-report"[\s\S]*reportPendingImageCurrent/);
+    expect(method).toMatch(
+      /replacementContainerStarted\([\s\S]*await this\.ensureHydrated\(\);[\s\S]*reportPendingImageCurrent/,
+    );
+    expect(method).toMatch(/action === "start"[\s\S]*holdDrainFor[\s\S]*IMAGE_REPORT_PENDING_KEY/);
+    expect(method).toMatch(
+      /const activeBeforeCycle = await this\.isRuntimeActive\(\)\.catch\(\(\) => null\);\s*const containerBeforeCycle = activeBeforeCycle === true \? await this\.containerIdentity\(\) : undefined;/,
+    );
+    expect(method).toMatch(/this\.reconcileImage\("deploy", true\)/);
+  });
+
   it("the hold's liveness is wired (issue 2044): holdDrainFor stamps the bound and arms the alarm at it, the alarm's reopen names the stale containers, a fresh provision reports its own container current, /op answers the drain, and the admin view carries the image report", () => {
     // The bound stamped and the alarm armed at it — the earlier end fires first.
     expect(source).toMatch(/holdDrain\(record, resources, now\)/);
@@ -367,7 +382,9 @@ describe("the Worker's wiring (by scan)", () => {
     // report that outruns its hold is a no-op that consumes the marker and
     // leaves a hold nothing will report (the `until` backstop alone).
     expect(forDeploy).toMatch(/registryStub\(this\.env\)\.holdDrainFor\(\[resource\]\)/);
-    expect(forDeploy.indexOf("holdDrainFor([resource])")).toBeLessThan(forDeploy.indexOf("IMAGE_REPORT_PENDING_KEY"));
+    expect(forDeploy.indexOf("holdDrainFor([resource])")).toBeLessThan(
+      forDeploy.indexOf("storage.put(IMAGE_REPORT_PENDING_KEY"),
+    );
     // The later report stands on either an inactive runtime (whose next start
     // is on the deployed image by construction), or an active replacement
     // completing its own hydration to `warm` — never on the stop or the

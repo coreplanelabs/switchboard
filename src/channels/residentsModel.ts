@@ -34,6 +34,7 @@ export interface ResidentRecordView {
 export interface ResidentListing {
   cap?: unknown;
   count?: unknown;
+  draining?: unknown;
   residents: ResidentRecordView[];
 }
 
@@ -63,7 +64,12 @@ export function residentStateTone(state: string): ResidentTone {
  *  grey ("no claim"), never green: a fleet is only "all up" when all of it is. */
 export function residentsFleetTone(records: readonly ResidentRecordView[]): ResidentTone {
   if (records.length === 0) return "grey";
-  const tones = new Set(records.map((record) => residentStateTone(residentLive(rec(record)).state)));
+  const tones = new Set(
+    records.map((record) => {
+      const state = residentStateTone(residentLive(rec(record)).state);
+      return state === "green" && residentImageReport(record) === "pending" ? "amber" : state;
+    }),
+  );
   if (tones.has("red")) return "red";
   if (tones.has("amber")) return "amber";
   return tones.size === 1 && tones.has("green") ? "green" : "grey";
@@ -123,6 +129,12 @@ export function residentLive(record: ResidentRecordView): Record<string, unknown
   const live = rec(record.live);
   if (typeof live.error === "string") return { ...live, state: "unreachable", reason: live.error };
   return { ...live, state: str(live.state) || "unknown", reason: str(live.reason) };
+}
+
+/** Container image readiness is separate from the resident's lifecycle state. */
+export function residentImageReport(record: ResidentRecordView): "current" | "pending" | "unknown" {
+  const report = residentLive(record).imageReport;
+  return report === "current" || report === "pending" ? report : "unknown";
 }
 
 // ---- thread worktrees and the runs on them ----------------------------------
@@ -237,6 +249,7 @@ export function diskHeadroom(disk: ResidentDiskView, diskBudgetMb: number | unde
 export interface ResidentsIndexState {
   cap: unknown;
   count: unknown;
+  draining: unknown;
   residents: unknown[];
   runs: Map<string, RunIndexRowSeed>;
 }
@@ -258,6 +271,7 @@ export function applyResidentsFrame(state: ResidentsIndexState, frame: Residents
   } else if (frame.type === "residents") {
     state.cap = frame.cap;
     state.count = frame.count;
+    state.draining = frame.draining;
     state.residents = Array.isArray(frame.residents) ? frame.residents : [];
   }
 }

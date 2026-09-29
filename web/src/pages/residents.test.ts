@@ -158,6 +158,37 @@ afterEach(() => {
 });
 
 describe("ResidentsIndexPage", () => {
+  it("shows a deploy drain even when the resident listing is empty", () => {
+    const { wrapper: w } = mountIndex({ ...indexSeed([]), draining: { reason: "deploy abc1234" } });
+    expect(w.find(".drain-status").text()).toContain("deploy abc1234");
+    expect(w.text()).toContain("No repos onboarded");
+  });
+
+  it("shows the fleet drain and image reports beside warm state", async () => {
+    const pending = { ...WARM, live: { ...WARM.live, imageReport: "pending" } };
+    const { wrapper: w, es } = mountIndex({
+      ...indexSeed([pending]),
+      draining: { reason: "deploy deb60c5", holds: ["repo:jshttp/vary"], until: "2026-09-29T06:40:00Z" },
+    });
+    expect(w.find(".drain-status").text()).toContain("jshttp/vary");
+    expect(w.find(".drain-status").text()).toContain("deploy deb60c5");
+    expect(w.find("li.resident summary").text()).toContain("warm");
+    expect(w.find("li.resident summary").text()).toContain("image pending");
+    expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_BY_TONE.amber);
+
+    es().emitMessage({
+      type: "residents",
+      cap: 5,
+      count: 1,
+      draining: null,
+      residents: [{ ...WARM, live: { ...WARM.live, imageReport: "current" } }],
+    });
+    await nextTick();
+    expect(w.find(".drain-status").exists()).toBe(false);
+    expect(w.find("li.resident summary").text()).toContain("image current");
+    expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_BY_TONE.green);
+  });
+
   it("renders one fold per resident with state, reason, ref, short sha and a detail link, and opens the feed", () => {
     const { wrapper: w, es } = mountIndex(indexSeed([WARM, DOWN], 5, 2));
     expect(w.findAll("li.resident").map((li) => li.attributes("data-slug"))).toEqual(["jshttp/vary", "acme/api"]);
@@ -411,6 +442,13 @@ describe("ResidentsIndexPage — live over the feed", () => {
 });
 
 describe("ResidentDetailPage", () => {
+  it("shows the container image report separately from lifecycle", () => {
+    const record = { ...WARM, live: { ...WARM.live, imageReport: "pending" } };
+    const w = mountApp(ResidentDetailPage, { seed: detailSeed(record) });
+    expect(w.findAll("tr")[0].text()).toContain("warm");
+    expect(w.find(".image-report").text()).toContain("pending");
+  });
+
   it("shows the interesting facts: state, ref, sha, lockfile hash, provisioned/refreshed, snapshot stamp, schedules, command table", () => {
     const w = mountApp(ResidentDetailPage, { seed: detailSeed(WARM) });
     const t = w.text();

@@ -9,6 +9,7 @@ import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
 import {
   applyResidentsFrame,
+  rec,
   residentSlug,
   residentsFleetTone,
   runsOnResident,
@@ -33,6 +34,7 @@ const seed = useSeed("residents");
 const state = reactive<ResidentsIndexState>({
   cap: seed?.cap,
   count: seed?.count,
+  draining: seed?.draining ?? null,
   residents: seed?.residents ?? [],
   runs: new Map((seed?.runs ?? []).map((r) => [r.id, r])),
 });
@@ -57,6 +59,14 @@ const rows = computed(() =>
 );
 const cap = computed(() => str(state.cap) || "?");
 const count = computed(() => str(state.count) || String(rows.value.length));
+const drain = computed(() => (state.draining && typeof state.draining === "object" ? rec(state.draining) : null));
+const drainHolds = computed(() =>
+  Array.isArray(drain.value?.holds)
+    ? drain.value.holds
+        .filter((hold): hold is string => typeof hold === "string")
+        .map((hold) => hold.replace(/^repo:/, ""))
+    : [],
+);
 /** Runs on the residents listed — a repo run whose resident is not (yet) listed is not counted. */
 const running = computed(() => rows.value.reduce((n, r) => n + r.runs.length, 0));
 
@@ -113,7 +123,7 @@ onUnmounted(() => {
 <template>
   <AppShell :title="title" nav="residents">
     <template #status>
-      <UTooltip text="runs arrive from the registry feed; the listing is re-read when a run attaches or ends">
+      <UTooltip text="runs arrive from the registry feed; the resident listing also refreshes every 30 seconds">
         <span class="conn flex items-center gap-1.5">
           <StatusDot :tone="conn.tone" :label="conn.text" />
           <span id="state" class="text-xs text-muted">{{ conn.text }}</span>
@@ -121,6 +131,12 @@ onUnmounted(() => {
       </UTooltip>
     </template>
 
+    <p v-if="drain" class="drain-status mb-2 rounded border border-warn/30 bg-warn/8 px-3 py-2 text-xs text-warn">
+      Deploy drain<span v-if="str(drain.reason)"> · {{ str(drain.reason) }}</span>
+      <span v-if="drainHolds.length"> · waiting for container images: {{ drainHolds.join(", ") }}</span>
+      <span v-else> · new runs wait until the fleet reopens</span>
+      <span v-if="str(drain.holdsUntil)"> · hold ends by {{ str(drain.holdsUntil) }}</span>
+    </p>
     <template v-if="rows.length > 0">
       <p class="mb-2 text-xs text-muted">
         {{ `${count}/${cap} resident slots in use · `
