@@ -51,9 +51,13 @@ export async function appendPrivateWorkerInput(
   identity: PrivateWorkerIdentity,
   input: { id: string; sender: string; text: string; at: number },
 ): Promise<void> {
+  // Hash the JSON string so distinct unpaired UTF-16 surrogates do not both
+  // collapse to the same UTF-8 replacement character.
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(input.text)));
+  const textSha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
   await log.append(
     privateWorkerThreadKey(identity),
-    boundedHistoryCopy({ kind: "input" as const, ...input }, PRIVATE_WORKER_EVENT_MAX_CHARS),
+    boundedHistoryCopy({ kind: "input" as const, ...input, textSha256 }, PRIVATE_WORKER_EVENT_MAX_CHARS),
   );
 }
 

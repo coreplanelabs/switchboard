@@ -2,7 +2,7 @@ import type { StatusUpdate } from "./types.js";
 
 /** An internal worker's conversation and progress. No platform message id or URL is needed. */
 export type PrivateWorkerEventInput =
-  | { kind: "input"; id: string; sender: string; text: string; at: number }
+  | { kind: "input"; id: string; sender: string; text: string; at: number; textSha256?: string }
   | { kind: "reply"; id?: string; text: string; at: number; runId?: string }
   | { kind: "status"; phase: "start"; frame: StatusUpdate; at: number }
   | { kind: "status"; phase: "update" | "done"; statusSeq: number; frame: StatusUpdate; at: number };
@@ -39,7 +39,8 @@ export function isPrivateWorkerEventInput(value: unknown): value is PrivateWorke
       typeof row.sender === "string" &&
       row.sender.length > 0 &&
       row.sender.length <= 256 &&
-      typeof row.text === "string"
+      typeof row.text === "string" &&
+      (row.textSha256 === undefined || (typeof row.textSha256 === "string" && /^[0-9a-f]{64}$/.test(row.textSha256)))
     );
   if (row.kind === "reply")
     return (
@@ -86,7 +87,10 @@ export class InMemoryPrivateWorkerLog implements PrivateWorkerLog {
         const same =
           prior.kind === event.kind &&
           (event.kind === "input"
-            ? prior.kind === "input" && prior.sender === event.sender && prior.text === event.text
+            ? prior.kind === "input" &&
+              prior.sender === event.sender &&
+              prior.text === event.text &&
+              prior.textSha256 === event.textSha256
             : prior.kind === "reply" && prior.text === event.text && prior.runId === event.runId);
         if (!same) throw new Error("private worker event id reused with different content");
         return structuredClone(prior);

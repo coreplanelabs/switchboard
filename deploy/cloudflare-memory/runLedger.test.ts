@@ -61,6 +61,9 @@ describe("private worker log on the state Worker", () => {
         ],
       },
     });
+    const longInput = { ...input, id: "long-input", text: "shortened", textSha256: "a".repeat(64) };
+    expect((await append(longInput)).status).toBe(200);
+    expect((await append({ ...longInput, textSha256: "b".repeat(64) })).status).toBe(409);
     expect((await post("/runs/private-worker/list", { storeKey: key, threadKey: "slack:C1:1.0" })).status).toBe(400);
   });
 });

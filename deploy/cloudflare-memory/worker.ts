@@ -2649,7 +2649,10 @@ export class RunHistoryDO extends DurableObject<Env> {
           const same =
             row.kind === event.kind &&
             (event.kind === "input"
-              ? row.kind === "input" && row.sender === event.sender && row.text === event.text
+              ? row.kind === "input" &&
+                row.sender === event.sender &&
+                row.text === event.text &&
+                row.textSha256 === event.textSha256
               : row.kind === "reply" && row.text === event.text && row.runId === event.runId);
           if (!same) return null;
           return row;

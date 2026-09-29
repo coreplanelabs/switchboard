@@ -54,13 +54,33 @@ describe("private worker IO — a task thread with no Slack delivery", () => {
     const text = `Fix this: ${'"\\\n🙂'.repeat(12_000)}`;
     await appendPrivateWorkerInput(log, task, { id: "long-1", sender: "slack:UA", text, at: 10 });
     await appendPrivateWorkerInput(log, task, { id: "long-1", sender: "slack:UA", text, at: 11 });
+    await expect(
+      appendPrivateWorkerInput(log, task, { id: "long-1", sender: "slack:UA", text: `${text}Changed`, at: 12 }),
+    ).rejects.toThrow("private worker event id reused with different content");
+    const longPrefix = "x".repeat(40_000);
+    await appendPrivateWorkerInput(log, task, {
+      id: "long-unicode",
+      sender: "slack:UA",
+      text: `${longPrefix}\ud800`,
+      at: 13,
+    });
+    await expect(
+      appendPrivateWorkerInput(log, task, {
+        id: "long-unicode",
+        sender: "slack:UA",
+        text: `${longPrefix}\udc00`,
+        at: 14,
+      }),
+    ).rejects.toThrow("private worker event id reused with different content");
     const events = await log.list(threadKey);
-    expect(events).toHaveLength(1);
-    expect(isPrivateWorkerEvent(events[0])).toBe(true);
+    expect(events).toHaveLength(2);
+    expect(events.every(isPrivateWorkerEvent)).toBe(true);
     expect(events[0]?.kind === "input" ? events[0].text : "").toContain("[Private history copy shortened;");
     const stored = events[0]?.kind === "input" ? events[0].text : "";
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(stored)).toBe(false);
-    expect(await privateWorkerIO(log, task, { currentInputId: "long-1", clock: now }).history()).toEqual([]);
+    const history = await privateWorkerIO(log, task, { currentInputId: "long-1", clock: now }).history();
+    expect(history).toHaveLength(1);
+    expect(history[0]?.text).toBe(events[1]?.kind === "input" ? events[1].text : "");
   });
 
   it("bounds an oversized private reply while preserving a full valid unit report", async () => {
