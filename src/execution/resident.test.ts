@@ -710,6 +710,40 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[1])).not.toHaveProperty("readonly");
   });
 
+  it("sends a run budget only when the caller provides one", async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: ATTACH_OK });
+    await ResidentExecutor.open({ ...OPTS, runBudgetMs: 25 * 60_000 });
+    expect(sentBody(calls[0])).toMatchObject({ runBudgetMs: 25 * 60_000 });
+    await ResidentExecutor.open(OPTS);
+    expect(sentBody(calls[1])).not.toHaveProperty("runBudgetMs");
+  });
+
+  it("protects setup through the later lease, then uses the remaining lease on reattach", async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: ATTACH_OK });
+    let remaining: number | undefined;
+    const opts = {
+      ...OPTS,
+      runId: "run-1",
+      ownerGen: "gen-1",
+      runBudgetMs: 25 * 60_000,
+      setupRemainingMs: () => 4 * 60_000,
+      remainingMs: () => remaining,
+    };
+    await ResidentExecutor.open(opts);
+    expect(sentBody(calls[0])).toMatchObject({ runId: "run-1", ownerGen: "gen-1", runBudgetMs: 29 * 60_000 });
+    remaining = 7 * 60_000;
+    await ResidentExecutor.open(opts);
+    expect(sentBody(calls[1])).toMatchObject({ runId: "run-1", ownerGen: "gen-1", runBudgetMs: 7 * 60_000 });
+  });
+
+  it("sends the lease deadline to the registration owned by this run", async () => {
+    const { calls } = stubFetch({ body: { deadlineAt: 1 } });
+    const executor = new ResidentExecutor({ ...OPTS, runId: "run-1", ownerGen: "gen-1" });
+    await executor.setRunDeadline(8 * 60_000);
+    expect(route(calls[0])).toBe("/run-deadline");
+    expect(sentBody(calls[0])).toMatchObject({ runId: "run-1", ownerGen: "gen-1", remainingMs: 8 * 60_000 });
+  });
+
   // docs/reference/specs/resident-repos.md item 51: the expected head rides along so the
   // resident fetches a mirror whose ref tip lags it (a re-review after a push
   // would otherwise attach to a stale tip). Sent only when set — older body
@@ -1251,6 +1285,13 @@ describe("ResidentExecutor.probeStatus", () => {
 });
 
 describe("ResidentExecutor.release — return the thread's pool user when a run ends", () => {
+  it("sends the owning run ID and generation so an old finalizer cannot detach a reclaimed successor", async () => {
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: { released: true } });
+    const ex = await ResidentExecutor.open({ ...OPTS, runId: "run-1", ownerGen: "gen-1" });
+    await ex.release("always");
+    expect(sentBody(calls[1])).toMatchObject({ runId: "run-1", ownerGen: "gen-1", force: true });
+  });
+
   it('"always" POSTs /detach with force:true and reports the resident\'s answer', async () => {
     const { calls } = stubFetch({ body: ATTACH_OK }, { body: { released: true, user: "worker2" } });
     const ex = await ResidentExecutor.open(OPTS);

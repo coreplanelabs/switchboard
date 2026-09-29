@@ -124,6 +124,10 @@ export async function attachRoundWorkspace(input: {
   factory: ExecutorFactoryOptions;
   round: {
     threadKey: string;
+    runId?: string;
+    ownerGen?: string;
+    residentClaim?: () => Promise<number | undefined>;
+    setupRemainingMs?: () => number;
     agent: AgentDef;
     /** The round's effective profile — what is provisioned, and as whom. */
     profile: RunProfile;
@@ -160,6 +164,10 @@ export async function attachRoundWorkspace(input: {
     input.factory,
     {
       threadKey: input.round.threadKey,
+      ...(input.round.runId !== undefined ? { runId: input.round.runId } : {}),
+      ...(input.round.ownerGen !== undefined ? { ownerGen: input.round.ownerGen } : {}),
+      ...(input.round.residentClaim !== undefined ? { residentClaim: input.round.residentClaim } : {}),
+      ...(input.round.setupRemainingMs !== undefined ? { setupRemainingMs: input.round.setupRemainingMs } : {}),
       agent,
       profile,
       ...(input.round.githubDoor ? { githubDoor: input.round.githubDoor } : {}),

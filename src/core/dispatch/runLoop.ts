@@ -609,6 +609,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     lastActivity = bookkeeping && !showBookkeeping ? undefined : cardActivity(e);
     card.update(currentFrame());
   };
+  const updateResidentRunDeadline = (remainingMs: number) => {
+    const update = executor.setRunDeadline?.(Math.max(1, remainingMs));
+    void update?.catch((err) =>
+      console.warn(
+        `[run] ${msg.threadKey}: resident run deadline update failed: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    );
+  };
   const onEvent = (e: RunEvent) => {
     // Authorization precedes execution, while streamed results and their local
     // ref reads may lag behind it. Close both harness gates synchronously so
@@ -622,6 +630,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (startsRunBudget) {
       modelBudgetEndsAt = e.endsAt;
       run.control.startLease(() => e.endsAt - clock());
+      updateResidentRunDeadline(e.endsAt - clock());
     }
     // One ordered lane owns every streamed event. Tool projection may await the
     // ledger, so letting later events publish outside this lane would let them
@@ -1599,6 +1608,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         // continues, a moment earlier than the harness's own.
         const resumeDeadline = clock() + reentry.remainingMs;
         run.control.startLease(() => resumeDeadline - clock());
+        updateResidentRunDeadline(resumeDeadline - clock());
       }
       let harnessResume: HarnessResume | undefined = reentry
         ? {
@@ -1727,6 +1737,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           try {
             decision = await prepareRelaunch(deps, {
               runId: run.id,
+              ownerGen: deps.runLedger.gen,
               threadKey: msg.threadKey,
               requester: msg.userId,
               agent: ctx.agent,

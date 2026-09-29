@@ -45,6 +45,7 @@ export class RelaunchRefusedError extends HarnessInterruptedError {
 /** What the relaunch reads off the run. */
 export interface RelaunchContext {
   runId: string;
+  ownerGen?: string;
   threadKey: string;
   agent: AgentDef;
   profile: RunProfile;
@@ -107,7 +108,8 @@ export type RelaunchDecision =
  * nothing is relaunched, and the store keeps both secrets verifying.
  */
 export async function prepareRelaunch(
-  deps: Pick<ProvisionDeps, "config" | "dataDir" | "runBearers" | "githubCredentials">,
+  deps: Pick<ProvisionDeps, "config" | "dataDir" | "runBearers" | "githubCredentials"> &
+    Partial<Pick<ProvisionDeps, "runLedger">>,
   ctx: RelaunchContext,
 ): Promise<RelaunchDecision> {
   const { replaced, facts, harness } = ctx;
@@ -138,6 +140,8 @@ export async function prepareRelaunch(
   if (ctx.binding !== undefined) {
     const reattached = await reattachWorkspace(deps, {
       threadKey: ctx.threadKey,
+      runId: ctx.runId,
+      ...(ctx.ownerGen !== undefined ? { ownerGen: ctx.ownerGen } : {}),
       agent: ctx.agent,
       profile: ctx.profile,
       repoCtx: ctx.repoCtx,

@@ -822,6 +822,9 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
  *  steps to it. */
 export interface AttachContext {
   threadKey: string;
+  runId?: string;
+  ownerGen?: string;
+  setupRemainingMs?: () => number;
   agent: AgentDef;
   profile: RunProfile;
   githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };
@@ -879,11 +882,14 @@ export type WorkspaceAttach =
  * Every failure propagates: the callers read the ones they decide by name.
  */
 async function attachRound(
-  deps: Pick<ProvisionDeps, "config" | "dataDir" | "githubCredentials">,
+  deps: Pick<ProvisionDeps, "config" | "dataDir" | "githubCredentials"> & Partial<Pick<ProvisionDeps, "runLedger">>,
   ctx: AttachContext,
 ): Promise<RoundWorkspace> {
   const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal, remainingMs, requester } = ctx;
   const { onLiveStateObservation } = ctx;
+  const ledger = deps.runLedger;
+  const runId = ctx.runId;
+  const residentClaim = ledger && runId ? () => ledger.claimResident(runId, threadKey) : undefined;
   // A review target's PR-derived ref is authoritative. Passing `ownPr` asks
   // the resident to preserve or conditionally move a sticky thread binding;
   // that is right for a coding follow-up, but can keep a plan unit's branch
@@ -915,6 +921,10 @@ async function attachRound(
         },
         round: {
           threadKey,
+          ...(ctx.runId !== undefined ? { runId: ctx.runId } : {}),
+          ...(ctx.ownerGen !== undefined ? { ownerGen: ctx.ownerGen } : {}),
+          ...(residentClaim !== undefined ? { residentClaim } : {}),
+          ...(ctx.setupRemainingMs !== undefined ? { setupRemainingMs: ctx.setupRemainingMs } : {}),
           agent,
           profile,
           ...(ctx.githubDoor ? { githubDoor: ctx.githubDoor } : {}),
@@ -954,7 +964,7 @@ async function attachRound(
  * other failure propagates.
  */
 export async function reattachWorkspace(
-  deps: Pick<ProvisionDeps, "config" | "dataDir">,
+  deps: Pick<ProvisionDeps, "config" | "dataDir"> & Partial<Pick<ProvisionDeps, "runLedger">>,
   ctx: AttachContext & { reattach: WorkspaceBinding },
 ): Promise<WorkspaceReattach | { kind: "lease_spent"; leftMs: number; note: string }> {
   try {
@@ -1017,6 +1027,9 @@ export async function attachWorkspace(
   try {
     round = await attachRound(deps, {
       threadKey: msg.threadKey,
+      ...(ctx.runId !== undefined ? { runId: ctx.runId } : {}),
+      ...(ctx.ownerGen !== undefined ? { ownerGen: ctx.ownerGen } : {}),
+      ...(ctx.setupRemainingMs !== undefined ? { setupRemainingMs: ctx.setupRemainingMs } : {}),
       agent,
       profile,
       ...(ctx.githubDoor ? { githubDoor: ctx.githubDoor } : {}),

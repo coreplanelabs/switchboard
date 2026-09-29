@@ -626,6 +626,26 @@ describe("executor provisioning by agent resources", () => {
     });
   });
 
+  it("releases a review workspace when setup fails after attach", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const registry = new RunRegistry();
+    deps.runRegistry = registry;
+    const commit = registry.commitLiveState.bind(registry);
+    vi.spyOn(registry, "commitLiveState").mockImplementation((id, assignment) =>
+      assignment.liveState.state === "preparing" ? false : commit(id, assignment),
+    );
+    const release = vi.fn(async () => ({ released: true }));
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "", release },
+    });
+
+    await dispatch(deps, msg("agent:review look at it", "slack:UADMIN"), fakeIO().io);
+
+    expect(release).toHaveBeenCalledExactlyOnceWith("always", undefined);
+    expect(provider.requests).toEqual([]);
+  });
+
   it("the answer reaches the thread BEFORE the workspace release round trip (a slow /detach never delays the reply)", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -1695,6 +1715,7 @@ function residentFetchStub(
       if (typeof answer?.sha === "string") attachedSha = answer.sha;
       return response;
     }
+    if (path === "/run-deadline") return new Response(JSON.stringify({ deadlineAt: 0 }), { status: 200 });
     if (path === "/exec") {
       if (handlers.exec === undefined && body?.command !== "git rev-parse HEAD") {
         throw new Error(`unexpected fetch: ${String(url)}`);
@@ -11267,8 +11288,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       "keeps the same-id finalizer through a %s failure at durable promotion without running the model",
       async (failure) => {
         const h = await setup();
+        const release = vi.fn(async () => ({ released: true }));
         vi.mocked(makeExecutor).mockResolvedValueOnce({
-          executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" },
+          executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "", release },
         });
         const abandon = vi.spyOn(h.ledger, "abandon");
         const claim = h.ledger.claim.bind(h.ledger);
@@ -11312,6 +11334,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         );
         expect(h.provider.requests).toEqual([]);
         expect(vi.mocked(runPiHarnessOpen)).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledOnce();
         expect(abandon).not.toHaveBeenCalled();
         if (failure !== "open")
           expect(rowAfterOpen).toMatchObject({ runId: "run-l", meta: { parentInstanceId: h.instance.id } });
@@ -12605,7 +12628,13 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(replies.at(-1)).toBe("resumed and done");
     const attaches = calls.filter((c) => c.path === "/status" || c.path === "/attach");
     expect(attaches.map((c) => c.path)).toEqual(["/status", "/attach"]);
-    expect(attaches[1].body).toMatchObject({ reuse: true, refHint: "main" });
+    expect(attaches[1].body).toMatchObject({
+      reuse: true,
+      refHint: "main",
+      runId: "run-old",
+    });
+    expect(attaches[1].body?.runBudgetMs).toBeGreaterThan(19 * 60_000);
+    expect(attaches[1].body?.runBudgetMs).toBeLessThanOrEqual(20 * 60_000);
     expect(stateAtFirstCall).toMatchObject({
       binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2", container: "vm-1" },
     });

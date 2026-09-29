@@ -26,12 +26,13 @@ function method(name: string): string {
   return body!;
 }
 
-describe("the idle-sleep gate asks about attaches and ops, never about dirt", () => {
+describe("the idle-sleep gate reads activity and live registrations, never dirt", () => {
   const isIdle = method("isIdle");
 
-  it("isIdle is recent use and the in-flight count alone — a dirty live tree never pins the container awake", () => {
+  it("isIdle reads recent use, active operations, and bounded run registrations — dirt never pins the container awake", () => {
     expect(isIdle).toMatch(/if \(this\.recentlyUsed\(await this\.liveBindings\(\)\)\) return false;/);
-    expect(isIdle).toMatch(/return this\.inFlightCount\(\) === 0;/);
+    expect(isIdle).toContain("this.inFlightCount()");
+    expect(isIdle).toContain("this.registeredRunsBeyondOps()");
     expect(isIdle).not.toMatch(/liveTreesClean|worktreeCleanliness|isRuntimeActive|measureTreeBeforeEviction/);
   });
 
@@ -62,9 +63,10 @@ describe("the disk-full recycle goes by liveness, never by dirt", () => {
     expect(disk).not.toMatch(/treesClean|dirty|uncommitted|unpushed/i);
   });
 
-  it("the Worker feeds the plan the idle gate's own predicate at its floor, the calling cycle excluded from the in-flight count", () => {
+  it("the Worker feeds the plan recent use or a live run registration, with the calling cycle excluded", () => {
     expect(recover).toMatch(/inFlight: this\.inFlightCount\(\) - selfInFlight,/);
-    expect(recover).toMatch(/recentlyUsed: this\.recentlyUsed\(live\),/);
+    expect(recover).toContain("this.registeredRunsBeyondOps()");
+    expect(recover).toMatch(/recentlyUsed: this\.recentlyUsed\(live\) \|\| liveRegistrations > 0,/);
     expect(recover).toMatch(/idleFloorS: IDLE_AFTER_S,/);
     expect(recover).not.toMatch(/treesClean|liveTreesClean|worktreeCleanliness|\.clean\b/);
   });
@@ -73,7 +75,7 @@ describe("the disk-full recycle goes by liveness, never by dirt", () => {
     const plan = recover.indexOf('if (first.action === "wait") return kept(first.why);');
     const active = recover.indexOf("const active = await this.isRuntimeActive().catch(() => false);");
     const measure = recover.indexOf("await this.measureTreeBeforeEviction(binding)");
-    const verdict = recover.indexOf("const verdict = plan(await this.liveBindings());");
+    const verdict = recover.indexOf("const verdict = await plan(await this.liveBindings());");
     const refuse = recover.indexOf('if (verdict.action === "wait") return kept(verdict.why);');
     const record = recover.indexOf("await this.recordRecycledTree(binding, tree);");
     const stamp = recover.indexOf("await this.ctx.storage.put(DISK_FULL_RECYCLE_KEY, systemClock());");

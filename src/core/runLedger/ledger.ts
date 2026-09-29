@@ -101,6 +101,12 @@ export interface FinishResult {
 }
 
 export interface RunLedger {
+  /** Atomically mint a monotonic resident attachment fence for the live ledger owner. */
+  residentClaim(
+    runId: string,
+    gen: string,
+    threadKey: string,
+  ): Promise<{ ok: true; fence: number } | { ok: false; reason: "fenced" | "unknown-run" }>;
   /** One live run per thread; refused with the live run when the thread is
    *  taken. The Worker implementation is two requests (the history claim, then
    *  the transcript owner); a failure between them leaves a claimed run whose

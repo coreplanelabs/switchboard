@@ -116,7 +116,7 @@ import { runShipBranch, type ShipContext, type ShipDeps } from "./dispatch/ship.
 import { fetchInstanceStatusViaShim, processShimOptions } from "./coordinator/instancesClient.js";
 import { shipPresetFor } from "./shipPipeline.js";
 import { resolveAddressSeverity } from "./reviewVerdict.js";
-import { closedReviewPreflight } from "./reviewRound.js";
+import { closedReviewPreflight, type RoundWorkspace } from "./reviewRound.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
 import { withContractInFirstUserTurn } from "./ship/codingChild.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
@@ -807,6 +807,9 @@ export async function dispatch(
   // then the outer finally discards the row — the run never started — as it
   // abandons the reservation.
   let runLoopStarted = false;
+  // A successful attach belongs to this setup until the run loop takes it.
+  // Setup can still fail after attach; its outer finally must release the tree.
+  let setupRound: RoundWorkspace | undefined;
   // The ship fork ran, and whether its branch deliberately left its run live —
   // the hosted parent of a completed hand-off (record 0060). Read by the outer
   // finally's second net (run-history item 42), which finishes any run a
@@ -2672,6 +2675,9 @@ export async function dispatch(
     const reattach = resume ? carriedWorkspaceBinding(resume.row) : undefined;
     const control = registered?.control;
     const attach = await attachWorkspace(deps, {
+      runId: run.id,
+      ownerGen: deps.runLedger.gen,
+      setupRemainingMs: () => Math.max(0, admissionBound - clock()),
       msg,
       io,
       refuse,
@@ -2689,7 +2695,12 @@ export async function dispatch(
       // during the attach ends its wake wait at once, and once the harness
       // starts the lease every attach the executor opens is clipped to the
       // run's remaining clock (execution.md item 9).
-      ...(control ? { stopSignal: control.hardSignal, remainingMs: () => control.remainingMs() } : {}),
+      ...(control
+        ? {
+            stopSignal: control.hardSignal,
+            remainingMs: () => control.remainingMs() ?? (resume ? Math.max(0, admissionBound - clock()) : undefined),
+          }
+        : {}),
       onLiveStateObservation: observeResidentLiveState,
     });
     if (attach.kind === "refused") return ended;
@@ -2757,6 +2768,7 @@ export async function dispatch(
       return ended;
     }
     const { round } = attach;
+    setupRound = round;
     // A resident wait owns only its short wait deadline, not the run's budget.
     // Keep the admission deadline across setup transitions; if a running lease
     // exists, it may narrow that deadline, never renew it. Recheck each boundary
@@ -2773,13 +2785,7 @@ export async function dispatch(
     };
     const assignSetupLive = async (state: "falling_back" | "preparing" | "working", detail: string) => {
       const at = clock();
-      let bound: number;
-      try {
-        bound = assertAdmissionBudget(at);
-      } catch (err) {
-        await round.release({ hardStopped: false });
-        throw err;
-      }
+      const bound = assertAdmissionBudget(at);
       return assignLive({ state, bound }, at, detail);
     };
     if (typeof registry.commitLiveState === "function") {
@@ -2839,7 +2845,8 @@ export async function dispatch(
       console.log(
         `[dispatch] ${msg.threadKey} run ${runId}: another generation took the run during the attach — stopping here, it restarts there`,
       );
-      if (executor.release) await executor.release("always").catch(() => {});
+      await round.release({ hardStopped: true });
+      setupRound = undefined;
       return ended;
     }
     // The staged files land now (record 0033): the copies awaited, each pulled
@@ -3110,6 +3117,7 @@ export async function dispatch(
     // Only the loop's own finally may replace the setup finalizer: promotion,
     // its seed and the working-state commit have all succeeded before here.
     runLoopStarted = true;
+    setupRound = undefined;
     // The agent loop (dispatch/runLoop.ts): the model turn, the follow-up inbox,
     // the settle and the post-steps, the finish. A throw propagates to the
     // outer catch after the workspace is released.
@@ -3337,6 +3345,7 @@ export async function dispatch(
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
     ending.drain(undefined);
+    if (setupRound) await setupRound.release({ hardStopped: true });
     // …and a bearer minted for a run that never reached its loop (a head gate
     // after the attach, a throw in the prompt) is revoked here — the ending's
     // hook ran only for a run the loop finished.

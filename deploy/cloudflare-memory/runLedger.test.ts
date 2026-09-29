@@ -123,6 +123,33 @@ function timeSealedRunStages(
 }
 
 describe("run ledger — claim and admission (item 29)", () => {
+  it("mints resident fences only for the live owner, in ledger order", async () => {
+    const key = storeKey();
+    const threadKey = "slack:C1:resident-fence";
+    const body = (runId: string, gen: string, keyOverride = threadKey) => ({
+      storeKey: key,
+      runId,
+      gen,
+      threadKey: keyOverride,
+    });
+    expect(await post("/runs/resident-claim", body("r1", "g1"))).toMatchObject({
+      status: 409,
+      data: { reason: "unknown-run" },
+    });
+    expect((await post("/runs/claim", claimBody(key, "r1", threadKey))).status).toBe(200);
+    expect(await post("/runs/resident-claim", body("r1", "g1"))).toMatchObject({
+      status: 200,
+      data: { ok: true, fence: 1 },
+    });
+    expect(await post("/runs/resident-claim", body("r1", "g1", "wrong-thread"))).toMatchObject({
+      status: 409,
+      data: { reason: "fenced" },
+    });
+    expect(await post("/runs/resident-claim", body("r1", "g1"))).toMatchObject({
+      status: 200,
+      data: { ok: true, fence: 2 },
+    });
+  });
   it("claim → 200; a second run on the same thread → 409 thread-live naming the live run; the owner's re-claim is idempotent; /runs/live lists it", async () => {
     const key = storeKey();
     expect(await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"))).toMatchObject({

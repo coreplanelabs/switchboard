@@ -77,10 +77,15 @@ describe("detachThread releases the tree whatever it holds, and names what it di
   });
 });
 
-describe("the clean-idle sweep releases on idleness alone", () => {
+describe("the clean-idle sweep releases idle trees after live run protection", () => {
   const sweep = method("sweepWorktrees");
 
-  it("a live binding idle past the hour with no op in flight is released whatever its tree holds; a busy or recently attached one is kept", () => {
+  it("a binding idle past the hour with no op or live registration is released whatever its tree holds; a busy or recently attached one is kept", () => {
+    const registrationGuard = sweep.indexOf("const registration = await this.ctx.storage.get<RunRegistration>");
+    const idleRelease = sweep.indexOf("const last = Date.parse(binding.lastAttachAt)");
+    expect(registrationGuard).toBeGreaterThan(-1);
+    expect(idleRelease).toBeGreaterThan(registrationGuard);
+    expect(sweep).toContain("systemClock() <= registration.deadlineAt + RUN_REGISTRATION_GRACE_MS");
     expect(sweep).toMatch(
       /const busy = this\.threadOpsInFlight\.get\(binding\.threadKey\) \?\? 0;\s*if \(last >= idleCutoff \|\| busy > 0\) \{\s*kept\+\+;\s*continue;\s*\}/,
     );

@@ -634,6 +634,15 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(s.releases).toEqual(["paired"]);
   });
 
+  it("sets the resident registration deadline from the harness lease", async () => {
+    const remaining: number[] = [];
+    const s = setup("the answer", { executor: { setRunDeadline: async (ms) => void remaining.push(ms) } });
+    answered(await runLoop(s.deps, s.ctx));
+    expect(remaining).toEqual([expect.any(Number)]);
+    expect(remaining[0]).toBeGreaterThan(0);
+    expect(remaining[0]).toBeLessThanOrEqual(s.ctx.profile.minutes * 60_000);
+  });
+
   it("a failed run: the error propagates, the registry is finished `failed`, the workspace is released first and the card closes with ❌; the drain writes the failed record", async () => {
     const s = setup(new Error("provider down"));
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
@@ -5625,6 +5634,25 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(pi.calls.open).toEqual([]);
     expect(container.starts).toEqual([]);
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+  });
+
+  it("a resumed run sets its resident deadline from the saved lease remainder without a new lease event", async () => {
+    const deadlines: number[] = [];
+    const oc = watched(openCodeHarness, { answer: "Resumed." });
+    const s = setup("unused", {
+      agent: "general",
+      executor: { setRunDeadline: async (ms) => void deadlines.push(ms) },
+      harness: {
+        harnesses: roster(piHarness, oc.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const resume = reentering({ harness: OPENCODE_ROW }, "general");
+    answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect(deadlines).toEqual([resume.plan.remainingMs]);
   });
 
   // harness.md item 8: the row's word wins over every scope's — a person who

@@ -185,6 +185,19 @@ export class WorkerRunLedger implements RunLedger {
     if (gen !== undefined && !GEN_PATTERN.test(gen)) throw new PermanentStoreError(`run ledger: malformed generation`);
   }
 
+  async residentClaim(
+    runId: string,
+    gen: string,
+    threadKey: string,
+  ): Promise<{ ok: true; fence: number } | { ok: false; reason: "fenced" | "unknown-run" }> {
+    this.checkIds(runId, gen);
+    const r = await this.post("/runs/resident-claim", { storeKey: this.opts.storeKey, runId, gen, threadKey });
+    if (r.status === 409) return { ok: false, reason: r.data.reason === "unknown-run" ? "unknown-run" : "fenced" };
+    if (!Number.isSafeInteger(r.data.fence) || (r.data.fence as number) <= 0)
+      throw new PermanentStoreError("run ledger resident claim: invalid fence");
+    return { ok: true, fence: r.data.fence as number };
+  }
+
   async claim(req: ClaimRequest): Promise<ClaimResult> {
     this.checkIds(req.runId, req.gen);
     const r = await this.post("/runs/claim", { storeKey: this.opts.storeKey, run: req });

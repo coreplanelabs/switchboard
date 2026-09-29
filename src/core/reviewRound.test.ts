@@ -98,6 +98,41 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
     };
   }
 
+  it("passes the ledger claim, run and generation through attach and release", async () => {
+    const calls = residentStub({ ref: "main", sha: HEAD });
+    let claims = 0;
+    const round = await attachRoundWorkspace({
+      factory: factoryOptions(),
+      round: {
+        threadKey: "t-owned",
+        runId: "run-1",
+        ownerGen: "gen-2",
+        residentClaim: async () => {
+          claims++;
+          return 17;
+        },
+        agent: AGENTS.review,
+        profile: declaredProfile(AGENTS.review),
+        repo: "acme/api",
+        ref: "main",
+        githubDoor: { baseUrl: "https://git.example", bearer: "sbr_test.secret" },
+      },
+      logKey: "t-owned",
+    });
+    expect(claims).toBe(1);
+    expect(calls.find((c) => c.path === "/attach")?.body).toMatchObject({
+      runId: "run-1",
+      ownerGen: "gen-2",
+      ownerFence: 17,
+    });
+    await round.release({ hardStopped: false });
+    expect(calls.find((c) => c.path === "/detach")?.body).toMatchObject({
+      runId: "run-1",
+      ownerGen: "gen-2",
+      ownerFence: 17,
+    });
+  });
+
   it("a readonly AgentDef yields a readonly resident attach, and release() detaches with force (mode always)", async () => {
     const calls = residentStub({ ref: "patch-1", sha: HEAD });
     const round = await attachRoundWorkspace({

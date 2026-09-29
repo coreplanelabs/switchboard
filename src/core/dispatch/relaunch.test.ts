@@ -23,7 +23,8 @@ import { prepareRelaunch, RelaunchRefusedError } from "./relaunch.js";
 // with the context the relaunch passed kept for the test.
 const reattachState = vi.hoisted(() => ({
   answer: undefined as { kind: "stopped" } | undefined,
-  contexts: [] as Array<{ stopSignal?: AbortSignal }>,
+  contexts: [] as Array<{ runId?: string; ownerGen?: string; stopSignal?: AbortSignal }>,
+  requiredOwner: undefined as string | undefined,
 }));
 vi.mock("./provision.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("./provision.js")>();
@@ -33,7 +34,9 @@ vi.mock("./provision.js", async (importOriginal) => {
       deps: Parameters<typeof mod.reattachWorkspace>[0],
       ctx: Parameters<typeof mod.reattachWorkspace>[1],
     ) => {
-      reattachState.contexts.push({ stopSignal: ctx.stopSignal });
+      reattachState.contexts.push({ runId: ctx.runId, ownerGen: ctx.ownerGen, stopSignal: ctx.stopSignal });
+      if (reattachState.requiredOwner && ctx.runId !== reattachState.requiredOwner)
+        return { kind: "reattach_refused", why: "draining: the run does not own the live registration" };
       return reattachState.answer ?? mod.reattachWorkspace(deps, ctx);
     },
   };
@@ -142,6 +145,20 @@ const grant = (store: RunBearerStore, runId = "run-1") =>
   });
 
 describe("prepareRelaunch — the relaunch decided and prepared", () => {
+  it("an in-process relaunch carries its run ID and generation through reattach while the fleet gate requires ownership", async () => {
+    const d = deps();
+    grant(d.runBearers);
+    reattachState.requiredOwner = "run-1";
+    try {
+      const { ctx } = context({ ownerGen: "gen-1", binding: { backend: "local" }, remainingMs: () => 10 * 60_000 });
+      const decision = await prepareRelaunch(d, ctx);
+      expect(decision.kind).toBe("relaunch");
+      expect(reattachState.contexts.at(-1)?.runId).toBe("run-1");
+      expect(reattachState.contexts.at(-1)?.ownerGen).toBe("gen-1");
+    } finally {
+      reattachState.requiredOwner = undefined;
+    }
+  });
   it("relaunches: the bearer rotated on the run's own meter with the row written exactly once inside the rotation — the new hash, the count one higher, nothing else changed — the old bearer refused, the resume the record with the budget left from the deadline, the rotated facts and the two containers' words; the workspace re-attached where the row says", async () => {
     const d = deps();
     const old = grant(d.runBearers);
