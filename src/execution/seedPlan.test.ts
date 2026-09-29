@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   isBackupMissing,
@@ -79,6 +82,50 @@ describe("pilot ready environment check", () => {
     expect(command).toContain("command -v 'bash'");
     expect(command).toContain("bash -n -c 'npm test'");
     expect(command).not.toContain("\nnpm test\n");
+  });
+
+  it("checks a seeded snapshot's committed lockfiles against the target checkout", () => {
+    const source = "0123456789abcdef0123456789abcdef01234567";
+    const command = readyEnvironmentCommand("/workspace/checkout", requirement, source);
+    expect(command).toContain(`git diff --quiet '${source}' HEAD --`);
+    expect(command).toContain("'package-lock.json'");
+    expect(command).toContain("'pnpm-lock.yaml'");
+    expect(command).toContain("LOCKFILE_MISMATCH");
+    expect(readyEnvironmentOutcome("LOCKFILE_MISMATCH")).toEqual({ ready: false, reason: "dependencies_stale" });
+  });
+
+  it("admits unchanged committed lockfiles and refuses a target head with a changed lockfile", () => {
+    const checkout = mkdtempSync(join(tmpdir(), "switchboard-ready-lockfiles-"));
+    const git = (...args: string[]) => {
+      const result = spawnSync("git", args, { cwd: checkout, encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    try {
+      git("init", "-q");
+      writeFileSync(join(checkout, "package-lock.json"), '{"lockfileVersion":3}\n');
+      git("add", "package-lock.json");
+      git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "snapshot");
+      const source = git("rev-parse", "HEAD");
+      mkdirSync(join(checkout, "node_modules"));
+
+      writeFileSync(join(checkout, "README.md"), "same dependencies\n");
+      git("add", "README.md");
+      git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "other change");
+      const command = readyEnvironmentCommand(checkout, requirement, source);
+      const unchanged = spawnSync("bash", ["-c", command], { cwd: checkout, encoding: "utf8" });
+      expect(unchanged.status, unchanged.stderr).toBe(0);
+      expect(readyEnvironmentOutcome(unchanged.stdout)).toEqual({ ready: true });
+
+      writeFileSync(join(checkout, "package-lock.json"), '{"lockfileVersion":3,"changed":true}\n');
+      git("add", "package-lock.json");
+      git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "dependencies changed");
+      const changed = spawnSync("bash", ["-c", command], { cwd: checkout, encoding: "utf8" });
+      expect(changed.status, changed.stderr).toBe(0);
+      expect(readyEnvironmentOutcome(changed.stdout)).toEqual({ ready: false, reason: "dependencies_stale" });
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
   });
 
   it("refuses malformed tool, dependency path and test command before shell construction", () => {
@@ -339,12 +386,17 @@ describe("the seeded sandbox wiring (static) — a restore the judge gave up on"
 
 describe("seedMarkerText", () => {
   it("names the handle, the ref the tree is on and the head asked for, so a seed on another ref is a new seed", () => {
-    expect(seedMarkerText(seed)).toBe(`${seed.checkoutBackupId} main -`);
-    expect(seedMarkerText({ ...seed, fetchRef: "feat/x" })).toBe(`${seed.checkoutBackupId} feat/x -`);
+    expect(seedMarkerText(seed)).toBe(`${seed.checkoutBackupId} ${seed.depsBackupId} main -`);
+    expect(seedMarkerText({ ...seed, fetchRef: "feat/x" })).toBe(
+      `${seed.checkoutBackupId} ${seed.depsBackupId} feat/x -`,
+    );
     expect(seedMarkerText({ ...seed, fetchRef: "feat/x", fetchSha: "89abcdef0123456789abcdef0123456789abcdef" })).toBe(
-      `${seed.checkoutBackupId} feat/x 89abcdef0123456789abcdef0123456789abcdef`,
+      `${seed.checkoutBackupId} ${seed.depsBackupId} feat/x 89abcdef0123456789abcdef0123456789abcdef`,
     );
     expect(seedMarkerText({ ...seed, fetchRef: "feat/y" })).not.toBe(seedMarkerText({ ...seed, fetchRef: "feat/x" }));
+    expect(seedMarkerText({ ...seed, depsBackupId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" })).not.toBe(
+      seedMarkerText(seed),
+    );
   });
 });
 

@@ -1272,6 +1272,8 @@ interface AttachOk {
    *  the container its pi runs in. Absent when the kernel does not say. */
   container?: string;
   deps: ThreadDepsMechanism;
+  /** Present on a reused tree only when its stored dependency key matches this head. */
+  depsKey?: string;
   /** `ok` — writable origin uses the Git door; `unavailable` — no door;
    *  `none` — read-only attach with an unfetchable origin (item 50). */
   credentials: "ok" | "unavailable" | "none";
@@ -6768,6 +6770,7 @@ export class ResidentDO extends Sandbox<Env> {
       recreated: locked.value.recreated,
       ...(container !== undefined ? { container } : {}),
       deps: deps.deps,
+      ...(deps.depsKey ? { depsKey: deps.depsKey } : {}),
       credentials,
       readonly: mode.readonly,
       mutexWaitMs: locked.waitedMs,
@@ -6974,7 +6977,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  A differing key runs the repo's install command in the worktree,
    *  token-free, as the thread user. */
   private async materializeThreadDeps(
-    binding: { user: string; worktreePath: string }, // a ThreadBinding, or a per-op checkout
+    binding: { user: string; worktreePath: string; depsKey?: string }, // a ThreadBinding, or a per-op checkout
     threadLockKey: string,
     sha: string,
     warmLockKey: string,
@@ -6989,7 +6992,12 @@ export class ResidentDO extends Sandbox<Env> {
     // per key inside the store's install (seeded from the warm key's entry) —
     // every thread on the key, this one included, then hardlinks the result.
     const plan = planThreadDeps({ hasDeps, threadLockKey, warmLockKey, installCmd });
-    if (!plan.seed) return { deps: "none", reconciled: false };
+    if (!plan.seed)
+      return {
+        deps: "none",
+        reconciled: false,
+        ...(hasDeps && binding.depsKey === threadLockKey ? { depsKey: threadLockKey } : {}),
+      };
     if (installCmd === undefined) {
       // No install command (item 52): there is no deps entry, but the build
       // step still ran at provisioning, so the tree still gets the checkout's

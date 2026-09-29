@@ -271,6 +271,7 @@ export type ReadyEnvironmentReason =
   | "backend_unavailable"
   | "snapshot_missing"
   | "dependencies_missing"
+  | "dependencies_stale"
   | "binding_mismatch"
   | "seed_failed"
   | "tool_missing"
@@ -302,10 +303,11 @@ async function checkReadyEnvironment(
   workspace: string,
   requirement: ReadyEnvironmentRequirement,
   signal?: AbortSignal,
+  seededFromSha?: string,
 ): Promise<void> {
   let command: string;
   try {
-    command = readyEnvironmentCommand(workspace, requirement);
+    command = readyEnvironmentCommand(workspace, requirement, seededFromSha);
   } catch {
     throw readyFailure(
       "test_command_invalid",
@@ -326,6 +328,11 @@ async function checkReadyEnvironment(
       throw readyFailure(
         "dependencies_missing",
         "Restore or install the repository dependencies, then retry this task.",
+      );
+    case "dependencies_stale":
+      throw readyFailure(
+        "dependencies_stale",
+        "Install dependencies for the exact target head, then retry this task on the same unit.",
       );
     case "tool_missing":
       throw readyFailure(
@@ -736,7 +743,10 @@ export async function makeExecutor(
                 "binding_mismatch",
                 "Verify the original task's repository branch and head, then retry it.",
               );
-            if (selection.binding.deps === undefined || selection.binding.deps === "none")
+            if (
+              selection.binding.deps === undefined ||
+              (selection.binding.deps === "none" && !selection.binding.depsKey)
+            )
               throw readyFailure(
                 "dependencies_missing",
                 "Restore or install the resident's dependency view, then retry this task.",
@@ -813,7 +823,7 @@ export async function makeExecutor(
       if (outcome !== undefined) await recheckOwner();
       if (outcome && "seeded" in outcome) {
         if (ready !== undefined) {
-          await checkReadyEnvironment(executor, outcome.seeded.workspace, ready, ctx.stopSignal);
+          await checkReadyEnvironment(executor, outcome.seeded.workspace, ready, ctx.stopSignal, outcome.sourceSha);
           await recheckOwner();
         }
         return {
@@ -870,7 +880,7 @@ async function seedSandbox(
   ctx: ExecutorContext,
   reprobe: () => Promise<ResidentStatusProbe>,
   span?: Span,
-): Promise<{ seeded: SeededSandbox } | { why: string }> {
+): Promise<{ seeded: SeededSandbox; sourceSha: string } | { why: string }> {
   let seed: SandboxSeed = seedForThread(handle, {
     slug: ctx.repo!,
     ...(ctx.ref ? { ref: ctx.ref } : {}),
@@ -900,6 +910,7 @@ async function seedSandbox(
       )
         return { why: "seed source did not match the bound snapshot" };
       return {
+        sourceSha: seed.sha,
         seeded: {
           slug: answer.slug,
           ref: answer.ref,

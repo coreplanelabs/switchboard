@@ -3128,6 +3128,19 @@ describe("makeExecutor pilot ready environment", () => {
     expect(calls).toEqual(["/status", "/attach"]);
   });
 
+  it("admits a reused resident dependency view only when the resident verifies its key", async () => {
+    envs();
+    const calls = fetches(
+      { body: { state: "warm", reason: "", snapshot: snapshot() } },
+      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: SHA, deps: "none", depsKey: "lock" } },
+    );
+    const check = vi.spyOn(ResidentExecutor.prototype, "exec").mockResolvedValue("READY");
+    const selection = await makeExecutor(opts(), context());
+    expect(selection.backend).toBe("resident");
+    expect(check).toHaveBeenCalledOnce();
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
   it("holds the unit before the model when the resident has no dependency view or the tool is missing", async () => {
     envs();
     const calls = fetches(
@@ -3174,6 +3187,32 @@ describe("makeExecutor pilot ready environment", () => {
     expect(selection.backend).toBe("sandbox");
     expect(selection.seeded).toMatchObject({ slug: "jshttp/vary", ref: "master", sha: SHA });
     expect(check.mock.calls[0]?.[0]).toContain("/workspace/checkout");
+    expect(calls).toEqual(["/status", "/seed"]);
+  });
+
+  it("refuses a seeded target whose lockfile changed after the dependency snapshot", async () => {
+    envs();
+    const target = "89abcdef0123456789abcdef0123456789abcdef";
+    const calls = fetches(
+      { body: { state: "degraded", reason: "install-failed", snapshot: snapshot() } },
+      {
+        body: {
+          seeded: true,
+          cached: false,
+          slug: "jshttp/vary",
+          ref: "feature/new-deps",
+          sha: target,
+          from: { ref: "master", sha: SHA, checkoutBackupId: CHECKOUT, depsBackupId: DEPS },
+          steps: { restore: 1, deps: 1, fixup: 1 },
+          ms: 3,
+        },
+      },
+    );
+    const check = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockResolvedValue("LOCKFILE_MISMATCH");
+    await expect(
+      makeExecutor(opts(), { ...context(), ref: "feature/new-deps", headSha: target }),
+    ).rejects.toMatchObject({ reason: "dependencies_stale", beforeModel: true });
+    expect(check.mock.calls[0]?.[0]).toContain(`git diff --quiet '${SHA}' HEAD --`);
     expect(calls).toEqual(["/status", "/seed"]);
   });
 
