@@ -184,15 +184,17 @@ import { shellQuote } from "../../src/execution/shellQuote.js";
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
 import { CREDENTIAL_EXPIRY_MARGIN_MS } from "../../src/execution/residentCredentials.js";
 import { destroyWithPersistentFence } from "../../src/execution/residentDestroyGate.js";
-import { ResidentRecreateAdmission } from "../../src/execution/residentRecreateAdmission.js";
+import { ResidentRecreateAdmission, idleForPoolRecycle } from "../../src/execution/residentRecreateAdmission.js";
 import {
   claimPoolBinding,
   mayRunAsPoolUser,
+  ownedPoolUsers,
   parsePoolBindings,
   parseSpentPoolUsers,
   rebuildPoolBindingIndex,
   releasePoolBinding,
   spendPoolUser,
+  unavailablePoolUsers,
 } from "../../src/execution/residentPoolSpends.js";
 import {
   recordFiring,
@@ -596,16 +598,10 @@ const THREADS_DIR = "/workspace/threads";
  *  at the latest (disk is cache). */
 const OPS_DIR = "/workspace/ops";
 
-/** The thread-user pool. worker1 is the engine's build user; each
- *  attach allocates one of these to the thread (persisted in the binding)
- *  and every /exec /read /write for that thread runs privilege-dropped as
- *  that user. The pool is released by the inactivity sweep. */
-/** Pool of OS users for thread worktrees (worker1 is the build user). Sized
- *  for SIMULTANEOUS runs, not for every thread ever seen: a run returns its
- *  user via /detach when it ends, so the pool only fills when 16 runs on one
- *  repo are genuinely concurrent. Memory, not this list, is the real ceiling
- *  — see the instance_type note in wrangler.jsonc. Must match the useradd loop
- *  in the Dockerfile. */
+/** Pool of OS users for thread worktrees and disposable ops. A UID stays with
+ *  its first owner for this VM generation; detach releases the live binding,
+ *  not the UID spend. Exhaustion may recycle a proven-idle VM. Must match the
+ *  useradd loop in the Dockerfile. */
 const THREAD_USERS = Array.from({ length: THREAD_POOL_SIZE }, (_, i) => `worker${i + 2}`);
 
 /** Force-detach: after killing the thread user's processes, how long
@@ -1301,7 +1297,7 @@ interface AttachOk {
   returned?: Returned;
 }
 
-/** What `POST /detach` answers: whether the pool user went back, why not, and
+/** What `POST /detach` answers: whether the live binding was released, why not, and
  *  — on a release — what the tree still held (item 16a), now gone with it. */
 interface DetachAnswer {
   released: boolean;
@@ -3916,8 +3912,8 @@ export class ResidentDO extends Sandbox<Env> {
     await this.ctx.storage.delete(INFRA_STREAK_KEY);
     await this.setResidentState("warm");
     // Event-triggered reclamation: the prune above already told the
-    // mirror which branches died; finished refs give their worktree and
-    // pool user back now, not at the idle TTL. Housekeeping, never a
+    // mirror which branches died; finished refs release their worktree and
+    // live binding now, not at the idle TTL. Housekeeping, never a
     // lifecycle flip — a failure here is a log line.
     try {
       const gc = await this.reclaimFinishedRefs(resource, facts.defaultRef, cycle.token);
@@ -5317,6 +5313,17 @@ export class ResidentDO extends Sandbox<Env> {
    *  added afterwards would wait for a report nothing sends (until the drain's
    *  `until`). Held first, every report finds its hold. */
   async reconcileForDeploy(resource: string): Promise<{ result: ImageReconcileResult; verified: boolean }> {
+    // The deploy's image report and an idle pool recycle both reason about the
+    // same VM. Admit reconciliation as disk work before its first await, so a
+    // recycle sees it as busy; a recycle already holding admission defers this
+    // pass for the deploy's bounded readiness retry.
+    const admitted = await this.withRecreateSafeAdmin(() => this.reconcileForDeployAdmitted(resource));
+    return "error" in admitted ? { result: "deferred", verified: false } : admitted;
+  }
+
+  private async reconcileForDeployAdmitted(
+    resource: string,
+  ): Promise<{ result: ImageReconcileResult; verified: boolean }> {
     const progress = await this.ctx.storage.get<DeployImageReconcileState>(IMAGE_RECONCILE_KEY);
     const pending = await this.ctx.storage.get<{ resource: string }>(IMAGE_REPORT_PENDING_KEY);
     const action = nextDeployImageReconcile(BUILD.commit, progress, pending !== undefined);
@@ -5672,7 +5679,11 @@ export class ResidentDO extends Sandbox<Env> {
   /** Storage bindings, active ops and inspections all reserve a pool user.
    * Claim inside this method, before its promise resolves: two concurrent
    * callers must not each read the same free UID before either can claim it. */
-  private async findFreePoolUser(excludeThreadKey?: string, excluded = new Set<string>()): Promise<string | undefined> {
+  private async findFreePoolUser(
+    excludeThreadKey?: string,
+    excluded = new Set<string>(),
+    preferred: readonly string[] = [],
+  ): Promise<string | undefined> {
     const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
     const used = new Set(
       [...all.values()].filter((b) => !b.evicted && b.user && b.threadKey !== excludeThreadKey).map((b) => b.user),
@@ -5680,7 +5691,7 @@ export class ResidentDO extends Sandbox<Env> {
     for (const u of this.opUsersInUse.keys()) used.add(u);
     for (const u of this.poolUsersInspecting) used.add(u);
     for (const u of excluded) used.add(u);
-    const user = THREAD_USERS.find((u) => !used.has(u));
+    const user = [...preferred, ...THREAD_USERS].find((u) => !used.has(u));
     if (user) this.poolUsersInspecting.add(user);
     return user;
   }
@@ -5717,19 +5728,82 @@ export class ResidentDO extends Sandbox<Env> {
     throw new Error("pool-user-stage-scan-invalid");
   }
 
+  /** A full one-use pool can serve the next request by destroying its VM,
+   * never by assigning another owner's UID. The admission mark closes every
+   * other entry before the idle read and stays held through the restore. */
+  private async recycleSpentPoolForAdmission(): Promise<true | ThreadErr> {
+    try {
+      const admission = await this.recreateAdmission.run(async (): Promise<true | ThreadErr> => {
+        const spent = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);
+        if (!spent) return { error: "pool-generation-unknown: fresh VM required before UID assignment", status: 503 };
+        if (spent.size < THREAD_USERS.length) return true; // another checked recreate already cleared the generation
+        const [status, drain, imagePending, snapshot, registeredRuns, bindings] = await Promise.all([
+          this.getStatus(),
+          this.registry().getDrain(),
+          this.ctx.storage.get(IMAGE_REPORT_PENDING_KEY),
+          this.ctx.storage.get(SNAPSHOT_KEY),
+          this.registeredRunsBeyondOps(),
+          this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX }),
+        ]);
+        if (
+          !snapshot ||
+          !idleForPoolRecycle({
+            state: status.state,
+            draining: liveDrain(drain, systemClock()) !== null,
+            imagePending: imagePending !== undefined,
+            inFlight: this.inFlightCount(),
+            refreshAdmissions: this.refreshAdmissionsInFlight,
+            adminWork: this.adminWorkInFlight,
+            hydrating: this.hydration !== null,
+            registeredRuns,
+            liveBindings: [...bindings.values()].filter((binding) => !binding.evicted).length,
+            inspecting: this.poolUsersInspecting.size,
+          })
+        )
+          return {
+            error: "pool-recycle-required: all UIDs spent and the resident is not idle for checked VM recycle",
+            status: 503,
+          };
+        await this.recreateContainer("pool-recycle: all UIDs spent; no other resident work owns this VM");
+        await this.ensureHydrated();
+        const fresh = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);
+        const ready = await this.getStatus();
+        const imageStillPending = (await this.ctx.storage.get(IMAGE_REPORT_PENDING_KEY)) !== undefined;
+        if (!fresh || fresh.size !== 0 || ready.state !== "warm" || imageStillPending)
+          return { error: "pool-recycle-failed: the restored VM is not warm, current and empty", status: 503 };
+        return true;
+      });
+      return admission.busy ? this.recreateRefusal() : admission.value;
+    } catch (err) {
+      console.log(`pool-recycle: checked VM recycle failed (${errMsg(err)})`);
+      return { error: "pool-recycle-failed: the checked VM restore did not complete", status: 503 };
+    }
+  }
+
   private async reserveSafePoolUser(owner: string, excludeThreadKey?: string): Promise<string | ThreadErr> {
-    const spent = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);
+    let spent = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);
     if (!spent) return { error: "pool-generation-unknown: fresh VM required before UID assignment", status: 503 };
-    const excluded = new Set(spent.keys());
+    let excluded = unavailablePoolUsers(spent, owner);
     let contaminated = false;
+    let recycled = false;
     for (;;) {
-      const user = await this.findFreePoolUser(excludeThreadKey, excluded);
-      if (!user)
+      const user = await this.findFreePoolUser(excludeThreadKey, excluded, ownedPoolUsers(spent, owner));
+      if (!user) {
+        if (!contaminated && excluded.size === THREAD_USERS.length && !recycled) {
+          recycled = true;
+          const result = await this.recycleSpentPoolForAdmission();
+          if (result !== true) return result;
+          spent = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);
+          if (!spent) return { error: "pool-generation-unknown: fresh VM required before UID assignment", status: 503 };
+          excluded = unavailablePoolUsers(spent, owner);
+          continue;
+        }
         return contaminated
           ? { error: "pool-user-contaminated: no clean pool user is available", status: 503 }
           : excluded.size === THREAD_USERS.length
             ? { error: "pool-recycle-required: all UIDs spent on this VM; confirm idle and recreate it", status: 503 }
             : { error: "user-pool-exhausted: no safe pool user is available", status: 429 };
+      }
       let safe = false;
       try {
         const clean = !(await this.poolUserHasOldThreadDir(user, [])) && !(await this.poolUserHasOldStageContent(user));
@@ -7860,9 +7934,9 @@ export class ResidentDO extends Sandbox<Env> {
     return "evicted";
   }
 
-  /** POST /detach: a run has ended — give the thread's pool user back now
-   *  instead of holding it until the TTL sweep (the pool is sized for
-   *  simultaneous runs). A run starts from a clean tree (item 17), so the tree
+  /** POST /detach: a run has ended — release its live binding now instead of
+   *  holding it until the TTL sweep. The UID remains spent for this VM
+   *  generation. A run starts from a clean tree (item 17), so the tree
    *  goes whatever it holds: what it held — uncommitted changes, unpushed
    *  commits — is measured once, as the thread user, and named in the answer
    *  (`leftBehind`) so the loss is never silent. The one thing that keeps a
@@ -8844,6 +8918,7 @@ export class ResidentDO extends Sandbox<Env> {
     // The runs whose process lives in the container between operator calls
     // (item 44): what the deploy preflight must see, added to both counts.
     const registeredRuns = await this.registeredRunsBeyondOps();
+    const poolSpends = parseSpentPoolUsers(map.get(SPENT_POOL_USERS_KEY), THREAD_USERS);
     return {
       resource: map.get(RESOURCE_KEY) ?? null,
       state: this.destroying || map.get(DESTROY_UNCONFIRMED_KEY) ? "down" : (map.get(STATE_KEY) ?? "down"),
@@ -8875,7 +8950,10 @@ export class ResidentDO extends Sandbox<Env> {
       // running container the last deploy could not verify.
       imageReport: map.get(IMAGE_REPORT_PENDING_KEY) !== undefined ? "pending" : "current",
       recreateAdmissionHeld: this.recreateAdmission.pending || map.get(RECREATE_ADMISSION_KEY) === true,
-      poolUsersSpent: parseSpentPoolUsers(map.get(SPENT_POOL_USERS_KEY), THREAD_USERS)?.size ?? null,
+      poolUsersSpent: poolSpends?.size ?? null,
+      // Read-scoped owner receipts explain historical occupancy even after
+      // every live binding and disposable op has ended.
+      poolUserSpends: poolSpends ? [...poolSpends].map(([user, owner]) => ({ user, owner })) : null,
       // Item 22: who holds what, as the rows say — the mirror mutex and the
       // cycle/hydration leases, each judged against this incarnation.
       incarnation: this.incarnation,

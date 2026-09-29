@@ -5,6 +5,15 @@ export interface SpentPoolUser {
   owner: string;
 }
 
+/** An owner may reclaim its own UID; only a different owner needs a fresh one. */
+export function unavailablePoolUsers(spent: ReadonlyMap<string, string>, owner: string): Set<string> {
+  return new Set([...spent].filter(([, prior]) => prior !== owner).map(([user]) => user));
+}
+
+export function ownedPoolUsers(spent: ReadonlyMap<string, string>, owner: string): string[] {
+  return [...spent].filter(([, prior]) => prior === owner).map(([user]) => user);
+}
+
 export function parseSpentPoolUsers(value: unknown, pool: readonly string[]): ReadonlyMap<string, string> | null {
   if (
     !Array.isArray(value) ||

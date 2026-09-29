@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { methodOf, readSource } from "./testing/sourceScan";
 
-// A run's end gives its pool user back, whatever its tree holds
+// A run's end releases its live binding, whatever its tree holds
 // (docs/reference/specs/resident-repos.md items 16a, 16b and 17): a run starts
 // from a clean tree, so nothing uncommitted or unpushed outlives the run —
 // what a run wants kept, it commits and pushes. `detachThread` therefore has

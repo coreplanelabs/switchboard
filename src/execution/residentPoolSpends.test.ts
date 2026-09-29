@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   claimPoolBinding,
   mayRunAsPoolUser,
+  ownedPoolUsers,
   parsePoolBindings,
   parseSpentPoolUsers,
   rebuildPoolBindingIndex,
   releasePoolBinding,
   spendPoolUser,
+  unavailablePoolUsers,
 } from "./residentPoolSpends.js";
 
 const pool = ["worker2", "worker3", "worker4"];
@@ -45,6 +47,20 @@ describe("resident pool UID spends", () => {
     const first = spendPoolUser([], pool, "worker2", "thread:a");
     expect(spendPoolUser(first, pool, "worker2", "thread:a")).toEqual(first);
     expect(spendPoolUser(first, pool, "worker2", "thread:b")).toBeNull();
+  });
+
+  it("makes a detached thread's UID available only to that same owner", () => {
+    const spent = parseSpentPoolUsers(
+      [
+        { user: "worker2", owner: "thread:a" },
+        { user: "worker3", owner: "op:one" },
+      ],
+      pool,
+    )!;
+    expect(unavailablePoolUsers(spent, "thread:a")).toEqual(new Set(["worker3"]));
+    expect(unavailablePoolUsers(spent, "thread:b")).toEqual(new Set(["worker2", "worker3"]));
+    expect(ownedPoolUsers(spent, "thread:a")).toEqual(["worker2"]);
+    expect(ownedPoolUsers(spent, "thread:b")).toEqual([]);
   });
 
   it("refuses UID-scoped work while two retained bindings name one UID", () => {

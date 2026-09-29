@@ -30,9 +30,8 @@ export const REFRESH_INTERVAL_S = 600;
  *  ten-minute buckets since the last instance. */
 export const IDLE_REFRESH_INTERVAL_S = 6 * 60 * 60;
 
-/** The thread user pool the image carries (`worker2`..`worker17`): one OS
- *  user per attached thread, and the bound on how many bindings one sweep
- *  step can have to check. */
+/** The image's `worker2`..`worker17` pool: 16 one-use identities per VM
+ *  generation for thread owners and disposable operations. */
 export const THREAD_POOL_SIZE = 16;
 
 /** Exec budgets. Each is a refresh step's own budget too (refresh.ts), so a
