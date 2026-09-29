@@ -57,7 +57,8 @@ export function createMainTaskStarter(deps: MainStartDeps) {
       actor.origin.threadKey !== msg.threadKey ||
       !selfIdsOf(actor).includes(msg.userId) ||
       !msg.messageId ||
-      !deps.privateWorkerAvailable
+      !deps.privateWorkerAvailable ||
+      !deps.privateWorkerLog
     )
       return refuse("I can't start private work from this conversation right now.");
     if (!stillLive())

@@ -7,6 +7,7 @@ import { MAX_FILE_CHARS } from "../../execution/githubApi.js";
 import { PLAN_MAX_CHARS } from "../ship/contract.js";
 import { generatedPlanId } from "../ship/coordinator.js";
 import { DecisionRecordAllocator } from "../decisionRecordReservation.js";
+import { InMemoryPrivateWorkerLog, UnavailablePrivateWorkerLog } from "../privateWorkerLog.js";
 
 // Feature: docs/reference/specs/agent-ship.md item 16 — every `agent:ship`
 // request the preflight admitted is handed to the plan runner: the bot writes
@@ -65,6 +66,7 @@ function harness(
     /** The shim's status of an earlier attempt's instance, by id; `absent` when unscripted. */
     status?: Record<string, InstanceStatusAnswer>;
     store?: HandOffDeps["instances"];
+    privateWorkerLog?: HandOffDeps["privateWorkerLog"];
   } = {},
 ) {
   const files = over.files ?? { "docs/plans/fixture.md": PLAN };
@@ -83,6 +85,7 @@ function harness(
       return content.length > maxChars ? { content: content.slice(0, maxChars), truncated: true } : { content };
     },
     instances,
+    privateWorkerLog: over.privateWorkerLog ?? new InMemoryPrivateWorkerLog(),
     create: async (id) => {
       created.push(id);
       const answer = over.create ?? { kind: "created", id };
@@ -99,6 +102,55 @@ function harness(
 }
 
 describe("main-agent work hand-off", () => {
+  it("proves the durable private log before claiming a main task or starting a Workflow", async () => {
+    const h = harness({ privateWorkerLog: new UnavailablePrivateWorkerLog() });
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "fix failed signups",
+        mainTask: {
+          mainThreadKey: "slack:C1:1.0",
+          actId: "act-private",
+          brief: { question: "How many signups failed?", findings: [], requestedChange: "Fix the failure" },
+        },
+        privateWorkerReady: true,
+        stillLive: () => true,
+        stillPrivate: async () => true,
+      }),
+    );
+    expect(out).toMatchObject({ status: "aborted", refusal: { code: "setup_failed" } });
+    expect(out.reply).toContain("could not be verified");
+    expect(h.created).toEqual([]);
+    expect(await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-private" })).toBeNull();
+  });
+
+  it("rechecks the private log before retrying a saved main task", async () => {
+    const h = harness({ create: new Error("Workflow unavailable") });
+    const request = input({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "fix failed signups",
+      mainTask: {
+        mainThreadKey: "slack:C1:1.0",
+        actId: "act-private",
+        brief: { question: "How many signups failed?", findings: [], requestedChange: "Fix the failure" },
+      },
+      privateWorkerReady: true,
+      stillLive: () => true,
+      stillPrivate: async () => true,
+    });
+    const first = await handOffToCoordinator(h.deps, request);
+    expect(first).toMatchObject({ status: "aborted", refusal: { code: "plan_start_failed" } });
+    expect(h.created).toHaveLength(1);
+    expect(await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-private" })).not.toBeNull();
+
+    h.deps.privateWorkerLog = new UnavailablePrivateWorkerLog();
+    const second = await handOffToCoordinator(h.deps, request);
+    expect(second).toMatchObject({ status: "aborted", refusal: { code: "setup_failed" } });
+    expect(second.reply).toContain("could not be verified");
+    expect(h.created).toHaveLength(1);
+  });
+
   it("describes a private worker without promising a requester-thread unit or card", async () => {
     const h = harness();
     const out = await handOffToCoordinator(

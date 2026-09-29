@@ -1,17 +1,14 @@
-import { INSTANCE_ID_PATTERN } from "../core/coordinator/contract.js";
 import {
   PRIVATE_WORKER_EVENT_MAX_CHARS,
   PRIVATE_WORKER_REPLY_MAX_CHARS,
+  privateWorkerThreadKey,
+  type PrivateWorkerIdentity,
   type PrivateWorkerLog,
 } from "../core/privateWorkerLog.js";
 import type { ChannelIO, HistoryItem, StatusHandle, StatusUpdate } from "../core/types.js";
 
-export interface PrivateWorkerIdentity {
-  instanceId: string;
-  unit: string;
-}
-
-const UNIT_ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+export { privateWorkerThreadKey, parsePrivateWorkerThreadKey } from "../core/privateWorkerLog.js";
+export type { PrivateWorkerIdentity } from "../core/privateWorkerLog.js";
 const SHORTENED_COPY = "\n\n[Private history copy shortened; original text may be longer.]";
 
 function boundedHistoryCopy<T extends { text: string }>(event: T, limit: number): T {
@@ -29,20 +26,6 @@ function boundedHistoryCopy<T extends { text: string }>(event: T, limit: number)
     else high = mid - 1;
   }
   return { ...event, text: characters.slice(0, low).join("") + SHORTENED_COPY };
-}
-
-/** Stable across bot generations; never a Slack thread key. */
-export function privateWorkerThreadKey(identity: PrivateWorkerIdentity): string {
-  if (!INSTANCE_ID_PATTERN.test(identity.instanceId) || !UNIT_ID_PATTERN.test(identity.unit))
-    throw new Error("invalid private worker identity");
-  return `worker:${identity.instanceId}:${identity.unit}`;
-}
-
-/** Only an exact internal key can be rebuilt after a bot restart. */
-export function parsePrivateWorkerThreadKey(threadKey: string): PrivateWorkerIdentity | undefined {
-  const match = /^worker:([^:]+):([^:]+)$/.exec(threadKey);
-  if (!match || !INSTANCE_ID_PATTERN.test(match[1]!) || !UNIT_ID_PATTERN.test(match[2]!)) return undefined;
-  return { instanceId: match[1]!, unit: match[2]! };
 }
 
 /** Record a previously authorized human turn before dispatch; retries reuse its id. */

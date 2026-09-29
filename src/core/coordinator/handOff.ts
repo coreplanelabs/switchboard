@@ -52,6 +52,7 @@ import {
 } from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
+import { privateWorkerThreadKey, type PrivateWorkerLog } from "../privateWorkerLog.js";
 
 export type BeforeCoordinatorStart = () => Promise<
   | {
@@ -154,6 +155,8 @@ export interface HandOffDeps {
     opts?: { maxChars?: number },
   ) => Promise<{ content: string; truncated?: boolean }>;
   instances: CoordinatorInstanceStore;
+  /** The durable private conversation store, checked before a main task claims a unit. */
+  privateWorkerLog?: PrivateWorkerLog;
   /** The shim's `POST /admin/coordinator/instances` for the id. */
   create: (id: string) => Promise<CreateInstanceAnswer>;
   /** The shim's `GET /admin/coordinator/instances/<id>`: whether an earlier attempt's instance still runs, ended, or never existed. */
@@ -221,6 +224,16 @@ async function privateAtGate(input: HandOffInput): Promise<boolean> {
   if (!input.stillPrivate) return true;
   try {
     return await input.stillPrivate();
+  } catch {
+    return false;
+  }
+}
+
+async function privateWorkerLogReachable(deps: HandOffDeps, instanceId: string, unit: string): Promise<boolean> {
+  if (deps.privateWorkerLog === undefined) return false;
+  try {
+    await deps.privateWorkerLog.list(privateWorkerThreadKey({ instanceId, unit }));
+    return true;
   } catch {
     return false;
   }
@@ -740,6 +753,10 @@ async function linkedTask(
       return refused("setup_failed", "The main run stopped; its linked worker was not started.");
     if (!(await privateAtGate(input)))
       return refused("setup_failed", "This is no longer a private conversation; no worker started.");
+    if (!(await privateWorkerLogReachable(deps, instance.id, unit.unit)))
+      return refused("setup_failed", "The private worker conversation could not be verified; no worker started.");
+    if (!(await privateAtGate(input)))
+      return refused("setup_failed", "This is no longer a private conversation; no worker started.");
     if (!mainRunLiveAtGate(input))
       return refused("setup_failed", "The main run stopped; its linked worker was not started.");
     let created: CreateInstanceAnswer;
@@ -791,6 +808,14 @@ async function start(
     if (!(await privateAtGate(input)))
       return refused("setup_failed", "This is no longer a private conversation; no worker started.");
     if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
+    if (input.mainTask !== undefined) {
+      const unit = units[0];
+      if (unit === undefined || !(await privateWorkerLogReachable(deps, instance.id, unit.unit)))
+        return refused("setup_failed", "The private worker conversation could not be verified; no worker started.");
+      if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
+      if (!(await privateAtGate(input)))
+        return refused("setup_failed", "This is no longer a private conversation; no worker started.");
+    }
     try {
       mainClaim =
         input.mainTask !== undefined
@@ -883,6 +908,10 @@ async function start(
     let answer: CreateInstanceAnswer;
     if (!mainRunLiveAtGate(input))
       return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
+    if (!(await privateAtGate(input)))
+      return refused("setup_failed", "This is no longer a private conversation; its task is saved for a safe retry.");
+    if (input.mainTask !== undefined && !(await privateWorkerLogReachable(deps, instance.id, units[0]!.unit)))
+      return refused("setup_failed", "The private worker conversation could not be verified; no worker started.");
     if (!(await privateAtGate(input)))
       return refused("setup_failed", "This is no longer a private conversation; its task is saved for a safe retry.");
     if (!mainRunLiveAtGate(input))

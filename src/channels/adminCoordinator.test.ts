@@ -3267,6 +3267,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     };
     const start = createMainTaskStarter({
       instances: h.instances,
+      privateWorkerLog: new InMemoryPrivateWorkerLog(),
       readFile: async () => ({ content: "" }),
       create: async (id) => ({ kind: "created", id }),
       status: async () => ({ kind: "status", status: "running" }),

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ALL_GRANTS } from "../authz/grants.js";
 import type { Actor } from "../authz/types.js";
 import type { IncomingMessage } from "../types.js";
+import { InMemoryPrivateWorkerLog } from "../privateWorkerLog.js";
 import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
 import { createMainTaskStarter, type MainStartDeps, type MainStartInput } from "./mainStart.js";
 
@@ -39,6 +40,7 @@ function harness(over: Partial<MainStartDeps> = {}) {
   const created: string[] = [];
   const deps: MainStartDeps = {
     instances,
+    privateWorkerLog: new InMemoryPrivateWorkerLog(),
     readFile: async () => ({ content: "" }),
     create: async (id) => {
       created.push(id);
@@ -127,6 +129,7 @@ describe("main-agent private worker start", () => {
     const cases: Array<Partial<MainStartDeps> | "foreign" | "unbound"> = [
       { canUseRepo: () => false },
       { privateWorkerAvailable: false },
+      { privateWorkerLog: undefined },
       { canRunAgent: (_, name) => name !== "review" },
       "foreign",
       "unbound",
