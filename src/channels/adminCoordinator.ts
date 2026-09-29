@@ -4792,9 +4792,11 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
 
   const countedIdle = wakeEvents.length > 0 ? { ...idle, wakes: idle.wakes + 1 } : idle;
   const segments = row.segments ?? [];
+  // A segment answer resumes work. Keep its durable wake, but stop marking the
+  // unit idle so publication and intake read the current lifecycle correctly.
+  const { idle: _idle, ...activeRow } = row;
   const updated: CoordinatorUnit = {
-    ...row,
-    idle: countedIdle,
+    ...(answer.kind === "segment" ? activeRow : { ...row, idle: countedIdle }),
     ...(answer.kind === "segment" && answer.index >= 2 && !segments.some((s) => s.index === answer.index)
       ? {
           segments: [

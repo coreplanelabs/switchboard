@@ -2285,6 +2285,7 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
       repo: "acme/api",
       base: "main",
       branch: "feat/x",
+      expectedTip: HEAD,
       startState: emptyStart,
     });
   });
@@ -2304,10 +2305,14 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
     expect(seam.pullRequestHead).toHaveBeenCalledWith("acme/api", 7);
     expect(seam.rewrite).toHaveBeenCalledTimes(1);
     expect(note).toContain("1 commit(s) re-authored");
+    expect(events.filter((event) => event.type === "pushed_head")).toEqual([
+      expect.objectContaining({ ref: "feat/x", sha: HEAD, by: "push" }),
+      expect.objectContaining({ ref: "feat/x", sha: REBUILT, by: "push" }),
+    ]);
     expect(events).toContainEqual(expect.objectContaining({ type: "pr_opened", number: 7, rewritten: 1 }));
   });
 
-  it("a head mismatch after the open runs the rewrite once more and re-renders at the tip it settles", async () => {
+  it("a head mismatch after the open is checked against the tip the rewrite settled", async () => {
     const spy = openSpy();
     const events: RunEvent[] = [];
     const moved = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
@@ -2315,6 +2320,7 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
     const seam = identityOf({ rewrite: { kind: "rewritten", count: 1, replaced: ["x"], tip: REBUILT }, prHead: moved });
     await runCodingPrPostStep({ ...common(events, spy), updatePullRequest: update, identity: seam.identity });
     expect(seam.rewrite).toHaveBeenCalledTimes(2);
+    expect(seam.rewrite).toHaveBeenLastCalledWith(expect.objectContaining({ expectedTip: REBUILT }));
     expect(update).toHaveBeenCalledTimes(1);
     // The two rewrites both counted: the event carries the sum.
     expect(events).toContainEqual(expect.objectContaining({ type: "pr_opened", rewritten: 2 }));
@@ -2536,6 +2542,7 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
         repo: "acme/api",
         base: "main",
         branch: "feat/x",
+        expectedTip: PR_HEAD,
         startState: emptyStart,
       });
       expect(updates).toEqual([]);

@@ -1496,15 +1496,45 @@ describe("githubPulls — the identity rewrite's Git Data calls (record 0062)", 
     await expect(createCommit("acme/api", commit)).rejects.toThrow(/HTTP 422/);
   });
 
-  it("forceMoveRef PATCHes the branch ref with force: true; a ruleset refusal throws with the status", async () => {
+  it("forceMoveRef updates the branch only at its expected head; a moved ref refuses", async () => {
     stubToken();
-    const calls = stubFetch(() => new Response("{}", { status: 200 }));
-    await forceMoveRef("acme/api", "feat/x", "r1");
-    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/refs/heads/feat/x");
-    expect(calls[0].init.method).toBe("PATCH");
-    expect(JSON.parse(String(calls[0].init.body))).toEqual({ sha: "r1", force: true });
-    stubFetch(() => new Response("force pushes blocked", { status: 422 }));
-    await expect(forceMoveRef("acme/api", "feat/x", "r1")).rejects.toThrow(/HTTP 422/);
+    const calls = stubFetch(
+      (_url, init) =>
+        new Response(
+          String(init.body).includes("mutation")
+            ? '{"data":{"updateRefs":{"clientMutationId":null}}}'
+            : '{"data":{"repository":{"id":"repo-id"}}}',
+          { status: 200 },
+        ),
+    );
+    await forceMoveRef("acme/api", "feat/x", "r1", "c1");
+    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/graphql", "https://api.github.com/graphql"]);
+    expect(JSON.parse(String(calls[1]!.init.body)).variables).toEqual({
+      repositoryId: "repo-id",
+      name: "refs/heads/feat/x",
+      before: "c1",
+      after: "r1",
+    });
+    stubFetch(
+      (_url, init) =>
+        new Response(
+          String(init.body).includes("mutation")
+            ? '{"errors":[{"message":"the ref no longer points to beforeOid"}]}'
+            : '{"data":{"repository":{"id":"repo-id"}}}',
+          { status: 200 },
+        ),
+    );
+    await expect(forceMoveRef("acme/api", "feat/x", "r1", "c1")).rejects.toThrow(/no longer points/);
+    stubFetch(
+      (_url, init) =>
+        new Response(
+          String(init.body).includes("mutation")
+            ? '{"data":{"updateRefs":null}}'
+            : '{"data":{"repository":{"id":"repo-id"}}}',
+          { status: 200 },
+        ),
+    );
+    await expect(forceMoveRef("acme/api", "feat/x", "r1", "c1")).rejects.toThrow(/update result unavailable/);
   });
 
   it("pullRequestHead reads the pull request's head.sha and answers undefined on any failure", async () => {

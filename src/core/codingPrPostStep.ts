@@ -697,6 +697,7 @@ export async function runCodingPrPostStep(input: {
       repo: string;
       base: string;
       branch: string;
+      expectedTip?: string;
       startState: BranchStartState;
     }) => Promise<RewriteResult>;
     /** The pull request's `head.sha` after the open (githubPulls.pullRequestHead). */
@@ -1007,7 +1008,13 @@ export async function runCodingPrPostStep(input: {
       if (base === undefined)
         return `⚠️ A PR description was submitted and the open pull request ${url} heads \`${headBranch}\`${branchNote}, but no base branch is known to judge its commits against, so it was not edited; ${caveat}.`;
       const result = await input.identity
-        .rewrite({ repo, base, branch: headBranch, startState: startStateFor(headBranch) })
+        .rewrite({
+          repo,
+          base,
+          branch: headBranch,
+          expectedTip: pushed ? (headSha ?? prHead) : prHead,
+          startState: startStateFor(headBranch),
+        })
         .catch((err: unknown): RewriteResult => ({
           kind: "unreadable",
           reason: err instanceof Error ? err.message : String(err),
@@ -1029,6 +1036,8 @@ export async function runCodingPrPostStep(input: {
           `[identity] ${logKey} re-authored ${result.count} commit(s) on ${repo} ${headBranch}: ${result.replaced.join("; ")}`,
         );
         reauthored = ` — ${result.count} commit(s) re-authored`;
+        if (/^[0-9a-f]{40}$/.test(result.tip) && result.tip !== renderHead)
+          input.publish({ type: "pushed_head", ref: headBranch, sha: result.tip, by: "push", at: systemClock() });
       }
       if (result.tip !== undefined && /^[0-9a-f]{40}$/.test(result.tip)) renderHead = result.tip;
     }
@@ -1096,7 +1105,7 @@ export async function runCodingPrPostStep(input: {
     const rewriteOnce = async (): Promise<RewriteResult | undefined> => {
       if (!input.identity) return undefined;
       const result = await input.identity
-        .rewrite({ repo, base, branch, startState })
+        .rewrite({ repo, base, branch, expectedTip: renderHead, startState })
         .catch((err: unknown): RewriteResult => ({
           kind: "unreadable",
           reason: err instanceof Error ? err.message : String(err),
@@ -1106,6 +1115,8 @@ export async function runCodingPrPostStep(input: {
         console.log(
           `[identity] ${logKey} re-authored ${result.count} commit(s) on ${repo} ${branch}: ${result.replaced.join("; ")}`,
         );
+        if (/^[0-9a-f]{40}$/.test(result.tip) && result.tip !== renderHead)
+          input.publish({ type: "pushed_head", ref: branch, sha: result.tip, by: "push", at: systemClock() });
       }
       if (result.kind !== "unreadable" && result.tip !== undefined && /^[0-9a-f]{40}$/.test(result.tip))
         renderHead = result.tip;
@@ -1129,9 +1140,9 @@ export async function runCodingPrPostStep(input: {
       let body = renderPrDescriptionMarkdown(prDescription, renderCtx);
       const opened = await input.openPullRequest({ repo, headBranch: branch, base, title: prDescription.title, body });
       // The head pin: after the open or edit, the pull request's head
-      // must be the tip the rewrite settled; a mismatch (the model pushed once
-      // more between the rewrite and the open) runs the rewrite once more and
-      // re-renders at the tip it settles. A second rewrite that answers
+      // must be the tip the rewrite settled; a mismatch gets one guarded
+      // reread against that tip. An intervening push fails closed, while a
+      // stale PR head read can settle and re-render. A second rewrite answering
       // `unreadable` cannot un-open the pull request, so the reply and the
       // record carry a warning instead of claiming a verified head.
       let pinWarning = "";

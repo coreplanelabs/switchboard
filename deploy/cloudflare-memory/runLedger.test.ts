@@ -1402,10 +1402,11 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
       senders: ["Alice"],
       leaseMs: 60_000,
     } as const;
+    const { idle: _idle, ...resumed } = row;
     expect(
       await post("/runs/coordinator/wake", {
         storeKey: key,
-        unit: row,
+        unit: resumed,
         waitId: "U12/idle/1",
         answer,
         seqs: [1],
@@ -1413,7 +1414,7 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
       }),
     ).toEqual({ status: 200, data: { ok: true } });
     expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: INSTANCE_ID })).data).toEqual({
-      units: [{ ...row, wakes: { "U12/idle/1": answer } }],
+      units: [{ ...resumed, wakes: { "U12/idle/1": answer } }],
     });
     expect(
       (await post("/runs/coordinator/events/list", { storeKey: key, instanceId: INSTANCE_ID, unit: "U12" })).data,
