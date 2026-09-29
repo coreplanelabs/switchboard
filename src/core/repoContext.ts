@@ -404,7 +404,7 @@ function contextCueOf(later: { before: string; after: string }): boolean {
   // failure and review <PR>" requests that PR.
   const clause = later.before.split(/[;\n]/).at(-1) ?? later.before;
   const action = [
-    ...clause.matchAll(/\b(?:re-?review|review|see|context|example|reference|related|compare|background)\b/gi),
+    ...clause.matchAll(/\b(?:re-?review|review|see|context|example|reference|related|compare|background|packages)\b/gi),
   ]
     .at(-1)?.[0]
     .toLowerCase();

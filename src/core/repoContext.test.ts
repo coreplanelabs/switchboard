@@ -270,6 +270,30 @@ describe("resolveRepoContext: explicit signals in the current message", () => {
     expect(explicitPrOf(text)).toEqual({ repo: "acme/api", number: 9 });
   });
 
+  it("a release review keeps its direct PR when the description names merged component PRs", async () => {
+    const text =
+      "agent:review https://github.com/acme/api/pull/7\nReview release PR exact head. It packages merged installer PR #8 and previously merged CI fix #9.";
+    expect(explicitRepoOf(text)).toBe("acme/api");
+    expect(explicitPrOf(text)).toEqual({ repo: "acme/api", number: 7 });
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "release", sha: "e".repeat(40), repo: { full_name: "acme/api" } } } },
+      { body: { object: { sha: "e".repeat(40) } } },
+    );
+    const review = await resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true);
+    expect(review).toMatchObject({ repo: "acme/api", pr: 7, prFromMessage: true });
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
+  });
+
+  it("a later review request still conflicts after a packaged PR citation", async () => {
+    const text = "review https://github.com/acme/api/pull/7. It packages merged PR #8. Review PR #9 too.";
+    expect(explicitPrOf(text)).toBeUndefined();
+    const { fn } = stubFetch();
+    await expect(
+      resolveRepoContext(msg(text), [], async () => true, undefined, undefined, undefined, true),
+    ).resolves.toMatchObject({ prConflict: { target: "acme/api#7", cited: "PR #9" } });
+    expect(fn).not.toHaveBeenCalled();
+  });
+
   it("a direct PR URL outranks a later addressed bare example", async () => {
     const text = "review https://github.com/acme/api/pull/9; PR #7 in acme/web was an earlier example";
     expect(explicitRepoOf(text)).toBe("acme/api");
