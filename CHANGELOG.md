@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.268.0](https://github.com/coreplanelabs/switchboard/compare/v1.267.3...v1.268.0) (2026-09-29)
+
+
+### Features
+
+* **costs:** chart Ship run spending against unit caps ([#2466](https://github.com/coreplanelabs/switchboard/issues/2466)) ([9c7b0e0](https://github.com/coreplanelabs/switchboard/commit/9c7b0e0183f05db011668bf5e6ffe2c125e98d14))
+
+
+### Bug fixes
+
+* **dispatcher:** keep release PR target amid merged citations ([#2468](https://github.com/coreplanelabs/switchboard/issues/2468)) ([7a3f2a7](https://github.com/coreplanelabs/switchboard/commit/7a3f2a740ffc45108703300048ab5fe8a47ae978))
+* **dispatcher:** keep stacked connector footers off Ship tasks ([#2467](https://github.com/coreplanelabs/switchboard/issues/2467)) ([1ef592f](https://github.com/coreplanelabs/switchboard/commit/1ef592ff70a0d719416bff68cc593ec05c55e90f))
+* **resident:** recover image reports during deploy ([#2471](https://github.com/coreplanelabs/switchboard/issues/2471)) ([e2c9d45](https://github.com/coreplanelabs/switchboard/commit/e2c9d454b5890e3b105c22a56433fb99274c941c))
+* **resident:** recycle spent UID pool only when idle ([#2472](https://github.com/coreplanelabs/switchboard/issues/2472)) ([c33c79d](https://github.com/coreplanelabs/switchboard/commit/c33c79d9cc07dda231fc37727c26255c49a55320))
+* **runs:** honor hard stops during recovery ([#2465](https://github.com/coreplanelabs/switchboard/issues/2465)) ([65f8494](https://github.com/coreplanelabs/switchboard/commit/65f8494f8c33c75464798fddf8b0b1ba3afc4805))
+
 ## [1.267.3](https://github.com/coreplanelabs/switchboard/compare/v1.267.2...v1.267.3) (2026-09-29)
 
 
