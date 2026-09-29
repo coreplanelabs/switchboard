@@ -1590,6 +1590,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           : prBase !== undefined
             ? (binding?.ref ?? repoCtx.ref)
             : undefined;
+      const publicationSystem =
+        coordinator?.publication !== undefined && existingPrPublication !== undefined
+          ? "blocked" in existingPrPublication
+            ? `${system}\n\nSwitchboard could not verify this run's existing pull request publication binding: ${existingPrPublication.blocked}. Do not edit or publish until the binding is repaired.`
+            : `${system}\n\nSwitchboard verified this run's durable Ship publication binding against its checkout and a fresh pull request read before opening this agent: ${coordinator.publication.repo}#${coordinator.publication.pr}, head ref ${existingPrPublication.ref}, base ref ${coordinator.publication.baseRef}, expected full head ${existingPrPublication.expectedHeadSha}, owner ${coordinator.publication.owner.instanceId}:${coordinator.publication.owner.unit}. This is the trusted adoption receipt for this run. Continue work on that exact pull request and use the authorized Git door push for publication; do not require a separate adoption lookup.`
+          : system;
       const protectedBranches = [
         ...new Set(
           (prBase !== undefined ? [prBase] : [binding?.ref, repoCtx.ref]).filter(
@@ -1642,7 +1648,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
             model: { id: modelId, provider: providerName, providerType: providerCfg.type },
             ...(ctx.modelCard ? { card: ctx.modelCard } : {}),
-            system,
+            system: publicationSystem,
             messages,
             tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools),
             toolContext,
@@ -2016,6 +2022,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // and asks nothing — the post-step's note then says the description was
     // not resubmitted.
     let descriptionTurnRan = false;
+    const confirmedPublicationPush = (): boolean | undefined =>
+      coordinator?.publication === undefined
+        ? undefined
+        : publicationReceipts.some((receipt) => receipt.ref === observedBranch && receipt.sha === observedHead) ||
+          (salvagedTo?.branch === observedBranch && salvagedTo?.head === observedHead);
     if (isCodingPrRun && !tailSkipped() && !endingSalvageAttempted && prDescription === undefined) {
       const turnTarget = await descriptionTurnTarget({
         observed: {
@@ -2027,6 +2038,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         },
         description: prDescription,
         target: prTarget,
+        confirmedPush: confirmedPublicationPush(),
         findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
         logKey: msg.threadKey,
       });
@@ -2241,6 +2253,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             remoteHead: observedRemoteHead,
             remoteRepo: observedRemoteRepo,
           },
+          confirmedPush: confirmedPublicationPush(),
           description: prDescription,
           requestedBy: {
             name: requester.userName?.trim() || requestedLogin || requester.userId,

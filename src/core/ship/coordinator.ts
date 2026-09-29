@@ -2835,6 +2835,32 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
   if (pr.state === "closed") return foundClosed(s, pr, [roundNote(round, "completed")]);
   if (pr.state === "open" && pr.headBranchExists === false)
     return missingHeadBranch(s, pr, [roundNote(round, "aborted")]);
+  // An existing PR can still be open when its coding child stopped before
+  // writing. A blocked handoff with no accepted push ends this coding attempt;
+  // the old PR's existence does not authorize a review round.
+  if (
+    pr.state === "open" &&
+    round.kind === "coding" &&
+    phase.dead === undefined &&
+    (phase.childPushed?.length ?? 0) === 0 &&
+    (phase.childHandoff?.deviations.length ?? 0) > 0
+  ) {
+    const bound = { ...s, pr: { number: pr.prNumber, url: pr.url } };
+    return end(
+      bound,
+      {
+        kind: "held",
+        cause: "blocked",
+        pr: bound.pr,
+        round,
+        runId: phase.runId,
+        reason: phase.childHandoff!.deviations.map((dv) => `${dv.from} → ${dv.to} — ${dv.why}`).join("; "),
+        ...(phase.finalReply !== undefined ? { finalReply: phase.finalReply } : {}),
+        reviewRounds: bound.reviewRounds,
+      },
+      [roundNote(round, "held")],
+    );
+  }
   if (pr.state === "none") {
     // A dead child left nothing on the branch to recover: the unit ends with
     // the child's own reason — never the budget clip.

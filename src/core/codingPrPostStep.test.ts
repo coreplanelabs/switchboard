@@ -113,6 +113,40 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     events.length = 0;
     await runCodingPrPostStep({ ...common, observed: observation({ remoteHead: undefined }), description: undefined });
     expect(events.some((e) => e.type === "pushed_head")).toBe(false);
+    // An existing-PR run can start with its checkout already at the remote tip.
+    events.length = 0;
+    await runCodingPrPostStep({
+      ...common,
+      observed: observation(),
+      description: undefined,
+      confirmedPush: false,
+    });
+    expect(events).toEqual([]);
+  });
+
+  it("an existing-PR run without an accepted push cannot edit its PR even after submitting a description", async () => {
+    const events: RunEvent[] = [];
+    const findOpenPr = vi.fn(async () => ({ number: 7, htmlUrl: "https://github.com/acme/api/pull/7" }));
+    const updatePullRequest = vi.fn(async () => {});
+    const openPullRequest = vi.fn(openSpy().fn);
+    const note = await runCodingPrPostStep({
+      observed: observation(),
+      confirmedPush: false,
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: "feat/x", resolvedRef: "feat/x" },
+      findOpenPr,
+      updatePullRequest,
+      openPullRequest,
+      fetchRepoInfo: unreachable,
+      publish: (e) => events.push(e),
+      logKey: "t",
+      verbosity: "quiet",
+    });
+    expect(note).toContain("no accepted push");
+    expect(findOpenPr).not.toHaveBeenCalled();
+    expect(updatePullRequest).not.toHaveBeenCalled();
+    expect(openPullRequest).not.toHaveBeenCalled();
+    expect(events).toEqual([expect.objectContaining({ type: "run_note", kind: "pr_not_opened" })]);
   });
 
   it("description + observed pushed branch → PR opened from typed values, pr_opened published, note carries the URL", async () => {

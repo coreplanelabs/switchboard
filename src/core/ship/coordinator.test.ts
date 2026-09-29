@@ -1808,6 +1808,40 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(d.state.ending).toMatchObject({ kind: "held", cause: "blocked" });
   });
 
+  it("a fresh adopted PR stays held when its coding child stopped before pushing, rather than starting review on the old head", () => {
+    const d = new Driver(openUnitPipeline(input({ merge: "person", generated: true, freshAdopt: true }), T0));
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, headBranchExists: true },
+      at: T0,
+    });
+    expect(d.action).toMatchObject({ type: "spawn", preset: "coding", round: { index: 0 } });
+    runChild(
+      d,
+      "run-c0",
+      finished({
+        status: "completed",
+        headSha: HEAD_A,
+        handoffLists: {
+          deviations: [{ from: "repair the PR", to: "stopped before edits", why: "binding receipt unavailable" }],
+          followUps: [],
+          unproven: [],
+        },
+      }),
+      T0 + 5 * MIN,
+    );
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, headBranchExists: true },
+      at: T0 + 5 * MIN,
+    });
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: { kind: "held", cause: "blocked", pr: { number: 7 }, runId: "run-c0" },
+    });
+    expect(d.rounds()).toEqual(["0 coding started", "0 coding held"]);
+  });
+
   it("a lease end without a handoff is renewed as today: the child stopped without an ending of its own, so the grant decides and the next segment opens from the pushed head", () => {
     const d = fresh(input({ merge: "person", generated: true, grant: { renewals: 6 }, grantSource: "channel" }));
     d.answer({ type: "branch", ok: true, at: T0 });

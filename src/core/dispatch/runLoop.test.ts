@@ -1291,6 +1291,144 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
   });
 
+  it("gives an existing-PR writer the verified adoption receipt and does not invent a push from its clean checkout", async () => {
+    const head = "a".repeat(40);
+    const ref = "dependabot/deps";
+    const publication = {
+      repo: "o/r",
+      pr: 7,
+      headRef: ref,
+      baseRef: "main",
+      expectedHeadSha: head,
+      publicationRef: ref,
+      owner: { instanceId: "coord-p", unit: "U12" },
+    };
+    let system = "";
+    const s = endingIn(
+      async (_deps, run) => {
+        system = run.system;
+        return sessionAnswering("Stopped before edits.");
+      },
+      {
+        coding: true,
+        repoCtx: { repo: "o/r", pr: 7, ref, baseRef: "main", headSha: head },
+        binding: { ref, sha: head, workspace: "/srv/wt/existing" },
+        coordinator: {
+          parentInstanceId: "coord-p",
+          idempotencyKey: "coord-p:U12/0/coding",
+          base: "main",
+          publication,
+        },
+        executor: {
+          exec: async (cmd) => {
+            if (cmd.includes("rev-parse --abbrev-ref HEAD")) return ref;
+            if (cmd.includes("rev-parse HEAD") || cmd.includes("rev-parse @{u}")) return head;
+            if (cmd.includes("ls-remote")) return `${head}\trefs/heads/${ref}`;
+            if (cmd.includes("rev-list --count")) return "0";
+            return "";
+          },
+        },
+      },
+    );
+    s.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: ref,
+      baseRef: "main",
+      headSha: head,
+      verifiedHead: { repo: "o/r", ref, sha: head },
+    });
+    const findOpenPr = vi.fn(async () => ({ number: 7, htmlUrl: "https://github.com/o/r/pull/7" }));
+    const updatePr = vi.fn(async () => {});
+    s.deps.findOpenPrByHead = findOpenPr;
+    s.deps.updatePullRequest = updatePr;
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(system).toContain(`trusted adoption receipt for this run`);
+    expect(system).toContain(`o/r#7, head ref ${ref}, base ref main, expected full head ${head}`);
+    expect(out.prNote).toBeUndefined();
+    expect(findOpenPr).not.toHaveBeenCalled();
+    expect(updatePr).not.toHaveBeenCalled();
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.some((e) => e.type === "pushed_head" || e.type === "pr_opened")).toBe(false);
+  });
+
+  it("keeps an existing PR unchanged when its writer submits a description without pushing", async () => {
+    const head = "a".repeat(40);
+    const ref = "dependabot/deps";
+    const description: PrDescription = {
+      title: "fix(dispatcher): describe the existing PR",
+      tldr: "The description alone does not prove source changes.",
+      why: "The writer stopped before pushing.",
+      pointers: [],
+      feedbackWanted: "Check the source change.",
+      verified: "None yet.",
+      decisions: [],
+      risk: "none",
+      validation: { criteria: [] },
+    };
+    const s = endingIn(
+      async (_deps, run) => {
+        run.toolContext.onPrDescription?.(description);
+        return sessionAnswering("Stopped before edits.");
+      },
+      {
+        coding: true,
+        repoCtx: { repo: "o/r", pr: 7, ref, baseRef: "main", headSha: head },
+        binding: { ref, sha: head, workspace: "/srv/wt/existing" },
+        coordinator: {
+          parentInstanceId: "coord-p",
+          idempotencyKey: "coord-p:U12/0/coding",
+          base: "main",
+          publication: {
+            repo: "o/r",
+            pr: 7,
+            headRef: ref,
+            baseRef: "main",
+            expectedHeadSha: head,
+            publicationRef: ref,
+            owner: { instanceId: "coord-p", unit: "U12" },
+          },
+        },
+        executor: {
+          exec: async (cmd) => {
+            if (cmd.includes("rev-parse --abbrev-ref HEAD")) return ref;
+            if (cmd.includes("rev-parse HEAD") || cmd.includes("rev-parse @{u}")) return head;
+            if (cmd.includes("ls-remote")) return `${head}\trefs/heads/${ref}`;
+            if (cmd.includes("rev-list --count")) return "0";
+            return "";
+          },
+        },
+      },
+    );
+    s.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: ref,
+      baseRef: "main",
+      headSha: head,
+      verifiedHead: { repo: "o/r", ref, sha: head },
+    });
+    const findOpenPr = vi.fn(async () => ({ number: 7, htmlUrl: "https://github.com/o/r/pull/7" }));
+    const updatePr = vi.fn(async () => {});
+    const openPr = vi.fn(async () => ({ number: 7, htmlUrl: "https://github.com/o/r/pull/7", created: false }));
+    s.deps.findOpenPrByHead = findOpenPr;
+    s.deps.updatePullRequest = updatePr;
+    s.deps.openPullRequest = openPr;
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.prNote).toContain("no accepted push");
+    expect(findOpenPr).not.toHaveBeenCalled();
+    expect(updatePr).not.toHaveBeenCalled();
+    expect(openPr).not.toHaveBeenCalled();
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.some((e) => e.type === "pushed_head" || e.type === "pr_opened")).toBe(false);
+  });
+
   it("commits a Git-door existing-PR intent before forwarding and its accepted head before reporting success", async () => {
     const old = "a".repeat(40);
     const head = "b".repeat(40);
