@@ -2,6 +2,8 @@
 
 Give an agent tools from an external service over the Model Context Protocol, with the credential entered on a one-time link, never in chat.
 
+To connect an MCP client **to Switchboard**, see [Connect to Switchboard over MCP](connect-to-switchboard-over-mcp.md).
+
 **You need:**
 
 - An `mcp` block in `config.yaml` naming the credential-key env var (`credentialKeyEnv`, default `MCP_CREDENTIAL_KEY`); without it the `mcp` commands do not exist ([Turn features on and off](turn-features-on-and-off.md)).

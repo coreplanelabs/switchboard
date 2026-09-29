@@ -76,6 +76,7 @@ npx --yes @coreplane/switchboard@<version> deploy secrets bot
 
 - An absent required value refuses before any upload; an absent optional one is skipped, by name. Nothing is printed.
 - A shared bearer (`MEMORY_TOKEN`, `SANDBOX_TOKEN`, `RESIDENT_*_TOKEN`) carries one value on every Worker listed for it. `--only NAME` puts a subset.
+- `--source op://Vault/Item` reads from one 1Password item for this command only; combine it with `--only NAME` when that item holds one secret. The profile's source for other secrets stays the same.
 
 ## Deploy
 

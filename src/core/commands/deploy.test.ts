@@ -921,6 +921,30 @@ describe("deploy.secrets", () => {
     expect(h.probes[0].source).toEqual({ kind: "op", vault: "Prod", item: "Switchboard secrets" });
   });
 
+  it("--source reads one selected secret from a 1Password item without changing the profile's source", async () => {
+    const h = host(["MEMORY_TOKEN"]);
+    const { commands } = withSecrets(h.io);
+    const input = { args: ["bot"], options: { only: "MEMORY_TOKEN", source: "op://CI/Switchboard ingress tokens" } };
+    const res = await commands.invoke("deploy.secrets", input, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.value).toMatchObject({ source: "op://CI/Switchboard ingress tokens/<NAME>", put: ["MEMORY_TOKEN"] });
+    expect(h.probes[0].source).toEqual({ kind: "op", vault: "CI", item: "Switchboard ingress tokens" });
+    expect(h.puts).toEqual(["MEMORY_TOKEN → deploy/cloudflare"]);
+
+    const normal = await commands.invoke("deploy.secrets", { args: ["bot"], options: { only: "MEMORY_TOKEN" } }, cli);
+    if (!normal.ok) throw new Error(normal.message);
+    expect(normal.value).toMatchObject({ source: "~/.secrets/switchboard/<NAME>" });
+    expect(h.probes[1].source).toEqual({ kind: "dir", path: "~/.secrets/switchboard" });
+
+    const bad = await commands.invoke(
+      "deploy.secrets",
+      { args: ["bot"], options: { only: "MEMORY_TOKEN", source: "op://CI/Item/FIELD" } },
+      cli,
+    );
+    expect(bad).toMatchObject({ ok: false, error: "unavailable" });
+    expect(h.puts).toHaveLength(2);
+  });
+
   it("refuses BEFORE any upload when a required value is absent, naming the secret and where it was expected", async () => {
     const h = host(["SLACK_BOT_TOKEN"]);
     const { commands } = withSecrets(h.io);

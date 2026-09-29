@@ -601,6 +601,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "required": false,
         "type": "string",
       },
+      {
+        "name": "source",
+        "required": false,
+        "type": "string",
+      },
     ],
     "resource": "command",
     "surfaces": [
