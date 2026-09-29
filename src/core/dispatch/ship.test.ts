@@ -252,6 +252,21 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect(s.created).toEqual([]);
   });
 
+  it("explains a spent original cap without starting another plan", async () => {
+    const s = setup("slack:UADMIN", { text: "agent:ship recover unit plan-old:U12" });
+    s.deps.recoverOriginalUnit = async () => ({
+      status: 409,
+      body: { error: "recovery_cost_cap_exhausted", spendUsd: 108.898936, costCapUsd: 50 },
+    });
+
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+
+    expect(s.replies.join(" ")).toContain("$108.90 spent against the original $50.00 cost cap");
+    expect(s.replies.join(" ")).toContain("existing pull request");
+    expect(s.replies.join(" ")).not.toContain("start ship again");
+    expect(s.created).toEqual([]);
+  });
+
   it("surfaces a deterministic recovery refusal and never falls through to generated-plan hand-off", async () => {
     const s = setup("slack:UADMIN", { text: "agent:ship recover unit plan-old:U12" });
     s.deps.recoverOriginalUnit = async () => ({
