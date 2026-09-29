@@ -1173,6 +1173,7 @@ export async function runBot(): Promise<void> {
     });
     const coordinatorDeps: AdminCoordinatorDeps = {
       tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
+      ...(process.env.PUBLIC_GIT_BASE_URL ? { gitDoorBaseUrl: process.env.PUBLIC_GIT_BASE_URL } : {}),
       childAdmission: coordinatorChildAdmission,
       grantsFor: (id) => config.grantsFor(id),
       instances: coordinatorInstances,

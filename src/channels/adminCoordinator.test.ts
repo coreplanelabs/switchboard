@@ -9530,6 +9530,22 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     },
   );
 
+  it("missing push receipt reconciles a leased Git door push without a call ID", async () => {
+    const h = await ordinaryFindingsHarness();
+    h.deps.gitDoorBaseUrl = "https://git.bot.test";
+    const run = missingReceiptRecord();
+    (run.events[1] as Extract<RunEvent, { type: "tool_call" }>).command =
+      `git -c http.postBuffer=52428800 push --force-with-lease=refs/heads/${INSTANCE.branch}:${HEAD} -u origin ${INSTANCE.branch}:refs/heads/${INSTANCE.branch}`;
+    (run.events[2] as Extract<RunEvent, { type: "tool_result" }>).output =
+      `To https://git.bot.test/git/${INSTANCE.repo}.git\n + ${HEAD.slice(0, 8)}...bbbbbbbb ${INSTANCE.branch} -> ${INSTANCE.branch} (forced update)\nBranch '${INSTANCE.branch}' set up to track remote branch '${INSTANCE.branch}' from 'origin'.`;
+    await h.store.put(run);
+    expect((await ordinaryPrCheck(h)).status).toBe(200);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      publication: { expectedHeadSha: "b".repeat(40) },
+      lastPush: "b".repeat(40),
+    });
+  });
+
   it("missing push receipt at a terminal pr-check resumes only the original read-only review within its original lease", async () => {
     const h = harness({ prFacts: exactRecoveryFacts("b".repeat(40)) });
     const instance = recoveryInstance();
@@ -9582,6 +9598,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     "unpriced",
     "rival owner",
     "competing push",
+    "competing configured push",
     "unavailable live ledger",
     "moved during evidence read",
     "incomplete listing",
@@ -9648,6 +9665,19 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         startedAt: NOW - minutesToMs(25),
         finishedAt: NOW - minutesToMs(20),
       });
+    if (scenario === "competing configured push") {
+      const competing = missingReceiptRecord();
+      (competing.events[1] as Extract<RunEvent, { type: "tool_call" }>).command =
+        `git -c http.postBuffer=52428800 push --force-with-lease=refs/heads/${INSTANCE.branch}:${HEAD} origin ${INSTANCE.branch}:${INSTANCE.branch}`;
+      await h.store.put({
+        ...competing,
+        id: "run-competing",
+        idempotencyKey: `${INSTANCE.id}:U12/1/findings/a1`,
+        status: "failed",
+        startedAt: NOW - minutesToMs(25),
+        finishedAt: NOW - minutesToMs(20),
+      });
+    }
     await h.store.put(run);
     const before = await h.instances.listUnits(INSTANCE.id);
     expect((await ordinaryPrCheck(h)).status).toBe(409);

@@ -579,7 +579,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     try {
       const head = (await executor.exec(`git rev-parse refs/heads/${authority.ref}`)).trim();
       const current = { ...binding, expectedHeadSha: authority.expectedHeadSha };
-      return pairedPublicationPush([...history, e], current, head, e.callId);
+      return pairedPublicationPush([...history, e], current, head, e.callId, ctx.githubDoor?.baseUrl);
     } catch {
       // An uncertain result is not permission to invent a push or retry one.
       return;
@@ -1304,6 +1304,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       const original = coordinator.publication;
       const restoredHead = resume === undefined ? undefined : restoredPublicationHead(publicationReceipts, original);
       const publication = restoredHead === undefined ? original : { ...original, expectedHeadSha: restoredHead };
+      const seeded =
+        binding === undefined && round.selection.seeded?.slug.toLowerCase() === publication.repo.toLowerCase()
+          ? round.selection.seeded
+          : undefined;
       const fresh = await (deps.fetchPrFacts ?? fetchPullRequestFacts)({
         repo: publication.repo,
         number: publication.pr,
@@ -1316,8 +1320,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           ref: repoCtx.ref,
           baseRef: prBase,
           requestHeadSha: restoredHead ?? repoCtx.headSha,
-          workspaceRef: binding?.ref,
-          workspaceHeadSha: binding?.sha,
+          workspaceRef: binding?.ref ?? seeded?.ref,
+          workspaceHeadSha: binding?.sha ?? seeded?.sha,
           owner: {
             instanceId: coordinator.parentInstanceId,
             unit: unitOfIdempotencyKey(coordinator.idempotencyKey) ?? "",

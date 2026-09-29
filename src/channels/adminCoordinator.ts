@@ -56,7 +56,7 @@ import {
   type GrantSource,
 } from "../core/budgets.js";
 import { DEFAULT_VERBOSITY, shows } from "../core/verbosity.js";
-import { pairedPublicationPush } from "../core/publicationPush.js";
+import { mentionsGitPush, pairedPublicationPush } from "../core/publicationPush.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { requestedByLine } from "../core/prDescription.js";
 import { threadPageLink } from "../core/dispatch/reply.js";
@@ -205,6 +205,8 @@ export function createCoordinatorChildAdmission(draining: () => boolean): Coordi
 export interface AdminCoordinatorDeps {
   /** The `SWITCHBOARD_INGRESS_TOKENS` secret as the process sees it. */
   tokens: Secret | undefined;
+  /** Public Git door URL used to authenticate retained push output in recovery. */
+  gitDoorBaseUrl?: string;
   /** The process drain's child-admission fence. Once draining, a runner's
    * durable spawn step is held for the next generation; a permit acquired at
    * dispatch keeps this generation alive until the child registers. */
@@ -2058,7 +2060,7 @@ async function reconcileMissingFindingsPush(
     !samePublicationBinding(tag.publication, binding) ||
     (run.pr !== undefined &&
       (run.pr.number !== binding.pr || (run.pr.head !== undefined && run.pr.head !== row.branch))) ||
-    pairedPublicationPush(run.events!, binding, head) === undefined
+    pairedPublicationPush(run.events!, binding, head, undefined, deps.gitDoorBaseUrl) === undefined
   )
     return false;
   for (const sibling of siblings.filter(
@@ -2084,7 +2086,7 @@ async function reconcileMissingFindingsPush(
       prior.value.events!.some(
         (e) =>
           e.type === "pushed_head" ||
-          (e.type === "tool_call" && e.tool === "bash" && /\bgit\s+push\b/.test(e.command ?? e.summary)),
+          (e.type === "tool_call" && e.tool === "bash" && mentionsGitPush(e.command ?? e.summary)),
       )
     )
       return false;
