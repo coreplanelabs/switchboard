@@ -39,19 +39,14 @@ export interface ThreadTurnsOptions {
   botUserId?: string;
 }
 
-/** Slack appends "*Sent using* <@APP|Name>" as the LAST line of a message an
- *  app posts on a user's behalf (the Claude Slack plugin does this). It is
- *  platform chrome, not the user's words — left in, it breaks strict inline
- *  parsers (`repo onboard …` saw `*Sent` as a bad token) and, quoted from a
- *  linked thread, puts a stray mention token inside the fence. Only whole
- *  trailing footers of exactly that shape are removed (repeated for stacked
- *  footers); the phrase inside a user's own text is untouched. The footer is
- *  anchored to the END of the text, not to its own line: the raw event text
- *  arrives as `friction report *Sent using* <@UAPP>` — same line, no newline —
- *  so a line-anchored regex lets `*Sent` reach the command parser (`repo list`
- *  masks this because it ignores trailing text). An optional bracketed sender
- *  attribution after the mention is tolerated too. */
-const APP_FOOTER_RE = /(?:^|\s)(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s*\[[^\]\n]*\])?\s*$/;
+/** Slack app attribution is transport chrome. A mention or a matching Markdown
+ *  emphasis pair on `Sent using` distinguishes an inline footer from prose;
+ *  without either, a plain app label must occupy its own trailing line.
+ *  Labels are bounded, regardless of the app's display name. */
+const APP_MENTION_FOOTER_RE =
+  /(?:^|\s)(?:(\*{1,3}|_{1,3})Sent using\1|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s*\[[^\]\n]*\])?\s*$/i;
+const APP_EMPHASIZED_LABEL_FOOTER_RE = /(?:^|[ \t])(\*{1,3}|_{1,3})Sent using\1[ \t]+(?!<@)\S[^\r\n]{0,119}$/i;
+const APP_LABEL_FOOTER_RE = /(?:^|\r?\n)(?:(\*{1,3}|_{1,3})Sent using\1|Sent using)[ \t]+\S[^\r\n]{0,119}$/i;
 
 /** The other footer the Claude Slack app appends — to a message it posts from
  *  a Claude Code session: the source channel, the person when the app names
@@ -67,19 +62,22 @@ export const RELAY_FOOTER_RE =
 
 /**
  * Remove the app footer(s) from the end of a message's text and trim it.
- * Exactly the two `Sent using` shapes Slack emits (bold or plain — never
- * asymmetric) and the relay footer, as whole trailing lines; repeated because a
- * forwarded app message can stack two, and a message that is nothing but the
- * footer strips to "". Applied to the request text (`stripMention`) and to
- * every turn `threadTurns` keeps, so the current thread's history and a quoted
- * thread read the same words.
+ * A trailing app mention, a standalone `Sent using` attribution, or a relay
+ * footer is removed until no footer remains. The same operation applies to the
+ * request text (`stripMention`) and every kept thread turn, including linked
+ * threads, so downstream parsers see only the person's request.
  */
 export function stripAppFooter(text: string): string {
   let out = text.trim();
   let prev: string;
   do {
     prev = out;
-    out = out.replace(APP_FOOTER_RE, "").replace(RELAY_FOOTER_RE, "").trim();
+    out = out.replace(APP_MENTION_FOOTER_RE, "");
+    // A quoted last line is the person's example, not attribution on their request.
+    if (!/^[ \t]*>/.test(out.slice(out.lastIndexOf("\n") + 1))) {
+      out = out.replace(APP_EMPHASIZED_LABEL_FOOTER_RE, "");
+    }
+    out = out.replace(APP_LABEL_FOOTER_RE, "").replace(RELAY_FOOTER_RE, "").trim();
   } while (out !== prev);
   return out;
 }

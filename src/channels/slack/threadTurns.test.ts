@@ -93,6 +93,33 @@ describe("threadTurns — the thread-page-to-turns mapping", () => {
     ]);
   });
 
+  it("removes standalone connector attribution from thread history and drops a footer-only turn", () => {
+    const turns = threadTurns(
+      [
+        {
+          user: "UA",
+          text: "agent:ship https://github.com/acme/api/pull/42\n*Sent using* ChatGPT Connector (Local MCP)",
+          ts: "1.0",
+        },
+        { user: "UA", text: "Sent using Another App", ts: "2.0" },
+      ],
+      {},
+    );
+    expect(turns.map((turn) => turn.text)).toEqual(["agent:ship https://github.com/acme/api/pull/42"]);
+    expect(
+      threadTurns(
+        [
+          {
+            user: "UA",
+            text: "agent:ship <https://github.com/acme/api/pull/42> *Sent using* ChatGPT Connector (Local MCP)",
+            ts: "3.0",
+          },
+        ],
+        {},
+      ).map((turn) => turn.text),
+    ).toEqual(["agent:ship <https://github.com/acme/api/pull/42>"]);
+  });
+
   // slack-channel.md item 13: the relay footer a Claude Code session's post
   // carries is chrome like the plugin footer — gone from every turn, so a
   // quoted thread never reads the source channel and permalink as words.

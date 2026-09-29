@@ -81,6 +81,7 @@ import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memor
 import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
 import { matchesPredicate, NO_GRANTS, predicateFor, type Actor, type ChannelDirectory } from "./authz/index.js";
 import { SlackChannelDirectory } from "../channels/slackChannelDirectory.js";
+import { stripMention } from "../channels/slack.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
 import { StaticMcpToolSource, InMemoryMcpClient } from "../mcp/index.js";
 import { NullMcpToolSource } from "../mcp/source.js";
@@ -19673,7 +19674,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.deps.invoked).toEqual([]);
   });
 
-  it("a connector-attributed review continuation checks the original unit", async () => {
+  it("a same-line connector-attributed review continuation checks its original PR owner after Slack intake", async () => {
     const s = await endedPrContinuationSetup();
     const movedHead = "2222222222222222222222222222222222222222";
     s.deps.fetchPrFacts = vi.fn(async () => ({
@@ -19687,47 +19688,10 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       htmlUrl: "https://github.com/acme/api/pull/7",
     }));
     const { io, replies } = fakeIO();
+    const raw =
+      "agent:ship in acme/api: Please continue the review of <https://github.com/acme/api/pull/7> *Sent using* Another App";
 
-    await dispatch(
-      s.deps,
-      msg(
-        "agent:ship in acme/api: Please continue the review of https://github.com/acme/api/pull/7\n*Sent using* ChatGPT Connector (Local MCP)",
-        "slack:UADMIN",
-      ),
-      io,
-    );
-
-    expect(replies).toEqual([
-      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
-    ]);
-    expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).not.toHaveBeenCalled();
-    expect(s.deps.invoked).toEqual([]);
-  });
-
-  it("stacked connector footers on a review continuation keep the original unit", async () => {
-    const s = await endedPrContinuationSetup();
-    const movedHead = "2222222222222222222222222222222222222222";
-    s.deps.fetchPrFacts = vi.fn(async () => ({
-      state: "open" as const,
-      sameRepoHead: true,
-      headBranchExists: true,
-      headRef: s.branch,
-      headSha: movedHead,
-      verifiedHead: { repo: "acme/api", ref: s.branch, sha: movedHead },
-      baseRef: "main",
-      htmlUrl: "https://github.com/acme/api/pull/7",
-    }));
-    const { io, replies } = fakeIO();
-
-    await dispatch(
-      s.deps,
-      msg(
-        "agent:ship in acme/api: Please continue the review of https://github.com/acme/api/pull/7 _Sent using_ ChatGPT Connector (Local MCP) **Sent using** ChatGPT Connector (Local MCP)",
-        "slack:UADMIN",
-      ),
-      io,
-    );
+    await dispatch(s.deps, msg(stripMention(raw), "slack:UADMIN"), io);
 
     expect(replies).toEqual([
       `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,

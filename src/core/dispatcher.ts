@@ -194,14 +194,6 @@ import {
   decisionRecordTaskKey,
 } from "./decisionRecordReservation.js";
 
-const CONNECTOR_FOOTER_RE = /(?:^|\s)(?:(\*{1,3}|_{1,3})Sent using\1|Sent using) ChatGPT Connector \(Local MCP\)\s*$/i;
-
-function stripConnectorFooters(text: string): string {
-  let probe = text.trimEnd();
-  while (CONNECTOR_FOOTER_RE.test(probe)) probe = probe.replace(CONNECTOR_FOOTER_RE, "").trimEnd();
-  return probe;
-}
-
 // The dispatcher is the channel-agnostic core: config commands, directive
 // parsing, layered resolution, permission gates, history assembly, executor
 // selection, and the agent run. Channels are pure transports (src/channels/).
@@ -986,10 +978,7 @@ export async function dispatch(
     const typed = parseDirectives(msg.text);
     const typedAgent = typed.agent;
     const explicitPr = explicitPrOf(msg.text);
-    // The connector's trailing attribution is transport chrome, not task text;
-    // directive parsing may have folded newlines or stacked rendered footers.
-    const shipTaskProbe = stripConnectorFooters(typed.text);
-    const namedShipTask = typedAgent === "ship" && explicitPr ? shipTaskText(shipTaskProbe, explicitPr.repo) : "";
+    const namedShipTask = typedAgent === "ship" && explicitPr ? shipTaskText(typed.text, explicitPr.repo) : "";
     const freshShipTask =
       namedShipTask !== "" &&
       !/^(?:please\s+)?(?:continue|resume|retry|keep going|carry on|finish)(?:\s+(?:with|on))?(?:\s+(?:it|this|the task|the plan|(?:the\s+)?work|working|(?:the\s+)?review|reviewing))?(?:\s+(?:of|on|for|with))?[.!]?$/i.test(

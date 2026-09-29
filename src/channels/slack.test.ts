@@ -24,6 +24,8 @@ import type { RunView } from "../core/runsService.js";
 import { fetchImages } from "./slack/attachments.js";
 import { createStatusBudget, type StatusBudget } from "../core/statusBudget.js";
 import { dispatchClick, type CoreDeps } from "../core/dispatcher.js";
+import { shipTaskText } from "../core/ship/preflight.js";
+import { parseDirectives } from "../directives.js";
 import {
   OFFER_CANCELLED_LINE,
   OFFER_EXPIRED_LINE,
@@ -265,6 +267,40 @@ describe("stripMention — Slack app 'Sent using' footer", () => {
     );
     expect(stripMention(`<@${BOT}> ${footer} — what does this footer mean?`, BOT)).toBe(
       `${footer} — what does this footer mean?`,
+    );
+  });
+
+  it("strips a standalone trailing attribution by syntax, independent of the app name", () => {
+    const request = "agent:ship https://github.com/acme/api/pull/42";
+    for (const footer of [
+      "*Sent using* ChatGPT Connector (Local MCP)",
+      "_Sent using_ Another App",
+      "**Sent using** A New Connector",
+      "Sent using A Plain App",
+    ]) {
+      expect(stripMention(`${request}\n${footer}`, BOT)).toBe(request);
+    }
+    expect(stripMention(`${request}\n*Sent using* ChatGPT Connector (Local MCP)\nSent using Another App`, BOT)).toBe(
+      request,
+    );
+    expect(stripMention(`${request} *Sent using* ChatGPT Connector (Local MCP)`, BOT)).toBe(request);
+    expect(stripMention(`${request} _Sent using_ Another App`, BOT)).toBe(request);
+    expect(
+      stripMention(`${request} *Sent using* ChatGPT Connector (Local MCP) **Sent using** Yet Another App`, BOT),
+    ).toBe(request);
+    expect(stripMention(`${request} *Sent using* Another App`, BOT)).toBe(request);
+    expect(stripMention(`${request} Sent using Another App`, BOT)).toBe(`${request} Sent using Another App`);
+    expect(stripMention(`${request} *Sent using* ${"A".repeat(121)}`, BOT)).toBe(
+      `${request} *Sent using* ${"A".repeat(121)}`,
+    );
+    expect(stripMention(`${request} *Sent using* ChatGPT Connector (Local MCP)\nplease explain`, BOT)).toBe(
+      `${request} *Sent using* ChatGPT Connector (Local MCP)\nplease explain`,
+    );
+    expect(stripMention(`Explain this line:\n> *Sent using* ChatGPT Connector (Local MCP)`, BOT)).toBe(
+      `Explain this line:\n> *Sent using* ChatGPT Connector (Local MCP)`,
+    );
+    expect(stripMention(`Explain this line:\n> Example *Sent using* Another App`, BOT)).toBe(
+      `Explain this line:\n> Example *Sent using* Another App`,
     );
   });
 });
@@ -1517,6 +1553,36 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     metadata.mockResolvedValue({ ok: true, channel: { ...safe, is_shared: true } });
     const refused = await receiveSlackMessage(s.client, { ...event, ts: "121.000001" }, spanStub().span, POLICY, []);
     expect(refused?.message.directAudience).toBeUndefined();
+  });
+
+  it("hands a bare Ship PR continuation to dispatch without same-line or standalone connector attribution", async () => {
+    const s = gateClient();
+    for (const request of [
+      "agent:ship https://github.com/acme/api/pull/42",
+      "agent:ship <https://github.com/acme/api/pull/42|github.com/acme/api/pull/42>",
+    ]) {
+      for (const separator of [" ", "\n"]) {
+        for (const app of ["ChatGPT Connector (Local MCP)", "Another App"]) {
+          const ts = nextTs();
+          const out = await receiveSlackMessage(
+            s.client,
+            {
+              channel: "DMAIN",
+              user: "UASKER",
+              text: `${request}${separator}*Sent using* ${app}`,
+              ts,
+              threadTs: ts,
+              trigger: "dm",
+            },
+            spanStub().span,
+            POLICY,
+            [],
+          );
+          expect(out?.message.text).toBe(request);
+          expect(shipTaskText(parseDirectives(out!.message.text).text, "acme/api")).toBe("");
+        }
+      }
+    }
   });
 
   it("an app mention missing file metadata reads its exact Slack message before the operator sees the request", async () => {
