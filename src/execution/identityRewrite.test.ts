@@ -19,7 +19,7 @@ import {
 // everything else is rewritten over the Git Data API with the same trees, the
 // original author dates and the committer sent explicitly as the bot pair —
 // and an unreadable range (over 300 commits, an unknown start state, a moved
-// tip after two rebuilds, a ruleset refusal) opens nothing.
+// tip, a ruleset refusal) opens nothing.
 
 const BOT: IdentityPair = { name: "switchboard-dev[bot]", email: "9999+switchboard-dev[bot]@users.noreply.github.com" };
 const IVY = pairOfBinding({ login: "ivy-dev", id: 4242 });
@@ -45,15 +45,15 @@ const commit = (
 function apiOf(compares: Array<CompareResult | "missing" | undefined>) {
   let reads = 0;
   const created: Array<Parameters<RewriteApi["createCommit"]>[1]> = [];
-  const moved: Array<{ branch: string; sha: string }> = [];
+  const moved: Array<{ branch: string; sha: string; expectedSha: string }> = [];
   const api: RewriteApi = {
     compareRange: async () => compares[Math.min(reads++, compares.length - 1)],
     createCommit: async (_repo, c) => {
       created.push(c);
       return `r${created.length}`;
     },
-    forceMoveRef: async (_repo, branch, sha) => {
-      moved.push({ branch, sha });
+    forceMoveRef: async (_repo, branch, sha, expectedSha) => {
+      moved.push({ branch, sha, expectedSha });
     },
   };
   return { api, created, moved, reads: () => reads };
@@ -61,12 +61,18 @@ function apiOf(compares: Array<CompareResult | "missing" | undefined>) {
 
 const runRewrite = (
   api: RewriteApi,
-  over: { startState?: BranchStartState; requester?: IdentityPair; bot?: IdentityPair | undefined } = {},
+  over: {
+    startState?: BranchStartState;
+    requester?: IdentityPair;
+    bot?: IdentityPair | undefined;
+    expectedTip?: string;
+  } = {},
 ) =>
   rewriteRunCommits({
     repo: "acme/api",
     base: "main",
     branch: "feat/x",
+    ...(over.expectedTip !== undefined ? { expectedTip: over.expectedTip } : {}),
     startState: over.startState ?? EMPTY_START_STATE,
     bot: "bot" in over ? over.bot : BOT,
     ...(over.requester !== undefined ? { requester: over.requester } : {}),
@@ -125,7 +131,7 @@ describe("rewriteRunCommits — the run's commits carry only the allowed identit
         committer: { name: BOT.name, email: BOT.email },
       },
     ]);
-    expect(moved).toEqual([{ branch: "feat/x", sha: "r1" }]);
+    expect(moved).toEqual([{ branch: "feat/x", sha: "r1", expectedSha: "b2c3" }]);
   });
 
   it("a commit committed by the requester pair (the model set GIT_COMMITTER_*) is rewritten; committed by the bot's name at a foreign address too", async () => {
@@ -198,7 +204,7 @@ describe("rewriteRunCommits — the run's commits carry only the allowed identit
     ]);
     // Four and five already passed: their authors are kept.
     expect(created[1].author.name).toBe(IVY.name);
-    expect(moved).toEqual([{ branch: "feat/x", sha: "r3" }]);
+    expect(moved).toEqual([{ branch: "feat/x", sha: "r3", expectedSha: "c5" }]);
   });
 
   it("a rebased start commit keeps its start pair by fingerprint (same pair, date and message under a new sha); a new commit is judged", async () => {
@@ -284,7 +290,7 @@ describe("rewriteRunCommits — the run's commits carry only the allowed identit
         committer: { name: BOT.name, email: BOT.email },
       },
     ]);
-    expect(moved).toEqual([{ branch: "feat/x", sha: "r1" }]);
+    expect(moved).toEqual([{ branch: "feat/x", sha: "r1", expectedSha: "bbbb2222" }]);
   });
 
   it("a boundary head no longer in the range, and one an abbreviation leaves ambiguous, are unreadable with no writes — history the run did not create is never rewritten below it", async () => {
@@ -345,14 +351,23 @@ describe("rewriteRunCommits — the run's commits carry only the allowed identit
     expect(noBot.reads()).toBe(0);
   });
 
-  it("a tip that moved after two rebuilds is unreadable — the third disagreement gives up", async () => {
+  it("a tip that moved after the ref update is unreadable without another rewrite", async () => {
     const spoof = { totalCommits: 1, commits: [commit("a1b2", { author: { ...RAJ } })] };
-    // Every re-read finds a fresh offending tip: two rebuilds are spent, the
-    // third disagreement is unreadable.
     const { api, moved } = apiOf([spoof, spoof, spoof]);
     const result = await runRewrite(api, { requester: IVY });
-    expect(result).toMatchObject({ kind: "unreadable", reason: expect.stringContaining("moved twice") });
-    expect(moved).toHaveLength(2);
+    expect(result).toMatchObject({ kind: "unreadable", reason: expect.stringContaining("caller observed") });
+    expect(moved).toHaveLength(1);
+  });
+
+  it("refuses a branch that moved before the compare without writing", async () => {
+    const spoof = { totalCommits: 1, commits: [commit("a1b2", { author: { ...RAJ } })] };
+    const before = apiOf([spoof]);
+    expect(await runRewrite(before.api, { requester: IVY, expectedTip: "other" })).toMatchObject({
+      kind: "unreadable",
+      reason: expect.stringContaining("caller observed"),
+    });
+    expect(before.created).toEqual([]);
+    expect(before.moved).toEqual([]);
   });
 
   it("a ruleset's 422 on the ref move is unreadable with the rule named", async () => {

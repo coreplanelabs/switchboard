@@ -898,9 +898,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     dispositions = d;
     ledgerRun?.setState({ dispositions: d });
   };
-  // The commit actually checked out in the run's workspace when the model
-  // finished — read by us, not reported by the model — for the reviewed-head
-  // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
+  // The branch tip observed after the model, then updated if the post-step
+  // publishes an identity rewrite. This is the coordinator's final head
+  // guard. Undefined when no Git branch could be read.
   let observedHead: string | undefined;
   // The PR head branch (coding runs), read alongside it for the PR
   // post-step: the coordinator's owned ref, or for standalone coding the
@@ -2460,7 +2460,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               }
             : {}),
           descriptionTurnRan,
-          publish: (event) => events.publish(event),
+          publish: (event) => {
+            events.publish(event);
+            // The bot's identity rewrite is a second push after workspace
+            // observation. Carry its verified tip into the child's record.
+            if (event.type === "pushed_head" && event.ref === observedBranch) observedHead = event.sha;
+          },
           logKey: msg.threadKey,
         }),
       );

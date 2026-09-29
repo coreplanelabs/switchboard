@@ -6602,6 +6602,32 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(out.prNote).toContain("PR opened");
   });
 
+  it("records the identity rewrite's final pushed head for the coordinator's exact-head read", async () => {
+    const { BRANCH, description, s } = startStateFixture();
+    const rewrittenHead = "f".repeat(40);
+    s.deps.identityRewrite!.rewrite = async () => ({
+      kind: "rewritten",
+      count: 1,
+      replaced: ["author"],
+      tip: rewrittenHead,
+    });
+    s.deps.identityRewrite!.pullRequestHead = async () => rewrittenHead;
+    const resume = finishing("Done: pushed the fix.", {
+      agent: "coding",
+      state: { prDescription: description, pushedBranch: BRANCH },
+    });
+    await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    s.ending.drain(true);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    expect(record.headSha).toBe(rewrittenHead);
+    expect(record.pushed).toEqual([{ ref: BRANCH, sha: rewrittenHead, by: "push" }]);
+    expect(record.events.filter((event) => event.type === "pushed_head")).toEqual([
+      expect.objectContaining({ ref: BRANCH, sha: HEAD }),
+      expect.objectContaining({ ref: BRANCH, sha: rewrittenHead }),
+    ]);
+  });
+
   it("PR attribution uses the initiating requester and thread even without a binding or after a binding lookup failure", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example.com");
     for (const binding of ["ivy-dev", undefined, new Error("GitHub unavailable")]) {

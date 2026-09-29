@@ -1432,7 +1432,7 @@ export async function fetchPullRequestReviews(pr: {
 }
 
 // ---- the identity rewrite's Git Data reads and writes (record 0062) ----
-// The compare read, the commit rebuild and the forced ref move the identity
+// The compare read, the commit rebuild and the conditional ref move the identity
 // rewrite (src/execution/identityRewrite.ts) runs before the bot opens or
 // edits a pull request, plus the assignee pre-check and write the post-step
 // runs after an open. Same REST-with-App-token conventions as the writes
@@ -1582,25 +1582,39 @@ export async function createCommit(
   return data.sha;
 }
 
-/**
- * PATCH /repos/{repo}/git/refs/heads/{branch} `{ sha, force: true }` — move the
- * branch to the rebuilt tip, a non-ancestor included. Throws on any failure
- * with the status and body so the rewrite can name a ruleset refusal (a 422 or
- * 409: force pushes blocked, signed commits required).
- */
-export async function forceMoveRef(repo: string, branch: string, sha: string): Promise<void> {
-  const token = await requireToken();
-  const path = branch.split("/").map(encodeURIComponent).join("/");
-  const res = await fetch(`https://api.github.com/repos/${repo}/git/refs/heads/${path}`, {
-    method: "PATCH",
-    headers: apiHeaders(token, true),
-    body: JSON.stringify({ sha, force: true }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`ref move failed for ${branch}: HTTP ${res.status} ${redactAndCap(text, 300)}`);
-  }
+/** Move a rewritten commit only if the ref still has the compare's tip. */
+export async function forceMoveRef(repo: string, branch: string, sha: string, expectedSha: string): Promise<void> {
+  const [owner, name] = repo.split("/");
+  const looked = await graphql(
+    `
+      query ($owner: String!, $name: String!) {
+        repository(owner: $owner, name: $name) {
+          id
+        }
+      }
+    `,
+    { owner, name },
+  );
+  const repositoryId = (looked.data as { repository?: { id?: unknown } } | undefined)?.repository?.id;
+  if (typeof repositoryId !== "string")
+    throw new Error(`ref move failed for ${branch}: ${firstGraphqlError(looked) ?? "repository id unavailable"}`);
+  const moved = await graphql(
+    `
+      mutation ($repositoryId: ID!, $name: GitRefname!, $before: GitObjectID!, $after: GitObjectID!) {
+        updateRefs(
+          input: {
+            repositoryId: $repositoryId
+            refUpdates: [{ name: $name, beforeOid: $before, afterOid: $after, force: true }]
+          }
+        ) {
+          clientMutationId
+        }
+      }
+    `,
+    { repositoryId, name: `refs/heads/${branch}`, before: expectedSha, after: sha },
+  );
+  if ((moved.data as { updateRefs?: unknown } | undefined)?.updateRefs == null || firstGraphqlError(moved))
+    throw new Error(`ref move failed for ${branch}: ${firstGraphqlError(moved) ?? "update result unavailable"}`);
 }
 
 /** GET /repos/{repo}/pulls/{number} → the pull request's `head.sha` — the pin

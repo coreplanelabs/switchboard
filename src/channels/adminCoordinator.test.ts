@@ -5375,7 +5375,23 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         leaseMs: minutesToMs(240),
       },
     });
-    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].segments).toBeUndefined();
+    const [resumed] = await h.instances.listUnits(PLAN_INSTANCE.id);
+    expect(resumed!.segments).toBeUndefined();
+    expect(resumed!.idle).toBeUndefined();
+    const answer = (response.body as { answer: unknown }).answer;
+    expect(resumed!.wakes?.["U10/idle/1"]).toEqual(answer);
+    expect(
+      (
+        (await call(h, "unit-wake", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", waitId: "U10/idle/1" }))
+          .body as { answer: unknown }
+      ).answer,
+    ).toEqual(answer);
+    const laterIdle = { why: "stopped" as const, at: NOW + 10_000, renewalsLeft: 0, spendUsd: null, wakes: 0 };
+    await h.instances.putUnits([{ ...resumed!, idle: laterIdle }]);
+    expect(
+      (await call(h, "unit-wake", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", waitId: "U10/idle/1" })).body,
+    ).toMatchObject({ answer });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].idle).toEqual(laterIdle);
     expect(await h.instances.listEvents(key, true)).toEqual([]);
   });
 
@@ -5405,6 +5421,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(
       (await call(raised, "unit-wake", { ...key, parentInstanceId: key.instanceId, waitId: "U10/idle/1" })).body,
     ).toMatchObject({ answer: { kind: "segment", index: 2 } });
+    expect((await raised.instances.listUnits(PLAN_INSTANCE.id))[0].idle).toBeUndefined();
 
     const other = await idleHarness({ grantFact: { grant: { renewals: 2 }, source: "channel" } });
     await other.instances.appendEvent(key, { sender: "slack:UBOB", text: "go on", mode: "wake", at: NOW + 1 });

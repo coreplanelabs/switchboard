@@ -11,7 +11,7 @@
 // pairs throughout (record 0062): GitHub links by email and displays the name, so a
 // login-only or name-only rule lets spoofs through. Fail closed: an unreadable
 // range (over 300 commits, an unknown start state, a failed read, a tip that
-// moved twice after two rebuilds, a ruleset refusal) opens nothing.
+// moved tip, a ruleset refusal) opens nothing.
 
 import {
   addAssignee,
@@ -97,7 +97,7 @@ export interface RewriteApi {
       committer: { name: string; email: string };
     },
   ): Promise<string>;
-  forceMoveRef(repo: string, branch: string, sha: string): Promise<void>;
+  forceMoveRef(repo: string, branch: string, sha: string, expectedSha: string): Promise<void>;
 }
 
 /** How the rewrite ended: every run commit already allowed (`clean`); the
@@ -114,6 +114,8 @@ export interface RewriteInput {
   repo: string;
   base: string;
   branch: string;
+  /** The branch tip the caller proved before the rewrite began. */
+  expectedTip?: string;
   startState: BranchStartState;
   /** The bot pair — resolveGithubIdentity()'s pair; undefined fails closed. */
   bot: IdentityPair | undefined;
@@ -125,7 +127,7 @@ export interface RewriteInput {
 
 /** How many commits the compare may carry before the range is unreadable. */
 const MAX_RUN_COMMITS = 300;
-/** The initial read plus the re-read after each of two rebuilds. */
+/** The initial read plus the re-read after each of at most two self-rebuilds. */
 const MAX_READS = 3;
 
 const samePair = (a: IdentityPair, b: IdentityPair): boolean => a.name === b.name && a.email === b.email;
@@ -210,9 +212,9 @@ function rulesetRefusal(err: unknown): string | undefined {
  * as the run's commits every listed commit whose sha is not in the start
  * state, judge each against the allowed identities, and — from the first
  * commit that fails through the tip — rebuild the chain over the Git Data API
- * with the same trees and the committer as the bot pair, force-move the ref,
- * then re-read and require every run commit to pass. A tip that moved
- * meanwhile is rebuilt once more; a third disagreement is unreadable.
+ * with the same trees and the committer as the bot pair, conditionally move
+ * the ref, then re-read and require every run commit to pass. A tip that
+ * moved since the caller observed it, or after our ref move, is unreadable.
  */
 export async function rewriteRunCommits(input: RewriteInput): Promise<RewriteResult> {
   if (input.startState.kind === "unknown")
@@ -258,6 +260,7 @@ export async function rewriteRunCommits(input: RewriteInput): Promise<RewriteRes
   let totalRewritten = 0;
   const replaced: string[] = [];
   let rebuilds = 0;
+  let expectedTip = input.expectedTip;
   for (let read = 1; read <= MAX_READS; read += 1) {
     const compare = await input.api.compareRange(input.repo, input.base, input.branch);
     if (compare === "missing")
@@ -278,6 +281,8 @@ export async function rewriteRunCommits(input: RewriteInput): Promise<RewriteRes
     };
     const runCommits = split.run;
     const tip = compare.commits[compare.commits.length - 1]?.sha;
+    if (expectedTip !== undefined && tip !== expectedTip)
+      return { kind: "unreadable", reason: "the branch tip moved after the caller observed it" };
     const firstOffender = runCommits.findIndex((c) => offenceOf(c, allowed) !== undefined);
     if (firstOffender === -1) {
       if (totalRewritten === 0) return { kind: "clean", ...(tip !== undefined ? { tip } : {}) };
@@ -321,7 +326,8 @@ export async function rewriteRunCommits(input: RewriteInput): Promise<RewriteRes
     const newTip = rebuilt.get(runCommits[runCommits.length - 1].sha);
     if (newTip === undefined) return { kind: "unreadable", reason: "the rebuild produced no tip" };
     try {
-      await input.api.forceMoveRef(input.repo, input.branch, newTip);
+      if (tip === undefined) return { kind: "unreadable", reason: "the branch compare named no current tip" };
+      await input.api.forceMoveRef(input.repo, input.branch, newTip, tip);
     } catch (err) {
       const rule = rulesetRefusal(err);
       return {
@@ -330,9 +336,9 @@ export async function rewriteRunCommits(input: RewriteInput): Promise<RewriteRes
       };
     }
     rebuilds += 1;
-    // The re-read: the loop reads the compare again and requires every
-    // run commit to pass; a tip that moved meanwhile fails the judge and is
-    // rebuilt once more, and the third disagreement returns unreadable above.
+    expectedTip = newTip;
+    // The re-read requires the ref to stay at the tip we just wrote and every
+    // run commit to pass. Another writer's move is unreadable, never rebuilt.
   }
   return { kind: "unreadable", reason: "the rewrite could not settle the branch" };
 }
@@ -347,6 +353,7 @@ export interface DispatchIdentityRewrite {
     repo: string;
     base: string;
     branch: string;
+    expectedTip?: string;
     startState: BranchStartState;
     requester: string;
   }): Promise<RewriteResult>;
@@ -365,7 +372,7 @@ export interface DispatchIdentityRewrite {
 export function dispatchIdentityRewrite(store: BindingSource): DispatchIdentityRewrite {
   return {
     readStartState: (repo, base, branch) => readBranchStartState(repo, base, branch, compareRange),
-    rewrite: async ({ repo, base, branch, startState, requester }) => {
+    rewrite: async ({ repo, base, branch, expectedTip, startState, requester }) => {
       const bot = await resolveGithubIdentity();
       // The authoritative read: `fresh` bypasses the binding's TTL cache, so a
       // rename inside the exec path's window is still refused before the PR
@@ -376,6 +383,7 @@ export function dispatchIdentityRewrite(store: BindingSource): DispatchIdentityR
         repo,
         base,
         branch,
+        ...(expectedTip !== undefined ? { expectedTip } : {}),
         startState,
         bot: bot !== undefined ? pairOfBinding(bot) : undefined,
         ...(requesterPair !== undefined ? { requester: requesterPair } : {}),
