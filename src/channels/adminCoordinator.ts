@@ -89,6 +89,8 @@ import { foldThreadAttachments } from "../core/dispatch/admission.js";
 import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import type { PrivateWorkerLog } from "../core/privateWorkerLog.js";
+import { appendPrivateWorkerInput, privateWorkerIO, privateWorkerThreadKey } from "./privateWorker.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../core/coordinator/instancesRoute.js";
 import type { OriginalUnitRecoveryParams } from "../core/coordinator/driver.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
@@ -275,6 +277,8 @@ export interface AdminCoordinatorDeps {
    *  row's parts — the card's ts when the handle must redraw it); undefined for
    *  a platform no thread can be rebuilt on. */
   ioFor: (thread: { threadKey: string; userId: string; cardTs?: string }) => ChannelIO | undefined;
+  /** Durable internal conversation for main-agent workers. Missing means no worker admission. */
+  privateWorkerLog?: PrivateWorkerLog;
   /** The open pull request heading a branch (githubPulls.findOpenPrByHead), and
    *  — asked only when there is none — the merged one (githubPulls.findMergedPrByHead):
    *  a unit whose pull request merged before the runner reached it is done, not aborted. */
@@ -675,9 +679,34 @@ const isGenerated = (instance: CoordinatorInstance): boolean => instance.plan?.p
  *  plan — whatever its source, keyed on the unit count (record 0055 item 3) —
  *  the thread every child of the unit runs in (record 0055). */
 function unitThread(instance: CoordinatorInstance, row: CoordinatorUnit | undefined, unitCount: number) {
+  if (row?.workBrief !== undefined)
+    return { threadKey: privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit }), sourceUrl: undefined };
   const threadKey = row?.threadKey ?? (row === undefined || unitCount === 1 ? instance.threadKey : undefined);
   const sourceUrl = row?.sourceUrl ?? (threadKey === instance.threadKey ? instance.sourceUrl : undefined);
   return { threadKey, sourceUrl };
+}
+
+function unitIO(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  currentInputId?: string,
+): ChannelIO | undefined {
+  if (row.workBrief !== undefined)
+    return deps.privateWorkerLog === undefined
+      ? undefined
+      : privateWorkerIO(
+          deps.privateWorkerLog,
+          { instanceId: instance.id, unit: row.unit },
+          {
+            clock: deps.clock ?? systemClock,
+            ...(currentInputId !== undefined ? { currentInputId } : {}),
+          },
+        );
+  const thread = unitThread(instance, row, 1);
+  return thread.threadKey === undefined
+    ? undefined
+    : deps.ioFor({ threadKey: thread.threadKey, userId: instance.userId });
 }
 
 type OpenedThreadRef = { threadKey: string; sourceUrl?: string };
@@ -849,6 +878,15 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   if (instance.stop !== undefined) return json(409, { ok: false, error: "stopped", at });
   const unit = await unitRowOf(deps, instance, req.unit);
   if (!unit.ok) return unit.response;
+  if (unit.rows.some((candidate) => candidate.workBrief !== undefined) && unit.row?.workBrief === undefined)
+    return json(409, { ok: false, error: "private_worker_unit_required", at });
+  if (unit.row?.workBrief !== undefined) {
+    const expected = privateWorkerThreadKey({ instanceId: instance.id, unit: unit.row.unit });
+    if (unit.row.threadKey !== expected || unit.row.reviewThread !== undefined)
+      return json(409, { ok: false, error: "private_worker_not_started", at });
+    if (deps.privateWorkerLog === undefined)
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+  }
   const own = unitThread(instance, unit.row, unit.rows.length);
   // A plan unit's thread is opened by `unit-start`; a spawn before it has no
   // thread to run in — a passing condition (the runner asks again), stamped
@@ -862,6 +900,8 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // review rounds stay there, so a unit in flight across the release keeps
   // its review session where it began.
   const row = unit.row;
+  if (row?.workBrief !== undefined && req.brief === undefined)
+    return json(409, { ok: false, error: "private_worker_brief_required", at });
   const legacy = req.preset === "review" ? row?.reviewThread : undefined;
   const thread: OpenedThreadRef = legacy ?? {
     threadKey: own.threadKey,
@@ -979,7 +1019,10 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       return json(409, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
     }
   }
-  const io = deps.ioFor({ threadKey, userId: instance.userId });
+  const io =
+    row?.workBrief !== undefined
+      ? unitIO(deps, instance, row, key)
+      : deps.ioFor({ threadKey, userId: instance.userId });
   if (!io) return json(503, { ok: false, error: "no_channel", at });
   // The child's turn: the caller's prompt, or the brief composed from what the
   // bot holds — the plan at the base ref, the prior rounds' records.
@@ -1081,6 +1124,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     ...(instance.postedBy !== undefined ? { postedBy: instance.postedBy } : {}),
     ...(instance.channelName !== undefined ? { channelName: instance.channelName } : {}),
     threadKey,
+    ...(row?.workBrief !== undefined ? { messageId: key } : {}),
     ...(thread.sourceUrl !== undefined ? { sourceUrl: thread.sourceUrl } : {}),
     text: childRequestText({
       preset: req.preset,
@@ -1094,6 +1138,22 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     ...carried,
     receivedAt: at,
   };
+  if (row?.workBrief !== undefined) {
+    try {
+      await appendPrivateWorkerInput(
+        deps.privateWorkerLog!,
+        { instanceId: instance.id, unit: row.unit },
+        {
+          id: key,
+          sender: instance.userId,
+          text: msg.text,
+          at,
+        },
+      );
+    } catch (err) {
+      return json(503, { ok: false, error: "private_worker_log_unavailable", message: describe(err), at });
+    }
+  }
   // The definitive drain fence sits beside dispatch, after every asynchronous
   // read. Its synchronous permit acquisition and dispatch call cannot have a
   // signal callback interleave; once dispatch yields, the drain counts this
@@ -4160,6 +4220,20 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
   const unit = await unitRowOf(deps, instance, body.unit);
   if (!unit.ok) return unit.response;
   let row = unit.row!;
+  if (row.workBrief !== undefined) {
+    const threadKey = privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit });
+    if (deps.privateWorkerLog === undefined)
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    if ((row.threadKey !== undefined && row.threadKey !== threadKey) || row.reviewThread !== undefined)
+      return json(409, { ok: false, error: "private_worker_thread_conflict", at });
+    // Prove the durable log is reachable before admitting a worker. No Slack thread is opened.
+    try {
+      await deps.privateWorkerLog.list(threadKey);
+    } catch {
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    }
+    row = { ...row, threadKey };
+  }
   if (row.threadKey === undefined) {
     // A one-unit plan — generated or checked-in — runs its unit where the
     // request was made (record 0055 item 3): the count decides, not the source.
@@ -4320,6 +4394,7 @@ async function drawCard(
   units: readonly CoordinatorUnit[],
   close?: { icon: string },
 ): Promise<void> {
+  if (units.some((row) => row.workBrief !== undefined)) return;
   if (!instance.card) return;
   const io = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId, cardTs: instance.card.ts });
   if (!io) return;
@@ -4384,6 +4459,8 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  if (row.workBrief !== undefined && deps.privateWorkerLog === undefined)
+    return json(503, { ok: false, error: "private_worker_log_unavailable", at });
   const recoveryWorkflowId =
     typeof body.recoveryWorkflowId === "string" && INSTANCE_ID_PATTERN.test(body.recoveryWorkflowId)
       ? body.recoveryWorkflowId
@@ -4532,6 +4609,15 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  if (row.workBrief !== undefined && deps.privateWorkerLog === undefined)
+    return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+  if (row.workBrief !== undefined) {
+    try {
+      await deps.privateWorkerLog!.list(privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit }));
+    } catch {
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    }
+  }
   const host = await hostRunOf(deps, instance);
   if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
   const stored = row.wakes?.[body.waitId];
@@ -4669,8 +4755,7 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
   );
   const visible = { ...updated, wakes: { ...(updated.wakes ?? {}), [body.waitId]: answer } };
   if (answer.kind === "answered") {
-    const thread = unitThread(instance, visible, units.length);
-    const io = thread.threadKey ? deps.ioFor({ threadKey: thread.threadKey, userId: instance.userId }) : undefined;
+    const io = unitIO(deps, instance, visible);
     await io?.reply(answer.reply);
   }
   await drawCard(
@@ -4720,6 +4805,15 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  if (row.workBrief !== undefined && deps.privateWorkerLog === undefined)
+    return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+  if (row.workBrief !== undefined) {
+    try {
+      await deps.privateWorkerLog!.list(privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit }));
+    } catch {
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    }
+  }
   const recoveryWorkflowId =
     typeof body.recoveryWorkflowId === "string" && INSTANCE_ID_PATTERN.test(body.recoveryWorkflowId)
       ? body.recoveryWorkflowId
@@ -4872,8 +4966,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       ],
       at,
     );
-  const io =
-    thread.threadKey !== undefined ? deps.ioFor({ threadKey: thread.threadKey, userId: instance.userId }) : undefined;
+  const io = unitIO(deps, instance, updated);
   // The leftovers (record 0051's fold rule): events still unconsumed when the unit ends
   // run as ONE fresh turn in the unit's thread — as a run's unconsumed
   // follow-ups do at the settle — dispatched as the requester with each text
@@ -4885,7 +4978,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // the log says so by count — a loss the operator can read, never a silent one.
   // An idle unit has not ended: its events wait for the fold or the wake
   // (record 0051; the wait lands with this plan's fifth unit).
-  if (segment === undefined && idle === undefined && row.recovery === undefined) {
+  if (segment === undefined && idle === undefined && row.recovery === undefined && row.workBrief === undefined) {
     const leftovers = await deps.instances
       .listEvents({ instanceId: instance.id, unit: row.unit }, true)
       .catch(() => [] as ThreadEvent[]);
@@ -4958,7 +5051,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // refused, a cap, a stop — and under it the last coding child's typed handoff
   // as the parent renders it, so a deviation the child recorded reaches the
   // board without a person copying it over. Best effort, like the thread's.
-  if (row.issue !== undefined) {
+  if (row.issue !== undefined && row.workBrief === undefined) {
     const handoff = await codingHandoffOf(deps, instance, body.codingRunId);
     const rendered =
       handoff !== undefined
@@ -5542,7 +5635,7 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
   // A one-unit plan's unit ran in the requesting thread, so its report is
   // already there — only a plan of two or more units posts the summary back
   // (record 0055 item 3: the count decides, not the source).
-  if (units.length >= 2) {
+  if (units.length >= 2 && !units.some((row) => row.workBrief !== undefined)) {
     const io = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId });
     await io?.reply(`Plan ${instance.plan?.id ?? ""} ended (${body.outcome}):\n${planSummary(units)}`).catch(() => {});
   }

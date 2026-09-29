@@ -1,23 +1,31 @@
 import { describe, expect, it } from "vitest";
 import { InMemoryPrivateWorkerLog, UnavailablePrivateWorkerLog } from "../core/privateWorkerLog.js";
-import { appendPrivateWorkerInput, privateWorkerIO, privateWorkerThreadKey } from "./privateWorker.js";
+import {
+  appendPrivateWorkerInput,
+  parsePrivateWorkerThreadKey,
+  privateWorkerIO,
+  privateWorkerThreadKey,
+} from "./privateWorker.js";
 
-const task = { instanceId: "plan_A-1", unit: "U2" };
-const threadKey = "worker:plan_A-1:U2";
+const task = { instanceId: "plan_A-1", unit: "U12" };
+const threadKey = "worker:plan_A-1:U12";
 const now = () => 1000;
 
 describe("private worker IO — a task thread with no Slack delivery", () => {
   it("derives the same internal thread key after rehost and rejects ambiguous identities", () => {
     expect(privateWorkerThreadKey(task)).toBe(threadKey);
     expect(privateWorkerThreadKey({ ...task })).toBe(threadKey);
-    expect(() => privateWorkerThreadKey({ ...task, unit: "U2:other" })).toThrow("invalid private worker identity");
+    expect(parsePrivateWorkerThreadKey(threadKey)).toEqual(task);
+    expect(parsePrivateWorkerThreadKey("worker:plan_A-1:U12:extra")).toBeUndefined();
+    expect(parsePrivateWorkerThreadKey("slack:C1:1.0")).toBeUndefined();
+    expect(() => privateWorkerThreadKey({ ...task, unit: "U12:other" })).toThrow("invalid private worker identity");
     expect(() => privateWorkerThreadKey({ ...task, instanceId: "" })).toThrow("invalid private worker identity");
   });
 
   it("persists attributed input and worker replies, then rebuilds history without status noise or the current request", async () => {
     const log = new InMemoryPrivateWorkerLog();
     await appendPrivateWorkerInput(log, task, { id: "human-1", sender: "slack:UA", text: "fix signup", at: 10 });
-    await appendPrivateWorkerInput(log, task, { id: "human-1", sender: "slack:UA", text: "fix signup", at: 10 });
+    await appendPrivateWorkerInput(log, task, { id: "human-1", sender: "slack:UA", text: "fix signup", at: 11 });
     const first = privateWorkerIO(log, task, { currentInputId: "human-1", clock: now });
     expect(await first.history()).toEqual([]);
     expect(first.openThread).toBeUndefined();

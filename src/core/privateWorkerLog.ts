@@ -9,6 +9,45 @@ export type PrivateWorkerEventInput =
 
 export type PrivateWorkerEvent = PrivateWorkerEventInput & { seq: number; statusSeq?: number };
 
+const frame = (value: unknown): boolean =>
+  typeof value === "object" && value !== null && typeof (value as { title?: unknown }).title === "string";
+
+/** Bound stored worker prose and reject malformed rows at the persistence door. */
+export function isPrivateWorkerEventInput(value: unknown): value is PrivateWorkerEventInput {
+  if (typeof value !== "object" || value === null || JSON.stringify(value).length > 32_000) return false;
+  const row = value as Record<string, unknown>;
+  if (typeof row.at !== "number" || !Number.isFinite(row.at)) return false;
+  if (row.kind === "input")
+    return (
+      typeof row.id === "string" &&
+      row.id.length > 0 &&
+      row.id.length <= 256 &&
+      typeof row.sender === "string" &&
+      row.sender.length > 0 &&
+      row.sender.length <= 256 &&
+      typeof row.text === "string"
+    );
+  if (row.kind === "reply")
+    return typeof row.text === "string" && (row.runId === undefined || typeof row.runId === "string");
+  if (row.kind === "status")
+    return (
+      (row.phase === "start" || row.phase === "update" || row.phase === "done") &&
+      frame(row.frame) &&
+      (row.phase === "start" || (Number.isSafeInteger(row.statusSeq) && (row.statusSeq as number) > 0))
+    );
+  return false;
+}
+
+export function isPrivateWorkerEvent(value: unknown): value is PrivateWorkerEvent {
+  if (!isPrivateWorkerEventInput(value)) return false;
+  const row = value as PrivateWorkerEvent;
+  return (
+    Number.isSafeInteger(row.seq) &&
+    row.seq > 0 &&
+    (row.kind !== "status" || (Number.isSafeInteger(row.statusSeq) && row.statusSeq! > 0))
+  );
+}
+
 /** The production implementation must persist this log outside the bot process. */
 export interface PrivateWorkerLog {
   /** Assigns one monotonic sequence per thread. A repeated input id returns its original row. */
@@ -25,8 +64,8 @@ export class InMemoryPrivateWorkerLog implements PrivateWorkerLog {
     const rows = this.rows.get(threadKey) ?? [];
     if (event.kind === "input") {
       const prior = rows.find((row) => row.kind === "input" && row.id === event.id);
-      if (prior !== undefined) {
-        if (JSON.stringify({ ...prior, seq: undefined }) !== JSON.stringify({ ...event, seq: undefined }))
+      if (prior?.kind === "input") {
+        if (prior.sender !== event.sender || prior.text !== event.text)
           throw new Error("private worker input id reused with different content");
         return structuredClone(prior);
       }

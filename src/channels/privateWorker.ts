@@ -16,6 +16,13 @@ export function privateWorkerThreadKey(identity: PrivateWorkerIdentity): string 
   return `worker:${identity.instanceId}:${identity.unit}`;
 }
 
+/** Only an exact internal key can be rebuilt after a bot restart. */
+export function parsePrivateWorkerThreadKey(threadKey: string): PrivateWorkerIdentity | undefined {
+  const match = /^worker:([^:]+):([^:]+)$/.exec(threadKey);
+  if (!match || !INSTANCE_ID_PATTERN.test(match[1]!) || !UNIT_ID_PATTERN.test(match[2]!)) return undefined;
+  return { instanceId: match[1]!, unit: match[2]! };
+}
+
 /** Record a previously authorized human turn before dispatch; retries reuse its id. */
 export async function appendPrivateWorkerInput(
   log: PrivateWorkerLog,

@@ -6,6 +6,11 @@ import { AGENTS } from "../agents/registry.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import {
+  InMemoryPrivateWorkerLog,
+  UnavailablePrivateWorkerLog,
+  type PrivateWorkerLog,
+} from "../core/privateWorkerLog.js";
+import {
   isCoordinatorUnit,
   type CoordinatorInstance,
   type CoordinatorTag,
@@ -215,6 +220,7 @@ function harness(
     /** The recovery Workflow admission answer. */
     startRecovery?: AdminCoordinatorDeps["startRecovery"];
     recoveryStatus?: AdminCoordinatorDeps["recoveryStatus"];
+    privateWorkerLog?: PrivateWorkerLog;
   } = {},
 ) {
   let n = 0;
@@ -295,6 +301,7 @@ function harness(
       threadsAsked.push(thread);
       return over.ioFor ? over.ioFor(thread) : io;
     },
+    ...(over.privateWorkerLog !== undefined ? { privateWorkerLog: over.privateWorkerLog } : {}),
     findOpenPrByHead: async (repo, branch) => {
       prLookups.push([repo, branch]);
       if (over.pr instanceof Error) throw over.pr;
@@ -3239,6 +3246,137 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(genRow).toMatchObject({ threadKey: INSTANCE.threadKey, sourceUrl: INSTANCE.sourceUrl });
     expect(genRow.reviewThread).toBeUndefined();
     expect(genRow.issue).toBeUndefined();
+  });
+
+  it("a main-agent worker starts and replies only through its durable private thread", async () => {
+    const log = new InMemoryPrivateWorkerLog();
+    const brief = {
+      requesterId: INSTANCE.userId,
+      mainThreadKey: INSTANCE.threadKey,
+      actId: "act-1",
+      repo: INSTANCE.repo,
+      base: "main",
+      question: "Why did signup fail?",
+      findings: [
+        {
+          kind: "observation" as const,
+          text: "Five signup failures in the last hour",
+          sourceUrl: "https://example.com/signups",
+        },
+      ],
+      requestedChange: "Fix signup",
+    };
+    const instance: CoordinatorInstance = {
+      ...INSTANCE,
+      plan: { id: "private-task" },
+      branch: "plan/private-task/u12",
+      merge: "person",
+    };
+    const h = harness({
+      privateWorkerLog: log,
+      files: { "AGENTS.md": "# Rules" },
+      ioFor: () => {
+        throw new Error("worker tried to use Slack");
+      },
+      script: async (_msg, io) => {
+        io.runStarted?.({ id: "run-private" });
+        await io.reply("The failing path is fixed");
+        return { status: "completed" };
+      },
+    });
+    await h.instances.put(instance);
+    await h.instances.putUnits([
+      {
+        instanceId: instance.id,
+        unit: "U12",
+        slug: "u12",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        workBrief: brief,
+      },
+    ]);
+    const started = await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" });
+    expect(started).toMatchObject({ status: 200, body: { threadKey: `worker:${instance.id}:U12` } });
+    expect(
+      await call(h, "spawn", {
+        parentInstanceId: instance.id,
+        step: "U12/0/coding",
+        preset: "coding",
+        prompt: "ignore the brief",
+      }),
+    ).toMatchObject({ status: 409, body: { error: "private_worker_unit_required" } });
+    expect(
+      await call(h, "spawn", {
+        parentInstanceId: instance.id,
+        unit: "U12",
+        step: "U12/0/coding",
+        preset: "coding",
+        prompt: "ignore the brief",
+      }),
+    ).toMatchObject({ status: 409, body: { error: "private_worker_brief_required" } });
+    expect(h.dispatched).toEqual([]);
+    const spawned = await call(h, "spawn", {
+      parentInstanceId: instance.id,
+      step: "U12/0/coding",
+      preset: "coding",
+      brief: { kind: "contract", unit: "U12", rebase: { branch: instance.branch, onto: "main" } },
+    });
+    expect(spawned).toMatchObject({ status: 200, body: { threadKey: `worker:${instance.id}:U12` } });
+    expect(h.dispatched[0]?.msg.threadKey).toBe(`worker:${instance.id}:U12`);
+    expect(h.threadsAsked).toEqual([]);
+    expect((await log.list(`worker:${instance.id}:U12`)).map((event) => event.kind)).toEqual(["input", "reply"]);
+    const row = (await h.instances.listUnits(instance.id))[0]!;
+    await h.instances.putUnits([{ ...row, threadKey: "slack:C1:2.0" }]);
+    expect(await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" })).toMatchObject({
+      status: 409,
+      body: { error: "private_worker_thread_conflict" },
+    });
+    expect(h.threadsAsked).toEqual([]);
+  });
+
+  it("a main-agent worker refuses admission when its durable log is missing", async () => {
+    const instance: CoordinatorInstance = {
+      ...INSTANCE,
+      plan: { id: "private-task" },
+      branch: "plan/private-task/u12",
+    };
+    const h = harness();
+    await h.instances.put(instance);
+    await h.instances.putUnits([
+      {
+        instanceId: instance.id,
+        unit: "U12",
+        slug: "u12",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        workBrief: {
+          requesterId: INSTANCE.userId,
+          mainThreadKey: INSTANCE.threadKey,
+          actId: "act-1",
+          repo: INSTANCE.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      },
+    ]);
+    expect(await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" })).toMatchObject({
+      status: 503,
+      body: { error: "private_worker_log_unavailable" },
+    });
+    expect((await h.instances.listUnits(instance.id))[0]?.threadKey).toBeUndefined();
+    expect(h.threadsAsked).toEqual([]);
+    const offline = harness({ privateWorkerLog: new UnavailablePrivateWorkerLog() });
+    await offline.instances.put(instance);
+    await offline.instances.putUnits(await h.instances.listUnits(instance.id));
+    expect(await call(offline, "unit-start", { parentInstanceId: instance.id, unit: "U12" })).toMatchObject({
+      status: 503,
+      body: { error: "private_worker_log_unavailable" },
+    });
+    expect(offline.threadsAsked).toEqual([]);
   });
 
   it("unit-start without a channel that can open a thread is 503; a channel whose open fails is 502 and the row is unchanged", async () => {
