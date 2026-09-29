@@ -17594,6 +17594,102 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     return { ...s, branch, recordedHead, operator, shipBranch, shipParent };
   }
 
+  async function repeatedEndedPrSetup() {
+    const s = await endedPrContinuationSetup();
+    const original = (await s.instances.listUnits(INSTANCE))[0]!;
+    const otherInstances = ["attempt-one", "attempt-two"];
+    await s.instances.putUnits(otherInstances.map((instanceId) => ({ ...original, instanceId })));
+    const otherParents = otherInstances.map((instanceId, index) => ({
+      ...s.shipParent,
+      id: `ship-attempt-${index}`,
+      instanceId,
+    }));
+    s.deps.runs!.listRuns = vi.fn(async () => ({ runs: [s.shipParent, ...otherParents] }));
+    return { ...s, otherInstances };
+  }
+
+  it("several ended Ship attempts on one PR still allow a fresh review at its current head", async () => {
+    const s = await repeatedEndedPrSetup();
+    const head = "2".repeat(40);
+    const originalRows = await Promise.all([INSTANCE, ...s.otherInstances].map((id) => s.instances.listUnits(id)));
+    s.deps.operatorModel = vi.fn(async () => ({
+      tool: "bind_preset",
+      input: { preset: "review", reason: "review the exact PR head" },
+    }));
+    s.deps.resolveRepoContext = vi.fn(() => ({
+      repo: "acme/api",
+      ref: s.branch,
+      pr: 7,
+      headSha: head,
+      baseRef: "main",
+      refFromPr: true,
+    }));
+    s.deps.fetchPrHead = async () => head;
+    s.deps.postReviewComment = vi.fn(async () => {});
+    const executor = {
+      exec: async (command: string) => (/git rev-parse HEAD/.test(command) ? `${head}\n` : ""),
+      readFile: async () => "",
+      writeFile: async () => "",
+      release: async () => ({ released: true }),
+    };
+    const harness = vi.fn<typeof runPiHarnessOpen>(async (_deps, run) => {
+      expect(run.agent.name).toBe("review");
+      await run.tools
+        .find((tool) => tool.name === "submit_verdict")!
+        .run({ verdict: "approve", summary: "Reviewed the new head", head, findings: [] }, run.toolContext);
+      return piAnswered("Reviewed the new head");
+    });
+    const { io, replies } = fakeIO();
+    await vi.mocked(makeExecutor).withImplementation(
+      async () => ({ executor }),
+      async () => {
+        await vi.mocked(runPiHarnessOpen).withImplementation(harness, async () => {
+          await dispatch(s.deps, msg("please review https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
+        });
+      },
+    );
+    expect(harness).toHaveBeenCalledOnce();
+    expect(s.deps.postReviewComment).toHaveBeenCalledWith(
+      { repo: "acme/api", number: 7, commitId: head },
+      expect.stringContaining("Reviewed the new head"),
+    );
+    expect(replies.join("\n")).not.toContain("continuation is ambiguous");
+    expect(await Promise.all([INSTANCE, ...s.otherInstances].map((id) => s.instances.listUnits(id)))).toEqual(
+      originalRows,
+    );
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.sends).toEqual([]);
+  });
+
+  it("several ended Ship attempts still refuse a non-review continuation", async () => {
+    const s = await repeatedEndedPrSetup();
+    s.deps.operatorModel = vi.fn(async () => ({
+      tool: "bind_preset",
+      input: { preset: "ship", reason: "continue the prior work" },
+    }));
+    const { io, replies } = fakeIO();
+    await dispatch(s.deps, msg("continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
+    expect(replies).toEqual([
+      "This thread matches multiple ended plan units (U12, U12, U12), so continuation is ambiguous. Nothing started.",
+    ]);
+    expect(s.shipBranch).not.toHaveBeenCalled();
+  });
+
+  it("an unfinished claim on the named PR blocks review beside ended attempts", async () => {
+    const s = await repeatedEndedPrSetup();
+    const [unit] = await s.instances.listUnits(s.otherInstances[0]!);
+    await s.instances.putUnits([{ ...unit!, ending: undefined }]);
+    s.deps.operatorModel = vi.fn(async () => ({
+      tool: "bind_preset",
+      input: { preset: "review", reason: "review the PR" },
+    }));
+    const { io, replies } = fakeIO();
+    await dispatch(s.deps, msg("please review https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
+    expect(replies.join("\n")).toContain("already has an unfinished unit");
+    expect(s.deps.operatorModel).not.toHaveBeenCalled();
+    expect(s.shipBranch).not.toHaveBeenCalled();
+  });
+
   it("a plain review after the round cap reviews each changed head and preserves the original unit branch and PR", async () => {
     const s = await endedPrContinuationSetup();
     const unit = {

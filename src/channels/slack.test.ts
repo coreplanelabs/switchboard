@@ -112,6 +112,16 @@ describe("stripMention", () => {
   it("removes only the first generic mention when the bot id is unknown", () => {
     expect(stripMention("<@UANY> hello <@UOTHER>", undefined)).toBe("hello <@UOTHER>");
   });
+
+  it("removes a connector's leading bot name so an agent directive stays at the head", () => {
+    expect(stripMention("@switchboard agent:review https://github.com/acme/api/pull/7", BOT)).toBe(
+      "agent:review https://github.com/acme/api/pull/7",
+    );
+    expect(stripMention("please ask @switchboard agent:review about this", BOT)).toBe(
+      "please ask @switchboard agent:review about this",
+    );
+    expect(stripMention("@someone agent:review about this", BOT)).toBe("@someone agent:review about this");
+  });
 });
 
 describe("stripMention — Slack app 'Sent using' footer", () => {
