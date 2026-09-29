@@ -1193,7 +1193,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
           await held;
           return { kind: "stopped", instanceId: instance.id, runnerStopped: true, stopsSucceeded: true, children: [] };
         },
-    }) as unknown as PlaneService;
+      }) as unknown as PlaneService;
     await runLoop(s.deps, {
       ...s.ctx,
       msg: {
