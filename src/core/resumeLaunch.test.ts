@@ -188,6 +188,33 @@ describe("the pure pieces", () => {
     ).toBeUndefined();
   });
 
+  it("resumeMessage carries only a matching private audience stamp for a fresh verifier on rehost", () => {
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:D1",
+      userId: "slack:WALICE",
+      threadKey: "slack:D1:1.0",
+    };
+    const meta = {
+      ...row().meta,
+      channelId: directAudience.channelId,
+      userId: directAudience.userId,
+      threadKey: directAudience.threadKey,
+      directAudience,
+    };
+    expect(
+      (resumeMessage(row({ meta }), "status?") as IncomingMessage & { directAudience?: unknown }).directAudience,
+    ).toEqual(directAudience);
+    expect(
+      (
+        resumeMessage(
+          row({ meta: { ...meta, directAudience: { ...directAudience, userId: "slack:WB0B" } } }),
+          "status?",
+        ) as IncomingMessage & { directAudience?: unknown }
+      ).directAudience,
+    ).toBeUndefined();
+  });
+
   // record 0060: a hosted row's key column carries `#host`, which no channel's
   // thread can match — the resume message and the launcher's handle are built
   // from the METADATA's thread.

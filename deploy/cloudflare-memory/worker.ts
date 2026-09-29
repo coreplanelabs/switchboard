@@ -2820,6 +2820,25 @@ export class RunHistoryDO extends DurableObject<Env> {
       .map((row) => JSON.parse(row.json) as PrivateWorkerEvent);
   }
 
+  async listPrivateWorkerEventsAfter(
+    threadKey: string,
+    afterSeq: number,
+    limit: number,
+  ): Promise<{ events: PrivateWorkerEvent[]; more: boolean }> {
+    const rows = this.sql
+      .exec<{ json: string }>(
+        `SELECT json FROM coordinator_private_worker_events WHERE thread_key = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
+        threadKey,
+        afterSeq,
+        limit + 1,
+      )
+      .toArray();
+    return {
+      events: rows.slice(0, limit).map((row) => JSON.parse(row.json) as PrivateWorkerEvent),
+      more: rows.length > limit,
+    };
+  }
+
   async claimMainTask(
     key: { mainThreadKey: string; actId: string },
     instance: CoordinatorInstance,
@@ -5796,6 +5815,7 @@ export class SessionLogDO extends DurableObject<Env> {
 const LEDGER_ROUTES = new Set([
   "/runs/private-worker/append",
   "/runs/private-worker/list",
+  "/runs/private-worker/list-after",
   "/runs/coordinator/put",
   "/runs/coordinator/replace",
   "/runs/coordinator/main-task/get",
@@ -6520,11 +6540,26 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       return json({ error: "key must name one requester in a Slack DM" }, 400);
     return json({ turn: await stub.latestRequesterTurn({ threadKey: key.threadKey, requesterId: key.requesterId }) });
   }
-  if (pathname === "/runs/private-worker/append" || pathname === "/runs/private-worker/list") {
+  if (
+    pathname === "/runs/private-worker/append" ||
+    pathname === "/runs/private-worker/list" ||
+    pathname === "/runs/private-worker/list-after"
+  ) {
     if (typeof b.threadKey !== "string" || parsePrivateWorkerThreadKey(b.threadKey) === undefined)
       return json({ error: "threadKey must name one private worker" }, 400);
     if (pathname === "/runs/private-worker/list")
       return json({ events: await stub.listPrivateWorkerEvents(b.threadKey) });
+    if (pathname === "/runs/private-worker/list-after") {
+      if (
+        !Number.isSafeInteger(b.afterSeq) ||
+        (b.afterSeq as number) < 0 ||
+        !Number.isSafeInteger(b.limit) ||
+        (b.limit as number) < 1 ||
+        (b.limit as number) > 32
+      )
+        return json({ error: "afterSeq and limit must be bounded positive integers" }, 400);
+      return json(await stub.listPrivateWorkerEventsAfter(b.threadKey, b.afterSeq as number, b.limit as number));
+    }
     if (!isPrivateWorkerEventInput(b.event)) return json({ error: "event must be a bounded worker event" }, 400);
     const event = await stub.appendPrivateWorkerEvent(b.threadKey, b.event);
     return event === null ? json({ error: "private worker input id conflict" }, 409) : json({ event });

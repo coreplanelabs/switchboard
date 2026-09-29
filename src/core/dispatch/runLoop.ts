@@ -24,7 +24,7 @@ import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
 import { isReissueSteerText } from "../plane/decide.js";
 import type { ModelCard } from "../modelCard.js";
-import { mergeTools, toolsForRun } from "../../tools/toolsets.js";
+import { filterUnavailableTools, mergeTools, toolsForRun } from "../../tools/toolsets.js";
 import { createMainWorkEffectGate, mainWorkForRun, type DirectAudience } from "../../tools/mainWork.js";
 import { type SlackContextBinding } from "./slackContextBinding.js";
 import {
@@ -143,6 +143,7 @@ import { shows } from "../verbosity.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { MainSourceTracker } from "./mainSource.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
+import { mainWorkerCapabilityFor, privateProgressSourceTrusted } from "./mainWorkerCapability.js";
 import { buildDepotCi } from "../../execution/depotCi.js";
 import { privateMainEvent } from "../privateMainEvent.js";
 import { planeRowIdentities } from "./mainAudience.js";
@@ -1452,6 +1453,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(io.verifyDirectAudience ? { verifyDirectAudience: io.verifyDirectAudience.bind(io) } : {}),
     ...(deps.mainTaskStart ? { start: deps.mainTaskStart } : {}),
   });
+  const progressSourceTrusted = privateProgressSourceTrusted(msg.userId, admitted.inbox, resume?.events);
+  const mainWorker = await mainWorkerCapabilityFor(
+    deps,
+    agent.name,
+    msg,
+    io,
+    () => !privateAudienceLatch.revoked && progressSourceTrusted(),
+  );
   const toolContext = {
     executor,
     reportProgress,
@@ -1481,6 +1490,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(plane ? { plane } : {}),
     ...(mainWork ? { mainWork } : {}),
     ...(mainStart ? { mainStart } : {}),
+    ...(mainWorker ? { mainWorker } : {}),
     ...(steer ? { steer } : {}),
     ...(wait ? { wait } : {}),
     ...(session ? { session } : {}),
@@ -1938,13 +1948,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(ctx.modelCard ? { card: ctx.modelCard } : {}),
             system: publicationSystem,
             messages,
-            tools: mergeTools(
-              toolsForRun(
-                agent.toolset,
-                mainWork !== undefined,
-                mainStart !== undefined && verifiedAtOpen && mainWorkTrusted && !privateAudienceLatch.revoked,
-              ).filter((tool) => slackContext !== undefined || tool.name !== "slack_context"),
-              mcpForRun?.tools,
+            tools: filterUnavailableTools(
+              mergeTools(
+                toolsForRun(
+                  agent.toolset,
+                  mainWork !== undefined,
+                  mainStart !== undefined && verifiedAtOpen && mainWorkTrusted && !privateAudienceLatch.revoked,
+                ).filter((tool) => slackContext !== undefined || tool.name !== "slack_context"),
+                mcpForRun?.tools,
+              ),
+              mainWorker ? [] : ["work_progress"],
             ),
             toolContext,
             ...(ctx.decisionRecord !== undefined ? { environment: { [DECISION_RECORD_ENV]: ctx.decisionRecord } } : {}),

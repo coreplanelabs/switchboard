@@ -57,6 +57,27 @@ describe("durable inbox — staged references (record 0033)", () => {
     expect(messageFromInbox(relayed, 1)?.msg.relayedBy).toBe("slack:bot:BOTHER");
     expect(messageFromInbox({ ...stored, relayedBy: "slack:bot:BOTHER" }, 1)?.msg.directAudience).toBeUndefined();
   });
+
+  it("keeps a matching private audience stamp for a restarted request and drops a forged one", () => {
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:D1",
+      userId: "slack:WALICE",
+      threadKey: "slack:D1:1.0",
+    };
+    const dm = { ...base, ...directAudience, directAudience };
+    const stored = durableInboxMessage(dm, dm.text, 1);
+    expect(stored.directAudience).toEqual(directAudience);
+    expect((messageFromInbox(stored, 0)?.msg as IncomingMessage & { directAudience?: unknown }).directAudience).toEqual(
+      directAudience,
+    );
+    expect(
+      (
+        messageFromInbox({ ...stored, directAudience: { ...directAudience, userId: "slack:WB0B" } }, 0)
+          ?.msg as IncomingMessage & { directAudience?: unknown }
+      ).directAudience,
+    ).toBeUndefined();
+  });
   it("a steer with a staged reference writes it on the row and reads it back as the same reference", () => {
     const row = durableInboxMessage({ ...base, staged: [clip] }, "and this video", 1_700_000_000_000);
     expect(row.staged).toEqual([clip]);

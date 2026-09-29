@@ -9,6 +9,7 @@ import { ASKS } from "../budgets.js";
 import { ConfigStore } from "../../config.js";
 import { PLANE_ACTOR_ID } from "../authz/grants.js";
 import { reissueSteerSentence } from "../plane/decide.js";
+import { visibilityOf } from "../authz/channelDirectory.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
@@ -94,6 +95,8 @@ import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js"
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { PlaneService } from "../planeService.js";
+import { InMemoryPrivateWorkerLog } from "../privateWorkerLog.js";
+import { privateWorkerThreadKey } from "../../channels/privateWorker.js";
 import type { RepoContext } from "../repoContext.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
 import type { ResidentBinding } from "../../execution/resident.js";
@@ -193,10 +196,10 @@ function provider(answer: string | Error): Provider {
   };
 }
 
-const msg = (text: string, userId = "slack:UX"): IncomingMessage => ({
-  channelId: "slack:CX",
+const msg = (text: string, userId = "slack:UX", channelId = "slack:CX", threadKey = THREAD): IncomingMessage => ({
+  channelId,
   userId,
-  threadKey: THREAD,
+  threadKey,
   text,
 });
 
@@ -211,7 +214,15 @@ function setup(
     /** The request's verbosity directive (item 28); unset → the default, quiet. */
     verbosity?: Verbosity;
     provider?: Provider;
-    io?: Partial<ChannelIO>;
+    io?: Partial<ChannelIO> & {
+      verifyDirectAudience?: (audience: {
+        kind: "slack-unshared-im";
+        channelId: string;
+        userId: string;
+        threadKey: string;
+      }) => Promise<boolean>;
+    };
+    directAudience?: { kind: "slack-unshared-im"; channelId: string; userId: string; threadKey: string };
     executor?: Partial<Executor>;
     /** The config to run under; the default names no harness block. */
     yaml?: string;
@@ -249,6 +260,8 @@ function setup(
     session?: SessionCapability;
     /** Who asked; `slack:UX` unless a test needs a second person's scope. */
     userId?: string;
+    channelId?: string;
+    threadKey?: string;
     /** The registry's per-run backlog bound in events, when a test needs the run's early events evicted. */
     backlogLimit?: number;
   } = {},
@@ -301,7 +314,10 @@ function setup(
         }
       : {}),
   };
-  const message = msg("hello there", opts.userId);
+  const message = {
+    ...msg("hello there", opts.userId, opts.channelId, opts.threadKey),
+    ...(opts.directAudience ? { directAudience: opts.directAudience } : {}),
+  };
   const { resolved } = resolveRun(
     { config },
     {
@@ -323,9 +339,9 @@ function setup(
   const run = registry.create(`${agentName} · #CX · UX`, {
     agent: agentName,
     model: resolved.modelRef,
-    channelId: "slack:CX",
+    channelId: message.channelId,
     userId: message.userId,
-    threadKey: THREAD,
+    threadKey: message.threadKey,
     receivedAt: NOW,
   });
   const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf(message.channelId), receivedAt: NOW });
@@ -334,6 +350,7 @@ function setup(
     reply: async (t) => void replies.push(t),
     status: async () => ({ update: () => {}, done: async () => {} }),
     history: async () => [],
+    ...(opts.directAudience ? { directAudience: () => opts.directAudience } : {}),
     ...opts.io,
   };
   const frames: StatusUpdate[] = [];
@@ -369,7 +386,7 @@ function setup(
               : "paired",
         ),
     },
-    admitted: new ThreadAdmission<DispatchFollowUp>().claim(THREAD, { agent: agentName }).live,
+    admitted: new ThreadAdmission<DispatchFollowUp>().claim(message.threadKey, { agent: agentName }).live,
     ledgerRun: undefined,
     resume: undefined,
     repoCtx: opts.repoCtx ?? {},
@@ -388,7 +405,7 @@ function setup(
     startedAt: NOW,
     loopStartedAt: NOW,
     assertAdmissionBudget: () => {},
-    channelVisibility: "unknown" as const,
+    channelVisibility: visibilityOf(message.channelId),
     addressSeverity: { level: "minor" as const, source: "org" as const },
     publishText: (type: "input" | "context" | "answer", text: string) => {
       published.push(`${type}:${text}`);
@@ -1630,6 +1647,256 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(await toolNames("slack:DPRIVATE", "dm")).toEqual(
       expect.arrayContaining(["work_status", "work_steer", "work_stop"]),
     );
+  });
+
+  it("does not show the private progress tool to a model in a shared or unknown channel", async () => {
+    let visible: string[] = [];
+    const scripted: Provider = {
+      name: "fake",
+      async complete(req) {
+        visible = req.tools?.map((tool) => tool.name) ?? [];
+        return { content: [{ type: "text", text: "Status unavailable here." }], stopReason: "end_turn" };
+      },
+    };
+    const s = setup("", { agent: "orchestrator", provider: scripted });
+    s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    s.deps.privateWorkerLog = new InMemoryPrivateWorkerLog();
+    answered(await runLoop(s.deps, s.ctx));
+    expect(visible).toContain("plane_show");
+    expect(visible).not.toContain("work_progress");
+  });
+
+  it("does not show private progress to a model in an unverified or newly shared Slack D conversation", async () => {
+    for (const state of ["unverified", "shared", "external", "pending"]) {
+      let visible: string[] = [];
+      const s = setup("", {
+        agent: "orchestrator",
+        channelId: "slack:DMAIN",
+        threadKey: "slack:DMAIN:1.0",
+        directAudience:
+          state === "unverified"
+            ? undefined
+            : { kind: "slack-unshared-im", channelId: "slack:DMAIN", userId: "slack:UX", threadKey: "slack:DMAIN:1.0" },
+        io: { verifyDirectAudience: async () => false },
+        provider: {
+          name: "fake",
+          async complete(req) {
+            visible = req.tools?.map((tool) => tool.name) ?? [];
+            return { content: [{ type: "text", text: "Status unavailable here." }], stopReason: "end_turn" };
+          },
+        },
+      });
+      s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+      s.deps.privateWorkerLog = new InMemoryPrivateWorkerLog();
+      answered(await runLoop(s.deps, s.ctx));
+      expect(visible, state).not.toContain("work_progress");
+    }
+  });
+
+  it("a later orchestrator turn reads only its linked private worker projection through the tool context", async () => {
+    const dmThread = "slack:DMAIN:1.0";
+    const instances = new InMemoryCoordinatorInstanceStore();
+    const instance = {
+      id: "ship_signup_1",
+      kind: "ship" as const,
+      userId: "slack:UX",
+      channelId: "slack:DMAIN",
+      threadKey: dmThread,
+      repo: "acme/api",
+      branch: "ship/signup",
+      base: "main",
+      plan: { id: "signup" },
+      merge: "person" as const,
+      createdAt: 1,
+    };
+    const unit = {
+      instanceId: instance.id,
+      unit: "task",
+      slug: "signup",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: dmThread,
+        actId: "fix-signups",
+        repo: instance.repo,
+        base: instance.base,
+        question: "How many signups failed?",
+        findings: [],
+        requestedChange: "Fix signups",
+      },
+    };
+    await instances.recordRequesterTurn({ threadKey: dmThread, requesterId: instance.userId, messageId: "1" });
+    await instances.claimMainTask({ mainThreadKey: dmThread, actId: "fix-signups" }, instance, unit, {
+      requesterId: instance.userId,
+      sourceMessageId: "1",
+      revision: 1,
+      repo: instance.repo,
+    });
+    const log = new InMemoryPrivateWorkerLog();
+    const key = privateWorkerThreadKey({ instanceId: instance.id, unit: unit.unit });
+    await log.append(key, { kind: "reply", text: "private coding transcript", at: 2 });
+    await log.append(key, {
+      kind: "status",
+      phase: "start",
+      frame: { title: "Testing", detail: "private details" },
+      at: 3,
+    });
+    let turn = 0;
+    let visible: string[] = [];
+    let modelContext = "";
+    const scripted: Provider = {
+      name: "fake",
+      async complete(req) {
+        visible = req.tools?.map((tool) => tool.name) ?? [];
+        if (turn++ === 0)
+          return {
+            content: [
+              { type: "tool_use", id: "progress-read", name: "work_progress", input: { actId: "fix-signups" } },
+            ],
+            stopReason: "tool_use",
+          };
+        modelContext = JSON.stringify(req.messages);
+        return { content: [{ type: "text", text: "The worker is testing." }], stopReason: "end_turn" };
+      },
+    };
+    const s = setup("", {
+      agent: "orchestrator",
+      provider: scripted,
+      channelId: instance.channelId,
+      threadKey: dmThread,
+      directAudience: {
+        kind: "slack-unshared-im",
+        channelId: instance.channelId,
+        userId: instance.userId,
+        threadKey: dmThread,
+      },
+      io: { verifyDirectAudience: async () => true },
+    });
+    s.deps.coordinatorInstances = instances;
+    s.deps.privateWorkerLog = log;
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.answer).toContain("worker is testing");
+    expect(visible).toContain("work_progress");
+    s.ending.drain(true);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    const result = JSON.stringify(record.events.filter((event) => event.type === "tool_result"));
+    expect(modelContext).toContain("Testing");
+    expect(modelContext).not.toMatch(/private coding transcript|private details/);
+    expect(result).not.toContain("Testing");
+    expect(result).not.toMatch(/private coding transcript|private details/);
+  });
+
+  it("revokes private progress when an app follow-up folds into the live main run", async () => {
+    const threadKey = "slack:DMAIN:1.0";
+    const instances = new InMemoryCoordinatorInstanceStore();
+    const instance = {
+      id: "ship_signup_2",
+      kind: "ship" as const,
+      userId: "slack:UX",
+      channelId: "slack:DMAIN",
+      threadKey,
+      repo: "acme/api",
+      branch: "ship/signup",
+      base: "main",
+      plan: { id: "signup" },
+      merge: "person" as const,
+      createdAt: 1,
+    };
+    await instances.recordRequesterTurn({ threadKey, requesterId: instance.userId, messageId: "1" });
+    await instances.claimMainTask(
+      { mainThreadKey: threadKey, actId: "fix-signups" },
+      instance,
+      {
+        instanceId: instance.id,
+        unit: "task",
+        slug: "signup",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        workBrief: {
+          requesterId: instance.userId,
+          mainThreadKey: threadKey,
+          actId: "fix-signups",
+          repo: instance.repo,
+          base: instance.base,
+          question: "How many signups failed?",
+          findings: [],
+          requestedChange: "Fix signups",
+        },
+      },
+      {
+        requesterId: instance.userId,
+        sourceMessageId: "1",
+        revision: 1,
+        repo: instance.repo,
+      },
+    );
+    const log = new InMemoryPrivateWorkerLog();
+    await log.append(privateWorkerThreadKey({ instanceId: instance.id, unit: "task" }), {
+      kind: "status",
+      phase: "start",
+      frame: { title: "Private progress" },
+      at: 2,
+    });
+    let turn = 0;
+    let modelResult = "";
+    let s: ReturnType<typeof setup>;
+    const scripted: Provider = {
+      name: "fake",
+      async complete(req) {
+        if (turn++ === 0) {
+          s.ctx.admitted.inbox.push({
+            text: "fix it",
+            userId: instance.userId,
+            postedBy: "slack:bot:B1",
+            at: NOW + 1,
+            msg: {
+              channelId: instance.channelId,
+              userId: instance.userId,
+              threadKey,
+              text: "fix it",
+              postedBy: "slack:bot:B1",
+            },
+          });
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "progress-after-followup",
+                name: "work_progress",
+                input: { actId: "fix-signups" },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        }
+        modelResult = JSON.stringify(req.messages);
+        return { content: [{ type: "text", text: "I saw the follow-up." }], stopReason: "end_turn" };
+      },
+    };
+    s = setup("", {
+      agent: "orchestrator",
+      provider: scripted,
+      channelId: instance.channelId,
+      threadKey,
+      directAudience: { kind: "slack-unshared-im", channelId: instance.channelId, userId: instance.userId, threadKey },
+      io: { verifyDirectAudience: async () => true },
+    });
+    s.deps.coordinatorInstances = instances;
+    s.deps.privateWorkerLog = log;
+    answered(await runLoop(s.deps, s.ctx));
+    s.ending.drain(true);
+    await s.writer.settled();
+    const events = (await s.store.get("run-l"))!.events;
+    expect(modelResult).toContain("unavailable");
+    expect(events).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "input", text: "Private request" })]),
+    );
+    expect(JSON.stringify(events)).not.toContain("Private progress");
+    expect(s.ctx.admitted.inbox.hasOnlyDirectRequester(instance.userId)).toBe(false);
   });
 
   const WIP_COORDINATOR: CoordinatorTag = {

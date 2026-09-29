@@ -3424,6 +3424,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     const backing = new InMemoryPrivateWorkerLog();
     const log: PrivateWorkerLog = {
       list: (threadKey) => backing.list(threadKey),
+      listAfter: (threadKey, afterSeq, limit) => backing.listAfter(threadKey, afterSeq, limit),
       append: (threadKey, event) => {
         if (!isPrivateWorkerEventInput(event)) throw new Error("private log event over cap");
         return backing.append(threadKey, event);
@@ -3542,6 +3543,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     let fail = true;
     const log: PrivateWorkerLog = {
       list: (threadKey) => backing.list(threadKey),
+      listAfter: (threadKey, afterSeq, limit) => backing.listAfter(threadKey, afterSeq, limit),
       append: async (threadKey, event) => {
         if (!isPrivateWorkerEventInput(event)) throw new Error("private log event over cap");
         if (event.kind === "reply" && fail) {
@@ -3669,6 +3671,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     let fail = true;
     const log: PrivateWorkerLog = {
       list: (threadKey) => backing.list(threadKey),
+      listAfter: (threadKey, afterSeq, limit) => backing.listAfter(threadKey, afterSeq, limit),
       append: async (threadKey, event) => {
         if (event.kind === "reply" && fail) {
           fail = false;
@@ -12591,6 +12594,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     let fail = true;
     const log: PrivateWorkerLog = {
       list: (threadKey) => backing.list(threadKey),
+      listAfter: (threadKey, afterSeq, limit) => backing.listAfter(threadKey, afterSeq, limit),
       append: async (threadKey, event) => {
         if (event.kind === "reply" && fail) {
           fail = false;

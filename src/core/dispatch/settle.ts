@@ -12,6 +12,7 @@ import type { StopMode } from "../runEvents.js";
 import type { Clock, Span } from "../trace/types.js";
 import type { RunControl } from "../runRegistry/runControl.js";
 import { channelOf, startRequestRoot, type RequestTrace, type RequestTraceDeps } from "../requestTrace.js";
+import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
 import { mergeFollowUps, type LiveThread } from "../threadAdmission.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import { defaultAdmission, type AdmissionDeps, type DispatchFollowUp } from "./admission.js";
@@ -128,6 +129,17 @@ export function prepareFreshTurn(
   const { agent, pending, clock } = ctx;
   const merged = mergeFollowUps(pending)!;
   const first = pending[0];
+  // A merged request speaks for every pending sender. The first sender's
+  // one-person proof cannot authorize private tools for their combined words.
+  const firstMsg = { ...first.msg } as IncomingMessage & { directAudience?: unknown };
+  delete firstMsg.directAudience;
+  const directAudience =
+    pending.length === 1 &&
+    first.postedBy === undefined &&
+    first.authenticatedAs === undefined &&
+    first.relayedBy === undefined
+      ? directAudienceStampOf(first.msg as IncomingMessage & { directAudience?: unknown })
+      : undefined;
   const freshAt = clock();
   const earliestAt = Math.min(...pending.map((p) => p.at));
   const queuedBehindMs = Math.max(0, freshAt - earliestAt);
@@ -140,11 +152,9 @@ export function prepareFreshTurn(
     // The follow-up's own platform stamp stays behind: the fresh turn's
     // wait is `queuedBehindMs`, not a `queued … before we saw it`.
     msg: {
-      ...first.msg,
+      ...firstMsg,
       ...merged,
-      // A merged fresh turn has several source messages but only the first
-      // sender's identity. Do not offer private work against that mixed text.
-      ...(pending.length > 1 ? { directAudience: undefined } : {}),
+      ...(directAudience ? { directAudience } : {}),
       text: `agent:${agent} ${merged.text}`,
       receivedAt: freshAt,
       originAt: undefined,

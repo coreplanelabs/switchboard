@@ -200,6 +200,34 @@ describe("prepareFreshTurn — the one request the unconsumed follow-ups run as"
     expect(canOfferMainStart("orchestrator", "dm", fresh.msg, actor, true)).toBe(false);
   });
 
+  it("does not carry private audience proof into a merged fresh turn with another sender or app", () => {
+    const replies: string[] = [];
+    const first = followUp("private question", NOW - 2, replies, "slack:UA");
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:UA",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    first.msg = {
+      ...first.msg,
+      channelId: directAudience.channelId,
+      threadKey: directAudience.threadKey,
+      directAudience,
+    } as typeof first.msg;
+    const foreign = followUp("and this", NOW - 1, replies, "slack:UB");
+    const app = followUp("also this", NOW - 1, replies, "slack:UA");
+    app.postedBy = "slack:bot:B1";
+    for (const next of [foreign, app]) {
+      const fresh = prepareFreshTurn(
+        { clock: () => NOW },
+        { agent: "orchestrator", pending: [first, next], clock: () => NOW },
+      );
+      expect((fresh.msg as typeof fresh.msg & { directAudience?: unknown }).directAudience).toBeUndefined();
+    }
+    const alone = prepareFreshTurn({ clock: () => NOW }, { agent: "orchestrator", pending: [first], clock: () => NOW });
+    expect((alone.msg as typeof alone.msg & { directAudience?: unknown }).directAudience).toEqual(directAudience);
+  });
   it("merges the follow-ups into the FIRST sender's message and handle — the fresh turn's requester, credential included — each text attributed, pins the agent, stamps receivedAt now and the wait since the earliest, and drops the platform stamp", () => {
     const a: string[] = [];
     const b: string[] = [];

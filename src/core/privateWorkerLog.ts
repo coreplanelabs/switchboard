@@ -95,6 +95,12 @@ export interface PrivateWorkerLog {
   append(threadKey: string, event: PrivateWorkerEventInput): Promise<PrivateWorkerEvent>;
   /** Complete oldest-first thread history, including progress frames. */
   list(threadKey: string): Promise<PrivateWorkerEvent[]>;
+  /** Read at most `limit` rows after a durable sequence, without loading the full log. */
+  listAfter(
+    threadKey: string,
+    afterSeq: number,
+    limit: number,
+  ): Promise<{ events: PrivateWorkerEvent[]; more: boolean }>;
 }
 
 /** Test implementation; never used as a production fallback. */
@@ -132,6 +138,15 @@ export class InMemoryPrivateWorkerLog implements PrivateWorkerLog {
   async list(threadKey: string): Promise<PrivateWorkerEvent[]> {
     return structuredClone(this.rows.get(threadKey) ?? []);
   }
+
+  async listAfter(
+    threadKey: string,
+    afterSeq: number,
+    limit: number,
+  ): Promise<{ events: PrivateWorkerEvent[]; more: boolean }> {
+    const rows = (this.rows.get(threadKey) ?? []).filter((row) => row.seq > afterSeq);
+    return { events: structuredClone(rows.slice(0, limit)), more: rows.length > limit };
+  }
 }
 
 /** Fail closed until the durable Worker-backed implementation is wired. */
@@ -141,6 +156,14 @@ export class UnavailablePrivateWorkerLog implements PrivateWorkerLog {
   }
 
   async list(_threadKey: string): Promise<PrivateWorkerEvent[]> {
+    throw new Error("private worker log unavailable");
+  }
+
+  async listAfter(
+    _threadKey: string,
+    _afterSeq: number,
+    _limit: number,
+  ): Promise<{ events: PrivateWorkerEvent[]; more: boolean }> {
     throw new Error("private worker log unavailable");
   }
 }

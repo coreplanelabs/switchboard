@@ -638,6 +638,7 @@ export async function runBot(): Promise<void> {
     runHistoryWriter,
     // The coordinator's instance records and unit rows (run-history items 49 and 50): what the ship branch writes when it hands an `agent:ship` request to the plan runner.
     coordinatorInstances,
+    ...(privateWorkerLog !== undefined ? { privateWorkerLog } : {}),
     reserveDecisionRecord: decisionRecordAllocator.reserve.bind(decisionRecordAllocator),
     workflow: workflowSender,
     runStore,

@@ -1,0 +1,120 @@
+import { privateWorkerThreadKey } from "../../channels/privateWorker.js";
+import { authorize, selfIdsOf } from "../authz/authorize.js";
+import type { Actor } from "../authz/types.js";
+import type { PrivateWorkerLog } from "../privateWorkerLog.js";
+import {
+  isCoordinatorInstance,
+  isCoordinatorUnit,
+  isMainTaskKey,
+  mainTaskClaimMatches,
+  type CoordinatorInstance,
+} from "./contract.js";
+import type { CoordinatorInstanceStore } from "./instanceStore.js";
+
+const PAGE_SIZE = 8;
+const TITLE_LIMIT = 160;
+const REPORT_LIMIT = 2_000;
+
+export interface MainWorkerProgress {
+  seq: number;
+  phase: "start" | "update" | "done";
+  title: string;
+  at: number;
+}
+
+export type MainWorkerRelayResult =
+  | { kind: "not_found" | "forbidden" | "invalid" | "unavailable" }
+  | {
+      kind: "found";
+      /** The private log's durable sequence, safe to pass as `afterSeq` on the next read. */
+      cursor: number;
+      more: boolean;
+      progress: MainWorkerProgress[];
+      final?: {
+        kind: string;
+        report: string;
+        reportTruncated?: true;
+        at: number;
+        pr?: { number: number; url: string };
+      };
+    };
+
+function resource(instance: CoordinatorInstance) {
+  return {
+    type: "run" as const,
+    id: instance.runId ?? instance.id,
+    channelId: instance.channelId,
+    userId: instance.userId,
+    repo: instance.repo,
+    channelVisibility: "unknown" as const,
+  };
+}
+
+/** A private worker's progress is data for its main agent, never a child-channel post.
+ * The indexed act is only an address; the requester, thread and durable unit
+ * are rechecked on every read. No input or freeform worker reply crosses. */
+export function createMainWorkerRelay(deps: {
+  instances: Pick<CoordinatorInstanceStore, "getMainTask" | "get" | "listUnits">;
+  privateWorkerLog: Pick<PrivateWorkerLog, "listAfter">;
+}) {
+  return {
+    async read(actor: Actor, input: { actId: string; afterSeq?: number }): Promise<MainWorkerRelayResult> {
+      const afterSeq = input.afterSeq ?? 0;
+      if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) return { kind: "invalid" };
+      const origin = actor.origin;
+      if (!origin || !isMainTaskKey({ mainThreadKey: origin.threadKey, actId: input.actId }))
+        return { kind: "not_found" };
+      try {
+        const key = { mainThreadKey: origin.threadKey, actId: input.actId };
+        const link = await deps.instances.getMainTask(key);
+        if (!link) return { kind: "not_found" };
+        const [instance, units] = await Promise.all([
+          deps.instances.get(link.instanceId),
+          deps.instances.listUnits(link.instanceId),
+        ]);
+        const unit = units.find((row) => row.unit === link.unit);
+        if (
+          !isCoordinatorInstance(instance) ||
+          !isCoordinatorUnit(unit) ||
+          instance.channelId !== origin.channelId ||
+          !selfIdsOf(actor).includes(instance.userId) ||
+          !mainTaskClaimMatches(key, instance, unit)
+        )
+          return { kind: "not_found" };
+        if (!authorize(actor, "runs:read", resource(instance)).allow) return { kind: "forbidden" };
+        const page = await deps.privateWorkerLog.listAfter(
+          privateWorkerThreadKey({ instanceId: instance.id, unit: unit.unit }),
+          afterSeq,
+          PAGE_SIZE,
+        );
+        if (
+          page.events.length > PAGE_SIZE ||
+          page.events.some((event, index) => event.seq <= (index === 0 ? afterSeq : page.events[index - 1]!.seq))
+        )
+          return { kind: "unavailable" };
+        const cursor = page.events.at(-1)?.seq ?? afterSeq;
+        const progress = page.events.flatMap((event): MainWorkerProgress[] => {
+          if (event.kind !== "status") return [];
+          const title =
+            event.frame.title
+              .split(/[\r\n]/, 1)[0]!
+              .trim()
+              .slice(0, TITLE_LIMIT) || "Working";
+          return [{ seq: event.seq, phase: event.phase, title, at: event.at }];
+        });
+        const final = unit.ending
+          ? {
+              kind: unit.ending.kind,
+              report: unit.ending.report.slice(0, REPORT_LIMIT),
+              ...(unit.ending.report.length > REPORT_LIMIT ? { reportTruncated: true as const } : {}),
+              at: unit.ending.at,
+              ...(unit.pr ? { pr: { number: unit.pr.number, url: unit.pr.url } } : {}),
+            }
+          : undefined;
+        return { kind: "found", cursor, more: page.more, progress, ...(final ? { final } : {}) };
+      } catch {
+        return { kind: "unavailable" };
+      }
+    },
+  };
+}

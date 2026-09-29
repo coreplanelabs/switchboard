@@ -31,6 +31,7 @@ import type { GithubCapability } from "./github.js";
 import type { MainWorkCapability } from "./mainWork.js";
 import type { MainStartCapability } from "./mainStart.js";
 import type { PlaneReadCapability } from "./plane.js";
+import type { MainWorkerCapability } from "./mainWorker.js";
 import type { RunsReadCapability, SteerCapability } from "./runs.js";
 import type { SessionCapability } from "./session.js";
 import type { SlackContextCapability } from "./slackContext.js";
@@ -122,6 +123,8 @@ export interface ToolContext {
   /** Linked work controls bound to this run's resolved requester and current
    * conversation. Only the orchestrator toolset receives this capability. */
   mainWork?: MainWorkCapability;
+  /** A requester and main-thread bound read of its linked private worker. */
+  mainWorker?: MainWorkerCapability;
   /** The run's reach into its own session log (docs/reference/specs/session-log.md
    *  item 10): what `recall` searches and reads and `notes` writes. Built by
    *  the dispatcher for a run with a session; absent, the tools say so. */

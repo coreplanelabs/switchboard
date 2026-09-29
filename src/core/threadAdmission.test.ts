@@ -108,6 +108,26 @@ describe("FollowUpInbox", () => {
 });
 
 describe("FollowUpInbox — one durable follow-up folds in once (thread-admission item 5)", () => {
+  it("permanently records a foreign, app, or run source after its follow-up drains", () => {
+    const inbox = new FollowUpInbox();
+    expect(inbox.hasOnlyDirectRequester("slack:UALICE")).toBe(true);
+    inbox.push({ text: "same person", userId: "slack:UALICE", at: 1 });
+    expect(inbox.hasOnlyDirectRequester("slack:UALICE")).toBe(true);
+    inbox.push({ text: "app relay", userId: "slack:UALICE", postedBy: "slack:bot:B1", at: 2 });
+    inbox.drain();
+    expect(inbox.hasOnlyDirectRequester("slack:UALICE")).toBe(false);
+    inbox.push({ text: "same person again", userId: "slack:UALICE", at: 3 });
+    expect(inbox.hasOnlyDirectRequester("slack:UALICE")).toBe(false);
+    const foreign = new FollowUpInbox();
+    foreign.push({ text: "other person", userId: "slack:UBOB", at: 1 });
+    expect(foreign.hasOnlyDirectRequester("slack:UALICE")).toBe(false);
+    const fromRun = new FollowUpInbox();
+    fromRun.push({ text: "child", userId: "slack:UALICE", from: { runId: "r1" }, at: 1 });
+    expect(fromRun.hasOnlyDirectRequester("slack:UALICE")).toBe(false);
+    const refused = new FollowUpInbox();
+    refused.markUntrustedFollowUp();
+    expect(refused.hasOnlyDirectRequester("slack:UALICE")).toBe(false);
+  });
   it("a second push with a ledger seq the inbox has seen — pending or already drained — is ignored; items without a seq are never deduped", () => {
     const inbox = new FollowUpInbox();
     inbox.push(input("a", { at: 1, ledgerSeq: 1 }));

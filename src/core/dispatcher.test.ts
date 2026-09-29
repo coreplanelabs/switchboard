@@ -774,7 +774,7 @@ describe("dispatch", () => {
     expect(replies).toContain("I will check the review before starting work.");
   });
 
-  it.each(["github_file", "plane_show", "mcp__metrics__query"] as const)(
+  it.each(["github_file", "plane_show", "mcp__metrics__query", "work_progress"] as const)(
     "continues a main DM after a saved %s read without replaying its answer",
     async (sourceTool) => {
       const requests: CompletionRequest[] = [];

@@ -106,6 +106,7 @@ function followUpOf(
     // row, so the fresh turn a leftover becomes is gated on the actor they make.
     ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
     ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+    ...(msg.relayedBy !== undefined ? { relayedBy: msg.relayedBy } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(directAudience !== undefined ? { directAudience } : {}),
     ...(msg.images !== undefined ? { images: msg.images } : {}),
