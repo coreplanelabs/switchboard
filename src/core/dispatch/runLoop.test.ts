@@ -1058,11 +1058,6 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(finished.ok).toBe(true);
     expect(JSON.stringify(finished)).not.toContain("private signup count");
   });
-  const WIP_COORDINATOR: CoordinatorTag = {
-    parentInstanceId: "instance",
-    idempotencyKey: "key",
-    base: "main",
-  };
   it("withdraws linked-work authority before a relayed follow-up reaches the model", async () => {
     let before: unknown;
     let after: unknown;
@@ -1174,7 +1169,19 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         harnesses: roster({
           ...watchedPi.harness,
           open: async (deps, run) => {
-            const direct = run.stageFollowUps!([{ text: "Check the work", userId: "slack:UX", at: 2_000 }]);
+            const direct = run.stageFollowUps!([
+              {
+                text: "Check the work",
+                userId: "slack:UX",
+                directAudience: {
+                  kind: "slack-unshared-im",
+                  channelId: "slack:DPRIVATE",
+                  threadKey: "slack:DPRIVATE:1.0",
+                  userId: "slack:UX",
+                },
+                at: 2_000,
+              },
+            ]);
             await started;
             await run.stageFollowUps!([{ text: "Stop it", userId: "slack:UX", postedBy: "slack:bot:B1", at: 2_001 }]);
             release(true);

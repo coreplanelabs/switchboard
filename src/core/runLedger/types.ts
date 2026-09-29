@@ -64,8 +64,6 @@ export interface LiveRunMeta {
   authenticatedAs?: string;
   /** The app that relayed the request for the person (authorization.md item 14): a resume or restart keeps app ∩ person at the gates. */
   postedBy?: string;
-  /** Slack adapter's fresh proof that this request came from the named person's unshared IM. Rechecked before linked-work tools run. */
-  directAudience?: { kind: "slack-unshared-im"; channelId: string; userId: string; threadKey: string };
   effort?: string;
   /** The request's resolved display level. Hosted parents have no model loop
    *  to rebuild it from, and their input event deliberately omits directives. */

@@ -76,7 +76,6 @@ export function resumeMessage(row: LiveRunRow, inputText: string, messageId?: st
     ...(row.meta.userName !== undefined ? { userName: row.meta.userName } : {}),
     ...(row.meta.authenticatedAs !== undefined ? { authenticatedAs: row.meta.authenticatedAs } : {}),
     ...(row.meta.postedBy !== undefined ? { postedBy: row.meta.postedBy } : {}),
-    ...(row.meta.directAudience !== undefined ? { directAudience: row.meta.directAudience } : {}),
     ...(row.meta.sourceUrl !== undefined ? { sourceUrl: row.meta.sourceUrl } : {}),
   };
 }

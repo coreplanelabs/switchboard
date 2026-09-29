@@ -48,6 +48,7 @@ describe("the toolset table", () => {
     expect(toolsForRun("orchestrator", false).map((tool) => tool.name)).toEqual([
       "update_status",
       "plane_show",
+      "slack_context",
       "recall",
       "notes",
     ]);

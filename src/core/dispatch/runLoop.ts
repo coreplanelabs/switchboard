@@ -1241,7 +1241,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // tool calls can still be in flight when a later follow-up is staged.
   // A reclaimed run cannot reconstruct the last consumed sender from its
   // prompt, so linked-work authority stays withdrawn in that run too.
-  let mainWorkTrusted = ctx.resume === undefined;
+  let mainWorkTrusted = ctx.resume === undefined && !privateAudienceLatch.revoked;
   const mainWorkEffectGate = createMainWorkEffectGate();
   const withdrawMainWork = async () => {
     await mainWorkEffectGate.revoke();
@@ -1259,6 +1259,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     const requesterInputs = inputs.filter(
       (input) => !(input.userId === PLANE_ACTOR_ID && isReissueSteerText(input.text)),
     );
+    if (privateAudienceLatch.revoked && mainWorkTrusted) await withdrawMainWork();
     if (mainWorkTrusted && requesterInputs.length > 0) {
       if (
         requesterInputs.some(
@@ -1266,6 +1267,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             input.userId !== msg.userId ||
             input.postedBy !== undefined ||
             input.authenticatedAs !== undefined ||
+            input.directAudience?.kind !== "slack-unshared-im" ||
+            input.directAudience.channelId !== msg.channelId ||
+            input.directAudience.userId !== msg.userId ||
+            input.directAudience.threadKey !== msg.threadKey ||
             input.from !== undefined,
         )
       )
@@ -1320,7 +1325,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(deps.plane ? { plane: deps.plane } : {}),
     clock,
     effectGate: mainWorkEffectGate,
-    trusted: () => mainWorkTrusted,
+    trusted: () => mainWorkTrusted && !privateAudienceLatch.revoked,
     verifiedAtOpen,
     ...(verifyDirectAudience ? { verify: verifyDirectAudience } : {}),
   });
@@ -1424,6 +1429,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     const revoke = () => {
       privateAudienceLatch.revoked = true;
       slackContext?.revoke();
+      mainWorkTrusted = false;
+      void mainWorkEffectGate.revoke();
     };
     admitted.inbox.onUntrustedFollowUp(revoke);
     admitted.inbox.onAccepted((followUp) => {
