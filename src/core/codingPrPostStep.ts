@@ -168,7 +168,7 @@ export function workLeftBehindLabel(left: LeftBehind): string {
  */
 export async function observeCodingWorkspace(
   executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
-  opts: { probeRemote: boolean; pushedBranch?: string },
+  opts: { probeRemote: boolean; pushedBranch?: string; checkout?: string },
   /** The step's span (`run.observe_workspace`, or the ship round): every probe's exec hangs under it (docs/reference/specs/tracing.md item 17). */
   span?: Span,
 ): Promise<WorkspaceObservation> {
@@ -218,6 +218,9 @@ export async function observeCodingWorkspace(
       isRepo: headSha !== undefined,
     };
   };
+  // A resident executor need not start in its checkout. The attach supplies
+  // its exact path; searching the executor's cwd could inspect another tree.
+  if (opts.checkout !== undefined) return (await probesAt(`git -C ${shellQuote(opts.checkout)}`)).observation;
   const atRoot = await probesAt("git");
   if (atRoot.isRepo) return atRoot.observation;
   const dir = parseCloneDirOutput(await probe(CLONED_REPO_PROBE));
@@ -304,6 +307,7 @@ export async function salvageBudgetPush(
   executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
   opts: {
     branch: string;
+    checkout?: string;
     cue?: "budget" | "compaction" | "ending" | "completion";
     publication?: { ref: string; expectedHeadSha: string } | { blocked: string };
   },
@@ -350,12 +354,16 @@ export async function salvageBudgetPush(
     // ignore rules still keep dependency caches, credentials and attachment
     // staging out. The measure is `run`, not `probe`: a failure is the salvage
     // failing, never a tree read as clean.
-    let git = "git";
+    let git = opts.checkout === undefined ? "git" : `git -C ${shellQuote(opts.checkout)}`;
     let status: string;
     try {
       status = (await run(`${git} status --porcelain`)).trim();
     } catch (err) {
-      if (!/not a git repository/i.test(err instanceof Error ? err.message : String(err))) throw err;
+      if (
+        opts.checkout !== undefined ||
+        !/not a git repository/i.test(err instanceof Error ? err.message : String(err))
+      )
+        throw err;
       const dir = parseCloneDirOutput(await probe(CLONED_REPO_PROBE));
       if (dir === undefined) throw err;
       git = `git -C ${shellQuote(dir)}`;

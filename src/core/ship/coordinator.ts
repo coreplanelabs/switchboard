@@ -1223,8 +1223,13 @@ type Phase =
       finishedObserved: boolean;
     }
   /** A moved-head child has drained. Re-read the adopted pull request before
-   *  restarting review because it may have merged, closed or moved again. */
-  | { at: "superseded-pr-check"; round: RoundRef }
+   *  restarting review because it may have merged, closed or moved again. A
+   *  findings child's typed result is needed if its own head reappears. */
+  | {
+      at: "superseded-pr-check";
+      round: RoundRef;
+      child?: { runId: string; facts: Extract<ChildFacts, { finished: true }> };
+    }
   | {
       at: "pr-check";
       round: RoundRef;
@@ -1984,6 +1989,7 @@ function settleCoding(
   round: RoundRef,
   runId: string,
   facts: Extract<ChildFacts, { finished: true }>,
+  costAlreadyCharged = false,
 ): Transition {
   // Recorded before the checks below: a pull request is a fact a stop must
   // still report, and submitted dispositions are a fact no ending erases. The
@@ -1991,7 +1997,7 @@ function settleCoding(
   // round's findings enter the state (agent-ship item 6).
   let next: UnitPipelineState = {
     ...s,
-    spendUsd: addSpend(s.spendUsd, facts.costUsd),
+    spendUsd: costAlreadyCharged ? s.spendUsd : addSpend(s.spendUsd, facts.costUsd),
     // The continuation facts an idle ending reads off the state (record 0051).
     ...(facts.headSha !== undefined ? { lastChildHead: facts.headSha } : {}),
     ...(facts.handoffLists !== undefined ? { lastCodingHandoff: facts.handoffLists } : {}),
@@ -2640,24 +2646,59 @@ function missingHeadBranch(
   );
 }
 
-/** What a fresh pull-request read says about a child already in flight. A
- * review is pinned, so a moved head supersedes it; a coding child may itself
- * be moving the head and is superseded only by a terminal or deleted ref. */
+/** A review is pinned to one head. A coding child may move that head itself,
+ * so only a finished findings run with a different local head can establish
+ * that an unrecorded remote head came from another writer. */
 function childSupersession(
   s: UnitPipelineState,
   round: RoundRef,
   pr: PrCheck | undefined,
+  child: ChildFacts,
 ): ChildSupersession | undefined {
   if (pr?.state === "merged") return { reason: "merged", pullRequest: pr };
   if (pr?.state === "closed") return { reason: "closed", pullRequest: pr };
   if (pr?.state !== "open") return undefined;
   if (pr.headBranchExists === false) return { reason: "branch_deleted", pullRequest: pr };
-  if (round.kind !== "review") return undefined;
   const expected = normalizeHead(s.lastReviewHead);
   const actual = normalizeHead(pr.headSha);
-  if (expected !== undefined && actual !== undefined && !sameCommit(expected, actual))
+  if (round.kind === "review" && expected !== undefined && actual !== undefined && !sameCommit(expected, actual))
+    return { reason: "head_moved", pullRequest: pr };
+  if (
+    round.kind === "findings" &&
+    child.finished &&
+    child.status === "completed" &&
+    pr.headBranchExists === true &&
+    s.pr?.number === pr.prNumber &&
+    fullHead(expected) !== undefined &&
+    fullHead(actual) !== undefined &&
+    fullHead(child.headSha) !== undefined &&
+    actual !== expected &&
+    actual !== fullHead(child.headSha) &&
+    !child.pushed?.some((push) => fullHead(push.sha) === actual)
+  )
     return { reason: "head_moved", pullRequest: pr };
   return undefined;
+}
+
+/** A finished child cannot authorize more work after its parent was stopped. */
+function finishStoppedChild(
+  s: UnitPipelineState,
+  round: RoundRef,
+  facts: Extract<ChildFacts, { finished: true }>,
+): Transition {
+  const checkpoint = round.kind === "review" ? undefined : interruptedCheckpoint(s, facts.pushed);
+  return end(
+    s,
+    {
+      kind: "stopped",
+      mode: "hard",
+      round,
+      reviewRounds: s.reviewRounds,
+      ...(facts.finalReply !== undefined ? { finalReply: facts.finalReply } : {}),
+      ...(checkpoint !== undefined ? { checkpoint } : {}),
+    },
+    [roundNote(round, "stopped")],
+  );
 }
 
 function finishSupersededChild(
@@ -2679,15 +2720,26 @@ function finishSupersededChild(
         return settlePrCheck(settled.state, ready, supersession.pullRequest);
       return settled;
     }
-    return foundMerged(s, supersession.pullRequest);
+    return foundMerged({ ...s, spendUsd: addSpend(s.spendUsd, facts.costUsd) }, supersession.pullRequest);
   }
-  if (supersession.reason === "closed") return foundClosed(s, supersession.pullRequest);
-  if (supersession.reason === "branch_deleted") return missingHeadBranch(s, supersession.pullRequest);
+  // The superseded child still spent its lease and dollars. Its results do
+  // not become findings dispositions or publication authority.
+  const charged: UnitPipelineState = {
+    ...s,
+    spendUsd: addSpend(s.spendUsd, facts.costUsd),
+    ...(phase.round.kind === "findings" && facts.headSha !== undefined ? { lastChildHead: facts.headSha } : {}),
+  };
+  if (supersession.reason === "closed") return foundClosed(charged, supersession.pullRequest);
+  if (supersession.reason === "branch_deleted") return missingHeadBranch(charged, supersession.pullRequest);
   return {
     state: {
-      ...s,
+      ...charged,
       pr: { number: supersession.pullRequest.prNumber, url: supersession.pullRequest.url },
-      phase: { at: "superseded-pr-check", round: phase.round },
+      phase: {
+        at: "superseded-pr-check",
+        round: phase.round,
+        ...(phase.round.kind === "findings" ? { child: { runId: phase.runId, facts } } : {}),
+      },
     },
     notes: [],
   };
@@ -2698,12 +2750,18 @@ function restartSupersededReview(
   round: RoundRef,
   pr: Extract<PrCheck, { state: "open" }>,
 ): Transition {
-  if (pr.headBranchExists === false) return missingHeadBranch(s, pr);
-  const head = normalizeHead(pr.headSha);
-  if (head === undefined)
+  if (s.pr?.number !== pr.prNumber)
     return end(s, {
       kind: "aborted",
-      reason: `⚠️ ${pr.url} moved while review was running, but its fresh head could not be read; no child was dispatched on a guessed head.`,
+      reason: `⚠️ The fresh pull request read did not match the adopted pull request; no replacement review was dispatched.`,
+      reviewRounds: s.reviewRounds,
+    });
+  if (pr.headBranchExists === false) return missingHeadBranch(s, pr);
+  const head = fullHead(pr.headSha);
+  if (pr.headBranchExists !== true || head === undefined)
+    return end(s, {
+      kind: "aborted",
+      reason: `⚠️ ${pr.url} moved while ${round.kind === "findings" ? "findings work" : "review"} was running, but its fresh branch and exact head could not be verified; no child was dispatched on a guessed head.`,
       reviewRounds: s.reviewRounds,
     });
   const reviewRestarts = s.reviewRestarts + 1;
@@ -2713,7 +2771,7 @@ function restartSupersededReview(
     pr: { number: pr.prNumber, url: pr.url },
     lastReviewHead: head,
   };
-  return enterRound(next, { ...round, attempt: reviewRestarts + 1 });
+  return enterRound(next, { ...round, kind: "review", attempt: reviewRestarts + 1 });
 }
 
 /** Reconcile the ending-time facts read. A person can merge or close after
@@ -3349,7 +3407,11 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
     }
     case "read": {
       const r = ret as Extract<StepReturn, { type: "read-record" }>;
-      const supersession = childSupersession(clocked, p.round, r.pullRequest);
+      // The hosted parent's hard stop wins after a child finishes, even if
+      // the adopted PR moved while it ran. No recovery path can dispatch
+      // another child after that stop mark.
+      if (r.run.finished && r.stopped === true) return finishStoppedChild(clocked, p.round, r.run);
+      const supersession = childSupersession(clocked, p.round, r.pullRequest, r.run);
       if (supersession !== undefined) {
         // A finished child needs no steer; its verdict, dispositions or push
         // remain on its own record but cannot change the terminal/moved PR.
@@ -3392,24 +3454,6 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           },
           notes: [],
         };
-      // The hosted parent's hard stop landed while this child ran (record 0060;
-      // issue 1924): the unit ends stopped as the child ends, whatever the
-      // child's own status — the runner runs nothing more of it.
-      if (r.stopped === true) {
-        const checkpoint = p.round.kind === "review" ? undefined : interruptedCheckpoint(clocked, r.run.pushed);
-        return end(
-          clocked,
-          {
-            kind: "stopped",
-            mode: "hard",
-            round: p.round,
-            reviewRounds: s.reviewRounds,
-            ...(r.run.finalReply !== undefined ? { finalReply: r.run.finalReply } : {}),
-            ...(checkpoint !== undefined ? { checkpoint } : {}),
-          },
-          [roundNote(p.round, "stopped")],
-        );
-      }
       if (r.run.status === "interrupted") {
         const cause = r.run.interruption;
         const checkpoint = interruptedCheckpoint(clocked, r.run.pushed);
@@ -3517,6 +3561,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
     }
     case "superseded-read": {
       const r = ret as Extract<StepReturn, { type: "read-record" }>;
+      if (r.run.finished && r.stopped === true) return finishStoppedChild(clocked, p.round, r.run);
       if (r.run.finished) return finishSupersededChild(clocked, p, r.run);
       return {
         state: {
@@ -3535,6 +3580,37 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
     }
     case "superseded-pr-check": {
       const r = ret as Extract<StepReturn, { type: "pr-check" }>;
+      if (r.pr.state !== "none" && clocked.pr?.number !== r.pr.prNumber)
+        return end(clocked, {
+          kind: "aborted",
+          reason:
+            "The fresh pull request read did not match the adopted pull request; no replacement review was dispatched.",
+          reviewRounds: clocked.reviewRounds,
+        });
+      if (p.child !== undefined) {
+        if (r.pr.state === "closed") return foundClosed(clocked, r.pr);
+        const remoteHead = r.pr.state === "none" ? undefined : fullHead(r.pr.headSha);
+        const childHead = fullHead(p.child.facts.headSha);
+        const reviewedHead = fullHead(clocked.lastReviewHead);
+        const stillForeign =
+          r.pr.state === "open" &&
+          r.pr.headBranchExists === true &&
+          remoteHead !== undefined &&
+          childHead !== undefined &&
+          reviewedHead !== undefined &&
+          remoteHead !== childHead &&
+          remoteHead !== reviewedHead &&
+          !p.child.facts.pushed?.some((push) => fullHead(push.sha) === remoteHead);
+        if (stillForeign && r.pr.state === "open") return restartSupersededReview(clocked, p.round, r.pr);
+        // The second read may now be the child's head, or a merged PR. Its
+        // typed completion gate and exact-head reconciliation must run before
+        // either state can authorize review or a merged ending.
+        const settled = settleCoding(clocked, p.round, p.child.runId, p.child.facts, true);
+        const next = settled.state.phase;
+        if (next.at === "pr-check" && (next.findingsReady === true || next.findingsIncomplete !== undefined))
+          return settlePrCheck(settled.state, next, r.pr);
+        return settled;
+      }
       if (r.pr.state === "merged") return foundMerged(clocked, r.pr);
       if (r.pr.state === "closed") return foundClosed(clocked, r.pr);
       if (r.pr.state === "open") return restartSupersededReview(clocked, p.round, r.pr);

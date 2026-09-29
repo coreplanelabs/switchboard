@@ -14,7 +14,7 @@ import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import { TEST_GITHUB_CREDENTIALS } from "../../execution/testing/githubCredentials.js";
 import type { Provider } from "../provider.js";
-import { ExecSandboxRestartedError, type Executor } from "../../execution/executor.js";
+import { ExecSandboxRestartedError, LocalExecutor, type Executor } from "../../execution/executor.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
@@ -2141,8 +2141,8 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       },
     });
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("retry budget ended");
-    expect(commands).toContain("git add -A");
-    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands).toContain("git -C '/srv/wt/u1' add -A");
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
     expect(s.releases).toEqual(["paired"]);
     s.ending.drain(undefined);
     await s.writer.settled();
@@ -2206,12 +2206,12 @@ describe("runLoop — the model turn and everything that rides on it", () => {
           if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
           if (/status --porcelain/.test(cmd)) return dirty ? " M src/work.ts\n" : "";
           if (/rev-list --count/.test(cmd)) return unpushed ? "1\n" : "0\n";
-          if (/git commit -m/.test(cmd)) {
+          if (/git(?: -C '[^']+')? commit -m/.test(cmd)) {
             dirty = false;
             unpushed = true;
             return "";
           }
-          if (/git push origin/.test(cmd)) {
+          if (/git(?: -C '[^']+')? push origin/.test(cmd)) {
             unpushed = false;
             return "";
           }
@@ -2223,8 +2223,8 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
     const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("the contract handoff is complete");
-    expect(commands).toContain("git add -A");
-    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands).toContain("git -C '/srv/wt/u1' add -A");
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
     expect(out.prNote).toBeUndefined();
     expect(JSON.stringify(s.closes)).not.toContain("discarded at the run's end");
     await out.releaseWorkspace();
@@ -2260,8 +2260,8 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
     const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("the contract handoff is complete");
-    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
-    expect(commands.some((cmd) => cmd.startsWith("git commit --allow-empty"))).toBe(false);
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands.some((cmd) => /^git(?: -C '[^']+')? commit --allow-empty/.test(cmd))).toBe(false);
     expect(JSON.stringify(s.closes)).not.toContain("discarded at the run's end");
     await out.releaseWorkspace();
     s.ending.drain(undefined);
@@ -3045,7 +3045,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
     const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("the local fix is complete");
-    expect(commands.some((command) => command.startsWith("git push"))).toBe(false);
+    expect(commands.some((command) => /^git(?: -C '[^']+')? push/.test(command))).toBe(false);
     const card = `${s.ctx.shell.label}\n${JSON.stringify([...s.frames, ...s.closes])}`;
     expect(card).toContain("kept the local checkpoint");
     expect(card).toContain("retention beyond this run is unverified");
@@ -3096,7 +3096,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       executor: {
         exec: async (cmd: string) => {
           commands.push(cmd);
-          if (cmd.startsWith("git push --force-with-lease="))
+          if (cmd.startsWith("git -C '/srv/wt/existing' push --force-with-lease="))
             throw new Error("rejected: stale info — the branch moved concurrently");
           if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
           if (/rev-parse HEAD/.test(cmd)) return `${LOCAL}\n`;
@@ -3119,7 +3119,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
     const out = answered(await runLoop(s.deps, s.ctx));
     expect(commands).toContain(
-      `git push --force-with-lease='refs/heads/${BRANCH}:${EXPECTED}' origin 'HEAD:refs/heads/${BRANCH}'`,
+      `git -C '/srv/wt/existing' push --force-with-lease='refs/heads/${BRANCH}:${EXPECTED}' origin 'HEAD:refs/heads/${BRANCH}'`,
     );
     expect(out.answer).toBe("the local fix is complete");
     await out.releaseWorkspace();
@@ -3179,7 +3179,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
     const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toContain("aborted by an operator");
-    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
     await out.releaseWorkspace();
     expect(s.releases).toEqual(["hard"]);
     s.ending.drain(undefined);
@@ -3228,7 +3228,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
     const out = await runLoop(s.deps, s.ctx);
     expect(out).toMatchObject({ kind: "interrupted", refusal: "bot_restart" });
-    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
     expect(JSON.stringify(s.closes)).not.toContain("left behind — discarded");
     s.ending.drain(undefined);
     await s.writer.settled();
@@ -3449,8 +3449,8 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(pushed.out.answer).toBe(
       `⚠️ _Hit the ${ASKS.coding}-minute budget before finishing. What the tree held was pushed to \`${BRANCH}\` at \`${HEAD.slice(0, 7)}\` by the budget salvage, unreviewed — a follow-up starts from it. No PR description was submitted. Findings so far:_\n\nhalf done`,
     );
-    expect(pushed.commands).toContain("git add -A");
-    expect(pushed.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(pushed.commands).toContain("git -C '/srv/wt/u1' add -A");
+    expect(pushed.commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
     expect(pushed.salvage).toEqual([
       expect.objectContaining({
         summary: `the budget ended with work in the tree — committed the uncommitted work and pushed to \`${BRANCH}\` (${HEAD.slice(0, 7)})`,
@@ -3462,7 +3462,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(lost.out.answer).toBe(
       `⚠️ _Hit the ${ASKS.coding}-minute budget before finishing. 1 uncommitted change(s) and 0 unpushed commit(s) were left in the tree and discarded at the run's end. No PR description was submitted. Findings so far:_\n\nhalf done`,
     );
-    expect(lost.commands.some((c) => c.startsWith("git push") || c.startsWith("git commit"))).toBe(false);
+    expect(lost.commands.some((c) => /^git(?: -C '[^']+')? (?:push|commit)/.test(c))).toBe(false);
     expect(lost.salvage).toEqual([
       expect.objectContaining({
         summary: `the budget-end salvage to \`${BRANCH}\` was skipped: the plan's base is unknown, so the branch cannot be told from it`,
@@ -3543,7 +3543,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
             if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
             if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
             if (/status --porcelain/.test(cmd)) return dirty ? " M src/a.ts\n" : "";
-            if (/^git commit /.test(cmd)) dirty = false;
+            if (/^git(?: -C '[^']+')? commit /.test(cmd)) dirty = false;
             if (/rev-list --count/.test(cmd)) return "0\n";
             return "";
           },
@@ -3565,8 +3565,8 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     const tracked = await compacted({ dirty: true });
     // The run continued past the failed compaction and answered.
     expect(tracked.out.answer).toBe("done");
-    expect(tracked.commands).toContain("git add -A");
-    expect(tracked.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(tracked.commands).toContain("git -C '/srv/wt/u1' add -A");
+    expect(tracked.commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
     expect(tracked.notes.map((n) => n.summary)).toEqual([
       `the compaction failed (${REFUSAL}); the failed compaction left work in the tree — committed the uncommitted work and pushed to \`${BRANCH}\` (${HEAD.slice(0, 7)})`,
     ]);
@@ -3574,7 +3574,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     // Nothing to commit: the note alone, no push and no pushed_head.
     const clean = await compacted({ dirty: false });
     expect(clean.out.answer).toBe("done");
-    expect(clean.commands.some((c) => c.startsWith("git push") || c.startsWith("git commit"))).toBe(false);
+    expect(clean.commands.some((c) => /^git(?: -C '[^']+')? (?:push|commit)/.test(c))).toBe(false);
     expect(clean.notes.map((n) => n.summary)).toEqual([
       `the compaction failed (${REFUSAL}); the compaction checkpoint found nothing to push: the tree is clean and \`${BRANCH}\` holds no unpushed commits`,
     ]);
@@ -3582,7 +3582,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     // The context no longer fits: the round ends with the push already made.
     const overflowed = await compacted({ dirty: true, thenOverflow: true });
     expect(overflowed.out.failed).toContain(UNKNOWN_MODEL_TERMINAL_MESSAGE);
-    expect(overflowed.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(overflowed.commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
     // The compaction checkpoint preserves the dirty tree; the abnormal ending
     // then adds its own WIP marker so the durable last push cannot look final.
     expect(overflowed.pushed).toHaveLength(2);
@@ -3630,7 +3630,12 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
         },
       );
       void (async () => {
-        for (let i = 0; i < 200 && !commands.some((command) => command.startsWith("git push --force-with-lease=")); i++)
+        for (
+          let i = 0;
+          i < 200 &&
+          !commands.some((command) => command.startsWith("git -C '/srv/wt/existing' push --force-with-lease="));
+          i++
+        )
           await new Promise((resolve) => setTimeout(resolve, 1));
         const live = registry.get("run-l")!;
         const input = { command: PUSH };
@@ -3686,7 +3691,8 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       executor: {
         exec: async (command: string) => {
           commands.push(command);
-          if (command.startsWith("git push --force-with-lease=")) throw new Error("rejected: stale info");
+          if (command.startsWith("git -C '/srv/wt/existing' push --force-with-lease="))
+            throw new Error("rejected: stale info");
           if (/rev-parse --abbrev-ref HEAD/.test(command)) return `${BRANCH}\n`;
           if (/rev-parse HEAD/.test(command)) return `${LOCAL}\n`;
           if (/status --porcelain/.test(command)) return " M src/a.ts\n";
@@ -3709,7 +3715,9 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       allow: false,
       reason: expect.stringContaining("existing-PR publication blocked: the atomic leased push was rejected"),
     });
-    expect(commands.filter((command) => command.startsWith("git push --force-with-lease="))).toHaveLength(1);
+    expect(
+      commands.filter((command) => command.startsWith("git -C '/srv/wt/existing' push --force-with-lease=")),
+    ).toHaveLength(1);
   });
 
   // harness-pi item 6: the finale answer reads what the ending established.
@@ -3802,8 +3810,8 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       `the budget ended with work in the tree — created a WIP checkpoint commit and pushed to \`${BRANCH}\` (${HEAD.slice(0, 7)})`,
     ]);
     expect(notes.some((n) => n.kind === "description_turn")).toBe(true);
-    expect(commands.some((c) => c.startsWith("git commit --allow-empty -m"))).toBe(true);
-    expect(commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands.some((c) => c.startsWith("git -C '/srv/wt/u1' commit --allow-empty -m"))).toBe(true);
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
     // The quiet default (routing-and-config item 28): the link, not the head it was rendered at.
     expect(out.prNote).toContain("PR updated: https://github.com/o/r/pull/700");
     expect(out.prNote).not.toContain("re-rendered");
@@ -4464,6 +4472,45 @@ describe("the pi harness — the container replaced under a living bot: the rela
     expect(registry.get("run-l")).toBeUndefined();
     // A run no coordinator spawned publishes no child event on the roll it survived (run-history item 47a).
     expect(record.events.some((e) => e.type === "child_resumed" || e.type === "child_interrupted")).toBe(false);
+  });
+
+  it("observes a coding run after reattach in the new workspace instead of its old bound checkout", async () => {
+    const registry = new HarnessRegistry();
+    const old = new FakeHarnessContainer();
+    old.onStdin = piThatMeetsTheRoll(registry);
+    const replacement = new FakeHarnessContainer();
+    replacement.vm = "vm-new";
+    scriptPiFromProvider(replacement, {
+      provider: provider("resumed and done"),
+      registry,
+      beforeModelCall: () => new Promise((resolve) => setTimeout(resolve, 10)),
+    });
+    const commands: string[] = [];
+    const exec = vi.spyOn(LocalExecutor.prototype, "exec").mockImplementation(async (command) => {
+      commands.push(command);
+      return "";
+    });
+    try {
+      let opens = 0;
+      const s = setup("unused", {
+        agent: "coding",
+        coding: true,
+        yaml: yamlWithWorkspace(),
+        harness: harnessOver(registry, () => (opens++ === 0 ? old : replacement)),
+        binding: { ref: "main", sha: "a".repeat(40), workspace: "/workspace/old-checkout" },
+        repoCtx: { repo: "o/r", ref: "main", baseRef: "main" },
+      });
+      const out = answered(await runLoop(s.deps, s.ctx));
+      expect(out.answer).toBe("resumed and done");
+      expect(opens).toBe(2);
+      expect(commands).toContain("git rev-parse HEAD");
+      expect(commands.some((command) => command.includes("/workspace/old-checkout"))).toBe(false);
+      await out.releaseWorkspace();
+      s.ending.drain(undefined);
+      await s.writer.settled();
+    } finally {
+      exec.mockRestore();
+    }
   });
 
   it("a coordinator's child relaunched in the replacement container publishes child_resumed on its record — the roll survived under the run's own id, tag and budget, never a restart", async () => {
@@ -6032,7 +6079,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       const record = (await s.store.get("run-l"))!;
       expect(record.pushed).toEqual([{ ref, sha: head, by: "push" }]);
       expect(record.events.some((e) => e.type === "run_note" && e.kind === "publication_blocked")).toBe(false);
-      expect(commands.some((command) => command.startsWith("git push"))).toBe(false);
+      expect(commands.some((command) => /^git(?: -C '[^']+')? push/.test(command))).toBe(false);
       await out.releaseWorkspace();
     },
   );
@@ -6458,7 +6505,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(opened[0]).toMatchObject({ repo: "o/r", headBranch: BRANCH, base: "main" });
     expect(String(opened[0].body)).toContain(`blob/${HEAD}/`);
     expect(out.prNote).toContain("PR opened");
-    expect(commands.some((cmd) => cmd.startsWith("git push"))).toBe(false);
+    expect(commands.some((cmd) => /^git(?: -C '[^']+')? push/.test(cmd))).toBe(false);
   });
 
   it("a coordinator child whose plan base survived nowhere — no tag base, no instance in the store — opens nothing and publishes pr_not_opened saying the plan's base was lost across a roll", async () => {

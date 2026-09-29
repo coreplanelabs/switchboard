@@ -386,6 +386,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const { round } = ctx;
   let { executor } = round.selection;
   const { binding } = round.selection;
+  // A relaunch may attach the same run at a different checkout path. Every
+  // later probe, checkpoint and harness rule must use the latest attachment.
+  let currentCheckout = binding?.workspace;
   // The plan's base for a coordinator's child (run-history item 48a): the
   // tag's — the spawn's own, or the one the `coordinator_tag` event carried
   // across a roll — else, when the tag lost it, the second guard: the parent
@@ -1052,6 +1055,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         {
           probeRemote: repoCtx.repo === undefined,
           ...(pushedBranch !== undefined ? { pushedBranch } : {}),
+          ...(currentCheckout !== undefined ? { checkout: currentCheckout } : {}),
         },
         span,
       ),
@@ -1095,6 +1099,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               {
                 branch: target.branch,
                 cue,
+                ...(currentCheckout !== undefined ? { checkout: currentCheckout } : {}),
                 ...(existingPrPublication !== undefined ? { publication: existingPrPublication } : {}),
               },
               span,
@@ -1841,6 +1846,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                         {
                           branch,
                           cue: "compaction",
+                          ...(currentCheckout !== undefined ? { checkout: currentCheckout } : {}),
                           ...(existingPrPublication !== undefined ? { publication: existingPrPublication } : {}),
                         },
                         span,
@@ -1860,7 +1866,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 }
               : {}),
             rules: {
-              checkout: binding?.workspace ?? "/workspace",
+              checkout: currentCheckout ?? "/workspace",
               ...(ownBranch !== undefined ? { branch: ownBranch } : {}),
               protectedBranches,
               ...(existingPrPublicationFence !== undefined ? { publication: existingPrPublicationFence } : {}),
@@ -2001,6 +2007,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             // row learns the binding complete, as a resumed row does.
             executor = decision.round.selection.executor;
             toolContext.executor = executor;
+            currentCheckout = decision.round.selection.binding?.workspace;
             const rebound = workspaceBindingFor(decision.round.selection, profile.machine);
             if (rebound !== undefined) {
               workspaceBinding = rebound;
