@@ -2018,11 +2018,34 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
   });
 
   it("a completed child with no work leaves the ordinary PR post-step free to run", async () => {
-    const w = fakeExecutor({ "git status": "\n", "git rev-list": "0\n" });
+    const w = fakeExecutor({ "git status": "(no output)", "git rev-list": "0\n" });
     const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "completion" });
     expect(out.pushed).toBe(false);
     expect(out.summary).toContain("nothing to preserve");
     expect(w.commands.some((c) => c.startsWith("git commit") || c.startsWith("git push"))).toBe(false);
+  });
+
+  it("reports a text-rendered failed commit without claiming a push", async () => {
+    const w = fakeExecutor({
+      "git status": " M src/a.ts\n",
+      "git commit": "exit 1: nothing to commit, working tree clean",
+    });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "completion" });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toContain("exit 1: nothing to commit");
+    expect(w.commands.some((c) => c.startsWith("git push"))).toBe(false);
+  });
+
+  it("reports a text-rendered failed push without recording a successful head", async () => {
+    const w = fakeExecutor({
+      "git status": "(no output)",
+      "git rev-list": "1\n",
+      "git push": "exit 1: remote rejected the push",
+    });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "completion" });
+    expect(out.pushed).toBe(false);
+    expect(out.head).toBeUndefined();
+    expect(out.summary).toContain("exit 1: remote rejected the push");
   });
 
   it("an abnormal ending creates and pushes a WIP marker when an ordinary push already left the tree clean", async () => {
