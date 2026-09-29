@@ -7,6 +7,7 @@ import {
   ownerOf,
   previousRunOf,
   readThread,
+  readPrOwnerThread,
   releasedPrOf,
   refusedRequestsOf,
   requesterOf,
@@ -57,6 +58,47 @@ describe("readThread — one page of the thread's newest runs", () => {
     });
     expect(await readThread({ listRuns }, "slack:C1:1.0")).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("slack:C1:1.0: thread read failed — store down"));
+  });
+});
+
+describe("readPrOwnerThread — complete ownership evidence", () => {
+  it("reads every page before selecting an older Ship parent", async () => {
+    const newer = Array.from({ length: 100 }, (_, i) => run({ id: `new-${i}`, finishedAt: 2_000 - i }));
+    const original = run({ id: "original", agent: "ship", instanceId: "plan-original", finishedAt: 500 });
+    const listRuns = vi.fn(async (opts: { before?: number; beforeId?: string }) =>
+      opts.before === undefined
+        ? { runs: newer, nextBefore: { finishedAt: 1_901, id: "new-99" } }
+        : { runs: [original] },
+    );
+
+    expect(await readPrOwnerThread({ listRuns } as never, "slack:C1:1.0")).toEqual([...newer, original]);
+    expect(listRuns).toHaveBeenCalledTimes(2);
+    expect(listRuns.mock.calls[1]?.[0]).toMatchObject({ before: 1_901, beforeId: "new-99" });
+  });
+
+  it.each(["storeUnavailable", "ledgerUnavailable"])("refuses a %s listing even if it has live rows", async (flag) => {
+    const listRuns = vi.fn(async () => ({ runs: [run({ id: "live", finished: false })], [flag]: true }));
+    expect(await readPrOwnerThread({ listRuns } as never, "slack:C1:1.0")).toBeUndefined();
+  });
+
+  it("refuses a cursor that repeats instead of proving the end", async () => {
+    const page = { runs: [run({ id: "r1", finishedAt: 1_000 })], nextBefore: { finishedAt: 1_000, id: "r1" } };
+    const listRuns = vi.fn(async () => page);
+    expect(await readPrOwnerThread({ listRuns } as never, "slack:C1:1.0")).toBeUndefined();
+    expect(listRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses when ten full pages still cannot prove the end", async () => {
+    let page = 0;
+    const listRuns = vi.fn(async () => {
+      page += 1;
+      return {
+        runs: Array.from({ length: 100 }, (_, index) => run({ id: `${page}-${index}`, finishedAt: 2_000 - page })),
+        nextBefore: { finishedAt: 2_000 - page, id: `${page}-99` },
+      };
+    });
+    expect(await readPrOwnerThread({ listRuns } as never, "slack:C1:1.0")).toBeUndefined();
+    expect(listRuns).toHaveBeenCalledTimes(10);
   });
 });
 

@@ -320,7 +320,7 @@ export interface RunListCursor {
 
 export interface ListRunsResult {
   runs: RunView[];
-  /** Present when the page was full and ended on a persisted row: the cursor for the next page. */
+  /** Present when the visible page or the underlying store fetch may have more persisted rows. */
   nextBefore?: RunListCursor;
   /** Set when the store threw: `runs` holds live rows only. Never set for `active`. */
   storeUnavailable?: true;
@@ -1070,6 +1070,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
 
       const byId = new Map<string, RunView>();
       let storeUnavailable = false;
+      let fullStorePageCursor: RunListCursor | undefined;
       // Every unfinished registry run, whatever `status`/page was asked for: a
       // store row for one of these is its provisional `interrupted` tombstone
       // — the truth only if the run dies — and must never surface while
@@ -1085,8 +1086,9 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       ]);
       if (store) {
         try {
+          const storeLimit = Math.min(RUN_LIST_MAX_LIMIT, limit + live.length);
           const rows = await store.list({
-            limit: Math.min(RUN_LIST_MAX_LIMIT, limit + live.length),
+            limit: storeLimit,
             // The policy rides down as the store's own filter: `all` is no
             // constraint and is omitted so the store's query is unchanged for it.
             ...(opts.visibleTo.kind !== "all" ? { visibleTo: toVisibilityFilter(opts.visibleTo) } : {}),
@@ -1099,6 +1101,11 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             ...(opts.before !== undefined ? { before: opts.before } : {}),
             ...(opts.beforeId !== undefined ? { beforeId: opts.beforeId } : {}),
           });
+          // A provisional tombstone may be dropped below. A short visible
+          // page cannot prove exhaustion when the underlying store page was full.
+          const lastStored = rows.at(-1);
+          if (rows.length === storeLimit && lastStored !== undefined)
+            fullStorePageCursor = { finishedAt: lastStored.finishedAt, id: lastStored.id };
           for (const row of rows) if (!unfinished.has(row.id)) byId.set(row.id, persistedView(row, prices));
         } catch (err) {
           // Degrade to live rows — never a whole-command failure — but say so
@@ -1135,11 +1142,13 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       }
       const runs = [...byId.values()].sort(newestFinished).slice(0, limit);
       const out: ListRunsResult = { runs };
-      // A full page ending on a persisted row has a next page to ask for; a
-      // page of live rows only, or a short page, is the end of the list.
+      // A full visible page advances from its last returned persisted row.
+      // A short visible page advances from the raw store boundary if filtering
+      // hid rows, so callers do not mistake it for complete history.
       const last = runs.at(-1);
       if (runs.length === limit && last?.finishedAt !== undefined)
         out.nextBefore = { finishedAt: last.finishedAt, id: last.id };
+      else if (runs.length < limit && fullStorePageCursor !== undefined) out.nextBefore = fullStorePageCursor;
       if (storeUnavailable) out.storeUnavailable = true;
       if (ledgerUnavailable) out.ledgerUnavailable = true;
       return out;

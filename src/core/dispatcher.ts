@@ -137,9 +137,12 @@ import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispa
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
 import {
+  endedPipelineForPrOf,
+  PrOwnerConflictError,
   newestFinishedRunOf,
   ownerOf,
   readThread,
+  readPrOwnerThread,
   releasedPrOf,
   shipRequestOf,
   stickyAgentOf,
@@ -165,7 +168,7 @@ import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
 import type { CardShell } from "./statusCardFrame.js";
 import { createRunEnding } from "./runEnding.js";
-import { shipUnitText } from "./ship/preflight.js";
+import { shipTaskText, shipUnitText } from "./ship/preflight.js";
 import { messageIdOf, type ChannelIO, type IncomingMessage, type StatusHandle } from "./types.js";
 import {
   DECISION_RECORD_STORE_REFUSAL,
@@ -890,9 +893,24 @@ export async function dispatch(
     // immediate usage reply (routing-and-config item 10), never a model turn
     // that could re-bind the typo. Shadow still records its decision beside
     // either.
+    const typed = parseDirectives(msg.text);
+    const typedAgent = typed.agent;
+    const explicitPr = explicitPrOf(msg.text);
+    const namedShipTask = typedAgent === "ship" && explicitPr ? shipTaskText(typed.text, explicitPr.repo) : "";
+    const freshShipTask =
+      namedShipTask !== "" &&
+      !/^(?:please\s+)?(?:continue|resume|retry|keep going|carry on|finish)(?:\s+(?:it|this|the task|the plan|work|the work|review|the review))?[.!]?$/i.test(
+        namedShipTask,
+      );
+    const exactPrReply =
+      explicitPr !== undefined &&
+      (typedAgent === undefined || typedAgent === "ship") &&
+      !opts.parent &&
+      !opts.coordinator &&
+      !resume &&
+      !restart;
     const typedDecision =
-      parseDirectives(msg.text).agent !== undefined ||
-      (deps.commands !== undefined && parseChatCommand(msg.text, deps.commands) !== null);
+      typedAgent !== undefined || (deps.commands !== undefined && parseChatCommand(msg.text, deps.commands) !== null);
     let operatorMode = configuredOperator === "on" && typedDecision ? "off" : configuredOperator;
     // The preset an `on` decision binds on the person's own words, with the
     // decision's event on the run.
@@ -926,7 +944,13 @@ export async function dispatch(
     let pageOwner: ThreadOwner | undefined;
     if (operatorMode !== "off") {
       const runsService = deps.runs ?? createRunsService({ registry, store: deps.runStore });
-      operatorThread = opts.thread ?? (await readThread(runsService, msg.threadKey));
+      operatorThread = exactPrReply
+        ? await readPrOwnerThread(runsService, msg.threadKey)
+        : (opts.thread ?? (await readThread(runsService, msg.threadKey)));
+      if (exactPrReply && operatorThread === undefined) {
+        await io.reply("This thread's earlier Ship runs could not be verified, so no new plan started.");
+        return ended;
+      }
       if (operatorThread !== undefined && deps.coordinatorInstances !== undefined) {
         const unitReads = new Map<string, Promise<CoordinatorUnit[]>>();
         const unitsOf = (id: string) => {
@@ -938,6 +962,18 @@ export async function dispatch(
           return read;
         };
         pageOwner = await ownerOf(operatorThread, unitsOf, msg.threadKey);
+        if (exactPrReply && pageOwner.kind !== "live") {
+          try {
+            pageOwner = (await endedPipelineForPrOf(operatorThread, unitsOf, msg.threadKey, explicitPr)) ?? pageOwner;
+          } catch (err) {
+            await io.reply(
+              err instanceof PrOwnerConflictError
+                ? `${explicitPr.repo}#${explicitPr.number} already has an unfinished unit in this thread, so continuation did not start. Nothing else ran.`
+                : `The original unit for ${explicitPr.repo}#${explicitPr.number} could not be verified, so no new plan started.`,
+            );
+            return ended;
+          }
+        }
         // An ended generated pipeline is a deterministic continuation door,
         // not an operator decision. Bypass the model before any read command
         // can substitute for the reply. When a concurrent continuation has
@@ -1123,6 +1159,7 @@ export async function dispatch(
     // class). A confirmed proposal carries its own task: its tail is the
     // request, since the person's message was the word "yes".
     if (operatorRequest !== undefined) directives.text = operatorRequest;
+    const originalUnitRecovery = directives.agent === "ship" && /^\s*recover\s+unit\b/i.test(directives.text);
 
     // The thread's runs, read once (dispatch/thread.ts) for a reply in an
     // existing thread — a message that starts a thread has none, and a spawn,
@@ -1136,10 +1173,26 @@ export async function dispatch(
     // resolved, the previous run its seed continues from (session-log item 9).
     const runsService = deps.runs ?? createRunsService({ registry, store: deps.runStore });
     const thread =
-      opts.thread ??
-      (opts.parent || opts.coordinator || resume || restart || history.length === 0
-        ? undefined
-        : (operatorThread ?? (await readThread(runsService, msg.threadKey))));
+      exactPrReply && !originalUnitRecovery
+        ? (operatorThread ?? (await readPrOwnerThread(runsService, msg.threadKey)))
+        : (opts.thread ??
+          (opts.parent || opts.coordinator || resume || restart || history.length === 0
+            ? undefined
+            : (operatorThread ?? (await readThread(runsService, msg.threadKey)))));
+    if (
+      thread === undefined &&
+      !opts.parent &&
+      !opts.coordinator &&
+      !resume &&
+      !restart &&
+      !originalUnitRecovery &&
+      (directives.agent === undefined || directives.agent === "ship") &&
+      explicitPr !== undefined
+    ) {
+      await io.reply("This thread's earlier Ship runs could not be verified, so no new plan started.");
+      await recordPendingOperator();
+      return ended;
+    }
     const lineage = lineageOf(thread?.[0]);
     const parent: ParentRun | undefined = opts.parent ?? (lineage ? lineageParent(lineage) : undefined);
     const tellLineage = async (heard: LineageHeard) => {
@@ -1165,7 +1218,6 @@ export async function dispatch(
       releasedPr !== undefined && (runPr === undefined || releasedPr.at > runPr.at) ? releasedPr : runPr;
     let threadPr = laterPr(thread ? threadPrOf(thread) : undefined, pageOwner?.releasedPr);
     const barePrNumber = barePrNumberOf(msg.text);
-    const explicitPr = explicitPrOf(msg.text);
     const currentPrNumber = explicitPr?.number ?? barePrNumber;
     let namedReleasedPr: ThreadPullRequest | undefined;
     if (thread && barePrNumber !== undefined && deps.coordinatorInstances !== undefined) {
@@ -1222,9 +1274,40 @@ export async function dispatch(
     // is the live run's (admission steers below); a session or no owner follows
     // the ordinary sticky or door-bound path.
     if (thread && !threadLive && deps.coordinatorInstances !== undefined) {
-      const owner =
-        pageOwner ?? (await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey));
+      let owner = pageOwner ?? (await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey));
+      if (
+        !originalUnitRecovery &&
+        (directives.agent === undefined || directives.agent === "ship") &&
+        explicitPr !== undefined &&
+        owner.kind !== "live"
+      ) {
+        try {
+          owner =
+            (await endedPipelineForPrOf(
+              thread,
+              (id) => deps.coordinatorInstances!.listUnits(id),
+              msg.threadKey,
+              explicitPr,
+            )) ?? owner;
+        } catch (err) {
+          await io.reply(
+            err instanceof PrOwnerConflictError
+              ? `${explicitPr.repo}#${explicitPr.number} already has an unfinished unit in this thread, so continuation did not start. Nothing else ran.`
+              : `The original unit for ${explicitPr.repo}#${explicitPr.number} could not be verified, so no new plan started.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+      }
       threadPr = namedReleasedPr ?? laterPr(threadPr, owner.releasedPr);
+      if (
+        freshShipTask &&
+        owner.kind === "pipeline" &&
+        explicitPr !== undefined &&
+        owner.unit.pr?.number === explicitPr.number &&
+        owner.run.repo?.toLowerCase() === explicitPr.repo
+      )
+        threadPr = { repo: explicitPr.repo, number: explicitPr.number, at: owner.unit.ending!.at };
       if (owner.kind === "live" && owner.run.hosted === true) {
         // The seed thread of a live pipeline runner (issue 2010; record 0051's
         // owner rule, thread-admission item 9): a hosted runner occupies no
@@ -1252,14 +1335,26 @@ export async function dispatch(
         await recordPendingOperator();
         return ended;
       }
-      if (owner.kind === "pipeline_ambiguous" && directives.agent === undefined) {
+      if (
+        owner.kind === "pipeline_ambiguous" &&
+        (directives.agent === undefined || (directives.agent === "ship" && explicitPr !== undefined))
+      ) {
         await io.reply(
           `This thread matches multiple ended plan units (${owner.units.map((unit) => unit.unit).join(", ")}), so continuation is ambiguous. Nothing started.`,
         );
         await recordPendingOperator();
         return ended;
       }
-      if (owner.kind === "pipeline" && directives.agent === undefined) {
+      if (
+        owner.kind === "pipeline" &&
+        !freshShipTask &&
+        (directives.agent === undefined ||
+          (directives.agent === "ship" &&
+            !originalUnitRecovery &&
+            currentPrNumber !== undefined &&
+            owner.unit.pr?.number === currentPrNumber &&
+            (explicitPr === undefined || explicitPr.repo === owner.run.repo?.toLowerCase())))
+      ) {
         if (
           currentPrNumber !== undefined &&
           (owner.unit.pr?.number !== currentPrNumber ||
