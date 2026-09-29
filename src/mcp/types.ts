@@ -10,6 +10,8 @@ export interface McpServerSpec {
    *  key, so an org and a user server with one name are two clients. Config
    *  servers have none (their name is the key). */
   id?: string;
+  /** Runtime entry creation time; helps distinguish a replacement under the same name. */
+  addedAt?: number;
   /** Slug, `^[a-z0-9][a-z0-9-]*$`, ≤ 32 chars — the middle of every bridged tool name. */
   name: string;
   /** Streamable-HTTP endpoint (http/https; SSRF-checked at load and at connect). */

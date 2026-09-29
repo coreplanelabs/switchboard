@@ -4,6 +4,7 @@ import type { RunEvent } from "./runEvents.js";
 import type { IndexEvent } from "./runRegistry/indexFeed.js";
 import type { FinishedFrame, SealedFrame } from "./runRegistry/state.js";
 import { call, result, seq, spanEnd, testRegistry } from "./runRegistry/testing.js";
+import { assignRunLiveState } from "./runLiveState.js";
 
 // Feature: docs/reference/specs/live-view.md — the in-memory, live-only run registry that
 // backs the external live-view page. It mints an unguessable id+token per run,
@@ -120,6 +121,49 @@ describe("RunRegistry.create", () => {
     expect(snap.startedAt).toBe(4_242);
     // The next fresh run still mints its own id.
     expect(reg.create().id).toBe("id-1");
+  });
+
+  it("a private main run replays redacted events at their original sequence and accepts its next live state", () => {
+    const { reg } = testRegistry();
+    const run = reg.create(
+      "private",
+      {
+        agent: "orchestrator",
+        channelId: "slack:D1",
+        userId: "slack:UA",
+        threadKey: "slack:D1:1",
+        directAudience: {
+          kind: "slack-unshared-im",
+          channelId: "slack:D1",
+          userId: "slack:UA",
+          threadKey: "slack:D1:1",
+        },
+      },
+      {
+        id: "main-rehost",
+        replay: [
+          {
+            type: "tool_result",
+            tool: "github_file",
+            ok: true,
+            summary: "secret result",
+            output: "secret result",
+            seq: 2,
+          },
+          { type: "input", messageId: "m1", text: "secret question", seq: 1 },
+        ],
+      },
+    );
+    const replay = reg.snapshot(run.id, run.token)!;
+    expect(replay.events.map((event) => event.seq)).toEqual([1, 2]);
+    expect(JSON.stringify(replay)).not.toContain("secret");
+    const assigned = assignRunLiveState(undefined, 0, { expectedSeq: 0, state: "admitted", at: 3, bound: 10 });
+    expect(assigned.ok).toBe(true);
+    if (!assigned.ok || !assigned.event) return;
+    expect(reg.commitLiveState(run.id, { ...assigned, event: { ...assigned.event, seq: 3 }, liveStateSeq: 3 })).toBe(
+      true,
+    );
+    expect(reg.snapshot(run.id, run.token)!.events.map((event) => event.seq)).toEqual([1, 2, 3]);
   });
 
   it("a restart that keeps its predecessor's identity (run-history item 54) re-creates the run under the same id AND token — the posted capability links keep opening the page — replacing the finished row so the index counts one run, not two", () => {

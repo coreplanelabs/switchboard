@@ -108,7 +108,7 @@ import {
   type ProvisionDeps,
 } from "./dispatch/provision.js";
 import type { FrictionDiagnosis } from "./runFriction.js";
-import { claimRun, type RunDeps } from "./dispatch/run.js";
+import { claimRun, githubCapabilityFor, type RunDeps } from "./dispatch/run.js";
 import { bindSlackContext, type SlackContextBinding } from "./dispatch/slackContextBinding.js";
 import {
   privateAudienceRequired,
@@ -120,6 +120,8 @@ import {
 import { directAudienceStampOf } from "./runLedger/inboxMessage.js";
 import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
+import { mainAudienceAtPrompt, mainAudienceAtReply, planeRowIdentities } from "./dispatch/mainAudience.js";
+import { predicateFor } from "./authz/predicate.js";
 import { channelVisibilityOf, finishChildSetup, writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipContext, type ShipDeps } from "./dispatch/ship.js";
 import { fetchInstanceStatusViaShim, processShimOptions } from "./coordinator/instancesClient.js";
@@ -151,12 +153,14 @@ import { sessionCapabilityFor } from "../tools/session.js";
 import type { DirectAudience } from "../tools/mainWork.js";
 import {
   endedPipelineForPrOf,
+  establishedMainDmOf,
   PrOwnerConflictError,
   newestFinishedRunOf,
   ownerOf,
   readThread,
   readPrOwnerThread,
   releasedPrOf,
+  requesterOf,
   shipRequestOf,
   stickyAgentOf,
   threadPrOf,
@@ -924,6 +928,7 @@ export async function dispatch(
       relayStop("hard");
     },
   };
+  let directAudienceVerified = false;
   try {
     // A later DM turn may inherit private tool results from its session log.
     // Stop before the operator, history or seed can read that log unless Slack
@@ -936,7 +941,8 @@ export async function dispatch(
       if (live?.agent === "orchestrator") live.inbox.markUntrustedFollowUp();
     };
     if (directDm && directAudienceStampOf(msg) === undefined) revokePrivateLive();
-    if (directDm && !(await privateAudienceStillValid(msg, io))) {
+    if (directDm) directAudienceVerified = await privateAudienceStillValid(msg, io);
+    if (directDm && !directAudienceVerified) {
       revokePrivateLive();
       await refuse(
         refusalOf(
@@ -998,7 +1004,14 @@ export async function dispatch(
       !restart;
     const typedDecision =
       typedAgent !== undefined || (deps.commands !== undefined && parseChatCommand(msg.text, deps.commands) !== null);
-    let operatorMode = configuredOperator === "on" && typedDecision ? "off" : configuredOperator;
+    // An explicitly opted-in one-person DM is the main conversation. Plain
+    // questions stay with its configured agent; typed commands still use the
+    // registry, and other channels keep the operator's normal routing.
+    const mainScopes = deps.config.scopes(msg.channelId, msg.userId);
+    const mainDm =
+      msg.channelId.startsWith("slack:D") &&
+      (mainScopes.user.agent ?? mainScopes.channel.agent ?? deps.config.config.defaults.agent) === "orchestrator";
+    let operatorMode = configuredOperator === "on" && (typedDecision || mainDm) ? "off" : configuredOperator;
     // The preset an `on` decision binds on the person's own words, with the
     // decision's event on the run.
     let operatorPreset: string | undefined;
@@ -1024,6 +1037,7 @@ export async function dispatch(
     // "yes" this event may be (routing-and-config item 29). Read here once and
     // reused below, so the operator costs the dispatch no second page.
     let operatorThread: RunView[] | undefined;
+    let establishedMainDm = false;
     // The thread's owner off the page (record 0051's owner order), with unit
     // rows cached per instance so the operator view and an ended-owner check
     // still cost at most one durable read.
@@ -1041,7 +1055,26 @@ export async function dispatch(
         await io.reply("This thread's earlier Ship runs could not be verified, so no new plan started.");
         return ended;
       }
-      if (operatorThread !== undefined && deps.coordinatorInstances !== undefined) {
+      // A main conversation established in a one-person DM remains with its
+      // main agent on plain follow-ups, even without a channel override. The
+      // current message's typed agent or exact PR target still uses its door.
+      if (
+        operatorMode === "on" &&
+        !typedDecision &&
+        !exactPrReply &&
+        msg.channelId.startsWith("slack:D") &&
+        operatorThread !== undefined &&
+        requesterOf(operatorThread) === msg.userId &&
+        (await establishedMainDmOf(
+          runsService,
+          { channelId: msg.channelId, threadKey: msg.threadKey, userId: msg.userId },
+          operatorThread,
+        ))
+      ) {
+        operatorMode = "off";
+        establishedMainDm = true;
+      }
+      if (operatorMode !== "off" && operatorThread !== undefined && deps.coordinatorInstances !== undefined) {
         const unitReads = new Map<string, Promise<CoordinatorUnit[]>>();
         const unitsOf = (id: string) => {
           let read = unitReads.get(id);
@@ -1289,7 +1322,7 @@ export async function dispatch(
       exactPrReply && !originalUnitRecovery
         ? (operatorThread ?? (await readPrOwnerThread(runsService, msg.threadKey)))
         : (opts.thread ??
-          (opts.parent || opts.coordinator || resume || restart || history.length === 0
+          (opts.parent || opts.coordinator || resume || restart || (history.length === 0 && !establishedMainDm)
             ? undefined
             : (operatorThread ?? (await readThread(runsService, msg.threadKey)))));
     if (
@@ -1324,7 +1357,15 @@ export async function dispatch(
     // item 3) — else the config scopes; the model and effort from the thread's
     // user turns, then the scopes. A ledger resume is a fresh lease segment:
     // it keeps the preset but resolves model and effort from today's scopes.
-    const stickyAgent = thread ? stickyAgentOf(thread) : undefined;
+    // The configured one-person main DM owns its conversation across an
+    // explicit specialist turn. A fresh plain follow-up without an exact PR
+    // target returns to its orchestrator; typed and exact PR requests keep
+    // their existing authority.
+    const stickyAgent = establishedMainDm
+      ? "orchestrator"
+      : thread && !(mainDm && !exactPrReply && !resume && !restart && !opts.parent && !opts.coordinator)
+        ? stickyAgentOf(thread)
+        : undefined;
     // A completed unit's publication can name the PR when the hosted run
     // record has none. A later completed run's PR supersedes that publication.
     const laterPr = (runPr: ThreadPullRequest | undefined, releasedPr: ThreadPullRequest | undefined) =>
@@ -2058,7 +2099,12 @@ export async function dispatch(
     // Cross-session memory — READ path, started here (dispatch/provision.ts) so
     // the memory Worker round trip overlaps the repo/PR resolution and the
     // attach; awaited when the prompt is composed.
-    const memoryBlockP = startMemoryRead(deps, { msg, directives, repoCtxP, root });
+    // The pilot cannot prove an org/repo memory record's audience from a
+    // private DM source. Keep this agent's context within its thread.
+    const memoryBlockP =
+      agent.name === "orchestrator"
+        ? Promise.resolve(undefined)
+        : startMemoryRead(deps, { msg, directives, repoCtxP, root });
 
     // Acknowledge NOW, before anything slow. Everything between here and the
     // model turn can take minutes — repo/PR resolution (GitHub REST), memory
@@ -2343,7 +2389,10 @@ export async function dispatch(
     // finished runs newer than that run — another agent's, a coordinator's
     // child — read off the same page, whatever the seed's source, and rendered
     // as data into the prompt (composePrompt below), never into the
-    // conversation. Both reads are of the thread and neither needs the other.
+    // conversation. The main agent does not inherit specialist artifacts:
+    // their source audience cannot be proven from those records, so it must
+    // check the source itself before using or sharing a specialist result.
+    // When both reads apply, they are independent reads of the same thread.
     const [fromSession, threadArtifacts] = await Promise.all([
       !resume && !opts.seed && thread
         ? sessionSeedFor({
@@ -2361,9 +2410,42 @@ export async function dispatch(
             },
           })
         : undefined,
-      thread ? threadArtifactsFor({ runs: runsService, thread, agent: agent.name }) : undefined,
+      thread && agent.name !== "orchestrator"
+        ? threadArtifactsFor({ runs: runsService, thread, agent: agent.name })
+        : undefined,
     ]);
-    const session = fromSession?.seed;
+    // GitHub, plane and MCP results have no durable grant or source revision label. A later main turn
+    // starts from requester-authored Slack text and reads those sources anew;
+    // it must not replay the old log through either its prompt or session tools.
+    const staleMainRead =
+      agent.name === "orchestrator" &&
+      fromSession?.seed !== undefined &&
+      fromSession.seed.messages.some((message) =>
+        message.content.some(
+          (part) =>
+            part.type === "tool_use" &&
+            (part.name.startsWith("github_") || part.name === "plane_show" || part.name.startsWith("mcp__")),
+        ),
+      );
+    const session = staleMainRead ? undefined : fromSession?.seed;
+    // If a prior main run exists but its log cannot be read, an old bot answer
+    // may quote a private source. A specialist-only history has no main answer
+    // to recover and can start fresh from the requester's own words.
+    const unprovedMainLog =
+      agent.name === "orchestrator" &&
+      fromSession?.seed === undefined &&
+      msg.channelId.startsWith("slack:D") &&
+      (await establishedMainDmOf(
+        runsService,
+        { channelId: msg.channelId, threadKey: msg.threadKey, userId: msg.userId },
+        thread ?? [],
+      ));
+    // A fresh main run has no durable source labels for earlier bot posts in
+    // channel history. Keep the requester's turns, then read sources afresh.
+    const mainHistory =
+      agent.name === "orchestrator"
+        ? history.filter((item) => item.role === "user" && item.user === msg.userId)
+        : history;
     const seedNotes = [...(fromSession?.notes ?? []), ...(threadArtifacts?.notes ?? [])];
     const recovered = resume !== undefined || restart !== undefined || opts.restartOf !== undefined;
     // Recovery cannot prove whether an indirect source was consumed before the
@@ -2375,7 +2457,7 @@ export async function dispatch(
     const needsSavedSlackRecheck =
       agent.name === "orchestrator" &&
       /^slack:D[A-Z0-9_]+$/.test(msg.channelId) &&
-      savedSlackContextNeedsRecheck(session, history);
+      savedSlackContextNeedsRecheck(session, unprovedMainLog ? history : mainHistory);
     const savedSlackVisibility = needsSavedSlackRecheck
       ? await root.span("dispatch.channel_visibility", () => channelVisibilityOf(deps, msg.channelId))
       : undefined;
@@ -2416,7 +2498,14 @@ export async function dispatch(
     // the requester's, exactly as the session path does through SessionSeed.actors.
     const channelBuilt = session
       ? undefined
-      : buildConversation(opts.seed ?? history, requestText, msg.images, msg.documents, references.blocks, msg.userId);
+      : buildConversation(
+          opts.seed ?? mainHistory,
+          requestText,
+          msg.images,
+          msg.documents,
+          references.blocks,
+          msg.userId,
+        );
     const built = session ? session.messages : channelBuilt!.messages;
     const seedActors = session ? session.actors : channelBuilt?.actors;
     const withRecord =
@@ -3218,6 +3307,7 @@ export async function dispatch(
     // the system composer pinned to the head this run reviews.
     const prompt = await composePrompt(deps, {
       msg,
+      directAudienceVerified,
       agent,
       profile,
       resolved,
@@ -3248,6 +3338,41 @@ export async function dispatch(
         : {}),
     });
     const { mcpForRun, system } = prompt;
+    const mainAudience =
+      agent.name === "orchestrator"
+        ? mainAudienceAtPrompt({
+            requester: msg.userId,
+            channelId: msg.channelId,
+            verifiedDirectAudience: directAudienceVerified,
+            servers: mcpForRun.servers,
+            session,
+            ...(resume
+              ? {
+                  resumed: {
+                    kind: resume.plan.kind,
+                    messages: resume.plan.messages,
+                    originalToolNames: resume.row.tools.map((tool) => tool.name),
+                    originalAudienceChecked: resume.row.meta.mainAudienceChecked === true,
+                    compacted: resume.plan.kind === "resume" && resume.plan.compactions.length > 0,
+                    requester: resume.row.meta.userId,
+                    channelId: resume.row.meta.channelId,
+                  },
+                }
+              : {}),
+            thread,
+            history: agent.name === "orchestrator" ? history.filter((item) => item.role === "user") : history,
+            threadArtifacts: threadArtifacts?.block?.text,
+            parentSeed: opts.seed !== undefined,
+            referencedContext: references.blocks.length > 0 || threadFiles.length > 0,
+          })
+        : undefined;
+    if (mainAudience && !mainAudience.ok) {
+      const reason = mainAudience.reason;
+      await refuse(refusalOf("setup_failed", reason), () =>
+        card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
+      );
+      return ended;
+    }
     // The PR head this run reviews — the resolved head, or the one adopted at
     // attach; the head settle (item 12) advances it after the model turn.
     const reviewHead = prompt.reviewHead;
@@ -3320,6 +3445,7 @@ export async function dispatch(
       reserved,
       system,
       mcpForRun,
+      ...(mainAudience?.ok ? { mainAudienceChecked: true as const } : {}),
       messages,
       resume,
       ledgerRun,
@@ -3358,20 +3484,27 @@ export async function dispatch(
     // `recall` and `notes` tools over the row's place in the log, once the
     // claim set it; a run without a session (untracked, a ship pipeline, no
     // ledger) has none and the tools say so.
-    const sessionTools = sessionCapabilityFor(
-      ledgerRun,
-      deps.runLedger,
-      deps.artifacts
-        ? {
-            read: () =>
-              readThreadAssets(
-                { runs: runsService, store: deps.artifacts!, trustedCoordinatorChild: opts.coordinator !== undefined },
-                msg.threadKey,
-              ),
-            pathOf: (key) => workspaceFiles.pathOf(key),
-          }
-        : undefined,
-    );
+    const sessionTools =
+      agent.name === "orchestrator" && (staleMainRead || unprovedMainLog)
+        ? undefined
+        : sessionCapabilityFor(
+            ledgerRun,
+            deps.runLedger,
+            deps.artifacts
+              ? {
+                  read: () =>
+                    readThreadAssets(
+                      {
+                        runs: runsService,
+                        store: deps.artifacts!,
+                        trustedCoordinatorChild: opts.coordinator !== undefined,
+                      },
+                      msg.threadKey,
+                    ),
+                  pathOf: (key) => workspaceFiles.pathOf(key),
+                }
+              : undefined,
+          );
     // What this run may do to other runs (dispatch/spawn.ts; docs/reference/specs/
     // agent-conductor.md): spawn a child as this run, read the runs its
     // REQUESTER may, steer a child through the inbox a thread reply takes, and
@@ -3575,24 +3708,81 @@ export async function dispatch(
       runDiagnosis,
       releaseWorkspace,
       root,
+      ...(mainAudience?.ok
+        ? {
+            publicationRefusal: async () => {
+              try {
+                const directSlack = /^slack:D[A-Z0-9_]+$/.test(msg.channelId);
+                const directAudienceStillValid =
+                  directSlack || mainAudience.audience.sources.length > 0
+                    ? await privateAudienceStillValid(msg, io)
+                    : false;
+                if ((directSlack || mainAudience.audience.sources.length > 0) && !directAudienceStillValid)
+                  return "I can't verify that this Slack DM is private. Please ask me again in your private DM.";
+                const fresh = await deps.mcp.toolsFor("orchestrator", {
+                  userId: msg.userId,
+                  channelId: msg.channelId,
+                  ...(msg.directAudience ? { directAudience: msg.directAudience } : {}),
+                });
+                const readable =
+                  ran.githubReadRepos.length > 0 || ran.githubReadUnknown
+                    ? await githubCapabilityFor(deps, chatActorOf(deps.config, msg)).readableRepos?.()
+                    : [];
+                if (!readable)
+                  return "I can't verify this source's sharing permissions right now. Please ask me to check it again.";
+                if (ran.planeRead && !deps.plane)
+                  return "I can't verify this source's sharing permissions right now. Please ask me to check it again.";
+                const currentPlaneRows = ran.planeRead
+                  ? planeRowIdentities(
+                      await (
+                        await deps.plane!()
+                      ).table(predicateFor(chatActorOf(deps.config, msg), "runs:read", "run")),
+                    )
+                  : undefined;
+                const checked = mainAudienceAtReply(
+                  mainAudience.audience,
+                  fresh.servers,
+                  msg.channelId,
+                  msg.userId,
+                  {
+                    repos: ran.githubReadRepos,
+                    current: readable.map((repo) => repo.fullName),
+                    unknown: ran.githubReadUnknown,
+                  },
+                  {
+                    read: ran.planeRead,
+                    exposed: ran.planeReadRows,
+                    current: currentPlaneRows?.rows,
+                    unknown: ran.planeReadUnknown || currentPlaneRows?.unknown === true,
+                  },
+                  directAudienceStillValid,
+                );
+                return checked.ok ? undefined : checked.reason;
+              } catch {
+                return "I can't verify this source's sharing permissions right now. Please ask me to check it again.";
+              }
+            },
+          }
+        : {}),
     });
     if (delivery.kind === "fenced") return ended;
 
     // After the reply (dispatch/reply.ts): the memory reflection pass. The
     // review post-step ran inside the run loop, before the stream finished.
-    afterReply(deps, {
-      msg,
-      resolved,
-      directives,
-      history,
-      repoCtx,
-      run,
-      channelVisibility,
-      referenceVisibilities: references.visibilities,
-      stopped,
-      answer,
-      toolCalls,
-    });
+    if (agent.name !== "orchestrator")
+      afterReply(deps, {
+        msg,
+        resolved,
+        directives,
+        history,
+        repoCtx,
+        run,
+        channelVisibility,
+        referenceVisibilities: references.visibilities,
+        stopped,
+        answer,
+        toolCalls,
+      });
     return ended;
   } catch (err) {
     // Promotion can discover a fence after the attach's ownership check. The

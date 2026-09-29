@@ -174,13 +174,17 @@ describe("RestGithubApi — reads use the read token", () => {
         ? {
             status: 200,
             body: {
-              repositories: [{ full_name: "acme/api", private: true, default_branch: "main", description: "d" }],
+              repositories: [
+                { full_name: "acme/api", private: true, default_branch: "main", description: "d" },
+                { full_name: "acme/unknown-visibility" },
+              ],
             },
           }
         : { status: 200, body: { repositories: [] } },
     );
     expect(await gh.listRepos()).toEqual([
       { fullName: "acme/api", private: true, defaultBranch: "main", description: "d" },
+      { fullName: "acme/unknown-visibility", private: true, defaultBranch: "main", description: null },
     ]);
   });
 

@@ -49,6 +49,74 @@ describe("StaticMcpToolSource", () => {
     expect(await onlyLinear.toolsFor("review", { userId: "slack:UA" })).toEqual({ tools: [], servers: [] });
   });
 
+  it("orchestrator only receives explicitly scoped read tools, never writes, destructive or unannotated tools, even from a warm cache", async () => {
+    const client = new InMemoryMcpClient([
+      { name: "read", inputSchema: {}, annotations: { readOnlyHint: true } },
+      { name: "write", inputSchema: {}, annotations: { readOnlyHint: false } },
+      { name: "unknown", inputSchema: {} },
+      { name: "destructive", inputSchema: {}, annotations: { readOnlyHint: true, destructiveHint: true } },
+      { name: "duplicate", inputSchema: {} },
+      { name: "duplicate", inputSchema: {}, annotations: { readOnlyHint: true } },
+    ]);
+    const src = new StaticMcpToolSource([{ ...linear, agents: ["general", "orchestrator"] }, github], {
+      factory: () => client,
+    });
+    const caller = { userId: "slack:UA" };
+    expect((await src.toolsFor("general", caller)).tools).toHaveLength(10);
+    const out = await src.toolsFor("orchestrator", caller);
+    expect(out.tools.map((t) => t.name)).toEqual(["mcp__linear__read"]);
+    expect(out.tools[0].sideEffectFree).toBe(true);
+    expect(out.servers).toEqual([{ server: "linear", toolCount: 1 }]);
+    // Filtering one run must not narrow the cached list for another agent.
+    expect((await src.toolsFor("general", caller)).tools).toHaveLength(10);
+    expect(client.listCalls).toBe(2); // two differently scoped server clients
+  });
+
+  it("changes the private source revision and client when its endpoint, credential, or incarnation changes", async () => {
+    const server: McpServerSpec = {
+      id: "user:slack:UA/metrics",
+      name: "metrics",
+      url: "https://metrics.example/one",
+      agents: ["orchestrator"],
+      addedAt: 1,
+      auth: { type: "bearer", token: "first-token" },
+    };
+    let built = 0;
+    const source = new StaticMcpToolSource([server], {
+      factory: () => {
+        built++;
+        return new InMemoryMcpClient([{ name: "read", inputSchema: {}, annotations: { readOnlyHint: true } }]);
+      },
+    });
+    const read = async () => (await source.toolsFor("orchestrator", { userId: "slack:UA" })).servers[0].revision;
+    const first = await read();
+    expect(first).toMatch(/^[a-f0-9]{32}$/);
+    expect(await read()).toBe(first);
+    expect(built).toBe(1);
+    server.url = "https://metrics.example/two";
+    const changedEndpoint = await read();
+    expect(changedEndpoint).not.toBe(first);
+    expect(built).toBe(2);
+    server.auth = { type: "bearer", token: "second-token" };
+    const changedCredential = await read();
+    expect(changedCredential).not.toBe(changedEndpoint);
+    server.addedAt = 2;
+    const replaced = await read();
+    expect(replaced).not.toBe(changedCredential);
+    source.forget(server.id!);
+    expect(await read()).not.toBe(replaced);
+  });
+
+  it("orchestrator names a source with no advertised read tools as unavailable", async () => {
+    const src = new StaticMcpToolSource([{ ...linear, agents: ["orchestrator"] }], {
+      factory: () => new InMemoryMcpClient([{ name: "write", inputSchema: {} }]),
+    });
+    const out = await src.toolsFor("orchestrator", { userId: "slack:UA" });
+    expect(out.tools).toEqual([]);
+    expect(out.servers).toEqual([{ server: "linear", unavailable: "no read-only tools advertised for orchestrator" }]);
+    expect(mcpGuidanceBlock(out.servers)).toContain("unavailable");
+  });
+
   it("a failing server is an outcome, the others still serve", async () => {
     const { byName, factory } = clients();
     byName.linear.failListWith = "HTTP 503 from https://mcp.linear.app/mcp?token=abc";

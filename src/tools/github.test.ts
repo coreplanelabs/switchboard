@@ -78,6 +78,132 @@ const text = async (
 ) => String(await tool.run(input, ctx));
 
 describe("github_* reads", () => {
+  it("records each repository exposed by an orchestrator read for the final requester check", async () => {
+    const api = new InMemoryGithubApi({ "acme/public": { private: false, files: { "README.md": "public text" } } });
+    const exposed: string[] = [];
+    let allowed = true;
+    const ctx: ToolContext = {
+      executor: noExecutor,
+      agentName: "orchestrator",
+      github: {
+        api,
+        canWrite: () => false,
+        readableRepos: async () => (allowed ? await api.listRepos() : []),
+        recordRead: (repo) => exposed.push(repo),
+      },
+    };
+    expect(await text(githubReposTool, {}, ctx)).toContain("acme/public");
+    expect(await text(githubFileTool, { repo: "acme/public", path: "README.md" }, ctx)).toContain("public text");
+    expect(exposed).toEqual(["acme/public", "acme/public"]);
+    allowed = false;
+    expect(await text(githubFileTool, { repo: "acme/public", path: "README.md" }, ctx)).toContain("not allowed");
+    expect(exposed).toHaveLength(2);
+  });
+
+  it("records the scoped search repository and never exposes a foreign hit", async () => {
+    const api = new InMemoryGithubApi({ "acme/public": { private: false } });
+    api.searchCode = async () => [
+      {
+        repo: "acme/public",
+        path: "README.md",
+        url: "https://github.com/acme/public/blob/main/README.md",
+        fragments: ["public"],
+      },
+      {
+        repo: "acme/private",
+        path: "secret.md",
+        url: "https://github.com/acme/private/blob/main/secret.md",
+        fragments: ["secret"],
+      },
+    ];
+    const exposed: string[] = [];
+    const ctx: ToolContext = {
+      executor: noExecutor,
+      agentName: "orchestrator",
+      github: {
+        api,
+        canWrite: () => false,
+        readableRepos: async () => api.listRepos(),
+        recordRead: (repo) => exposed.push(repo),
+      },
+    };
+    const out = await text(githubSearchCodeTool, { repo: "acme/public", query: "hello" }, ctx);
+    expect(out).toContain("acme/public:README.md");
+    expect(out).not.toContain("acme/private");
+    expect(exposed).toEqual(["acme/public"]);
+  });
+
+  it("accepts the requester's repository grant with mixed-case spelling", async () => {
+    const api = new InMemoryGithubApi({ "Acme/Public": { private: false, files: { "README.md": "public text" } } });
+    const ctx: ToolContext = {
+      executor: noExecutor,
+      agentName: "orchestrator",
+      github: {
+        api,
+        canWrite: () => false,
+        readableRepos: async () => api.listRepos(),
+      },
+    };
+    expect(await text(githubFileTool, { repo: "Acme/Public", path: "README.md" }, ctx)).toContain("public text");
+  });
+
+  it("keeps authorized code-search hits for a mixed-case requested repository", async () => {
+    const api = new InMemoryGithubApi({ "Acme/Public": { private: false, files: { "README.md": "public text" } } });
+    const ctx: ToolContext = {
+      executor: noExecutor,
+      agentName: "orchestrator",
+      github: { api, canWrite: () => false, readableRepos: async () => api.listRepos() },
+    };
+    expect(await text(githubSearchCodeTool, { repo: "Acme/Public", query: "public text" }, ctx)).toContain(
+      "acme/public:README.md",
+    );
+  });
+
+  it("the orchestrator exposes only requester-approved public repositories and refuses every private or unscoped read before the API", async () => {
+    const api = new InMemoryGithubApi({
+      "acme/public": { private: false, files: { "README.md": "public text" } },
+      "acme/private": { private: true, files: { "README.md": "private text" } },
+    });
+    const calls: string[] = [];
+    const ctx: ToolContext = {
+      executor: noExecutor,
+      agentName: "orchestrator",
+      github: {
+        api,
+        canWrite: () => false,
+        readableRepos: async () => {
+          calls.push("list");
+          return (await api.listRepos()).filter((repo) => repo.fullName === "acme/public");
+        },
+      },
+    };
+    expect(await text(githubReposTool, {}, ctx)).toContain("acme/public");
+    expect(await text(githubReposTool, {}, ctx)).not.toContain("acme/private");
+    expect(await text(githubFileTool, { repo: "acme/private", path: "README.md" }, ctx)).toContain("not allowed");
+    expect(await text(githubTreeTool, { repo: "acme/private" }, ctx)).toContain("not allowed");
+    expect(await text(githubIssueListTool, { repo: "acme/private" }, ctx)).toContain("not allowed");
+    expect(await text(githubIssueGetTool, { repo: "acme/private", number: 1 }, ctx)).toContain("not allowed");
+    expect(await text(githubPullGetTool, { repo: "acme/private", number: 1 }, ctx)).toContain("not allowed");
+    expect(await text(githubSearchCodeTool, { query: "private text" }, ctx)).toContain("repo is required");
+    expect(await text(githubSearchCodeTool, { query: "private text", repo: "acme/private" }, ctx)).toContain(
+      "not allowed",
+    );
+    expect(await text(githubActionsRunTool, { run: "https://github.com/acme/private/actions/runs/1" }, ctx)).toContain(
+      "not allowed",
+    );
+    expect(
+      await text(githubActionsJobLogTool, { job: "https://github.com/acme/private/actions/runs/1/job/1" }, ctx),
+    ).toContain("not allowed");
+    expect(await text(githubFileTool, { repo: "acme/public", path: "README.md" }, ctx)).toContain("public text");
+    expect(calls.length).toBeGreaterThanOrEqual(9);
+    expect(
+      await text(
+        githubFileTool,
+        { repo: "acme/public", path: "README.md" },
+        { ...ctx, github: { api, canWrite: () => false } },
+      ),
+    ).toContain("not allowed");
+  });
   it("every tool reports itself unavailable without the capability, never throws", async () => {
     for (const tool of [...GITHUB_READ_TOOLS, ...GITHUB_ISSUE_WRITE_TOOLS]) {
       expect(

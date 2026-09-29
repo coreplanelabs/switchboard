@@ -102,10 +102,10 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
    *  does a child's job. */
   conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
   /** The orchestrator (record 0070; docs/reference/specs/orchestration-plane.md
-   *  item 12): plane and session reads, the status card, bounded requester
-   *  Slack context, and linked-work tools only when dispatch proves an
-   *  unshared requester DM. No shell or generic run tool. */
-  orchestrator: [updateStatusTool, planeShowTool, slackContextTool, ...MAIN_WORK_TOOLS, ...SESSION_TOOLS],
+   *  item 12): plane, requester-scoped GitHub and session reads; bounded
+   *  Slack context and linked-work controls require a verified requester DM.
+   *  No public status, shell or generic run tool. */
+  orchestrator: [planeShowTool, slackContextTool, ...MAIN_WORK_TOOLS, ...GITHUB_READ_TOOLS, ...SESSION_TOOLS],
   none: [],
 };
 

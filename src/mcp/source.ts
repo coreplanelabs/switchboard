@@ -1,6 +1,8 @@
+import { createHmac, randomBytes } from "node:crypto";
 import { mapLimit } from "../core/mapLimit.js";
 import { redactAndCap } from "../core/runEvents.js";
 import type { RunnableTool } from "../tools/runnableTool.js";
+import type { SlackDirectAudience } from "../core/types.js";
 import { bridgeMcpTools, newRunBudget } from "./bridge.js";
 import type { McpClient, McpClientFactory, McpServerSpec, McpToolInfo } from "./types.js";
 
@@ -20,9 +22,16 @@ export const MCP_DISCOVERY_CONCURRENCY = 4;
 /** A server's `initialize.instructions` ride every turn of every run that sees
  *  it, so they are clipped here — the server's hint, not its manual. */
 export const MCP_INSTRUCTIONS_MAX = 2_000;
+/** Keeps the transient source stamp from revealing an endpoint or credential. */
+const SOURCE_STAMP_KEY = randomBytes(32);
 
 export interface McpServerOutcome {
   server: string;
+  /** Internal source audience key; never rendered in the prompt. For the pilot
+   *  main agent only a `user:<requester>/<server>` key may carry private data. */
+  audience?: string;
+  /** Process-local source incarnation, checked before a private answer is published. */
+  revision?: string;
   /** Tools bridged for this run; `undefined` when discovery failed. */
   toolCount?: number;
   /** The server's own `initialize.instructions`, whitespace-collapsed and
@@ -37,6 +46,13 @@ export interface McpToolsForRun {
   servers: McpServerOutcome[];
 }
 
+export interface McpRunCaller {
+  userId: string;
+  channelId?: string;
+  /** The adapter's one-person DM claim, rechecked by dispatch before discovery. */
+  directAudience?: SlackDirectAudience;
+}
+
 /** One server as the front door sees it (record 0040): a fact for the preset
  *  choice, never a tool. `agents` is the list the run will be scoped by;
  *  `instructions` is the server's own head text when discovery has cached it. */
@@ -47,11 +63,7 @@ export interface McpCatalogEntry {
 }
 
 export interface McpToolSource {
-  toolsFor(
-    agentName: string,
-    caller: { userId: string; channelId?: string },
-    opts?: { signal?: AbortSignal },
-  ): Promise<McpToolsForRun>;
+  toolsFor(agentName: string, caller: McpRunCaller, opts?: { signal?: AbortSignal }): Promise<McpToolsForRun>;
   /** The servers this caller's runs can reach, whatever the agent — read from
    *  configuration and the discovery cache alone: no credential is opened, no
    *  client is built, no server is asked (record 0040). */
@@ -63,11 +75,7 @@ export interface McpToolSource {
  *  byte-identical to before the feature — and the dispatcher never asks
  *  whether a source exists. */
 export class NullMcpToolSource implements McpToolSource {
-  async toolsFor(
-    _agentName: string,
-    _caller: { userId: string; channelId?: string },
-    _opts?: { signal?: AbortSignal },
-  ): Promise<McpToolsForRun> {
+  async toolsFor(_agentName: string, _caller: McpRunCaller, _opts?: { signal?: AbortSignal }): Promise<McpToolsForRun> {
     return { tools: [], servers: [] };
   }
 
@@ -95,8 +103,12 @@ export interface DiscoveringSourceOptions {
 }
 
 export abstract class DiscoveringMcpToolSource implements McpToolSource {
-  private readonly clients = new Map<string, McpClient>();
-  private readonly cache = new Map<string, { at: number; tools: McpToolInfo[]; instructions?: string }>();
+  private readonly clients = new Map<string, { revision: string; client: McpClient }>();
+  private readonly cache = new Map<
+    string,
+    { revision: string; at: number; tools: McpToolInfo[]; instructions?: string }
+  >();
+  private readonly generations = new Map<string, number>();
   protected readonly now: () => number;
   private readonly ttl: number;
 
@@ -106,10 +118,7 @@ export abstract class DiscoveringMcpToolSource implements McpToolSource {
   }
 
   /** The servers this agent + caller may see, in priority order. */
-  protected abstract resolve(
-    agentName: string,
-    caller: { userId: string; channelId?: string },
-  ): Promise<ResolvedServer[]>;
+  protected abstract resolve(agentName: string, caller: McpRunCaller): Promise<ResolvedServer[]>;
 
   /** Every server this caller's runs can reach, for any agent, without a
    *  credential: what the catalog is built from. */
@@ -122,11 +131,7 @@ export abstract class DiscoveringMcpToolSource implements McpToolSource {
     });
   }
 
-  async toolsFor(
-    agentName: string,
-    caller: { userId: string; channelId?: string },
-    opts?: { signal?: AbortSignal },
-  ): Promise<McpToolsForRun> {
+  async toolsFor(agentName: string, caller: McpRunCaller, opts?: { signal?: AbortSignal }): Promise<McpToolsForRun> {
     const resolved = await this.resolve(agentName, caller);
     if (resolved.length === 0) return { tools: [], servers: [] };
     const budget = newRunBudget();
@@ -137,16 +142,31 @@ export abstract class DiscoveringMcpToolSource implements McpToolSource {
           tools: [] as RunnableTool[],
         };
       const server = entry.spec;
-      const client = this.clientFor(server);
+      const revision = this.revisionOf(server);
+      const client = this.clientFor(server, revision);
       try {
-        const { tools, instructions } = await this.discover(server, client, opts?.signal);
+        const { tools, instructions } = await this.discover(server, client, revision, opts?.signal);
+        // Filter after bridging: duplicate remote names keep their first
+        // declaration, so a later read hint cannot relabel an unknown/write tool.
+        // Do not alter discovery's cache — another agent has its own tool policy.
+        const bridged = bridgeMcpTools(server, client, tools, { budget });
+        const offered = agentName === "orchestrator" ? bridged.filter((t) => t.sideEffectFree === true) : bridged;
+        if (agentName === "orchestrator" && offered.length === 0)
+          return {
+            outcome: {
+              server: server.name,
+              unavailable: "no read-only tools advertised for orchestrator",
+            } as McpServerOutcome,
+            tools: [] as RunnableTool[],
+          };
         return {
           outcome: {
             server: server.name,
-            toolCount: tools.length,
+            toolCount: offered.length,
+            ...(agentName === "orchestrator" && server.id ? { audience: server.id, revision } : {}),
             ...(instructions ? { instructions } : {}),
           } as McpServerOutcome,
-          tools: bridgeMcpTools(server, client, tools, { budget }),
+          tools: offered,
         };
       } catch (err) {
         const reason = redactAndCap(err instanceof Error ? err.message : String(err), 160);
@@ -166,20 +186,40 @@ export abstract class DiscoveringMcpToolSource implements McpToolSource {
     return server.id ?? server.name;
   }
 
+  private revisionOf(server: McpServerSpec): string {
+    const headers = Object.entries(server.headers ?? {}).sort(([a], [b]) => a.localeCompare(b));
+    return createHmac("sha256", SOURCE_STAMP_KEY)
+      .update(
+        JSON.stringify([
+          this.keyOf(server),
+          server.url,
+          server.addedAt,
+          server.agents,
+          server.auth?.token,
+          headers,
+          this.generations.get(this.keyOf(server)) ?? 0,
+        ]),
+      )
+      .digest("hex")
+      .slice(0, 32);
+  }
+
   /** Drop the cached client + tool list of one server (after a credential change). */
   forget(key: string): void {
     this.clients.delete(key);
     this.cache.delete(key);
+    this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
   }
 
-  private clientFor(server: McpServerSpec): McpClient {
+  private clientFor(server: McpServerSpec, revision: string): McpClient {
     const key = this.keyOf(server);
-    let c = this.clients.get(key);
-    if (!c) {
-      c = this.opts.factory(server);
-      this.clients.set(key, c);
+    let entry = this.clients.get(key);
+    if (!entry || entry.revision !== revision) {
+      entry = { revision, client: this.opts.factory(server) };
+      this.clients.set(key, entry);
+      this.cache.delete(key);
     }
-    return c;
+    return entry.client;
   }
 
   /** `tools/list` plus the server's `initialize.instructions`, cached together:
@@ -187,15 +227,16 @@ export abstract class DiscoveringMcpToolSource implements McpToolSource {
   private async discover(
     server: McpServerSpec,
     client: McpClient,
+    revision: string,
     signal?: AbortSignal,
   ): Promise<{ tools: McpToolInfo[]; instructions?: string }> {
     const key = this.keyOf(server);
     const hit = this.cache.get(key);
     const t = this.now();
-    if (hit && t - hit.at < this.ttl) return hit;
+    if (hit && hit.revision === revision && t - hit.at < this.ttl) return hit;
     const tools = await client.listTools({ signal });
     const instructions = clipInstructions(await client.instructions({ signal }));
-    const entry = { at: t, tools, ...(instructions ? { instructions } : {}) };
+    const entry = { revision, at: t, tools, ...(instructions ? { instructions } : {}) };
     this.cache.set(key, entry);
     return entry;
   }
@@ -251,11 +292,7 @@ export class CompositeMcpToolSource implements McpToolSource {
     return out;
   }
 
-  async toolsFor(
-    agentName: string,
-    caller: { userId: string; channelId?: string },
-    opts?: { signal?: AbortSignal },
-  ): Promise<McpToolsForRun> {
+  async toolsFor(agentName: string, caller: McpRunCaller, opts?: { signal?: AbortSignal }): Promise<McpToolsForRun> {
     const parts = await Promise.all(this.sources.map((s) => s.toolsFor(agentName, caller, opts)));
     const seen = new Set<string>();
     const tools: RunnableTool[] = [];

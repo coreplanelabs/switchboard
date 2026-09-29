@@ -2208,6 +2208,12 @@ users:
     expect(shown).toMatch(/\*Your scope:\*.*mcp `vanta` `linear`/);
   });
 
+  it("accepts explicitly scoped orchestrator sources in static config without changing omitted agent lists", () => {
+    const explicit = store(withDefaults.replace("auth: none }", "auth: none, agents: [orchestrator] }"));
+    expect(explicit.config.channels?.["slack:CMCP"].mcpServers?.notion.agents).toEqual(["orchestrator"]);
+    expect(store(withDefaults).config.channels?.["slack:CMCP"].mcpServers?.notion.agents).toBeUndefined();
+  });
+
   it("validates every tier at load: slug names, http(s) + SSRF-safe URLs, known agents, auth kind, tokenEnv only with bearer, headersEnv as HTTP header names → env var names (never Authorization), and self-serve agents only outside org", () => {
     const bad = (yaml: string) => () => store(yaml);
     expect(bad(withDefaults.replace("notion:", "Bad Name:"))).toThrow(
@@ -2234,7 +2240,9 @@ users:
           'vanta: { url: "https://mcp.vanta.com/mcp", auth: bearer, agents: [coding] }',
         ),
       ),
-    ).toThrow(/users\.slack:UX\.mcpServers\.vanta\.agents: a user-scoped server may name general\/research only/);
+    ).toThrow(
+      /users\.slack:UX\.mcpServers\.vanta\.agents: a user-scoped server may name general\/research\/orchestrator only/,
+    );
     expect(
       bad(
         withDefaults.replace(
@@ -2242,7 +2250,7 @@ users:
           'notion: { url: "https://mcp.notion.so/mcp", auth: none, agents: [review] }',
         ),
       ),
-    ).toThrow(/a channel-scoped server may name general\/research only/);
+    ).toThrow(/a channel-scoped server may name general\/research\/orchestrator only/);
     expect(bad(withDefaults.replace("auth: none }", "auth: magic }"))).toThrow(
       /must be \{ url, auth: none\|bearer\|oauth/,
     );

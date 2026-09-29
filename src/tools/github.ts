@@ -3,17 +3,21 @@ import {
   GithubApiError,
   type ActionsJob,
   type GithubApi,
+  type InstallationRepo,
   type IssueSummary,
 } from "../execution/githubApi.js";
 import { redactSecrets, stripAnsi } from "../core/redact.js";
 import type { RunnableTool } from "./runnableTool.js";
 
-// The `github_*` tools (docs/reference/specs/github-tools.md): every agent with a tool
-// loop can read the org's repositories and read/write their issues through the
+// The `github_*` tools (docs/reference/specs/github-tools.md): agents with a tool
+// loop read repositories and read/write their issues through the
 // bot's own GitHub App credential — in the bot process over REST (invariant 5),
 // with no workspace, so the no-repo `general` and `research` agents can answer
 // "how does X in our repo work?" and "open an issue on Y" without a clone.
 //
+// The main orchestrator has a narrower read list: public repositories that
+// its requester may use. The App installation token alone does not prove a
+// person's access to a private repository.
 // Reads are `sideEffectFree` (the runner may run several from one turn
 // concurrently); the issue writes are not, and each one is gated by
 // `ctx.github.canWrite(repo)` — the caller's per-repo permission
@@ -28,6 +32,10 @@ export interface GithubCapability {
   api: GithubApi;
   /** True when the requesting user may write to `repo` (`canUseRepo`: open unless `restrict.repos` names it). */
   canWrite(repo: string): boolean;
+  /** Fresh requester and publication scoped list for the main conversation. Absent means no main-agent GitHub reads. */
+  readableRepos?: () => Promise<InstallationRepo[]>;
+  /** Records an authorized read's repository for the final publication gate. */
+  recordRead?: (repo: string) => void;
 }
 
 const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/;
@@ -35,6 +43,30 @@ const UNAVAILABLE = "GitHub tools are not available in this context.";
 const MAX_TREE_ENTRIES = 300;
 const MAX_ISSUE_BODY_SHOWN = 6000;
 const MAX_PULL_BODY_SHOWN = 65_536;
+const READ_REFUSED =
+  "you are not allowed to read this repository here; ask an admin to grant this requester access to a public pilot repository.";
+
+async function readableRepos(ctx: Parameters<RunnableTool["run"]>[1]): Promise<InstallationRepo[] | undefined> {
+  if (ctx.agentName !== "orchestrator") return undefined;
+  return ctx.github?.readableRepos?.();
+}
+
+async function readGate(
+  tool: string,
+  ctx: Parameters<RunnableTool["run"]>[1],
+  repo: string,
+): Promise<string | undefined> {
+  if (ctx.agentName !== "orchestrator") return undefined;
+  try {
+    const repos = await readableRepos(ctx);
+    if (!repos?.some((r) => r.fullName.toLowerCase() === repo.toLowerCase())) return `${tool}: ${READ_REFUSED}`;
+    // Record before the API call: even a returned error may expose metadata.
+    ctx.github?.recordRead?.(repo);
+  } catch {
+    return `${tool}: repository access could not be verified; try again later.`;
+  }
+  return undefined;
+}
 
 function repoOf(input: Record<string, unknown>): string | { error: string } {
   const raw = String(input.repo ?? "")
@@ -96,12 +128,16 @@ export const githubReposTool: RunnableTool = {
   sideEffectFree: true,
   name: "github_repos",
   description:
-    'List the GitHub repositories Switchboard can reach (the org repos in its GitHub App installation), with default branch and description. Use it to resolve a repo the user named loosely ("the web app" → acme/web).',
+    'List the GitHub repositories this request may read, with default branch and description. Use it to resolve a repo the user named loosely ("the web app" → acme/web).',
   inputSchema: { type: "object", properties: {} },
   async run(_input, ctx) {
     if (!ctx.github) return UNAVAILABLE;
     try {
-      const repos = await ctx.github.api.listRepos();
+      const scoped = await readableRepos(ctx);
+      if (ctx.agentName === "orchestrator" && !scoped)
+        return "github_repos: repository access could not be verified for this requester.";
+      const repos = scoped ?? (await ctx.github.api.listRepos());
+      if (ctx.agentName === "orchestrator") for (const repo of repos) ctx.github.recordRead?.(repo.fullName);
       if (repos.length === 0) return "github_repos: the installation covers no repositories.";
       return `Repositories reachable (${repos.length}):\n${repos.map((r) => `- ${r.fullName}${r.private ? " (private)" : ""} — default branch ${r.defaultBranch}${r.description ? ` — ${r.description}` : ""}`).join("\n")}`;
     } catch (err) {
@@ -130,6 +166,8 @@ export const githubFileTool: RunnableTool = {
     if (typeof repo !== "string") return `github_file: ${repo.error}`;
     const path = String(input.path ?? "").trim();
     if (!path) return "github_file: path is required.";
+    const refused = await readGate("github_file", ctx, repo);
+    if (refused) return refused;
     const ref = input.ref ? String(input.ref).trim() : undefined;
     try {
       const f = await ctx.github.api.readFile(repo, path, ref);
@@ -159,6 +197,8 @@ export const githubTreeTool: RunnableTool = {
     const repo = repoOf(input);
     if (typeof repo !== "string") return `github_tree: ${repo.error}`;
     const path = input.path ? String(input.path).trim() : "";
+    const refused = await readGate("github_tree", ctx, repo);
+    if (refused) return refused;
     const ref = input.ref ? String(input.ref).trim() : undefined;
     try {
       const entries = await ctx.github.api.listTree(repo, path, ref);
@@ -179,7 +219,7 @@ export const githubSearchCodeTool: RunnableTool = {
   sideEffectFree: true,
   name: "github_search_code",
   description:
-    "Search code across the repositories Switchboard can reach (GitHub code search; default branches only). Returns matching files with fragments. Optionally limit to one repo.",
+    "Search code in a GitHub repository this request may read (default branches only). The main agent must name one repo. Returns matching files with fragments.",
   inputSchema: {
     type: "object",
     properties: {
@@ -202,9 +242,17 @@ export const githubSearchCodeTool: RunnableTool = {
       if (typeof r !== "string") return `github_search_code: ${r.error}`;
       repo = r;
     }
+    if (ctx.agentName === "orchestrator" && !repo)
+      return "github_search_code: repo is required for a main-agent search.";
+    if (repo) {
+      const refused = await readGate("github_search_code", ctx, repo);
+      if (refused) return refused;
+    }
     const limit = input.limit != null ? Number(input.limit) : undefined;
     try {
-      const hits = await ctx.github.api.searchCode(query, repo, Number.isFinite(limit) ? limit : undefined);
+      const hits = (await ctx.github.api.searchCode(query, repo, Number.isFinite(limit) ? limit : undefined)).filter(
+        (hit) => ctx.agentName !== "orchestrator" || hit.repo.toLowerCase() === repo?.toLowerCase(),
+      );
       if (hits.length === 0) return `No code matches for "${query}"${repo ? ` in ${repo}` : ""}.`;
       return `Code matches for "${query}"${repo ? ` in ${repo}` : ""} (${hits.length}):\n\n${hits.map((h, i) => `${i + 1}. ${h.repo}:${h.path}\n   ${h.url}${h.fragments.length ? `\n   ${clip(h.fragments[0].replace(/\s+/g, " ").trim(), 240)}` : ""}`).join("\n\n")}`;
     } catch (err) {
@@ -236,6 +284,8 @@ export const githubIssueListTool: RunnableTool = {
     if (!ctx.github) return UNAVAILABLE;
     const repo = repoOf(input);
     if (typeof repo !== "string") return `github_issue_list: ${repo.error}`;
+    const refused = await readGate("github_issue_list", ctx, repo);
+    if (refused) return refused;
     const state = input.state === "closed" || input.state === "all" ? input.state : "open";
     const limit = input.limit != null ? Number(input.limit) : undefined;
     try {
@@ -272,6 +322,8 @@ export const githubIssueGetTool: RunnableTool = {
     if (typeof repo !== "string") return `github_issue_get: ${repo.error}`;
     const number = numberOf(input);
     if (typeof number !== "number") return `github_issue_get: ${number.error}`;
+    const refused = await readGate("github_issue_get", ctx, repo);
+    if (refused) return refused;
     try {
       const { issue, comments } = await ctx.github.api.getIssue(repo, number);
       const head = `${repo}#${issue.number} [${issue.state}] ${issue.title}\n${issue.url}\nby ${issue.author}, created ${issue.createdAt}, updated ${issue.updatedAt}${issue.labels.length ? `\nlabels: ${issue.labels.join(", ")}` : ""}${issue.assignees.length ? `\nassignees: ${issue.assignees.join(", ")}` : ""}`;
@@ -305,6 +357,8 @@ export const githubPullGetTool: RunnableTool = {
     if (typeof repo !== "string") return `github_pull_get: ${repo.error}`;
     const number = numberOf(input, "pull request");
     if (typeof number !== "number") return `github_pull_get: ${number.error}`;
+    const refused = await readGate("github_pull_get", ctx, repo);
+    if (refused) return refused;
     try {
       const pull = await ctx.github.api.getPullRequest(repo, number);
       return `${repo}#${pull.number} [${pull.state}${pull.draft ? " draft" : ""}] ${pull.title}
@@ -591,6 +645,8 @@ export const githubActionsRunTool: RunnableTool = {
     if (!ctx.github) return UNAVAILABLE;
     const ref = actionsRef("github_actions_run", input, "run");
     if ("error" in ref) return ref.error;
+    const refused = await readGate("github_actions_run", ctx, ref.repo);
+    if (refused) return refused;
     try {
       const { run, jobs } = await ctx.github.api.getActionsRun(ref.repo, ref.id);
       const sorted = [...jobs].sort(
@@ -664,6 +720,8 @@ export const githubActionsJobLogTool: RunnableTool = {
     if (!ctx.github) return UNAVAILABLE;
     const ref = actionsRef("github_actions_job_log", input, "job");
     if ("error" in ref) return ref.error;
+    const refused = await readGate("github_actions_job_log", ctx, ref.repo);
+    if (refused) return refused;
     const want = Math.min(MAX_TAIL_LINES, Math.max(1, Math.trunc(Number(input.lines)) || DEFAULT_TAIL_LINES));
     const match = input.match === undefined || input.match === null ? "" : String(input.match).trim();
     try {

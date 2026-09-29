@@ -34,6 +34,7 @@ import {
 } from "./oauth.js";
 import {
   MCP_AGENTS_MAX,
+  MCP_DEFAULT_AGENTS,
   MCP_SELF_SERVE_AGENTS,
   MCP_SERVERS_PER_SCOPE_MAX,
   MCP_TICKET_TTL_MS,
@@ -53,6 +54,7 @@ import {
   type CatalogedServer,
   DiscoveringMcpToolSource,
   type DiscoveringSourceOptions,
+  type McpRunCaller,
   type ResolvedServer,
 } from "./source.js";
 import type { McpClientFactory, McpServerSpec } from "./types.js";
@@ -522,7 +524,7 @@ export class McpService {
       id: decision.ticket.serverId,
       name: found.name,
       url: found.entry.url,
-      agents: found.entry.agents ?? [...MCP_SELF_SERVE_AGENTS],
+      agents: found.entry.agents ?? [...MCP_DEFAULT_AGENTS],
       auth: { type: "bearer", token: decision.token },
     });
     const server = await this.view(found);
@@ -692,7 +694,7 @@ export class McpService {
       id: decision.ticket.serverId,
       name: found.name,
       url: found.entry.url,
-      agents: found.entry.agents ?? [...MCP_SELF_SERVE_AGENTS],
+      agents: found.entry.agents ?? [...MCP_DEFAULT_AGENTS],
       auth: { type: "bearer", token: cred.accessToken },
     });
     if (probe.kind === "rejected") return { ok: false, refusal: { kind: "oauth_failed", reason: probe.error }, server };
@@ -792,11 +794,23 @@ export class McpService {
 
   /** Servers a run may use: every tier's entries whose agents include the
    *  agent, shadowed names reported as such, credentials opened for this run. */
-  async resolveForRun(agentName: string, caller: { userId: string; channelId?: string }): Promise<ResolvedServer[]> {
+  async resolveForRun(agentName: string, caller: McpRunCaller): Promise<ResolvedServer[]> {
     const out: ResolvedServer[] = [];
     for (const r of this.opts.config.mcpServersFor(caller.channelId ?? `none:${caller.userId}`, caller.userId)) {
-      const agents = r.entry.agents ?? MCP_SELF_SERVE_AGENTS;
+      const agents = r.entry.agents ?? MCP_DEFAULT_AGENTS;
       if (!agents.includes(agentName)) continue;
+      // A main-agent answer is posted back to its Slack conversation. The
+      // pilot can prove the audience of a one-person DM and a source owned by
+      // that requester; an org or channel credential proves neither.
+      if (
+        agentName === "orchestrator" &&
+        (r.kind !== "user" ||
+          !/^slack:D[A-Z0-9_]+$/.test(caller.channelId ?? "") ||
+          caller.directAudience?.kind !== "slack-unshared-im" ||
+          caller.directAudience.channelId !== caller.channelId ||
+          caller.directAudience.userId !== caller.userId)
+      )
+        continue;
       if (r.kind !== "org" && !MCP_SELF_SERVE_AGENTS.includes(agentName)) continue; // defense in depth over validateMcpServers
       if (r.shadowedBy) {
         out.push({
@@ -819,8 +833,10 @@ export class McpService {
     const out: Array<{ key: string; name: string; agents: string[] }> = [];
     for (const r of this.opts.config.mcpServersFor(caller.channelId ?? `none:${caller.userId}`, caller.userId)) {
       if (r.shadowedBy) continue;
-      const declared = r.entry.agents ?? MCP_SELF_SERVE_AGENTS;
-      const agents = r.kind === "org" ? [...declared] : declared.filter((a) => MCP_SELF_SERVE_AGENTS.includes(a));
+      const declared = r.entry.agents ?? MCP_DEFAULT_AGENTS;
+      const agents = (
+        r.kind === "org" ? [...declared] : declared.filter((a) => MCP_SELF_SERVE_AGENTS.includes(a))
+      ).filter((a) => a !== "orchestrator" || (r.kind === "user" && caller.channelId?.startsWith("slack:D")));
       if (agents.length === 0) continue;
       out.push({ key: mcpCredentialKey(r.scopeKey, r.name), name: r.name, agents });
     }
@@ -830,7 +846,7 @@ export class McpService {
   // ---- internals -----------------------------------------------------------------
 
   private checkAgents(kind: McpScopeKind, agents: string[] | undefined): string[] {
-    const list = agents && agents.length > 0 ? [...new Set(agents)] : [...MCP_SELF_SERVE_AGENTS];
+    const list = agents && agents.length > 0 ? [...new Set(agents)] : [...MCP_DEFAULT_AGENTS];
     if (list.length > MCP_AGENTS_MAX) throw new McpServiceError("invalid_input", `agents: at most ${MCP_AGENTS_MAX}`);
     const known = Object.keys(AGENTS);
     for (const a of list) {
@@ -1017,7 +1033,8 @@ export class McpService {
       id,
       name: r.name,
       url: r.entry.url,
-      agents: r.entry.agents ?? [...MCP_SELF_SERVE_AGENTS],
+      agents: r.entry.agents ?? [...MCP_DEFAULT_AGENTS],
+      ...(r.entry.addedAt !== undefined ? { addedAt: r.entry.addedAt } : {}),
     };
     // `headersEnv` first: a gate in front of the server (Cloudflare Access) is
     // checked before the server's own auth, and a half-authenticated request
@@ -1121,10 +1138,7 @@ export class ConfigMcpToolSource extends DiscoveringMcpToolSource {
     return this.service.catalog(caller).map(({ key, name, agents }) => ({ key, server: name, agents }));
   }
 
-  protected async resolve(
-    agentName: string,
-    caller: { userId: string; channelId?: string },
-  ): Promise<ResolvedServer[]> {
+  protected async resolve(agentName: string, caller: McpRunCaller): Promise<ResolvedServer[]> {
     try {
       return await this.service.resolveForRun(agentName, caller);
     } catch (err) {

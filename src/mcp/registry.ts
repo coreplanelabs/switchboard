@@ -123,9 +123,12 @@ export const MCP_SERVER_NAME_MAX = 32;
 export const MCP_SERVER_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 export const MCP_URL_MAX = 2_048;
 export const MCP_AGENTS_MAX = 8;
-/** Agents a CHANNEL- or USER-scoped server may reach — never the code-writing
- *  or read-only-by-contract agents (item 14); only an org server (admins) may. */
-export const MCP_SELF_SERVE_AGENTS: readonly string[] = ["general", "research"];
+/** Omitted agent lists retain their original reach, at every tier. Eligibility
+ *  for a new preset must never silently widen an existing source. */
+export const MCP_DEFAULT_AGENTS: readonly string[] = ["general", "research"];
+/** Agents a CHANNEL- or USER-scoped server may explicitly reach (item 14).
+ *  Orchestrator additionally filters tools to reads; other presets need org scope. */
+export const MCP_SELF_SERVE_AGENTS: readonly string[] = [...MCP_DEFAULT_AGENTS, "orchestrator"];
 export const MCP_TOKEN_MAX_CHARS = 8_192;
 export const MCP_SERVERS_PER_SCOPE_MAX = 32;
 
@@ -268,7 +271,7 @@ export function serverView(
     scope: parsed?.kind ?? "org",
     scopeKey,
     url: safeUrl(entry.url),
-    agents: [...(entry.agents ?? MCP_SELF_SERVE_AGENTS)],
+    agents: [...(entry.agents ?? MCP_DEFAULT_AGENTS)],
     auth: entry.auth,
     state,
     source: opts.source,

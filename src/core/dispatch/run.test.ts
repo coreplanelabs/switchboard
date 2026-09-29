@@ -514,6 +514,22 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
 });
 
 describe("githubCapabilityFor — the github_* tools' capability for one run", () => {
+  it("limits main-agent reads to public installation repos the resolved requester may use", async () => {
+    const { deps } = setup();
+    deps.githubApi = new InMemoryGithubApi({
+      "acme/api": { private: false },
+      "acme/secret": { private: false },
+      "acme/private": { private: true },
+    });
+    const actor = (userId: string) => chatActorOf(deps.config, { userId, channelId: "slack:CX", threadKey: THREAD });
+    expect((await githubCapabilityFor(deps, actor("slack:UDEV")).readableRepos?.())?.map((r) => r.fullName)).toEqual([
+      "acme/api",
+    ]);
+    expect((await githubCapabilityFor(deps, actor("slack:UADMIN")).readableRepos?.())?.map((r) => r.fullName)).toEqual([
+      "acme/api",
+      "acme/secret",
+    ]);
+  });
   it("pairs the process's API with the requesting actor's per-repo write gate — a relay for an admin writes only where the app may too (item 14)", () => {
     const { deps } = setup();
     const actor = (userId: string, postedBy?: string) =>

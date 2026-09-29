@@ -48,6 +48,9 @@ export interface CardHandle {
 export interface LiveRunMeta {
   agent?: string;
   model?: string;
+  /** The main conversation's source audience was checked before this row's
+   * prompt and tools were saved. Legacy rows have no such proof. */
+  mainAudienceChecked?: true;
   channelId: string;
   userId: string;
   threadKey: string;

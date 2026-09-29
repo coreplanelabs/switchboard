@@ -4,6 +4,7 @@ import { NO_VERDICT_LINE } from "./reviewVerdict.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { SELF_DESCRIPTION_HEADER, selfDescriptionBlock } from "./selfDescription.js";
 import { InMemoryGithubApi } from "../execution/githubApi.js";
+import type { PlaneTable } from "./plane/table.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -432,6 +433,616 @@ beforeEach(() => {
 });
 
 describe("dispatch", () => {
+  // orchestration-plane item 12 pilot: the channel opts in once. Subsequent
+  // plain sentences stay in one main agent; commands still use stage A.
+  const mainDmYaml =
+    YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }") +
+    'channels:\n  "slack:DALICE": { agent: orchestrator }\n';
+  const directMainAudience = {
+    kind: "slack-unshared-im" as const,
+    channelId: "slack:DALICE",
+    userId: "slack:UADMIN",
+    threadKey: "slack:DALICE:1.0",
+  };
+  const mainDm = (text: string) => ({
+    ...msg(text, "slack:UADMIN"),
+    channelId: "slack:DALICE",
+    threadKey: "slack:DALICE:1.0",
+    directAudience: directMainAudience,
+  });
+  const mainDmIO = (history: HistoryItem[] = []) => {
+    const out = fakeIO(history);
+    out.io.directAudience = () => directMainAudience;
+    out.io.verifyDirectAudience = async (audience) =>
+      audience.channelId === directMainAudience.channelId &&
+      audience.userId === directMainAudience.userId &&
+      audience.threadKey === directMainAudience.threadKey;
+    return out;
+  };
+
+  it("routes plain Slack DM conversation to the configured main agent while operator routing is on", async () => {
+    const provider = capturingProvider("The answer is 17.");
+    const deps = makeDeps(mainDmYaml, provider);
+    deps.operatorModel = vi.fn(async () => {
+      throw new Error("the operator should not read a plain main-DM turn");
+    });
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm("how many signups failed?"), io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(provider.requests[0]?.system).toContain("Switchboard's orchestrator");
+    expect(replies).toContain("The answer is 17.");
+  });
+
+  it("offers session recall on a first verified main DM turn", async () => {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        return requests.length === 1
+          ? {
+              content: [{ type: "tool_use", id: "first-recall", name: "recall", input: { query: "signups" } }],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "I can use this conversation's notes." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    wireChildLedger(deps);
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm("how many signups failed?"), io);
+    expect(requests).toHaveLength(2);
+    expect(JSON.stringify(requests[1]?.messages)).not.toContain("session tools are not available");
+    expect(replies).toContain("I can use this conversation's notes.");
+  });
+
+  it("reads a permalink and its file through the verified DM tool without seeding linked text", async () => {
+    const permalink = "https://team.slack.com/archives/C123/p1700000000000100";
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        if (requests.length === 1)
+          return {
+            content: [{ type: "tool_use", id: "link", name: "slack_context", input: { kind: "link", url: permalink } }],
+            stopReason: "tool_use",
+          };
+        if (requests.length === 2)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "file",
+                name: "slack_context",
+                input: { kind: "file", url: permalink, fileId: "F123" },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        return { content: [{ type: "text", text: "The linked thread and file both say 17." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    const reads: unknown[] = [];
+    deps.slackContextForRun = () => ({
+      verifyDirectOrigin: async () => true,
+      read: async (request) => {
+        reads.push(request);
+        return request.kind === "link" ? "linked source data: 17" : "attached file data: 17";
+      },
+    });
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm(`read this permalink and its file: ${permalink}`), io);
+    expect(reads).toEqual([
+      { kind: "link", url: permalink },
+      { kind: "file", url: permalink, fileId: "F123" },
+    ]);
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("linked source data");
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("attached file data");
+    expect(JSON.stringify(requests[1]?.messages)).toContain("linked source data: 17");
+    expect(JSON.stringify(requests[2]?.messages)).toContain("attached file data: 17");
+    expect(replies).toContain("The linked thread and file both say 17.");
+  });
+
+  it("returns a plain follow-up to the configured main agent after an explicit specialist turn", async () => {
+    const provider = capturingProvider("I can take the next step.");
+    const deps = makeDeps(mainDmYaml, provider);
+    await threadWithFinishedRun(deps, "review", {
+      channelId: "slack:DALICE",
+      threadKey: "slack:DALICE:1.0",
+      channelVisibility: "private",
+    });
+    deps.operatorModel = vi.fn(async () => {
+      throw new Error("the operator should not route the main conversation");
+    });
+    const { io, replies } = mainDmIO([
+      { role: "user", text: "agent:review check the patch", user: "slack:UADMIN" },
+      { role: "assistant", text: "unverified specialist output" },
+    ]);
+    await dispatch(deps, mainDm("fix it"), io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(provider.requests[0]?.system).toContain("Switchboard's orchestrator");
+    expect(JSON.stringify(provider.requests[0]?.messages)).not.toContain("unverified specialist output");
+    expect(replies).toContain("I can take the next step.");
+  });
+
+  it("keeps a main DM usable after a specialist review recorded a verdict and review post", async () => {
+    const provider = capturingProvider("I will check the review before starting work.");
+    const deps = makeDeps(mainDmYaml, provider);
+    await threadWithFinishedRun(deps, "orchestrator", {
+      channelId: "slack:DALICE",
+      threadKey: "slack:DALICE:1.0",
+      channelVisibility: "private",
+    });
+    const prior = (await deps.runStore.get("run-prev"))!;
+    await deps.runStore.put({
+      ...prior,
+      id: "run-review",
+      label: "review · #DALICE",
+      agent: "review",
+      startedAt: Date.now() - 9_000,
+      finishedAt: Date.now() - 8_000,
+      session: { key: "slack:DALICE:1.0:review", seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+      verdict: { verdict: "request_changes", summary: "fix the sign-up validation", findings: [] },
+      reviewPost: {
+        posted: true,
+        target: { repo: "acme/api", number: 7 },
+        head: "a".repeat(40),
+        verdict: "request_changes",
+      },
+    });
+    deps.runLedger.readSessionTail = async () => ({
+      from: 0,
+      transcript: {
+        complete: true,
+        turns: 2,
+        messages: [
+          { role: "user", content: [{ type: "text", text: "how many signups failed?" }] },
+          { role: "assistant", content: [{ type: "text", text: "17 failed signups." }] },
+        ],
+        compactions: [],
+      },
+    });
+    const { io, replies } = mainDmIO([
+      { role: "user", user: "slack:UADMIN", text: "how many signups failed?", at: Date.now() - 20_000 },
+      { role: "assistant", text: "17 failed signups.", at: Date.now() - 10_000 },
+      { role: "user", user: "slack:UADMIN", text: "check the review", at: Date.now() - 9_500 },
+      { role: "assistant", text: "fix the sign-up validation", at: Date.now() - 8_000 },
+    ]);
+    await dispatch(deps, mainDm("fix it"), io);
+    expect(provider.requests[0]?.system).toContain("Switchboard's orchestrator");
+    expect(provider.requests[0]?.system).not.toContain("fix the sign-up validation");
+    expect(JSON.stringify(provider.requests[0]?.messages)).toContain("17 failed signups");
+    expect(JSON.stringify(provider.requests[0]?.messages)).not.toContain("fix the sign-up validation");
+    expect(replies).toContain("I will check the review before starting work.");
+  });
+
+  it.each(["github_file", "plane_show", "mcp__metrics__query"] as const)(
+    "continues a main DM after a saved %s read without replaying its answer",
+    async (sourceTool) => {
+      const requests: CompletionRequest[] = [];
+      const provider: Provider = {
+        name: "fake",
+        async complete(req): Promise<CompletionResult> {
+          requests.push(req);
+          return requests.length === 1
+            ? {
+                content: [{ type: "tool_use", id: "recall-old", name: "recall", input: { query: "signups" } }],
+                stopReason: "tool_use",
+              }
+            : {
+                content: [{ type: "text", text: "I will check that source again before acting." }],
+                stopReason: "end_turn",
+              };
+        },
+      };
+      const deps = makeDeps(mainDmYaml, provider);
+      await threadWithFinishedRun(deps, "orchestrator", {
+        channelId: "slack:DALICE",
+        threadKey: "slack:DALICE:1.0",
+        channelVisibility: "private",
+      });
+      deps.runLedger.readSessionTail = async () => ({
+        from: 0,
+        transcript: {
+          complete: true,
+          turns: 4,
+          messages: [
+            { role: "user", content: [{ type: "text", text: "How many signups failed?" }] },
+            {
+              role: "assistant",
+              content: [{ type: "tool_use", id: "prior-read", name: sourceTool, input: { repo: "acme/api" } }],
+            },
+            {
+              role: "user",
+              content: [{ type: "tool_result", toolUseId: "prior-read", content: "17 private signups" }],
+            },
+            { role: "assistant", content: [{ type: "text", text: "17 private signups failed." }] },
+          ],
+          actors: ["slack:UADMIN", undefined, undefined, undefined],
+          compactions: [],
+        },
+      });
+      const { io, replies } = mainDmIO([
+        { role: "user", user: "slack:UADMIN", text: "How many signups failed?", at: Date.now() - 20_000 },
+        { role: "assistant", text: "17 private signups failed.", at: Date.now() - 10_000 },
+      ]);
+      await dispatch(deps, mainDm("fix it"), io);
+      expect(requests).toHaveLength(2);
+      const prompt = JSON.stringify(requests[0]?.messages);
+      expect(prompt).toContain("How many signups failed?");
+      expect(prompt).toContain("fix it");
+      expect(prompt).not.toContain("17 private signups");
+      expect(prompt).not.toContain("prior-read");
+      expect(JSON.stringify(requests[1]?.messages)).toContain("session tools are not available");
+      expect(JSON.stringify(requests[1]?.messages)).not.toContain("17 private signups");
+      expect(replies).toContain("I will check that source again before acting.");
+    },
+  );
+
+  it("keeps an established main DM with the orchestrator when the operator is on", async () => {
+    const provider = capturingProvider("I can take the next step.");
+    const deps = makeDeps(YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }"), provider);
+    await threadWithFinishedRun(deps, "orchestrator", {
+      channelId: "slack:DALICE",
+      threadKey: "slack:DALICE:1.0",
+      channelVisibility: "private",
+    });
+    deps.operatorModel = vi.fn(async () => {
+      throw new Error("the operator should not route an established main conversation");
+    });
+    const { io, replies } = mainDmIO([{ role: "user", text: "how many signups failed?" }]);
+    await dispatch(deps, mainDm("fix it"), io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(provider.requests[0]?.system).toContain("Switchboard's orchestrator");
+    expect(replies).toContain("I can take the next step.");
+  });
+
+  it("keeps an established main DM after an explicit specialist turn when the operator is on", async () => {
+    const provider = capturingProvider("I can take the next step.");
+    const deps = makeDeps(YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }"), provider);
+    await threadWithFinishedRun(deps, "orchestrator", {
+      channelId: "slack:DALICE",
+      threadKey: "slack:DALICE:1.0",
+      channelVisibility: "private",
+    });
+    const prior = (await deps.runStore.get("run-prev"))!;
+    await deps.runStore.put({
+      ...prior,
+      id: "run-specialist",
+      agent: "review",
+      startedAt: Date.now() - 9_000,
+      finishedAt: Date.now() - 8_000,
+      session: { key: "slack:DALICE:1.0:review", seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+    });
+    deps.operatorModel = vi.fn(async () => {
+      throw new Error("the operator should not route an established main conversation");
+    });
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm("fix it"), io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(provider.requests[0]?.system).toContain("Switchboard's orchestrator");
+    expect(replies).toContain("I can take the next step.");
+  });
+
+  it("finds an established main DM behind more specialist runs than the thread page holds", async () => {
+    const provider = capturingProvider("I can take the next step.");
+    const deps = makeDeps(YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }"), provider);
+    await threadWithFinishedRun(deps, "orchestrator", {
+      channelId: "slack:DALICE",
+      threadKey: "slack:DALICE:1.0",
+      channelVisibility: "private",
+    });
+    const prior = (await deps.runStore.get("run-prev"))!;
+    for (let index = 0; index < 9; index += 1) {
+      await deps.runStore.put({
+        ...prior,
+        id: `run-specialist-${index}`,
+        agent: "review",
+        startedAt: Date.now() - 9_000 + index * 500,
+        finishedAt: Date.now() - 8_000 + index * 500,
+        session: { key: "slack:DALICE:1.0:review", seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+      });
+    }
+    deps.operatorModel = vi.fn(async () => {
+      throw new Error("the operator should not route an established main conversation");
+    });
+    const { io } = mainDmIO();
+    await dispatch(deps, mainDm("fix it"), io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(provider.requests[0]?.system).toContain("Switchboard's orchestrator");
+  });
+
+  it("uses an established main DM run when channel history is empty", async () => {
+    const provider = capturingProvider("I can take the next step.");
+    const deps = makeDeps(YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }"), provider);
+    await threadWithFinishedRun(deps, "orchestrator", {
+      channelId: "slack:DALICE",
+      threadKey: "slack:DALICE:1.0",
+      channelVisibility: "private",
+    });
+    deps.operatorModel = vi.fn(async () => {
+      throw new Error("the operator should not route an established main conversation");
+    });
+    const { io } = mainDmIO();
+    await dispatch(deps, mainDm("fix it"), io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(provider.requests[0]?.system).toContain("Switchboard's orchestrator");
+  });
+
+  it("uses the requester's scoped main agent and keeps an explicit specialist directive", async () => {
+    const userMainYaml =
+      YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }") +
+      'users:\n  "slack:UADMIN": { agent: orchestrator }\n';
+    const provider = capturingProvider("answer");
+    const deps = makeDeps(userMainYaml, provider);
+    deps.operatorModel = vi.fn(async () => {
+      throw new Error("the operator should not route a scoped main DM or typed directive");
+    });
+    await dispatch(deps, mainDm("fix it"), mainDmIO().io);
+    await dispatch(deps, mainDm("agent:review check this"), mainDmIO().io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(provider.requests[0]?.system).toContain("Switchboard's orchestrator");
+    expect(provider.requests[1]?.system).toContain("code review agent");
+  });
+
+  it("refuses a spawned main agent's parent text before its first model turn", async () => {
+    const provider = capturingProvider("should not answer");
+    const deps = makeDeps(mainDmYaml, provider);
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm("what changed?"), io, {
+      parent: { runId: "parent", depth: 1, remainingMs: 10 * 60_000 },
+      seed: [{ role: "assistant", text: "Earlier private source said 17 failed." }],
+    });
+    expect(provider.requests).toHaveLength(0);
+    expect(replies.join(" ")).toContain("ask me to check the source again");
+  });
+
+  it("withholds a main answer when its private source disappears before the reply", async () => {
+    const provider = capturingProvider("17 failed signups.");
+    const deps = makeDeps(mainDmYaml, provider);
+    let reads = 0;
+    class MovingSource extends NullMcpToolSource {
+      override async toolsFor(_agentName: string, _caller: { userId: string; channelId?: string }) {
+        reads++;
+        return {
+          tools: [],
+          servers:
+            reads === 1
+              ? [{ server: "metrics", toolCount: 1, audience: "user:slack:UADMIN/metrics", revision: "source-a" }]
+              : [],
+        };
+      }
+    }
+    deps.mcp = new MovingSource();
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm("how many signups failed?"), io);
+    expect(provider.requests).toHaveLength(1);
+    expect(reads).toBe(2);
+    expect(replies.join(" ")).not.toContain("17 failed signups");
+    expect(replies.join(" ")).toContain("ask me to check the source again");
+  });
+
+  it("rechecks a GitHub read at publication and withholds its answer after requester repo access is revoked", async () => {
+    for (const revoke of [false, true]) {
+      const requests: CompletionRequest[] = [];
+      const provider: Provider = {
+        name: "fake",
+        async complete(req): Promise<CompletionResult> {
+          requests.push(req);
+          return requests.length === 1
+            ? {
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "read",
+                    name: "github_file",
+                    input: { repo: "acme/public", path: "README.md" },
+                  },
+                ],
+                stopReason: "tool_use",
+              }
+            : { content: [{ type: "text", text: "The README says 17 signups failed." }], stopReason: "end_turn" };
+        },
+      };
+      const deps = makeDeps(mainDmYaml, provider);
+      let allowed = true;
+      deps.config.canUseRepo = () => allowed;
+      const api = new InMemoryGithubApi({
+        "acme/public": { private: false, files: { "README.md": "17 failed signups" } },
+      });
+      const readFile = api.readFile.bind(api);
+      api.readFile = async (...args) => {
+        const file = await readFile(...args);
+        if (revoke) allowed = false;
+        return file;
+      };
+      deps.githubApi = api;
+      const registry = new RunRegistry({ genId: () => "main-private", genToken: () => "private-token" });
+      deps.runRegistry = registry;
+      const { io, replies, statuses } = mainDmIO();
+      const streamed: RunEvent[] = [];
+      io.runStarted = ({ id }) => {
+        registry.subscribe(id, "private-token", { onEvent: (event) => void streamed.push(event) });
+      };
+      await dispatch(deps, mainDm("what does the README say about signup failures?"), io);
+      expect(requests).toHaveLength(2);
+      const publicSurfaces = JSON.stringify({
+        run: registry.snapshot("main-private", "private-token"),
+        statuses,
+        streamed,
+      });
+      expect(publicSurfaces).not.toContain("17 failed signups");
+      expect(publicSurfaces).not.toContain("The README says");
+      if (revoke) {
+        expect(replies.join(" ")).not.toContain("The README says 17");
+        expect(replies.join(" ")).toContain("ask me to check the source again");
+      } else expect(replies).toContain("The README says 17 signups failed.");
+    }
+  });
+
+  it("withholds a plane answer when the requester loses the exposed private run before publication", async () => {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        return requests.length === 1
+          ? { content: [{ type: "tool_use", id: "plane", name: "plane_show", input: {} }], stopReason: "tool_use" }
+          : { content: [{ type: "text", text: "Bob's private-worker run is failing." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    const originalGrantsFor = deps.config.grantsFor.bind(deps.config);
+    let granted = true;
+    deps.config.grantsFor = (actorId) =>
+      actorId === "slack:UADMIN"
+        ? { actions: "all", channels: granted ? "all" : new Set<string>(), repos: "all" }
+        : originalGrantsFor(actorId);
+    const privateRun = {
+      id: "fleet-private-run",
+      agent: "private-worker",
+      channelId: "slack:CPRIVATE",
+      userId: "slack:UBOB",
+      channelVisibility: "private" as const,
+      startedAt: 1,
+      finished: true,
+      eventCount: 0,
+    };
+    let tableReads = 0;
+    deps.plane = async () => ({
+      table: async (visibleTo): Promise<PlaneTable> => {
+        const runs = matchesPredicate(visibleTo, privateRun)
+          ? [{ run: privateRun, owner: { id: privateRun.userId }, health: [] }]
+          : [];
+        tableReads++;
+        if (tableReads === 1) granted = false;
+        return { at: 1, runs, units: [], pullRequests: [], windows: [], findings: [] };
+      },
+      stop: async () => ({ kind: "unavailable", reason: "unused" }),
+    });
+    const registry = new RunRegistry({ genId: () => "main-plane", genToken: () => "private-token" });
+    deps.runRegistry = registry;
+    const { io, replies, statuses } = mainDmIO();
+    await dispatch(deps, mainDm("what is happening in the fleet?"), io);
+    expect(tableReads).toBe(2);
+    expect(JSON.stringify(requests[1]?.messages)).toContain("private-worker");
+    expect(JSON.stringify({ replies, statuses, run: registry.snapshot("main-plane", "private-token") })).not.toContain(
+      "private-worker",
+    );
+    expect(replies.join(" ")).toContain("ask me to check the source again");
+  });
+
+  it("withholds a GitHub answer when its verified DM becomes shared after the source read", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        return ++calls === 1
+          ? {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "read",
+                  name: "github_file",
+                  input: { repo: "acme/public", path: "README.md" },
+                },
+              ],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "The private count is 17." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    deps.config.canUseRepo = () => true;
+    const api = new InMemoryGithubApi({
+      "acme/public": { private: false, files: { "README.md": "The private count is 17." } },
+    });
+    let shared = false;
+    const readFile = api.readFile.bind(api);
+    api.readFile = async (...args) => {
+      const file = await readFile(...args);
+      shared = true;
+      return file;
+    };
+    deps.githubApi = api;
+    const registry = new RunRegistry({ genId: () => "main-sharing-flip", genToken: () => "private-token" });
+    deps.runRegistry = registry;
+    const { io, replies, statuses } = mainDmIO();
+    io.verifyDirectAudience = async () => !shared;
+    await dispatch(deps, mainDm("read the signup count"), io);
+    expect(shared).toBe(true);
+    expect(calls).toBeGreaterThan(0);
+    expect(replies.join(" ")).not.toContain("The private count is 17.");
+    expect(
+      JSON.stringify({ replies, statuses, run: registry.snapshot("main-sharing-flip", "private-token") }),
+    ).not.toContain("The private count is 17.");
+  });
+
+  it("withholds a GitHub answer when a listed repository has no usable identity", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        return ++calls === 1
+          ? { content: [{ type: "tool_use", id: "list", name: "github_repos", input: {} }], stopReason: "tool_use" }
+          : { content: [{ type: "text", text: "The repository is not-a-repo." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    deps.githubApi = new InMemoryGithubApi({ "not-a-repo": { private: false } });
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm("which repos can I reach?"), io);
+    expect(calls).toBe(2);
+    expect(replies.join(" ")).not.toContain("The repository is not-a-repo.");
+    expect(replies.join(" ")).toContain("ask me to check the source again");
+  });
+
+  it("withholds a github_repos answer when its listed repo is revoked before publication", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        return ++calls === 1
+          ? { content: [{ type: "tool_use", id: "list", name: "github_repos", input: {} }], stopReason: "tool_use" }
+          : { content: [{ type: "text", text: "You can reach acme/public." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    let allowed = true;
+    deps.config.canUseRepo = () => allowed;
+    deps.githubApi = new InMemoryGithubApi({ "acme/public": { private: false } });
+    let sourceChecks = 0;
+    class RevokingSource extends NullMcpToolSource {
+      override async toolsFor() {
+        if (++sourceChecks === 2) allowed = false;
+        return { tools: [], servers: [] };
+      }
+    }
+    deps.mcp = new RevokingSource();
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm("which repos can I reach?"), io);
+    expect(calls).toBe(2);
+    expect(replies.join(" ")).not.toContain("You can reach acme/public.");
+    expect(replies.join(" ")).toContain("ask me to check the source again");
+  });
+
+  it("refuses an unverified source audience before the main model sees it", async () => {
+    const provider = capturingProvider("should not answer");
+    const deps = makeDeps(mainDmYaml, provider);
+    class UnscopedSource extends NullMcpToolSource {
+      override async toolsFor() {
+        return { tools: [], servers: [{ server: "metrics", toolCount: 1 }] };
+      }
+    }
+    deps.mcp = new UnscopedSource();
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm("how many signups failed?"), io);
+    expect(provider.requests).toHaveLength(0);
+    expect(replies.join(" ")).toContain("one-person Slack DM");
+  });
+
   it("answers config commands inline without calling a model", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
@@ -10994,6 +11605,141 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       }
     },
   );
+  it("a fresh main run stamps its checked audience on the row for later resumption", async () => {
+    const ledger = new InMemoryRunLedger();
+    let checkedAtModel: boolean | undefined;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        checkedAtModel = ledger.live.get("run-l")?.meta.mainAudienceChecked === true;
+        return { content: [{ type: "text", text: "The answer is 17." }], stopReason: "end_turn" };
+      },
+    };
+    const yaml =
+      YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }") +
+      'channels:\n  "slack:DALICE": { agent: orchestrator }\n';
+    const { deps, writer } = wired(provider, { ledger, yaml });
+    const { io, replies } = ioWithCard();
+    io.history = async () => [];
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DALICE",
+      userId: "slack:UADMIN",
+      threadKey: "slack:DALICE:1.0",
+    };
+    io.directAudience = () => directAudience;
+    io.verifyDirectAudience = async () => true;
+    await dispatch(deps, { ...msg("how many signups failed?", "slack:UADMIN"), ...directAudience, directAudience }, io);
+    await writer.settled();
+    expect(checkedAtModel).toBe(true);
+    expect(replies).toContain("The answer is 17.");
+  });
+
+  it("a resumed main run refuses replayed private source evidence before the model or Slack reply sees it", async () => {
+    for (const { originalToolNames, replayedTool } of [
+      { originalToolNames: ["mcp__metrics__query"], replayedTool: "github_file" },
+      { originalToolNames: [], replayedTool: "mcp__metrics__query" },
+      { originalToolNames: [], replayedTool: "slack_context" },
+    ]) {
+      const ledger = new InMemoryRunLedger(() => 10_000);
+      const transcript: ChatMessage[] = [
+        { role: "user", content: [{ type: "text", text: "how many signups failed?" }] },
+        { role: "assistant", content: [{ type: "tool_use", id: "private", name: replayedTool, input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "private", content: "17 failed signups" }] },
+      ];
+      await ledger.claim({
+        runId: "run-main",
+        threadKey: "slack:DALICE:1.0",
+        gen: "gen-OLD",
+        leaseMs: 30_000,
+        startedAt: 5_000,
+        meta: {
+          channelId: "slack:DALICE",
+          userId: "slack:UADMIN",
+          threadKey: "slack:DALICE:1.0",
+          agent: "orchestrator",
+          model: "anthropic/general-model",
+          mainAudienceChecked: true,
+          directAudience: {
+            kind: "slack-unshared-im",
+            channelId: "slack:DALICE",
+            userId: "slack:UADMIN",
+            threadKey: "slack:DALICE:1.0",
+          },
+        },
+        card: { channel: "DALICE", ts: "1.2" },
+        system: "the original prompt",
+        tools: originalToolNames.map((name) => ({ name, description: "old source", inputSchema: {} })),
+        state: {},
+      });
+      await ledger.seed("run-main", "gen-OLD", [{ idx: 0, message: transcript[0]! }]);
+      await ledger.step(
+        "run-main",
+        "gen-OLD",
+        {
+          step: 0,
+          seq: 0,
+          turnIndex: 1,
+          inFlight: [],
+          inboxConsumedSeq: 0,
+          remainingMs: 300_000,
+          turn: 0,
+          iteration: 0,
+        },
+        [],
+      );
+      await ledger.step(
+        "run-main",
+        "gen-OLD",
+        {
+          step: 1,
+          seq: 0,
+          turnIndex: 3,
+          inFlight: [],
+          inboxConsumedSeq: 0,
+          remainingMs: 240_000,
+          turn: 1,
+          iteration: 0,
+        },
+        transcript.slice(1).map((message, idx) => ({ idx: idx + 1, message })),
+      );
+      ledger.live.get("run-main")!.leaseUntil = 0;
+      const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+      const provider = capturingProvider("must not use old source result");
+      const { deps, writer } = wired(provider, { ledger });
+      const { io, replies } = ioWithCard();
+      io.directAudience = () => ({ channelId: "slack:DALICE", userId: "slack:UADMIN", threadKey: "slack:DALICE:1.0" });
+      io.verifyDirectAudience = async () => true;
+      const plan = {
+        kind: "resume" as const,
+        messages: transcript,
+        compactions: [],
+        settlements: [],
+        stepRecorded: true,
+        inboxConsumedSeq: 0,
+        step: 1,
+        turn: 1,
+        iteration: 0,
+        remainingMs: 240_000,
+      };
+      await dispatch(deps, resumeMessage(reclaimed.row, "how many signups failed?"), io, {
+        resume: {
+          row: reclaimed.row,
+          lastStep: reclaimed.lastStep!,
+          plan,
+          events: [],
+          lastSeq: 0,
+          repoCtx: {},
+          inbox: [],
+        },
+      });
+      await writer.settled();
+      expect(provider.requests).toHaveLength(0);
+      expect(replies.join(" ")).toContain("run restarted");
+      expect(replies.join(" ")).not.toContain("17 failed signups");
+      expect(ledger.live.has("run-main")).toBe(false);
+    }
+  });
 
   it("claims the run once its prompt exists (system, tools, card, meta, seed), records each step before its tools, appends events, takes finishing before the reply and finishes through the ledger", async () => {
     const seen: {
@@ -17543,6 +18289,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const privateResult = await prior!.capability.read({ kind: "thread" });
     expect(privateResult).toBe("private sign-up count: 17");
     const privateText = typeof privateResult === "string" ? privateResult : JSON.stringify(privateResult);
+    const mcpPrivateText = "private MCP sign-up count: 17";
     const yaml =
       PI_YAML.replace(
         "    coding: anthropic/coding-model",
@@ -17560,6 +18307,11 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
           content: [{ type: "tool_use", id: "c1", name: "slack_context", input: { kind: "thread" } }],
         },
         { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: privateResult }] },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "c2", name: "mcp__metrics__query", input: { metric: "signups" } }],
+        },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "c2", content: mcpPrivateText }] },
         assistant("I found the count."),
       ],
     });
@@ -17579,11 +18331,13 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       async () => dispatch(t.deps, { channelId, userId: "slack:UADMIN", threadKey, text: "What should we fix?" }, io),
     );
     expect(JSON.stringify(seeded ?? [])).not.toContain(privateText);
+    expect(JSON.stringify(seeded ?? [])).not.toContain(mcpPrivateText);
     expect(sessionRead).not.toHaveBeenCalled();
     expect(seeded).toBeUndefined();
     expect(historyRead).not.toHaveBeenCalled();
     expect(replies.join(" ")).toContain("can't verify that this Slack DM is private");
     expect(JSON.stringify({ replies, statuses })).not.toContain(privateText);
+    expect(JSON.stringify({ replies, statuses })).not.toContain(mcpPrivateText);
   });
 
   it("revokes a live private run for relayed and app-authored DM follow-ups before refusing session reads", async () => {
@@ -17648,7 +18402,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const freshRead = vi.fn(async () => "slack_context: I can't read that Slack source.");
     t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
     const { io, replies, statuses } = fakeIO([
-      { role: "user", text: "Read this linked thread", at: NOW - 20_000 },
+      { role: "user", user: directAudience.userId, text: "Read this linked thread", at: NOW - 20_000 },
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;
@@ -17772,7 +18526,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       },
     ];
     const { io, replies } = fakeIO([
-      { role: "user", text: `What happened? ${permalink}`, at: NOW - 20_000 },
+      { role: "user", user: directAudience.userId, text: `What happened? ${permalink}`, at: NOW - 20_000 },
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;
@@ -17894,7 +18648,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const freshRead = vi.fn(async () => privateText);
     t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
     const { io, replies } = fakeIO([
-      { role: "user", text: "Read this linked thread", at: NOW - 20_000 },
+      { role: "user", user: directAudience.userId, text: "Read this linked thread", at: NOW - 20_000 },
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;
@@ -17942,7 +18696,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const freshRead = vi.fn(async () => appended);
     t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
     const { io, replies } = fakeIO([
-      { role: "user", text: "How many users failed to sign up?", at: NOW - 20_000 },
+      { role: "user", user: directAudience.userId, text: "How many users failed to sign up?", at: NOW - 20_000 },
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;
@@ -17998,7 +18752,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       .mockResolvedValue("slack_context: I can't read that Slack source.");
     t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
     const { io, replies, statuses } = fakeIO([
-      { role: "user", text: "Read this linked thread", at: NOW - 20_000 },
+      { role: "user", user: directAudience.userId, text: "Read this linked thread", at: NOW - 20_000 },
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;

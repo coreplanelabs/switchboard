@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { GITHUB_READ_TOOLS } from "./github.js";
 import type { RunnableTool } from "./runnableTool.js";
 import { mergeTools, TOOLSETS, toolsForRun } from "./toolsets.js";
 
@@ -29,26 +30,27 @@ describe("mergeTools — the static toolset plus a run's extra tools", () => {
 });
 
 describe("the toolset table", () => {
-  // The orchestrator has bounded Slack reads and linked-work controls in a
-  // verified requester DM; it has no shell, generic spawn, or merge tool.
-  it("orchestrator: linked work controls and bounded Slack reads beside plane and session tools", () => {
+  // The main agent gets bounded reads and requester-bound linked-work tools;
+  // it has no shell, public status, generic spawn or merge tool.
+  it("orchestrator: source reads and private linked-work controls", () => {
     expect(TOOLSETS.orchestrator!.map((t) => t.name)).toEqual([
-      "update_status",
       "plane_show",
       "slack_context",
       "work_status",
       "work_steer",
       "work_stop",
+      ...GITHUB_READ_TOOLS.map((t) => t.name),
       "recall",
       "notes",
     ]);
+    expect(GITHUB_READ_TOOLS.every((t) => t.sideEffectFree === true)).toBe(true);
   });
 
   it("a shared conversation's model tool list omits linked-work calls while a private one retains them", () => {
     expect(toolsForRun("orchestrator", false).map((tool) => tool.name)).toEqual([
-      "update_status",
       "plane_show",
       "slack_context",
+      ...GITHUB_READ_TOOLS.map((t) => t.name),
       "recall",
       "notes",
     ]);

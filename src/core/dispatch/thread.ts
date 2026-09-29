@@ -13,6 +13,7 @@
 import type { CoordinatorUnit } from "../coordinator/contract.js";
 import type { RunPullRequest } from "../runRecord.js";
 import type { RunView, RunsService } from "../runsService.js";
+import { RUN_LIST_MAX_LIMIT } from "../runRecord.js";
 import type { PreviousRun } from "./seed.js";
 
 /** How many of the thread's newest runs one read brings back: enough to find
@@ -142,6 +143,50 @@ export function stickyAgentOf(runs: readonly RunView[]): string | undefined {
   const newest = runs.find(addressed);
   if (newest === undefined || !continuable(newest)) return undefined;
   return newest.agent;
+}
+
+/** A main conversation may have more recent specialist runs than the normal
+ * thread page holds. Search the retained main-agent rows directly, so a
+ * specialist turn cannot silently send the next plain DM back to the router. */
+export async function establishedMainDmOf(
+  service: Pick<RunsService, "listRuns">,
+  audience: { channelId: string; threadKey: string; userId: string },
+  recent: readonly RunView[],
+): Promise<boolean> {
+  const matches = (run: RunView) =>
+    continuable(run) &&
+    run.agent === "orchestrator" &&
+    run.parentInstanceId === undefined &&
+    run.userId === audience.userId &&
+    run.channelId === audience.channelId &&
+    run.threadKey === audience.threadKey;
+  if (recent.some(matches)) return true;
+  let before: { finishedAt: number; id: string } | undefined;
+  const seen = new Set<string>();
+  try {
+    for (;;) {
+      const page = await service.listRuns({
+        status: "finished",
+        visibleTo: { kind: "all" },
+        threadKey: audience.threadKey,
+        agent: "orchestrator",
+        limit: RUN_LIST_MAX_LIMIT,
+        ...(before ? { before: before.finishedAt, beforeId: before.id } : {}),
+      });
+      if (page.storeUnavailable || page.ledgerUnavailable) return false;
+      if (page.runs.some(matches)) return true;
+      if (!page.nextBefore) return false;
+      const cursor = `${page.nextBefore.finishedAt}:${page.nextBefore.id}`;
+      if (seen.has(cursor)) return false;
+      seen.add(cursor);
+      before = page.nextBefore;
+    }
+  } catch (err) {
+    console.warn(
+      `[thread] ${audience.threadKey}: main conversation read failed — ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return false;
+  }
 }
 
 /** The route a sticky-by-transcript follow-up carries (routing-and-config
