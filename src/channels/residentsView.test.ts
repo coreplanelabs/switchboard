@@ -432,6 +432,28 @@ describe("createResidentsViewHandler — the runs on residents and the live feed
     expect((seedOf(none.body()) as ResidentsIndexSeed).runs).toEqual([]);
   });
 
+  it("hides private worker runs from the residents seed and feed even for an admin", async () => {
+    const registry = new RunRegistry();
+    const worker = registry.create(
+      "coding · jshttp/vary",
+      meta(PUBLIC, "worker:instance-private:unitA", "jshttp/vary"),
+    );
+    const h = handler(
+      fakeClient(() => Promise.resolve(ok(LISTING as never))),
+      undefined,
+      registry,
+    );
+    const page = fakeReqRes("GET", "/residents");
+    h(page.req, page.res, ADMIN);
+    await new Promise((r) => setTimeout(r, 0));
+    expect((seedOf(page.body()) as ResidentsIndexSeed).runs).toEqual([]);
+
+    const feed = fakeReqRes("GET", "/residents?stream=1");
+    h(feed.req, feed.res, ADMIN);
+    expect(feed.body()).not.toContain(worker.id);
+    expect(feed.body()).not.toContain(worker.token);
+  });
+
   it("`?stream=1` is the feed: an SSE head, the viewer's repo runs replayed, live upserts, and a fresh listing when a run's attach span ends", async () => {
     const f = fleet();
     let reads = 0;

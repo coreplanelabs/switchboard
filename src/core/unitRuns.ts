@@ -107,7 +107,9 @@ export function unitFactsOf(unit: CoordinatorUnit): UnitFacts {
     },
     ...(unit.pr !== undefined ? { pr: unit.pr } : {}),
     ...(unit.issue !== undefined ? { issue: unit.issue } : {}),
-    rounds: unit.rounds,
+    rounds: privateWorker
+      ? unit.rounds.map((round) => ({ index: round.index, agent: round.agent, outcome: round.outcome, at: round.at }))
+      : unit.rounds,
     ...(unit.ending !== undefined
       ? { ending: privateWorker ? { kind: unit.ending.kind, at: unit.ending.at } : unit.ending }
       : {}),

@@ -4711,6 +4711,52 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].rounds).toHaveLength(1); // nothing malformed was appended
   });
 
+  it("keeps a private worker's round-gate findings in its unit row, not the hosted run or card", async () => {
+    const frames: StatusUpdate[] = [];
+    const h = await planHarness({
+      privateWorkerLog: new InMemoryPrivateWorkerLog(),
+      ioFor: () => ({
+        reply: async () => {},
+        status: async (initial) => {
+          frames.push(initial);
+          return { update: () => {}, done: async () => {} };
+        },
+        history: async () => [],
+      }),
+    });
+    await h.instances.putUnits([
+      unitRow("U10", {
+        threadKey: `worker:${PLAN_INSTANCE.id}:unitA`,
+        workBrief: {
+          requesterId: PLAN_INSTANCE.userId,
+          mainThreadKey: PLAN_INSTANCE.threadKey,
+          actId: "act-private",
+          repo: PLAN_INSTANCE.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      }),
+      unitRow("U11"),
+    ]);
+    const { run } = await hostParent(h);
+    const gate = { level: "minor", findings: ["private customer finding"] };
+    expect(
+      await call(h, "round", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        index: 1,
+        agent: "review",
+        outcome: "approve",
+        gate,
+      }),
+    ).toMatchObject({ status: 200, body: { ok: true } });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].rounds.at(-1)?.gate).toEqual(gate);
+    expect(JSON.stringify(h.registry.snapshotById(run.id)?.events)).not.toContain("private customer finding");
+    expect(JSON.stringify(frames)).not.toContain("private customer finding");
+  });
+
   // Record 0065 / issue 1968: `ShipRoundOutcome` grew `continued` (decision 0046's
   // renewal) and `idle` (record 0051) while the route's accepted list did not,
   // so a renewed round 0 threw in the driver. The route now accepts the whole

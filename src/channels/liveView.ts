@@ -21,7 +21,13 @@ import { safeBasename } from "../artifacts/keys.js";
 import type { RunRegistry } from "../core/runRegistry.js";
 import type { RunSummary } from "../core/runRegistry/projections.js";
 import { pullRequestNumberOf } from "../core/runRecord.js";
-import { runResource, type RunListCursor, type RunsService, type RunView } from "../core/runsService.js";
+import {
+  privateWorkerRun,
+  runResource,
+  type RunListCursor,
+  type RunsService,
+  type RunView,
+} from "../core/runsService.js";
 import type { ScheduleDef } from "../core/schedules.js";
 import type { ScheduleStore } from "../core/scheduleStore.js";
 import { STORE_UNAVAILABLE_BANNER } from "../core/commandRegistry.js";
@@ -567,7 +573,7 @@ export function createLiveViewHandler(
         );
         return true;
       }
-      const live = index.listActive().filter((s) => matchesPredicate(visibleTo, s));
+      const live = index.listActive().filter((s) => !privateWorkerRun(s) && matchesPredicate(visibleTo, s));
       const render = (page: IndexPage) => {
         // A session holding `all` may view the dashboard as a person (record 0053): the picker
         // offers the installation's people as the source last computed them and the page's
@@ -621,7 +627,7 @@ export function createLiveViewHandler(
         return true;
       }
       const visibleTo = readableRuns(ctx.actor);
-      const live = index.listActive().filter((s) => matchesPredicate(visibleTo, s));
+      const live = index.listActive().filter((s) => !privateWorkerRun(s) && matchesPredicate(visibleTo, s));
       const render = (firings: FiringsState) => {
         const t = now();
         const seed: ScheduledSeed = {
@@ -692,7 +698,7 @@ export function createLiveViewHandler(
         // live path never reads the store — in start order, live rows with
         // their tokens: the token that opened the parent's page opens no child,
         // so each child's row carries its own.
-        const active = index.listActive();
+        const active = index.listActive().filter((s) => !privateWorkerRun(s));
         // The way up (item 33), from the registry alone: the spawning run, or
         // the hosted parent whose instance this run is a child of. A LIVE
         // parent's link carries its token — a hosted parent is live for the
@@ -954,7 +960,9 @@ export function createLiveViewHandler(
         const parentId = view.parentRunId ?? unitLineage?.runId;
         const parentRow =
           parentId !== undefined
-            ? index.listActive().find((s) => s.id === parentId && !s.finished && matchesPredicate(visibleTo, s))
+            ? index
+                .listActive()
+                .find((s) => s.id === parentId && !privateWorkerRun(s) && !s.finished && matchesPredicate(visibleTo, s))
             : undefined;
         const lineage = {
           ...(parentId !== undefined

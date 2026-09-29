@@ -8,6 +8,7 @@ import {
 } from "../../core/authz/index.js";
 import type { IndexSubscriber } from "../../core/runRegistry/indexFeed.js";
 import type { Unsubscribe } from "../../core/runRegistry/state.js";
+import { privateWorkerRun } from "../../core/runsService.js";
 
 // What one dashboard viewer may see of the run registry: the predicate the
 // Access-gated pages list live runs through, and the index feed narrowed to
@@ -43,7 +44,7 @@ export function visibleIndexFeed(
     const shown = new Set<string>();
     return subscribeIndex((ev) => {
       if (ev.type === "upsert") {
-        if (!matchesPredicate(visibleTo, ev.run)) return;
+        if (privateWorkerRun(ev.run) || !matchesPredicate(visibleTo, ev.run)) return;
         shown.add(ev.run.id);
       } else if (!shown.delete(ev.id)) return;
       onEvent(ev);

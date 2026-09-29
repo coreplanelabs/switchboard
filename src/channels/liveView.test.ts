@@ -2170,6 +2170,24 @@ describe("live view on RunsService: history pages + index toggle", () => {
       feed.fireClose();
     });
 
+    it("keeps private worker rows and live tokens out of every ordinary runs page and feed", async () => {
+      const h = harness();
+      const worker = h.registry.create("coding · private", meta(PUBLIC, "worker:instance-private:unitA"));
+      h.registry.publish(worker.id, { type: "input", messageId: "private", text: "private child prompt" });
+      await h.store!.put(record("private-finished", { ...PUBLIC, threadKey: "worker:instance-private:unitA" }));
+      expect((await index(h, "/runs", admin)).ids).toEqual([]);
+      expect((await index(h, "/runs?all=1", admin)).ids).toEqual([]);
+      const feed = fakeReqRes("GET", "/runs?stream=1");
+      h.handler(feed.req, feed.res, admin);
+      expect(feed.body()).not.toContain(worker.id);
+      expect(feed.body()).not.toContain(worker.token);
+      expect(feed.body()).not.toContain("private child prompt");
+      h.registry.publish(worker.id, call("private progress"));
+      expect(feed.body()).not.toContain("private progress");
+      expect((await request(h, `/runs/${worker.id}?t=${worker.token}`, admin)).status).toBe(404);
+      feed.fireClose();
+    });
+
     it("a tokenless finished run the viewer may not read is the same 404 as an unknown id — the page byte-identical, events and friction the text body, the stop's 409 a 404 — with the reason on the audit line and never in the reply", async () => {
       const audit = vi.fn();
       const h = harness({ audit });

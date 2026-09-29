@@ -279,6 +279,8 @@ function instanceAdmits(instance: CoordinatorInstance, visibleTo: Predicate): bo
 export type RunListStatus = "active" | "finished" | "all";
 
 export interface ListRunsOptions {
+  /** Internal coordinator/history reconstruction only; cannot arrive in a JSON request. */
+  privateWorkerAccess?: typeof PRIVATE_WORKER_INTERNAL_READ;
   /** Internal historical admission only: complete evidence, no UI merge or cached ledger. */
   recoveryEvidence?: RecoveryEvidenceScope;
   status: RunListStatus;
@@ -322,7 +324,8 @@ export interface ListRunsResult {
   runs: RunView[];
   /** Present when the visible page or the underlying store fetch may have more persisted rows. */
   nextBefore?: RunListCursor;
-  /** Set when the store threw: `runs` holds live rows only. Never set for `active`. */
+  /** Set when persisted history could not be fully read, including a bounded
+   *  private-run scan; the page is incomplete. Never set for `active`. */
   storeUnavailable?: true;
   /** Set when the live-ledger listing failed: foreign live runs and tombstone
    *  suppression may be missing. A fallback page cannot prove completeness. */
@@ -415,8 +418,18 @@ export interface RunsService {
    *  registry's rows. Empty without a ledger; a ledger that cannot be read is a
    *  warning and empty. */
   liveElsewhere(visibleTo: Predicate): Promise<RunView[]>;
-  getRun(id: string, opts?: { include?: "messages"; requireFinalRecord?: boolean }): Promise<Result<RunRecordView>>;
-  getRunEvents(id: string, opts: { afterSeq?: number; limit?: number }): Promise<Result<RunEventsPageView>>;
+  getRun(
+    id: string,
+    opts?: {
+      include?: "messages";
+      requireFinalRecord?: boolean;
+      privateWorkerAccess?: typeof PRIVATE_WORKER_INTERNAL_READ;
+    },
+  ): Promise<Result<RunRecordView>>;
+  getRunEvents(
+    id: string,
+    opts: { afterSeq?: number; limit?: number; privateWorkerAccess?: typeof PRIVATE_WORKER_INTERNAL_READ },
+  ): Promise<Result<RunEventsPageView>>;
   getRunFriction(id: string): Promise<Result<RunFrictionView>>;
   stopRun(id: string, mode: StopMode, actor: RunActor): Promise<Result<StopRunView>>;
   /** A ship unit's runs in round order (agent-ship item 17): the coding
@@ -473,6 +486,15 @@ export interface RunsService {
  *  bytes of event JSON. */
 export const MAX_EVENTS_PAGE = 500;
 export const MAX_EVENTS_PAGE_BYTES = 256 * 1024;
+const PRIVATE_WORKER_LIST_SCAN_MAX_PAGES = 8;
+
+/** A non-serializable read grant for coordinator settlement and session rebuild. */
+export const PRIVATE_WORKER_INTERNAL_READ = Symbol("private worker internal run read");
+
+export const privateWorkerRun = (view: { threadKey?: string }): boolean =>
+  view.threadKey?.startsWith("worker:") === true;
+const ordinaryRun = (view: { threadKey?: string }, access?: typeof PRIVATE_WORKER_INTERNAL_READ): boolean =>
+  access === PRIVATE_WORKER_INTERNAL_READ || !privateWorkerRun(view);
 
 export interface RunsServiceDeps {
   registry: RunRegistry;
@@ -1042,6 +1064,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         }
       }
       const matches = (r: RunView): boolean =>
+        ordinaryRun(r, opts.privateWorkerAccess) &&
         matchesPredicate(opts.visibleTo, r) &&
         (opts.agent === undefined || r.agent === opts.agent) &&
         (opts.channel === undefined || r.channelId === opts.channel) &&
@@ -1087,26 +1110,52 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       if (store) {
         try {
           const storeLimit = Math.min(RUN_LIST_MAX_LIMIT, limit + live.length);
-          const rows = await store.list({
-            limit: storeLimit,
-            // The policy rides down as the store's own filter: `all` is no
-            // constraint and is omitted so the store's query is unchanged for it.
-            ...(opts.visibleTo.kind !== "all" ? { visibleTo: toVisibilityFilter(opts.visibleTo) } : {}),
-            ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
-            ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
-            ...(opts.threadKey !== undefined ? { threadKey: opts.threadKey } : {}),
-            ...(opts.parentRunId !== undefined ? { parentRunId: opts.parentRunId } : {}),
-            ...(opts.pr !== undefined ? { pr: opts.pr } : {}),
-            ...(opts.sinceMs !== undefined ? { sinceMs: opts.sinceMs } : {}),
-            ...(opts.before !== undefined ? { before: opts.before } : {}),
-            ...(opts.beforeId !== undefined ? { beforeId: opts.beforeId } : {}),
-          });
-          // A provisional tombstone may be dropped below. A short visible
-          // page cannot prove exhaustion when the underlying store page was full.
-          const lastStored = rows.at(-1);
-          if (rows.length === storeLimit && lastStored !== undefined)
-            fullStorePageCursor = { finishedAt: lastStored.finishedAt, id: lastStored.id };
-          for (const row of rows) if (!unfinished.has(row.id)) byId.set(row.id, persistedView(row, prices));
+          let cursor = opts.before !== undefined ? { before: opts.before, beforeId: opts.beforeId } : undefined;
+          let batchLimit = storeLimit;
+          let scanPrivate = false;
+          let scanPages = 0;
+          for (;;) {
+            scanPages++;
+            const rows = await store.list({
+              limit: batchLimit,
+              // The policy rides down as the store's own filter: `all` is no
+              // constraint and is omitted so the store's query is unchanged for it.
+              ...(opts.visibleTo.kind !== "all" ? { visibleTo: toVisibilityFilter(opts.visibleTo) } : {}),
+              ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+              ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
+              ...(opts.threadKey !== undefined ? { threadKey: opts.threadKey } : {}),
+              ...(opts.parentRunId !== undefined ? { parentRunId: opts.parentRunId } : {}),
+              ...(opts.pr !== undefined ? { pr: opts.pr } : {}),
+              ...(opts.sinceMs !== undefined ? { sinceMs: opts.sinceMs } : {}),
+              ...(cursor !== undefined ? cursor : {}),
+            });
+            // A private row can be an internal store cursor, never a public
+            // cursor. Read through it so an ordinary run behind it remains
+            // reachable without revealing the private id or history.
+            scanPrivate ||= rows.some((row) => !ordinaryRun(row, opts.privateWorkerAccess));
+            for (const row of rows)
+              if (!unfinished.has(row.id) && ordinaryRun(row, opts.privateWorkerAccess))
+                byId.set(row.id, persistedView(row, prices));
+            const lastStored = rows.at(-1);
+            const lastVisible = [...byId.values()].at(-1);
+            fullStorePageCursor =
+              rows.length === batchLimit && lastVisible?.finishedAt !== undefined
+                ? { finishedAt: lastVisible.finishedAt, id: lastVisible.id }
+                : undefined;
+            if (!scanPrivate || byId.size >= storeLimit || rows.length < batchLimit || lastStored === undefined) break;
+            if (scanPages >= PRIVATE_WORKER_LIST_SCAN_MAX_PAGES) {
+              storeUnavailable = true;
+              warn("[runs] history list incomplete after the private-run scan bound");
+              break;
+            }
+            const nextCursor = { before: lastStored.finishedAt, beforeId: lastStored.id };
+            if (cursor?.before === nextCursor.before && cursor.beforeId === nextCursor.beforeId) {
+              storeUnavailable = true;
+              break;
+            }
+            cursor = nextCursor;
+            batchLimit = RUN_LIST_MAX_LIMIT;
+          }
         } catch (err) {
           // Degrade to live rows — never a whole-command failure — but say so
           // in the log: the message only (a store error names a route or an
@@ -1156,7 +1205,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
 
     async liveElsewhere(visibleTo) {
       if (visibleTo.kind === "none") return [];
-      return (await ledgerLive()).runs.filter((r) => matchesPredicate(visibleTo, r));
+      return (await ledgerLive()).runs.filter((r) => !privateWorkerRun(r) && matchesPredicate(visibleTo, r));
     },
 
     async getRun(id, opts = {}) {
@@ -1165,7 +1214,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // Git write may be absent from that temporary registry projection.
       if (opts.requireFinalRecord) {
         const record = await storeGet(id);
-        if (!record || record.provisional === true) return notFound;
+        if (!record || record.provisional === true || !ordinaryRun(record, opts.privateWorkerAccess)) return notFound;
         const { events, ...rest } = record;
         const view: RunRecordView = persistedView(rest, prices);
         if (opts.include === "messages") view.events = events;
@@ -1175,6 +1224,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       const snap = summary ? registry.snapshotById(id) : null;
       if (summary && snap) {
         const view: RunRecordView = liveView(summary);
+        if (!ordinaryRun(view, opts.privateWorkerAccess)) return notFound;
         if (opts.include === "messages") view.events = snap.events;
         // A finished row inside the registry's window: its identity, stop state,
         // finish fields and events are the registry's; the record's typed
@@ -1186,6 +1236,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       const far = await ledgerRow(id);
       if (far) {
         const view: RunRecordView = ledgerView(far.row, far.events);
+        if (!ordinaryRun(view, opts.privateWorkerAccess)) return notFound;
         if (opts.include === "messages") view.events = far.events;
         return { ok: true, value: view };
       }
@@ -1194,17 +1245,21 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // read whole to answer "what is this run".
       if (opts.include !== "messages") {
         const summary = await storeSummary(id);
-        if (summary) return { ok: true, value: persistedView(summary, prices) };
+        if (summary)
+          return ordinaryRun(summary, opts.privateWorkerAccess)
+            ? { ok: true, value: persistedView(summary, prices) }
+            : notFound;
         // Not live, not stored: a queued ask's id still has a page (record
         // 0064, "The queue") — the stored request the plane holds under it.
         const queued = await queuedRun(id);
-        return queued ? { ok: true, value: queued } : notFound;
+        return queued && ordinaryRun(queued, opts.privateWorkerAccess) ? { ok: true, value: queued } : notFound;
       }
       const record = await storeGet(id);
       if (!record) {
         const queued = await queuedRun(id);
-        return queued ? { ok: true, value: queued } : notFound;
+        return queued && ordinaryRun(queued, opts.privateWorkerAccess) ? { ok: true, value: queued } : notFound;
       }
+      if (!ordinaryRun(record, opts.privateWorkerAccess)) return notFound;
       const { events, ...rest } = record;
       const view: RunRecordView = persistedView(rest, prices);
       view.events = events;
@@ -1212,6 +1267,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     },
 
     async getRunEvents(id, opts) {
+      if (!(await service.getRun(id, { privateWorkerAccess: opts.privateWorkerAccess })).ok) return notFound;
       const afterSeq = Math.max(0, Math.floor(opts.afterSeq ?? 0));
       const limit = opts.limit ?? MAX_EVENTS_PAGE;
       const snap = registry.snapshotById(id);
@@ -1248,7 +1304,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
 
     async getRunFriction(id) {
       const snap = registry.snapshotById(id);
-      if (snap)
+      if (snap) {
+        if (privateWorkerRun(registry.getById(id) ?? {})) return notFound;
         return {
           ok: true,
           value: {
@@ -1265,11 +1322,15 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             }),
           },
         };
+      }
       const far = await ledgerRow(id);
-      if (far) return { ok: true, value: { id, finished: false, diagnosis: analyze(far.events, { finished: false }) } };
+      if (far)
+        return privateWorkerRun(far.row.meta)
+          ? notFound
+          : { ok: true, value: { id, finished: false, diagnosis: analyze(far.events, { finished: false }) } };
       // The stored diagnosis rides on the summary row — the events are not needed.
       const summary = await storeSummary(id);
-      if (!summary) return notFound;
+      if (!summary || privateWorkerRun(summary)) return notFound;
       return { ok: true, value: { id, finished: true, diagnosis: summary.diagnosis } };
     },
 
@@ -1324,6 +1385,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     },
 
     authorizeLive(id, token) {
+      const summary = registry.getById(id);
+      if (!summary || privateWorkerRun(summary)) return null;
       if (!registry.has(id, token)) return null;
       return {
         subscribe: (opts) => registry.subscribe(id, token, opts),

@@ -11,7 +11,13 @@ import type { RunRecord } from "./runRecord.js";
 import { RunRegistry, type RunRegistryOptions } from "./runRegistry.js";
 import { parseModelPrices } from "./modelPricing.js";
 import { InMemoryRunStore, type RunStore } from "./runStore.js";
-import { createRunsService, runResource, type RunActor, type RunsService } from "./runsService.js";
+import {
+  PRIVATE_WORKER_INTERNAL_READ,
+  createRunsService,
+  runResource,
+  type RunActor,
+  type RunsService,
+} from "./runsService.js";
 import { authorize } from "./authz/authorize.js";
 import { assembleRunRecord } from "./dispatch/record.js";
 import { pipelineOfEvents } from "./pipelineStanding.js";
@@ -85,6 +91,77 @@ function expectNoToken(value: unknown): void {
 }
 
 describe("RunsService.getRun", () => {
+  it("hides a private worker's live and persisted prompt from ordinary run reads", async () => {
+    const { reg, svc, store } = setup();
+    const privateThread = "worker:instance-private:unitA";
+    const live = reg.create("coding · private", {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: privateThread,
+    });
+    reg.publish(live.id, { type: "input", messageId: "private-1", text: "private child prompt" });
+    await store!.put(record("private-finished", NOW - 1, { threadKey: privateThread }));
+
+    const listed = await svc.listRuns({ visibleTo: ALL, status: "all" });
+    expect(listed.runs).toEqual([]);
+    expect(await svc.getRun(live.id, { include: "messages" })).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRun("private-finished", { include: "messages" })).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRunEvents(live.id, {})).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRunEvents("private-finished", {})).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRunFriction(live.id)).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRunFriction("private-finished")).toEqual({ ok: false, error: "not_found" });
+    expect(svc.authorizeLive(live.id, live.token)).toBeNull();
+
+    expect(
+      (
+        await svc.listRuns({ visibleTo: ALL, status: "all", privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ })
+      ).runs.map((r) => r.id),
+    ).toEqual([live.id, "private-finished"]);
+    expect(
+      (await svc.getRun(live.id, { include: "messages", privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ })).ok,
+    ).toBe(true);
+    expect(
+      (await svc.getRun("private-finished", { include: "messages", privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ }))
+        .ok,
+    ).toBe(true);
+    expect((await svc.getRunEvents(live.id, { privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ })).ok).toBe(true);
+  });
+
+  it("pages past private worker records without exposing their ids as cursors", async () => {
+    const { svc, store } = setup();
+    await store!.put(record("ordinary-old", NOW - 3));
+    await store!.put(record("private-middle", NOW - 2, { threadKey: "worker:instance-private:unitA" }));
+    await store!.put(record("private-new", NOW - 1, { threadKey: "worker:instance-private:unitB" }));
+    const first = await svc.listRuns({ visibleTo: ALL, status: "all", limit: 1 });
+    expect(first.runs.map((row) => row.id)).toEqual(["ordinary-old"]);
+    expect(JSON.stringify(first)).not.toContain("private-");
+
+    await store!.put(record("ordinary-new", NOW));
+    const newest = await svc.listRuns({ visibleTo: ALL, status: "all", limit: 1 });
+    expect(newest.runs.map((row) => row.id)).toEqual(["ordinary-new"]);
+    expect(newest.nextBefore).toEqual({ finishedAt: NOW, id: "ordinary-new" });
+    const older = await svc.listRuns({
+      visibleTo: ALL,
+      status: "all",
+      limit: 1,
+      before: NOW,
+      beforeId: "ordinary-new",
+    });
+    expect(older.runs.map((row) => row.id)).toEqual(["ordinary-old"]);
+    expect(JSON.stringify(older)).not.toContain("private-");
+  });
+
+  it("bounds a private-only history scan and marks the ordinary page incomplete", async () => {
+    const { svc, store } = setup();
+    for (let i = 0; i < 1600; i++)
+      await store!.put(record(`private-${i}`, NOW - i, { threadKey: "worker:instance-private:unitA" }));
+    const list = vi.spyOn(store!, "list");
+    const page = await svc.listRuns({ visibleTo: ALL, status: "all", limit: 1 });
+    expect(list).toHaveBeenCalledTimes(8);
+    expect(page).toEqual({ runs: [], storeUnavailable: true });
+    expect(JSON.stringify(page)).not.toContain("private-");
+  });
   it("returns a live run as finished:false with no token and no events unless asked", async () => {
     const { reg, svc } = setup();
     const { id } = reg.create("coding · acme/x");
@@ -1025,17 +1102,22 @@ describe("RunsService with the run ledger — one registry across generations (r
     const svc = createRunsService({ registry: base.reg, store: base.store, ledger, warn: (m) => warnings.push(m) });
     return { ...base, svc, ledger, warnings };
   }
-  async function farRun(ledger: InMemoryRunLedger, id = "far-1", over: { userId?: string; agent?: string } = {}) {
+  async function farRun(
+    ledger: InMemoryRunLedger,
+    id = "far-1",
+    over: { userId?: string; agent?: string; threadKey?: string } = {},
+  ) {
+    const threadKey = over.threadKey ?? `slack:C9:${id}`;
     await ledger.claim({
       runId: id,
-      threadKey: `slack:C9:${id}`,
+      threadKey,
       gen: "g-OTHER",
       leaseMs: 30_000,
       startedAt: NOW - 5_000,
       meta: {
         channelId: "slack:C9",
         userId: over.userId ?? "slack:UIVY",
-        threadKey: `slack:C9:${id}`,
+        threadKey,
         agent: over.agent ?? "coding",
         model: "anthropic/claude",
         channelVisibility: "public",
@@ -1052,6 +1134,18 @@ describe("RunsService with the run ledger — one registry across generations (r
       { type: "tool_call", tool: "bash", summary: "$ make", at: NOW - 4_000, seq: 2 },
     ]);
   }
+
+  it("hides a private worker live on another generation's ledger while preserving an internal read", async () => {
+    const { svc, ledger } = ledgerSetup();
+    await farRun(ledger, "far-private", { threadKey: "worker:instance-private:unitA" });
+    expect((await svc.listRuns({ visibleTo: ALL, status: "active" })).runs).toEqual([]);
+    expect(await svc.getRun("far-private", { include: "messages" })).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRunEvents("far-private", {})).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRunFriction("far-private")).toEqual({ ok: false, error: "not_found" });
+    expect(
+      (await svc.getRun("far-private", { include: "messages", privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ })).ok,
+    ).toBe(true);
+  });
 
   it("lists a run live on the ledger under another generation as a live row — its agent, sender, repo, event count and activity from the ledger, its owner generation named — under `all` and `active`, never under `finished`; its store tombstone never surfaces", async () => {
     const { svc, store, ledger } = ledgerSetup();

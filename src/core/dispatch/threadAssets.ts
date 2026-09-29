@@ -11,7 +11,7 @@
 // walks the tools' imports — nothing here reaches the dispatcher's runtime.
 import type { ArtifactStore } from "../../artifacts/store.js";
 import type { RunEvent } from "../runEvents.js";
-import type { RunListCursor, RunView, RunsService } from "../runsService.js";
+import { PRIVATE_WORKER_INTERNAL_READ, type RunListCursor, type RunView, type RunsService } from "../runsService.js";
 import { formatSize, type ThreadArtifact } from "./staging.js";
 
 /** One file of the thread: received on one of its messages (`in`) or produced
@@ -63,15 +63,22 @@ export function threadAssetsOf(
  *  refused stops that read where it stands and the log says so: a store
  *  hiccup costs an incomplete list, never the request. */
 export async function readThreadAssets(
-  deps: { runs: Pick<RunsService, "listRuns" | "getRunEvents">; store: Pick<ArtifactStore, "head"> },
+  deps: {
+    runs: Pick<RunsService, "listRuns" | "getRunEvents">;
+    store: Pick<ArtifactStore, "head">;
+    trustedCoordinatorChild?: boolean;
+  },
   threadKey: string,
   warn: (line: string) => void = (line) => console.warn(line),
 ): Promise<ThreadAsset[]> {
+  const privateWorkerAccess =
+    deps.trustedCoordinatorChild && threadKey.startsWith("worker:") ? PRIVATE_WORKER_INTERNAL_READ : undefined;
   const runs: RunView[] = [];
   let before: RunListCursor | undefined;
   try {
     for (;;) {
       const page = await deps.runs.listRuns({
+        ...(privateWorkerAccess !== undefined ? { privateWorkerAccess } : {}),
         status: "all",
         visibleTo: { kind: "all" },
         threadKey,
@@ -101,7 +108,10 @@ export async function readThreadAssets(
     let afterSeq: number | undefined;
     try {
       for (;;) {
-        const r = await deps.runs.getRunEvents(run.id, afterSeq === undefined ? {} : { afterSeq });
+        const r = await deps.runs.getRunEvents(run.id, {
+          ...(afterSeq !== undefined ? { afterSeq } : {}),
+          ...(privateWorkerAccess !== undefined ? { privateWorkerAccess } : {}),
+        });
         if (!r.ok) {
           warn(`[thread] ${run.id}: reading its files stopped after ${events.length} event(s) — ${r.error}`);
           break;

@@ -2555,9 +2555,10 @@ export async function dispatch(
     // reads them fresh.
     const threadAssets: Promise<ThreadAsset[]> | undefined =
       !resume && deps.artifacts && thread && thread.length > 0
-        ? readThreadAssets({ runs: runsService, store: deps.artifacts }, msg.threadKey).then((assets) =>
-            assets.filter((a) => a.runId !== runId),
-          )
+        ? readThreadAssets(
+            { runs: runsService, store: deps.artifacts, trustedCoordinatorChild: opts.coordinator !== undefined },
+            msg.threadKey,
+          ).then((assets) => assets.filter((a) => a.runId !== runId))
         : undefined;
     // What prior runs' records name as received is still in the store for the
     // retention window, so a later run pulls it too — never copied again. The
@@ -3157,7 +3158,11 @@ export async function dispatch(
       deps.runLedger,
       deps.artifacts
         ? {
-            read: () => readThreadAssets({ runs: runsService, store: deps.artifacts! }, msg.threadKey),
+            read: () =>
+              readThreadAssets(
+                { runs: runsService, store: deps.artifacts!, trustedCoordinatorChild: opts.coordinator !== undefined },
+                msg.threadKey,
+              ),
             pathOf: (key) => workspaceFiles.pathOf(key),
           }
         : undefined,

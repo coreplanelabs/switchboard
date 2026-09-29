@@ -238,7 +238,11 @@ describe("plane stop — the runner_stop move (record 0064; issue 1924)", () => 
     };
     const runs = {
       listRuns: async (opts: ListRunsOptions): Promise<ListRunsResult> => ({
-        runs: opts.threadKey !== undefined ? (over.liveByThread?.[opts.threadKey] ?? []) : [],
+        runs:
+          opts.threadKey !== undefined &&
+          (!opts.threadKey.startsWith("worker:") || opts.privateWorkerAccess !== undefined)
+            ? (over.liveByThread?.[opts.threadKey] ?? [])
+            : [],
       }),
       listInstanceUnits: async () => [],
       stopRun: async (id: string, mode: "soft" | "hard", actor: { kind: string; id: string }) => {
@@ -314,6 +318,18 @@ describe("plane stop — the runner_stop move (record 0064; issue 1924)", () => 
       ],
     });
     expect(h.stops.map((stop) => stop.id)).toEqual(["parent-1", "child-1", "child-2"]);
+  });
+
+  it("hard-stops a linked private worker while keeping ordinary plane reads private", async () => {
+    const threadKey = `worker:${INSTANCE.id}:U12`;
+    const h = stopHarness({
+      liveByThread: { [threadKey]: [view({ id: "private-child", threadKey, parentInstanceId: INSTANCE.id })] },
+    });
+    await h.store.put(INSTANCE);
+    await h.store.putUnits([unit("U12", { threadKey })]);
+    const report = await h.service.stop(INSTANCE.id, actor, ALL);
+    expect(report).toMatchObject({ children: [{ id: "private-child", outcome: "stopping" }] });
+    expect(h.stops.map((s) => s.id)).toEqual(["parent-1", "private-child"]);
   });
 
   it("a stop mark that could not be written still ends the runs and says so; an instance the viewer's predicate does not admit is unknown, and an unknown id stops nothing", async () => {
