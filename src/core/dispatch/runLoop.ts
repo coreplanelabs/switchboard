@@ -141,6 +141,7 @@ import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 import { buildDepotCi } from "../../execution/depotCi.js";
 import { privateMainEvent } from "../privateMainEvent.js";
+import { planeRowIdentities } from "./mainAudience.js";
 
 /** Longest note summary the loop writes for an ending (`run_failed`, `workspace_torn_down`): a reason, not a stack dump. */
 const ENDING_NOTE_MAX = 500;
@@ -165,6 +166,14 @@ export interface RunOutcome {
   prNote: string | undefined;
   /** "Did real work" — the memory reflection gate. */
   toolCalls: number;
+  /** Repositories exposed by main-agent GitHub reads during this run. */
+  githubReadRepos: readonly string[];
+  /** An exposed repository without a usable name cannot be reauthorized. */
+  githubReadUnknown: boolean;
+  /** Full identities exposed by plane_show, for a fresh requester-view check before reply. */
+  planeRead: boolean;
+  planeReadRows: readonly string[];
+  planeReadUnknown: boolean;
   runDiagnosis: FrictionDiagnosis | undefined;
   /** The agent's checklist exactly as it left it (○/✱ items still open) — what a failed or stopped card shows. */
   checklistAsLeft: () => string | undefined;
@@ -776,7 +785,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (!trimmed) return;
     if (privateRun) return;
     checklist = trimmed;
-    ledgerRun?.setState({ checklist: trimmed });
+    if (!privateMain) ledgerRun?.setState({ checklist: trimmed });
     card.update(currentFrame());
   };
   // Heartbeat: the card ticks every 5s no matter what. A ticking timer means
@@ -1313,9 +1322,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // The plane's read for the orchestrator preset (record 0070): the one plane
   // service under the REQUESTER's own predicate, so the chat cites exactly the
   // rows its person may see — the same rows `plane show` would print them.
+  const planeReadRows = new Set<string>();
+  let planeRead = false;
+  let planeReadUnknown = false;
   const plane = deps.plane
     ? {
-        table: async () => (await deps.plane!()).table(predicateFor(chatActorOf(deps.config, msg), "runs:read", "run")),
+        table: async () => {
+          const table = await (
+            await deps.plane!()
+          ).table(predicateFor(chatActorOf(deps.config, msg), "runs:read", "run"));
+          planeRead = true;
+          const identities = planeRowIdentities(table);
+          for (const id of identities.rows) planeReadRows.add(id);
+          planeReadUnknown ||= identities.unknown;
+          return table;
+        },
       }
     : undefined;
   const mainWork = mainWorkForRun({
@@ -1333,6 +1354,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     verifiedAtOpen,
     ...(verifyDirectAudience ? { verify: verifyDirectAudience } : {}),
   });
+  const githubReadRepos = new Set<string>();
+  let githubReadUnknown = false;
+  const github = githubCapabilityFor(deps, chatActorOf(deps.config, msg));
+  github.recordRead = (repo) => {
+    if (/^[^/\s]+\/[^/\s]+$/.test(repo)) githubReadRepos.add(repo.toLowerCase());
+    else githubReadUnknown = true;
+  };
   const toolContext = {
     executor,
     reportProgress,
@@ -1341,7 +1369,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(uploadTicket ? { uploadTicket } : {}),
     web: webCapability(),
     skills: deps.skills,
-    github: githubCapabilityFor(deps, chatActorOf(deps.config, msg)),
+    github,
     ...(slackContext ? { slackContext: slackContext.capability } : {}),
     depotCi:
       agent.name === "coding"
@@ -2437,8 +2465,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         }),
       );
     }
-    // The run record is the source of truth and Slack/GitHub are projections
-    // of it: publish the final answer into the stream FIRST (redacted like
+    // The run record is the source of truth for ordinary runs and Slack/GitHub
+    // are projections of it. The private main run records only a generic
+    // answer; its source-bearing answer may reach the DM after the audience
+    // recheck. Publish the final answer into the stream FIRST (redacted like
     // every event, uncapped — a soft stop's "findings so far" included; a
     // re-review's answer supersedes the first one, which is not the run's
     // answer). It MUST precede the finally below: `finish()` runs there, and a
@@ -2784,6 +2814,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     reviewStoppedBeforeStart,
     prNote,
     toolCalls,
+    githubReadRepos: [...githubReadRepos],
+    githubReadUnknown,
+    planeRead,
+    planeReadRows: [...planeReadRows],
+    planeReadUnknown,
     runDiagnosis,
     checklistAsLeft,
     checklistCheckedOff,

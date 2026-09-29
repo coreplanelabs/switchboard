@@ -1287,6 +1287,8 @@ export interface ComposedPrompt {
 /** What `composePrompt` reads off the dispatch. */
 export interface PromptContext {
   msg: IncomingMessage;
+  /** The one-person DM was checked against Slack before private MCP discovery. */
+  directAudienceVerified?: boolean;
   agent: AgentDef;
   /** The run's effective profile: the config block names its budget and what clipped it. */
   profile: RunProfile;
@@ -1360,7 +1362,11 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
   // scoped — a process without MCP has the null source — → no tools, no
   // block, request unchanged.
   const mcpForRun = await root.span("dispatch.mcp_discovery", () =>
-    deps.mcp.toolsFor(agent.name, { userId: msg.userId, channelId: msg.channelId }),
+    deps.mcp.toolsFor(agent.name, {
+      userId: msg.userId,
+      channelId: msg.channelId,
+      ...(ctx.directAudienceVerified && msg.directAudience ? { directAudience: msg.directAudience } : {}),
+    }),
   );
   const mcpBlock = mcpGuidanceBlock(mcpForRun.servers);
 

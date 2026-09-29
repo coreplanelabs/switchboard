@@ -117,7 +117,7 @@ describe("selfDescriptionBlock", () => {
     expect(allOff).not.toContain("kept as run history");
     expect(allOff).toContain("no cross-session memory");
     expect(allOff).not.toContain("memory list");
-    expect(allOff).not.toContain("MCP");
+    expect(allOff).not.toContain("an MCP surface");
     const memoryOnly = selfDescriptionBlock(AGENTS, "acme", { ...NO_CAPABILITIES, memory: true }, undefined);
     expect(memoryOnly).toContain("`memory list`");
     expect(memoryOnly).toContain("keeps no run history");

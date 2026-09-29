@@ -695,6 +695,8 @@ export interface DeliveryContext {
   runDiagnosis: FrictionDiagnosis | undefined;
   releaseWorkspace: (span?: Span) => Promise<void>;
   root: Span;
+  /** A source-bearing answer is rechecked before any channel publication. */
+  publicationRefusal?: () => Promise<string | undefined>;
 }
 
 /**
@@ -805,9 +807,11 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
         ),
       () =>
         root.span("post.reply", async () => {
-          if (!privateAddressValid || (privateRun && !(await privateRunStillValid())))
+          if (!privateAddressValid) return io.reply(privateAudienceRefusal(ctx.privateAudienceLatch));
+          const publicationRefusal = await ctx.publicationRefusal?.();
+          if (privateRun && !(await privateRunStillValid()))
             return io.reply(privateAudienceRefusal(ctx.privateAudienceLatch));
-          return io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer);
+          return io.reply(publicationRefusal ?? (prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer));
         }),
       // A null channel's reply resolves but reaches nobody: the seal says
       // `replyOk: false` with the reason (run-history.md item 38).

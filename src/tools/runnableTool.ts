@@ -91,7 +91,7 @@ export interface ToolContext {
   skills?: SkillStore;
   /** GitHub capability behind the `github_*` tools (docs/reference/specs/github-tools.md):
    *  the REST client on the bot's App credential plus the requesting user's
-   *  per-repo write gate. Injected by the dispatcher; absent → the tools
+   *  per-repo gates. Injected by the dispatcher; absent → the tools
    *  report themselves unavailable. */
   github?: GithubCapability;
   /** Requester-bound Slack source reads; only a Slack main run may receive it. */

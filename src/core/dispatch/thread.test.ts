@@ -3,6 +3,7 @@ import type { CoordinatorUnit } from "../coordinator/contract.js";
 import type { RunSession } from "../runRecord.js";
 import type { RunView } from "../runsService.js";
 import {
+  establishedMainDmOf,
   instanceOf,
   ownerOf,
   previousRunOf,
@@ -27,6 +28,37 @@ const run = (over: Partial<RunView> & { id: string }): RunView => ({
   finished: true,
   eventCount: 0,
   ...over,
+});
+
+describe("establishedMainDmOf — retained main conversation", () => {
+  const audience = { channelId: "slack:D1", threadKey: "slack:D1:1.0", userId: "slack:UADMIN" };
+
+  it("finds a continuable main run behind a full page of newer refused main runs", async () => {
+    const refused = Array.from({ length: 200 }, (_, index) =>
+      run({ id: `refused-${index}`, agent: "orchestrator", ...audience, finishedAt: 2_000 - index }),
+    );
+    const main = run({ id: "main", agent: "orchestrator", ...audience, session: closed, finishedAt: 500 });
+    const listRuns = vi.fn(async (opts: { before?: number; beforeId?: string }) =>
+      opts.before === undefined
+        ? { runs: refused, nextBefore: { finishedAt: 1_801, id: "refused-199" } }
+        : { runs: [main] },
+    );
+    expect(await establishedMainDmOf({ listRuns } as never, audience, [])).toBe(true);
+    expect(listRuns).toHaveBeenCalledTimes(2);
+    expect(listRuns.mock.calls[0]?.[0]).toMatchObject({
+      agent: "orchestrator",
+      status: "finished",
+      threadKey: audience.threadKey,
+    });
+    expect(listRuns.mock.calls[1]?.[0]).toMatchObject({ before: 1_801, beforeId: "refused-199" });
+  });
+
+  it("does not adopt a different requester's main session", async () => {
+    const listRuns = vi.fn(async () => ({
+      runs: [run({ id: "foreign", agent: "orchestrator", ...audience, userId: "slack:UOTHER", session: closed })],
+    }));
+    expect(await establishedMainDmOf({ listRuns } as never, audience, [])).toBe(false);
+  });
 });
 const session = (range: RunSession["range"]): RunSession => ({
   key: "slack:C1:1.0:coding",

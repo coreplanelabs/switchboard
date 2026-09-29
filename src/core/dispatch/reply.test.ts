@@ -886,6 +886,31 @@ describe("deliverAnswer — the answer reaches the thread", () => {
     expect(s.replies[0]).not.toContain("private fact");
   });
 
+  it("rechecks source access after the card closes and before the channel reply", async () => {
+    const s = finishedRun();
+    let sourceReadable = true;
+    let checks = 0;
+    await deliverAnswer({
+      ...s.ctx,
+      agent: getAgent("orchestrator"),
+      answer: "private source fact",
+      card: {
+        ...s.ctx.card,
+        done: async (frame) => {
+          sourceReadable = false;
+          s.closes.push(frame);
+        },
+      },
+      publicationRefusal: async () => {
+        checks++;
+        return sourceReadable ? undefined : "Please ask me to check the source again.";
+      },
+    });
+    expect(checks).toBe(1);
+    expect(s.replies).toEqual(["Please ask me to check the source again."]);
+    expect(JSON.stringify(s.closes)).not.toContain("private source fact");
+  });
+
   it("rechecks a stamped private run without a Slack context binding before its reply", async () => {
     const s = finishedRun();
     const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };

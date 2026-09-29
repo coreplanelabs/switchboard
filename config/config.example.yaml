@@ -717,6 +717,11 @@ workspaceDir: ./workspaces
 #                                          # bot-only — seals tokens entered on the connect page
 #   # secretsPath: ./data/mcp-secrets.json # sealed blobs + tickets when no runtimeOverrides.worker
 #
+# MCP agents default to [general, research], unchanged for existing sources.
+# To expose a read source to orchestrator, explicitly set agents: [orchestrator]
+# (or add it to an explicit list). Use read-only upstream permissions: only tools
+# marked readOnlyHint: true and not destructive are offered to orchestrator;
+# annotations select tools but cannot constrain what a remote server actually does.
 # defaults:
 #   mcpServers:
 #     github:

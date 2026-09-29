@@ -99,7 +99,7 @@ export interface HarnessProcessDeps {
 }
 
 /** What the run stage reads off the dispatcher's dependencies: the tools'
- *  capabilities (the GitHub API and the per-user write gate), the GitHub seams
+ *  capabilities (the GitHub API and the per-user gates), the GitHub seams
  *  the post-steps call, the ledger for the claim, the skills store for the
  *  tool context, the record writer for the finish. `CoreDeps` extends this; a
  *  caller's shape is unchanged. */
@@ -274,6 +274,8 @@ export interface ClaimContext {
   reserved: LedgerRun | undefined;
   system: string;
   mcpForRun: McpToolsForRun;
+  /** Stamped only after the main audience preflight accepted the prompt. */
+  mainAudienceChecked?: true;
   messages: ChatMessage[];
   resume: ResumeContext | undefined;
   /** The handle a resume adopted at admission; undefined for a fresh request. */
@@ -387,6 +389,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         meta: {
           agent: agent.name,
           model: resolved.modelRef,
+          ...(ctx.mainAudienceChecked ? { mainAudienceChecked: true as const } : {}),
           channelId: msg.channelId,
           userId: msg.userId,
           threadKey: msg.threadKey,
@@ -532,7 +535,7 @@ export const webCapability = () => (sharedWeb ??= makeWebCapability(processSecre
 
 /** The `github_*` tools' capability for one run (docs/reference/specs/github-tools.md):
  *  the process-wide REST client on the App credential (or the injected test
- *  double) plus the REQUESTING ACTOR's per-repo write gate — `canUseRepo` on
+ *  double) plus the REQUESTING ACTOR's per-repo gate — `canUseRepo` on
  *  the actor `resolveChatActor` yields (a relay's app ∩ person, a bound
  *  credential's own grants), the same allowlist that admits a user to a
  *  repo's resident — so an issue write from a plain mention is authorized
@@ -540,7 +543,16 @@ export const webCapability = () => (sharedWeb ??= makeWebCapability(processSecre
 let sharedGithubApi: GithubApi | undefined;
 export function githubCapabilityFor(deps: RunDeps, actor: Actor): GithubCapability {
   const api = deps.githubApi ?? (sharedGithubApi ??= new RestGithubApi());
-  return { api, canWrite: (repo) => deps.config.canUseRepo(actor, repo) };
+  return {
+    api,
+    canWrite: (repo) => deps.config.canUseRepo(actor, repo),
+    // The App token proves only the installation's access, not this person's.
+    // Until GitHub user credentials are available, expose only public repos
+    // that the resolved requester may use. Re-read each tool call so a grant
+    // or visibility change is not masked by an earlier turn's cached list.
+    readableRepos: async () =>
+      (await api.listRepos()).filter((repo) => !repo.private && deps.config.canUseRepo(actor, repo.fullName)),
+  };
 }
 
 /** The notice the drain (src/index.ts) sets on SIGTERM from a deploy rollout.

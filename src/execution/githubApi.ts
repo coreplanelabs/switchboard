@@ -304,7 +304,8 @@ export class RestGithubApi implements GithubApi {
       for (const r of body.repositories ?? []) {
         out.push({
           fullName: String(r.full_name),
-          private: Boolean(r.private),
+          // A missing visibility field is unknown, never evidence that a repo is public.
+          private: r.private !== false,
           defaultBranch: String(r.default_branch ?? "main"),
           description: typeof r.description === "string" ? r.description : null,
         });

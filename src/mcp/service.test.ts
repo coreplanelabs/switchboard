@@ -158,7 +158,7 @@ describe("McpService — tiers and authorization (items 13–14)", () => {
     expect(h.config.config.defaults.mcpServers).toEqual({ github: expect.anything() });
   });
 
-  it("channel and user servers may reach general/research only; unknown agents, SSRF URLs, duplicates (runtime or static), and lower-tier shadowing are refused", async () => {
+  it("channel and user servers reject agents outside the self-serve set; unknown agents, SSRF URLs, duplicates (runtime or static), and lower-tier shadowing are refused", async () => {
     const h = harness();
     expect(
       await code(
@@ -445,6 +445,114 @@ describe("McpService — the connect flow (items 15–16)", () => {
 });
 
 describe("McpService — the run-time view (item 17)", () => {
+  it("orchestrator opens only its requester's user-scoped source in a one-person Slack DM", async () => {
+    const h = harness();
+    await h.service.add(alice, ME(alice), { name: "default-user", url: "https://u.example/mcp", auth: "none" });
+    await h.service.add(alice, CH("slack:C1"), { name: "default-channel", url: "https://c.example/mcp", auth: "none" });
+    await h.service.add(admin, ORG, { name: "default-org", url: "https://o.example/mcp", auth: "none" });
+    const caller = { userId: alice.id, channelId: "slack:C1" };
+    expect(await h.service.source.toolsFor("orchestrator", caller)).toEqual({ tools: [], servers: [] });
+    expect(
+      (await h.service.list(alice, "slack:C1")).filter((s) => s.name.startsWith("default-")).map((s) => s.agents),
+    ).toEqual([
+      ["general", "research"],
+      ["general", "research"],
+      ["general", "research"],
+    ]);
+    for (const [actor, target, name] of [
+      [alice, ME(alice), "own"],
+      [bob, ME(bob), "own"],
+      [alice, CH("slack:C1"), "channel"],
+      [admin, ORG, "org"],
+    ] as const) {
+      await h.service.add(actor, target, {
+        name,
+        url: `https://${name}.example/mcp`,
+        auth: "bearer",
+        agents: ["orchestrator"],
+      });
+    }
+    // Separate sealed credentials, not a shared service actor or a thread owner's token.
+    for (const [idx, identity, token] of [
+      [1, ada, "own-token"],
+      [2, stranger, "other-token"],
+      [3, ada, "channel-token"],
+      [4, ada, "org-token"],
+    ] as const) {
+      await h.service.completeTicket(`nonce-${String(idx).padStart(20, "0")}`, identity, token);
+    }
+    expect(await h.service.source.toolsFor("orchestrator", caller)).toEqual({ tools: [], servers: [] });
+    expect(await h.service.source.toolsFor("orchestrator", { userId: alice.id, channelId: "slack:G1" })).toEqual({
+      tools: [],
+      servers: [],
+    });
+    expect(await h.service.source.toolsFor("orchestrator", { userId: alice.id })).toEqual({ tools: [], servers: [] });
+    const dm = {
+      userId: alice.id,
+      channelId: "slack:DALICE",
+      directAudience: {
+        kind: "slack-unshared-im" as const,
+        userId: alice.id,
+        channelId: "slack:DALICE",
+        threadKey: "slack:DALICE:1.0",
+      },
+    };
+    expect(await h.service.source.toolsFor("orchestrator", { userId: alice.id, channelId: "slack:DALICE" })).toEqual({
+      tools: [],
+      servers: [],
+    });
+    expect(
+      await h.service.source.toolsFor("orchestrator", {
+        ...dm,
+        channelId: "slack:C1",
+        directAudience: { ...dm.directAudience, channelId: "slack:C1" },
+      }),
+    ).toEqual({ tools: [], servers: [] });
+    const out = await h.service.source.toolsFor("orchestrator", dm);
+    expect(out.tools.map((t) => t.name)).toEqual(["mcp__own__search"]);
+    expect(out.servers).toEqual([
+      expect.objectContaining({
+        server: "own",
+        toolCount: 1,
+        audience: "user:slack:UALICE/own",
+        revision: expect.stringMatching(/^[a-f0-9]{32}$/),
+      }),
+    ]);
+    const resolved = await h.service.resolveForRun("orchestrator", dm);
+    expect(resolved.map((r) => ("spec" in r ? [r.spec.id, r.spec.auth?.token] : r.name))).toEqual([
+      ["user:slack:UALICE/own", "own-token"],
+    ]);
+    const other = await h.service.source.toolsFor("orchestrator", {
+      userId: bob.id,
+      channelId: "slack:DBOB",
+      directAudience: {
+        kind: "slack-unshared-im",
+        userId: bob.id,
+        channelId: "slack:DBOB",
+        threadKey: "slack:DBOB:1.0",
+      },
+    });
+    expect(other.tools.map((t) => t.name)).toEqual(["mcp__own__search"]);
+    expect(
+      h.clients
+        .filter(({ spec }) => spec.id?.startsWith("user:") && spec.name === "own")
+        .map(({ spec }) => [spec.id, spec.auth?.token]),
+    ).toEqual([
+      ["user:slack:UALICE/own", "own-token"],
+      ["user:slack:UBOB/own", "other-token"],
+      ["user:slack:UALICE/own", "own-token"],
+      ["user:slack:UBOB/own", "other-token"],
+    ]);
+    const catalog = await h.service.source.catalogFor(caller);
+    expect(catalog.filter((s) => s.agents.includes("orchestrator"))).toEqual([]);
+    expect(
+      (await h.service.source.catalogFor(dm)).filter((s) => s.agents.includes("orchestrator")).map((s) => s.server),
+    ).toEqual(["own"]);
+    expect(
+      catalog.filter((s) => s.server.startsWith("default-")).every((s) => s.agents.join() === "general,research"),
+    ).toBe(true);
+  });
+
   it("resolves org + channel + own servers for the agent, shadowed names reported, self-serve tiers never reach coding; the source bridges them", async () => {
     const h = harness();
     await h.service.add(alice, ME(alice), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "none" });
@@ -484,6 +592,27 @@ describe("McpService — the run-time view (item 17)", () => {
       { server: "vanta", toolCount: 2 },
       { server: "github", unavailable: "name shadowed by the org-scoped server of the same name" },
     ]);
+  });
+
+  it("omitted agents in existing static and stored sources remain general and research only", async () => {
+    const h = harness({ yaml: YAML.replace(", agents: [general, coding]", "") });
+    const entry = { url: "https://read.example/mcp", auth: "none" as const };
+    await h.config.setOrgOverride({ mcpServers: { org: entry } });
+    await h.config.setChannelOverride("slack:CSTATIC", { mcpServers: { channel: entry } });
+    await h.config.setUserOverride(alice.id, { mcpServers: { own: entry } });
+    const caller = { userId: alice.id, channelId: "slack:CSTATIC" };
+    expect(await h.service.source.toolsFor("orchestrator", caller)).toEqual({ tools: [], servers: [] });
+    expect(h.clients).toEqual([]);
+    const catalog = await h.service.source.catalogFor(caller);
+    expect(catalog).toHaveLength(6);
+    expect(catalog.every((s) => s.agents.join() === "general,research")).toBe(true);
+    expect((await h.service.list(alice, caller.channelId)).every((s) => s.agents.join() === "general,research")).toBe(
+      true,
+    );
+    const specs = await h.service.resolveForRun("general", caller);
+    expect(
+      specs.filter((s) => "spec" in s).every((s) => "spec" in s && s.spec.agents.join() === "general,research"),
+    ).toBe(true);
   });
 
   it("a credential that will not open, a missing one, and a secret-store outage are named outcomes, never a crash", async () => {
