@@ -7,6 +7,7 @@ import {
   githubIssueCreateTool,
   githubIssueDeleteTool,
   githubIssueGetTool,
+  githubPullGetTool,
   githubIssueListTool,
   githubIssueUpdateTool,
   githubReposTool,
@@ -48,6 +49,20 @@ const mem = () =>
           updatedAt: "2026-09-02T00:00:00Z",
           body: "the body",
           comments: 0,
+        },
+      ],
+      pulls: [
+        {
+          number: 7,
+          title: "Fix login",
+          body: "Keep this context",
+          state: "open",
+          draft: false,
+          url: "https://github.com/acme/api/pull/7",
+          author: "ada",
+          updatedAt: "2026-09-29T00:00:00Z",
+          head: { repo: "acme/api", ref: "fix/login", sha: "a".repeat(40) },
+          base: { repo: "acme/api", ref: "main" },
         },
       ],
     },
@@ -131,6 +146,21 @@ describe("github_* reads", () => {
     );
     expect(await text(githubIssueGetTool, { repo: "acme/api", number: 0 }, ctx)).toBe(
       "github_issue_get: number must be a positive integer issue number (got 0).",
+    );
+  });
+
+  it("github_pull_get renders PR metadata and body, with number and 404 errors", async () => {
+    const ctx = ctxFor(mem());
+    const got = await text(githubPullGetTool, { repo: "acme/api", number: 7 }, ctx);
+    expect(got).toContain("acme/api#7 [open] Fix login");
+    expect(got).toContain("head: acme/api:fix/login @ " + "a".repeat(40));
+    expect(got).toContain("base: acme/api:main");
+    expect(got).toContain("Keep this context");
+    expect(await text(githubPullGetTool, { repo: "acme/api", number: 0 }, ctx)).toContain(
+      "number must be a positive integer",
+    );
+    expect(await text(githubPullGetTool, { repo: "acme/api", number: 8 }, ctx)).toMatch(
+      /^github_pull_get: not found in acme\/api/,
     );
   });
 

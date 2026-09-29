@@ -88,6 +88,20 @@ export interface IssueComment {
   body: string;
 }
 
+/** PR metadata for a relayed read. This is context, not publication authority. */
+export interface PullSummary {
+  number: number;
+  title: string;
+  body: string;
+  state: string;
+  draft: boolean;
+  url: string;
+  author: string;
+  updatedAt: string;
+  head: { repo: string; ref: string; sha: string };
+  base: { repo: string; ref: string };
+}
+
 export interface NewIssueInput {
   title: string;
   body?: string;
@@ -121,6 +135,7 @@ export interface GithubApi {
     opts?: { state?: "open" | "closed" | "all"; labels?: string[]; limit?: number },
   ): Promise<IssueSummary[]>;
   getIssue(repo: string, number: number): Promise<{ issue: IssueSummary; comments: IssueComment[] }>;
+  getPullRequest(repo: string, number: number): Promise<PullSummary>;
   createIssue(repo: string, input: NewIssueInput): Promise<IssueSummary>;
   updateIssue(repo: string, number: number, patch: IssuePatch): Promise<IssueSummary>;
   commentIssue(repo: string, number: number, body: string): Promise<{ url: string }>;
@@ -239,6 +254,7 @@ export type GithubRoute =
   | "issues"
   | "issue"
   | "issue_comments"
+  | "pull"
   | "issue_create"
   | "issue_update"
   | "issue_comment_create"
@@ -415,6 +431,32 @@ export class RestGithubApi implements GithubApi {
       }));
     }
     return { issue, comments };
+  }
+
+  async getPullRequest(repo: string, number: number): Promise<PullSummary> {
+    const res = await this.request("read", "GET", "pull", `/repos/${repo}/pulls/${number}`);
+    const row = (await res.json()) as Record<string, unknown>;
+    const head = (row.head ?? {}) as Record<string, unknown>;
+    const base = (row.base ?? {}) as Record<string, unknown>;
+    const headRepo = (head.repo ?? {}) as Record<string, unknown>;
+    const baseRepo = (base.repo ?? {}) as Record<string, unknown>;
+    const user = (row.user ?? {}) as Record<string, unknown>;
+    return {
+      number: Number(row.number),
+      title: String(row.title ?? ""),
+      body: String(row.body ?? ""),
+      state: String(row.state ?? ""),
+      draft: row.draft === true,
+      url: String(row.html_url ?? ""),
+      author: String(user.login ?? ""),
+      updatedAt: String(row.updated_at ?? ""),
+      head: {
+        repo: String(headRepo.full_name ?? ""),
+        ref: String(head.ref ?? ""),
+        sha: String(head.sha ?? ""),
+      },
+      base: { repo: String(baseRepo.full_name ?? ""), ref: String(base.ref ?? "") },
+    };
   }
 
   async compareDiff(repo: string, base: string, head: string, maxChars = COMPARE_DIFF_MAX_CHARS): Promise<CompareDiff> {
@@ -752,6 +794,7 @@ function toIssue(row: Record<string, unknown>): IssueSummary {
 export interface InMemoryRepo {
   files?: Record<string, string>;
   issues?: IssueSummary[];
+  pulls?: PullSummary[];
   defaultBranch?: string;
   private?: boolean;
   description?: string | null;
@@ -889,6 +932,12 @@ export class InMemoryGithubApi implements GithubApi {
     const issue = this.repo(repo).issues.find((i) => i.number === number);
     if (!issue) throw new GithubApiError(404, `GitHub GET /repos/${repo}/issues/${number} failed: HTTP 404 Not Found`);
     return { issue, comments: this.comments.get(`${repo.toLowerCase()}#${number}`) ?? [] };
+  }
+
+  async getPullRequest(repo: string, number: number): Promise<PullSummary> {
+    const pull = this.repo(repo).pulls?.find((p) => p.number === number);
+    if (!pull) throw new GithubApiError(404, `GitHub GET /repos/${repo}/pulls/${number} failed: HTTP 404 Not Found`);
+    return pull;
   }
 
   async createIssue(repo: string, input: NewIssueInput): Promise<IssueSummary> {

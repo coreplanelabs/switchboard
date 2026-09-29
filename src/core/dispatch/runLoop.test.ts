@@ -4266,6 +4266,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       "github_search_code",
       "github_issue_list",
       "github_issue_get",
+      "github_pull_get",
       "github_actions_run",
       "github_actions_job_log",
       "github_issue_create",
@@ -4326,6 +4327,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     "github_search_code",
     "github_issue_list",
     "github_issue_get",
+    "github_pull_get",
     "github_actions_run",
     "github_actions_job_log",
   ];

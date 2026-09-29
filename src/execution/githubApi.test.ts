@@ -322,6 +322,46 @@ describe("RestGithubApi — reads use the read token", () => {
   });
 });
 
+describe("RestGithubApi — pull request reads", () => {
+  it("getPullRequest reads title, body and exact refs with the read token", async () => {
+    scopes.length = 0;
+    const { api: gh, calls } = api(({ url }) =>
+      url.endsWith("/repos/acme/api/pulls/7")
+        ? {
+            status: 200,
+            body: {
+              number: 7,
+              title: "Fix login",
+              body: "Keep this context",
+              state: "open",
+              draft: false,
+              html_url: "https://github.com/acme/api/pull/7",
+              user: { login: "ada" },
+              updated_at: "2026-09-29T00:00:00Z",
+              head: { ref: "fix/login", sha: "a".repeat(40), repo: { full_name: "acme/api" } },
+              base: { ref: "main", repo: { full_name: "acme/api" } },
+            },
+          }
+        : undefined,
+    );
+    expect(await gh.getPullRequest("acme/api", 7)).toEqual({
+      number: 7,
+      title: "Fix login",
+      body: "Keep this context",
+      state: "open",
+      draft: false,
+      url: "https://github.com/acme/api/pull/7",
+      author: "ada",
+      updatedAt: "2026-09-29T00:00:00Z",
+      head: { repo: "acme/api", ref: "fix/login", sha: "a".repeat(40) },
+      base: { repo: "acme/api", ref: "main" },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.headers.authorization).toBe("Bearer tok-read");
+    expect(scopes).toEqual(["read"]);
+  });
+});
+
 describe("RestGithubApi — writes use the write token", () => {
   it("createIssue posts title/body/labels/assignees (omitting empties), clips a huge body, and maps the row", async () => {
     scopes.length = 0;
@@ -446,6 +486,24 @@ describe("InMemoryGithubApi", () => {
     expect((await gh.searchCode("watchdog")).map((h) => h.path)).toEqual(["README.md"]);
     await expect(gh.readFile("other/repo", "x")).rejects.toMatchObject({ status: 404 });
     await expect(gh.readFile("acme/api", "features")).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("reads a seeded pull request and 404s an unknown number", async () => {
+    const pull = {
+      number: 7,
+      title: "Fix login",
+      body: "Keep this context",
+      state: "open",
+      draft: false,
+      url: "https://github.com/acme/api/pull/7",
+      author: "ada",
+      updatedAt: "2026-09-29T00:00:00Z",
+      head: { repo: "acme/api", ref: "fix/login", sha: "a".repeat(40) },
+      base: { repo: "acme/api", ref: "main" },
+    };
+    const gh = new InMemoryGithubApi({ "acme/api": { pulls: [pull] } });
+    expect(await gh.getPullRequest("acme/api", 7)).toEqual(pull);
+    await expect(gh.getPullRequest("acme/api", 8)).rejects.toMatchObject({ status: 404 });
   });
 
   it("issues: create numbers sequentially, update patches, comment counts, delete removes and records", async () => {

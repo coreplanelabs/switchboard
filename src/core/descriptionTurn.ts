@@ -45,7 +45,7 @@ export const DESCRIPTION_TURN_MAX_TURNS = 8;
  *  and the change, submit the description, report on the card — never edit
  *  or push. The proxy trims each request's tool list to these. */
 export const DESCRIPTION_TURN_TOOLS: readonly string[] = [
-  "github_issue_get",
+  "github_pull_get",
   "diff_digest",
   "bash",
   "read",
@@ -109,7 +109,7 @@ export function descriptionFollowUp(t: DescriptionTurnTarget): string {
   const short = t.headSha.slice(0, 7);
   return [
     `You pushed \`${t.branch}\` at \`${short}\` — that branch is the head of the open pull request ${t.pr.htmlUrl} (${t.repo}#${t.pr.number}) — but you did not call submit_pr_description, so the PR's title and body were not re-evaluated against what you pushed. A PR describing an earlier state of its branch is a bug, whoever opened it. Do this now, in this turn:`,
-    `1. Read the PR's current title and body: call github_issue_get with repo \`${t.repo}\` and number ${t.pr.number} (it takes a pull request number).`,
+    `1. Read the PR's current title and body: call github_pull_get with repo \`${t.repo}\` and number ${t.pr.number}.`,
     `2. Compare them with the change as it now stands at \`${short}\` (diff_digest where available; otherwise git diff against the base).`,
     `3. Call submit_pr_description with the object that describes the PR as it is NOW: carry forward what the existing body says that is still true (a dependency bump's release notes belong in why), add what you pushed, and anchor the pointers at \`${t.headSha}\`.`,
     `Do not push again and do not open a PR — Switchboard re-renders the PR's title and body from your object at ${short}. Then reply in one line.`,
