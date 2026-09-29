@@ -1,4 +1,5 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
+import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
 import type { ScheduleFiring } from "../../src/core/schedules.ts";
 import { ScheduleDO } from "./worker.ts";
@@ -17,15 +18,16 @@ let n = 0;
 const name = () => `sched-${Date.now()}-${n++}`;
 
 async function post(path: string, body: unknown, headers: Record<string, string> = AUTH) {
-  const res = await SELF.fetch(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
-  const text = await res.text();
-  let data: Record<string, unknown> = {};
-  try {
-    data = JSON.parse(text);
-  } catch {
-    // non-JSON: leave {}
-  }
-  return { status: res.status, data };
+  return fetchMemoryTest(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) }, async (res) => {
+    const text = await res.text();
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // non-JSON: leave {}
+    }
+    return { status: res.status, data };
+  });
 }
 
 const firing = (schedule: string, firedAt: number, over: Partial<ScheduleFiring> = {}): ScheduleFiring => ({
@@ -117,7 +119,7 @@ describe("schedule firing routes", () => {
         )
       ).status,
     ).toBe(401);
-    const res = await SELF.fetch(`${BASE}/schedules/latest`, { method: "GET", headers: AUTH });
+    const res = await fetchMemoryTest(`${BASE}/schedules/latest`, { method: "GET", headers: AUTH });
     expect(res.status).toBe(405);
   });
 });

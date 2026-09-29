@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
 
 // Feature: docs/reference/specs/routing-and-config.md item 12 — the ConfigDO: versioned
@@ -12,23 +12,24 @@ let n = 0;
 const key = () => `doc-${Date.now().toString(36)}-${n++}`;
 
 async function post(path: string, body: unknown, headers: Record<string, string> = AUTH) {
-  const res = await SELF.fetch(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
-  const text = await res.text();
-  let data: Record<string, unknown> = {};
-  try {
-    data = JSON.parse(text);
-  } catch {
-    // non-JSON: leave {}
-  }
-  return { status: res.status, data };
+  return fetchMemoryTest(`${BASE}${path}`, { method: "POST", headers, body: JSON.stringify(body) }, async (res) => {
+    const text = await res.text();
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // non-JSON: leave {}
+    }
+    return { status: res.status, data };
+  });
 }
 
 describe("ConfigDO routes", () => {
   it("advertises the feature; refuses unauthenticated and non-POST", async () => {
-    const health = await SELF.fetch(`${BASE}/healthz`);
-    expect(((await health.json()) as { features: string[] }).features).toContain("config");
+    const health = await fetchMemoryTest(`${BASE}/healthz`, undefined, (res) => res.json());
+    expect((health as { features: string[] }).features).toContain("config");
     expect((await post("/config/get", { key: "overrides" }, { "content-type": "application/json" })).status).toBe(401);
-    expect((await SELF.fetch(`${BASE}/config/get`, { method: "GET" })).status).toBe(405);
+    expect((await fetchMemoryTest(`${BASE}/config/get`, { method: "GET" })).status).toBe(405);
   });
 
   it("get of an unknown key is null at version 0; put creates v1, replaces to v2, and a stale expectedVersion is a 409 carrying the current version", async () => {

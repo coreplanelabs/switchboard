@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
 
 // Feature: docs/reference/specs/run-history.md item 32 — one RunTranscriptDO per live run:
@@ -12,12 +12,18 @@ const runId = () => `tr-${Date.now()}-${n++}`;
 
 async function post(path: string, body: unknown) {
   const raw = JSON.stringify(body);
-  const res = await SELF.fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: { ...AUTH, "content-length": String(new TextEncoder().encode(raw).byteLength) },
-    body: raw,
-  });
-  return { status: res.status, data: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+  return fetchMemoryTest(
+    `${BASE}${path}`,
+    {
+      method: "POST",
+      headers: { ...AUTH, "content-length": String(new TextEncoder().encode(raw).byteLength) },
+      body: raw,
+    },
+    async (res) => ({
+      status: res.status,
+      data: (await res.json().catch(() => ({}))) as Record<string, unknown>,
+    }),
+  );
 }
 
 const row = (idx: number, part: number, text: string) => ({

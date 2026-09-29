@@ -1,4 +1,5 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
@@ -20,19 +21,24 @@ const storeKey = () => `runs:test-${Date.now()}-${n++}`;
 
 async function post(path: string, body: unknown, headers: Record<string, string> = AUTH) {
   const raw = typeof body === "string" ? body : JSON.stringify(body);
-  const res = await SELF.fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: { ...headers, "content-length": String(new TextEncoder().encode(raw).byteLength) },
-    body: raw,
-  });
-  const text = await res.text();
-  let data: Record<string, unknown> = {};
-  try {
-    data = JSON.parse(text);
-  } catch {
-    // non-JSON: leave {}
-  }
-  return { status: res.status, data };
+  return fetchMemoryTest(
+    `${BASE}${path}`,
+    {
+      method: "POST",
+      headers: { ...headers, "content-length": String(new TextEncoder().encode(raw).byteLength) },
+      body: raw,
+    },
+    async (res) => {
+      const text = await res.text();
+      let data: Record<string, unknown> = {};
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // non-JSON: leave {}
+      }
+      return { status: res.status, data };
+    },
+  );
 }
 
 const ZERO = { count: 0, durationMs: 0 };
@@ -717,7 +723,7 @@ describe("run history routes", () => {
     const bigList = JSON.stringify({ storeKey: key, agent: "x".repeat(600 * 1024) });
     expect((await post("/runs/list", bigList)).status).toBe(413);
     // missing Content-Length → 411 (a streamed body)
-    const res = await SELF.fetch(`${BASE}/runs/put`, {
+    const res = await fetchMemoryTest(`${BASE}/runs/put`, {
       method: "POST",
       headers: AUTH,
       body: new ReadableStream({
@@ -745,7 +751,7 @@ describe("run history routes", () => {
     expect((await post("/runs/get", { storeKey: key, id: "a" }, { "content-type": "application/json" })).status).toBe(
       401,
     );
-    expect((await SELF.fetch(`${BASE}/runs/list`, { headers: AUTH })).status).toBe(405);
+    expect((await fetchMemoryTest(`${BASE}/runs/list`, { headers: AUTH })).status).toBe(405);
   });
 
   it("a corrupt event row is skipped: the run still returns with the remaining events", async () => {
@@ -761,8 +767,8 @@ describe("run history routes", () => {
   });
 
   it("/healthz lists runs", async () => {
-    const res = await SELF.fetch(`${BASE}/healthz`);
-    expect(await res.json()).toEqual({
+    const health = await fetchMemoryTest(`${BASE}/healthz`, undefined, (res) => res.json());
+    expect(health).toEqual({
       ok: true,
       build: { commit: "unknown" },
       features: ["memory", "schedules", "runs", "config", "delivery", "costs", "plane"],

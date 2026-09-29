@@ -30,6 +30,7 @@ function annotationFor(testCase: TestCase): MemoryTestAnnotation {
     registeredBackgroundTasks: [],
     pendingPromises: [],
     pendingTimers: [],
+    operations: [],
   };
 }
 
@@ -84,5 +85,26 @@ export class MemoryDiagnosticsReporter implements Reporter {
         ? "no completed tests"
         : slowest.map((test) => `${Math.round(test.durationMs)}ms ${test.test}`).join("; ");
     this.#writeLog(`[memory diagnostics] slowest ${slowest.length}: ${summary}`);
+    for (const test of this.#tests) {
+      if (test.operations.length === 0 || (test.state !== "failed" && !slowest.includes(test))) continue;
+      const selected =
+        test.state === "failed"
+          ? [
+              ...new Set([
+                ...test.operations.filter((operation) => operation.state === "pending"),
+                ...test.operations.slice(-8),
+              ]),
+            ]
+          : [...test.operations].sort((a, b) => (b.durationMs ?? Infinity) - (a.durationMs ?? Infinity)).slice(0, 3);
+      const operations = selected
+        .map(
+          (operation) =>
+            `${operation.label} ${operation.state} ${operation.durationMs === undefined ? "pending" : `${operation.durationMs}ms`}`,
+        )
+        .join("; ");
+      this.#writeLog(
+        `[memory diagnostics] ${test.test}: ${selected.length}/${test.operations.length} operation(s): ${operations}`,
+      );
+    }
   }
 }

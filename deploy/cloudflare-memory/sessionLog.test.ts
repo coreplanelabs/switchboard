@@ -1,4 +1,5 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
+import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
 import { GAP_MARKER, NOTEPAD_MAX_BYTES } from "../../src/core/runLedger/sessionLog.ts";
 import type { SessionLogDO } from "./worker.ts";
@@ -18,12 +19,18 @@ const sessionKey = () => `slack:C1:${Date.now()}.${n++}:coding`;
 
 async function post(path: string, body: unknown) {
   const raw = JSON.stringify(body);
-  const res = await SELF.fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: { ...AUTH, "content-length": String(new TextEncoder().encode(raw).byteLength) },
-    body: raw,
-  });
-  return { status: res.status, data: (await res.json().catch(() => ({}))) as Record<string, unknown> };
+  return fetchMemoryTest(
+    `${BASE}${path}`,
+    {
+      method: "POST",
+      headers: { ...AUTH, "content-length": String(new TextEncoder().encode(raw).byteLength) },
+      body: raw,
+    },
+    async (res) => ({
+      status: res.status,
+      data: (await res.json().catch(() => ({}))) as Record<string, unknown>,
+    }),
+  );
 }
 
 const text = (idx: number, part: number, t: string, role: "user" | "assistant" = "user") => ({
