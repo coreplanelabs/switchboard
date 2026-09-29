@@ -899,10 +899,13 @@ export async function dispatch(
     const typed = parseDirectives(msg.text);
     const typedAgent = typed.agent;
     const explicitPr = explicitPrOf(msg.text);
-    const namedShipTask = typedAgent === "ship" && explicitPr ? shipTaskText(typed.text, explicitPr.repo) : "";
+    // The official connector's exact trailing attribution is transport chrome,
+    // not new task text; directive parsing may have folded its newline to a space.
+    const shipTaskProbe = typed.text.replace(/\s+\*Sent using\* ChatGPT Connector \(Local MCP\)\s*$/i, "");
+    const namedShipTask = typedAgent === "ship" && explicitPr ? shipTaskText(shipTaskProbe, explicitPr.repo) : "";
     const freshShipTask =
       namedShipTask !== "" &&
-      !/^(?:please\s+)?(?:continue|resume|retry|keep going|carry on|finish)(?:\s+(?:it|this|the task|the plan|work|the work|review|the review))?[.!]?$/i.test(
+      !/^(?:please\s+)?(?:continue|resume|retry|keep going|carry on|finish)(?:\s+(?:with|on))?(?:\s+(?:it|this|the task|the plan|(?:the\s+)?work|working|(?:the\s+)?review|reviewing))?(?:\s+(?:of|on|for|with))?[.!]?$/i.test(
         namedShipTask,
       );
     const exactPrReply =
