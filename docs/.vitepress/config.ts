@@ -229,7 +229,6 @@ export default defineConfig({
           { text: "Restrict who can do what", link: "/how-to/restrict-who-can-do-what" },
           { text: "Configure your defaults", link: "/how-to/configure-your-defaults" },
           { text: "Connect an MCP server", link: "/how-to/connect-an-mcp-server" },
-          { text: "Connect to Switchboard over MCP", link: "/how-to/connect-to-switchboard-over-mcp" },
           { text: "Onboard a repo", link: "/how-to/onboard-a-repo" },
           { text: "Watch a run", link: "/how-to/watch-a-run" },
           { text: "Check spend", link: "/how-to/check-spend" },

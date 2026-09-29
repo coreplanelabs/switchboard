@@ -12,7 +12,6 @@
 
 - [Configure your defaults](configure-your-defaults.md): agent, model and effort, per you or per channel.
 - [Connect an MCP server](connect-an-mcp-server.md): external tools without a token in chat.
-- [Connect to Switchboard over MCP](connect-to-switchboard-over-mcp.md): issue a bearer and connect a client to the bot.
 - [Onboard a repo](onboard-a-repo.md): an always-warm environment for one repository.
 - [Watch a run](watch-a-run.md): live runs, stopping one, reading history.
 - [Check spend](check-spend.md): cost per day and group, and the JSON twin.
