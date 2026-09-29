@@ -11502,6 +11502,71 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
   });
 
+  it("replays a recovered private unit report after its settlement committed but the log failed", async () => {
+    const backing = new InMemoryPrivateWorkerLog();
+    let fail = true;
+    const log: PrivateWorkerLog = {
+      list: (threadKey) => backing.list(threadKey),
+      append: async (threadKey, event) => {
+        if (event.kind === "reply" && fail) {
+          fail = false;
+          throw new Error("temporary log failure");
+        }
+        return backing.append(threadKey, event);
+      },
+    };
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
+    await h.instances.put(recoveryInstance());
+    const key = `worker:${INSTANCE.id}:U12`;
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    await h.instances.putUnits([
+      {
+        ...claimed!,
+        threadKey: key,
+        workBrief: {
+          requesterId: INSTANCE.userId,
+          mainThreadKey: INSTANCE.threadKey,
+          actId: "act-1",
+          repo: INSTANCE.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      },
+    ]);
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      unit: "U12",
+      recoveryWorkflowId: "recovery-run-original-review",
+      deliveryId: "U12/recovery/end",
+      ending: { kind: "merge_ready", report: "ready at the recovered head" },
+      pr: PR,
+      headSha: HEAD,
+    };
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+      status: 503,
+      body: { error: "private_worker_log_unavailable" },
+    });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recoveryReceipt).toMatchObject({
+      workflowId: "recovery-run-original-review",
+    });
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+      status: 200,
+      body: { ok: true, alreadySettled: true, told: true },
+    });
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+      status: 200,
+      body: { ok: true, alreadySettled: true, told: true },
+    });
+    expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
+      { kind: "reply", id: "U12/recovery/end", text: "ready at the recovered head" },
+    ]);
+  });
+
   it("rejects a stale original Workflow settlement that omits the active recovery identity", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put(recoveryInstance());

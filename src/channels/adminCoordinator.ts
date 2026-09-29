@@ -4847,6 +4847,19 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       return json(503, { ok: false, error: "private_worker_log_unavailable", at });
     }
   }
+  const deliverPrivateReport = async (): Promise<boolean> => {
+    if (threadReport.length === 0) return true;
+    try {
+      await appendPrivateWorkerReply(
+        deps.privateWorkerLog!,
+        { instanceId: instance.id, unit: row.unit },
+        { id: body.deliveryId as string, text: threadReport, at },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const recoveryWorkflowId =
     typeof body.recoveryWorkflowId === "string" && INSTANCE_ID_PATTERN.test(body.recoveryWorkflowId)
       ? body.recoveryWorkflowId
@@ -4854,13 +4867,20 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   if (body.recoveryWorkflowId !== undefined && recoveryWorkflowId === undefined)
     return json(400, { ok: false, error: "recoveryWorkflowId must be a Workflow instance id", at });
   if (recoveryWorkflowId !== undefined && row.recoveryReceipt?.workflowId === recoveryWorkflowId) {
+    if (row.workBrief !== undefined && !(await deliverPrivateReport()))
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
     if (row.pr !== undefined) {
       const owner = { instanceId: instance.id, unit: row.unit };
       const current = deps.runnerOwnership?.owner(instance.repo, row.pr.number);
       if (current?.instanceId === owner.instanceId && current.unit === owner.unit)
         deps.runnerOwnership?.release(instance.repo, row.pr.number, owner);
     }
-    return json(200, { ok: true, alreadySettled: true, at: row.recoveryReceipt.at });
+    return json(200, {
+      ok: true,
+      alreadySettled: true,
+      ...(row.workBrief !== undefined ? { told: true } : {}),
+      at: row.recoveryReceipt.at,
+    });
   }
   if (row.recovery !== undefined && recoveryWorkflowId !== row.recovery.workflowId)
     return json(409, { ok: false, error: "recovery_claim_mismatch", at });
@@ -5068,23 +5088,8 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   }
   let told = false;
   if (row.workBrief !== undefined) {
-    if (threadReport.length === 0) told = true;
-    else {
-      try {
-        await appendPrivateWorkerReply(
-          deps.privateWorkerLog!,
-          { instanceId: instance.id, unit: row.unit },
-          {
-            id: body.deliveryId as string,
-            text: threadReport,
-            at,
-          },
-        );
-        told = true;
-      } catch {
-        return json(503, { ok: false, error: "private_worker_log_unavailable", at });
-      }
-    }
+    if (!(await deliverPrivateReport())) return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    told = true;
   } else if (io && threadReport.length === 0)
     told = true; // nothing owed to the thread at this level
   else if (io) {
