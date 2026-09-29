@@ -17,12 +17,14 @@ import {
   isCoordinatorInstance,
   isCoordinatorUnit,
   isMainTaskKey,
+  mainTaskBindingMatches,
   mainTaskClaimMatches,
   preserveWorkBrief,
   isThreadEvent,
   type CoordinatorInstance,
   type CoordinatorUnit,
   type MainTaskKey,
+  type MainTaskBinding,
   type ThreadEvent,
   type UnitWakeAnswer,
 } from "./contract.js";
@@ -32,10 +34,11 @@ import {
 export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "unavailable" };
 export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type CompareAndReplaceUnitResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
-export type AppendEventResult = { ok: true; seq: number } | { ok: false; reason: "unavailable" };
+export type AppendEventResult =
+  { ok: true; seq: number; event?: ThreadEvent } | { ok: false; reason: "ended" | "stale" | "unavailable" };
 export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type AnswerWakeResult = { ok: true } | { ok: false; reason: "unavailable" };
-export type MarkStoppedResult = { ok: true } | { ok: false; reason: "unknown_instance" | "unavailable" };
+export type MarkStoppedResult = { ok: true } | { ok: false; reason: "unknown_instance" | "stale" | "unavailable" };
 export type ReserveDecisionRecordResult = { ok: true; number: string } | { ok: false; reason: "unavailable" };
 export interface MainTaskLink {
   instanceId: string;
@@ -93,7 +96,7 @@ export interface CoordinatorInstanceStore {
    *  written when the hosted parent is sealed, read back by the runner's plan,
    *  spawn and read-record routes. Idempotent — a marked row keeps its first
    *  mark; an id no record holds is `unknown_instance`. */
-  markStopped(instanceId: string, at: number): Promise<MarkStoppedResult>;
+  markStopped(instanceId: string, at: number, binding?: MainTaskBinding): Promise<MarkStoppedResult>;
   /** A thread event onto the unit's list (record 0051's reply-as-event rule): the store assigns
    *  the next sequence and enforces the per-event cap (attachments dropped
    *  whole, the row saying how many). An `id` already on the unit returns its
@@ -101,7 +104,12 @@ export interface CoordinatorInstanceStore {
    *  sibling of the unit rows, never a
    *  field on them: `putUnits` replaces a row whole, and an append landing
    *  between a route's read and its put would be lost (record 0051). */
-  appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult>;
+  appendEvent(
+    key: UnitEventKey,
+    event: ThreadEventInput,
+    requireActive?: boolean,
+    binding?: MainTaskBinding,
+  ): Promise<AppendEventResult>;
   /** The unit's events in sequence order; `unconsumedOnly` filters to the rows no spawn or run has consumed. */
   listEvents(key: UnitEventKey, unconsumedOnly?: boolean): Promise<ThreadEvent[]>;
   /** Named sequences consumed by a spawn step or a run — idempotent: a row already consumed keeps its first consumer. */
@@ -223,24 +231,55 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     this.decisionRecords.set(key, number);
     return { ok: true, number };
   }
-  async markStopped(instanceId: string, at: number): Promise<MarkStoppedResult> {
+  async markStopped(instanceId: string, at: number, binding?: MainTaskBinding): Promise<MarkStoppedResult> {
     const text = this.rows.get(instanceId);
     if (text === undefined) return { ok: false, reason: "unknown_instance" };
     const instance = JSON.parse(text) as CoordinatorInstance;
+    if (binding !== undefined) {
+      const unitText = this.units.get(unitKey(binding));
+      const unit = unitText ? (JSON.parse(unitText) as CoordinatorUnit) : undefined;
+      if (
+        binding.instanceId !== instanceId ||
+        !mainTaskBindingMatches(binding, this.mainTasks.get(this.mainTaskKey(binding.key)) ?? null, instance, unit)
+      )
+        return { ok: false, reason: "stale" };
+    }
     if (instance.stop === undefined) this.rows.set(instanceId, JSON.stringify({ ...instance, stop: { at } }));
     return { ok: true };
   }
-  async appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult> {
+  async appendEvent(
+    key: UnitEventKey,
+    event: ThreadEventInput,
+    requireActive = false,
+    binding?: MainTaskBinding,
+  ): Promise<AppendEventResult> {
+    if (requireActive || binding !== undefined) {
+      const instanceText = this.rows.get(key.instanceId);
+      const unitText = this.units.get(unitKey(key));
+      const instance = instanceText ? (JSON.parse(instanceText) as CoordinatorInstance) : undefined;
+      const unit = unitText ? (JSON.parse(unitText) as CoordinatorUnit) : undefined;
+      if (
+        binding !== undefined &&
+        (binding.instanceId !== key.instanceId ||
+          binding.unit !== key.unit ||
+          !mainTaskBindingMatches(binding, this.mainTasks.get(this.mainTaskKey(binding.key)) ?? null, instance, unit))
+      )
+        return { ok: false, reason: "stale" };
+      if (!instance || !unit || instance.stop || unit.ending || unit.recovery || unit.recoveryHold)
+        return { ok: false, reason: "ended" };
+    }
     const list = this.events.get(unitKey(key)) ?? [];
     // A channel message id and the ship hand-off's seed id are durable event
     // identities. Returning the first row makes an append retry idempotent;
     // events without an id retain the append-every-time behavior.
     const existing = event.id !== undefined ? list.find((e) => e.id === event.id) : undefined;
-    if (existing !== undefined) return { ok: true, seq: existing.seq };
+    if (existing !== undefined)
+      return binding === undefined ? { ok: true, seq: existing.seq } : { ok: true, seq: existing.seq, event: existing };
     const seq = (list[list.length - 1]?.seq ?? 0) + 1;
-    list.push(capThreadEvent({ ...event, seq }));
+    const stored = capThreadEvent({ ...event, seq });
+    list.push(stored);
     this.events.set(unitKey(key), list);
-    return { ok: true, seq };
+    return binding === undefined ? { ok: true, seq } : { ok: true, seq, event: stored };
   }
   async listEvents(key: UnitEventKey, unconsumedOnly = false): Promise<ThreadEvent[]> {
     const list = this.events.get(unitKey(key)) ?? [];
@@ -315,10 +354,15 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
   ): Promise<ReserveDecisionRecordResult> {
     return { ok: false, reason: "unavailable" };
   }
-  async markStopped(_instanceId: string, _at: number): Promise<MarkStoppedResult> {
+  async markStopped(_instanceId: string, _at: number, _binding?: MainTaskBinding): Promise<MarkStoppedResult> {
     return { ok: false, reason: "unavailable" };
   }
-  async appendEvent(_key: UnitEventKey, _event: ThreadEventInput): Promise<AppendEventResult> {
+  async appendEvent(
+    _key: UnitEventKey,
+    _event: ThreadEventInput,
+    _requireActive = false,
+    _binding?: MainTaskBinding,
+  ): Promise<AppendEventResult> {
     return { ok: false, reason: "unavailable" };
   }
   async listEvents(_key: UnitEventKey, _unconsumedOnly?: boolean): Promise<ThreadEvent[]> {
@@ -500,23 +544,32 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     throw new Error(`coordinator store /runs/decision-record/reserve: unexpected answer (HTTP ${r.status})`);
   }
 
-  async markStopped(instanceId: string, at: number): Promise<MarkStoppedResult> {
-    const r = await this.post("/runs/coordinator/stop", { instanceId, at });
+  async markStopped(instanceId: string, at: number, binding?: MainTaskBinding): Promise<MarkStoppedResult> {
+    const r = await this.post("/runs/coordinator/stop", { instanceId, at, binding });
     const d = r.data as { ok?: unknown; reason?: unknown };
     if (r.status === 409 && d.reason === "unknown_instance") return { ok: false, reason: "unknown_instance" };
+    if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/stop: unexpected answer (HTTP ${r.status})`);
   }
 
-  async appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult> {
+  async appendEvent(
+    key: UnitEventKey,
+    event: ThreadEventInput,
+    requireActive = false,
+    binding?: MainTaskBinding,
+  ): Promise<AppendEventResult> {
     // The state Worker caps again after assigning the sequence, but its HTTP
     // request-body fence runs first. Cap here too so an accepted 5–10 MB file
     // reaches that boundary as the small dropped-count row the store contract
     // promises, never as a transport-level 413.
     const capped = capThreadEvent(event);
-    const r = await this.post("/runs/coordinator/events/append", { ...key, event: capped });
-    const d = r.data as { ok?: unknown; seq?: unknown };
-    if (d.ok === true && typeof d.seq === "number") return { ok: true, seq: d.seq };
+    const r = await this.post("/runs/coordinator/events/append", { ...key, event: capped, requireActive, binding });
+    const d = r.data as { ok?: unknown; seq?: unknown; event?: unknown; reason?: unknown };
+    if (d.ok === true && typeof d.seq === "number" && (d.event === undefined || isThreadEvent(d.event)))
+      return { ok: true, seq: d.seq, ...(d.event === undefined ? {} : { event: d.event }) };
+    if (r.status === 409 && d.reason === "ended") return { ok: false, reason: "ended" };
+    if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
     throw new Error(`coordinator store /runs/coordinator/events/append: unexpected answer (HTTP ${r.status})`);
   }
 

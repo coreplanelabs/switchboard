@@ -111,6 +111,8 @@ import {
   capThreadEvent,
   INSTANCE_ID_PATTERN,
   isMainTaskKey,
+  isMainTaskBinding,
+  mainTaskBindingMatches,
   mainTaskClaimMatches,
   preserveWorkBrief,
   isCoordinatorInstance,
@@ -124,6 +126,7 @@ import {
   unitOfIdempotencyKey,
   type CoordinatorInstance,
   type CoordinatorUnit,
+  type MainTaskBinding,
   type RunFinishedSend,
   type ThreadEvent,
   type UnitWakeAnswer,
@@ -2725,8 +2728,32 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** The hard stop's mark on the instance row (record 0060; issue 1924).
    *  Idempotent: a marked row keeps its first mark. */
-  async markInstanceStopped(id: string, at: number): Promise<{ ok: true } | { ok: false; reason: "unknown_instance" }> {
-    let out: { ok: true } | { ok: false; reason: "unknown_instance" } = { ok: true };
+  private currentMainTaskBindingMatches(
+    binding: MainTaskBinding,
+    instance: CoordinatorInstance,
+    unit: CoordinatorUnit | undefined,
+  ): boolean {
+    const link = this.sql
+      .exec<{ instance_id: string; unit: string }>(
+        `SELECT instance_id, unit FROM coordinator_main_task_links WHERE main_thread_key = ? AND act_id = ?`,
+        binding.key.mainThreadKey,
+        binding.key.actId,
+      )
+      .toArray()[0];
+    return mainTaskBindingMatches(
+      binding,
+      link ? { instanceId: link.instance_id, unit: link.unit } : null,
+      instance,
+      unit,
+    );
+  }
+
+  async markInstanceStopped(
+    id: string,
+    at: number,
+    binding?: MainTaskBinding,
+  ): Promise<{ ok: true } | { ok: false; reason: "unknown_instance" | "stale" }> {
+    let out: { ok: true } | { ok: false; reason: "unknown_instance" | "stale" } = { ok: true };
     this.ctx.storage.transactionSync(() => {
       const row = this.sql
         .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, id)
@@ -2736,6 +2763,20 @@ export class RunHistoryDO extends DurableObject<Env> {
         return;
       }
       const instance = JSON.parse(row.json) as CoordinatorInstance;
+      if (binding !== undefined) {
+        const unitText = this.sql
+          .exec<{ json: string }>(
+            `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+            binding.instanceId,
+            binding.unit,
+          )
+          .toArray()[0]?.json;
+        const unit = unitText ? (JSON.parse(unitText) as CoordinatorUnit) : undefined;
+        if (binding.instanceId !== id || !this.currentMainTaskBindingMatches(binding, instance, unit)) {
+          out = { ok: false, reason: "stale" };
+          return;
+        }
+      }
       if (instance.stop !== undefined) return;
       this.sql.exec(
         `UPDATE coordinator_instances SET json = ? WHERE instance_id = ?`,
@@ -2917,9 +2958,41 @@ export class RunHistoryDO extends DurableObject<Env> {
     instanceId: string,
     unit: string,
     event: Omit<ThreadEvent, "seq">,
-  ): Promise<{ ok: true; seq: number }> {
+    requireActive = false,
+    binding?: MainTaskBinding,
+  ): Promise<{ ok: true; seq: number; event?: ThreadEvent } | { ok: false; reason: "ended" | "stale" }> {
     let seq = 1;
+    let refusal: "ended" | "stale" | undefined;
+    let storedEvent: ThreadEvent | undefined;
     this.ctx.storage.transactionSync(() => {
+      if (requireActive || binding !== undefined) {
+        const instanceText = this.sql
+          .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, instanceId)
+          .toArray()[0]?.json;
+        const unitText = this.sql
+          .exec<{ json: string }>(
+            `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+            instanceId,
+            unit,
+          )
+          .toArray()[0]?.json;
+        const instance = instanceText ? (JSON.parse(instanceText) as CoordinatorInstance) : undefined;
+        const row = unitText ? (JSON.parse(unitText) as CoordinatorUnit) : undefined;
+        if (
+          binding !== undefined &&
+          (binding.instanceId !== instanceId ||
+            binding.unit !== unit ||
+            !instance ||
+            !this.currentMainTaskBindingMatches(binding, instance, row))
+        ) {
+          refusal = "stale";
+          return;
+        }
+        if (!instance || !row || instance.stop || row.ending || row.recovery || row.recoveryHold) {
+          refusal = "ended";
+          return;
+        }
+      }
       if (event.id !== undefined) {
         const existing = this.sql
           .exec<{ seq: number; json: string }>(
@@ -2931,6 +3004,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           .find((row) => (JSON.parse(row.json) as ThreadEvent).id === event.id);
         if (existing !== undefined) {
           seq = existing.seq;
+          storedEvent = JSON.parse(existing.json) as ThreadEvent;
           return;
         }
       }
@@ -2941,6 +3015,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         .toArray()[0];
       seq = (max?.m ?? 0) + 1;
       const capped = capThreadEvent({ ...event, seq });
+      storedEvent = capped;
       this.sql.exec(
         `INSERT INTO coordinator_unit_events (instance_id, unit, seq, json) VALUES (?, ?, ?, ?)`,
         instanceId,
@@ -2949,7 +3024,11 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify(capped),
       );
     });
-    return { ok: true, seq };
+    return refusal
+      ? { ok: false, reason: refusal }
+      : binding === undefined
+        ? { ok: true, seq }
+        : { ok: true, seq, event: storedEvent };
   }
 
   /** The unit's events in sequence order; `unconsumedOnly` filters to the rows nothing has consumed. */
@@ -6183,7 +6262,9 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))
       return json({ error: "instanceId must be a Workflow instance id" }, 400);
     if (typeof b.at !== "number" || !Number.isFinite(b.at)) return json({ error: "at must be a time" }, 400);
-    const r = await stub.markInstanceStopped(b.instanceId, b.at);
+    if (b.binding !== undefined && !isMainTaskBinding(b.binding))
+      return json({ error: "binding must name one main task claim" }, 400);
+    const r = await stub.markInstanceStopped(b.instanceId, b.at, b.binding as MainTaskBinding | undefined);
     console.log(`[runs/coordinator/stop] ${key.value} ${b.instanceId} → ${r.ok ? "marked" : r.reason}`);
     return r.ok ? json(r) : json(r, 409);
   }
@@ -6239,11 +6320,22 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (pathname === "/runs/coordinator/events/append") {
       if (!isThreadEvent({ ...(b.event as Record<string, unknown>), seq: 1 }))
         return json({ error: "event must be a thread event (without its seq)" }, 400);
+      if (b.requireActive !== undefined && typeof b.requireActive !== "boolean")
+        return json({ error: "requireActive must be boolean" }, 400);
+      if (b.binding !== undefined && !isMainTaskBinding(b.binding))
+        return json({ error: "binding must name one main task claim" }, 400);
       // The store assigns the sequence and the consumer: a caller's `seq` or
       // `consumedBy` is dropped, so no row is born consumed in its JSON while
       // its column still lists it unconsumed.
       const { seq: _ignored, consumedBy: _fresh, ...event } = b.event as ThreadEvent;
-      const r = await stub.appendUnitEvent(b.instanceId, b.unit, event as Omit<ThreadEvent, "seq" | "consumedBy">);
+      const r = await stub.appendUnitEvent(
+        b.instanceId,
+        b.unit,
+        event as Omit<ThreadEvent, "seq" | "consumedBy">,
+        b.requireActive === true,
+        b.binding as MainTaskBinding | undefined,
+      );
+      if (!r.ok) return json(r, 409);
       console.log(`[runs/coordinator/events/append] ${key.value} ${b.instanceId}:${b.unit} seq ${r.seq}`);
       return json(r);
     }

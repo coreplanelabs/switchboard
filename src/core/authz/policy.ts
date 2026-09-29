@@ -55,6 +55,9 @@ export const POLICY: readonly Rule[] = [
   // Stopping a run needs the write grant AND visibility of the run.
   { action: "runs:write", resource: "run", when: [grant("runs:write"), MEMBER_OF] },
   { action: "runs:write", resource: "run", when: [grant("runs:write"), ALL_CHANNELS] },
+  // A main conversation may stop only its own linked work. The service
+  // verifies the thread and unit link before this point decision.
+  { action: "main-task:stop", resource: "run", actorKinds: ["user", "agent"], when: [IS_SELF] },
   // List-shaped `runs.*`: the grant admits the command; the store predicate narrows the rows.
   { action: "runs:read", resource: "command", when: [grant("runs:read")] },
   { action: "runs:write", resource: "command", when: [grant("runs:write")] },

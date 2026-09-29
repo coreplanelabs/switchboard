@@ -2,6 +2,7 @@ import { matchesPredicate } from "./authz/predicate.js";
 import type { Predicate } from "./authz/types.js";
 import type { RunActor } from "./runEvents.js";
 import type { CoordinatorInstanceStore } from "./coordinator/instanceStore.js";
+import type { MainTaskBinding } from "./coordinator/contract.js";
 import { buildPlaneTable, type PlanePullRequestFacts, type PlaneTable } from "./plane/table.js";
 import { checkPrTitle } from "./prTitle.mjs";
 import PR_TITLE_VOCABULARY from "./prTitleVocabulary.json" with { type: "json" };
@@ -73,6 +74,8 @@ export type PlaneStopReport =
        *  that could not be written still stops the runs, and the report says
        *  the runner may still be walking). */
       runnerStopped: boolean;
+      /** Every named parent and child run accepted the stop. */
+      stopsSucceeded: boolean;
       /** The hosted parent run's stop outcome, when the instance names one. */
       parent?: { id: string; outcome: string };
       /** Each live child ended, with the stop's outcome. */
@@ -87,7 +90,7 @@ export interface PlaneService {
   /** `plane stop <instance>` (record 0064): terminate the runner instance
    *  and end its live children in one move. An instance the viewer's predicate
    *  does not admit is `unknown_instance`, like a run they may not see. */
-  stop(instanceId: string, actor: RunActor, visibleTo: Predicate): Promise<PlaneStopReport>;
+  stop(instanceId: string, actor: RunActor, visibleTo: Predicate, binding?: MainTaskBinding): Promise<PlaneStopReport>;
 }
 
 export const DEFAULT_RECENT_MS = minutesToMs(PLANE.recentMinutes);
@@ -190,7 +193,7 @@ export function createPlaneService(deps: PlaneServiceDeps): PlaneService {
       return buildPlaneTable({ now, runs, instances, pullRequests });
     },
 
-    async stop(instanceId, actor, visibleTo) {
+    async stop(instanceId, actor, visibleTo, binding) {
       const { stopRun } = deps.runs;
       const { listUnits, markStopped } = deps.instances;
       if (stopRun === undefined || listUnits === undefined || markStopped === undefined)
@@ -211,15 +214,29 @@ export function createPlaneService(deps: PlaneServiceDeps): PlaneService {
       // Best effort — a mark that could not be written still ends the runs.
       let runnerStopped = false;
       try {
-        runnerStopped = (await markStopped.call(deps.instances, instanceId, clock())).ok;
+        const mark = await markStopped.call(deps.instances, instanceId, clock(), binding);
+        if (binding !== undefined && !mark.ok)
+          return mark.reason === "stale" || mark.reason === "unknown_instance"
+            ? { kind: "unknown_instance", instanceId }
+            : { kind: "unavailable", reason: "the linked work could not be stopped" };
+        runnerStopped = mark.ok;
       } catch {
+        if (binding !== undefined) return { kind: "unavailable", reason: "the linked work could not be stopped" };
         // the report says the runner may still be walking
       }
       // The hosted parent: a hard stop seals it and releases the host key; a
       // parent already over answers its refusal words instead of throwing.
+      let stopsSucceeded = true;
       const outcomeOf = async (id: string): Promise<string> => {
-        const res = await stopRun.call(deps.runs, id, "hard", actor);
-        return res.ok ? res.value.state : res.error;
+        try {
+          const res = await stopRun.call(deps.runs, id, "hard", actor);
+          if (res.ok) return res.value.state;
+          stopsSucceeded = false;
+          return res.error;
+        } catch {
+          stopsSucceeded = false;
+          return "unavailable";
+        }
       };
       const parent =
         instance.runId !== undefined ? { id: instance.runId, outcome: await outcomeOf(instance.runId) } : undefined;
@@ -240,7 +257,7 @@ export function createPlaneService(deps: PlaneServiceDeps): PlaneService {
           limit: RUN_LIST_MAX_LIMIT,
         });
         for (const run of runs) {
-          if (run.id === instance.runId) continue;
+          if (run.id === instance.runId || run.parentInstanceId !== instanceId) continue;
           children.push({ id: run.id, outcome: await outcomeOf(run.id) });
         }
       }
@@ -248,6 +265,7 @@ export function createPlaneService(deps: PlaneServiceDeps): PlaneService {
         kind: "stopped",
         instanceId,
         runnerStopped,
+        stopsSucceeded,
         ...(parent !== undefined ? { parent } : {}),
         children,
       };

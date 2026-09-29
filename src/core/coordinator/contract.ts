@@ -62,6 +62,35 @@ export interface MainTaskKey {
   actId: string;
 }
 
+/** Stable claim fields that a main-task mutation checks with its durable write. */
+export interface MainTaskBinding {
+  key: MainTaskKey;
+  instanceId: string;
+  unit: string;
+  branch: string;
+  channelId: string;
+  requesterId: string;
+}
+
+export function isMainTaskBinding(v: unknown): v is MainTaskBinding {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  const b = v as Record<string, unknown>;
+  return (
+    isMainTaskKey(b.key) &&
+    typeof b.instanceId === "string" &&
+    INSTANCE_ID_PATTERN.test(b.instanceId) &&
+    typeof b.unit === "string" &&
+    UNIT_PATTERN.test(b.unit) &&
+    typeof b.branch === "string" &&
+    b.branch.length > 0 &&
+    b.branch.length <= 500 &&
+    typeof b.channelId === "string" &&
+    b.channelId.length > 0 &&
+    typeof b.requesterId === "string" &&
+    b.requesterId.length > 0
+  );
+}
+
 export function isMainTaskKey(v: unknown): v is MainTaskKey {
   const thread = (v as MainTaskKey | null)?.mainThreadKey;
   return (
@@ -157,6 +186,25 @@ export function mainTaskClaimMatches(key: MainTaskKey, instance: CoordinatorInst
     unit.workBrief.requesterId === instance.userId &&
     unit.workBrief.repo === instance.repo &&
     unit.workBrief.base === instance.base
+  );
+}
+
+export function mainTaskBindingMatches(
+  binding: MainTaskBinding,
+  link: { instanceId: string; unit: string } | null,
+  instance: CoordinatorInstance | undefined,
+  unit: CoordinatorUnit | undefined,
+): boolean {
+  return (
+    link?.instanceId === binding.instanceId &&
+    link.unit === binding.unit &&
+    instance?.id === binding.instanceId &&
+    instance.kind === "ship" &&
+    instance.branch === binding.branch &&
+    instance.channelId === binding.channelId &&
+    instance.userId === binding.requesterId &&
+    unit?.unit === binding.unit &&
+    mainTaskClaimMatches(binding.key, instance, unit)
   );
 }
 
