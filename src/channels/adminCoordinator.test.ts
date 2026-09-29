@@ -3397,7 +3397,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(h.threadsAsked).toEqual([]);
   });
 
-  it("admits a valid long worker request while bounding only its private history copy", async () => {
+  it("starts from the bounded work brief instead of a long main-run request", async () => {
     const backing = new InMemoryPrivateWorkerLog();
     const log: PrivateWorkerLog = {
       list: (threadKey) => backing.list(threadKey),
@@ -3461,12 +3461,13 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       brief: { kind: "contract", unit: "U12", rebase: { branch: instance.branch, onto: "main" } },
     });
     expect(spawned.status, JSON.stringify(spawned.body)).toBe(200);
-    expect(h.dispatched[0]?.msg.text.length).toBeGreaterThan(32_000);
-    expect(h.dispatched[0]?.msg.text.includes(longTask)).toBe(true);
+    expect(h.dispatched[0]?.msg.text).toContain("Fix it");
+    expect(h.dispatched[0]?.msg.text).toContain("Why?");
+    expect(h.dispatched[0]?.msg.text).not.toContain(longTask);
     const [input] = await backing.list(`worker:${instance.id}:U12`);
     expect(input?.kind).toBe("input");
     expect(isPrivateWorkerEventInput(input)).toBe(true);
-    expect(input?.kind === "input" ? input.text : "").toContain("[Private history copy shortened;");
+    expect(input?.kind === "input" ? input.text : "").toBe(h.dispatched[0]?.msg.text);
   });
 
   it("a main-agent worker refuses admission when its durable log is missing", async () => {
