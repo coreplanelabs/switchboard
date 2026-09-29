@@ -4,7 +4,9 @@ import { InMemoryArtifactStore } from "../artifacts/store.js";
 import { Secret } from "../secrets.js";
 import { AGENTS } from "../agents/registry.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
+import { ALL_GRANTS } from "../core/authz/grants.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import { createMainTaskStarter } from "../core/coordinator/mainStart.js";
 import {
   InMemoryPrivateWorkerLog,
   UnavailablePrivateWorkerLog,
@@ -3247,6 +3249,62 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(genRow).toMatchObject({ threadKey: INSTANCE.threadKey, sourceUrl: INSTANCE.sourceUrl });
     expect(genRow.reviewThread).toBeUndefined();
     expect(genRow.issue).toBeUndefined();
+  });
+
+  it("a plain fix hand-off binds its generated child to private IO before any spawn", async () => {
+    const h = harness({
+      privateWorkerLog: new InMemoryPrivateWorkerLog(),
+      ioFor: () => {
+        throw new Error("private worker tried to open Slack");
+      },
+    });
+    const msg: IncomingMessage = {
+      channelId: "slack:DMAIN",
+      userId: INSTANCE.userId,
+      threadKey: "slack:DMAIN:1700000000.000001",
+      messageId: "1700000000.000002",
+      text: "fix it",
+    };
+    const start = createMainTaskStarter({
+      instances: h.instances,
+      readFile: async () => ({ content: "" }),
+      create: async (id) => ({ kind: "created", id }),
+      status: async () => ({ kind: "status", status: "running" }),
+      repoInfo: async () => ({ defaultBranch: "main" }),
+      canUseRepo: () => true,
+      canRunAgent: () => true,
+      adminsHint: () => "an admin",
+      privateWorkerAvailable: true,
+      caps: { maxRounds: 3, maxMinutes: 45 },
+      clock: () => NOW,
+    });
+    const out = await start({
+      actor: {
+        kind: "user",
+        id: msg.userId,
+        origin: { channelId: msg.channelId, threadKey: msg.threadKey },
+        grants: ALL_GRANTS,
+      },
+      msg,
+      mainRunId: "main-active-run",
+      stillPrivate: async () => true,
+      repo: INSTANCE.repo,
+      brief: {
+        question: "Why did signup fail?",
+        findings: [{ kind: "observation", text: "Five failures in the last hour", sourceUrl: "https://example.com/signups" }],
+        requestedChange: "Fix the signup path and add a regression test",
+      },
+    });
+    expect(out.kind).toBe("accepted");
+    if (out.kind !== "accepted") return;
+    expect((await h.instances.get(out.instanceId))?.runId).toBeUndefined();
+    const firstUnit = (await h.instances.listUnits(out.instanceId))[0]!;
+    const started = await call(h, "unit-start", { parentInstanceId: out.instanceId, unit: firstUnit.unit });
+    expect(started).toMatchObject({ status: 200, body: { threadKey: `worker:${out.instanceId}:${firstUnit.unit}` } });
+    expect((await h.instances.listUnits(out.instanceId))[0]?.threadKey).toBe(
+      `worker:${out.instanceId}:${firstUnit.unit}`,
+    );
+    expect(h.threadsAsked).toEqual([]);
   });
 
   it("a main-agent worker starts and replies only through its durable private thread", async () => {

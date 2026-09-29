@@ -41,12 +41,14 @@ import {
   type ShipCaps,
 } from "../ship/coordinator.js";
 import type { AgentSource } from "../runEvents.js";
-import type {
-  CoordinatorInstance,
-  CoordinatorUnit,
-  MainTaskKey,
-  ThreadEventAttachment,
-  WorkBrief,
+import {
+  isMainTaskKey,
+  isWorkBrief,
+  type CoordinatorInstance,
+  type CoordinatorUnit,
+  type MainTaskKey,
+  type ThreadEventAttachment,
+  type WorkBrief,
 } from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
@@ -69,8 +71,11 @@ export interface HandOffInput {
   entry: ShipEntry;
   /** The request's directive-stripped text (the preflight's input). */
   requestText: string;
-  /** Reserved for a main-agent hand-off once its private worker route exists. */
+  /** An opt-in main-agent decision. Its key is stable across message retries;
+   * the brief is context for the existing Ship unit, not publication authority. */
   mainTask?: MainTaskKey & { brief: Omit<WorkBrief, "requesterId" | "mainThreadKey" | "actId" | "repo" | "base"> };
+  /** Set by the trusted caller only when the private worker log is configured. */
+  privateWorkerReady?: boolean;
   /** A generated plan this thread already owns and is re-issuing. Internal:
    *  the dispatcher read it from the coordinator row, so formatting in the
    *  stored request can never mint a nearby but different plan id. */
@@ -79,6 +84,11 @@ export interface HandOffInput {
    * attempt selection and every refusal gate succeeded, immediately before
    * records are written. Any later refusal aborts its provisional transition. */
   beforeStart?: BeforeCoordinatorStart;
+  /** A main-agent run's liveness fence. Durable claim and Workflow creation
+   * both check it after awaited preflight work; absent for ordinary Ship. */
+  stillLive?: () => boolean;
+  /** Main-agent only: checked after async setup and immediately before each durable start effect. */
+  stillPrivate?: () => Promise<boolean>;
   msg: {
     channelId: string;
     channelName?: string;
@@ -188,6 +198,7 @@ type Planned = {
   autoMergeEnabled?: boolean;
   /** Stable task keys for units whose own brief asks to write a decision record. */
   recordTasks?: Readonly<Record<string, string>>;
+  workBrief?: WorkBrief;
 };
 
 const refused = (code: RefusalCode, reply: string): HandOffOutcome => ({
@@ -196,6 +207,15 @@ const refused = (code: RefusalCode, reply: string): HandOffOutcome => ({
   refusal: refusalOf(code, reply),
 });
 const describe = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+async function privateAtGate(input: HandOffInput): Promise<boolean> {
+  if (!input.stillPrivate) return true;
+  try {
+    return await input.stillPrivate();
+  } catch {
+    return false;
+  }
+}
 
 /** The Workflow platform's words for an instance that has not ended. */
 const RUNNING = new Set(["queued", "running", "paused", "waiting", "waitingForPause"]);
@@ -238,12 +258,16 @@ async function plan(
     // Absent, nothing idles: zero days, today's endings (record 0051).
     idleDays: input.idleDays ?? IDLE_DAYS_DEFAULT,
     ...(input.card !== undefined ? { card: input.card } : {}),
-    runId: input.runId,
+    // The main run answers while its worker continues. Giving that run to
+    // the coordinator would let the worker finish overwrite the main answer.
+    ...(input.mainTask === undefined ? { runId: input.runId } : {}),
     label: input.label,
   };
   // The probe (item 10): is there a task here at all? Never the unit's text.
   const taskText = shipTaskText(input.requestText, entry.repo);
-  const request = parseShipPlanRequest(taskText);
+  // A main-agent act is always one generated, person-merged task. Its plain
+  // prose may happen to begin with the spelling of a seeded plan request.
+  const request = input.mainTask === undefined ? parseShipPlanRequest(taskText) : undefined;
   if (request === undefined) {
     // A generated plan of one unit (agent-ship item 16): the request text AS
     // WRITTEN is the unit — its urls included, which the probe strips — the id
@@ -254,7 +278,27 @@ async function plan(
     const text =
       (taskText ? shipUnitText(input.requestText, entry.repo) : "") ||
       "Implement the task this thread's ship request describes.";
-    const planId = input.reissuePlanId ?? generatedPlanId(text, msg.threadKey);
+    const planId =
+      input.mainTask !== undefined
+        ? generatedPlanId(text, `${input.mainTask.mainThreadKey}:${input.mainTask.actId}`)
+        : (input.reissuePlanId ?? generatedPlanId(text, msg.threadKey));
+    const workBrief =
+      input.mainTask !== undefined
+        ? {
+            ...input.mainTask.brief,
+            requesterId: msg.userId,
+            mainThreadKey: input.mainTask.mainThreadKey,
+            actId: input.mainTask.actId,
+            repo: entry.repo,
+            base,
+          }
+        : undefined;
+    if (workBrief !== undefined && !isWorkBrief(workBrief))
+      return {
+        ok: false,
+        code: "setup_failed",
+        reply: "🚫 The main agent's work brief is invalid or too long; no worker started.",
+      };
     const graph: PlanGraph = {
       planId,
       units: [{ id: "U1", title: unitTitleOf(text), slug: "u1", branch: unitBranch(planId, "u1"), dependsOn: [] }],
@@ -268,6 +312,7 @@ async function plan(
         selected: ["U1"],
         identity,
         merge: "person",
+        ...(workBrief !== undefined ? { workBrief } : {}),
         ...(entry.resume !== undefined ? { resume: entry.resume } : {}),
         ...(entry.adopt !== undefined ? { adopt: entry.adopt } : {}),
         ...(entry.branch !== undefined ? { entryBranch: entry.branch } : {}),
@@ -279,6 +324,12 @@ async function plan(
       },
     };
   }
+  if (input.mainTask !== undefined)
+    return {
+      ok: false,
+      code: "setup_failed",
+      reply: "🚫 A main-agent work brief needs one generated task; a seeded plan cannot use this hand-off.",
+    };
   // The routed guard (agent-ship item 16; routing-and-config items 21 and 29):
   // a seeded plan's units merge under the runner's grant, so only a typed
   // `agent:ship` may start one — a ship the router or the operator bound from
@@ -388,6 +439,7 @@ async function rowsFor(
           title: u.title,
           branch,
           dependsOn: u.dependsOn,
+          ...(p.workBrief !== undefined ? { workBrief: p.workBrief } : {}),
           rounds: [],
           ...(p.resume !== undefined ? { resume: p.resume } : {}),
           ...(publication !== undefined ? { publication } : {}),
@@ -460,9 +512,7 @@ function planWhere(
  * attempts did not merge.
  */
 export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInput): Promise<HandOffOutcome> {
-  // The brief and atomic-link primitives are in place, but a Ship unit still
-  // runs in the requester's thread until the private worker route is wired.
-  if (input.mainTask !== undefined)
+  if (input.mainTask !== undefined && (!input.privateWorkerReady || input.stillPrivate === undefined))
     return refused("setup_failed", "⚠️ The private worker conversation is unavailable; no worker started.");
   try {
     return await handOffToCoordinatorUnchecked(deps, input);
@@ -475,6 +525,33 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
 
 async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffInput): Promise<HandOffOutcome> {
   const log = deps.log ?? console.log;
+  if (input.mainTask !== undefined) {
+    if (!isMainTaskKey(input.mainTask))
+      return refused("setup_failed", "🚫 The main agent's act id or thread key is invalid; no worker started.");
+    if (input.mainTask.mainThreadKey !== input.msg.threadKey)
+      return refused("setup_failed", "🚫 The main task must come from its own conversation; no worker started.");
+    if (
+      input.beforeStart !== undefined ||
+      input.entry.resume !== undefined ||
+      input.entry.adopt !== undefined ||
+      (input.msg.images?.length ?? 0) > 0 ||
+      (input.msg.documents?.length ?? 0) > 0
+    )
+      return refused(
+        "setup_failed",
+        "🚫 This main-agent hand-off accepts a fresh task and linked text evidence only; no worker started.",
+      );
+    let link;
+    try {
+      link = await deps.instances.getMainTask(input.mainTask);
+    } catch (err) {
+      return refused(
+        "plan_history_unavailable",
+        `⚠️ The main task link could not be read (${describe(err)}); no worker started.`,
+      );
+    }
+    if (link !== null) return linkedTask(deps, input, link);
+  }
   const planned = await plan(deps, input);
   if (!planned.ok) return refused(planned.code, planned.reply);
   const p = planned.planned;
@@ -498,6 +575,11 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
     };
     return start(deps, input, instance, units, planWhere(p, units, []), "put");
   }
+  if (input.mainTask !== undefined)
+    return refused(
+      "plan_runner_conflict",
+      `🚫 The main task's instance id is already taken without its act link; no new attempt started.`,
+    );
   // The latest attempt: the highest suffix with a record.
   let latest = first;
   let attempt = 1;
@@ -586,6 +668,91 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
   return start(deps, input, instance, units, planWhere(p, units, mergedBefore, attempt + 1), "put");
 }
 
+/** A replay reads the original authority and, only when the Workflow is
+ * absent, retries create under its original id. It never plans a new attempt. */
+async function linkedTask(
+  deps: HandOffDeps,
+  input: HandOffInput,
+  link: { instanceId: string; unit: string },
+): Promise<HandOffOutcome> {
+  let instance: CoordinatorInstance | null;
+  let unit: CoordinatorUnit | undefined;
+  try {
+    instance = await deps.instances.get(link.instanceId);
+    unit = (await deps.instances.listUnits(link.instanceId)).find((row) => row.unit === link.unit);
+  } catch (err) {
+    return refused(
+      "plan_history_unavailable",
+      `⚠️ The linked unit could not be read (${describe(err)}); no worker started.`,
+    );
+  }
+  const brief = unit?.workBrief;
+  const key = input.mainTask;
+  if (
+    instance === null ||
+    unit === undefined ||
+    brief === undefined ||
+    key === undefined ||
+    brief.mainThreadKey !== key.mainThreadKey ||
+    brief.actId !== key.actId ||
+    brief.requesterId !== input.msg.userId ||
+    instance.threadKey !== key.mainThreadKey ||
+    brief.repo !== instance.repo ||
+    brief.base !== instance.base ||
+    instance.repo !== input.entry.repo ||
+    instance.base !== input.entry.base
+  )
+    return refused(
+      "plan_runner_conflict",
+      "🚫 The main task link does not match its original unit, requester or target; no worker started.",
+    );
+  let answer: InstanceStatusAnswer;
+  try {
+    answer = await deps.status(instance.id);
+  } catch (err) {
+    answer = { kind: "unanswered", reason: describe(err) };
+  }
+  if (answer.kind === "unanswered")
+    return refused(
+      "plan_runner_state_unknown",
+      `⚠️ The linked worker's state could not be read (${answer.reason}); no new worker started.`,
+    );
+  if (answer.kind === "absent") {
+    if (input.stillLive?.() === false)
+      return refused("setup_failed", "The main run stopped; its linked worker was not started.");
+    if (!(await privateAtGate(input)))
+      return refused("setup_failed", "This is no longer a private conversation; no worker started.");
+    if (input.stillLive?.() === false)
+      return refused("setup_failed", "The main run stopped; its linked worker was not started.");
+    let created: CreateInstanceAnswer;
+    try {
+      created = await deps.create(instance.id);
+    } catch (err) {
+      created = { kind: "unanswered", reason: describe(err) };
+    }
+    if (created.kind === "created" || created.kind === "duplicate")
+      return {
+        status: "completed",
+        instanceId: instance.id,
+        reply: `🧭 This main-agent act keeps its original unit ${instance.id}:${unit.unit}; the runner was retried under the same id.`,
+      };
+    return refused(
+      "plan_start_failed",
+      `⚠️ The linked worker could not be started (${created.reason}); its original unit is preserved for recovery.`,
+    );
+  }
+  if (!RUNNING.has(answer.status) && !ENDED.has(answer.status))
+    return refused(
+      "plan_runner_state_unread",
+      `🚫 The linked runner is in an unread state (${answer.status}); no worker started.`,
+    );
+  return {
+    status: "completed",
+    instanceId: instance.id,
+    reply: `🧭 This main-agent act already owns unit ${instance.id}:${unit.unit} (runner: ${answer.status}).`,
+  };
+}
+
 /** The records, then the instance, then the reply. */
 async function start(
   deps: HandOffDeps,
@@ -601,7 +768,36 @@ async function start(
     return { status: "aborted", reply: reservation.refusal.text, refusal: reservation.refusal };
   let started = false;
   try {
-    const put = write === "replace" ? await deps.instances.replace(instance) : await deps.instances.put(instance);
+    let mainClaim;
+    if (input.stillLive?.() === false) return refused("setup_failed", "The main run stopped; no worker started.");
+    if (!(await privateAtGate(input)))
+      return refused("setup_failed", "This is no longer a private conversation; no worker started.");
+    if (input.stillLive?.() === false) return refused("setup_failed", "The main run stopped; no worker started.");
+    try {
+      mainClaim =
+        input.mainTask !== undefined
+          ? await deps.instances.claimMainTask(input.mainTask, instance, units[0]!)
+          : undefined;
+    } catch (err) {
+      return refused(
+        "plan_history_unavailable",
+        `⚠️ The main task could not be recorded on the state Worker (${describe(err)}); no worker started.`,
+      );
+    }
+    if (mainClaim?.ok === true && !mainClaim.created) return linkedTask(deps, input, mainClaim.link);
+    if (mainClaim?.ok === false)
+      return refused(
+        mainClaim.reason === "unavailable" ? "plan_history_unavailable" : "plan_runner_conflict",
+        mainClaim.reason === "unavailable"
+          ? "⚠️ The main task could not be recorded on the state Worker; no worker started."
+          : "🚫 This main task's instance id is already owned by another unit; no worker started.",
+      );
+    const put =
+      mainClaim !== undefined
+        ? { ok: true as const }
+        : write === "replace"
+          ? await deps.instances.replace(instance)
+          : await deps.instances.put(instance);
     if (!put.ok) {
       if (put.reason === "unavailable")
         return refused(
@@ -615,7 +811,7 @@ async function start(
         `🚫 A runner for \`${instance.id}\` was just recorded by another request, so this request started nothing; the recorded runner owns the pipeline.`,
       );
     }
-    const rows = await deps.instances.putUnits(units);
+    const rows = mainClaim !== undefined ? { ok: true as const } : await deps.instances.putUnits(units);
     if (!rows.ok)
       return refused(
         "plan_history_unavailable",
@@ -667,6 +863,12 @@ async function start(
       }
     }
     let answer: CreateInstanceAnswer;
+    if (input.stillLive?.() === false)
+      return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
+    if (!(await privateAtGate(input)))
+      return refused("setup_failed", "This is no longer a private conversation; its task is saved for a safe retry.");
+    if (input.stillLive?.() === false)
+      return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
     try {
       answer = await deps.create(instance.id);
     } catch (err) {
