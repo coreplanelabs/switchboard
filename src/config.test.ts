@@ -860,6 +860,31 @@ describe("restrict — closed unless granted (authorization.md item 11)", () => 
   });
 });
 
+describe("pilot ready environment config", () => {
+  const ready = `\nexecution:\n  type: cloudflare\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]\n`;
+
+  it("accepts a bounded operator declaration and refuses malformed requirements at load", () => {
+    expect(store(YAML_FIXTURE + ready).config.execution?.readyPilotRepos?.["acme/api"]).toEqual({
+      testCommand: "npm test",
+      dependencyDir: "node_modules",
+      requiredTools: ["node", "npm"],
+    });
+    expect(() => store(YAML_FIXTURE + ready.replace("acme/api:", "../api:")).config).toThrow(
+      /readyPilotRepos.*repository/i,
+    );
+    expect(
+      () => store(YAML_FIXTURE + ready.replace("dependencyDir: node_modules", "dependencyDir: ../private")).config,
+    ).toThrow(/readyPilotRepos.*dependency/i);
+    expect(
+      () =>
+        store(YAML_FIXTURE + ready.replace("requiredTools: [node, npm]", "requiredTools: [node, 'npm;true']")).config,
+    ).toThrow(/readyPilotRepos.*tool/i);
+    expect(() => store(YAML_FIXTURE + ready.replace("testCommand: npm test", "testCommand: ''")).config).toThrow(
+      /readyPilotRepos.*test command/i,
+    );
+  });
+});
+
 // Feature: docs/reference/specs/run-history.md — the `runHistory` section.
 describe("runHistory config", () => {
   const withRunHistory = (block: string, extra = "") => `${YAML_FIXTURE}\n${extra}\nrunHistory:\n${block}\n`;

@@ -21,6 +21,7 @@ import {
   fetchPullRequestReviews,
   branchHeadSubject,
   fetchRefExists,
+  fetchBranchHeadSha,
   fetchRepoShipInfo,
   findMergedPrByHead,
   findOpenPrByHead,
@@ -507,6 +508,26 @@ describe("githubPulls", () => {
       const calls = stubFetch(() => new Response("{}", { status: 200 }));
       expect(await fetchRefExists("acme/api", "main")).toBeUndefined();
       expect(calls).toHaveLength(0); // no unauthenticated probe
+    });
+  });
+
+  describe("fetchBranchHeadSha (pilot writer's exact base binding)", () => {
+    it("returns only a verified commit ref and never guesses after a failed read", async () => {
+      stubToken();
+      const sha = "a".repeat(40);
+      const calls = stubFetch(() => new Response(JSON.stringify({ object: { type: "commit", sha } }), { status: 200 }));
+      expect(await fetchBranchHeadSha("acme/api", "main")).toBe(sha);
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/main");
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response("{}", { status: 200 })),
+      );
+      expect(await fetchBranchHeadSha("acme/api", "main")).toBeUndefined();
+      vi.stubEnv("GH_TOKEN", "");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const noCredential = stubFetch(() => new Response("{}", { status: 200 }));
+      expect(await fetchBranchHeadSha("acme/api", "main")).toBeUndefined();
+      expect(noCredential).toHaveLength(0);
     });
   });
 

@@ -12898,7 +12898,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       system: "sys",
       tools: [],
       // A row from before the container was recorded: the re-attach completes it.
-      state: { binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" } },
+      state: {
+        binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" },
+      },
     });
     await ledger.seed("run-old", "gen-OLD", [
       { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
@@ -12928,7 +12930,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         return { content: [{ type: "text", text: "resumed and done" }], stopReason: "end_turn" };
       },
     };
-    const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    const yamlWithNewPilot = RESIDENT_YAML_FIXTURE.replace(
+      "    baseUrl: https://resident.example",
+      "    baseUrl: https://resident.example\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]",
+    );
+    const { deps, registry, writer } = wired(provider, { ledger, yaml: yamlWithNewPilot });
     const plan = planResume({
       transcript: {
         complete: true,
@@ -12970,6 +12976,348 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.finished.get("run-old")?.status).toBe("completed");
   });
 
+  it("a resumed pilot readiness failure keeps its run and dirty workspace for the next generation", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    let repaired = false;
+    const { calls } = residentFetchStub({
+      attach: (body) => {
+        expect(body.reuse).toBe(true);
+        return new Response(
+          JSON.stringify({
+            workspace: "/workspace/dirty",
+            ref: "main",
+            sha: "abc",
+            user: "worker2",
+            recreated: false,
+            deps: repaired ? "hardlink" : "none",
+          }),
+          { status: 200 },
+        );
+      },
+      exec: (body) =>
+        new Response(
+          JSON.stringify({
+            stdout: String(body.command).includes("MISSING_DEPENDENCIES")
+              ? repaired
+                ? "READY"
+                : "MISSING_DEPENDENCIES"
+              : "abc\n",
+            stderr: "",
+            exitCode: 0,
+            truncated: false,
+          }),
+          { status: 200 },
+        ),
+    });
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = msg("agent:coding fix it", "slack:UADMIN");
+    const binding = { backend: "resident" as const, workspace: "/workspace/dirty", user: "worker2", ref: "main" };
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+        ref: "main",
+        request: durableInboxMessage(request, request.text, 4_000),
+      },
+      system: "sys",
+      tools: [],
+      state: {
+        binding,
+        preserveOnReattachRefusal: true,
+        readyPilotRequirement: {
+          testCommand: "npm test",
+          dependencyDir: "node_modules",
+          requiredTools: ["node", "npm"],
+        },
+      },
+    });
+    await ledger.seed("run-old", "gen-OLD", [
+      { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
+    ]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      {
+        step: 0,
+        seq: 0,
+        turnIndex: 1,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 20 * 60_000,
+        turn: 0,
+        iteration: 0,
+      },
+      [],
+    );
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const provider = capturingProvider("must not run");
+    const yaml = RESIDENT_YAML_FIXTURE.replace(
+      "    baseUrl: https://resident.example",
+      "    baseUrl: https://resident.example\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]",
+    );
+    const { deps, writer } = wired(provider, { ledger, yaml });
+    const plan = planResume({
+      transcript: {
+        complete: true,
+        compactions: [],
+        turns: 1,
+        messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+      },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events: [],
+        lastSeq: 0,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        inbox: [],
+      },
+    });
+    await writer.settled();
+    expect(provider.requests).toEqual([]);
+    expect(calls.filter((c) => c.path === "/attach")).toHaveLength(1);
+    expect(replies.at(-1)).toMatch(/paused.*workspace/i);
+    expect(ledger.finished.has("run-old")).toBe(false);
+    expect(ledger.live.get("run-old")).toMatchObject({ phase: "handoff", state: { binding } });
+    await dispatch(deps, msg("agent:coding also keep this note", "slack:UADMIN"), io);
+    expect(calls.filter((c) => c.path === "/attach")).toHaveLength(1);
+    expect(await ledger.readInbox("run-old", 0)).toHaveLength(1);
+    const next = await ledger.reclaim("gen-NEXT", 10_000, 30_000);
+    expect(next.map((r) => r.row.runId)).toEqual(["run-old"]);
+    expect(next[0]?.row.state.binding).toEqual(binding);
+    repaired = true;
+    // The live pilot declaration can be removed after the writer was admitted;
+    // the recorded check still governs its original workspace on recovery.
+    const continued = wired(capturingProvider("continued after repair"), {
+      ledger,
+      gen: "gen-NEXT",
+      yaml: RESIDENT_YAML_FIXTURE,
+    });
+    const { io: nextIo, replies: nextReplies } = ioWithCard();
+    await dispatch(continued.deps, resumeMessage(next[0]!.row, "fix it"), nextIo, {
+      resume: {
+        row: next[0]!.row,
+        lastStep: next[0]!.lastStep!,
+        plan,
+        events: [],
+        lastSeq: 0,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        inbox: [],
+      },
+    });
+    await continued.writer.settled();
+    expect(nextReplies.at(-1)).toBe("continued after repair");
+    expect(calls.filter((c) => c.path === "/attach")).toHaveLength(2);
+    expect(calls.filter((c) => c.path === "/attach").every((c) => c.body?.reuse === true)).toBe(true);
+    expect(
+      calls.filter((c) => c.path === "/exec" && String(c.body?.command).includes("MISSING_DEPENDENCIES")),
+    ).toHaveLength(1);
+    expect(ledger.finished.get("run-old")?.status).toBe("completed");
+  });
+
+  it("a resumed pilot keeps its dirty checkout when setup fails after successful reattach", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = msg("agent:coding fix it", "slack:UADMIN");
+    const binding = { backend: "resident" as const, workspace: "/workspace/dirty", user: "worker2", ref: "main" };
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+        ref: "main",
+        request: durableInboxMessage(request, request.text, 4_000),
+      },
+      system: "sys",
+      tools: [],
+      state: {
+        binding,
+        preserveOnReattachRefusal: true,
+        readyPilotRequirement: {
+          testCommand: "npm test",
+          dependencyDir: "node_modules",
+          requiredTools: ["node", "npm"],
+        },
+      },
+    });
+    await ledger.seed("run-old", "gen-OLD", [
+      { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
+    ]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      {
+        step: 0,
+        seq: 0,
+        turnIndex: 1,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 20 * 60_000,
+        turn: 0,
+        iteration: 0,
+      },
+      [],
+    );
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const plan = planResume({
+      transcript: {
+        complete: true,
+        compactions: [],
+        turns: 1,
+        messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+      },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    const provider = capturingProvider("must not run");
+    const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    const commit = registry.commitLiveState.bind(registry);
+    vi.spyOn(registry, "commitLiveState").mockImplementation((id, assignment) =>
+      assignment.liveState.state === "preparing" ? false : commit(id, assignment),
+    );
+    const release = vi.fn(async () => ({ released: true }));
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "", release },
+      backend: "resident",
+      binding: { ...binding, sha: "abc" },
+    });
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events: [],
+        lastSeq: 0,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        inbox: [],
+      },
+    });
+    await writer.settled();
+    expect(vi.mocked(makeExecutor)).toHaveBeenCalledOnce();
+    expect(provider.requests).toEqual([]);
+    expect(release).not.toHaveBeenCalled();
+    expect(ledger.finished.has("run-old")).toBe(false);
+    expect(ledger.live.get("run-old")).toMatchObject({ phase: "handoff", state: { binding } });
+    expect(replies.at(-1)).toMatch(/paused.*workspace/i);
+    const next = await ledger.reclaim("gen-NEXT", 10_000, 30_000);
+    expect(next.map((r) => r.row.runId)).toEqual(["run-old"]);
+    expect(next[0]?.row.state.binding).toEqual(binding);
+  });
+
+  it("a resumed pilot with no recoverable workspace binding pauses its original run before provisioning", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = msg("agent:coding fix it", "slack:UADMIN");
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+        ref: "main",
+        request: durableInboxMessage(request, request.text, 4_000),
+      },
+      system: "sys",
+      tools: [],
+      state: {
+        binding: { backend: "unknown" },
+        preserveOnReattachRefusal: true,
+        readyPilotRequirement: {
+          testCommand: "npm test",
+          dependencyDir: "node_modules",
+          requiredTools: ["node", "npm"],
+        },
+      },
+    });
+    await ledger.seed("run-old", "gen-OLD", [
+      { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
+    ]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      {
+        step: 0,
+        seq: 0,
+        turnIndex: 1,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 20 * 60_000,
+        turn: 0,
+        iteration: 0,
+      },
+      [],
+    );
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const plan = planResume({
+      transcript: {
+        complete: true,
+        compactions: [],
+        turns: 1,
+        messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+      },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    const provider = capturingProvider("must not run");
+    const { deps, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    deps.readyEnvironmentBinding = async () => ({ ref: "main", headSha: "a".repeat(40) });
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events: [],
+        lastSeq: 0,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        inbox: [],
+      },
+    });
+    await writer.settled();
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(provider.requests).toEqual([]);
+    expect(replies.at(-1)).toMatch(/binding is missing or invalid.*paused without starting a replacement/i);
+    expect(ledger.finished.has("run-old")).toBe(false);
+    expect(ledger.live.get("run-old")).toMatchObject({ phase: "handoff" });
+    expect((await ledger.reclaim("gen-NEXT", 10_000, 30_000)).map((r) => r.row.runId)).toEqual(["run-old"]);
+  });
+
   // Feature: execution.md item 9 over run-history.md item 54 — a hard stop that
   // ends a resumed run's re-attach wait ends the request `stopped`, and the
   // adopted row closes with the stop's status, not `interrupted` with a note
@@ -13009,7 +13357,10 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
       system: "sys",
       tools: [],
-      state: { binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" } },
+      state: {
+        binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" },
+        preserveOnReattachRefusal: false,
+      },
     });
     await ledger.seed("run-old", "gen-OLD", [
       { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
@@ -13107,7 +13458,10 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
       system: "sys",
       tools: [],
-      state: { binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" } },
+      state: {
+        binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" },
+        preserveOnReattachRefusal: false,
+      },
     });
     await ledger.seed("run-old", "gen-OLD", [
       { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
@@ -13239,7 +13593,10 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
       system: "sys",
       tools: [],
-      state: { binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" } },
+      state: {
+        binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" },
+        preserveOnReattachRefusal: false,
+      },
     });
     await ledger.seed("run-old", "gen-OLD", [
       { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
@@ -13328,12 +13685,22 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
    */
   function replacedContainerWorld(
     ledger: InMemoryRunLedger,
-    hooks: { onCallOpen?: () => void; attach?: (body: Record<string, unknown>) => Response } = {},
+    hooks: {
+      onCallOpen?: () => void;
+      status?: () => Response;
+      attach?: (body: Record<string, unknown>) => Response;
+      exec?: (body: Record<string, unknown>) => Response;
+      yaml?: string;
+    } = {},
   ) {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
-    const { calls } = residentFetchStub(hooks.attach ? { attach: hooks.attach } : {});
+    const { calls } = residentFetchStub({
+      ...(hooks.status ? { status: hooks.status } : {}),
+      ...(hooks.attach ? { attach: hooks.attach } : {}),
+      ...(hooks.exec ? { exec: hooks.exec } : {}),
+    });
     const provider = capturingProvider("started over and done");
     let n = 0;
     const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
@@ -13344,7 +13711,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       onPersisted: (id) => registry.markPersisted(id),
       sleep: async () => {},
     });
-    const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const deps = makeDeps(hooks.yaml ?? RESIDENT_YAML_FIXTURE, provider);
     deps.runRegistry = registry;
     deps.runHistoryWriter = writer;
     deps.runLedger = createLedgerWriteThrough({
@@ -13419,6 +13786,126 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     };
     return { deps, provider, registry, writer, store, containers, calls };
   }
+
+  it("a pilot writer paused by mid-run reattach refusal keeps its original ledger row and checkout", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const head = "a".repeat(40);
+    const yaml = RESIDENT_YAML_FIXTURE.replace(
+      "    baseUrl: https://resident.example",
+      "    baseUrl: https://resident.example\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]",
+    );
+    const { deps, provider, registry, writer, containers, calls } = replacedContainerWorld(ledger, {
+      yaml,
+      status: () =>
+        new Response(
+          JSON.stringify({
+            state: "warm",
+            reason: "",
+            snapshot: {
+              ref: "main",
+              sha: head,
+              checkoutBackupId: "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b",
+              depsBackupId: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            },
+          }),
+          { status: 200 },
+        ),
+      attach: (body) =>
+        body.reuse === true
+          ? new Response(JSON.stringify({ error: "reuse-refused: recorded worktree unavailable", needs: "recreate" }), {
+              status: 409,
+            })
+          : new Response(
+              JSON.stringify({
+                workspace: "/workspace/dirty",
+                ref: "main",
+                sha: head,
+                user: "worker2",
+                deps: "hardlink",
+              }),
+              { status: 200 },
+            ),
+      exec: (body) =>
+        new Response(
+          JSON.stringify({
+            stdout: String(body.command).includes("MISSING_DEPENDENCIES") ? "READY" : `${head}\n`,
+            stderr: "",
+            exitCode: 0,
+            truncated: false,
+          }),
+          { status: 200 },
+        ),
+    });
+    deps.readyEnvironmentBinding = async () => ({ ref: "main", headSha: head });
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(replies.at(-1)).toMatch(/paused.*recorded workspace binding/i);
+    expect(outcome).toMatchObject({ status: "refused", refusal: "setup_failed" });
+    expect(ledger.finished.has("run-1")).toBe(false);
+    expect(ledger.live.get("run-1")).toMatchObject({
+      phase: "handoff",
+      state: { preserveOnReattachRefusal: true, binding: { backend: "resident", workspace: "/workspace/dirty" } },
+    });
+    expect(calls.filter((c) => c.path === "/attach").map((c) => c.body?.reuse === true)).toEqual([false, true]);
+    expect(provider.requests).toEqual([]);
+    expect(containers).toHaveLength(1);
+    expect(registry.getById("run-1")).toBeNull();
+    expect(registry.getById("run-2")?.agent).toBe("door");
+    const next = await ledger.reclaim("gen-NEXT", 10_000, 30_000);
+    expect(next.map((r) => r.row.runId)).toEqual(["run-1"]);
+    expect(next[0]?.row.state).toMatchObject({
+      preserveOnReattachRefusal: true,
+      binding: { backend: "resident", workspace: "/workspace/dirty" },
+    });
+    const continued = wired(capturingProvider("must not restart"), {
+      ledger,
+      gen: "gen-NEXT",
+      yaml: RESIDENT_YAML_FIXTURE,
+    });
+    const plan = planResume({
+      transcript: next[0]!.row.meta.session
+        ? await ledger.readSession(next[0]!.row.meta.session.key, next[0]!.row.meta.session.seedFrom)
+        : await ledger.readTranscript("run-1"),
+      lastStep: next[0]!.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    const resumed = await dispatch(continued.deps, resumeMessage(next[0]!.row, "fix it"), io, {
+      resume: {
+        row: next[0]!.row,
+        lastStep: next[0]!.lastStep!,
+        plan,
+        events: await ledger.readEvents("run-1"),
+        lastSeq: 0,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        inbox: [],
+      },
+    });
+    expect(resumed).toMatchObject({ status: "refused", refusal: "setup_failed" });
+    expect(ledger.finished.has("run-1")).toBe(false);
+    expect(ledger.live.get("run-1")?.phase).toBe("handoff");
+    expect(calls.filter((c) => c.path === "/attach").map((c) => c.body?.reuse === true)).toEqual([false, true, true]);
+  });
+
+  it("refuses an opted-in pilot writer before workspace attach when its run is not durably tracked", async () => {
+    const provider = capturingProvider("must not run");
+    const yaml = RESIDENT_YAML_FIXTURE.replace(
+      "    baseUrl: https://resident.example",
+      "    baseUrl: https://resident.example\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]",
+    );
+    const { deps, writer } = wired(provider, { yaml });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    deps.readyEnvironmentBinding = async () => ({ ref: "main", headSha: "a".repeat(40) });
+    deps.runLedger.reserve = async () => ({ kind: "untracked", why: "ledger unavailable" });
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(outcome).toMatchObject({ status: "failed", refusal: "uncaught" });
+    expect(replies.at(-1)).toMatch(/could not be durably tracked/i);
+    expect(vi.mocked(makeExecutor)).not.toHaveBeenCalled();
+    expect(provider.requests).toEqual([]);
+  });
 
   // Feature: docs/reference/specs/harness.md item 6 (the survival clause's
   // ceiling) over harness-pi.md item 16 — a container replaced under a live pi
@@ -14174,6 +14661,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       tools: [],
       state: {
         binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2", container: "vm-1" },
+        preserveOnReattachRefusal: false,
         harness: {
           harness: "pi",
           pid: PID,

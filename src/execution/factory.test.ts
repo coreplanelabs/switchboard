@@ -1922,7 +1922,7 @@ describe("makeExecutor resident selection", () => {
       expect(calls).toEqual(["/status", "/attach"]);
       expect(bodies[1]).toMatchObject({ reuse: true, refHint: "master" });
       expect(sel.binding?.container).toBe("vm-1");
-      expect(workspaceBindingFor(sel)).toEqual(recorded);
+      expect(workspaceBindingFor(sel)).toEqual({ ...recorded, ref: "master" });
     });
 
     it("a fresh run (no reattach) never sends reuse: the body is the one every fresh attach always sent", async () => {
@@ -2718,7 +2718,13 @@ describe("the workspace binding on the row", () => {
           container: "vm-9",
         },
       }),
-    ).toEqual({ backend: "resident", workspace: "/workspace/threads/t/main", user: "worker3", container: "vm-9" });
+    ).toEqual({
+      backend: "resident",
+      ref: "main",
+      workspace: "/workspace/threads/t/main",
+      user: "worker3",
+      container: "vm-9",
+    });
     expect(workspaceBindingFor({ executor: new LocalExecutor("/tmp/x"), backend: "sandbox" })).toEqual({
       backend: "sandbox",
     });
@@ -2730,6 +2736,7 @@ describe("the workspace binding on the row", () => {
           slug: "jshttp/vary",
           ref: "fix/existing",
           sha: "a".repeat(40),
+          sourceSha: "b".repeat(40),
           workspace: "/workspace/checkout",
           cached: false,
           ms: 100,
@@ -2737,14 +2744,17 @@ describe("the workspace binding on the row", () => {
       }),
     ).toEqual({
       backend: "sandbox",
-      seeded: { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout" },
+      seeded: { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout", sourceSha: "b".repeat(40) },
     });
     expect(workspaceBindingFor({ executor: new LocalExecutor("/tmp/x") })).toBeUndefined();
   });
 
   it("workspaceBindingOf reads a binding this build wrote and answers none for another shape", () => {
-    expect(workspaceBindingOf({ backend: "resident", workspace: "/w", user: "worker2", container: "vm-1" })).toEqual({
+    expect(
+      workspaceBindingOf({ backend: "resident", ref: "main", workspace: "/w", user: "worker2", container: "vm-1" }),
+    ).toEqual({
       backend: "resident",
+      ref: "main",
       workspace: "/w",
       user: "worker2",
       container: "vm-1",
@@ -2753,11 +2763,16 @@ describe("the workspace binding on the row", () => {
     expect(
       workspaceBindingOf({
         backend: "sandbox",
-        seeded: { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout" },
+        seeded: {
+          slug: "jshttp/vary",
+          ref: "fix/existing",
+          workspace: "/workspace/checkout",
+          sourceSha: "b".repeat(40),
+        },
       }),
     ).toEqual({
       backend: "sandbox",
-      seeded: { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout" },
+      seeded: { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout", sourceSha: "b".repeat(40) },
     });
     expect(
       workspaceBindingOf({
@@ -2895,6 +2910,7 @@ describe("makeExecutor seeded sandbox", () => {
       slug: "jshttp/vary",
       ref: "master",
       sha: HEAD,
+      sourceSha: SHA,
       workspace: "/workspace/checkout",
       cached: false,
       ms: 30_500,
@@ -3086,18 +3102,204 @@ describe("makeExecutor pilot ready environment", () => {
     expect(calls).toEqual([]);
   });
 
-  it("refuses a resumed pilot write before a model or backend can bypass readiness", async () => {
+  it("reattaches a pilot writer to its recorded resident worktree and rechecks readiness", async () => {
+    envs();
+    const calls = fetches(
+      { body: { state: "warm", reason: "", snapshot: snapshot() } },
+      {
+        body: {
+          workspace: "/workspace/threads/x/master",
+          user: "writer",
+          ref: "master",
+          sha: SHA,
+          deps: "hardlink",
+          depsKey: "lock",
+        },
+      },
+    );
+    const check = vi.spyOn(ResidentExecutor.prototype, "exec").mockResolvedValue("READY");
+    const selection = await makeExecutor(opts(), {
+      ...context(),
+      headSha: undefined,
+      reattach: { backend: "resident", workspace: "/workspace/threads/x/master", user: "writer" },
+    });
+    expect(selection.backend).toBe("resident");
+    expect(check).toHaveBeenCalledOnce();
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
+  it("refuses a pilot resident resume without a recorded worktree and user before attach", async () => {
     envs();
     const calls = fetches();
     await expect(
       makeExecutor(opts(), {
         ...context(),
+        headSha: undefined,
+        reattach: { backend: "resident", workspace: "/workspace/threads/x/master" },
+      }),
+    ).rejects.toMatchObject({ reason: "binding_mismatch", beforeModel: true });
+    await expect(
+      makeExecutor(opts(), {
+        ...context(),
+        headSha: undefined,
+        reattach: { backend: "resident", user: "writer" },
+      }),
+    ).rejects.toMatchObject({ reason: "binding_mismatch", beforeModel: true });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a pilot resident resume when attach omits the recorded user", async () => {
+    envs();
+    const calls = fetches(
+      { body: { state: "warm", reason: "", snapshot: snapshot() } },
+      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: SHA, deps: "hardlink" } },
+      { body: { ok: true } },
+    );
+    const check = vi.spyOn(ResidentExecutor.prototype, "exec").mockResolvedValue("READY");
+    await expect(
+      makeExecutor(opts(), {
+        ...context(),
+        headSha: undefined,
+        reattach: { backend: "resident", workspace: "/workspace/threads/x/master", user: "writer" },
+      }),
+    ).rejects.toMatchObject({ reason: "binding_mismatch", beforeModel: true });
+    expect(check).not.toHaveBeenCalled();
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
+  it("holds a resumed pilot writer when its recorded worktree has no dependency view", async () => {
+    envs();
+    const calls = fetches(
+      { body: { state: "warm", reason: "", snapshot: snapshot() } },
+      { body: { workspace: "/workspace/threads/x/master", user: "writer", ref: "master", sha: SHA, deps: "none" } },
+      { body: { ok: true } },
+    );
+    const check = vi.spyOn(ResidentExecutor.prototype, "exec").mockResolvedValue("READY");
+    await expect(
+      makeExecutor(opts(), {
+        ...context(),
+        headSha: undefined,
+        reattach: { backend: "resident", workspace: "/workspace/threads/x/master", user: "writer" },
+      }),
+    ).rejects.toMatchObject({ name: "ReadyEnvironmentError", reason: "dependencies_missing", beforeModel: true });
+    expect(check).not.toHaveBeenCalled();
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
+  it("accepts a reused resident dependency view with a matching stored key on resume", async () => {
+    envs();
+    const calls = fetches(
+      { body: { state: "warm", reason: "", snapshot: snapshot() } },
+      {
+        body: {
+          workspace: "/workspace/threads/x/master",
+          user: "writer",
+          ref: "master",
+          sha: SHA,
+          deps: "none",
+          depsKey: "lock",
+        },
+      },
+    );
+    const check = vi.spyOn(ResidentExecutor.prototype, "exec").mockResolvedValue("READY");
+    const selection = await makeExecutor(opts(), {
+      ...context(),
+      headSha: undefined,
+      reattach: { backend: "resident", ref: "master", workspace: "/workspace/threads/x/master", user: "writer" },
+    });
+    expect(selection.backend).toBe("resident");
+    expect(check).toHaveBeenCalledOnce();
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
+  it("accepts a repaired pilot worktree after its resident container changed", async () => {
+    envs();
+    const calls = fetches(
+      { body: { state: "warm", reason: "", snapshot: snapshot() } },
+      {
+        body: {
+          workspace: "/workspace/threads/x/master",
+          user: "writer",
+          container: "vm-new",
+          ref: "master",
+          sha: SHA,
+          deps: "hardlink",
+        },
+      },
+    );
+    const check = vi.spyOn(ResidentExecutor.prototype, "exec").mockResolvedValue("READY");
+    const selection = await makeExecutor(opts(), {
+      ...context(),
+      headSha: undefined,
+      reattach: {
+        backend: "resident",
+        workspace: "/workspace/threads/x/master",
+        user: "writer",
+        container: "vm-old",
+      },
+    });
+    expect(selection.binding).toMatchObject({ workspace: "/workspace/threads/x/master", container: "vm-new" });
+    expect(check).toHaveBeenCalledOnce();
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
+  it("reattaches a pilot writer to its seeded sandbox checkout and rechecks readiness", async () => {
+    envs();
+    const calls = fetches();
+    const check = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockImplementation(async (command) => {
+      if (command.includes("rev-parse --abbrev-ref HEAD")) return "master\n";
+      if (command.includes("rev-parse HEAD")) return `${SHA}\n`;
+      if (command.includes("config --get remote.origin.url")) return "https://door.example/git/jshttp/vary.git\n";
+      return "READY";
+    });
+    const selection = await makeExecutor(opts(), {
+      ...context(),
+      headSha: undefined,
+      reattach: {
+        backend: "sandbox",
+        seeded: { slug: "jshttp/vary", ref: "master", workspace: "/workspace/checkout", sourceSha: "b".repeat(40) },
+      },
+    });
+    expect(selection.backend).toBe("sandbox");
+    expect(selection.seeded).toMatchObject({ slug: "jshttp/vary", ref: "master", sha: SHA });
+    expect(check.mock.calls.at(-1)?.[0]).toContain("node_modules");
+    expect(check.mock.calls.at(-1)?.[0]).toContain("git diff --quiet 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' HEAD");
+    expect(calls).toEqual([]);
+  });
+
+  it("holds a seeded pilot resume when the recorded dependency snapshot head is absent", async () => {
+    envs();
+    const check = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockImplementation(async (command) => {
+      if (command.includes("rev-parse --abbrev-ref HEAD")) return "master\n";
+      if (command.includes("rev-parse HEAD")) return `${SHA}\n`;
+      if (command.includes("config --get remote.origin.url")) return "https://door.example/git/jshttp/vary.git\n";
+      return "READY";
+    });
+    await expect(
+      makeExecutor(opts(), {
+        ...context(),
+        headSha: undefined,
         reattach: {
           backend: "sandbox",
           seeded: { slug: "jshttp/vary", ref: "master", workspace: "/workspace/checkout" },
         },
       }),
-    ).rejects.toMatchObject({ name: "ReadyEnvironmentError", reason: "binding_mismatch", beforeModel: true });
+    ).rejects.toMatchObject({ reason: "binding_mismatch", beforeModel: true });
+    expect(check.mock.calls.some(([command]) => command.includes("node_modules"))).toBe(false);
+  });
+
+  it("refuses a resumed pilot writer with no recorded seed before any model command", async () => {
+    envs();
+    const calls = fetches();
+    const check = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockResolvedValue("READY");
+    await expect(
+      makeExecutor(opts(), {
+        ...context(),
+        headSha: undefined,
+        reattach: { backend: "sandbox" },
+      }),
+    ).rejects.toMatchObject({ reason: "binding_mismatch", beforeModel: true });
+    expect(check).not.toHaveBeenCalled();
     expect(calls).toEqual([]);
   });
 

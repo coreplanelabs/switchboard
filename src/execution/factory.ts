@@ -87,6 +87,9 @@ export interface ExecutionConfig {
    * no probe. The `blank` and `repo-cold` classes never consult it.
    */
   resident?: ResidentExecutionConfig;
+  /** Operator-declared admission for pilot coding repositories. An absent
+   * repository keeps ordinary executor selection unchanged. */
+  readyPilotRepos?: Record<string, ReadyEnvironmentRequirement>;
 }
 
 export interface GithubCredentialProvider {
@@ -181,6 +184,8 @@ export interface ExecutorContext {
 export interface WorkspaceBinding {
   /** The backend the run's commands execute on: the one a resume consults, and the only one. */
   backend: Backend;
+  /** The actual attached branch, including a resolved default branch. */
+  ref?: string;
   /** The worktree the resident bound for the thread; absent on a per-thread
    *  backend, whose workspace is the container's own. */
   workspace?: string;
@@ -190,7 +195,7 @@ export interface WorkspaceBinding {
    *  item 8), when the attach answered one: the resident's is its VM's boot id. */
   container?: string;
   /** A resident fallback's seed identity, retained so re-attach can verify the same checkout. */
-  seeded?: Pick<SeededSandbox, "slug" | "ref" | "workspace">;
+  seeded?: Pick<SeededSandbox, "slug" | "ref" | "workspace" | "sourceSha">;
 }
 
 const BACKENDS: readonly Backend[] = ["local", "resident", "sandbox", "e2b"];
@@ -212,10 +217,18 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
     seed.ref.length <= 255 &&
     typeof seed.workspace === "string" &&
     seed.workspace === SEED_CHECKOUT_DIR
-      ? { slug: seed.slug, ref: seed.ref, workspace: seed.workspace }
+      ? {
+          slug: seed.slug,
+          ref: seed.ref,
+          workspace: seed.workspace,
+          ...(typeof seed.sourceSha === "string" && /^[0-9a-f]{40}$/.test(seed.sourceSha)
+            ? { sourceSha: seed.sourceSha }
+            : {}),
+        }
       : undefined;
   return {
     backend: v.backend as Backend,
+    ...(typeof v.ref === "string" && v.ref.length > 0 && v.ref.length <= 255 ? { ref: v.ref } : {}),
     ...(typeof v.workspace === "string" && v.workspace ? { workspace: v.workspace } : {}),
     ...(typeof v.user === "string" && v.user ? { user: v.user } : {}),
     ...(typeof v.container === "string" && v.container ? { container: v.container } : {}),
@@ -234,6 +247,7 @@ export function workspaceBindingFor(
   const b = selection.binding;
   return {
     backend: selection.backend,
+    ...(b?.ref !== undefined ? { ref: b.ref } : {}),
     ...(b?.workspace !== undefined ? { workspace: b.workspace } : {}),
     ...(b?.user !== undefined ? { user: b.user } : {}),
     ...(b?.container !== undefined ? { container: b.container } : {}),
@@ -243,6 +257,7 @@ export function workspaceBindingFor(
             slug: selection.seeded.slug,
             ref: selection.seeded.ref,
             workspace: selection.seeded.workspace,
+            ...(selection.seeded.sourceSha ? { sourceSha: selection.seeded.sourceSha } : {}),
           },
         }
       : {}),
@@ -507,8 +522,7 @@ export async function makeExecutor(
       machine !== "repo-resident" ||
       !ctx.repo ||
       !ctx.ref ||
-      !ctx.headSha ||
-      !/^[0-9a-f]{40}$/.test(ctx.headSha)
+      (ctx.reattach === undefined && (!ctx.headSha || !/^[0-9a-f]{40}$/.test(ctx.headSha)))
     )
       throw readyFailure(
         "repository_unresolved",
@@ -523,6 +537,11 @@ export async function makeExecutor(
       !processSecrets.named(opts.execution.resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN")
     )
       throw readyFailure("backend_unavailable", "Configure the pilot resident and sandbox, then retry this task.");
+    if (ctx.reattach?.backend === "resident" && (!ctx.reattach.workspace || !ctx.reattach.user))
+      throw readyFailure(
+        "binding_mismatch",
+        "Verify the original task's recorded worktree and user before resuming it.",
+      );
   }
   if (machine === "none") {
     return { executor: new NullExecutor(ctx.agent.name), backend: "local" };
@@ -536,12 +555,47 @@ export async function makeExecutor(
   // A resume re-attaches where the row says the run ran (run-history item 54)
   // and never provisions again: the branches below are a fresh run's.
   if (ctx.reattach !== undefined) {
-    if (ready !== undefined)
-      throw readyFailure(
-        "binding_mismatch",
-        "Recheck the pilot task's recorded checkout and dependencies before resuming its model turn.",
+    const selection = await reattachWorkspace(opts, ctx, ctx.reattach, span);
+    if (ready === undefined) return selection;
+    // A resumed tree may hold unpublished edits. A readiness refusal leaves
+    // that binding in place for the same unit to retry after repair.
+    if (ctx.reattach.backend === "resident") {
+      const binding = selection.binding;
+      if (
+        !binding?.workspace ||
+        binding.workspace !== ctx.reattach.workspace ||
+        !binding.user ||
+        binding.user !== ctx.reattach.user ||
+        binding.ref !== ctx.ref
+      )
+        throw readyFailure(
+          "binding_mismatch",
+          "Verify the original task's repository branch and worktree, then retry it.",
+        );
+      if (binding.deps === undefined || (binding.deps === "none" && !binding.depsKey))
+        throw readyFailure("dependencies_missing", "Restore the resident's dependency view, then retry this task.");
+      await checkReadyEnvironment(selection.executor, binding.workspace, ready, ctx.stopSignal);
+    } else if (
+      ctx.reattach.backend === "sandbox" &&
+      ctx.reattach.seeded &&
+      selection.seeded &&
+      selection.seeded.slug.toLowerCase() === ctx.repo?.toLowerCase() &&
+      selection.seeded.ref === ctx.ref &&
+      selection.seeded.workspace === ctx.reattach.seeded.workspace &&
+      ctx.reattach.seeded.sourceSha !== undefined &&
+      /^[0-9a-f]{40}$/.test(ctx.reattach.seeded.sourceSha)
+    ) {
+      await checkReadyEnvironment(
+        selection.executor,
+        selection.seeded.workspace,
+        ready,
+        ctx.stopSignal,
+        ctx.reattach.seeded.sourceSha,
       );
-    return reattachWorkspace(opts, ctx, ctx.reattach, span);
+    } else {
+      throw readyFailure("binding_mismatch", "Verify the original task's seeded checkout, then retry it.");
+    }
+    return selection;
   }
   // `blank` → the per-thread backend with an empty workspace: no repository,
   // whatever the context carries (a blank run never resolves one), and no
@@ -830,7 +884,7 @@ export async function makeExecutor(
           executor,
           note: seededSandboxNote(reason, outcome.seeded),
           backend: perThreadBackend(opts),
-          seeded: outcome.seeded,
+          seeded: { ...outcome.seeded, sourceSha: outcome.sourceSha },
           ...(failedAttach ? { trace: failedAttach.steps } : {}),
           ...(drainWaitMs !== undefined ? { drainWaitMs } : {}),
         };

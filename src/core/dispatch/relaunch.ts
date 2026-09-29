@@ -9,13 +9,13 @@
 // rotation (model-proxy item 2); and the resume the harness rebuilds from —
 // the record the harness held at the interruption, its facts and its budget
 // filled in here. Harness-neutral: the rebuild itself is the harness's `open`
-// with that resume, and every refusal is the seam's `HarnessInterruptedError`,
-// so the loop closes the run `interrupted` for the dispatcher's restart
-// exactly as the floor does (harness-pi item 16).
+// with that resume. A stamped pilot writer whose recorded checkout cannot be
+// re-attached pauses on the same row; other refusals interrupt the run.
 
 import type { AgentDef } from "../../agents/registry.js";
 import type { RunProfile } from "../../config/profile.js";
-import type { WorkspaceBinding } from "../../execution/factory.js";
+import type { ReadyEnvironmentReason, WorkspaceBinding } from "../../execution/factory.js";
+import type { ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
 import {
   HarnessInterruptedError,
   RELAUNCH_CEILING,
@@ -29,7 +29,7 @@ import type { RoundWorkspace } from "../reviewRound.js";
 import type { Clock, Span } from "../trace/types.js";
 import { reattachWorkspace, type ProvisionDeps } from "./provision.js";
 
-/** A relaunch refused by name — the ceiling reached, the workspace lost, the
+/** A relaunch refused by name — the ceiling reached, an ordinary workspace lost, the
  *  bearer not rotatable, a harness with its own store, a row without facts:
  *  the run closes `interrupted` and its request runs again as a new run, the
  *  floor's outcome. `message` starts at the why — the harness's own
@@ -61,6 +61,8 @@ export interface RelaunchContext {
   facts: HarnessFacts | undefined;
   /** The run's recorded workspace, re-attached before the process starts; none for a run without one. */
   binding: WorkspaceBinding | undefined;
+  preserveOnReattachRefusal?: boolean;
+  readyRequirementOverride?: ReadyEnvironmentRequirement;
   /** The run's hard stop (`run.control.hardSignal`): it rides into the re-attach's
    *  wake wait, so a stop while the replacement is being re-attached ends it at
    *  once and the run ends stopped, never relaunched (execution.md item 9). */
@@ -88,6 +90,9 @@ export type RelaunchDecision =
       round?: RoundWorkspace;
     }
   | { kind: "refused"; interruption: HarnessInterruptedError }
+  /** A coding checkout can hold unpublished edits; leave its original row and
+   *  binding for a later recovery rather than restarting from the request. */
+  | { kind: "paused"; reason: ReadyEnvironmentReason | "relaunch_ceiling"; message: string }
   /** The run's own stop ended the re-attach: nothing is written or rotated, and the run ends stopped. */
   | { kind: "stopped" }
   /** The run is inside its write-up reserve, or ran into it under the
@@ -117,24 +122,44 @@ export async function prepareRelaunch(
     kind: "refused",
     interruption: new RelaunchRefusedError(why, reason, refusal),
   });
+  const pausePilot = (reason: ReadyEnvironmentReason | "relaunch_ceiling", message: string): RelaunchDecision => ({
+    kind: "paused",
+    reason,
+    message,
+  });
   // An own-store harness has only the store that went with the container (harness.md item 6).
-  if (harness.history !== "authored-session")
+  if (harness.history !== "authored-session") {
+    if (ctx.preserveOnReattachRefusal)
+      return pausePilot("backend_unavailable", "The coding run cannot resume after the container changed.");
     return refuse(
       `the ${harness.name} harness keeps its own store, which went with the container, so nothing here can rebuild its process; the run restarts from its request`,
       "container replaced under the run; the harness keeps its own store; restarting from the request",
     );
+  }
   // The bound lives on the row's facts; a row that never got any cannot keep it.
-  if (facts === undefined)
+  if (facts === undefined) {
+    if (ctx.preserveOnReattachRefusal)
+      return pausePilot(
+        "check_failed",
+        "The coding run has no saved harness state to resume after the container changed.",
+      );
     return refuse(
       "the row carries no harness facts to count a relaunch on; the run restarts from its request",
       "container replaced under the run before its process left facts; restarting from the request",
     );
+  }
   const relaunches = facts.relaunches;
-  if (relaunches >= RELAUNCH_CEILING)
+  if (relaunches >= RELAUNCH_CEILING) {
+    if (ctx.preserveOnReattachRefusal)
+      return pausePilot(
+        "relaunch_ceiling",
+        `The coding run reached its relaunch limit (${RELAUNCH_CEILING}) after the container changed. Inspect the original run before resuming it.`,
+      );
     return refuse(
       `the container was replaced under the run again and the relaunch ceiling is ${RELAUNCH_CEILING} (${relaunches} relaunches already), so pi is not started a ${ordinal(relaunches + 2)} time; the run restarts from its request`,
       `relaunch ceiling: ${relaunches} relaunches already; restarting from the request`,
     );
+  }
   // The workspace, where the row says it is or nowhere (run-history item 54).
   let round: RoundWorkspace | undefined;
   if (ctx.binding !== undefined) {
@@ -149,6 +174,8 @@ export async function prepareRelaunch(
       root: ctx.root,
       clock: ctx.clock,
       reattach: ctx.binding,
+      ...(ctx.preserveOnReattachRefusal ? { preserveOnReattachRefusal: true } : {}),
+      ...(ctx.readyRequirementOverride !== undefined ? { readyRequirementOverride: ctx.readyRequirementOverride } : {}),
       ...(ctx.requester !== undefined ? { requester: ctx.requester } : {}),
       ...(ctx.stopSignal !== undefined ? { stopSignal: ctx.stopSignal } : {}),
       ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
@@ -166,12 +193,20 @@ export async function prepareRelaunch(
         // source, worded by the bound that refused), with what it meant here.
         why: `the container was replaced under the run: ${reattached.note}; no write-up ran`,
       };
-    if (reattached.kind === "reattach_refused")
+    if (reattached.kind === "reattach_unready")
+      return { kind: "paused", reason: reattached.reason, message: reattached.message };
+    if (reattached.kind === "reattach_refused") {
+      if (ctx.preserveOnReattachRefusal)
+        return pausePilot(
+          "backend_unavailable",
+          "The coding run's original workspace could not be verified after the container changed.",
+        );
       return refuse(
         `the run's workspace could not be re-attached in the replacement container (${reattached.why}); the run restarts from its request under the same run id`,
         "workspace lost with the replaced container; restarting from the request",
         "workspace_lost",
       );
+    }
     round = reattached.round;
   }
   // The rotation (model-proxy item 2): the row's write inside it, the count one higher.
@@ -183,11 +218,17 @@ export async function prepareRelaunch(
       written = { ...counted, bearerHash: secretHash };
       ctx.saveFacts(written);
     });
-    if (!rotated.ok)
+    if (!rotated.ok) {
+      if (ctx.preserveOnReattachRefusal)
+        return pausePilot(
+          "backend_unavailable",
+          "The coding run's model credential could not be renewed after the container changed.",
+        );
       return refuse(
         `the run's bearer could not be rotated for the relaunch (${rotated.reason}); the run restarts from its request`,
         `the run's bearer could not be rotated (${rotated.reason}); restarting from the request`,
       );
+    }
     bearer = rotated.token;
   } else {
     ctx.saveFacts(written);

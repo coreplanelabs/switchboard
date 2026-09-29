@@ -75,7 +75,7 @@ export interface AdmissionDeps {
    *  (thread-admission item 5), fed by the reclaim sweep: a follow-up on one
    *  is steered into that run's durable inbox instead of starting a rival.
    *  Empty in a process without a ledger. */
-  threadsElsewhere: Pick<ThreadsElsewhere, "get" | "forget">;
+  threadsElsewhere: Pick<ThreadsElsewhere, "get" | "forget" | "remember">;
 }
 
 /** A follow-up as the dispatcher admits it: the runner's `FollowUpInput` plus

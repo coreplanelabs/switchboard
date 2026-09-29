@@ -1608,6 +1608,21 @@ describe("finishing and finish", () => {
     expect(await down.wt.handoff()).toEqual({ marked: [], failed: "HTTP 503" });
   });
 
+  it("pauses only one resumed run for readiness retry and preserves its workspace binding for the next generation", async () => {
+    const { ledger, wt } = harness();
+    const paused = (await openRun(wt, openReq()))!;
+    const other = (await openRun(wt, openReq({ runId: "r2", threadKey: "t2" })))!;
+    const binding = { backend: "resident" as const, workspace: "/workspace/dirty", user: "worker2" };
+    expect(await paused.setStateAndFlush({ binding })).toBe(true);
+    expect(await paused.pauseForRetry()).toBe(true);
+    expect(ledger.live.get("r1")).toMatchObject({ phase: "handoff", state: { binding } });
+    expect(ledger.live.get("r2")?.phase).toBe("live");
+    expect(other.handedOff).toBe(false);
+    const reclaimed = await ledger.reclaim("gen-next", 10_000, 30_000);
+    expect(reclaimed.map((r) => r.row.runId)).toEqual(["r1"]);
+    expect(reclaimed[0]?.row.state.binding).toEqual(binding);
+  });
+
   it("the step record carries the inbox seq the run has consumed (run-history item 40); pushInbox hands back the ledger's seq for a live run — undefined, with a warning, when the ledger refuses or fails", async () => {
     const { ledger, wt, warnings } = harness();
     const run = (await openRun(wt, openReq()))!;

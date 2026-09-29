@@ -28,6 +28,7 @@ import { HARNESS_NAMES, isHarnessName } from "../core/harness/roster.js";
 import type { OpenCodeCompactionConfig } from "../core/harness/opencode/process.js";
 import { CONFIRM_CLASSES, type Boundary, type ConfirmClass } from "./profile.js";
 import { assertUrlAllowed } from "../tools/web.js";
+import { readyEnvironmentCommand, type ReadyEnvironmentRequirement } from "../execution/seedPlan.js";
 import {
   isMcpServerEntry,
   MCP_HEADER_NAME_RE,
@@ -317,6 +318,7 @@ export function validateConfig(cfg: AppConfig): void {
   validateScopeVerbosity(cfg, "config.yaml");
   validateBoundaries(cfg, "config.yaml");
   validateScopeBlocks(cfg, "config.yaml");
+  validateReadyPilotRepos(cfg.execution);
   {
     // The merge watch's static half (record 0071): the org tier's defaults.
     const problem = pullsProblem("defaults.pulls", cfg.defaults?.pulls);
@@ -371,6 +373,29 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.opencode !== undefined) validateOpenCode(cfg.opencode);
   validateDashboardConfig(cfg.dashboard);
   validateSlack(cfg.slack);
+}
+
+function validateReadyPilotRepos(execution: AppConfig["execution"]): void {
+  const configured = execution?.readyPilotRepos;
+  if (configured === undefined) return;
+  if (typeof configured !== "object" || configured === null || Array.isArray(configured))
+    throw new Error("config.yaml: execution.readyPilotRepos must map repositories to requirements");
+  if (Object.keys(configured).length > 16)
+    throw new Error("config.yaml: execution.readyPilotRepos supports at most 16 repositories");
+  for (const [repo, requirement] of Object.entries(configured)) {
+    const where = `config.yaml: execution.readyPilotRepos.${repo}`;
+    if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(repo) || repo.split("/").some((part) => part === "." || part === ".."))
+      throw new Error(`${where}: repository names must be lower-case owner/name`);
+    if (typeof requirement !== "object" || requirement === null || Array.isArray(requirement))
+      throw new Error(`${where}: requirement must be a mapping`);
+    for (const key of unknownKeys(requirement, { testCommand: true, dependencyDir: true, requiredTools: true }))
+      throw new Error(`${where}: unknown field ${key}`);
+    try {
+      readyEnvironmentCommand("/workspace", requirement as ReadyEnvironmentRequirement);
+    } catch (err) {
+      throw new Error(`${where}: ${err instanceof Error ? err.message : "invalid requirement"}`, { cause: err });
+    }
+  }
 }
 
 /** A Slack bot id as the `bot_id` field carries it: `B` and the upper-case alphanumerics Slack mints. */

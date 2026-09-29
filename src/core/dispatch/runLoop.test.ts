@@ -29,6 +29,7 @@ import {
   HarnessContainerReplacedError,
   HarnessGateBypassedError,
   HarnessMismatchError,
+  RELAUNCH_CEILING,
   openThroughSeam,
   type Finding,
   type Harness,
@@ -50,7 +51,8 @@ import { runLoop, type RunLoopOutcome, type RunOutcome } from "./runLoop.js";
 
 /** The loop's answered outcome; an interruption fails the test naming its note. */
 function answered(out: RunLoopOutcome): RunOutcome {
-  if (out.kind !== "answered") throw new Error(`the loop was interrupted: ${out.note}`);
+  if (out.kind !== "answered")
+    throw new Error(`the loop did not answer: ${out.kind === "paused" ? out.message : out.note}`);
   return out;
 }
 import {
@@ -3600,6 +3602,83 @@ describe("the pi harness — the container replaced under a living bot: the rela
       "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s))",
     );
     expect(notes[1]!.summary).toBe((out as { note: string }).note);
+  });
+
+  it("pauses a coding run on mid-run reattach refusal without finishing or releasing its recorded worktree", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    const probe = vi.fn(async () => new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", probe);
+    const registry = new HarnessRegistry();
+    const container = new FakeHarnessContainer();
+    container.onStdin = piThatMeetsTheRoll(registry);
+    const s = setup("unused", {
+      agent: "coding",
+      yaml:
+        YAML +
+        "harness:\n  coding: pi\nexecution:\n  type: cloudflare\n  url: https://sandbox.example.com\n  resident:\n    baseUrl: https://resident.example.com\n",
+      harness: harnessOver(registry, () => container),
+      repoCtx: { repo: "acme/api", ref: "main" },
+      binding: {
+        ref: "main",
+        sha: "0123456",
+        workspace: "/workspace/threads/t/main",
+        user: "worker2",
+      } as ResidentBinding,
+    });
+    const { ledgerRun } = recordingLedgerRun();
+    const pauseForRetry = vi.fn(async () => true);
+    ledgerRun.pauseForRetry = pauseForRetry;
+    const round = { ...s.ctx.round, selection: { ...s.ctx.round.selection, backend: "resident" as const } };
+    const out = await runLoop(s.deps, {
+      ...s.ctx,
+      round,
+      ledgerRun,
+      preserveOnReattachRefusal: true,
+      readyRequirementOverride: {
+        testCommand: "npm test",
+        dependencyDir: "node_modules",
+        requiredTools: ["node", "npm"],
+      },
+    }).finally(() => {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    });
+    expect(out).toMatchObject({ kind: "paused", reason: "backend_unavailable", handedOff: true });
+    expect(probe).toHaveBeenCalledOnce();
+    expect(pauseForRetry).toHaveBeenCalledOnce();
+    expect(s.releases).toEqual([]);
+    expect(s.registry.getById("run-l")).toBeNull();
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(await s.store.get("run-l")).toBeNull();
+  });
+
+  it("pauses a pilot at the relaunch ceiling without finishing or releasing the run", async () => {
+    const registry = new HarnessRegistry();
+    const container = new FakeHarnessContainer();
+    container.onStdin = piThatMeetsTheRoll(registry);
+    const s = setup("unused", {
+      agent: "coding",
+      yaml: yamlWithWorkspace(),
+      harness: harnessOver(registry, () => container),
+    });
+    const { ledgerRun, states } = recordingLedgerRun();
+    const pauseForRetry = vi.fn(async () => true);
+    ledgerRun.pauseForRetry = pauseForRetry;
+    const out = await runLoop(s.deps, {
+      ...s.ctx,
+      round: { ...s.ctx.round, selection: { ...s.ctx.round.selection, backend: undefined } },
+      ledgerRun,
+      preserveOnReattachRefusal: true,
+    });
+    expect(out).toMatchObject({ kind: "paused", reason: "relaunch_ceiling", handedOff: true });
+    expect(container.starts).toHaveLength(3);
+    expect(Math.max(...harnessStates(states).map((f) => f.relaunches as number))).toBe(RELAUNCH_CEILING);
+    expect(pauseForRetry).toHaveBeenCalledOnce();
+    expect(s.releases).toEqual([]);
+    expect(s.closes).toEqual([]);
+    expect(s.registry.getById("run-l")).toBeNull();
   });
 
   it("the third finding closes the run interrupted naming the bound: two relaunches in a container that keeps dying under the run, no fourth start, the row counting each, the record carrying each verdict and relaunch, the relay forgotten, the card 🔁 — and the request runs again", async () => {

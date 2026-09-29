@@ -204,6 +204,47 @@ describe("prepareRelaunch — the relaunch decided and prepared", () => {
     expect(decision.resume.facts).toEqual(facts(2, "ab".repeat(32)));
   });
 
+  it("pauses a pilot at the relaunch ceiling without releasing or replacing its dirty checkout", async () => {
+    const d = deps();
+    const { ctx, saves } = context({
+      facts: facts(RELAUNCH_CEILING),
+      binding: { backend: "resident", ref: "main", workspace: "/workspace/dirty", user: "worker2" },
+      preserveOnReattachRefusal: true,
+    });
+    const attachesBefore = reattachState.contexts.length;
+    const decision = await prepareRelaunch(d, ctx);
+    expect(decision).toMatchObject({ kind: "paused", reason: "relaunch_ceiling" });
+    expect(reattachState.contexts).toHaveLength(attachesBefore);
+    expect(saves).toEqual([]);
+    expect(d.runBearers.grantOf("run-1")).toBeUndefined();
+  });
+
+  it("pauses a pilot on other relaunch refusals instead of restarting its dirty checkout", async () => {
+    const d = deps();
+    for (const over of [
+      { harness: { name: "opencode" as const, history: "own-store" as const } },
+      { facts: undefined },
+    ]) {
+      const { ctx, saves } = context({ ...over, preserveOnReattachRefusal: true });
+      expect(await prepareRelaunch(d, ctx)).toMatchObject({ kind: "paused" });
+      expect(saves).toEqual([]);
+    }
+    const noBearer = context({ preserveOnReattachRefusal: true });
+    expect(await prepareRelaunch(d, noBearer.ctx)).toMatchObject({ kind: "paused", reason: "backend_unavailable" });
+    expect(noBearer.saves).toEqual([]);
+    reattachState.requiredOwner = "other-run";
+    try {
+      const refused = context({
+        binding: { backend: "resident", ref: "main", workspace: "/workspace/dirty", user: "worker2" },
+        preserveOnReattachRefusal: true,
+      });
+      expect(await prepareRelaunch(d, refused.ctx)).toMatchObject({ kind: "paused", reason: "backend_unavailable" });
+      expect(refused.saves).toEqual([]);
+    } finally {
+      reattachState.requiredOwner = undefined;
+    }
+  });
+
   it("refuses by name, writing nothing: the ceiling reached (the reason names the bound), a row without facts, a harness that keeps its own store, a bearer that cannot be rotated — each an interruption with the refusal container_replaced", async () => {
     const d = deps();
     const refused = async (over: Partial<Parameters<typeof prepareRelaunch>[1]>, store = d.runBearers) => {

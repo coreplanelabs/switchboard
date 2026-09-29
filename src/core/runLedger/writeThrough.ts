@@ -262,6 +262,9 @@ export interface LedgerRun {
    *  so nothing restarts it. A no-op for a detached run (fenced: another
    *  generation owns the row) and for an untracked one. */
   abandon(): Promise<void>;
+  /** Preserve this one resumed run and its binding for the next generation after
+   *  a readiness failure. No finish record or replacement workspace is made. */
+  pauseForRetry(): Promise<boolean>;
   /** True when a resume could continue this run: its seed and seed record
    *  landed, it was adopted from a resume, or it is a hosted ship parent
    *  (record 0060) — a row with no process of its own that the next
@@ -521,6 +524,9 @@ export class NullLedgerRun implements LedgerRun {
     return "unavailable";
   }
   async abandon(): Promise<void> {}
+  async pauseForRetry(): Promise<boolean> {
+    return false;
+  }
   async close(): Promise<void> {
     // nothing was open
   }
@@ -898,6 +904,23 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     markHandedOff(): void {
       this.handedOff = true;
+    }
+
+    async pauseForRetry(): Promise<boolean> {
+      if (!this.resumable || !this.tracked() || this.handedOff || this.finished) return false;
+      try {
+        await this.stateSending;
+        await this.flusher.flush();
+        const { marked } = await ledger.handoff(gen, [this.runId]);
+        if (!marked.includes(this.runId)) return false;
+        this.markHandedOff();
+        this.stopHeartbeat();
+        live.delete(this);
+        return true;
+      } catch (err) {
+        warn(`[ledger] ${this.threadKey} could not pause run ${this.runId} for retry: ${describe(err)}`);
+        return false;
+      }
     }
 
     /** The run's range as the finished record carries it (session-log item 2):

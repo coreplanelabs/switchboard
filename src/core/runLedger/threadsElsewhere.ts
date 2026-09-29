@@ -37,6 +37,11 @@ export class ThreadsElsewhere {
     return this.byThread.get(threadKey);
   }
 
+  /** A local run paused onto the ledger is now elsewhere for admission too. */
+  remember(threadKey: string, run: ThreadElsewhere): void {
+    this.byThread.set(threadKey, run);
+  }
+
   /** Drop one thread before the next sweep: its row is gone (a refused push). */
   forget(threadKey: string): void {
     this.byThread.delete(threadKey);

@@ -340,6 +340,8 @@ export interface SeededSandbox {
   slug: string;
   ref: string;
   sha: string;
+  /** The snapshot commit whose root lockfiles supplied the dependency view. */
+  sourceSha?: string;
   /** The checkout's path inside the sandbox — the run's working tree. */
   workspace: string;
   /** The container already carried this seed: nothing was restored. */

@@ -19,10 +19,14 @@ import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import {
   WorkspaceReattachLeaseSpentError,
   WorkspaceReattachRefusedError,
+  ReadyEnvironmentError,
+  type ReadyEnvironmentReason,
   type ExecutorSelection,
   type GithubCredentialProvider,
   type WorkspaceBinding,
 } from "../../execution/factory.js";
+import { fetchBranchHeadSha, fetchRepoShipInfo } from "../../execution/githubPulls.js";
+import type { ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
 import { isRunStopError } from "../../execution/executor.js";
 import type { ResidentStep } from "../../execution/residentStepTrace.js";
 import { graftResidentSteps, residentTraceOf } from "../../execution/residentTrace.js";
@@ -153,6 +157,9 @@ export interface ProvisionDeps
    * tests) → no bearer is minted and the run is byte-identical to before the proxy existed.
    */
   runBearers?: RunBearerStore;
+  /** Test seam for the trusted GitHub branch read used only by configured
+   * pilot coding runs. Production reads the current branch ref with the App. */
+  readyEnvironmentBinding?: (repo: string, ref?: string) => Promise<{ ref: string; headSha: string } | undefined>;
 }
 
 /**
@@ -841,6 +848,12 @@ export interface AttachContext {
    *  workspace and never provisions again. Absent for a fresh run, and for a
    *  resumed row that recorded none. */
   reattach?: WorkspaceBinding;
+  /** Durable policy stamped before a pilot coding run starts using its checkout. */
+  preserveOnReattachRefusal?: boolean;
+  /** A resumed pilot must have a valid requirement saved by its original run. */
+  readyRequirementVerified?: boolean;
+  /** Original pilot check held by this run across a live config reload. */
+  readyRequirementOverride?: ReadyEnvironmentRequirement;
   /** The run's hard stop (its control's `hardSignal`, registered before the
    *  attach): a stop during the attach's wake wait ends it at once, and a
    *  stopped run is never provisioned cold (execution.md item 9). */
@@ -858,13 +871,19 @@ export interface AttachContext {
   onLiveStateObservation?: ResidentLiveStateObserver;
 }
 
-/** How a recorded workspace's re-attach ended: the round's workspace
- *  (executor, selection, release), or the factory's refusal by name (run-history
- *  item 54): nothing else was provisioned, and the caller closes the run
- *  `interrupted` saying why and runs its request again. */
+async function currentReadyBinding(repo: string, ref?: string): Promise<{ ref: string; headSha: string } | undefined> {
+  const branch = ref ?? (await fetchRepoShipInfo(repo))?.defaultBranch;
+  if (!branch) return undefined;
+  const headSha = await fetchBranchHeadSha(repo, branch);
+  return headSha ? { ref: branch, headSha } : undefined;
+}
+
+/** How a recorded workspace's re-attach ended. A stamped pilot writer keeps
+ *  its original row on refusal; other runs follow the ordinary restart path. */
 export type WorkspaceReattach =
   | { kind: "attached"; round: RoundWorkspace }
   | { kind: "reattach_refused"; why: string }
+  | { kind: "reattach_unready"; reason: ReadyEnvironmentReason; reattach: WorkspaceBinding; message: string }
   /** The run's own stop ended the re-attach (its signal rode into the attach's wait): not a refusal, nothing restarts. */
   | { kind: "stopped" };
 
@@ -872,6 +891,7 @@ export type WorkspaceReattach =
  *  ask-once refusal (no branch is bound and none was named). */
 export type WorkspaceAttach =
   | WorkspaceReattach
+  | { kind: "reattach_unready"; reason: ReadyEnvironmentReason; reattach: WorkspaceBinding; message: string }
   | { kind: "refused"; reason: "which_branch" | "workspace_backend_unconfigured" }
   /** The run's own stop ended the attach (its signal rode into the attach's wait): not a failure, never provisioned cold. */
   | { kind: "stopped" };
@@ -886,7 +906,8 @@ export type WorkspaceAttach =
  * Every failure propagates: the callers read the ones they decide by name.
  */
 async function attachRound(
-  deps: Pick<ProvisionDeps, "config" | "dataDir" | "githubCredentials"> & Partial<Pick<ProvisionDeps, "runLedger">>,
+  deps: Pick<ProvisionDeps, "config" | "dataDir"> &
+    Partial<Pick<ProvisionDeps, "githubCredentials" | "readyEnvironmentBinding" | "runLedger">>,
   ctx: AttachContext,
 ): Promise<RoundWorkspace> {
   const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal, remainingMs, requester } = ctx;
@@ -899,6 +920,35 @@ async function attachRound(
   // that is right for a coding follow-up, but can keep a plan unit's branch
   // when this round is reviewing an adopted pull request on another branch.
   const ownPr = agent.name === "review" ? undefined : ownPrOf(repoCtx);
+  const ready: ReadyEnvironmentRequirement | undefined =
+    reattach !== undefined
+      ? ctx.preserveOnReattachRefusal === true
+        ? ctx.readyRequirementOverride
+        : undefined
+      : (ctx.readyRequirementOverride ??
+        (agent.name === "coding" && profile.identity === "write" && repoCtx.repo
+          ? deps.config.config.execution?.readyPilotRepos?.[repoCtx.repo.toLowerCase()]
+          : undefined));
+  // A resumed checkout can be ahead of origin; verify its recorded workspace
+  // and dependencies in the factory instead of pinning it to a new remote tip.
+  const bound =
+    ready === undefined || reattach !== undefined
+      ? undefined
+      : await (deps.readyEnvironmentBinding ?? currentReadyBinding)(repoCtx.repo!, repoCtx.ref);
+  if (
+    ready !== undefined &&
+    reattach === undefined &&
+    (!bound || !/^[0-9a-f]{40}$/.test(bound.headSha) || (repoCtx.ref !== undefined && bound.ref !== repoCtx.ref))
+  )
+    throw new RefusalError(
+      refusalOf(
+        "setup_failed",
+        new ReadyEnvironmentError(
+          "repository_unresolved",
+          "Verify the pilot repository's current branch and commit, then retry this task on the same unit.",
+        ).message,
+      ),
+    );
   return root.span("dispatch.workspace.attach", async (span) => {
     // The resident's own steps (clone, install, the mutex wait…) graft under
     // this span, rebased to its start (docs/reference/specs/tracing.md item 19) — on a
@@ -933,8 +983,9 @@ async function attachRound(
           profile,
           ...(ctx.githubDoor ? { githubDoor: ctx.githubDoor } : {}),
           repo: repoCtx.repo,
-          ref: repoCtx.ref,
-          headSha: repoCtx.headSha,
+          ref: bound?.ref ?? reattach?.ref ?? reattach?.seeded?.ref ?? repoCtx.ref,
+          headSha: ready !== undefined && reattach !== undefined ? undefined : (bound?.headSha ?? repoCtx.headSha),
+          ...(ready !== undefined ? { readyEnvironment: ready } : {}),
           // The thread's own pull request, when the ref is its head (resident-
           // repos item 16): the one reason the resident may move a binding.
           ...(ownPr !== undefined ? { ownPr } : {}),
@@ -962,18 +1013,31 @@ async function attachRound(
  * A run's recorded workspace, re-attached where its row says it ran
  * (run-history item 54) with no gate: the factory reuses that workspace and
  * provisions nothing else, and its refusal is answered by name for the caller
- * to close the run saying why. Callable mid-run — a process relaunched in a
+ * to pause a stamped pilot writer or close an ordinary run. Callable mid-run — a process relaunched in a
  * replacement container re-attaches the run's binding before it starts — as
  * well as from the dispatch-time attach below, which adds the gate. Every
  * other failure propagates.
  */
 export async function reattachWorkspace(
-  deps: Pick<ProvisionDeps, "config" | "dataDir"> & Partial<Pick<ProvisionDeps, "runLedger">>,
+  deps: Pick<ProvisionDeps, "config" | "dataDir"> &
+    Partial<Pick<ProvisionDeps, "githubCredentials" | "readyEnvironmentBinding" | "runLedger">>,
   ctx: AttachContext & { reattach: WorkspaceBinding },
 ): Promise<WorkspaceReattach | { kind: "lease_spent"; leftMs: number; note: string }> {
+  if (ctx.preserveOnReattachRefusal === true && ctx.readyRequirementOverride === undefined)
+    return {
+      kind: "reattach_unready",
+      reason: "check_failed",
+      reattach: ctx.reattach,
+      message:
+        "The coding environment's recorded readiness settings are missing. Repair the original run record before resuming its workspace.",
+    };
   try {
     return { kind: "attached", round: await attachRound(deps, ctx) };
   } catch (err) {
+    if (err instanceof ReadyEnvironmentError)
+      return ctx.preserveOnReattachRefusal === true
+        ? { kind: "reattach_unready", reason: err.reason, reattach: ctx.reattach, message: err.message }
+        : { kind: "reattach_refused", why: err.message };
     // The run's lease is inside its write-up reserve, or ran into it under the
     // re-attach's waits (execution.md item 9): the factory asked for nothing
     // more, and the caller ends the run on its budget — never a refusal that
@@ -983,7 +1047,10 @@ export async function reattachWorkspace(
       return { kind: "lease_spent", leftMs: err.leftMs, note: err.note };
     // The run's workspace is where its row says or nowhere (item 54): the
     // factory tried that backend alone and refused by name.
-    if (err instanceof WorkspaceReattachRefusedError) return { kind: "reattach_refused", why: err.why };
+    if (err instanceof WorkspaceReattachRefusedError)
+      return ctx.preserveOnReattachRefusal === true
+        ? { kind: "reattach_unready", reason: "backend_unavailable", reattach: ctx.reattach, message: err.message }
+        : { kind: "reattach_refused", why: err.why };
     // The run's own stop ended the re-attach's wait — the executor's typed
     // `aborted` error, read by its shape as `attachWorkspace` reads it: the
     // caller ends the run stopped, and nothing restarts from its request.
@@ -1006,6 +1073,22 @@ export async function attachWorkspace(
 ): Promise<WorkspaceAttach> {
   const { msg, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach, stopSignal } = ctx;
   const { remainingMs } = ctx;
+  // A resumed pilot uses its saved readiness check across config reloads.
+  // An absent or invalid saved check leaves the original row paused.
+  if (
+    reattach !== undefined &&
+    ctx.preserveOnReattachRefusal === true &&
+    (ctx.readyRequirementVerified === false || ctx.readyRequirementOverride === undefined)
+  ) {
+    if (stopSignal?.aborted) return { kind: "stopped" };
+    return {
+      kind: "reattach_unready",
+      reason: "check_failed",
+      reattach,
+      message:
+        "The coding environment's recorded readiness settings are missing or invalid. Repair the original run record before resuming its workspace.",
+    };
+  }
   // A local backend is deliberate for the one-shot CLI, but in the hosted bot
   // it means a workspace preset would execute inside the bot container. Refuse
   // from the process capability before the factory can silently create one.
@@ -1047,10 +1130,19 @@ export async function attachWorkspace(
         shell.setSetupLabel(`${liveStateWords(observation.state)}…`);
       },
       ...(reattach !== undefined ? { reattach } : {}),
+      ...(ctx.preserveOnReattachRefusal === true ? { preserveOnReattachRefusal: true } : {}),
+      ...(ctx.readyRequirementOverride !== undefined ? { readyRequirementOverride: ctx.readyRequirementOverride } : {}),
       ...(stopSignal !== undefined ? { stopSignal } : {}),
       ...(remainingMs !== undefined ? { remainingMs } : {}),
     });
   } catch (err) {
+    if (err instanceof ReadyEnvironmentError) {
+      if (reattach !== undefined)
+        return ctx.preserveOnReattachRefusal === true
+          ? { kind: "reattach_unready", reason: err.reason, reattach, message: err.message }
+          : { kind: "reattach_refused", why: err.message };
+      throw new RefusalError(refusalOf("setup_failed", err.message));
+    }
     // Ask-once: the resident has no ref binding for this thread, the
     // message named no branch, AND the resident did not name a default to
     // bind to (the factory binds to `defaultRef` itself when the 409 carries
@@ -1068,10 +1160,13 @@ export async function attachWorkspace(
       );
       return { kind: "refused", reason: "which_branch" };
     }
-    // A resumed run's workspace is where its row says or nowhere (item 54):
-    // the factory tried that backend alone and refused by name. The caller
-    // closes this run saying why and dispatches its request again.
-    if (err instanceof WorkspaceReattachRefusedError) return { kind: "reattach_refused", why: err.why };
+    // A pilot coding checkout may hold unpublished edits. Read its durable
+    // policy, not today's config, which can change before a recovery.
+    if (err instanceof WorkspaceReattachRefusedError) {
+      if (reattach !== undefined && ctx.preserveOnReattachRefusal === true)
+        return { kind: "reattach_unready", reason: "backend_unavailable", reattach, message: err.message };
+      return { kind: "reattach_refused", why: err.why };
+    }
     // The run's own stop ended the attach — its signal rode into the attach's
     // wait, and the executor's typed `aborted` error is that stop, not a setup
     // failure. The dispatcher ends the request `stopped`; nothing is replied.

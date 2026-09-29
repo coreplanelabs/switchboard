@@ -142,7 +142,10 @@ describe("the installed CLI", () => {
     expect(r.stdout).not.toContain("npm run cli");
     expect(r.stdout).not.toContain("npm run dev");
     expect(r.stdout).not.toContain("sk-test");
-    for (const leak of [REPO_ROOT, tmp, "dist/assets", "node_modules"]) expect(r.stdout).not.toContain(leak);
+    // The shipped example may name a relative dependency directory; only an
+    // installation path would disclose where this package was unpacked.
+    for (const leak of [REPO_ROOT, tmp, "dist/assets", "node_modules/.bin", `node_modules/${facts.npmPackage}`])
+      expect(r.stdout).not.toContain(leak);
     expect(existsSync(join(work, ".env"))).toBe(false);
   });
 

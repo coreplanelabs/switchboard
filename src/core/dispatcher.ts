@@ -127,11 +127,13 @@ import {
   carriedOperationTarget,
   carriedRunIdentity,
   carriedWorkspaceBinding,
+  hasPilotWorkspaceBinding,
   prepareRestartTurn,
   recordRestartDeath,
   type CarriedRunIdentity,
 } from "./dispatch/reattach.js";
 import { workspaceBindingFor } from "../execution/factory.js";
+import { readyEnvironmentCommand, type ReadyEnvironmentRequirement } from "../execution/seedPlan.js";
 import { fetchPullRequestFacts } from "../execution/githubPulls.js";
 import { fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
@@ -634,6 +636,24 @@ async function legacyReviewedHeadOf(
   return exact.length === 1 ? exact[0] : undefined;
 }
 
+/** A reclaimed pilot uses its saved admission check, not a later config edit. */
+function recordedReadyRequirement(value: unknown): ReadyEnvironmentRequirement | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  if (Object.keys(value).some((key) => !["testCommand", "dependencyDir", "requiredTools"].includes(key)))
+    return undefined;
+  try {
+    const requirement = value as ReadyEnvironmentRequirement;
+    readyEnvironmentCommand("/workspace", requirement);
+    return {
+      testCommand: requirement.testCommand,
+      dependencyDir: requirement.dependencyDir,
+      requiredTools: [...requirement.requiredTools],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export async function dispatch(
   deps: CoreDeps,
   msg: IncomingMessage,
@@ -820,8 +840,11 @@ export async function dispatch(
   // abandons the reservation.
   let runLoopStarted = false;
   // A successful attach belongs to this setup until the run loop takes it.
-  // Setup can still fail after attach; its outer finally must release the tree.
+  // A failed setup releases an ordinary tree; a resumed pilot retains its
+  // original checkout and row for recovery.
   let setupRound: RoundWorkspace | undefined;
+  let attachedPilotResume = false;
+  let pausePilotAfterAttach: ((message: string) => Promise<void>) | undefined;
   // The ship fork ran, and whether its branch deliberately left its run live —
   // the hosted parent of a completed hand-off (record 0060). Read by the outer
   // finally's second net (run-history item 42), which finishes any run a
@@ -852,6 +875,9 @@ export async function dispatch(
   // 54): its row was closed with the note that says why, and its request runs
   // again as a new run once this dispatch has freed the thread.
   let resumeRowClosed = false;
+  // A readiness failure after re-attach retains the same row and workspace for
+  // the next generation; the generic pre-loop closer must leave it alone.
+  let resumeRowRetained = false;
   // The request to dispatch again as a new run once the thread is free (item
   // 54; harness-pi item 16), and the run it restarts — the one this dispatch
   // closed `interrupted`, which admission must never steer the request into
@@ -2770,6 +2796,66 @@ export async function dispatch(
     // run-history item 54), never provisioning again; a fresh run attaches as
     // it always did.
     const reattach = resume ? carriedWorkspaceBinding(resume.row) : undefined;
+    const currentReadyRequirement =
+      agent.name === "coding" && repoCtx.repo !== undefined
+        ? deps.config.config.execution?.readyPilotRepos?.[repoCtx.repo.toLowerCase()]
+        : undefined;
+    // A pilot's saved policy survives config changes. An unstamped older run
+    // keeps its ordinary resume behavior; no current config opts it in later.
+    const recordedPreservation = resume?.row.state.preserveOnReattachRefusal;
+    const preserveOnReattachRefusal = resume
+      ? recordedPreservation === true
+      : agent.name === "coding" &&
+        profile.identity === "write" &&
+        repoCtx.repo !== undefined &&
+        currentReadyRequirement !== undefined;
+    const readyRequirement = resume
+      ? recordedReadyRequirement(resume.row.state.readyPilotRequirement)
+      : currentReadyRequirement;
+    const readyRequirementVerified = !preserveOnReattachRefusal || readyRequirement !== undefined;
+    // A pilot cannot edit a checkout whose run has no durable owner. The
+    // reservation/adopted row is checked before attachment, then again after
+    // promotion in case the ledger detached during setup.
+    if (preserveOnReattachRefusal && !(reserved ?? ledgerRun)?.tracked())
+      throw new Error("The coding run could not be durably tracked. Restore the run ledger, then retry this task.");
+    const pauseResumedPilot = async (message: string, missingBinding = false): Promise<void> => {
+      if (!resume || !ledgerRun) throw new Error("a readiness retry needs the resumed run's ledger row");
+      resumeRowRetained = true;
+      const handedOff = await ledgerRun.pauseForRetry().catch(() => false);
+      if (ledgerRun.tracked())
+        deps.threadsElsewhere.remember(msg.threadKey, {
+          runId: resume.row.runId,
+          agent: resume.row.meta.agent,
+          startedAt: resume.row.startedAt,
+        });
+      await refuse(
+        refusalOf(
+          "setup_failed",
+          handedOff
+            ? `${message} This run is paused ${missingBinding ? "without starting a replacement. After restoring the binding" : "with its recorded workspace binding. After repairing the environment"}, restart the service to resume this run.`
+            : `${message} The original run could not be marked for immediate recovery. No replacement started; an operator needs to check its saved workspace before a retry.`,
+        ),
+        () =>
+          card.done(
+            shell.close({
+              kind: "not_started",
+              icon: "⏸️",
+              reason: missingBinding
+                ? "coding workspace binding missing, original run retained"
+                : "coding environment not ready, original binding retained",
+              ...closeLines(clock(), false),
+            }),
+          ),
+      );
+    };
+    if (resume && preserveOnReattachRefusal) pausePilotAfterAttach = pauseResumedPilot;
+    if (resume && preserveOnReattachRefusal && !hasPilotWorkspaceBinding(resume.row)) {
+      await pauseResumedPilot(
+        "The original coding workspace binding is missing or invalid. Repair the saved run record before resuming this task.",
+        true,
+      );
+      return ended;
+    }
     const control = registered?.control;
     const attach = await attachWorkspace(deps, {
       runId: run.id,
@@ -2788,6 +2874,11 @@ export async function dispatch(
       repoCtx,
       root,
       ...(reattach !== undefined ? { reattach } : {}),
+      ...(preserveOnReattachRefusal ? { preserveOnReattachRefusal: true } : {}),
+      readyRequirementVerified,
+      ...(preserveOnReattachRefusal && readyRequirement !== undefined
+        ? { readyRequirementOverride: readyRequirement }
+        : {}),
       // The run's control exists from the registry row above: a stop relayed
       // during the attach ends its wake wait at once, and once the harness
       // starts the lease every attach the executor opens is clipped to the
@@ -2865,8 +2956,13 @@ export async function dispatch(
       }
       return ended;
     }
+    if (attach.kind === "reattach_unready") {
+      await pauseResumedPilot(attach.message);
+      return ended;
+    }
     const { round } = attach;
     setupRound = round;
+    attachedPilotResume = !!(resume && preserveOnReattachRefusal);
     // A resident wait owns only its short wait deadline, not the run's budget.
     // Keep the admission deadline across setup transitions; if a running lease
     // exists, it may narrow that deadline, never renew it. Recheck each boundary
@@ -3144,6 +3240,19 @@ export async function dispatch(
       markUntracked: () => shell.note("debug", "untracked by the ledger"),
       ...(seedActors !== undefined ? { seedActors } : {}),
     });
+    if (preserveOnReattachRefusal && !ledgerRun?.tracked())
+      throw new Error("The coding run lost its durable owner during setup. Retry after the run ledger recovers.");
+    if (agent.name === "coding" && ledgerRun?.tracked()) {
+      if (
+        !(await ledgerRun.setStateAndFlush({
+          preserveOnReattachRefusal,
+          ...(preserveOnReattachRefusal && readyRequirement !== undefined
+            ? { readyPilotRequirement: readyRequirement }
+            : {}),
+        }))
+      )
+        throw new Error("the coding workspace preservation policy could not be saved");
+    }
     if (typeof registry.commitLiveState === "function") {
       if (!(await assignSetupLive("working", "model turn")))
         throw new Error("working live state could not be committed");
@@ -3238,6 +3347,10 @@ export async function dispatch(
       round,
       admitted,
       ledgerRun,
+      ...(preserveOnReattachRefusal ? { preserveOnReattachRefusal: true } : {}),
+      ...(preserveOnReattachRefusal && readyRequirement !== undefined
+        ? { readyRequirementOverride: readyRequirement }
+        : {}),
       resume,
       repoCtx,
       ...(githubDoor ? { githubDoor } : {}),
@@ -3269,6 +3382,33 @@ export async function dispatch(
       ...(bearer !== undefined ? { bearer } : {}),
       ...(modelCard ? { modelCard } : {}),
     });
+    if (ran.kind === "paused") {
+      resumeRowRetained = true;
+      if (ledgerRun?.tracked())
+        deps.threadsElsewhere.remember(msg.threadKey, {
+          runId: run.id,
+          agent: agent.name,
+          startedAt: resume?.row.startedAt ?? startedAt,
+        });
+      await refuse(
+        refusalOf(
+          "setup_failed",
+          ran.handedOff
+            ? `${ran.message} This run is paused with its recorded workspace binding. After repairing the environment, restart the service to resume this run.`
+            : `${ran.message} The original run could not be marked for immediate recovery. No replacement started; an operator needs to check its saved workspace before a retry.`,
+        ),
+        () =>
+          card.done(
+            shell.close({
+              kind: "refused",
+              icon: "⏸️",
+              reason: "coding environment not ready, original binding retained",
+              ...closeLines(clock(), false),
+            }),
+          ),
+      );
+      return ended;
+    }
     if (ran.kind === "interrupted") {
       // The run was interrupted, not failed (harness.md item 7): the harness's
       // container was replaced under the live run (harness-pi item 16), or the
@@ -3366,6 +3506,12 @@ export async function dispatch(
     // already-stamped code: the root and the outcome tell the same story.
     if (!refused) root.setAttrs({ refusal: thrown?.code ?? "uncaught", cause: thrown?.cause ?? "system" });
     const errMsg = err instanceof Error ? err.message : String(err);
+    if (attachedPilotResume && setupRound && pausePilotAfterAttach) {
+      await pausePilotAfterAttach(
+        `The coding run failed during setup after reattaching its original workspace (${oneLine(redactAndCap(errMsg, 120))}).`,
+      );
+      return ended;
+    }
     if (childSetupFinalizer && !runLoopStarted) {
       childSetupRefusal ??= thrown ?? refusalOf("setup_failed", errMsg);
       childSetupFinalizer();
@@ -3445,7 +3591,7 @@ export async function dispatch(
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
     ending.drain(undefined);
-    if (setupRound) await setupRound.release({ hardStopped: true });
+    if (setupRound && !resumeRowRetained) await setupRound.release({ hardStopped: true });
     // …and a bearer minted for a run that never reached its loop (a head gate
     // after the attach, a throw in the prompt) is revoked here — the ending's
     // hook ran only for a run the loop finished.
@@ -3455,7 +3601,7 @@ export async function dispatch(
     // provider, a refusal, a gate — has adopted a row it will never finish
     // (item 38). Close it `interrupted` here, or the sweep would relaunch it
     // every lease interval forever.
-    if (resume && ledgerRun && !runLoopStarted && !resumeRowClosed) {
+    if (resume && ledgerRun && !runLoopStarted && !resumeRowClosed && !resumeRowRetained) {
       const adopted = ledgerRun;
       // The row says what the request says: a stop that ended the re-attach's
       // wait closes it with the stop's status, not `interrupted` with a note
@@ -3537,7 +3683,16 @@ export async function dispatch(
     // The same status is the caller's outcome.
     ended.status = caught ? "failed" : refused ? "refused" : stopMode ? "stopped" : "completed";
     root.end(caught ? "error" : "ok", { status: ended.status });
-    if (restartRequest) {
+    if (resumeRowRetained && settled.kind === "handed-on") {
+      for (const pending of settled.pending) {
+        if (pending.ledgerSeq === undefined)
+          await pending.io
+            .reply(
+              "This reply could not be saved with the paused run. A new reply after the run resumes will be processed.",
+            )
+            .catch(() => undefined);
+      }
+    } else if (restartRequest) {
       // The run's request, dispatched again now that the thread is free — a
       // resumed run whose workspace could not be re-attached (item 54), or a
       // live run whose pi container was replaced under it (harness-pi item 16)
