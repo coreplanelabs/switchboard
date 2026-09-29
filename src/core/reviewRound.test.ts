@@ -109,7 +109,7 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
         ownerGen: "gen-2",
         residentClaim: async () => {
           claims++;
-          return 17;
+          return 16 + claims;
         },
         agent: AGENTS.review,
         profile: declaredProfile(AGENTS.review),
@@ -119,17 +119,17 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
       },
       logKey: "t-owned",
     });
-    expect(claims).toBe(1);
+    expect(claims).toBe(3);
     expect(calls.find((c) => c.path === "/attach")?.body).toMatchObject({
       runId: "run-1",
       ownerGen: "gen-2",
-      ownerFence: 17,
+      ownerFence: 18,
     });
     await round.release({ hardStopped: false });
     expect(calls.find((c) => c.path === "/detach")?.body).toMatchObject({
       runId: "run-1",
       ownerGen: "gen-2",
-      ownerFence: 17,
+      ownerFence: 18,
     });
   });
 

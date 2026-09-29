@@ -8,7 +8,13 @@ import { AGENTS, type AgentDef } from "../agents/registry.js";
 import { declaredProfile } from "../config/profile.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ExecInfraError, LocalExecutor } from "./executor.js";
-import { DRAIN_FALLBACK_WAIT_MS, DRAIN_POLL_MS, ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
+import {
+  DRAIN_FALLBACK_WAIT_MS,
+  DRAIN_POLL_MS,
+  ResidentExecutor,
+  ResidentNeedsRefError,
+  ResidentRegistrationMismatchError,
+} from "./resident.js";
 import {
   gitIdentityEnvs,
   makeExecutor,
@@ -511,7 +517,155 @@ describe("makeExecutor resident selection", () => {
         },
       }),
     ).rejects.toThrow("resident claim refused: fenced");
+    expect(calls).toEqual([]);
+  });
+
+  it("a fenced owner cannot provision cold when the resident is down", async () => {
+    stubEnvs();
+    const { calls } = stubFetch({ body: { state: "down", reason: "install-failed" } });
+    const claim = vi.fn(async (): Promise<number> => {
+      throw new Error("resident claim refused: fenced");
+    });
+    await expect(makeExecutor(residentOpts(), { ...repoCtx(), residentClaim: claim })).rejects.toThrow(
+      "resident claim refused: fenced",
+    );
+    expect(claim).toHaveBeenCalledOnce();
+    expect(calls).toEqual([]);
+  });
+
+  it("a current owner rechecks before and after taking a cold fallback", async () => {
+    stubEnvs();
+    const { calls } = stubFetch({ body: { state: "down", reason: "install-failed" } });
+    const claim = vi.fn(async () => 7);
+    const selection = await makeExecutor(residentOpts(), { ...repoCtx(), residentClaim: claim });
+    expect(selection.executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(claim).toHaveBeenCalledTimes(3);
     expect(calls).toEqual(["/status"]);
+  });
+
+  it("a generation reclaimed during the resident probe cannot provision cold", async () => {
+    stubEnvs();
+    let ownsRun = true;
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        calls.push(new URL(String(url)).pathname);
+        ownsRun = false;
+        return new Response(JSON.stringify({ state: "down", reason: "install-failed" }));
+      }),
+    );
+    const claim = vi.fn(async () => {
+      if (!ownsRun) throw new Error("resident claim refused: fenced");
+      return 7;
+    });
+    await expect(makeExecutor(residentOpts(), { ...repoCtx(), residentClaim: claim })).rejects.toThrow(
+      "resident claim refused: fenced",
+    );
+    expect(claim).toHaveBeenCalledTimes(2);
+    expect(calls).toEqual(["/status"]);
+  });
+
+  it("a generation reclaimed during the resident probe cannot attach warm", async () => {
+    stubEnvs();
+    let ownsRun = true;
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        calls.push(new URL(String(url)).pathname);
+        if (calls.at(-1) === "/status") ownsRun = false;
+        return new Response(JSON.stringify({ state: "warm", reason: "" }));
+      }),
+    );
+    const claim = vi.fn(async () => {
+      if (!ownsRun) throw new Error("resident claim refused: fenced");
+      return 7;
+    });
+    await expect(makeExecutor(residentOpts(), { ...repoCtx(), residentClaim: claim })).rejects.toThrow(
+      "resident claim refused: fenced",
+    );
+    expect(claim).toHaveBeenCalledTimes(2);
+    expect(calls).toEqual(["/status"]);
+  });
+
+  it("a warm attach uses the fence claimed after its probe", async () => {
+    stubEnvs();
+    const { bodies } = stubFetch(
+      { body: { state: "warm", reason: "" } },
+      {
+        body: {
+          workspace: "/workspace/threads/x/master",
+          ref: "master",
+          sha: "abc",
+          user: "worker2",
+          deps: "hardlink",
+        },
+      },
+    );
+    let fence = 6;
+    const claim = vi.fn(async () => ++fence);
+    const selection = await makeExecutor(residentOpts(), {
+      ...repoCtx(),
+      runId: "run-1",
+      ownerGen: "gen-1",
+      residentClaim: claim,
+    });
+    expect(selection.executor).toBeInstanceOf(ResidentExecutor);
+    expect(claim).toHaveBeenCalledTimes(3);
+    expect(bodies[1]).toMatchObject({ ownerFence: 8 });
+  });
+
+  it("a generation reclaimed during warm attach releases its registration before returning", async () => {
+    stubEnvs();
+    let ownsRun = true;
+    const calls: string[] = [];
+    const bodies: Array<Record<string, unknown> | undefined> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: RequestInit) => {
+        const path = new URL(String(url)).pathname;
+        calls.push(path);
+        bodies.push(init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined);
+        if (path === "/status") return new Response(JSON.stringify({ state: "warm", reason: "" }));
+        if (path === "/attach") {
+          ownsRun = false;
+          return new Response(
+            JSON.stringify({ workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" }),
+          );
+        }
+        if (path === "/detach") return new Response(JSON.stringify({ released: true }));
+        throw new Error(`unexpected fetch: ${path}`);
+      }),
+    );
+    let fence = 6;
+    const claim = vi.fn(async () => {
+      if (!ownsRun) throw new Error("resident claim refused: fenced");
+      return ++fence;
+    });
+    await expect(
+      makeExecutor(residentOpts(), { ...repoCtx(), runId: "run-1", ownerGen: "gen-1", residentClaim: claim }),
+    ).rejects.toThrow("resident claim refused: fenced");
+    expect(claim).toHaveBeenCalledTimes(3);
+    expect(calls).toEqual(["/status", "/attach", "/detach"]);
+    expect(bodies[1]).toMatchObject({ ownerFence: 8 });
+    expect(bodies[2]).toMatchObject({ ownerFence: 8 });
+  });
+
+  it("a resident registration mismatch never becomes a cold fallback", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(
+      { body: { state: "warm", reason: "" } },
+      { status: 409, body: { error: "run-registration-mismatch: a newer generation owns the thread" } },
+    );
+    const claim = vi.fn(async () => 7);
+    const refused = await makeExecutor(residentOpts(), { ...repoCtx(), residentClaim: claim }).catch(
+      (err: unknown) => err,
+    );
+    expect(refused).toBeInstanceOf(ResidentRegistrationMismatchError);
+    expect((refused as Error).message).toContain("run-registration-mismatch");
+    expect(claim).toHaveBeenCalledTimes(2);
+    expect(calls).toEqual(["/status", "/attach"]);
   });
 
   it("needs-ref WITH the resident's defaultRef → re-attach once on that ref; the note says it was the repo default", async () => {
@@ -2692,6 +2846,30 @@ describe("makeExecutor seeded sandbox", () => {
       steps: { restore: 18_000, deps: 9_000, fixup: 3_000 },
       ms: 30_500,
     },
+  });
+
+  it("a generation reclaimed during a seed wait cannot start from that sandbox", async () => {
+    stubEnvs();
+    let ownsRun = true;
+    const { calls } = stubFetch(degraded(C1), seededAnswer(C1));
+    const fetchBeforeReclaim = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        const answer = await fetchBeforeReclaim(url, init);
+        if (new URL(String(url)).pathname === "/seed") ownsRun = false;
+        return answer;
+      }),
+    );
+    const claim = vi.fn(async () => {
+      if (!ownsRun) throw new Error("resident claim refused: fenced");
+      return 7;
+    });
+    await expect(makeExecutor(residentOpts(), { ...repoCtx(), residentClaim: claim })).rejects.toThrow(
+      "resident claim refused: fenced",
+    );
+    expect(calls).toEqual(["/status", "/seed"]);
+    expect(claim.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
 
   it("a refused resident with a snapshot → one POST /seed with the thread's ref, the seeded facts on the selection, the reason and the seed on the note", async () => {

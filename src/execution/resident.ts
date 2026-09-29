@@ -719,6 +719,18 @@ export class ResidentNeedsRefError extends Error {
   }
 }
 
+/** The resident rejected an attach because another ledger owner holds the
+ * thread. This is an ownership fence, so callers must not provision cold. */
+export class ResidentRegistrationMismatchError extends Error {
+  constructor(
+    readonly resource: string,
+    reason: string,
+  ) {
+    super(`resident attach failed for ${resource}: ${reason}`);
+    this.name = "ResidentRegistrationMismatchError";
+  }
+}
+
 /** 409 needs:"recreate" from /attach: a resumed run asked the resident to keep
  *  this thread's worktree as it stands (`reuse`), and there is no tree it can
  *  keep (gone with a recycled disk or an eviction, unreadable, or built for
@@ -1393,6 +1405,8 @@ export class ResidentExecutor implements Executor {
       const defaultRef = typeof data.defaultRef === "string" && data.defaultRef ? data.defaultRef : undefined;
       return traced(new ResidentNeedsRefError(this.opts.resource, defaultRef));
     }
+    if (status === 409 && err.startsWith("run-registration-mismatch:"))
+      return traced(new ResidentRegistrationMismatchError(this.opts.resource, err));
     if (status === 409 && data.needs === "recreate")
       return traced(new ResidentReuseRefusedError(this.opts.resource, err));
     if (status === 404)

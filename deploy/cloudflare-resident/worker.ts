@@ -5825,31 +5825,27 @@ export class ResidentDO extends Sandbox<Env> {
     const t0 = systemClock();
     const trace = createStepTrace(t0);
     let res: AttachOk | ThreadErr;
-    if (this.recreateAdmission.pending) {
-      res = this.recreateRefusal();
-    } else {
-      this.attachAdmissionsInFlight++;
-      try {
-        res = await this.stepTrace.run(trace, () =>
-          this.attachThreadTraced(
-            threadKey,
-            refHint,
-            readonly,
-            wantSha,
-            reuse,
-            record,
-            t0,
-            reason,
-            githubDoor,
-            runBudgetMs,
-            runId,
-            ownerGen,
-            ownerFence,
-          ),
-        );
-      } finally {
-        this.attachAdmissionsInFlight--;
-      }
+    this.attachAdmissionsInFlight++;
+    try {
+      res = await this.stepTrace.run(trace, () =>
+        this.attachThreadTraced(
+          threadKey,
+          refHint,
+          readonly,
+          wantSha,
+          reuse,
+          record,
+          t0,
+          reason,
+          githubDoor,
+          runBudgetMs,
+          runId,
+          ownerGen,
+          ownerFence,
+        ),
+      );
+    } finally {
+      this.attachAdmissionsInFlight--;
     }
     // The same steps as the resident's own `resident.attach` root (item 22).
     emitStepRoot("resident.attach", t0, trace.steps(), traceparent, "error" in res ? refusalOutcome(res) : "ok");
@@ -5873,71 +5869,74 @@ export class ResidentDO extends Sandbox<Env> {
     ownerFence?: number,
   ): Promise<AttachOk | ThreadErr> {
     try {
-      if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
-      await this.ensureHydrated();
-      if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
-      // The fleet drain (item 69): a deploy is waiting for the runs in flight
-      // to end, and a NEW run's attach is refused with the record the bot
-      // waits on — a real 503 in the streamed document, read by the client as
-      // `draining`, never as the platform's transient. A run already in flight
-      // — with an owned, live registration (item 44) — re-attaches
-      // through: a rolled container, an evicted worktree, a resumed run are
-      // the runs the drain waits FOR, and refusing them would hold the fleet
-      // closed on the run it is closed for. Read before the image reconcile so
-      // a refused attach never restarts a container.
-      const drain = await this.fleetDrain();
-      const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-      const registered = registeredRunAllowsReattach(
-        registration,
-        runId,
-        systemClock(),
-        RUN_REGISTRATION_GRACE_MS,
-        ownerGen,
-        ownerFence,
-      );
-      if (drain && !registered) {
-        const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
-        return refusal;
-      }
-      // Item 70: above the soft memory threshold a NEW attach is refused like
-      // `mirror-busy` (the bot falls back or waits, the card says why) — after
-      // the drain (storage only, cheaper) and before the image reconcile, so a
-      // refused attach never restarts a container. An owned, live run's
-      // re-attach passes for the same reason it passes the drain above.
-      const memory = await this.memoryGate("attach", registered);
-      if (memory) return memory;
-      const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
-      // An attach never restarts the container (issue 2101): a `stale` verdict
-      // refuses the NEW run — it falls back to the seeded sandbox — while a
-      // owned, live run's re-attach passes exactly as it passes the drain and
-      // the memory gate; the restart itself is the refresh cycle's or the
-      // deploy's.
-      if ((await this.reconcileImage("attach")) === "stale" && !registered) {
-        const s = await this.getStatus();
-        return {
-          error:
-            "image-stale: the container predates the deploy and restarts on the next quiet refresh; new runs use the fallback sandbox until then",
-          status: 503,
-          state: s.state,
-          stateReason: s.reason,
-          reason: "image-stale",
-        };
-      }
-      // From here the attach may hold the mirror lock through clone/install:
-      // count it so a concurrent refresh-cycle reconcileImage never stops the
-      // container under it (and isIdle never parks the cycle mid-attach).
-      this.attachesInFlight++;
-      try {
-        return await this.threadAttaches.run(threadKey, async () => {
-          const current = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-          const accepted = await this.ctx.storage.get<Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence">>(
-            runFenceKey(threadKey),
-          );
-          if (
-            !registeredRunAllowsClaim(current, runId, ownerGen, ownerFence) ||
-            !registeredRunAllowsClaim(accepted, runId, ownerGen, ownerFence)
-          )
-            return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
+      return await this.threadAttaches.run(threadKey, async () => {
+        // The attachment fence takes precedence over every 503 gate. Keep the
+        // same thread lock through the gates and registration write so a newer
+        // attach cannot slip between this check and a fallback-eligible refusal.
+        const current = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+        const accepted = await this.ctx.storage.get<Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence">>(
+          runFenceKey(threadKey),
+        );
+        if (
+          !registeredRunAllowsClaim(current, runId, ownerGen, ownerFence) ||
+          !registeredRunAllowsClaim(accepted, runId, ownerGen, ownerFence)
+        )
+          return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
+        if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
+        await this.ensureHydrated();
+        if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
+        // The fleet drain (item 69): a deploy is waiting for the runs in flight
+        // to end, and a NEW run's attach is refused with the record the bot
+        // waits on — a real 503 in the streamed document, read by the client as
+        // `draining`, never as the platform's transient. A run already in flight
+        // — with an owned, live registration (item 44) — re-attaches
+        // through: a rolled container, an evicted worktree, a resumed run are
+        // the runs the drain waits FOR, and refusing them would hold the fleet
+        // closed on the run it is closed for. Read before the image reconcile so
+        // a refused attach never restarts a container.
+        const drain = await this.fleetDrain();
+        const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+        const registered = registeredRunAllowsReattach(
+          registration,
+          runId,
+          systemClock(),
+          RUN_REGISTRATION_GRACE_MS,
+          ownerGen,
+          ownerFence,
+        );
+        if (drain && !registered) {
+          const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
+          return refusal;
+        }
+        // Item 70: above the soft memory threshold a NEW attach is refused like
+        // `mirror-busy` (the bot falls back or waits, the card says why) — after
+        // the drain (storage only, cheaper) and before the image reconcile, so a
+        // refused attach never restarts a container. An owned, live run's
+        // re-attach passes for the same reason it passes the drain above.
+        const memory = await this.memoryGate("attach", registered);
+        if (memory) return memory;
+        const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+        // An attach never restarts the container (issue 2101): a `stale` verdict
+        // refuses the NEW run — it falls back to the seeded sandbox — while a
+        // owned, live run's re-attach passes exactly as it passes the drain and
+        // the memory gate; the restart itself is the refresh cycle's or the
+        // deploy's.
+        if ((await this.reconcileImage("attach")) === "stale" && !registered) {
+          const s = await this.getStatus();
+          return {
+            error:
+              "image-stale: the container predates the deploy and restarts on the next quiet refresh; new runs use the fallback sandbox until then",
+            status: 503,
+            state: s.state,
+            stateReason: s.reason,
+            reason: "image-stale",
+          };
+        }
+        // From here the attach may hold the mirror lock through clone/install:
+        // count it so a concurrent refresh-cycle reconcileImage never stops the
+        // container under it (and isIdle never parks the cycle mid-attach).
+        this.attachesInFlight++;
+        try {
           const res = await this.attachThreadBody(
             threadKey,
             refHint,
@@ -5954,10 +5953,10 @@ export class ResidentDO extends Sandbox<Env> {
           // whatever its op counters read between the bot's calls (item 44).
           if (!("error" in res)) await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence);
           return res;
-        });
-      } finally {
-        this.attachesInFlight--;
-      }
+        } finally {
+          this.attachesInFlight--;
+        }
+      });
     } catch (err) {
       return catchAllErr(err, "attach-failed");
     }

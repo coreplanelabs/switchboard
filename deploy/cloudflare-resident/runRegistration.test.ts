@@ -92,6 +92,20 @@ describe("a run's registration is held from attach to release", () => {
       attach.indexOf("await this.attachThreadBody("),
     );
   });
+  it("checks the attachment fence under the thread lock before drain, memory, and image gates", () => {
+    const attach = method("attachThreadTraced");
+    const lock = attach.indexOf("this.threadAttaches.run(threadKey");
+    const fence = attach.indexOf("registeredRunAllowsClaim(current, runId, ownerGen, ownerFence)");
+    const drain = attach.indexOf("await this.fleetDrain()");
+    const memory = attach.indexOf('await this.memoryGate("attach"');
+    const image = attach.indexOf('this.reconcileImage("attach")');
+    expect(lock).toBeGreaterThan(-1);
+    expect(fence).toBeGreaterThan(lock);
+    expect(drain).toBeGreaterThan(fence);
+    expect(memory).toBeGreaterThan(drain);
+    expect(image).toBeGreaterThan(memory);
+    expect(method("attachThread")).not.toContain("this.recreateAdmission.pending");
+  });
   it("registrations are durable rows under their own prefix — a fresh isolate still counts the process that survived in the container", () => {
     expect(source).toMatch(/const RUN_REG_KEY_PREFIX = "runReg:";/);
     expect(source).toMatch(/const runRegKey = \(threadKey: string\) => `\$\{RUN_REG_KEY_PREFIX\}\$\{threadKey\}`;/);
