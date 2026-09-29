@@ -159,6 +159,8 @@ import {
 } from "./core/coordinator/instancesClient.js";
 import { classifyRoundChecks } from "./core/ship/checkFindings.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
+import { buildPrivateWorkerLog } from "./core/privateWorkerLogWorker.js";
+import { parsePrivateWorkerThreadKey, privateWorkerIO } from "./channels/privateWorker.js";
 import {
   branchHasMergeQueue,
   branchHeadSubject,
@@ -458,6 +460,7 @@ export async function runBot(): Promise<void> {
   // ledger on the state Worker; without one, the null store knows no instance
   // and the coordinator routes refuse every step by name.
   const coordinatorInstances = buildCoordinatorInstanceStore(runHistoryCfg, processSecrets);
+  const privateWorkerLog = buildPrivateWorkerLog(runHistoryCfg, processSecrets);
   const decisionRecordAllocator = new DecisionRecordAllocator(
     fetchDecisionRecordClaims,
     durableDecisionRecordReservation(coordinatorInstances),
@@ -917,6 +920,14 @@ export async function runBot(): Promise<void> {
     thread: { threadKey: string; userId: string; cardTs?: string },
     request?: IncomingMessage,
   ): ChannelIO | undefined => {
+    const privateIdentity = parsePrivateWorkerThreadKey(thread.threadKey);
+    if (privateIdentity !== undefined)
+      return privateWorkerLog === undefined
+        ? undefined
+        : privateWorkerIO(privateWorkerLog, privateIdentity, {
+            clock: systemClock,
+            ...(request?.messageId !== undefined ? { currentInputId: request.messageId } : {}),
+          });
     const [platform, channel, threadTs] = thread.threadKey.split(":");
     if (platform === "slack" && channel && threadTs) {
       return resumeSlackIO(
@@ -1244,6 +1255,7 @@ export async function runBot(): Promise<void> {
         return outcome.kind === "steered";
       },
       ioFor: (thread) => threadIoFor(thread),
+      ...(privateWorkerLog !== undefined ? { privateWorkerLog } : {}),
       findOpenPrByHead,
       findMergedPrByHead,
       // The recover path (agent-ship item 15): a coding child that pushed and

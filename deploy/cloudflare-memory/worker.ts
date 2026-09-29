@@ -1,4 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
+import { parsePrivateWorkerThreadKey } from "../../src/channels/privateWorker.ts";
+import {
+  isPrivateWorkerEventInput,
+  type PrivateWorkerEvent,
+  type PrivateWorkerEventInput,
+} from "../../src/core/privateWorkerLog.ts";
 import type { MemoryCandidate, MemoryRecord } from "../../src/core/memory/types.ts";
 import {
   DEFAULT_SCOPE_CAP,
@@ -1754,6 +1760,14 @@ export class RunHistoryDO extends DurableObject<Env> {
         unit TEXT NOT NULL,
         PRIMARY KEY (main_thread_key, act_id)
       );
+      CREATE TABLE IF NOT EXISTS coordinator_private_worker_events (
+        thread_key TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        event_id TEXT,
+        json TEXT NOT NULL,
+        PRIMARY KEY (thread_key, seq),
+        UNIQUE (thread_key, event_id)
+      );
       CREATE TABLE IF NOT EXISTS decision_record_reservations (
         repo TEXT NOT NULL,
         task_key TEXT NOT NULL,
@@ -2617,6 +2631,66 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** The main decision is only an index. Its Ship instance and unit become
    * visible in the same transaction, so replay never points at a partial task. */
+  async appendPrivateWorkerEvent(
+    threadKey: string,
+    event: PrivateWorkerEventInput,
+  ): Promise<PrivateWorkerEvent | null> {
+    return this.ctx.storage.transactionSync(() => {
+      if ((event.kind === "input" || event.kind === "reply") && event.id !== undefined) {
+        const prior = this.sql
+          .exec<{ json: string }>(
+            `SELECT json FROM coordinator_private_worker_events WHERE thread_key = ? AND event_id = ?`,
+            threadKey,
+            event.id,
+          )
+          .toArray()[0];
+        if (prior) {
+          const row = JSON.parse(prior.json) as PrivateWorkerEvent;
+          const same =
+            row.kind === event.kind &&
+            (event.kind === "input"
+              ? row.kind === "input" &&
+                row.sender === event.sender &&
+                row.text === event.text &&
+                row.textSha256 === event.textSha256
+              : row.kind === "reply" && row.text === event.text && row.runId === event.runId);
+          if (!same) return null;
+          return row;
+        }
+      }
+      const last = this.sql
+        .exec<{ seq: number }>(
+          `SELECT seq FROM coordinator_private_worker_events WHERE thread_key = ? ORDER BY seq DESC LIMIT 1`,
+          threadKey,
+        )
+        .toArray()[0];
+      const seq = (last?.seq ?? 0) + 1;
+      const row: PrivateWorkerEvent = {
+        ...event,
+        seq,
+        ...(event.kind === "status" && event.phase === "start" ? { statusSeq: seq } : {}),
+      };
+      this.sql.exec(
+        `INSERT INTO coordinator_private_worker_events (thread_key, seq, event_id, json) VALUES (?, ?, ?, ?)`,
+        threadKey,
+        seq,
+        event.kind === "input" || event.kind === "reply" ? (event.id ?? null) : null,
+        JSON.stringify(row),
+      );
+      return row;
+    });
+  }
+
+  async listPrivateWorkerEvents(threadKey: string): Promise<PrivateWorkerEvent[]> {
+    return this.sql
+      .exec<{ json: string }>(
+        `SELECT json FROM coordinator_private_worker_events WHERE thread_key = ? ORDER BY seq ASC`,
+        threadKey,
+      )
+      .toArray()
+      .map((row) => JSON.parse(row.json) as PrivateWorkerEvent);
+  }
+
   async claimMainTask(
     key: { mainThreadKey: string; actId: string },
     instance: CoordinatorInstance,
@@ -5535,6 +5609,8 @@ export class SessionLogDO extends DurableObject<Env> {
 }
 
 const LEDGER_ROUTES = new Set([
+  "/runs/private-worker/append",
+  "/runs/private-worker/list",
   "/runs/coordinator/put",
   "/runs/coordinator/replace",
   "/runs/coordinator/main-task/get",
@@ -6239,6 +6315,15 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   if (pathname === "/runs/coordinator/main-task/get") {
     if (!isMainTaskKey(b.key)) return json({ error: "key must name a main thread and act id" }, 400);
     return json({ link: await stub.getMainTask(b.key) });
+  }
+  if (pathname === "/runs/private-worker/append" || pathname === "/runs/private-worker/list") {
+    if (typeof b.threadKey !== "string" || parsePrivateWorkerThreadKey(b.threadKey) === undefined)
+      return json({ error: "threadKey must name one private worker" }, 400);
+    if (pathname === "/runs/private-worker/list")
+      return json({ events: await stub.listPrivateWorkerEvents(b.threadKey) });
+    if (!isPrivateWorkerEventInput(b.event)) return json({ error: "event must be a bounded worker event" }, 400);
+    const event = await stub.appendPrivateWorkerEvent(b.threadKey, b.event);
+    return event === null ? json({ error: "private worker input id conflict" }, 409) : json({ event });
   }
   if (pathname === "/runs/coordinator/main-task/claim") {
     if (

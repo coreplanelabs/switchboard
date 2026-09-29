@@ -5,6 +5,7 @@ import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
 import type { CoordinatorInstance, CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
+import { PRIVATE_WORKER_REPLY_MAX_CHARS } from "../../src/core/privateWorkerLog.ts";
 import { assertNoPendingBackgroundTasks } from "./backgroundTasks.ts";
 import type { RunHistoryDO, SessionLogDO } from "./worker.ts";
 
@@ -19,6 +20,53 @@ const AUTH = { authorization: "Bearer test-token", "content-type": "application/
 
 let n = 0;
 const storeKey = () => `runs:ledger-${Date.now()}-${n++}`;
+
+describe("private worker log on the state Worker", () => {
+  it("stores ordered private history, replays an input id once, and refuses a changed replay", async () => {
+    const key = storeKey();
+    const threadKey = "worker:ship_private_1:U12";
+    const input = { kind: "input", id: "step-1", sender: "slack:UA", text: "Fix signup", at: 10 };
+    const append = (event: unknown) => post("/runs/private-worker/append", { storeKey: key, threadKey, event });
+    const first = await append(input);
+    expect(first).toMatchObject({ status: 200, data: { event: { ...input, seq: 1 } } });
+    expect(await append({ ...input, at: 11 })).toEqual(first);
+    expect((await append({ ...input, text: "other" })).status).toBe(409);
+    const reply = { kind: "reply", id: "report-1", text: "\u0000".repeat(20_000), at: 20 };
+    const settled = await append(reply);
+    expect(settled).toMatchObject({
+      status: 200,
+      data: { event: { seq: 2, id: "report-1", kind: "reply", text: reply.text } },
+    });
+    expect(await append({ ...reply, at: 21 })).toEqual(settled);
+    expect((await append({ ...reply, text: "Changed" })).status).toBe(409);
+    const boundary = { kind: "reply", id: "boundary", text: "", at: 21 };
+    boundary.text = "x".repeat(PRIVATE_WORKER_REPLY_MAX_CHARS - JSON.stringify(boundary).length - 1);
+    expect(JSON.stringify(boundary).length).toBe(PRIVATE_WORKER_REPLY_MAX_CHARS - 1);
+    expect((await append(boundary)).status).toBe(400);
+    expect(await append({ kind: "status", phase: "start", frame: { title: "testing" }, at: 21 })).toMatchObject({
+      status: 200,
+      data: { event: { seq: 3, statusSeq: 3, kind: "status" } },
+    });
+    expect(
+      await append({ kind: "status", phase: "done", statusSeq: 3, frame: { title: "done" }, at: 22 }),
+    ).toMatchObject({ status: 200, data: { event: { seq: 4, statusSeq: 3 } } });
+    expect(await post("/runs/private-worker/list", { storeKey: key, threadKey })).toMatchObject({
+      status: 200,
+      data: {
+        events: [
+          { seq: 1, kind: "input" },
+          { seq: 2, kind: "reply" },
+          { seq: 3, kind: "status" },
+          { seq: 4, kind: "status" },
+        ],
+      },
+    });
+    const longInput = { ...input, id: "long-input", text: "shortened", textSha256: "a".repeat(64) };
+    expect((await append(longInput)).status).toBe(200);
+    expect((await append({ ...longInput, textSha256: "b".repeat(64) })).status).toBe(409);
+    expect((await post("/runs/private-worker/list", { storeKey: key, threadKey: "slack:C1:1.0" })).status).toBe(400);
+  });
+});
 
 async function post(path: string, body: unknown, headers: Record<string, string> = AUTH) {
   const raw = typeof body === "string" ? body : JSON.stringify(body);

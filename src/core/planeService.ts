@@ -7,7 +7,7 @@ import { buildPlaneTable, type PlanePullRequestFacts, type PlaneTable } from "./
 import { checkPrTitle } from "./prTitle.mjs";
 import PR_TITLE_VOCABULARY from "./prTitleVocabulary.json" with { type: "json" };
 import { RUN_LIST_MAX_LIMIT } from "./runRecord.js";
-import type { RunsService, RunView } from "./runsService.js";
+import { PRIVATE_WORKER_INTERNAL_READ, type RunsService, type RunView } from "./runsService.js";
 import { instanceFactsOf, type InstanceFacts, type UnitFacts } from "./unitRuns.js";
 import { minutesToMs, PLANE } from "./budgets.js";
 import { systemClock } from "./trace/clock.js";
@@ -255,6 +255,7 @@ export function createPlaneService(deps: PlaneServiceDeps): PlaneService {
           visibleTo,
           threadKey,
           limit: RUN_LIST_MAX_LIMIT,
+          privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
         });
         for (const run of runs) {
           if (run.id === instance.runId || run.parentInstanceId !== instanceId) continue;

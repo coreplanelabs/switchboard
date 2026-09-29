@@ -89,6 +89,14 @@ import { foldThreadAttachments } from "../core/dispatch/admission.js";
 import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import type { PrivateWorkerLog } from "../core/privateWorkerLog.js";
+import { PRIVATE_WORKER_INTERNAL_READ } from "../core/runsService.js";
+import {
+  appendPrivateWorkerInput,
+  appendPrivateWorkerReply,
+  privateWorkerIO,
+  privateWorkerThreadKey,
+} from "./privateWorker.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../core/coordinator/instancesRoute.js";
 import type { OriginalUnitRecoveryParams } from "../core/coordinator/driver.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
@@ -275,6 +283,8 @@ export interface AdminCoordinatorDeps {
    *  row's parts — the card's ts when the handle must redraw it); undefined for
    *  a platform no thread can be rebuilt on. */
   ioFor: (thread: { threadKey: string; userId: string; cardTs?: string }) => ChannelIO | undefined;
+  /** Durable internal conversation for main-agent workers. Missing means no worker admission. */
+  privateWorkerLog?: PrivateWorkerLog;
   /** The open pull request heading a branch (githubPulls.findOpenPrByHead), and
    *  — asked only when there is none — the merged one (githubPulls.findMergedPrByHead):
    *  a unit whose pull request merged before the runner reached it is done, not aborted. */
@@ -675,9 +685,34 @@ const isGenerated = (instance: CoordinatorInstance): boolean => instance.plan?.p
  *  plan — whatever its source, keyed on the unit count (record 0055 item 3) —
  *  the thread every child of the unit runs in (record 0055). */
 function unitThread(instance: CoordinatorInstance, row: CoordinatorUnit | undefined, unitCount: number) {
+  if (row?.workBrief !== undefined)
+    return { threadKey: privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit }), sourceUrl: undefined };
   const threadKey = row?.threadKey ?? (row === undefined || unitCount === 1 ? instance.threadKey : undefined);
   const sourceUrl = row?.sourceUrl ?? (threadKey === instance.threadKey ? instance.sourceUrl : undefined);
   return { threadKey, sourceUrl };
+}
+
+function unitIO(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  currentInputId?: string,
+): ChannelIO | undefined {
+  if (row.workBrief !== undefined)
+    return deps.privateWorkerLog === undefined
+      ? undefined
+      : privateWorkerIO(
+          deps.privateWorkerLog,
+          { instanceId: instance.id, unit: row.unit },
+          {
+            clock: deps.clock ?? systemClock,
+            ...(currentInputId !== undefined ? { currentInputId } : {}),
+          },
+        );
+  const thread = unitThread(instance, row, 1);
+  return thread.threadKey === undefined
+    ? undefined
+    : deps.ioFor({ threadKey: thread.threadKey, userId: instance.userId });
 }
 
 type OpenedThreadRef = { threadKey: string; sourceUrl?: string };
@@ -752,6 +787,7 @@ async function liveOnThread(
   threadKey: string,
 ): Promise<RunView | undefined> {
   const active = await runs.listRuns({
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
     status: "active",
     visibleTo: EVERY_RUN,
     channel: instance.channelId,
@@ -770,6 +806,7 @@ async function finishedWithKey(
   let cursor: { before: number; beforeId: string } | undefined;
   for (let page = 0; page < FINISHED_LOOKBACK_PAGES; page++) {
     const result = await runs.listRuns({
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
       status: "finished",
       visibleTo: EVERY_RUN,
       channel: instance.channelId,
@@ -849,6 +886,15 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   if (instance.stop !== undefined) return json(409, { ok: false, error: "stopped", at });
   const unit = await unitRowOf(deps, instance, req.unit);
   if (!unit.ok) return unit.response;
+  if (unit.rows.some((candidate) => candidate.workBrief !== undefined) && unit.row?.workBrief === undefined)
+    return json(409, { ok: false, error: "private_worker_unit_required", at });
+  if (unit.row?.workBrief !== undefined) {
+    const expected = privateWorkerThreadKey({ instanceId: instance.id, unit: unit.row.unit });
+    if (unit.row.threadKey !== expected || unit.row.reviewThread !== undefined)
+      return json(409, { ok: false, error: "private_worker_not_started", at });
+    if (deps.privateWorkerLog === undefined)
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+  }
   const own = unitThread(instance, unit.row, unit.rows.length);
   // A plan unit's thread is opened by `unit-start`; a spawn before it has no
   // thread to run in — a passing condition (the runner asks again), stamped
@@ -862,6 +908,8 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // review rounds stay there, so a unit in flight across the release keeps
   // its review session where it began.
   const row = unit.row;
+  if (row?.workBrief !== undefined && req.brief === undefined)
+    return json(409, { ok: false, error: "private_worker_brief_required", at });
   const legacy = req.preset === "review" ? row?.reviewThread : undefined;
   const thread: OpenedThreadRef = legacy ?? {
     threadKey: own.threadKey,
@@ -919,7 +967,10 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
             : req.brief?.kind === "review"
               ? req.brief.prior?.reviewRunId
               : undefined;
-        const review = reviewId === undefined ? undefined : await deps.runs.getRun(reviewId);
+        const review =
+          reviewId === undefined
+            ? undefined
+            : await deps.runs.getRun(reviewId, { privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ });
         const run = review?.ok ? review.value : undefined;
         const round = Number(req.step.split("/")[2]);
         const priorRound = req.preset === "review" ? round - 1 : round;
@@ -979,7 +1030,10 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       return json(409, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
     }
   }
-  const io = deps.ioFor({ threadKey, userId: instance.userId });
+  const io =
+    row?.workBrief !== undefined
+      ? unitIO(deps, instance, row, key)
+      : deps.ioFor({ threadKey, userId: instance.userId });
   if (!io) return json(503, { ok: false, error: "no_channel", at });
   // The child's turn: the caller's prompt, or the brief composed from what the
   // bot holds — the plan at the base ref, the prior rounds' records.
@@ -1081,6 +1135,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     ...(instance.postedBy !== undefined ? { postedBy: instance.postedBy } : {}),
     ...(instance.channelName !== undefined ? { channelName: instance.channelName } : {}),
     threadKey,
+    ...(row?.workBrief !== undefined ? { messageId: key } : {}),
     ...(thread.sourceUrl !== undefined ? { sourceUrl: thread.sourceUrl } : {}),
     text: childRequestText({
       preset: req.preset,
@@ -1094,6 +1149,22 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     ...carried,
     receivedAt: at,
   };
+  if (row?.workBrief !== undefined) {
+    try {
+      await appendPrivateWorkerInput(
+        deps.privateWorkerLog!,
+        { instanceId: instance.id, unit: row.unit },
+        {
+          id: key,
+          sender: instance.userId,
+          text: msg.text,
+          at,
+        },
+      );
+    } catch (err) {
+      return json(503, { ok: false, error: "private_worker_log_unavailable", message: describe(err), at });
+    }
+  }
   // The definitive drain fence sits beside dispatch, after every asynchronous
   // read. Its synchronous permit acquisition and dispatch call cannot have a
   // signal callback interleave; once dispatch yields, the drain counts this
@@ -1576,7 +1647,10 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   // (authorization.md: a denied read reveals nothing). The only moved identity
   // admitted is an earlier attempt of this same plan and unit, proven from both
   // durable instance rows rather than from caller-supplied ids alone.
-  const [res, instanceRow] = await Promise.all([deps.runs.getRun(body.runId), deps.instances.get(id.value)]);
+  const [res, instanceRow] = await Promise.all([
+    deps.runs.getRun(body.runId, { privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ }),
+    deps.instances.get(id.value),
+  ]);
   if (!res.ok) return json(404, { ok: false, error: "not_found" });
   const view = res.value;
   if (
@@ -1601,7 +1675,11 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   // coding child's pull request, the review child's verdict and whether it
   // stands on the pull request, the coding run's dispositions.
   const full = await deps.runs
-    .getRun(body.runId, { include: "messages", requireFinalRecord: true })
+    .getRun(body.runId, {
+      include: "messages",
+      requireFinalRecord: true,
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    })
     .catch(() => undefined);
   if (full === undefined) return json(503, { ok: false, error: "record_unavailable", at });
   if (!full.ok) return json(409, { ok: false, error: "record_pending", at });
@@ -1756,6 +1834,7 @@ async function restartedChildOf(
   // The route is already instance-scoped (the run named must belong to the
   // instance), so the listing reads everything and filters on the tag.
   const listing = await deps.runs.listRuns({
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
     status: "all",
     visibleTo: { kind: "all" },
     threadKey: view.threadKey,
@@ -1849,7 +1928,10 @@ async function recoverPushedBranch(
   let title: string | undefined;
   let prBody = `Opened by the plan runner from the pushed branch \`${branch}\`: the coding run ${runId} of ${unitName} ended before it could open the pull request or submit its description. The review round asks for the description.`;
   try {
-    const full = await deps.runs.getRun(runId, { include: "messages" });
+    const full = await deps.runs.getRun(runId, {
+      include: "messages",
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    });
     if (full.ok && full.value.parentInstanceId === instance.id) {
       const events = full.value.events ?? [];
       const descEvent = [...events].reverse().find((e) => e.type === "pr_description");
@@ -1931,7 +2013,7 @@ async function steerChild(body: Record<string, unknown>, deps: AdminCoordinatorD
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (instance === null) return json(404, { ok: false, error: "unknown_instance", at });
-  const child = await deps.runs.getRun(body.runId);
+  const child = await deps.runs.getRun(body.runId, { privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ });
   if (!child.ok || child.value.parentInstanceId !== instance.id)
     return json(404, { ok: false, error: "not_found", at });
   const reason =
@@ -2019,7 +2101,10 @@ async function reconcileMissingFindingsPush(
 ): Promise<boolean> {
   const binding = row.publication;
   if (binding === undefined) return false;
-  const read = await deps.runs.getRun(runId, { include: "messages" });
+  const read = await deps.runs.getRun(runId, {
+    include: "messages",
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+  });
   if (!read.ok) return false;
   const run = read.value;
   const complete = (r: typeof run) => {
@@ -2084,7 +2169,10 @@ async function reconcileMissingFindingsPush(
       (sibling.pushed?.length ?? 0) > 0
     )
       return false;
-    const prior = await deps.runs.getRun(sibling.id, { include: "messages" });
+    const prior = await deps.runs.getRun(sibling.id, {
+      include: "messages",
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    });
     if (
       !prior.ok ||
       !complete(prior.value) ||
@@ -2123,7 +2211,10 @@ async function advanceFindingsPublication(
   runId: string,
 ): Promise<CoordinatorUnit> {
   if (row.publication === undefined || facts.headSha === row.publication.expectedHeadSha) return row;
-  const child = await deps.runs.getRun(runId, { include: "messages" });
+  const child = await deps.runs.getRun(runId, {
+    include: "messages",
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+  });
   const owner = { instanceId: instance.id, unit: row.unit };
   const latestReview = [...row.rounds].reverse().find((round) => round.agent === "review");
   const prefix = row.recovery !== undefined ? `${row.unit}/recovery` : publicationStepPrefix(row);
@@ -2147,6 +2238,7 @@ async function advanceFindingsPublication(
     )
       throw new PublicationBindingRefusal("publication_facts_mismatch");
     const listing = await deps.runs.listRuns({
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
       status: "all",
       visibleTo: EVERY_RUN,
       threadKey: row.threadKey ?? instance.threadKey,
@@ -3082,6 +3174,7 @@ export async function recoverOriginalUnit(
     // Query both identity claims across threads before selecting review/coding
     // evidence. Unrelated global history must not consume the evidence bound.
     const listing = await deps.runs.listRuns({
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
       status: "all",
       visibleTo: EVERY_RUN,
       limit: RUN_LIST_MAX_LIMIT,
@@ -3387,7 +3480,13 @@ export async function recoverOriginalUnit(
       );
       const completed = attempts.filter((run) => run.finished && run.status === "completed");
       const selected = completed.length === 1 ? completed[0] : undefined;
-      const full = selected === undefined ? undefined : await deps.runs.getRun(selected.id, { include: "messages" });
+      const full =
+        selected === undefined
+          ? undefined
+          : await deps.runs.getRun(selected.id, {
+              include: "messages",
+              privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+            });
       const child = full?.ok === true ? full.value : undefined;
       const tags = child?.events?.filter((event) => event.type === "coordinator_tag") ?? [];
       const tag = tags.length === 1 ? tags[0] : undefined;
@@ -3990,7 +4089,9 @@ async function hostRunOf(deps: AdminCoordinatorDeps, instance: CoordinatorInstan
   if (runId === undefined) return { kind: "untracked" };
   const here = deps.registry.getById(runId);
   if (here && !here.finished) return { kind: "host", runId };
-  const res = await deps.runs.getRun(runId).catch(() => undefined);
+  const res = await deps.runs
+    .getRun(runId, { privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ })
+    .catch(() => undefined);
   if (res !== undefined && res.ok && !res.value.finished && res.value.ownerGen !== undefined)
     return { kind: "not_host" };
   return { kind: "untracked" };
@@ -4160,6 +4261,20 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
   const unit = await unitRowOf(deps, instance, body.unit);
   if (!unit.ok) return unit.response;
   let row = unit.row!;
+  if (row.workBrief !== undefined) {
+    const threadKey = privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit });
+    if (deps.privateWorkerLog === undefined)
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    if ((row.threadKey !== undefined && row.threadKey !== threadKey) || row.reviewThread !== undefined)
+      return json(409, { ok: false, error: "private_worker_thread_conflict", at });
+    // Prove the durable log is reachable before admitting a worker. No Slack thread is opened.
+    try {
+      await deps.privateWorkerLog.list(threadKey);
+    } catch {
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    }
+    row = { ...row, threadKey };
+  }
   if (row.threadKey === undefined) {
     // A one-unit plan — generated or checked-in — runs its unit where the
     // request was made (record 0055 item 3): the count decides, not the source.
@@ -4191,8 +4306,8 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
           type: "ship_unit",
           unit: row.unit,
           state: "started",
-          ...(row.threadKey !== undefined ? { threadKey: row.threadKey } : {}),
-          lead: unitLead(instance, row),
+          ...(row.workBrief === undefined && row.threadKey !== undefined ? { threadKey: row.threadKey } : {}),
+          ...(row.workBrief === undefined ? { lead: unitLead(instance, row) } : {}),
           ...(row.pr !== undefined ? { pr: row.pr.number } : {}),
           at,
         },
@@ -4292,7 +4407,9 @@ function unitLines(
           `idle · ${endingWordOf(u.idle.why)}`
         : last
           ? `${shipRoundHeader({ index: last.index, agent: last.agent }, severity)} · ${roundOutcomeWordOf(last.outcome)}${
-              last.gate ? ` · ⚠️ gate fired: ${last.gate.findings.join(", ")} at or above ${last.gate.level}` : ""
+              last.gate && u.workBrief === undefined
+                ? ` · ⚠️ gate fired: ${last.gate.findings.join(", ")} at or above ${last.gate.level}`
+                : ""
             }`
           : u.threadKey
             ? "starting"
@@ -4320,6 +4437,7 @@ async function drawCard(
   units: readonly CoordinatorUnit[],
   close?: { icon: string },
 ): Promise<void> {
+  if (units.some((row) => row.workBrief !== undefined)) return;
   if (!instance.card) return;
   const io = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId, cardTs: instance.card.ts });
   if (!io) return;
@@ -4384,6 +4502,8 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  if (row.workBrief !== undefined && deps.privateWorkerLog === undefined)
+    return json(503, { ok: false, error: "private_worker_log_unavailable", at });
   const recoveryWorkflowId =
     typeof body.recoveryWorkflowId === "string" && INSTANCE_ID_PATTERN.test(body.recoveryWorkflowId)
       ? body.recoveryWorkflowId
@@ -4450,14 +4570,14 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
           index: body.index,
           agent: body.agent,
           outcome: body.outcome as ShipRoundOutcome,
-          ...(gate ? { gate } : {}),
+          ...(gate && row.workBrief === undefined ? { gate } : {}),
           at,
         },
         {
           type: "ship_unit",
           unit: updated.unit,
           state: body.outcome as string,
-          ...(thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
+          ...(row.workBrief === undefined && thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
           ...(updated.pr !== undefined ? { pr: updated.pr.number } : {}),
           at,
         },
@@ -4465,7 +4585,7 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       at,
     );
   }
-  if (gate)
+  if (gate && row.workBrief === undefined)
     (deps.log ?? console.warn)(
       `[coordinator] ${instance.id} ${row.unit}: severity gate fired on round ${body.index} — the review's approve carried ${gate.findings.join(", ")} at or above ${gate.level}, the level in force; the verdict was parsed at another level (agent-ship item 9)`,
     );
@@ -4532,10 +4652,40 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  if (row.workBrief !== undefined && deps.privateWorkerLog === undefined)
+    return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+  if (row.workBrief !== undefined) {
+    try {
+      await deps.privateWorkerLog!.list(privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit }));
+    } catch {
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    }
+  }
   const host = await hostRunOf(deps, instance);
   if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
+  const deliverPrivateWake = async (answer: UnitWakeAnswer): Promise<boolean> => {
+    if (row.workBrief === undefined || answer.kind !== "answered") return true;
+    try {
+      await appendPrivateWorkerReply(
+        deps.privateWorkerLog!,
+        { instanceId: instance.id, unit: row.unit },
+        {
+          id: body.waitId as string,
+          text: answer.reply,
+          at,
+        },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const stored = row.wakes?.[body.waitId];
-  if (stored !== undefined) return json(200, { ok: true, answer: stored, at });
+  if (stored !== undefined) {
+    if (!(await deliverPrivateWake(stored)))
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    return json(200, { ok: true, answer: stored, at });
+  }
   if (!row.idle) {
     const answer: UnitWakeAnswer = row.ending?.kind === "stopped" ? { kind: "stopped" } : { kind: "expired" };
     await deps.instances.answerWake(row, body.waitId, answer, [], body.waitId);
@@ -4669,9 +4819,13 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
   );
   const visible = { ...updated, wakes: { ...(updated.wakes ?? {}), [body.waitId]: answer } };
   if (answer.kind === "answered") {
-    const thread = unitThread(instance, visible, units.length);
-    const io = thread.threadKey ? deps.ioFor({ threadKey: thread.threadKey, userId: instance.userId }) : undefined;
-    await io?.reply(answer.reply);
+    if (row.workBrief !== undefined) {
+      if (!(await deliverPrivateWake(answer)))
+        return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    } else {
+      const io = unitIO(deps, instance, visible);
+      await io?.reply(answer.reply);
+    }
   }
   await drawCard(
     deps,
@@ -4712,6 +4866,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // renders it at the request's verbosity beside the full report the row and
   // the board keep; absent (an older driver), the full report is the thread's.
   // Empty means the level says nothing here — a quiet segment boundary.
+  const fullReport = ending.report as string;
   const threadReport = typeof ending.threadReport === "string" ? ending.threadReport : ending.report;
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
@@ -4720,6 +4875,29 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  if (row.workBrief !== undefined && deps.privateWorkerLog === undefined)
+    return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+  if (row.workBrief !== undefined) {
+    if (typeof body.deliveryId !== "string" || !STEP_NAME_PATTERN.test(body.deliveryId))
+      return json(400, { ok: false, error: "deliveryId must be a step name", at });
+    try {
+      await deps.privateWorkerLog!.list(privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit }));
+    } catch {
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    }
+  }
+  const deliverPrivateReport = async (): Promise<boolean> => {
+    try {
+      await appendPrivateWorkerReply(
+        deps.privateWorkerLog!,
+        { instanceId: instance.id, unit: row.unit },
+        { id: body.deliveryId as string, text: fullReport, at },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const recoveryWorkflowId =
     typeof body.recoveryWorkflowId === "string" && INSTANCE_ID_PATTERN.test(body.recoveryWorkflowId)
       ? body.recoveryWorkflowId
@@ -4727,13 +4905,20 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   if (body.recoveryWorkflowId !== undefined && recoveryWorkflowId === undefined)
     return json(400, { ok: false, error: "recoveryWorkflowId must be a Workflow instance id", at });
   if (recoveryWorkflowId !== undefined && row.recoveryReceipt?.workflowId === recoveryWorkflowId) {
+    if (row.workBrief !== undefined && !(await deliverPrivateReport()))
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
     if (row.pr !== undefined) {
       const owner = { instanceId: instance.id, unit: row.unit };
       const current = deps.runnerOwnership?.owner(instance.repo, row.pr.number);
       if (current?.instanceId === owner.instanceId && current.unit === owner.unit)
         deps.runnerOwnership?.release(instance.repo, row.pr.number, owner);
     }
-    return json(200, { ok: true, alreadySettled: true, at: row.recoveryReceipt.at });
+    return json(200, {
+      ok: true,
+      alreadySettled: true,
+      ...(row.workBrief !== undefined ? { told: true } : {}),
+      at: row.recoveryReceipt.at,
+    });
   }
   if (row.recovery !== undefined && recoveryWorkflowId !== row.recovery.workflowId)
     return json(409, { ok: false, error: "recovery_claim_mismatch", at });
@@ -4864,16 +5049,15 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
           type: "ship_unit",
           unit: updated.unit,
           state: ending.kind,
-          ...(thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
-          report: ending.report,
+          ...(row.workBrief === undefined && thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
+          ...(row.workBrief === undefined ? { report: ending.report } : {}),
           ...(updated.pr !== undefined ? { pr: updated.pr.number } : {}),
           at,
         },
       ],
       at,
     );
-  const io =
-    thread.threadKey !== undefined ? deps.ioFor({ threadKey: thread.threadKey, userId: instance.userId }) : undefined;
+  const io = unitIO(deps, instance, updated);
   // The leftovers (record 0051's fold rule): events still unconsumed when the unit ends
   // run as ONE fresh turn in the unit's thread — as a run's unconsumed
   // follow-ups do at the settle — dispatched as the requester with each text
@@ -4885,7 +5069,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // the log says so by count — a loss the operator can read, never a silent one.
   // An idle unit has not ended: its events wait for the fold or the wake
   // (record 0051; the wait lands with this plan's fifth unit).
-  if (segment === undefined && idle === undefined && row.recovery === undefined) {
+  if (segment === undefined && idle === undefined && row.recovery === undefined && row.workBrief === undefined) {
     const leftovers = await deps.instances
       .listEvents({ instanceId: instance.id, unit: row.unit }, true)
       .catch(() => [] as ThreadEvent[]);
@@ -4941,7 +5125,10 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       );
   }
   let told = false;
-  if (io && threadReport.length === 0)
+  if (row.workBrief !== undefined) {
+    if (!(await deliverPrivateReport())) return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    told = true;
+  } else if (io && threadReport.length === 0)
     told = true; // nothing owed to the thread at this level
   else if (io) {
     try {
@@ -4958,7 +5145,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // refused, a cap, a stop — and under it the last coding child's typed handoff
   // as the parent renders it, so a deviation the child recorded reaches the
   // board without a person copying it over. Best effort, like the thread's.
-  if (row.issue !== undefined) {
+  if (row.issue !== undefined && row.workBrief === undefined) {
     const handoff = await codingHandoffOf(deps, instance, body.codingRunId);
     const rendered =
       handoff !== undefined
@@ -4975,11 +5162,10 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         ),
       );
   }
-  // A human-gated question's next step is a person's, at either answer
-  // surface. The report lands on the pull request beside the review that named
-  // it; the bot's own comment is ignored by the human-answer intake.
+  // An ordinary human-gated unit leaves its report on the pull request beside
+  // the review. A private worker reports only to the main agent's durable log.
   const parkedHumanGate = ending.kind === "idle" && idle?.humanGate !== undefined;
-  if ((ending.kind === "held" || parkedHumanGate) && updated.pr !== undefined) {
+  if (row.workBrief === undefined && (ending.kind === "held" || parkedHumanGate) && updated.pr !== undefined) {
     const state = parkedHumanGate ? "waiting for a person" : "held";
     await deps.github
       .commentIssue(instance.repo, updated.pr.number, `**Plan runner — ${row.unit} ${state}**\n\n${ending.report}`)
@@ -5009,7 +5195,9 @@ async function codingHandoffOf(
   runId: unknown,
 ): Promise<Handoff | undefined> {
   if (typeof runId !== "string" || !RUN_ID_PATTERN.test(runId)) return undefined;
-  const res = await deps.runs.getRun(runId).catch(() => undefined);
+  const res = await deps.runs
+    .getRun(runId, { privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ })
+    .catch(() => undefined);
   if (res === undefined || !res.ok || res.value.parentInstanceId !== instance.id) return undefined;
   return isHandoffShape(res.value.handoff) ? res.value.handoff : undefined;
 }
@@ -5542,7 +5730,7 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
   // A one-unit plan's unit ran in the requesting thread, so its report is
   // already there — only a plan of two or more units posts the summary back
   // (record 0055 item 3: the count decides, not the source).
-  if (units.length >= 2) {
+  if (units.length >= 2 && !units.some((row) => row.workBrief !== undefined)) {
     const io = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId });
     await io?.reply(`Plan ${instance.plan?.id ?? ""} ended (${body.outcome}):\n${planSummary(units)}`).catch(() => {});
   }
@@ -5607,7 +5795,10 @@ function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance)
       }
     },
     readRunFacts: async (runId) => {
-      const res = await deps.runs.getRun(runId, { include: "messages" });
+      const res = await deps.runs.getRun(runId, {
+        include: "messages",
+        privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+      });
       if (!res.ok || res.value.parentInstanceId !== instance.id) return undefined;
       const r = res.value;
       return {
@@ -5623,7 +5814,9 @@ function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance)
     // words the person typed (agent-ship item 13).
     readShipRequest: async () => {
       if (instance.runId === undefined) return undefined;
-      const res = await deps.runs.getRun(instance.runId, { include: "messages" }).catch(() => undefined);
+      const res = await deps.runs
+        .getRun(instance.runId, { include: "messages", privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ })
+        .catch(() => undefined);
       if (res === undefined || !res.ok) return undefined;
       const input = (res.value.events ?? []).find((e) => e.type === "input");
       return input?.type === "input" ? input.text : undefined;

@@ -173,6 +173,53 @@ describe("unitFactsOf — the idle on the facts", () => {
   });
 });
 
+describe("unitFactsOf — private worker projection", () => {
+  it("keeps the private ending, title, and thread out of ordinary unit facts", () => {
+    const privateUnit: CoordinatorUnit = {
+      ...unit,
+      title: "Private signup diagnosis",
+      threadKey: "worker:plan-p-1:U16",
+      workBrief: {
+        requesterId: "slack:UALICE",
+        mainThreadKey: "slack:DMAIN:1.0",
+        actId: "act-signup",
+        repo: "acme/api",
+        base: "main",
+        question: "Why?",
+        findings: [],
+        requestedChange: "Fix signup",
+      },
+      ending: { kind: "held", report: "Private customer finding", at: T0 + 50_000 },
+    };
+    const facts = unitFactsOf(privateUnit);
+    expect(facts.ending).toEqual({ kind: "held", at: T0 + 50_000 });
+    expect(facts).not.toHaveProperty("title");
+    expect(facts.threads).toEqual({});
+    expect(JSON.stringify(facts)).not.toMatch(/Private customer finding|Private signup diagnosis|worker:/);
+    expect(unitFactsOf({ ...privateUnit, workBrief: undefined }).ending?.report).toBe("Private customer finding");
+  });
+
+  it("keeps a private round gate in the coordinator row, not ordinary unit facts", () => {
+    const gate = { level: "minor" as const, findings: ["private customer finding"] };
+    const privateUnit: CoordinatorUnit = {
+      ...unit,
+      workBrief: {
+        requesterId: "slack:UALICE",
+        mainThreadKey: "slack:DMAIN:1.0",
+        actId: "act-private",
+        repo: "acme/api",
+        base: "main",
+        question: "Why?",
+        findings: [],
+        requestedChange: "Fix it",
+      },
+      rounds: [{ index: 1, agent: "review", outcome: "approve", at: T0, gate }],
+    };
+    expect(privateUnit.rounds[0].gate).toEqual(gate);
+    expect(unitFactsOf(privateUnit).rounds).toEqual([{ index: 1, agent: "review", outcome: "approve", at: T0 }]);
+  });
+});
+
 describe("unitSessionKeys — the unit page's working-session keys (session-log item 13)", () => {
   it("derives <instance>:<unit>:coding and <instance>:<unit>:review, and a re-issue's attempt suffix is stripped so it searches the lanes it continued", () => {
     expect(unitSessionKeys({ instanceId: "plan-p", id: "U16" })).toEqual({

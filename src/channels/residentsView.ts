@@ -3,6 +3,7 @@ import { matchesPredicate, type Actor } from "../core/authz/index.js";
 import { RESIDENT_LISTING_POLL_MS } from "../core/budgets.js";
 import type { ResidentAdminClient } from "../core/residentAdmin.js";
 import type { RunRegistry } from "../core/runRegistry.js";
+import { privateWorkerRun } from "../core/runsService.js";
 import { startProcessRoot, type RequestTraceDeps } from "../core/requestTrace.js";
 import type { Span } from "../core/trace/types.js";
 import { nodeSseSink, startSseHeartbeat } from "./liveView/sse.js";
@@ -215,7 +216,7 @@ export function createResidentsViewHandler(
         // viewer's to see — each with its token, as the runs index seeds them.
         const live = runs
           .listActive()
-          .filter((s) => !s.finished && s.repo !== undefined && matchesPredicate(visibleTo, s));
+          .filter((s) => !privateWorkerRun(s) && !s.finished && s.repo !== undefined && matchesPredicate(visibleTo, s));
         const seed: ResidentsIndexSeed = {
           page: "residents",
           cap: listing.cap,

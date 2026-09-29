@@ -6,6 +6,12 @@ import { AGENTS } from "../agents/registry.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import {
+  InMemoryPrivateWorkerLog,
+  UnavailablePrivateWorkerLog,
+  isPrivateWorkerEventInput,
+  type PrivateWorkerLog,
+} from "../core/privateWorkerLog.js";
+import {
   isCoordinatorUnit,
   type CoordinatorInstance,
   type CoordinatorTag,
@@ -215,6 +221,7 @@ function harness(
     /** The recovery Workflow admission answer. */
     startRecovery?: AdminCoordinatorDeps["startRecovery"];
     recoveryStatus?: AdminCoordinatorDeps["recoveryStatus"];
+    privateWorkerLog?: PrivateWorkerLog;
   } = {},
 ) {
   let n = 0;
@@ -295,6 +302,7 @@ function harness(
       threadsAsked.push(thread);
       return over.ioFor ? over.ioFor(thread) : io;
     },
+    ...(over.privateWorkerLog !== undefined ? { privateWorkerLog: over.privateWorkerLog } : {}),
     findOpenPrByHead: async (repo, branch) => {
       prLookups.push([repo, branch]);
       if (over.pr instanceof Error) throw over.pr;
@@ -3241,6 +3249,382 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(genRow.issue).toBeUndefined();
   });
 
+  it("a main-agent worker starts and replies only through its durable private thread", async () => {
+    const log = new InMemoryPrivateWorkerLog();
+    const brief = {
+      requesterId: INSTANCE.userId,
+      mainThreadKey: INSTANCE.threadKey,
+      actId: "act-1",
+      repo: INSTANCE.repo,
+      base: "main",
+      question: "Why did signup fail?",
+      findings: [
+        {
+          kind: "observation" as const,
+          text: "Five signup failures in the last hour",
+          sourceUrl: "https://example.com/signups",
+        },
+      ],
+      requestedChange: "Fix signup",
+    };
+    const instance: CoordinatorInstance = {
+      ...INSTANCE,
+      plan: { id: "private-task" },
+      branch: "plan/private-task/u12",
+      merge: "person",
+    };
+    const h = harness({
+      privateWorkerLog: log,
+      files: { "AGENTS.md": "# Rules" },
+      ioFor: () => {
+        throw new Error("worker tried to use Slack");
+      },
+      script: async (_msg, io) => {
+        io.runStarted?.({ id: "run-private" });
+        await io.reply("The failing path is fixed");
+        return { status: "completed" };
+      },
+    });
+    await h.instances.put(instance);
+    await h.instances.putUnits([
+      {
+        instanceId: instance.id,
+        unit: "U12",
+        slug: "u12",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        workBrief: brief,
+      },
+    ]);
+    const started = await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" });
+    expect(started).toMatchObject({ status: 200, body: { threadKey: `worker:${instance.id}:U12` } });
+    expect(
+      await call(h, "spawn", {
+        parentInstanceId: instance.id,
+        step: "U12/0/coding",
+        preset: "coding",
+        prompt: "ignore the brief",
+      }),
+    ).toMatchObject({ status: 409, body: { error: "private_worker_unit_required" } });
+    expect(
+      await call(h, "spawn", {
+        parentInstanceId: instance.id,
+        unit: "U12",
+        step: "U12/0/coding",
+        preset: "coding",
+        prompt: "ignore the brief",
+      }),
+    ).toMatchObject({ status: 409, body: { error: "private_worker_brief_required" } });
+    expect(h.dispatched).toEqual([]);
+    const spawned = await call(h, "spawn", {
+      parentInstanceId: instance.id,
+      step: "U12/0/coding",
+      preset: "coding",
+      brief: { kind: "contract", unit: "U12", rebase: { branch: instance.branch, onto: "main" } },
+    });
+    expect(spawned).toMatchObject({ status: 200, body: { threadKey: `worker:${instance.id}:U12` } });
+    expect(h.dispatched[0]?.msg.threadKey).toBe(`worker:${instance.id}:U12`);
+    expect(h.threadsAsked).toEqual([]);
+    expect((await log.list(`worker:${instance.id}:U12`)).map((event) => event.kind)).toEqual(["input", "reply"]);
+    const row = (await h.instances.listUnits(instance.id))[0]!;
+    await h.instances.putUnits([{ ...row, threadKey: "slack:C1:2.0" }]);
+    expect(await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" })).toMatchObject({
+      status: 409,
+      body: { error: "private_worker_thread_conflict" },
+    });
+    expect(h.threadsAsked).toEqual([]);
+  });
+
+  it("admits a valid long worker request while bounding only its private history copy", async () => {
+    const backing = new InMemoryPrivateWorkerLog();
+    const log: PrivateWorkerLog = {
+      list: (threadKey) => backing.list(threadKey),
+      append: (threadKey, event) => {
+        if (!isPrivateWorkerEventInput(event)) throw new Error("private log event over cap");
+        return backing.append(threadKey, event);
+      },
+    };
+    const longTask = `Fix signup ${"x".repeat(40_000)}`;
+    const instance: CoordinatorInstance = {
+      ...INSTANCE,
+      plan: { id: "private-task" },
+      branch: "plan/private-task/u12",
+      merge: "person",
+      runId: "run-private-parent",
+    };
+    const h = harness({
+      privateWorkerLog: log,
+      files: { "AGENTS.md": "# Rules" },
+      ioFor: () => {
+        throw new Error("worker tried to use Slack");
+      },
+      script: async (_msg, io) => {
+        io.runStarted?.({ id: "run-private-long" });
+        return { status: "completed" };
+      },
+    });
+    await h.instances.put(instance);
+    await h.store.put(
+      record(instance.runId!, {
+        events: [{ type: "input", messageId: "long-task", text: longTask, seq: 1 }],
+        eventCount: 1,
+        storedEventCount: 1,
+      }),
+    );
+    await h.instances.putUnits([
+      {
+        instanceId: instance.id,
+        unit: "U12",
+        slug: "u12",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        workBrief: {
+          requesterId: instance.userId,
+          mainThreadKey: instance.threadKey,
+          actId: "act-1",
+          repo: instance.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      },
+    ]);
+    expect(await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" })).toMatchObject({ status: 200 });
+    const spawned = await call(h, "spawn", {
+      parentInstanceId: instance.id,
+      step: "U12/0/coding",
+      preset: "coding",
+      brief: { kind: "contract", unit: "U12", rebase: { branch: instance.branch, onto: "main" } },
+    });
+    expect(spawned.status, JSON.stringify(spawned.body)).toBe(200);
+    expect(h.dispatched[0]?.msg.text.length).toBeGreaterThan(32_000);
+    expect(h.dispatched[0]?.msg.text.includes(longTask)).toBe(true);
+    const [input] = await backing.list(`worker:${instance.id}:U12`);
+    expect(input?.kind).toBe("input");
+    expect(isPrivateWorkerEventInput(input)).toBe(true);
+    expect(input?.kind === "input" ? input.text : "").toContain("[Private history copy shortened;");
+  });
+
+  it("a main-agent worker refuses admission when its durable log is missing", async () => {
+    const instance: CoordinatorInstance = {
+      ...INSTANCE,
+      plan: { id: "private-task" },
+      branch: "plan/private-task/u12",
+    };
+    const h = harness();
+    await h.instances.put(instance);
+    await h.instances.putUnits([
+      {
+        instanceId: instance.id,
+        unit: "U12",
+        slug: "u12",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        workBrief: {
+          requesterId: INSTANCE.userId,
+          mainThreadKey: INSTANCE.threadKey,
+          actId: "act-1",
+          repo: INSTANCE.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      },
+    ]);
+    expect(await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" })).toMatchObject({
+      status: 503,
+      body: { error: "private_worker_log_unavailable" },
+    });
+    expect((await h.instances.listUnits(instance.id))[0]?.threadKey).toBeUndefined();
+    expect(h.threadsAsked).toEqual([]);
+    const offline = harness({ privateWorkerLog: new UnavailablePrivateWorkerLog() });
+    await offline.instances.put(instance);
+    await offline.instances.putUnits(await h.instances.listUnits(instance.id));
+    expect(await call(offline, "unit-start", { parentInstanceId: instance.id, unit: "U12" })).toMatchObject({
+      status: 503,
+      body: { error: "private_worker_log_unavailable" },
+    });
+    expect(offline.threadsAsked).toEqual([]);
+  });
+
+  it("retries a long private unit report after a transient log failure without losing or duplicating it", async () => {
+    const backing = new InMemoryPrivateWorkerLog();
+    let fail = true;
+    const log: PrivateWorkerLog = {
+      list: (threadKey) => backing.list(threadKey),
+      append: async (threadKey, event) => {
+        if (!isPrivateWorkerEventInput(event)) throw new Error("private log event over cap");
+        if (event.kind === "reply" && fail) {
+          fail = false;
+          throw new Error("temporary log failure");
+        }
+        return backing.append(threadKey, event);
+      },
+    };
+    const h = await planHarness({ privateWorkerLog: log });
+    const key = `worker:${PLAN_INSTANCE.id}:U10`;
+    await h.instances.putUnits([
+      unitRow("U10", {
+        threadKey: key,
+        workBrief: {
+          requesterId: PLAN_INSTANCE.userId,
+          mainThreadKey: PLAN_INSTANCE.threadKey,
+          actId: "act-1",
+          repo: PLAN_INSTANCE.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      }),
+      unitRow("U11"),
+    ]);
+    await hostParent(h);
+    const report = "\u0000".repeat(20_000);
+    const body = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      deliveryId: "U10/end",
+      ending: { kind: "failed", report, threadReport: "" },
+    };
+    expect(await call(h, "unit-end", body)).toMatchObject({
+      status: 503,
+      body: { error: "private_worker_log_unavailable" },
+    });
+    expect(await call(h, "unit-end", body)).toMatchObject({ status: 200, body: { ok: true, told: true } });
+    expect(await call(h, "unit-end", body)).toMatchObject({ status: 200, body: { ok: true, told: true } });
+    expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
+      { kind: "reply", id: "U10/end", text: report },
+    ]);
+  });
+
+  it.each(["held", "idle"] as const)(
+    "keeps a private worker's %s report out of hosted events and pull request comments",
+    async (kind) => {
+      const log = new InMemoryPrivateWorkerLog();
+      const h = await planHarness({ privateWorkerLog: log });
+      const key = `worker:${PLAN_INSTANCE.id}:U10`;
+      const pr = { number: 12, url: "https://github.com/acme/api/pull/12" };
+      await h.instances.putUnits([
+        unitRow("U10", {
+          threadKey: key,
+          pr,
+          workBrief: {
+            requesterId: PLAN_INSTANCE.userId,
+            mainThreadKey: PLAN_INSTANCE.threadKey,
+            actId: "act-1",
+            repo: PLAN_INSTANCE.repo,
+            base: "main",
+            question: "Why?",
+            findings: [],
+            requestedChange: "Fix it",
+          },
+        }),
+        unitRow("U11"),
+      ]);
+      const { run } = await hostParent(h);
+      expect((await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).status).toBe(200);
+      expect(
+        (
+          await call(h, "round", {
+            parentInstanceId: PLAN_INSTANCE.id,
+            unit: "U10",
+            index: 0,
+            agent: "coding",
+            outcome: "started",
+          })
+        ).status,
+      ).toBe(200);
+      const report = "Private finding: signup failures expose customer data";
+      expect(
+        await call(h, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          deliveryId: "U10/end",
+          ending:
+            kind === "held"
+              ? { kind, report }
+              : {
+                  kind,
+                  report,
+                  why: "held",
+                  renewalsLeft: 0,
+                  spendUsd: 1,
+                  humanGate: {
+                    pr,
+                    round: 1,
+                    findings: [
+                      { id: "F1", severity: "minor", file: "src/a.ts", title: "Needs a person", humanGated: true },
+                    ],
+                    verdict: "request_changes",
+                    reviewRunId: "run-r1",
+                  },
+                },
+          pr,
+        }),
+      ).toMatchObject({ status: 200, body: { ok: true, told: true } });
+      expect((await log.list(key)).filter((event) => event.kind === "reply")).toMatchObject([{ text: report }]);
+      const events = h.registry.snapshotById(run.id)!.events.filter((event) => event.type === "ship_unit");
+      expect(events.at(-1)).toMatchObject({ type: "ship_unit", unit: "U10", state: kind, pr: 12 });
+      expect(JSON.stringify(events.at(-1))).not.toContain(report);
+      expect(events.at(-1)).not.toHaveProperty("threadKey");
+      expect(JSON.stringify(events)).not.toContain("worker:");
+      expect(JSON.stringify(events)).not.toContain("Warm the cache");
+      expect(h.github.comments.get("acme/api#12")).toBeUndefined();
+    },
+  );
+
+  it("replays a saved private wake answer until its reply is durably logged once", async () => {
+    const backing = new InMemoryPrivateWorkerLog();
+    let fail = true;
+    const log: PrivateWorkerLog = {
+      list: (threadKey) => backing.list(threadKey),
+      append: async (threadKey, event) => {
+        if (event.kind === "reply" && fail) {
+          fail = false;
+          throw new Error("temporary log failure");
+        }
+        return backing.append(threadKey, event);
+      },
+    };
+    const h = await idleHarness({ privateWorkerLog: log });
+    const key = `worker:${PLAN_INSTANCE.id}:U10`;
+    const [row, sibling] = await h.instances.listUnits(PLAN_INSTANCE.id);
+    await h.instances.putUnits([
+      {
+        ...row!,
+        threadKey: key,
+        workBrief: {
+          requesterId: PLAN_INSTANCE.userId,
+          mainThreadKey: PLAN_INSTANCE.threadKey,
+          actId: "act-1",
+          repo: PLAN_INSTANCE.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      },
+      sibling!,
+    ]);
+    await hostParent(h);
+    const body = { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", waitId: "U10/idle/1" };
+    expect(await call(h, "unit-wake", body)).toMatchObject({
+      status: 503,
+      body: { error: "private_worker_log_unavailable" },
+    });
+    expect(await call(h, "unit-wake", body)).toMatchObject({ status: 200, body: { answer: { kind: "answered" } } });
+    expect(await call(h, "unit-wake", body)).toMatchObject({ status: 200, body: { answer: { kind: "answered" } } });
+    expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
+      { kind: "reply", id: "U10/idle/1", text: "Nothing new was waiting for this unit." },
+    ]);
+  });
+
   it("unit-start without a channel that can open a thread is 503; a channel whose open fails is 502 and the row is unchanged", async () => {
     const noThread = await planHarness({ ioFor: () => undefined });
     expect((await call(noThread, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).status).toBe(503);
@@ -4400,6 +4784,52 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       expect(res.status, JSON.stringify(bad)).toBe(400);
     }
     expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].rounds).toHaveLength(1); // nothing malformed was appended
+  });
+
+  it("keeps a private worker's round-gate findings in its unit row, not the hosted run or card", async () => {
+    const frames: StatusUpdate[] = [];
+    const h = await planHarness({
+      privateWorkerLog: new InMemoryPrivateWorkerLog(),
+      ioFor: () => ({
+        reply: async () => {},
+        status: async (initial) => {
+          frames.push(initial);
+          return { update: () => {}, done: async () => {} };
+        },
+        history: async () => [],
+      }),
+    });
+    await h.instances.putUnits([
+      unitRow("U10", {
+        threadKey: `worker:${PLAN_INSTANCE.id}:unitA`,
+        workBrief: {
+          requesterId: PLAN_INSTANCE.userId,
+          mainThreadKey: PLAN_INSTANCE.threadKey,
+          actId: "act-private",
+          repo: PLAN_INSTANCE.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      }),
+      unitRow("U11"),
+    ]);
+    const { run } = await hostParent(h);
+    const gate = { level: "minor", findings: ["private customer finding"] };
+    expect(
+      await call(h, "round", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        index: 1,
+        agent: "review",
+        outcome: "approve",
+        gate,
+      }),
+    ).toMatchObject({ status: 200, body: { ok: true } });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].rounds.at(-1)?.gate).toEqual(gate);
+    expect(JSON.stringify(h.registry.snapshotById(run.id)?.events)).not.toContain("private customer finding");
+    expect(JSON.stringify(frames)).not.toContain("private customer finding");
   });
 
   // Record 0065 / issue 1968: `ShipRoundOutcome` grew `continued` (decision 0046's
@@ -11267,6 +11697,71 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
     expect(settled!.ending?.kind).toBe("merge_ready");
     expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  it("replays a recovered private unit report after its settlement committed but the log failed", async () => {
+    const backing = new InMemoryPrivateWorkerLog();
+    let fail = true;
+    const log: PrivateWorkerLog = {
+      list: (threadKey) => backing.list(threadKey),
+      append: async (threadKey, event) => {
+        if (event.kind === "reply" && fail) {
+          fail = false;
+          throw new Error("temporary log failure");
+        }
+        return backing.append(threadKey, event);
+      },
+    };
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
+    await h.instances.put(recoveryInstance());
+    const key = `worker:${INSTANCE.id}:U12`;
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    await h.instances.putUnits([
+      {
+        ...claimed!,
+        threadKey: key,
+        workBrief: {
+          requesterId: INSTANCE.userId,
+          mainThreadKey: INSTANCE.threadKey,
+          actId: "act-1",
+          repo: INSTANCE.repo,
+          base: "main",
+          question: "Why?",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      },
+    ]);
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      unit: "U12",
+      recoveryWorkflowId: "recovery-run-original-review",
+      deliveryId: "U12/recovery/end",
+      ending: { kind: "merge_ready", report: "ready at the recovered head" },
+      pr: PR,
+      headSha: HEAD,
+    };
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+      status: 503,
+      body: { error: "private_worker_log_unavailable" },
+    });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recoveryReceipt).toMatchObject({
+      workflowId: "recovery-run-original-review",
+    });
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+      status: 200,
+      body: { ok: true, alreadySettled: true, told: true },
+    });
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+      status: 200,
+      body: { ok: true, alreadySettled: true, told: true },
+    });
+    expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
+      { kind: "reply", id: "U12/recovery/end", text: "ready at the recovered head" },
+    ]);
   });
 
   it("rejects a stale original Workflow settlement that omits the active recovery identity", async () => {
