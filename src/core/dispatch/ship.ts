@@ -137,10 +137,7 @@ export interface ShipBranchEnd {
 }
 
 export function parseOriginalUnitRecoveryRequest(text: string): { instanceId: string; unit: string } | undefined {
-  // The official Slack connector appends this attribution to every posted
-  // message; parseDirectives folds the intervening newline to a space. Accept
-  // that exact footer without admitting any other trailing prose.
-  const match = /^recover\s+unit\s+(\S+)(?:\s+\*Sent using\* ChatGPT Connector \(Local MCP\))?\s*$/i.exec(text.trim());
+  const match = /^recover\s+unit\s+(\S+)\s*$/i.exec(text.trim());
   return match ? parseUnitKey(match[1]!) : undefined;
 }
 

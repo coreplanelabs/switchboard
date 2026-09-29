@@ -286,7 +286,7 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
                   {
                     channel: m.channel,
                     user: m.user,
-                    text: stripMention(m.text, id),
+                    text: m.text,
                     ts: m.ts,
                     threadTs: m.threadTs,
                     files: m.files,
@@ -339,7 +339,7 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
         user: event.user,
         poster: posterOf(posted),
         rawText: rawTextOf(event.text, posted.blocks),
-        text: stripMention(event.text ?? "", botUserId),
+        text: event.text ?? "",
         ts: event.ts,
         threadTs: event.thread_ts ?? event.ts,
         files: (event as { files?: SlackFile[] }).files,
@@ -386,7 +386,7 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
         user: m.user,
         poster: posterOf(m),
         rawText: rawTextOf(m.text, (m as { blocks?: SlackBlock[] }).blocks),
-        text: stripMention(m.text ?? "", botUserId),
+        text: m.text ?? "",
         ts: m.ts,
         threadTs: m.thread_ts ?? m.ts,
         files: m.files,
@@ -884,6 +884,13 @@ export async function receiveSlackMessage(
   relayApps: readonly string[],
   intake?: SlackIntakeGate,
 ): Promise<ReceivedSlackMessage | undefined> {
+  // Preserve the raw footer for relay identity, then normalize the person's
+  // words once for intake and dispatch. Live events, catch-up and direct
+  // receiver calls must cross this same Slack boundary.
+  // Keep the event object: the source read attaches its thread page here for
+  // SlackIO.history() to reuse after receive returns.
+  ev.rawText ??= ev.text;
+  ev.text = stripMention(ev.text, ev.botUserId);
   // A configured relay gives its copy a new Slack event id, so ordinary
   // `(channel, ts)` dedupe cannot recognize a loop. Its footer still names the
   // native source message. Drop a source this process posted, or one Slack
