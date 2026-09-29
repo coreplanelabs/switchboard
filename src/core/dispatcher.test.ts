@@ -17394,6 +17394,153 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     return { ...s, branch, recordedHead, operator, shipBranch, shipParent };
   }
 
+  it("a plain review after the round cap reviews each changed head and preserves the original unit branch and PR", async () => {
+    const s = await endedPrContinuationSetup();
+    const unit = {
+      ...(await s.instances.listUnits(INSTANCE))[0]!,
+      rounds: [{ index: 3, agent: "review", outcome: "request_changes", at: 900 }],
+      ending: { kind: "round_cap", report: "Round cap reached: 1 blocker", at: 1_000 },
+    };
+    await s.instances.putUnits([unit]);
+    const instance = await s.instances.get(INSTANCE);
+    let runIndex = 0;
+    const registry = new RunRegistry({ genId: () => `fresh-review-${++runIndex}` });
+    s.deps.runRegistry = registry;
+    const oldReview: RunView = {
+      ...s.shipParent,
+      id: "old-review",
+      agent: "review",
+      instanceId: undefined,
+      parentInstanceId: INSTANCE,
+      pr: unit.pr,
+      reviewHead: s.recordedHead,
+      verdict: { verdict: "request_changes", summary: "old blocker", head: s.recordedHead, findings: [] },
+    };
+    s.deps.runs!.listRuns = vi.fn(async () => ({ runs: [oldReview, s.shipParent] }));
+    s.deps.operatorModel = vi.fn(async () => ({
+      tool: "bind_preset",
+      input: { preset: "review", reason: "review the changed PR head" },
+    }));
+    s.deps.postReviewComment = vi.fn(async () => {});
+    for (const head of ["2".repeat(40), "3".repeat(40)]) {
+      s.deps.resolveRepoContext = vi.fn(() => ({
+        repo: "acme/api",
+        ref: s.branch,
+        pr: 7,
+        headSha: head,
+        baseRef: "main",
+        refFromPr: true,
+      }));
+      s.deps.fetchPrHead = async () => head;
+      const executor = {
+        exec: async (command: string) => (/git rev-parse HEAD/.test(command) ? `${head}\n` : ""),
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => ({ released: true }),
+      };
+      const harness = vi.fn<typeof runPiHarnessOpen>(async (_deps, run) => {
+        expect(run.agent.name).toBe("review");
+        expect(run.system).toContain(`- Head commit: ${head}`);
+        expect(run.system).toContain(`- Head branch: ${s.branch}`);
+        await run.tools
+          .find((tool) => tool.name === "submit_verdict")!
+          .run(
+            {
+              verdict: "request_changes",
+              summary: "Reviewed the new head",
+              head,
+              findings: [{ id: "F1", severity: "minor", file: "src/login.ts", title: "new finding at this head" }],
+            },
+            run.toolContext,
+          );
+        return piAnswered("Reviewed the new head");
+      });
+      const { io, replies } = fakeIO([{ role: "assistant", text: unit.ending.report }]);
+      await vi.mocked(makeExecutor).withImplementation(
+        async () => ({ executor }),
+        async () => {
+          await vi.mocked(runPiHarnessOpen).withImplementation(harness, async () => {
+            await dispatch(
+              s.deps,
+              msg(
+                `please review https://github.com/acme/api/pull/7 — pushed ${head} on top of ${s.recordedHead}`,
+                "slack:UADMIN",
+              ),
+              io,
+            );
+          });
+        },
+      );
+      expect(harness).toHaveBeenCalledOnce();
+      expect(s.deps.postReviewComment).toHaveBeenLastCalledWith(
+        { repo: "acme/api", number: 7, commitId: head },
+        expect.stringContaining("Reviewed the new head"),
+      );
+      expect(registry.getById(`fresh-review-${runIndex}`)).toMatchObject({ agent: "review", threadKey: THREAD });
+      expect(replies.join("\n")).not.toContain("old blocker");
+      expect(await s.instances.listUnits(INSTANCE)).toEqual([unit]);
+      expect(await s.instances.get(INSTANCE)).toEqual(instance);
+    }
+    expect(runIndex).toBe(2);
+    expect(s.deps.operatorModel).toHaveBeenCalledTimes(2);
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.deps.invoked).toEqual([]);
+    expect(s.sends).toEqual([]);
+    expect(await s.instances.listEvents(s.key)).toEqual([]);
+  });
+
+  it("an exact-PR non-review decision after the round cap cannot replay the ledger or start a writer", async () => {
+    for (const answer of [
+      { tool: mcpToolName("runs.findings"), input: { target: "acme/api#7", reason: "show the findings" } },
+      { tool: "bind_preset", input: { preset: "ship", reason: "fix the findings" } },
+    ]) {
+      const s = await endedPrContinuationSetup();
+      const unit = {
+        ...(await s.instances.listUnits(INSTANCE))[0]!,
+        ending: { kind: "round_cap", report: "round cap", at: 1_000 },
+      };
+      await s.instances.putUnits([unit]);
+      s.deps.operatorModel = vi.fn(async () => answer);
+      const { io, replies } = fakeIO();
+      await dispatch(s.deps, msg("continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
+      expect(replies).toEqual([
+        "Unit U12 exhausted the ended pipeline's review-round budget, so continuation did not start. Nothing else ran.",
+      ]);
+      expect(s.deps.operatorModel).toHaveBeenCalledOnce();
+      expect(s.shipBranch).not.toHaveBeenCalled();
+      expect(s.deps.invoked).toEqual([]);
+      expect(await s.instances.listUnits(INSTANCE)).toEqual([unit]);
+    }
+  });
+
+  it("an exact-PR review cannot bypass an unfinished owner or an unknown review head", async () => {
+    const s = await endedPrContinuationSetup();
+    const unit = (await s.instances.listUnits(INSTANCE))[0]!;
+    await s.instances.putUnits([{ ...unit, ending: undefined }]);
+    s.deps.operatorModel = vi.fn(async () => ({
+      tool: "bind_preset",
+      input: { preset: "review", reason: "review PR" },
+    }));
+    s.deps.resolveRepoContext = vi.fn(() => ({ repo: "acme/api", ref: s.branch, pr: 7 }));
+    s.deps.postReviewComment = vi.fn(async () => {});
+    const request = msg("please review https://github.com/acme/api/pull/7", "slack:UADMIN");
+    const held = fakeIO();
+    await dispatch(s.deps, request, held.io);
+    expect(held.replies.join("\n")).toContain("already has an unfinished unit");
+    expect(s.deps.operatorModel).not.toHaveBeenCalled();
+    expect(s.deps.resolveRepoContext).not.toHaveBeenCalled();
+
+    await s.instances.putUnits([{ ...unit, ending: { kind: "round_cap", report: "round cap", at: 1_000 } }]);
+    const unknown = fakeIO();
+    await dispatch(s.deps, request, unknown.io);
+    expect(s.deps.operatorModel).toHaveBeenCalledOnce();
+    expect(s.deps.resolveRepoContext).toHaveBeenCalledOnce();
+    expect(unknown.replies.join("\n")).toMatch(/not started.*head/);
+    expect(s.deps.postReviewComment).not.toHaveBeenCalled();
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
   it("an explicit ship reply naming the owned PR checks the original unit before starting work", async () => {
     const s = await endedPrContinuationSetup();
     const movedHead = "2222222222222222222222222222222222222222";
@@ -17589,7 +17736,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.deps.fetchPrFacts).toHaveBeenCalledTimes(2);
     expect(s.deps.fetchPrFacts).toHaveBeenCalledWith({ repo: "acme/api", number: 7 });
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
   });
 
   it("an exact PR reply ignores a prefetched short page and reaches its original unit", async () => {
@@ -17637,7 +17784,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(replies).toEqual([
       `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
     ]);
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
     expect(s.shipBranch).not.toHaveBeenCalled();
     expect(s.deps.runs!.listRuns).toHaveBeenCalledTimes(2);
   });
@@ -17733,7 +17880,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
     ]);
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
   });
 
   it("an exact PR reply starts no Ship plan when the thread's run history is unreadable", async () => {

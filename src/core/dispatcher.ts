@@ -967,6 +967,10 @@ export async function dispatch(
     // rows cached per instance so the operator view and an ended-owner check
     // still cost at most one durable read.
     let pageOwner: ThreadOwner | undefined;
+    // A review of an ended unit's explicit PR is read-only work, not another
+    // attempt at the durable task. The operator decides intent; ownership
+    // only makes this narrow choice available, never releases a writer.
+    let canReviewEndedPr = false;
     if (operatorMode !== "off") {
       const runsService = deps.runs ?? createRunsService({ registry, store: deps.runStore });
       operatorThread = exactPrReply
@@ -987,6 +991,7 @@ export async function dispatch(
           return read;
         };
         pageOwner = await ownerOf(operatorThread, unitsOf, msg.threadKey);
+        const unfinishedOwner = pageOwner.kind === "unit";
         if (exactPrReply && pageOwner.kind !== "live") {
           try {
             pageOwner = (await endedPipelineForPrOf(operatorThread, unitsOf, msg.threadKey, explicitPr)) ?? pageOwner;
@@ -999,9 +1004,9 @@ export async function dispatch(
             return ended;
           }
         }
-        // An ended generated pipeline is a deterministic continuation door,
-        // not an operator decision. Bypass the model before any read command
-        // can substitute for the reply. When a concurrent continuation has
+        // Without an exact owned PR to review, an ended pipeline is a
+        // deterministic continuation door. No inferred read command may
+        // substitute for that task. When a concurrent continuation has
         // already claimed the local slot, ignore that new live row only for
         // this historical-owner check; ordinary admission below folds the
         // duplicate into the winner without another operator turn.
@@ -1015,8 +1020,17 @@ export async function dispatch(
                   msg.threadKey,
                 );
           if (continuationOwner.kind === "pipeline" || continuationOwner.kind === "pipeline_ambiguous") {
+            canReviewEndedPr =
+              pageOwner.kind === "pipeline" &&
+              !unfinishedOwner &&
+              explicitPr !== undefined &&
+              pageOwner.unit.pr?.number === explicitPr.number &&
+              pageOwner.run.repo?.toLowerCase() === explicitPr.repo &&
+              operatorThread.every((run) => run.finished) &&
+              admission.get(msg.threadKey) === undefined &&
+              deps.threadsElsewhere.get(msg.threadKey) === undefined;
             pageOwner = continuationOwner;
-            operatorMode = "off";
+            if (!canReviewEndedPr) operatorMode = "off";
           }
         }
       }
@@ -1028,7 +1042,8 @@ export async function dispatch(
       // else the page's idle unit, then a hosted runner guarding its seed
       // thread. Under an owner the turn's
       // projection narrows to steers and reads, and the prompt says the reply
-      // is the owner's follow-up. Ended pipelines bypassed this turn above.
+      // is the owner's follow-up. Ended pipelines bypassed this turn unless
+      // their exact PR can be reviewed.
       const slot = admission.get(msg.threadKey);
       const liveElsewhere = deps.threadsElsewhere.get(msg.threadKey) !== undefined;
       // A pending question's free-text answer (issue 2046; routing-and-config
@@ -1061,7 +1076,11 @@ export async function dispatch(
             : pageOwner?.kind === "unit"
               ? { kind: "unit", unit: pageOwner.unit.unit }
               : pageOwner?.kind === "pipeline"
-                ? { kind: "pipeline", unit: pageOwner.unit.unit }
+                ? {
+                    kind: "pipeline",
+                    unit: pageOwner.unit.unit,
+                    ...(canReviewEndedPr ? { allowReview: true } : {}),
+                  }
                 : pageOwner?.kind === "pipeline_ambiguous"
                   ? { kind: "pipeline", unit: pageOwner.units.map((unit) => unit.unit).join(", ") }
                   : undefined;
@@ -1140,7 +1159,7 @@ export async function dispatch(
         // words are the owner's follow-up — the dispatch runs on to admission's
         // fold (a live run) or the unit's one thread event (an idle unit), the
         // decision's event riding the fold or a door record, no prose posted.
-        // An ended pipeline's deterministic continuation bypassed this turn.
+        // An ended pipeline's non-review decision still reaches continuation below.
         // A confirmed "yes" to a question minted before the thread became
         // owned folds the proposal's own words: the person's message is the
         // word "yes", which tells the owner nothing.
@@ -1372,6 +1391,7 @@ export async function dispatch(
       }
       if (
         owner.kind === "pipeline" &&
+        !(canReviewEndedPr && operatorPreset === "review") &&
         !freshShipTask &&
         (directives.agent === undefined ||
           (directives.agent === "ship" &&
