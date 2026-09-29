@@ -1,0 +1,86 @@
+# Publish one installation's complete MCP bearer map from its 1Password item,
+# push the merged config grants, then restart the bot onto both changes.
+name: Sync MCP access
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: depot-ubuntu-24.04-4
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    timeout-minutes: 30
+    env:
+      SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_DEPLOY_PROFILE }}
+      INGRESS_SECRET_SOURCE: ${{ vars.SWITCHBOARD_INGRESS_SECRET_SOURCE }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+      MEMORY_TOKEN: ${{ secrets.MEMORY_TOKEN }}
+      HAS_APP_CREDENTIALS: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID != '' && secrets.CONFIG_REPO_APP_PRIVATE_KEY != '' }}
+      HAS_OP_CREDENTIAL: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}
+      WRANGLER_SEND_METRICS: "false"
+      CI: "1"
+    steps:
+      - name: check inputs before any write
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::Sync MCP access runs only from main. Nothing changed."
+            exit 1
+          fi
+          if [ -z "$SWITCHBOARD_DEPLOY_PROFILE" ] || [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$MEMORY_TOKEN" ] || [ "$HAS_APP_CREDENTIALS" != true ] || [ "$HAS_OP_CREDENTIAL" != true ] || [[ "$INGRESS_SECRET_SOURCE" != op://*/* ]]; then
+            echo "::error::Sync MCP access needs SWITCHBOARD_DEPLOY_PROFILE, SWITCHBOARD_INGRESS_SECRET_SOURCE=op://Vault/Item, CLOUDFLARE_DEPLOY_TOKEN, MEMORY_TOKEN, CONFIG_REPO_APP_CLIENT_ID, CONFIG_REPO_APP_PRIVATE_KEY, and OP_SERVICE_ACCOUNT_TOKEN. Nothing changed."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: mint the configuration repository token
+        id: infra-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}
+          owner: ${{ vars.CONFIG_REPO_OWNER }}
+          repositories: ${{ vars.CONFIG_REPO_NAME }}
+          permission-contents: read
+      - uses: 1Password/install-cli-action@1a3160d5e9de1ae0803eaa08a88746f5ae3daa50 # v4.1.0
+      - name: publish MCP access
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          map="$(op read --no-newline "$INGRESS_SECRET_SOURCE/SWITCHBOARD_INGRESS_TOKENS")"
+          if ! printf '%s' "$map" | jq -e '
+            type == "object" and length > 0 and
+            all(to_entries[];
+              (.key | length > 0) and
+              (.value | if type != "object" then false else
+                (.subject | if type == "string" then length > 0 else false end) and
+                (if has("channel") then (.channel | type == "string") else true end) and
+                (if has("email") then (.email | if type == "string" then contains("@") else false end) else true end)
+              end)
+            ) and
+            ([to_entries[] | select(.value.subject == "deployer")] | length == 1)
+          ' > /dev/null; then
+            echo "::error::1Password needs a complete MCP token map with valid entries and one deployer. Nothing changed."
+            exit 1
+          fi
+          SWITCHBOARD_DEPLOY_TOKEN="$(printf '%s' "$map" | jq -r 'to_entries[] | select(.value.subject == "deployer") | .key')"
+          export SWITCHBOARD_DEPLOY_TOKEN
+          unset map
+          npm run --silent cli -- deploy secrets bot --only SWITCHBOARD_INGRESS_TOKENS --source "$INGRESS_SECRET_SOURCE"
+          npm run --silent cli -- deploy config
+          npm run --silent cli -- deploy restart
+          echo 'MCP map published, grant config pushed, and bot restart verified live.' >> "$GITHUB_STEP_SUMMARY"

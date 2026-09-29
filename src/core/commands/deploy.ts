@@ -587,6 +587,7 @@ const secretsOptions = z.object({
   only: secretNames
     .optional()
     .describe("put only these secrets (comma list of names from deploy/secrets.manifest.json)"),
+  source: z.string().optional().describe("read values from this directory or op://Vault/Item for this run"),
 });
 
 interface SecretsOutput {
@@ -613,7 +614,7 @@ export const deploySecrets = defineCommand({
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into `wrangler secret put`; none is ever printed.",
+    "Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item), or override it with --source for this run: every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into `wrangler secret put`; none is ever printed.",
   render: (output) => {
     const o = output as unknown as SecretsOutput;
     return [
@@ -625,8 +626,12 @@ export const deploySecrets = defineCommand({
   handler: async ({ args, options, deps }) => {
     const worker = args.worker;
     const loaded = await loadProfile(deps);
-    const source = parseSecretsSource(loaded.profile.secretsSource);
-    if (!source.ok) throw new CommandError("unavailable", `${loaded.path}: ${source.problem}`);
+    const source = parseSecretsSource(options.source ?? loaded.profile.secretsSource);
+    if (!source.ok)
+      throw new CommandError(
+        "unavailable",
+        `${options.source === undefined ? loaded.path : "--source"}: ${source.problem}`,
+      );
     const raw = await deps.deploy.secrets.manifest();
     if (raw === undefined) throw new CommandError("unavailable", `${MANIFEST_PATH}: no such file`);
     const manifest = parseManifest(raw);

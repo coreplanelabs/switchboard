@@ -1,8 +1,10 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
+import { parseIngressTokenMap } from "./core/ingressTokens.js";
 import { DOCKERFILES, IMAGE_KINDS, VERSION, type ImageKind } from "./deploy/images.js";
 import { WORKER_DIRS } from "./deploy/plan.js";
 
@@ -767,9 +769,9 @@ describe("the production deploy is one reusable workflow", () => {
     });
   });
 
-  it("no workflow reaches into a vault: no 1Password action, no `op://` reference, no OP_SERVICE_ACCOUNT_TOKEN — an org secret scoped to private repositories vanished the day the repository went public", () => {
+  it("ordinary workflows do not reach into a vault; the configuration App still uses repository secrets", () => {
     const dir = new URL(".github/workflows/", `file://${root}`);
-    for (const f of readdirSync(dir).filter((n) => /\.ya?ml$/.test(n))) {
+    for (const f of readdirSync(dir).filter((n) => /\.ya?ml$/.test(n) && n !== "sync-mcp-access.yml")) {
       const text = read(`.github/workflows/${f}`);
       const code = text
         .split("\n")
@@ -973,6 +975,99 @@ describe("Scorecard orchestration", () => {
           file,
         ).not.toBe(true);
       }
+    }
+  });
+});
+
+describe("one-click MCP access sync", () => {
+  const workflow = parse(read(".github/workflows/sync-mcp-access.yml")) as Workflow & {
+    permissions: { contents: string };
+  };
+  const job = workflow.jobs.sync as Job & {
+    environment: string;
+    concurrency: { group: string; "cancel-in-progress": boolean };
+  };
+  const steps = job.steps as (Step & { id?: string; env?: Record<string, string> })[];
+
+  it("runs from main under the production deploy lock with the existing CI vault credential", () => {
+    expect(workflow.on).toEqual({ workflow_dispatch: null });
+    expect(workflow.permissions).toEqual({ contents: "read" });
+    expect(job["runs-on"]).toBe("depot-ubuntu-24.04-4");
+    expect(job.environment).toBe("production");
+    expect(job.concurrency).toEqual({ group: "deploy-production", "cancel-in-progress": false });
+    expect(job.env?.INGRESS_SECRET_SOURCE).toBe("${{ vars.SWITCHBOARD_INGRESS_SECRET_SOURCE }}");
+    expect(job.env?.SWITCHBOARD_DEPLOY_PROFILE).toBe("${{ vars.SWITCHBOARD_DEPLOY_PROFILE }}");
+    expect(job.env).not.toHaveProperty("OP_SERVICE_ACCOUNT_TOKEN");
+    const guard = steps[0].run ?? "";
+    expect(guard).toContain('"$GITHUB_REF" != refs/heads/main');
+    for (const name of [
+      "SWITCHBOARD_DEPLOY_PROFILE",
+      "INGRESS_SECRET_SOURCE",
+      "CLOUDFLARE_API_TOKEN",
+      "MEMORY_TOKEN",
+      "HAS_APP_CREDENTIALS",
+      "HAS_OP_CREDENTIAL",
+    ]) {
+      expect(guard).toContain(name);
+    }
+    expect(steps.find((s) => s.uses?.startsWith("1Password/install-cli-action@"))?.uses).toMatch(
+      /^1Password\/install-cli-action@[0-9a-f]{40}$/,
+    );
+    const mint = steps.find((s) => s.id === "infra-token")!;
+    expect(mint.with?.["client-id"]).toBe("${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}");
+    expect(mint.with?.["private-key"]).toBe("${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}");
+  });
+
+  it("validates the complete map, publishes one secret, pushes grants, then waits for a live restart", () => {
+    const publish = steps.find((s) => s.name === "publish MCP access")!;
+    expect(publish.env?.OP_SERVICE_ACCOUNT_TOKEN).toBe("${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}");
+    expect(publish.env?.CONFIG_REPO_TOKEN).toBe("${{ steps.infra-token.outputs.token }}");
+    const script = publish.run ?? "";
+    const read = script.indexOf('op read --no-newline "$INGRESS_SECRET_SOURCE/SWITCHBOARD_INGRESS_TOKENS"');
+    const validate = script.indexOf("jq -e");
+    const put = script.indexOf("deploy secrets bot --only SWITCHBOARD_INGRESS_TOKENS --source");
+    const config = script.indexOf("deploy config");
+    const restart = script.indexOf("deploy restart");
+    expect(read).toBeGreaterThanOrEqual(0);
+    expect(validate).toBeGreaterThan(read);
+    expect(script).toContain('select(.value.subject == "deployer")');
+    expect(script).toContain("export SWITCHBOARD_DEPLOY_TOKEN");
+    expect(put).toBeGreaterThan(validate);
+    expect(config).toBeGreaterThan(put);
+    expect(restart).toBeGreaterThan(config);
+    expect(script).not.toContain("deploy all");
+    expect(script).not.toContain("wrangler secret put");
+    expect(script).not.toContain("set -x");
+  });
+
+  it("rejects any map entry that the bot would discard before publishing", () => {
+    const script = steps.find((s) => s.name === "publish MCP access")?.run ?? "";
+    const filter = /\| jq -e '([\s\S]*?)' > \/dev\/null/.exec(script)?.[1];
+    expect(filter).toBeDefined();
+    const accepts = (map: unknown): boolean => {
+      const result = spawnSync("jq", ["-e", filter!], { input: JSON.stringify(map), encoding: "utf8" });
+      expect(result.error).toBeUndefined();
+      return result.status === 0;
+    };
+    const valid = {
+      "deployer-bearer": { subject: "deployer" },
+      "person-bearer": { subject: "matanya", channel: "ops", email: "matanya@example.com" },
+    };
+    expect(accepts(valid)).toBe(true);
+    const parsed = parseIngressTokenMap(JSON.stringify(valid));
+    expect(parsed.ok).toBe(true);
+    expect(Object.keys(parsed.tokens)).toHaveLength(Object.keys(valid).length);
+    for (const bad of [
+      {},
+      { ...valid, "": { subject: "blank-bearer" } },
+      { ...valid, "person-bearer": null },
+      { ...valid, "person-bearer": { subject: "" } },
+      { ...valid, "person-bearer": { subject: "matanya", channel: 42 } },
+      { ...valid, "person-bearer": { subject: "matanya", email: null } },
+      { ...valid, "person-bearer": { subject: "matanya", email: "missing-at" } },
+      { ...valid, "person-bearer": { subject: "deployer" } },
+    ]) {
+      expect(accepts(bad), JSON.stringify(bad)).toBe(false);
     }
   });
 });

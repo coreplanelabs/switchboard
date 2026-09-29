@@ -23,6 +23,8 @@ npx --yes @coreplane/switchboard@<version> deploy secrets <memory|bot|resident|s
 
 The command refuses before any upload when a required name is absent from the source, then passes each value to `wrangler secret put` on stdin; nothing is printed. It renders the Worker's `wrangler.jsonc` itself, so no `deploy init` first.
 
+For one secret in a separate 1Password item, add `--source op://Vault/Item`. This overrides the profile's `secretsSource` for that command only.
+
 ## Restart the bot
 
 ```bash
