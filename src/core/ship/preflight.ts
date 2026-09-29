@@ -19,22 +19,27 @@ import { parseShipPlanRequest, isUnitBranch } from "./coordinator.js";
 // if it started unwrapping those — so the two stay separate rather than sharing
 // one regex with different semantics.
 const SLACK_LINK = /<((?:https?):\/\/[^|>\s]+)(?:\|[^>]*)?>/gi;
+// Transport attribution is not task wording. Match the exact suffix before
+// removing URLs; directive parsing may already have folded its newline.
+const CONNECTOR_FOOTER = /(?:^|\s+)\*Sent using\* ChatGPT Connector \(Local MCP\)\s*$/;
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * A PROBE, never the task: the request text with the ship scaffolding
  * stripped — the "new task text" of the entry checks (spec item 10), asked
  * only "is there a task here at all, or just a pull request reference?".
- * Removes Slack link markup, every URL (the PR link included), `owner/name#N`
- * shorthand, the resolved repo slug (and an `in <slug>:` prefix around it),
- * then leading connective punctuation. Deliberately conservative: ANY
+ * Removes the exact trailing connector footer, Slack link markup, every URL
+ * (the PR link included), `owner/name#N` shorthand, the resolved repo slug
+ * (and an `in <slug>:` prefix around it), then leading connective punctuation.
+ * Deliberately conservative: ANY
  * non-empty remainder counts as a new task — a resume must carry only the
- * directive + the PR reference. The unit a child implements is shipUnitText's,
- * which keeps every URL — a probe that once doubled as the unit lost a task
- * whose whole point was the address it named.
+ * directive + the PR reference (plus optional transport attribution).
+ * The unit a child implements is shipUnitText's, which keeps every URL — a
+ * probe that once doubled as the unit lost a task whose whole point was the
+ * address it named.
  */
 export function shipTaskText(requestText: string, repo: string): string {
-  let t = requestText.replace(SLACK_LINK, " $1 ");
+  let t = requestText.replace(CONNECTOR_FOOTER, "").replace(SLACK_LINK, " $1 ");
   t = t.replace(/https?:\/\/\S+/gi, " ");
   const slug = escapeRegExp(repo);
   t = t.replace(new RegExp(`\\bin\\s+${slug}\\s*:?`, "gi"), " ");

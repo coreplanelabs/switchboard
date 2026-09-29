@@ -621,6 +621,95 @@ describe("shipPreflight — the entry table over (task text, PR source, thread's
   });
 });
 
+describe("shipPreflight — the trailing connector attribution (agent-ship item 10)", () => {
+  const footer = "*Sent using* ChatGPT Connector (Local MCP)";
+  const repoCtx = { repo: "acme/api", pr: 7, prFromMessage: true, ref: "stale-ref", refFromPr: true };
+
+  it.each([
+    { label: "newline", separator: "\n", prIsThreadOwn: false },
+    { label: "folded newline", separator: " ", prIsThreadOwn: false },
+    { label: "thread's own PR", separator: "\n", prIsThreadOwn: true },
+    { label: "trailing whitespace", separator: "\n", prIsThreadOwn: true, trailing: " \n" },
+  ])("resumes the same open PR at its exact head and ref with only the footer ($label)", async (row) => {
+    const res = await shipPreflight(
+      input({
+        requestText: `${PR_URL}${row.separator}${footer}${row.trailing ?? ""}`,
+        repoCtx: { ...repoCtx, prIsThreadOwn: row.prIsThreadOwn, headSha: "b".repeat(40), baseRef: "main" },
+        prFacts: async () => openPr(),
+      }),
+    );
+    expect(res).toEqual({
+      ok: true,
+      entry: {
+        repo: "acme/api",
+        branch: "feat/rate-limit",
+        base: "release/1.x",
+        resume: { pr: 7, headSha: HEAD, url: PR_URL },
+      },
+    });
+  });
+
+  it.each([false, true])(
+    "keeps real task wording and context/adoption with or without the footer (thread own: %s)",
+    async (prIsThreadOwn) => {
+      const task = "fix the failing check, keep one commit and preserve *Sent using* in the help text";
+      for (const suffix of ["", `\n${footer}`, ` ${footer}`]) {
+        const requestText = `${PR_URL} ${task}${suffix}`;
+        expect(shipTaskText(requestText, "acme/api")).toBe(task);
+        // The presence probe must not replace the unit's request-as-written text.
+        expect(shipUnitText(requestText, "acme/api")).toBe(requestText.replace(/\s+/g, " "));
+        const res = await shipPreflight(
+          input({ requestText, repoCtx: { ...repoCtx, prIsThreadOwn }, prFacts: async () => openPr() }),
+        );
+        expect(res).toEqual({
+          ok: true,
+          entry: prIsThreadOwn
+            ? {
+                repo: "acme/api",
+                branch: "feat/rate-limit",
+                base: "release/1.x",
+                adopt: { pr: 7, headSha: HEAD, url: PR_URL },
+              }
+            : { repo: "acme/api", base: "main" },
+        });
+      }
+    },
+  );
+
+  it.each([
+    "*Sent using* an unknown app",
+    "**Sent using** ChatGPT Connector (Local MCP)",
+    "*sent using* ChatGPT Connector (Local MCP)",
+    `"${footer}"`,
+    `${footer} — fix the failing check`,
+    `keep${footer}`,
+  ])("keeps similar or non-trailing attribution as task text: %s", async (task) => {
+    expect(shipTaskText(`${PR_URL} ${task}`, "acme/api")).toBe(task);
+    const res = await shipPreflight(
+      input({ requestText: `${PR_URL} ${task}`, repoCtx, prFacts: async () => openPr() }),
+    );
+    expect(res).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
+  });
+
+  it("does not treat attribution before another URL as a trailing footer", async () => {
+    const requestText = `${PR_URL} ${footer} https://example.com/task`;
+    expect(shipTaskText(requestText, "acme/api")).toBe(footer);
+    const res = await shipPreflight(input({ requestText, repoCtx, prFacts: async () => openPr() }));
+    expect(res).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
+  });
+
+  it.each([
+    { label: "unfetchable", facts: undefined, where: "PR facts unavailable" },
+    { label: "closed", facts: openPr({ state: "closed" }), where: "closed resume target" },
+    { label: "fork", facts: openPr({ sameRepoHead: false }), where: "fork-head PR" },
+  ])("keeps resume guards with the footer ($label)", async ({ facts, where }) => {
+    const res = await shipPreflight(
+      input({ requestText: `${PR_URL}\n${footer}`, repoCtx, prFacts: async () => facts }),
+    );
+    expect(res).toMatchObject({ ok: false, where });
+  });
+});
+
 describe("shipUnitText — the generated unit's text is the request as written (agent-ship item 16)", () => {
   it("keeps every url: a Slack `<url|label>` link unwraps to its bare url, a pasted url stays, an issue reference stays; only the mention and the `in <repo>:` prefix go (directives are the caller's)", () => {
     const text =
