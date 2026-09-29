@@ -1564,6 +1564,13 @@ describe("the pending question's free-text answer joins the original ask (issue 
 });
 
 describe("the projection and the prompt order", () => {
+  it("a question about my config overrides is directed to my effective settings, not the channel index", () => {
+    const prompt = buildOperatorPrompt(input({ text: "do i have any config overrides" }));
+    expect(prompt.system).toContain("A question about whether the person has config overrides uses `config show`");
+    expect(prompt.system).toContain("`config overrides` lists channels with scopes");
+    expect(prompt.user).toContain("<request>\ndo i have any config overrides\n</request>");
+  });
+
   it("the projection for a requester without a preset carries neither its row nor its tools", () => {
     const p = projectionOf(["general"]);
     expect(p.presets.map((x) => x.name)).toEqual(["general"]);

@@ -54,6 +54,7 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
   f("c03p", "paraphrase", "what version is this bot on right now", "status.show"),
   f("c04h", "happy", "show me the config for this channel", "config.show"),
   f("c04p", "paraphrase", "what agent, model and effort am I on here?", "config.show"),
+  f("c04r", "paraphrase", "do i have any config overrides", "config.show"),
   f("c05h", "happy", "which channels carry config overrides", "config.overrides"),
   f("c05p", "paraphrase", "list the channels that have their own settings", "config.overrides"),
   f("c36h", "happy", "which channels can I pick settings for", "config.channels"),
