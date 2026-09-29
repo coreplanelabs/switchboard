@@ -2025,6 +2025,110 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     expect(w.commands.some((c) => c.startsWith("git commit") || c.startsWith("git push"))).toBe(false);
   });
 
+  it.each(["budget", "ending"] as const)(
+    "a clean single-clone workspace keeps the %s WIP checkpoint inside the clone",
+    async (cue) => {
+      const w = fakeExecutor({
+        "git rev-parse HEAD": "exit 128: fatal: not a git repository",
+        "ls -d */.git": "api/.git\n",
+        "git status": "exit 128: fatal: not a git repository",
+        "git -C 'api' status": "(no output)",
+        "git -C 'api' rev-list": "0\n",
+        "git -C 'api' rev-parse HEAD": HEAD,
+      });
+      const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue });
+      expect(out).toMatchObject({ pushed: true, head: HEAD });
+      expect(w.commands.some((cmd) => cmd.startsWith("git -C 'api' commit --allow-empty -m"))).toBe(true);
+      expect(w.commands).toContain("git -C 'api' push origin 'HEAD:refs/heads/plan/p/u1'");
+      expect(w.commands.filter((cmd) => /^git (?:status|add|commit|rev-list|push)/.test(cmd))).toEqual([]);
+    },
+  );
+
+  it.each(["completion", "compaction"] as const)(
+    "a single-clone %s checkpoint preserves untracked work with the exact publication lease",
+    async (cue) => {
+      const w = fakeExecutor(
+        {
+          "ls -d */.git": "api/.git\n",
+          "git status": "exit 128: fatal: not a git repository",
+          "git -C 'api' status": "?? src/new-test.ts\n",
+          "git -C 'api' rev-list": "1\n",
+          "git -C 'api' rev-parse HEAD": HEAD,
+        },
+        { failOn: "git rev-parse HEAD" },
+      );
+      const out = await salvageBudgetPush(w.executor, {
+        branch: "plan/p/u1",
+        cue,
+        publication: { ref: "plan/p/u1", expectedHeadSha: STALE },
+      });
+      expect(out).toMatchObject({ pushed: true, head: HEAD });
+      expect(w.commands).toContain("git -C 'api' add -A");
+      expect(w.commands.some((cmd) => cmd.startsWith("git -C 'api' commit -m"))).toBe(true);
+      expect(w.commands).toContain(
+        `git -C 'api' push --force-with-lease='refs/heads/plan/p/u1:${STALE}' origin 'HEAD:refs/heads/plan/p/u1'`,
+      );
+      expect(w.commands.filter((cmd) => /^git (?:status|add|commit|rev-list|push)/.test(cmd))).toEqual([]);
+    },
+  );
+
+  it("a single-clone checkpoint keeps blocked publication local and reports a rejected lease without an alternate push", async () => {
+    for (const blocked of [true, false]) {
+      const w = fakeExecutor({
+        "git rev-parse HEAD": "exit 128: fatal: not a git repository",
+        "ls -d */.git": "api/.git\n",
+        "git status": "exit 128: fatal: not a git repository",
+        "git -C 'api' status": " M src/a.ts\n",
+        "git -C 'api' rev-list": "1\n",
+        "git -C 'api' push": "exit 1: stale info",
+      });
+      const out = await salvageBudgetPush(w.executor, {
+        branch: "plan/p/u1",
+        cue: "completion",
+        publication: blocked ? { blocked: "the remote head moved" } : { ref: "plan/p/u1", expectedHeadSha: STALE },
+      });
+      expect(out).toMatchObject({ pushed: false });
+      expect(out.head).toBeUndefined();
+      expect(out.summary).toContain("commit remains unpublished");
+      expect(out.summary).toContain("no alternate ref was created");
+      expect(w.commands.some((cmd) => cmd.startsWith("git -C 'api' commit -m"))).toBe(true);
+      const pushes = w.commands.filter((cmd) => /\bpush\b/.test(cmd));
+      expect(pushes).toEqual(
+        blocked
+          ? []
+          : [`git -C 'api' push --force-with-lease='refs/heads/plan/p/u1:${STALE}' origin 'HEAD:refs/heads/plan/p/u1'`],
+      );
+      if (!blocked) expect(out.publicationBlocked).toContain("atomic leased push was rejected");
+    }
+  });
+
+  it("a readable root checkout is never replaced by a child clone when its status fails", async () => {
+    const w = fakeExecutor({
+      "git rev-parse HEAD": HEAD,
+      "git status": "exit 128: index unreadable",
+      "ls -d */.git": "other/.git\n",
+    });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "completion" });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toContain("index unreadable");
+    expect(out.summary).not.toContain("nothing to preserve");
+    expect(w.commands).toEqual(["git rev-parse HEAD", "git status --porcelain"]);
+  });
+
+  it("an absent or unsafe clone name never becomes a checkpoint command or a clean completion", async () => {
+    for (const discovery of ["", "../.git", "-option/.git", "api;touch injected/.git", "api space/.git"]) {
+      const w = fakeExecutor({
+        "ls -d */.git": discovery,
+        git: "exit 128: fatal: not a git repository",
+      });
+      const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "completion" });
+      expect(out.pushed).toBe(false);
+      expect(out.summary).toContain("not a git repository");
+      expect(out.summary).not.toContain("nothing to preserve");
+      expect(w.commands.some((cmd) => cmd.startsWith("git -C") || /\b(?:add|commit|push)\b/.test(cmd))).toBe(false);
+    }
+  });
+
   it("reports a text-rendered failed commit without claiming a push", async () => {
     const w = fakeExecutor({
       "git status": " M src/a.ts\n",

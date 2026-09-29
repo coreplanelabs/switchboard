@@ -220,9 +220,17 @@ export async function observeCodingWorkspace(
   };
   const atRoot = await probesAt("git");
   if (atRoot.isRepo) return atRoot.observation;
+  const git = await discoverCloneGit(probe);
+  if (git === undefined) return atRoot.observation; // no clone anywhere → the post-step reports honestly
+  return (await probesAt(git)).observation;
+}
+
+/** Observation and checkpoints must agree on the checkout below an executor
+ *  root that is not itself a repository. Only a vetted, quoted directory may
+ *  reach the shell; the caller keeps its root failure when none is found. */
+async function discoverCloneGit(probe: (cmd: string) => Promise<string>): Promise<string | undefined> {
   const dir = parseCloneDirOutput(await probe("ls -d */.git 2>/dev/null | head -1"));
-  if (dir === undefined) return atRoot.observation; // no clone anywhere → the post-step reports honestly
-  return (await probesAt(`git -C ${shellQuote(dir)}`)).observation;
+  return dir === undefined ? undefined : `git -C ${shellQuote(dir)}`;
 }
 
 /** Where a ship coding child's budget-end salvage may push (push-before-abort,
@@ -343,25 +351,29 @@ export async function salvageBudgetPush(
               failedLead: `the budget-end salvage push to \`${opts.branch}\` failed`,
             };
   try {
+    const git =
+      parseRevParseOutput(await probe("git rev-parse HEAD")) !== undefined
+        ? "git"
+        : ((await discoverCloneGit(probe)) ?? "git");
     // An ending checkpoint preserves every non-ignored workspace change,
     // including a new source or test file the child had not added yet. Git's
     // ignore rules still keep dependency caches, credentials and attachment
     // staging out. The measure is `run`, not `probe`: a failure is the salvage
     // failing, never a tree read as clean.
-    const status = (await run("git status --porcelain")).trim();
+    const status = (await run(`${git} status --porcelain`)).trim();
     const dirty = status !== "" && status !== "(no output)";
     const endingCheckpoint = opts.cue !== "compaction" && opts.cue !== "completion";
     if (dirty) {
-      await run("git add -A");
-      await run(`git commit -m ${shellQuote(words.commit)}`);
+      await run(`${git} add -A`);
+      await run(`${git} commit -m ${shellQuote(words.commit)}`);
     } else if (endingCheckpoint) {
       // A clean tree can still be unfinished: the child may have pushed an
       // ordinary intermediate commit before its abnormal ending. Give every
       // ending its own mechanical marker so the durable fold records the last
       // head as salvage and the coordinator never reviews that work as final.
-      await run(`git commit --allow-empty -m ${shellQuote(words.commit)}`);
+      await run(`${git} commit --allow-empty -m ${shellQuote(words.commit)}`);
     }
-    const unpushed = parseCountOutput(await run("git rev-list --count HEAD --not --remotes")) ?? 0;
+    const unpushed = parseCountOutput(await run(`${git} rev-list --count HEAD --not --remotes`)) ?? 0;
     if (!dirty && !endingCheckpoint && unpushed === 0) return { pushed: false, summary: words.nothing };
     if (opts.publication !== undefined && "blocked" in opts.publication)
       return {
@@ -373,7 +385,7 @@ export async function salvageBudgetPush(
         ? ` --force-with-lease=${shellQuote(`refs/heads/${opts.publication.ref}:${opts.publication.expectedHeadSha}`)}`
         : "";
     try {
-      await run(`git push${lease} origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
+      await run(`${git} push${lease} origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
     } catch (err) {
       if (opts.publication !== undefined) {
         const detail = err instanceof Error ? err.message : String(err);
@@ -386,7 +398,7 @@ export async function salvageBudgetPush(
       }
       throw err;
     }
-    const head = parseRevParseOutput(await probe("git rev-parse HEAD"));
+    const head = parseRevParseOutput(await probe(`${git} rev-parse HEAD`));
     return {
       pushed: true,
       ...(head !== undefined ? { head } : {}),

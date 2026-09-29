@@ -1174,6 +1174,82 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
   });
 
+  it("a clean pushed coordinator child in a single-clone workspace opens its described PR without salvage", async () => {
+    const HEAD = "a".repeat(40);
+    const BRANCH = "plan/p/u1";
+    const description: PrDescription = {
+      title: "fix(ship): publish completed work",
+      tldr: "Publishes the completed branch. The checkout lives below the executor root.",
+      why: "The completed child already pushed and submitted its description.",
+      pointers: [{ label: "The change", text: "Completed work.", anchor: { path: "src/a", from: 1, to: 2 } }],
+      feedbackWanted: "The publication boundary.",
+      verified: "Focused test.",
+      decisions: [],
+      risk: "none",
+      validation: { criteria: [{ criterion: "publication", proof: "focused test" }] },
+    };
+    const child = watched(piHarness);
+    child.harness.open = async (_deps, run) => {
+      run.toolContext.onPrDescription?.(description);
+      return {
+        answer: "Done: pushed and described.",
+        followUp: async () => "",
+        remainingMs: () => 20 * 60_000,
+        end: async () => {},
+      };
+    };
+    const commands: string[] = [];
+    const s = setup("unused", {
+      agent: "coding",
+      coding: true,
+      repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+      coordinator: WIP_COORDINATOR,
+      harness: {
+        harnesses: roster(child.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      executor: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (cmd.startsWith("ls -d */.git")) return "api/.git\n";
+          if (!cmd.startsWith("git -C 'api' ")) return "exit 128: fatal: not a git repository\n";
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse/.test(cmd)) return `${HEAD}\n`;
+          if (/ls-remote/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+          if (/status --porcelain/.test(cmd)) return "(no output)";
+          if (/rev-list --count/.test(cmd)) return "0\n";
+          throw new Error(`unexpected checkout command: ${cmd}`);
+        },
+      },
+    });
+    const open = vi.fn(async () => ({ number: 9, htmlUrl: "https://github.com/o/r/pull/9", created: true }));
+    s.deps.openPullRequest = open;
+
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(open).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        repo: "o/r",
+        headBranch: BRANCH,
+        base: "main",
+        title: description.title,
+        body: expect.stringContaining(`blob/${HEAD}/`),
+      }),
+    );
+    expect(out.prNote).toContain("PR opened");
+    expect(commands).toContain("git -C 'api' status --porcelain");
+    expect(commands.some((cmd) => /\b(?:add|commit|push)\b/.test(cmd))).toBe(false);
+    await out.releaseWorkspace();
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec).toMatchObject({ status: "completed", headSha: HEAD });
+    expect(rec.events).toContainEqual(expect.objectContaining({ type: "pr_opened", number: 9, created: true }));
+    expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_salvage" }));
+    expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "pushed_head", by: "salvage" }));
+  });
+
   it("a coding child's final description turn checkpoints dirty work before release", async () => {
     const HEAD = "e1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     const BRANCH = "unit-work";
