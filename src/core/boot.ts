@@ -293,6 +293,11 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         const recorded = row.state.finalStatus;
         status = typeof recorded === "string" && TERMINAL.has(recorded) ? (recorded as RunStatus) : "completed";
         why = "replied before the previous generation died";
+      } else if (row.stop === "hard" && !row.meta.hosted && hostingOf(row.state) === undefined) {
+        // A hard stop is durable intent. No owner remains to acknowledge it,
+        // so restarting an ordinary run here would undo the operator's stop.
+        status = "stopped_hard";
+        why = "hard stop requested before the previous generation ended";
       } else if (run.reclaimedFrom === "attaching") {
         // Reserved at admission, killed before its prompt existed (item 42):
         // restarted from the request the row carries — or, without one (a row

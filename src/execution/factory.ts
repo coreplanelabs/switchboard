@@ -644,7 +644,13 @@ export async function makeExecutor(
       const handle = probe.kind === "status" ? probe.seed : undefined;
       const outcome =
         handle && executor instanceof CloudflareSandboxExecutor
-          ? await seedSandbox(executor, handle, ctx, () => probeResident(resident, token, resource, span), span)
+          ? await seedSandbox(
+              executor,
+              handle,
+              ctx,
+              () => probeResident(resident, token, resource, span, ctx.stopSignal),
+              span,
+            )
           : undefined;
       if (outcome !== undefined) await recheckOwner();
       if (outcome && "seeded" in outcome) {
@@ -700,8 +706,11 @@ async function seedSandbox(
   for (let retried = false; ; retried = true) {
     let answer: SeedAnswer;
     try {
-      answer = await executor.seed(seed, { span });
+      answer = await executor.seed(seed, { span, signal: ctx.stopSignal });
     } catch (err) {
+      // A stop ends setup, not just this attempt to seed. Falling through to
+      // a fresh sandbox would hide the stop and start work the run no longer owns.
+      if (isRunStopError(err)) throw err;
       return { why: oneLine(`seed failed (${err instanceof Error ? err.message : String(err)})`) };
     }
     if (answer.seeded) {
@@ -717,6 +726,9 @@ async function seedSandbox(
       };
     }
     const fresh = answer.reason === "seed-missing" && !retried ? await reprobe() : undefined;
+    // As on the selection probe, a transport ended by the run's signal is
+    // the stop, not a missing snapshot that permits a cold fallback.
+    if (fresh?.kind === "unreachable" && fresh.transport && ctx.stopSignal?.aborted) throw wakeStopped("/status");
     const decision = seedRetryDecision({
       answer,
       attempted: seed,
