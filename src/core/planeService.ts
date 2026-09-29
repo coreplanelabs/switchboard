@@ -240,9 +240,9 @@ export function createPlaneService(deps: PlaneServiceDeps): PlaneService {
       };
       const parent =
         instance.runId !== undefined ? { id: instance.runId, outcome: await outcomeOf(instance.runId) } : undefined;
-      // The live children, one per unit thread the instance opened (the
-      // requesting thread for a one-unit plan): each ended hard — the stop is
-      // recorded on the child run, whose record lives in the unit thread.
+      // A one-unit plan can share the requesting thread with the main agent
+      // and unrelated work. Thread membership finds candidates; the durable
+      // parent instance id decides which runs this stop owns.
       const children: Array<{ id: string; outcome: string }> = [];
       const threads = new Set<string>();
       for (const unit of await listUnits.call(deps.instances, instanceId)) {

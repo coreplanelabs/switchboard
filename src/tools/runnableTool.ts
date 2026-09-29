@@ -28,6 +28,7 @@ import type { Executor } from "../execution/executor.js";
 import type { SkillStore } from "../skills/index.js";
 import type { ArtifactsCapability, AttachCapability, UploadTicketCapability } from "./attach.js";
 import type { GithubCapability } from "./github.js";
+import type { MainWorkCapability } from "./mainWork.js";
 import type { PlaneReadCapability } from "./plane.js";
 import type { RunsReadCapability, SteerCapability } from "./runs.js";
 import type { SessionCapability } from "./session.js";
@@ -115,6 +116,9 @@ export interface ToolContext {
    *  `plane_show`, bound by the dispatcher with the requester's own predicate.
    *  Absent → the tool reports the tables unavailable. */
   plane?: PlaneReadCapability;
+  /** Linked work controls bound to this run's resolved requester and current
+   * conversation. Only the orchestrator toolset receives this capability. */
+  mainWork?: MainWorkCapability;
   /** The run's reach into its own session log (docs/reference/specs/session-log.md
    *  item 10): what `recall` searches and reads and `notes` writes. Built by
    *  the dispatcher for a run with a session; absent, the tools say so. */

@@ -21,7 +21,8 @@ import { DECISION_RECORD_ENV } from "../decisionRecordReservation.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
 import type { ModelCard } from "../modelCard.js";
-import { mergeTools } from "../../tools/toolsets.js";
+import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
+import { mainWorkForRun } from "../../tools/mainWork.js";
 import { toolsForSlackContextRun, type SlackContextBinding } from "./slackContextBinding.js";
 import {
   privateAudienceRequired,
@@ -1270,6 +1271,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         table: async () => (await deps.plane!()).table(predicateFor(chatActorOf(deps.config, msg), "runs:read", "run")),
       }
     : undefined;
+  const mainWork = mainWorkForRun({
+    agentName: agent.name,
+    actor: chatActorOf(deps.config, msg),
+    runId: run.id,
+    ...(deps.coordinatorInstances ? { instances: deps.coordinatorInstances } : {}),
+    ...(deps.workflow ? { workflow: deps.workflow } : {}),
+    ...(deps.plane ? { plane: deps.plane } : {}),
+    clock,
+  });
   const toolContext = {
     executor,
     reportProgress,
@@ -1297,6 +1307,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(spawn ? { spawn } : {}),
     ...(runs ? { runs } : {}),
     ...(plane ? { plane } : {}),
+    ...(mainWork ? { mainWork } : {}),
     ...(steer ? { steer } : {}),
     ...(wait ? { wait } : {}),
     ...(session ? { session } : {}),

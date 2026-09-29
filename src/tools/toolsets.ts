@@ -18,6 +18,7 @@ import { attachFileTool } from "./attach.js";
 import { planeShowTool } from "./plane.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS } from "./github.js";
+import { MAIN_WORK_TOOLS } from "./mainWork.js";
 import type { RunnableTool } from "./runnableTool.js";
 import { RUN_TOOLS } from "./runs.js";
 import { slackContextTool } from "./slackContext.js";
@@ -101,9 +102,10 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
    *  does a child's job. */
   conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
   /** The orchestrator (record 0070; docs/reference/specs/orchestration-plane.md
-   *  item 12): plane and session reads, the status card, and `slack_context`
-   *  only when dispatcher binds an exact requester DM. No shell or run tool. */
-  orchestrator: [updateStatusTool, planeShowTool, slackContextTool, ...SESSION_TOOLS],
+   *  item 12): plane and session reads, the status card, bounded requester
+   *  Slack context, and linked-work tools only when dispatch proves an
+   *  unshared requester DM. No shell or generic run tool. */
+  orchestrator: [updateStatusTool, planeShowTool, slackContextTool, ...MAIN_WORK_TOOLS, ...SESSION_TOOLS],
   none: [],
 };
 
