@@ -66,9 +66,10 @@ describe("resident VM destroy uncertainty", () => {
     expect(checked).toContain("this.refreshAdmissionsInFlight");
     expect(checked).toContain("this.hydration");
     expect(checked).toContain("this.adminWorkInFlight");
-    for (const name of ["debugSweepNow", "debugReclaimNow", "debugMeasureDisk"]) {
+    for (const name of ["debugSweepNow", "debugReclaimNow", "debugMeasureDisk", "reconcileForDeploy"]) {
       expect(method(name)).toContain("this.withRecreateSafeAdmin(");
     }
+    expect(method("reconcileForDeploy")).toContain('result: "deferred", verified: false');
     expect(method("getResidentInfo")).toContain("recreateAdmissionHeld:");
   });
 });

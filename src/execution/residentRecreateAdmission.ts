@@ -39,3 +39,31 @@ export class ResidentRecreateAdmission {
     }
   }
 }
+
+/** The request asking for a new UID is the sole in-flight operation. A VM
+ * recycle is safe only while no other work or retained workspace owns it. */
+export function idleForPoolRecycle(input: {
+  state: string;
+  draining: boolean;
+  imagePending: boolean;
+  inFlight: number;
+  refreshAdmissions: number;
+  adminWork: number;
+  hydrating: boolean;
+  registeredRuns: number;
+  liveBindings: number;
+  inspecting: number;
+}): boolean {
+  return (
+    input.state === "warm" &&
+    !input.draining &&
+    !input.imagePending &&
+    input.inFlight === 1 &&
+    input.refreshAdmissions === 0 &&
+    input.adminWork === 0 &&
+    !input.hydrating &&
+    input.registeredRuns === 0 &&
+    input.liveBindings === 0 &&
+    input.inspecting === 0
+  );
+}

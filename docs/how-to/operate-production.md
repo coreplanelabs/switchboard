@@ -104,6 +104,8 @@ After the containing release is verified live, an authorized operator handles ea
 
 Poll `/debug info` until `state` is `warm`, `lastRestore.at` is later than the response's `restoreStartedAt`, `imageReport` is `current`, `recreateAdmissionHeld` is false, and `poolUsersSpent` is a number. Independently confirm the expected image and a fresh physical placement, with the previous disk and processes gone. Record these facts for **each** resident before admitting new work there. A missing ledger, stale image, active run, failed restore, or uncertain placement keeps only that repository held; a successful check on one resident does not clear the others.
 
+`poolUsersSpent` counts historical UID claims on this VM, not active work. The read-scoped resident status also lists `poolUserSpends` as `{user, owner}` rows, where owners begin with `thread:` or `op:`. A detached thread may reclaim its own UID after a clean disk inspection; a different thread or a new disposable operation cannot. When all UIDs are spent, the next attach or operation may recycle the VM itself only if it is warm, current, undrained, and has no other active work or live binding. The checked destroy keeps snapshots and restores before that request proceeds. A `pool-recycle-required` refusal means the idle proof did not pass; inspect the live rows and use the operator procedure above once the resident is idle. Never clear the spend ledger by hand.
+
 ## For this installation
 
 The project's own production, not Switchboard:

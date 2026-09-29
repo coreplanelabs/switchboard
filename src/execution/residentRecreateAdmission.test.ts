@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ResidentRecreateAdmission } from "./residentRecreateAdmission.js";
+import { ResidentRecreateAdmission, idleForPoolRecycle } from "./residentRecreateAdmission.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -10,6 +10,35 @@ function deferred<T>() {
 }
 
 describe("resident recreate admission", () => {
+  it("recycles for the sole waiting request only when the VM has no other owner", () => {
+    const idle = {
+      state: "warm",
+      draining: false,
+      imagePending: false,
+      inFlight: 1,
+      refreshAdmissions: 0,
+      adminWork: 0,
+      hydrating: false,
+      registeredRuns: 0,
+      liveBindings: 0,
+      inspecting: 0,
+    };
+    expect(idleForPoolRecycle(idle)).toBe(true);
+    for (const busy of [
+      { state: "restoring" },
+      { draining: true },
+      { imagePending: true },
+      { inFlight: 2 },
+      { refreshAdmissions: 1 },
+      { adminWork: 1 },
+      { hydrating: true },
+      { registeredRuns: 1 },
+      { liveBindings: 1 },
+      { inspecting: 1 },
+    ])
+      expect(idleForPoolRecycle({ ...idle, ...busy })).toBe(false);
+  });
+
   it("closes admission before checking idleness and holds it through destruction", async () => {
     const checked = deferred<number>();
     const destroyed = deferred<void>();
