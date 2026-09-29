@@ -15,14 +15,17 @@ import { GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
+import { PLANE_ACTOR_ID } from "../authz/grants.js";
 import { predicateFor } from "../authz/predicate.js";
 import { unitOfIdempotencyKey, type CoordinatorTag } from "../coordinator/contract.js";
 import { DECISION_RECORD_ENV } from "../decisionRecordReservation.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
+import { isReissueSteerText } from "../plane/decide.js";
 import type { ModelCard } from "../modelCard.js";
-import { mergeTools } from "../../tools/toolsets.js";
-import { toolsForSlackContextRun, type SlackContextBinding } from "./slackContextBinding.js";
+import { mergeTools, toolsForRun } from "../../tools/toolsets.js";
+import { createMainWorkEffectGate, mainWorkForRun, type DirectAudience } from "../../tools/mainWork.js";
+import { type SlackContextBinding } from "./slackContextBinding.js";
 import {
   privateAudienceRequired,
   privateAudienceRefusal,
@@ -124,11 +127,11 @@ import { inFlightCallAfter, quietSuffix, type InFlightTool } from "../statusCard
 import { eventsInWindow, paceText, PACE_WINDOW_MS } from "../runPace.js";
 import { activityText, type CardShell } from "../statusCardFrame.js";
 import type { RunEnding } from "../runEnding.js";
-import type { LiveThread } from "../threadAdmission.js";
+import type { FollowUpInput, LiveThread } from "../threadAdmission.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { Clock, Span } from "../trace/types.js";
 import { publicEnv } from "../../secrets.js";
-import type { ChannelIO, IncomingMessage, StagedFile, StatusActivity, StatusHandle } from "../types.js";
+import type { ChannelIO, IncomingMessage, StatusActivity, StatusHandle } from "../types.js";
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
@@ -1233,23 +1236,68 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const nextStagedIndex = ctx.stagingIndex ?? stagingIndex();
   // A steered follow-up's staged files (record 0033): copied into the store and
   // pulled into this workspace before the model reads the turn — the same hook
-  // for the native loop and the pi harness, bound only when a store exists.
-  const stageFollowUps = deps.artifacts
-    ? async (inputs: readonly { staged?: readonly StagedFile[] }[]): Promise<string> => {
-        const files = inputs.flatMap((i) => i.staged ?? []);
-        if (files.length === 0) return "";
-        const staged = await stageIntoWorkspace(files, {
-          store: deps.artifacts!,
-          threadKey: msg.threadKey,
-          publish: (event) => events.publish(event),
-          nextIndex: nextStagedIndex,
-          executor,
-          resident: round.selection.resident !== undefined,
-        });
-        ctx.workspaceFiles?.record(staged.outcomes);
-        return staged.line;
+  // for the native loop and the pi harness. A relayed follow-up withdraws
+  // requester-bound work for the remainder of this live run: earlier model
+  // tool calls can still be in flight when a later follow-up is staged.
+  // A reclaimed run cannot reconstruct the last consumed sender from its
+  // prompt, so linked-work authority stays withdrawn in that run too.
+  let mainWorkTrusted = ctx.resume === undefined && !privateAudienceLatch.revoked;
+  const mainWorkEffectGate = createMainWorkEffectGate();
+  const withdrawMainWork = async () => {
+    mainWorkTrusted = false;
+    await mainWorkEffectGate.revoke();
+  };
+  const directAudience = (msg as IncomingMessage & { directAudience?: DirectAudience }).directAudience;
+  const verifyDirectAudience = (
+    io as ChannelIO & { verifyDirectAudience?: (audience: DirectAudience) => Promise<boolean> }
+  ).verifyDirectAudience?.bind(io);
+  const verifiedAtOpen =
+    agent.name === "orchestrator" && directAudience && verifyDirectAudience
+      ? await verifyDirectAudience(directAudience).catch(() => false)
+      : false;
+  const stageFollowUps = async (inputs: readonly FollowUpInput[]): Promise<string> => {
+    const ready = async (line: string) => {
+      if (privateAudienceLatch.revoked) await withdrawMainWork();
+      return line;
+    };
+    const requesterInputs = inputs.filter(
+      (input) => !(input.userId === PLANE_ACTOR_ID && isReissueSteerText(input.text)),
+    );
+    if (privateAudienceLatch.revoked) await withdrawMainWork();
+    if (mainWorkTrusted && requesterInputs.length > 0) {
+      if (
+        requesterInputs.some(
+          (input) =>
+            input.userId !== msg.userId ||
+            input.postedBy !== undefined ||
+            input.authenticatedAs !== undefined ||
+            input.directAudience?.kind !== "slack-unshared-im" ||
+            input.directAudience.channelId !== msg.channelId ||
+            input.directAudience.userId !== msg.userId ||
+            input.directAudience.threadKey !== msg.threadKey ||
+            input.from !== undefined,
+        )
+      )
+        await withdrawMainWork();
+      if (mainWorkTrusted && directAudience && verifyDirectAudience) {
+        const stillDirect = await verifyDirectAudience(directAudience).catch(() => false);
+        if (!stillDirect) await withdrawMainWork();
       }
-    : undefined;
+    }
+    if (!deps.artifacts) return ready("");
+    const files = inputs.flatMap((i) => i.staged ?? []);
+    if (files.length === 0) return ready("");
+    const staged = await stageIntoWorkspace(files, {
+      store: deps.artifacts,
+      threadKey: msg.threadKey,
+      publish: (event) => events.publish(event),
+      nextIndex: nextStagedIndex,
+      executor,
+      resident: round.selection.resident !== undefined,
+    });
+    ctx.workspaceFiles?.record(staged.outcomes);
+    return ready(staged.line);
+  };
   let artifactSeq = 0;
   // A ticketless channel's lead links the file itself: this run's artifact proxy
   // under its live token (the same capability the status card's link carries).
@@ -1270,6 +1318,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         table: async () => (await deps.plane!()).table(predicateFor(chatActorOf(deps.config, msg), "runs:read", "run")),
       }
     : undefined;
+  const mainWork = mainWorkForRun({
+    agentName: agent.name,
+    actor: chatActorOf(deps.config, msg),
+    message: msg,
+    channelVisibility,
+    runId: run.id,
+    ...(deps.coordinatorInstances ? { instances: deps.coordinatorInstances } : {}),
+    ...(deps.workflow ? { workflow: deps.workflow } : {}),
+    ...(deps.plane ? { plane: deps.plane } : {}),
+    clock,
+    effectGate: mainWorkEffectGate,
+    trusted: () => mainWorkTrusted && !privateAudienceLatch.revoked,
+    verifiedAtOpen,
+    ...(verifyDirectAudience ? { verify: verifyDirectAudience } : {}),
+  });
   const toolContext = {
     executor,
     reportProgress,
@@ -1297,6 +1360,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(spawn ? { spawn } : {}),
     ...(runs ? { runs } : {}),
     ...(plane ? { plane } : {}),
+    ...(mainWork ? { mainWork } : {}),
     ...(steer ? { steer } : {}),
     ...(wait ? { wait } : {}),
     ...(session ? { session } : {}),
@@ -1369,6 +1433,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     const revoke = () => {
       privateAudienceLatch.revoked = true;
       slackContext?.revoke();
+      mainWorkTrusted = false;
+      void mainWorkEffectGate.revoke();
     };
     admitted.inbox.onUntrustedFollowUp(revoke);
     admitted.inbox.onAccepted((followUp) => {
@@ -1718,7 +1784,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(ctx.modelCard ? { card: ctx.modelCard } : {}),
             system: publicationSystem,
             messages,
-            tools: mergeTools(toolsForSlackContextRun(agent.toolset, slackContext), mcpForRun?.tools),
+            tools: mergeTools(
+              toolsForRun(agent.toolset, mainWork !== undefined).filter(
+                (tool) => slackContext !== undefined || tool.name !== "slack_context",
+              ),
+              mcpForRun?.tools,
+            ),
             toolContext,
             ...(ctx.decisionRecord !== undefined ? { environment: { [DECISION_RECORD_ENV]: ctx.decisionRecord } } : {}),
             ...(session
@@ -1770,7 +1841,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             span: root,
             control: run.control,
             inbox: admitted.inbox,
-            ...(stageFollowUps ? { stageFollowUps } : {}),
+            stageFollowUps,
             onEvent,
             onProgress,
             // The provider park's capability (model-proxy item 12a; record

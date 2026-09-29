@@ -148,6 +148,7 @@ import { fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
+import type { DirectAudience } from "../tools/mainWork.js";
 import {
   endedPipelineForPrOf,
   PrOwnerConflictError,
@@ -3302,6 +3303,9 @@ export async function dispatch(
       privateAudienceLatch.revalidateSources = () => revalidateSavedSources(slackContext);
     ledgerRun = await claimRun(deps, {
       msg,
+      verifyDirectAudience: (
+        io as ChannelIO & { verifyDirectAudience?: (audience: DirectAudience) => Promise<boolean> }
+      ).verifyDirectAudience?.bind(io),
       agent,
       profile,
       resolved,

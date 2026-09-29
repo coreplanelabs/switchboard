@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ASKS } from "../budgets.js";
 import { ConfigStore } from "../../config.js";
+import { PLANE_ACTOR_ID } from "../authz/grants.js";
+import { reissueSteerSentence } from "../plane/decide.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
@@ -91,6 +93,7 @@ import { scriptPiFromProvider } from "../harness/pi/testing/providerPi.js";
 import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
+import type { PlaneService } from "../planeService.js";
 import type { RepoContext } from "../repoContext.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
 import type { ResidentBinding } from "../../execution/resident.js";
@@ -1055,6 +1058,321 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(finished.ok).toBe(true);
     expect(JSON.stringify(finished)).not.toContain("private signup count");
   });
+  it("withdraws linked-work authority before a relayed follow-up reaches the model", async () => {
+    let before: unknown;
+    let after: unknown;
+    let restored: unknown;
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            before = await run.toolContext.mainWork?.status("fix-signup");
+            expect(run.stageFollowUps).toBeDefined();
+            await run.stageFollowUps!([
+              { text: "stop that work", userId: "slack:UX", postedBy: "slack:bot:B1", at: 2_000 },
+            ]);
+            after = await run.toolContext.mainWork?.status("fix-signup");
+            await run.stageFollowUps!([{ text: "What happened?", userId: "slack:UX", at: 2_001 }]);
+            restored = await run.toolContext.mainWork?.status("fix-signup");
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    s.deps.plane = async () => ({}) as PlaneService;
+    const channelId = "slack:DPRIVATE";
+    const message = {
+      ...s.ctx.msg,
+      channelId,
+      threadKey: `${channelId}:1.0`,
+      directAudience: {
+        kind: "slack-unshared-im" as const,
+        channelId,
+        threadKey: `${channelId}:1.0`,
+        userId: s.ctx.msg.userId,
+      },
+    };
+    await runLoop(s.deps, {
+      ...s.ctx,
+      msg: message,
+      channelVisibility: "dm",
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(before).toEqual({ kind: "not_found" });
+    expect(after).toEqual({ kind: "unavailable" });
+    expect(restored).toEqual({ kind: "unavailable" });
+  });
+
+  it("waits for an admitted stop before a revoked private follow-up reaches the model", async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const stopping = new Promise<void>((resolve) => (entered = resolve));
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let followUpReachedModel = false;
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            const effect = run.toolContext.mainWork!.stop("fix-signup");
+            await stopping;
+            s.ctx.admitted.inbox.markUntrustedFollowUp();
+            const staged = run.stageFollowUps!([
+              { text: "What happened?", userId: "slack:UX", postedBy: "slack:bot:B1", at: 2_000 },
+            ]).then(() => (followUpReachedModel = true));
+            await Promise.resolve();
+            expect(followUpReachedModel).toBe(false);
+            release();
+            await effect;
+            await staged;
+            expect(followUpReachedModel).toBe(true);
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const channelId = "slack:DPRIVATE";
+    const threadKey = `${channelId}:1.0`;
+    const instances = new InMemoryCoordinatorInstanceStore();
+    const instance = {
+      id: "ship_signup_1",
+      kind: "ship" as const,
+      userId: s.ctx.msg.userId,
+      channelId,
+      threadKey,
+      repo: "acme/api",
+      branch: "ship/signup",
+      base: "main",
+      plan: { id: "signup" },
+      merge: "person" as const,
+      createdAt: 1_000,
+      runId: "run-parent",
+    };
+    expect(
+      await instances.claimMainTask({ mainThreadKey: threadKey, actId: "fix-signup" }, instance, {
+        instanceId: instance.id,
+        unit: "task",
+        slug: "signup",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        workBrief: {
+          requesterId: instance.userId,
+          mainThreadKey: threadKey,
+          actId: "fix-signup",
+          repo: instance.repo,
+          base: instance.base,
+          question: "How many users failed to sign up?",
+          findings: [],
+          requestedChange: "Fix signups",
+        },
+      }),
+    ).toMatchObject({ ok: true });
+    s.deps.coordinatorInstances = instances;
+    s.deps.plane = async () =>
+      ({
+        stop: async () => {
+          entered();
+          await held;
+          return { kind: "stopped", instanceId: instance.id, runnerStopped: true, stopsSucceeded: true, children: [] };
+        },
+      }) as unknown as PlaneService;
+    await runLoop(s.deps, {
+      ...s.ctx,
+      msg: {
+        ...s.ctx.msg,
+        channelId,
+        threadKey,
+        directAudience: { kind: "slack-unshared-im", channelId, threadKey, userId: s.ctx.msg.userId },
+      },
+      channelVisibility: "dm",
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+  });
+
+  it("a plane provider-reissue control does not withdraw linked-work authority", async () => {
+    let afterControl: unknown;
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            await run.stageFollowUps!([{ text: reissueSteerSentence("anthropic"), userId: PLANE_ACTOR_ID, at: 2_000 }]);
+            afterControl = await run.toolContext.mainWork?.status("fix-signup");
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    s.deps.plane = async () => ({}) as PlaneService;
+    const channelId = "slack:DPRIVATE";
+    const threadKey = `${channelId}:1.0`;
+    const message = {
+      ...s.ctx.msg,
+      channelId,
+      threadKey,
+      directAudience: { kind: "slack-unshared-im" as const, channelId, threadKey, userId: s.ctx.msg.userId },
+    };
+    await runLoop(s.deps, {
+      ...s.ctx,
+      msg: message,
+      channelVisibility: "dm",
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(afterControl).toEqual({ kind: "not_found" });
+  });
+
+  it("a delayed direct-audience check cannot restore a revoked run", async () => {
+    let afterRace: unknown;
+    let checks = 0;
+    let checking!: () => void;
+    let release!: (verified: boolean) => void;
+    const started = new Promise<void>((resolve) => (checking = resolve));
+    const verified = new Promise<boolean>((resolve) => (release = resolve));
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      io: { verifyDirectAudience: async () => (++checks === 1 ? true : (checking(), verified)) } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            const direct = run.stageFollowUps!([
+              {
+                text: "Check the work",
+                userId: "slack:UX",
+                directAudience: {
+                  kind: "slack-unshared-im",
+                  channelId: "slack:DPRIVATE",
+                  threadKey: "slack:DPRIVATE:1.0",
+                  userId: "slack:UX",
+                },
+                at: 2_000,
+              },
+            ]);
+            await started;
+            await run.stageFollowUps!([{ text: "Stop it", userId: "slack:UX", postedBy: "slack:bot:B1", at: 2_001 }]);
+            release(true);
+            await direct;
+            afterRace = await run.toolContext.mainWork?.status("fix-signup");
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    s.deps.plane = async () => ({}) as PlaneService;
+    const channelId = "slack:DPRIVATE";
+    const threadKey = `${channelId}:1.0`;
+    const message = {
+      ...s.ctx.msg,
+      channelId,
+      threadKey,
+      directAudience: { kind: "slack-unshared-im" as const, channelId, threadKey, userId: s.ctx.msg.userId },
+    };
+    await runLoop(s.deps, { ...s.ctx, msg: message, channelVisibility: "dm" });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(afterRace).toEqual({ kind: "unavailable" });
+  });
+
+  it("offers linked-work tools to the model only in a direct requester Slack DM", async () => {
+    const toolNames = async (
+      channelId: string,
+      visibility: "public" | "dm",
+      postedBy?: string,
+      attested = true,
+      verify: "ok" | "deny" | "error" = "ok",
+    ) => {
+      const observed: string[] = [];
+      const watchedPi = watched(piHarness);
+      const s = setup("Done.", {
+        agent: "orchestrator",
+        io: {
+          verifyDirectAudience: async () => {
+            if (verify === "error") throw new Error("Slack lookup unavailable");
+            return verify === "ok";
+          },
+        } as Partial<ChannelIO>,
+        harness: {
+          harnesses: roster({
+            ...watchedPi.harness,
+            open: async (deps, run) => {
+              observed.push(...run.tools.map((tool) => tool.name));
+              return watchedPi.harness.open(deps, run);
+            },
+          }),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+      s.deps.plane = async () => ({}) as PlaneService;
+      const message = {
+        ...s.ctx.msg,
+        channelId,
+        threadKey: `${channelId}:1.0`,
+        ...(postedBy ? { postedBy } : {}),
+        ...(attested
+          ? {
+              directAudience: {
+                kind: "slack-unshared-im" as const,
+                channelId,
+                threadKey: `${channelId}:1.0`,
+                userId: s.ctx.msg.userId,
+              },
+            }
+          : {}),
+      };
+      await runLoop(s.deps, { ...s.ctx, msg: message, channelVisibility: visibility });
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      return observed;
+    };
+
+    expect(await toolNames("slack:CPUB", "public")).not.toContain("work_status");
+    expect(await toolNames("slack:DPRIVATE", "dm", "slack:bot:B1")).not.toContain("work_steer");
+    expect(await toolNames("slack:DSHARED", "dm", undefined, false)).not.toContain("work_status");
+    expect(await toolNames("slack:DPRIVATE", "dm", undefined, true, "deny")).not.toContain("work_status");
+    expect(await toolNames("slack:DPRIVATE", "dm", undefined, true, "error")).not.toContain("work_stop");
+    expect(await toolNames("slack:DPRIVATE", "dm")).toEqual(
+      expect.arrayContaining(["work_status", "work_steer", "work_stop"]),
+    );
+  });
+
   const WIP_COORDINATOR: CoordinatorTag = {
     parentInstanceId: "instance",
     idempotencyKey: "key",

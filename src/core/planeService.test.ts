@@ -260,6 +260,24 @@ describe("plane stop — the runner_stop move (record 0064; issue 1924)", () => 
   }
   const actor = { kind: "chat", id: "slack:U_ALICE" } as const;
 
+  it("stops only children of the linked instance when a one-unit plan shares the main thread", async () => {
+    const h = stopHarness({
+      liveByThread: {
+        [INSTANCE.threadKey]: [
+          view({ id: "child-1", parentInstanceId: INSTANCE.id, userId: INSTANCE.userId }),
+          view({ id: "main-agent", userId: INSTANCE.userId }),
+          view({ id: "other-work", parentInstanceId: "another-instance", userId: INSTANCE.userId }),
+        ],
+      },
+    });
+    await h.store.put(INSTANCE);
+    await h.store.putUnits([unit("U12", { threadKey: INSTANCE.threadKey })]);
+
+    const report = await h.service.stop(INSTANCE.id, actor, ALL);
+    expect(report).toMatchObject({ children: [{ id: "child-1", outcome: "stopping" }] });
+    expect(h.stops.map((s) => s.id)).toEqual(["parent-1", "child-1"]);
+  });
+
   it("terminates the instance and ends its live children in one move: the stop mark first, the hosted parent hard-stopped, then every live child in a unit thread — never the parent twice", async () => {
     const h = stopHarness({
       liveByThread: {

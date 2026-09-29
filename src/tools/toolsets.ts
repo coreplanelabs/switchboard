@@ -18,6 +18,7 @@ import { attachFileTool } from "./attach.js";
 import { planeShowTool } from "./plane.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS } from "./github.js";
+import { MAIN_WORK_TOOLS } from "./mainWork.js";
 import type { RunnableTool } from "./runnableTool.js";
 import { RUN_TOOLS } from "./runs.js";
 import { slackContextTool } from "./slackContext.js";
@@ -101,11 +102,21 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
    *  does a child's job. */
   conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
   /** The orchestrator (record 0070; docs/reference/specs/orchestration-plane.md
-   *  item 12): plane and session reads, the status card, and `slack_context`
-   *  only when dispatcher binds an exact requester DM. No shell or run tool. */
-  orchestrator: [updateStatusTool, planeShowTool, slackContextTool, ...SESSION_TOOLS],
+   *  item 12): plane and session reads, the status card, bounded requester
+   *  Slack context, and linked-work tools only when dispatch proves an
+   *  unshared requester DM. No shell or generic run tool. */
+  orchestrator: [updateStatusTool, planeShowTool, slackContextTool, ...MAIN_WORK_TOOLS, ...SESSION_TOOLS],
   none: [],
 };
+
+/** Keep linked-work names out of a model's tool list when its conversation
+ * audience cannot receive the tool call and result in private. */
+export function toolsForRun(toolset: string, linkedWorkAllowed: boolean): RunnableTool[] {
+  const tools = TOOLSETS[toolset] ?? [];
+  return linkedWorkAllowed || toolset !== "orchestrator"
+    ? tools
+    : tools.filter((tool) => !MAIN_WORK_TOOLS.includes(tool));
+}
 
 /** The static toolset plus this run's extra tools (the bridged MCP tools,
  *  docs/reference/specs/mcp-tools.md item 12). A duplicate name is a programming
