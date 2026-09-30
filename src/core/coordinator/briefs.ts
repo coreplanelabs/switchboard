@@ -325,12 +325,16 @@ export async function composeChild(
       // session answers them with dispositions exactly as a reviewer's.
       return {
         preset: "coding",
-        prompt: findingsRequest({
-          where,
-          findings: [...(brief.findings ?? review.findings ?? []), ...(brief.checks ?? [])],
-          review: review.finalReply ?? "",
-          ...(brief.answers !== undefined ? { answers: brief.answers } : {}),
-        }),
+        prompt:
+          findingsRequest({
+            where,
+            findings: [...(brief.findings ?? review.findings ?? []), ...(brief.checks ?? [])],
+            review: review.finalReply ?? "",
+            ...(brief.answers !== undefined ? { answers: brief.answers } : {}),
+          }) +
+          (unit.recovery?.patch !== undefined
+            ? "\n\nThe previous findings child's privately saved patch was verified and applied to this exact PR head before this run. Inspect it, finish the required fixes, and submit every disposition and the updated PR description before pushing."
+            : ""),
         ref: unit.branch,
       };
     }

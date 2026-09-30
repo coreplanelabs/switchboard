@@ -561,12 +561,13 @@ export type CoordinatorAction =
        *  unit resumes at review, or at the merge decision, never at coding
        *  over an already-shipped pull request. */
       entry?: true;
-      /** Set after a coding child died: the bot opens the pull request from the
-       *  pushed branch itself (title from this run's submitted description when
-       *  the record holds one, else a conventional fallback from the unit's
-       *  title — issue 1877; body from the description when the record holds
-       *  one) instead of answering `none` over stranded work. */
+      /** Identifies the coding child for publication verification on an existing
+       *  pull request. After a child dies, the bot can also open a pull request
+       *  from its pushed branch instead of answering `none` over stranded work. */
       recover?: { runId: string };
+      /** A drained child no longer owns a moved PR head. Rebind it only after
+       * the admin door verifies the original child and a fresh exact ref. */
+      adopt?: { runId: string; childStep: string; previousHeadSha: string };
       /** The pull request the machine has adopted (`state.pr`), when it holds
        *  one: the child may have worked that pull request's own head branch,
        *  not the unit's (issue 1799), so when nothing heads the unit's branch
@@ -1228,6 +1229,7 @@ type Phase =
   | {
       at: "superseded-pr-check";
       round: RoundRef;
+      runId: string;
       child?: { runId: string; facts: Extract<ChildFacts, { finished: true }> };
     }
   | {
@@ -1646,17 +1648,26 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         runId: p.runId,
         ...(p.finishedObserved ? { finishedObserved: true as const } : {}),
       };
-    case "superseded-pr-check":
+    case "superseded-pr-check": {
+      const previousHeadSha = fullHead(s.lastReviewHead);
       return {
         type: "pr-check",
         step: `${roundStep(s, p.round)}/superseded/pr-check`,
+        ...(previousHeadSha !== undefined
+          ? { adopt: { runId: p.runId, childStep: roundStep(s, p.round), previousHeadSha } }
+          : {}),
         ...(s.pr !== undefined ? { pr: s.pr.number } : {}),
       };
+    }
     case "pr-check":
       return {
         type: "pr-check",
         step: `${roundStep(s, p.round)}/pr-check`,
-        ...(p.dead !== undefined || p.recover === true || p.findingsReady === true || p.findingsIncomplete !== undefined
+        ...(p.dead !== undefined ||
+        p.recover === true ||
+        p.findingsReady === true ||
+        p.findingsIncomplete !== undefined ||
+        (p.round.kind === "coding" && s.pr !== undefined)
           ? { recover: { runId: p.runId } }
           : {}),
         // The adopted pull request rides the check so the bot can follow it
@@ -2646,9 +2657,18 @@ function missingHeadBranch(
   );
 }
 
-/** A review is pinned to one head. A coding child may move that head itself,
- * so only a finished findings run with a different local head can establish
- * that an unrecorded remote head came from another writer. */
+/** A failed child's local head is not a push receipt. Only a completed
+ * child's observed head or a recorded push on this unit's ref can be its own. */
+function childOwnsHead(child: ChildFacts, head: string, ref: string): boolean {
+  return (
+    child.finished &&
+    ((child.status === "completed" && fullHead(child.headSha) === head) ||
+      child.pushed?.some((push) => push.ref === ref && fullHead(push.sha) === head) === true)
+  );
+}
+
+/** A review is pinned to one head. A drained findings child with an
+ * unattributed moved ref must pass its findings gate before any review. */
 function childSupersession(
   s: UnitPipelineState,
   round: RoundRef,
@@ -2661,20 +2681,18 @@ function childSupersession(
   if (pr.headBranchExists === false) return { reason: "branch_deleted", pullRequest: pr };
   const expected = normalizeHead(s.lastReviewHead);
   const actual = normalizeHead(pr.headSha);
+  const exactHead = fullHead(actual);
   if (round.kind === "review" && expected !== undefined && actual !== undefined && !sameCommit(expected, actual))
     return { reason: "head_moved", pullRequest: pr };
   if (
     round.kind === "findings" &&
     child.finished &&
-    child.status === "completed" &&
     pr.headBranchExists === true &&
     s.pr?.number === pr.prNumber &&
     fullHead(expected) !== undefined &&
-    fullHead(actual) !== undefined &&
-    fullHead(child.headSha) !== undefined &&
+    exactHead !== undefined &&
     actual !== expected &&
-    actual !== fullHead(child.headSha) &&
-    !child.pushed?.some((push) => fullHead(push.sha) === actual)
+    !childOwnsHead(child, exactHead, s.input.unit.branch)
   )
     return { reason: "head_moved", pullRequest: pr };
   return undefined;
@@ -2738,6 +2756,7 @@ function finishSupersededChild(
       phase: {
         at: "superseded-pr-check",
         round: phase.round,
+        runId: phase.runId,
         ...(phase.round.kind === "findings" ? { child: { runId: phase.runId, facts } } : {}),
       },
     },
@@ -3590,18 +3609,29 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       if (p.child !== undefined) {
         if (r.pr.state === "closed") return foundClosed(clocked, r.pr);
         const remoteHead = r.pr.state === "none" ? undefined : fullHead(r.pr.headSha);
-        const childHead = fullHead(p.child.facts.headSha);
         const reviewedHead = fullHead(clocked.lastReviewHead);
         const stillForeign =
           r.pr.state === "open" &&
           r.pr.headBranchExists === true &&
           remoteHead !== undefined &&
-          childHead !== undefined &&
           reviewedHead !== undefined &&
-          remoteHead !== childHead &&
           remoteHead !== reviewedHead &&
-          !p.child.facts.pushed?.some((push) => fullHead(push.sha) === remoteHead);
-        if (stillForeign && r.pr.state === "open") return restartSupersededReview(clocked, p.round, r.pr);
+          !childOwnsHead(p.child.facts, remoteHead, clocked.input.unit.branch);
+        // An earlier Hx push does not prove the child's local H2 work reached
+        // the foreign H1. Only a return to the child's own head can pass the
+        // typed findings gate; otherwise end for same-unit findings recovery.
+        if (stillForeign && r.pr.state === "open")
+          return end(
+            clocked,
+            {
+              kind: "aborted",
+              reason:
+                "The pull request moved while required fixes were being checked. The fixes must be proven at the new head before review can continue.",
+              round: p.round,
+              reviewRounds: clocked.reviewRounds,
+            },
+            [roundNote(p.round, "aborted")],
+          );
         // The second read may now be the child's head, or a merged PR. Its
         // typed completion gate and exact-head reconciliation must run before
         // either state can authorize review or a merged ending.

@@ -7,6 +7,27 @@ import { parseRunEventLines } from "./runEventLines.js";
 // > run.sse` is directly analyzable.
 
 describe("parseRunEventLines", () => {
+  it("reads a saved findings patch event only with its exact identity key", () => {
+    const baseHeadSha = "a".repeat(40);
+    const targetHeadSha = "d".repeat(40);
+    const sourceHeadSha = "b".repeat(40);
+    const patch = {
+      type: "unfinished_patch",
+      runId: "run-1",
+      key: `runs/run-1/out/0-unfinished-${baseHeadSha}-${targetHeadSha}-${sourceHeadSha}.patch`,
+      size: 123,
+      sha256: "c".repeat(64),
+      baseHeadSha,
+      targetHeadSha,
+      sourceHeadSha,
+    };
+    const wrong = { ...patch, key: patch.key.replace("run-1", "run-2") };
+    expect(parseRunEventLines([patch, wrong].map((event) => JSON.stringify(event)).join("\n"))).toEqual({
+      events: [patch],
+      skipped: 1,
+    });
+  });
+
   it("parses JSON lines of run events", () => {
     const text = [
       '{"type":"tool_call","tool":"bash","summary":"$ ls","at":1}',

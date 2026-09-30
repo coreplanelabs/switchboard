@@ -926,11 +926,11 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       { parentInstanceId: INSTANCE, unit: "U10", runId: "run-r1" },
     ]);
     // Twice: once before the branch (what already heads it), once after the
-    // coding child — the second carrying the pull request the child's record
-    // named, for the bot to follow when nothing heads the branch (issue 1799).
+    // coding child — the second carrying its run for publication verification
+    // and the pull request for the bot to follow (issue 1799).
     expect(b.of("pr-check")).toEqual([
       { parentInstanceId: INSTANCE, unit: "U10", entry: true },
-      { parentInstanceId: INSTANCE, unit: "U10", pr: 7 },
+      { parentInstanceId: INSTANCE, unit: "U10", pr: 7, recover: { runId: "run-c0" } },
     ]);
     expect(b.of("round")).toEqual([
       { parentInstanceId: INSTANCE, unit: "U10", index: 0, agent: "coding", outcome: "started" },
@@ -1770,10 +1770,10 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     });
     const summary = await runPlan(s.runner, b.client, INSTANCE);
     expect(summary.units).toEqual({ U10: "aborted" });
-    // The check carried the record's pull request for the bot to follow.
+    // The check carried the coding run and its pull request for verification.
     expect(b.of("pr-check")).toEqual([
       { parentInstanceId: INSTANCE, unit: "U10", entry: true },
-      { parentInstanceId: INSTANCE, unit: "U10", pr: 7 },
+      { parentInstanceId: INSTANCE, unit: "U10", pr: 7, recover: { runId: "run-c0" } },
     ]);
     expect(s.names()).not.toContain("U10/1/review");
   });
@@ -3579,8 +3579,8 @@ describe("the plan runner's driver — a unit whose pull request already merged 
     expect(b.of("pr-check")).toEqual([
       { parentInstanceId: INSTANCE, unit: "U10", entry: true },
       { parentInstanceId: INSTANCE, unit: "U11", entry: true },
-      // The round-0 check carries the pull request the child's record named.
-      { parentInstanceId: INSTANCE, unit: "U11", pr: 7 },
+      // The round-0 check verifies the coding run against its pull request.
+      { parentInstanceId: INSTANCE, unit: "U11", pr: 7, recover: { runId: "run-c1" } },
     ]);
     // No round boundary is drawn for a unit that ran nothing.
     expect(b.of("round").every((r) => r.unit === "U11")).toBe(true);

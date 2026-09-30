@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import type { ArtifactStore } from "../artifacts/store.js";
 import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } from "../execution/githubPulls.js";
 import type { BranchStartState, RewriteResult } from "../execution/identityRewrite.js";
 import { parsePrDescription, renderPrDescriptionMarkdown } from "./prDescription.js";
@@ -11,6 +12,7 @@ import {
   salvageBudgetPush,
   salvageTargetOf,
   salvageWorkOf,
+  stageSavedFindingsPatch,
   trackPushedBranch,
   workLeftBehindLabel,
   workLeftBehindOf,
@@ -2002,15 +2004,213 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     const w = fakeExecutor({
       "git status": "exit 128: fatal: not a git repository (or any of the parent directories): .git",
       "ls -d */.git": "sample/.git\n",
+      "git -C 'sample' remote get-url origin": "https://github.com/acme/api.git\n",
       "git -C 'sample' status": " M src/a.ts\n",
       "git -C 'sample' rev-list": "1\n",
       "git -C 'sample' rev-parse HEAD": "abc123def456abc123def456abc123def456ab12\n",
     });
-    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "completion" });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", repo: "acme/api", cue: "completion" });
     expect(out).toMatchObject({ pushed: true, head: "abc123def456abc123def456abc123def456ab12" });
     expect(w.commands).toContain("git -C 'sample' add -A");
     expect(w.commands.some((command) => command.startsWith("git -C 'sample' commit -m"))).toBe(true);
     expect(w.commands).toContain("git -C 'sample' push origin 'HEAD:refs/heads/plan/p/u1'");
+  });
+
+  it("refuses a cold clone without an expected repository rather than guessing its owner", async () => {
+    const w = fakeExecutor({
+      "git status": "exit 128: fatal: not a git repository (or any of the parent directories): .git",
+      "ls -d */.git": "sample/.git\n",
+    });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", cue: "completion" });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toContain("checkout's repository is unknown");
+    expect(w.commands.some((command) => command.includes("git -C 'sample' add"))).toBe(false);
+  });
+
+  it("refuses an ambiguous cold checkout instead of committing another clone's work", async () => {
+    const w = fakeExecutor({
+      "git status": "exit 128: fatal: not a git repository (or any of the parent directories): .git",
+      "ls -d */.git": "sample/.git\nother/.git\n",
+      "git -C 'sample' status": " M src/a.ts\n",
+      "git -C 'sample' rev-list": "1\n",
+    });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", repo: "acme/api", cue: "completion" });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toContain("not a git repository");
+    expect(w.commands.some((command) => command.includes("git -C 'sample'"))).toBe(false);
+  });
+
+  it("refuses a cold clone whose origin does not match the bound repository before staging", async () => {
+    const w = fakeExecutor({
+      "git status": "exit 128: fatal: not a git repository (or any of the parent directories): .git",
+      "ls -d */.git": "sample/.git\n",
+      "git -C 'sample' remote get-url origin": "https://github.com/acme/other.git\n",
+      "git -C 'sample' status": " M src/a.ts\n",
+    });
+    const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1", repo: "acme/api", cue: "completion" });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toContain("checkout's origin");
+    expect(w.commands.some((command) => command.includes("git -C 'sample' add"))).toBe(false);
+  });
+
+  it("saves a private exact-base patch when a seeded checkout loses its immutable PR push lease", async () => {
+    const base = "a".repeat(40);
+    const target = "d".repeat(40);
+    const head = "b".repeat(40);
+    const digest = "c".repeat(64);
+    const commands: string[] = [];
+    const executor = {
+      exec: async (cmd: string) => {
+        commands.push(cmd);
+        if (cmd === "git status --porcelain") return "exit 128: fatal: not a git repository";
+        if (cmd.includes("remote get-url origin")) return "https://github.com/acme/api.git\n";
+        if (cmd.startsWith("git -C '/workspace/checkout' status")) return " M src/a.ts\n";
+        if (cmd.includes("rev-list --count")) return "1\n";
+        if (cmd.includes("symbolic-ref")) return "fix/existing\n";
+        if (cmd.includes("ls-remote")) return `${target}\trefs/heads/fix/existing\n`;
+        if (cmd.includes("rev-parse HEAD")) return `${head}\n`;
+        if (cmd.startsWith("wc -c")) return "123\n";
+        if (cmd.startsWith("sha256sum")) return `${digest}  /tmp/patch\n`;
+        return "";
+      },
+    };
+    const store = {
+      presignPut: vi.fn(async () => "https://store.example/upload"),
+      head: vi.fn(async () => ({ size: 123, contentType: "text/plain" })),
+    } as unknown as ArtifactStore;
+    const result = await salvageBudgetPush(executor, {
+      branch: "fix/existing",
+      repo: "acme/api",
+      cue: "completion",
+      requireBranchProof: true,
+      publication: { blocked: "the PR head moved" },
+      unfinished: { runId: "run-1", baseHeadSha: base, store },
+    });
+    expect(result).toMatchObject({
+      pushed: false,
+      patch: {
+        runId: "run-1",
+        size: 123,
+        sha256: digest,
+        baseHeadSha: base,
+        targetHeadSha: target,
+        sourceHeadSha: head,
+      },
+    });
+    expect(commands).toContain("git -C '/workspace/checkout' status --porcelain");
+    expect(commands.some((cmd) => cmd.includes("merge-base --is-ancestor"))).toBe(true);
+    expect(commands.some((cmd) => cmd.includes(" diff --binary --full-index "))).toBe(true);
+    expect(commands.some((cmd) => cmd.startsWith("curl -fsS -T"))).toBe(true);
+    expect(commands.some((cmd) => cmd.includes(" push"))).toBe(false);
+  });
+
+  it("refuses to stage work when an unreadable observation resolves to another branch", async () => {
+    const w = fakeExecutor({
+      "git status": " M src/a.ts\n",
+      "git symbolic-ref": "other-branch\n",
+    });
+    const out = await salvageBudgetPush(w.executor, {
+      branch: "fix/existing",
+      cue: "completion",
+      requireBranchProof: true,
+    });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toContain("not on the owned branch");
+    expect(w.commands).not.toContain("git add -A");
+  });
+
+  it("refuses to stage work from a foreign checkout with the owned branch name", async () => {
+    const w = fakeExecutor({
+      "git status": " M src/a.ts\n",
+      "git symbolic-ref": "fix/existing\n",
+      "git remote get-url origin": "https://github.com/acme/other.git\n",
+    });
+    const out = await salvageBudgetPush(w.executor, {
+      branch: "fix/existing",
+      repo: "acme/api",
+      cue: "completion",
+      requireBranchProof: true,
+    });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toContain("origin does not match");
+    expect(w.commands).not.toContain("git add -A");
+  });
+
+  it("restores saved findings only after byte and exact-head verification", async () => {
+    const base = "a".repeat(40);
+    const target = "d".repeat(40);
+    const source = "b".repeat(40);
+    const digest = "c".repeat(64);
+    const patch = {
+      runId: "run-1",
+      key: `runs/run-1/out/0-unfinished-${base}-${target}-${source}.patch`,
+      size: 123,
+      sha256: digest,
+      baseHeadSha: base,
+      targetHeadSha: target,
+      sourceHeadSha: source,
+    };
+    const store = {
+      head: async () => ({ size: 123, contentType: "text/plain" }),
+      presignGet: async () => "https://store.example/download",
+    } as unknown as ArtifactStore;
+    const commands: string[] = [];
+    let goodBytes = false;
+    const executor = {
+      exec: async (cmd: string) => {
+        commands.push(cmd);
+        if (cmd.includes("remote get-url origin")) return "https://github.com/acme/api.git\n";
+        if (cmd.includes("symbolic-ref")) return "fix/existing\n";
+        if (cmd.includes("rev-parse HEAD")) return `${target}\n`;
+        if (cmd.startsWith("wc -c")) return "123\n";
+        if (cmd.startsWith("sha256sum")) return `${goodBytes ? digest : "d".repeat(64)}  patch\n`;
+        return "";
+      },
+    };
+    const owned = { checkout: "/workspace/checkout", repo: "acme/api", branch: "fix/existing" };
+    await expect(stageSavedFindingsPatch(executor, store, patch, owned)).rejects.toThrow("bytes failed verification");
+    expect(commands.some((cmd) => cmd.includes(" apply "))).toBe(false);
+    goodBytes = true;
+    await stageSavedFindingsPatch(executor, store, patch, owned);
+    expect(commands).toContain("git -C '/workspace/checkout' apply --check '/tmp/ship-recovery-run-1.patch'");
+    expect(commands).toContain("git -C '/workspace/checkout' apply '/tmp/ship-recovery-run-1.patch'");
+  });
+
+  it("restores saved findings in a verified cold clone instead of guessing the seed path", async () => {
+    const base = "a".repeat(40);
+    const target = "d".repeat(40);
+    const source = "b".repeat(40);
+    const digest = "c".repeat(64);
+    const patch = {
+      runId: "run-1",
+      key: `runs/run-1/out/0-unfinished-${base}-${target}-${source}.patch`,
+      size: 123,
+      sha256: digest,
+      baseHeadSha: base,
+      targetHeadSha: target,
+      sourceHeadSha: source,
+    };
+    const commands: string[] = [];
+    const executor = {
+      exec: async (cmd: string) => {
+        commands.push(cmd);
+        if (cmd === "git rev-parse --show-toplevel") return "exit 128: not a git repository";
+        if (cmd === "ls -d */.git 2>/dev/null") return "sample/.git\n";
+        if (cmd.includes("remote get-url origin")) return "https://github.com/acme/api.git\n";
+        if (cmd.includes("symbolic-ref")) return "fix/existing\n";
+        if (cmd.includes("rev-parse HEAD")) return `${target}\n`;
+        if (cmd.startsWith("wc -c")) return "123\n";
+        if (cmd.startsWith("sha256sum")) return `${digest}  patch\n`;
+        return "";
+      },
+    };
+    const store = {
+      head: async () => ({ size: 123, contentType: "text/plain" }),
+      presignGet: async () => "https://store.example/download",
+    } as unknown as ArtifactStore;
+    await stageSavedFindingsPatch(executor, store, patch, { repo: "acme/api", branch: "fix/existing" });
+    expect(commands).toContain("git -C 'sample' apply '/tmp/ship-recovery-run-1.patch'");
+    expect(commands.some((cmd) => cmd.includes("/workspace/checkout"))).toBe(false);
   });
 
   it("checkpoints a resident checkout from its bound path even when the executor starts elsewhere", async () => {
@@ -2208,6 +2408,14 @@ describe("salvageTargetOf — where the budget-end salvage may push, and when it
         base: "main",
       }),
     ).toEqual({ skipped: "the ending checkpoint kept work on `assets/screenshots`: the owned branch is `plan/p/u1`" });
+    expect(
+      salvageTargetOf({
+        pushedBranch: undefined,
+        checkedOut: undefined,
+        ownedBranch: "plan/p/u1",
+        base: "main",
+      }),
+    ).toEqual({ branch: "plan/p/u1" });
   });
   it("pushes to the branch the run's own push named, else to the checkout, when the plan's base is known and is another branch", () => {
     expect(salvageTargetOf({ pushedBranch: "plan/p/u1", checkedOut: "plan/p/u1", base: "feat/trunk" })).toEqual({

@@ -17,7 +17,7 @@ import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import { PLANE_ACTOR_ID } from "../authz/grants.js";
 import { predicateFor } from "../authz/predicate.js";
-import { unitOfIdempotencyKey, type CoordinatorTag } from "../coordinator/contract.js";
+import { isSavedFindingsPatch, unitOfIdempotencyKey, type CoordinatorTag } from "../coordinator/contract.js";
 import { DECISION_RECORD_ENV } from "../decisionRecordReservation.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
@@ -98,6 +98,7 @@ import {
   runCodingPrPostStep,
   salvageBudgetPush,
   salvageTargetOf,
+  stageSavedFindingsPatch,
   trackPushedBranch,
   workLeftBehindLabel,
   workLeftBehindOf,
@@ -1099,8 +1100,19 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               {
                 branch: target.branch,
                 cue,
+                ...(observedCheckedOut === undefined ? { requireBranchProof: true } : {}),
+                ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
                 ...(currentCheckout !== undefined ? { checkout: currentCheckout } : {}),
                 ...(existingPrPublication !== undefined ? { publication: existingPrPublication } : {}),
+                ...(deps.artifacts !== undefined && coordinator?.publication !== undefined
+                  ? {
+                      unfinished: {
+                        runId: run.id,
+                        baseHeadSha: coordinator.publication.expectedHeadSha,
+                        store: deps.artifacts,
+                      },
+                    }
+                  : {}),
               },
               span,
             ),
@@ -1117,6 +1129,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // A moved checkout was not checkpointed. The owned branch can still be
     // independently proven at the remote and published as a pull request.
     if (cue === "ending" || (cue === "completion" && !("skipped" in target))) endingSalvageAttempted = true;
+    const savedPatch = "patch" in salvaged ? salvaged.patch : undefined;
+    if (savedPatch !== undefined) onEvent({ type: "unfinished_patch", ...savedPatch });
     onEvent({
       type: "run_note",
       kind: cue === "budget" ? "budget_salvage" : "work_salvage",
@@ -1131,6 +1145,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // The checkpoint commit is still local. Re-read it so the record/card can
       // name what is retained, and keep this workspace attached at release.
       await observeWorkspaceNow();
+      // The executor can still start outside a seeded checkout. The private
+      // patch was saved only after exact branch, origin and source-head proof.
+      if (savedPatch !== undefined && observedHead === undefined && "branch" in target) {
+        observedHead = savedPatch.sourceHeadSha;
+        observedBranch = target.branch;
+        observedCheckedOut = target.branch;
+        observedRemoteHead ??= savedPatch.targetHeadSha;
+        observedRemoteRepo ??= repoCtx.repo?.toLowerCase();
+      }
       cardNote("quiet", salvaged.summary);
     } else if ("skipped" in target || /failed|not attempted/i.test(salvaged.summary))
       cardNote("quiet", salvaged.summary);
@@ -1592,6 +1615,40 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           "quiet",
           `Existing-PR publication is blocked: ${verified.reason}. Work stays on the bound checkout; no alternate branch or pull request will be published.`,
         );
+      const patch = coordinator.recovery?.patch;
+      if (patch !== undefined) {
+        if (
+          !isSavedFindingsPatch(patch) ||
+          patch.targetHeadSha !== original.expectedHeadSha ||
+          !verified.ok ||
+          deps.artifacts === undefined
+        )
+          throw new Error("saved findings patch cannot be admitted at this publication head");
+        await stageSavedFindingsPatch(executor, deps.artifacts, patch, {
+          ...(currentCheckout !== undefined ? { checkout: currentCheckout } : {}),
+          repo: original.repo,
+          branch: original.publicationRef,
+        });
+        const after = await (deps.fetchPrFacts ?? fetchPullRequestFacts)({
+          repo: original.repo,
+          number: original.pr,
+        }).catch(() => undefined);
+        if (
+          after?.state !== "open" ||
+          after.headRef !== original.headRef ||
+          after.baseRef !== original.baseRef ||
+          after.headSha !== patch.targetHeadSha ||
+          after.verifiedHead?.repo.toLowerCase() !== original.repo.toLowerCase() ||
+          after.verifiedHead.ref !== original.publicationRef ||
+          after.verifiedHead.sha !== patch.targetHeadSha
+        )
+          throw new Error("the PR moved again while saved findings work was restored");
+        onEvent({
+          type: "run_note",
+          kind: "work_salvage",
+          summary: "Saved findings work was restored at its verified PR head.",
+        });
+      }
     }
     if (ctx.githubDoor && deps.githubBindings && coordinator?.publication === undefined && repoCtx.pr === undefined) {
       if (!unresolvedDoorPublication)
@@ -1846,6 +1903,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                         {
                           branch,
                           cue: "compaction",
+                          ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
                           ...(currentCheckout !== undefined ? { checkout: currentCheckout } : {}),
                           ...(existingPrPublication !== undefined ? { publication: existingPrPublication } : {}),
                         },

@@ -3137,6 +3137,75 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(record.pushed ?? []).toEqual([]);
   });
 
+  it("records a verified seeded patch and source head when cold workspace observation cannot find the checkout", async () => {
+    const H0 = "a".repeat(40);
+    const H1 = "c".repeat(40);
+    const H2 = "b".repeat(40);
+    const BRANCH = "fix/existing";
+    const unit = `U${1}`;
+    const commands: string[] = [];
+    const artifacts = {
+      presignPut: async () => "https://store.example/upload",
+      head: async () => ({ size: 123, contentType: "text/plain" }),
+    } as unknown as ArtifactStore;
+    const s = setup("the local fix is complete", {
+      agent: "coding",
+      coding: true,
+      repoCtx: { repo: "o/r", pr: 7, ref: BRANCH, baseRef: "main", headSha: H0 },
+      artifacts,
+      coordinator: {
+        parentInstanceId: "coord-p",
+        idempotencyKey: `coord-p:${unit}/1/findings`,
+        base: "main",
+        publication: {
+          repo: "o/r",
+          pr: 7,
+          headRef: BRANCH,
+          baseRef: "main",
+          expectedHeadSha: H0,
+          publicationRef: BRANCH,
+          owner: { instanceId: "coord-p", unit },
+        },
+      },
+      executor: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (cmd === "ls -d */.git 2>/dev/null") return "";
+          if (cmd.startsWith("git ") && !cmd.startsWith("git -C ")) return "exit 128: fatal: not a git repository";
+          if (cmd.includes("remote get-url origin")) return "https://github.com/o/r.git\n";
+          if (cmd.includes("symbolic-ref --quiet --short HEAD")) return `${BRANCH}\n`;
+          if (cmd.includes("status --porcelain")) return " M src/work.ts\n";
+          if (cmd.includes("rev-list --count")) return "1\n";
+          if (cmd.includes("ls-remote --exit-code origin")) return `${H1}\trefs/heads/${BRANCH}\n`;
+          if (cmd.includes("rev-parse HEAD")) return `${H2}\n`;
+          if (cmd.startsWith("wc -c")) return "123\n";
+          if (cmd.startsWith("sha256sum")) return `${"d".repeat(64)}  /tmp/patch\n`;
+          return "";
+        },
+      },
+    });
+    s.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: BRANCH,
+      baseRef: "main",
+      headSha: H1,
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.answer).toBe("the local fix is complete");
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    expect(record.headSha).toBe(H2);
+    expect(record.events).toContainEqual(
+      expect.objectContaining({ type: "unfinished_patch", baseHeadSha: H0, targetHeadSha: H1, sourceHeadSha: H2 }),
+    );
+    expect(commands).toContain("git -C '/workspace/checkout' add -A");
+    expect(commands.some((cmd) => cmd.includes(` diff --binary --full-index '${H0}' '${H2}'`))).toBe(true);
+    expect(commands.some((cmd) => cmd.includes(" push"))).toBe(false);
+  });
+
   it("a stopped coding child checkpoints its WIP before the hard-stop teardown", async () => {
     const HEAD = "c1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     const BRANCH = "unit-work";
