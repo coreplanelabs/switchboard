@@ -3135,13 +3135,14 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
   });
 
   /** A requesting thread's channel that opens threads: each lead gets the next key, and the leads are kept. */
-  function openingIo(opened: string[]): ChannelIO {
+  function openingIo(opened: string[], keys?: string[]): ChannelIO {
     return {
       reply: async () => {},
       status: async () => ({ update: () => {}, done: async () => {} }),
       history: async () => [],
-      openThread: async (lead) => {
+      openThread: async (lead, idempotencyKey) => {
         opened.push(lead);
+        if (idempotencyKey !== undefined) keys?.push(idempotencyKey);
         return {
           thread: {
             threadKey: `slack:C1:${opened.length + 1}.0`,
@@ -3159,8 +3160,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
 
   it("unit-start opens a plan unit's thread through the requesting thread's channel and no review thread, finds the board issue titled by the unit id, and writes the thread on the row; a generated plan's unit runs in the requesting thread and opens nothing", async () => {
     const opened: string[] = [];
+    const keys: string[] = [];
     const h = await planHarness({
-      ioFor: () => openingIo(opened),
+      ioFor: () => openingIo(opened, keys),
       issues: [issue(7, "Something else"), issue(834, "U10: Warm the cache on wake (unit)")],
     });
     const first = await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
@@ -3177,6 +3179,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
     // One thread per unit (record 0055): no review thread is opened beside it.
     expect(opened).toHaveLength(1);
+    expect(keys).toEqual([`${PLAN_INSTANCE.id}:U10`]);
     expect(opened[0]).toContain("↳ *ship* unit U10 — Warm the cache on wake for alice");
     expect(opened[0]).toContain("`plan/fixture/u10` in acme/api");
     expect(h.threadsAsked[0]).toEqual({ threadKey: INSTANCE.threadKey, userId: INSTANCE.userId });
@@ -3194,6 +3197,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       threadKey: "slack:C1:2.0",
     });
     expect(opened).toHaveLength(1);
+    expect(keys).toEqual([`${PLAN_INSTANCE.id}:U10`]);
     expect((await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U99" })).status).toBe(404);
 
     // A row a bot wrote before record 0055 carries a review thread: its start

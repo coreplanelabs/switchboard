@@ -346,7 +346,7 @@ describe("shipPreflight — the channel capability (agent-ship item 1, record 00
     expect(cli.ok).toBe(true);
   });
 
-  it("refuses a handle that cannot open a thread — HTTP and MCP — with the spawn's reason and the run-page pointer, never calling the channel single-shot", async () => {
+  it("refuses a handle without openThread with the spawn's reason and the run-page pointer", async () => {
     for (const channelId of ["http:ingress", "mcp:client"]) {
       const res = await shipPreflight(input({ channelId, canOpenThread: false, runsBase: "https://bot.example" }));
       expect(res.ok, channelId).toBe(false);

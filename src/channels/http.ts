@@ -5,10 +5,12 @@ import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import { parseIngressTokenMap, type IngressIdentity } from "../core/ingressTokens.js";
 import { hasAction } from "../core/authz/authorize.js";
+import { HOST_KEY_SUFFIX, LEDGER_KEY_MAX_CHARS } from "../core/runLedger/hostKey.js";
 import type { GrantsLookup } from "../core/authz/actor.js";
 import type { Grants } from "../core/authz/types.js";
 import type { Secrets } from "../secrets.js";
-import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusHandle, StatusUpdate } from "../core/types.js";
+import type { HistoryItem, IncomingMessage, ChannelIO } from "../core/types.js";
+import { dispatchSingleShot, SingleShotIO } from "./singleShotDispatch.js";
 import { boundRequester, type PersonLookup } from "./requester.js";
 
 // HTTP channel adapter: adapter #3. Like Slack and the CLI, it is pure
@@ -41,6 +43,14 @@ export function ingressComponentError(name: "channel" | "thread", value: string)
   }
   if (/[:#]/.test(value)) return `\`${name}\` must not contain ':' or '#'`;
   return undefined;
+}
+
+/** A request thread must also leave room for a hosted Ship run's ledger key. */
+export function ingressThreadKeyError(threadKey: string): string | undefined {
+  const max = LEDGER_KEY_MAX_CHARS - HOST_KEY_SUFFIX.length;
+  return threadKey.length > max
+    ? `channel and thread together must make a key of at most ${max} characters`
+    : undefined;
 }
 
 /** The identity a token maps to (`subject` → `userId` "http:<subject>"; an
@@ -138,56 +148,8 @@ async function toIncomingMessage(
   };
 }
 
-/** ChannelIO for a single-shot HTTP request: reply() collects, status() is a
- *  no-op, history() replays what the body supplied, runFinished() keeps the run
- *  receipt for the response body. */
-export class HttpIO implements ChannelIO {
-  private replies: string[] = [];
-  private receipt: RunReceipt | undefined;
-  private resolveStarted!: (started: { id: string }) => void;
-  /** Resolves when the core has created a run in the registry (runStarted).
-   *  The async ingress path races this against dispatch completion to answer
-   *  202 with the run id; never resolves for a run-less request (config reply). */
-  readonly started: Promise<{ id: string }> = new Promise((resolve) => {
-    this.resolveStarted = resolve;
-  });
-  constructor(private readonly priorTurns: HistoryItem[] = []) {}
-
-  runStarted(started: { id: string }): void {
-    this.resolveStarted(started);
-  }
-
-  async reply(text: string): Promise<void> {
-    this.replies.push(text);
-  }
-
-  runFinished(receipt: RunReceipt): void {
-    this.receipt = receipt;
-  }
-
-  /** The run this request produced (id + terminal status), if the core made one. */
-  run(): RunReceipt | undefined {
-    return this.receipt;
-  }
-
-  async status(_initial: StatusUpdate): Promise<StatusHandle> {
-    // No live surface in a one-shot HTTP call; the final reply carries the
-    // result. Honest no-op rather than a fake progress channel.
-    return {
-      update: () => {},
-      done: async () => {},
-    };
-  }
-
-  async history(): Promise<HistoryItem[]> {
-    return this.priorTurns;
-  }
-
-  /** The collected reply text — the HTTP response body. */
-  collected(): string {
-    return this.replies.join("\n\n");
-  }
-}
+/** HTTP rendering of the shared one-shot job handle. */
+export class HttpIO extends SingleShotIO {}
 
 /** Validate and normalize the JSON body. Returns an error string on bad shape
  *  (surfaced as 400), never throws for caller-controlled input. */
@@ -325,51 +287,29 @@ async function handleAuthorized(
     const error = ingressComponentError("channel", identity.channel);
     if (error) return { status: 400, body: { error } };
   }
+  const receivedAt = systemClock();
+  const incoming = await toIncomingMessage(identity, parsed.body, options.personByEmail);
+  const keyError = ingressThreadKeyError(incoming.threadKey);
+  if (keyError) return { status: 400, body: { error: keyError } };
   // The request's root (docs/reference/specs/tracing.md): started once the caller's
   // identity is established and the body parsed; `dispatch()` ends it.
-  const receivedAt = systemClock();
   const trace = startRequestRoot(deps, { channel: "http", receivedAt });
-  const msg: IncomingMessage = {
-    ...(await toIncomingMessage(identity, parsed.body, options.personByEmail)),
-    receivedAt,
-  };
-  const io = new HttpIO(parsed.body.history);
+  const msg: IncomingMessage = { ...incoming, receivedAt };
+  const io = new HttpIO(parsed.body.history, msg.threadKey);
   const dispatchFn = options.dispatch ?? realDispatch;
-  if (parsed.body.async) {
-    // Async mode (`"async": true`): same validation and authorization as the
-    // sync path (both already happened above), but the caller gets a 202 the
-    // moment the core has CREATED the run — the run continues to completion in
-    // the background and its record lands in run history as usual (the reply
-    // text goes to the run record, not to any HTTP response). The dispatch
-    // promise is started (not awaited), which increments the dispatcher's
-    // activeRuns counter on its first line — so the shutdown drain awaits
-    // async runs exactly like synchronous ones. Errors are the dispatcher's
-    // own (it catches and records); the catch here is a belt against a
-    // transport-level throw escaping as an unhandled rejection.
-    const done = dispatchFn(deps, msg, io, { trace }).catch((err) => {
-      console.error(`[ingress] async dispatch: ${err instanceof Error ? err.message : String(err)}`);
-    });
-    // Race run creation against completion: a request the core answers WITHOUT
-    // a run (a config reply, a refused command) finishes dispatch with no
-    // runStarted — fall back to the synchronous response shape so the caller
-    // still gets the reply text rather than hanging.
-    const started = await Promise.race([io.started, done.then(() => undefined)]);
-    if (!started) {
-      const run = io.run();
-      return { status: 200, body: { reply: io.collected(), ...(run ? { run } : {}) } };
-    }
-    const base = options.publicBaseUrl?.replace(/\/+$/, "") ?? "";
-    return {
-      status: 202,
-      body: { runId: started.id, runUrl: `${base}/runs/${started.id}`, threadKey: msg.threadKey },
-    };
-  }
-  await dispatchFn(deps, msg, io, { trace });
-  // `run` is present only when the core created a run for this request (agent
-  // runs, inline command runs); a config reply has none. Id + status only —
-  // never the view token.
-  const run = io.run();
-  return { status: 200, body: { reply: io.collected(), ...(run ? { run } : {}) } };
+  const result = await dispatchSingleShot({
+    deps,
+    msg,
+    io,
+    dispatch: dispatchFn,
+    trace,
+    async: parsed.body.async,
+    publicBaseUrl: options.publicBaseUrl,
+    logPrefix: "ingress",
+  });
+  return result.kind === "started"
+    ? { status: 202, body: result.receipt }
+    : { status: 200, body: { reply: result.reply, ...(result.run ? { run: result.run } : {}) } };
 }
 
 export async function handleIngressRequest(

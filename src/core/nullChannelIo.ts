@@ -8,10 +8,11 @@
 // own under a derived key, so a resumed parent's spawn is a run with a record
 // rather than a refusal for want of a thread.
 
+import { createHash, randomUUID } from "node:crypto";
+import { LEDGER_KEY_MAX_CHARS } from "./runLedger/hostKey.js";
 import type { ChannelIO, StatusHandle } from "./types.js";
 
 export function nullChannelIO(logKey: string, log: (line: string) => void = console.log): ChannelIO {
-  let children = 0;
   return {
     // The seal reads this: a reply logged here was not delivered (run-history.md item 38).
     undeliverable: "no channel to deliver to",
@@ -20,8 +21,14 @@ export function nullChannelIO(logKey: string, log: (line: string) => void = cons
     },
     status: async (): Promise<StatusHandle> => ({ update: () => {}, done: async () => {} }),
     history: async () => [],
-    openThread: async (lead) => {
-      const threadKey = `${logKey}/child-${++children}`;
+    openThread: async (lead, idempotencyKey) => {
+      // A coordinator retry must get the same key after a bot restart; an
+      // unrelated child must never collide with it or another process's child.
+      const child = idempotencyKey
+        ? createHash("sha256").update(logKey).update("\0").update(idempotencyKey).digest("hex").slice(0, 32)
+        : randomUUID();
+      const suffix = `/child-${child}`;
+      const threadKey = `${logKey.slice(0, LEDGER_KEY_MAX_CHARS - suffix.length)}${suffix}`;
       log(`[resume] ${logKey} opened child thread ${threadKey} (no channel to post to): ${lead.length} chars`);
       return { thread: { threadKey }, io: nullChannelIO(threadKey, log) };
     },

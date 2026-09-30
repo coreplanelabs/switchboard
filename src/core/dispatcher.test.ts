@@ -81,6 +81,8 @@ import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memor
 import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
 import { matchesPredicate, NO_GRANTS, predicateFor, type Actor, type ChannelDirectory } from "./authz/index.js";
 import { SlackChannelDirectory } from "../channels/slackChannelDirectory.js";
+import { handleIngressRequest, HttpIO } from "../channels/http.js";
+import { handleMcpRequest, McpIO } from "../channels/mcp.js";
 import { stripMention } from "../channels/slack.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
 import { StaticMcpToolSource, InMemoryMcpClient } from "../mcp/index.js";
@@ -10006,6 +10008,8 @@ grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
   "slack:UDEV": { actions: [agent:run:coding] }
   "slack:UREV": { repos: ["acme/api"] }
+  "http:job": { actions: [dispatch, agent:run:coding], channels: ["http:ops"], repos: ["acme/api"] }
+  "mcp:job": { actions: [dispatch, agent:run:coding], channels: ["mcp:ops"], repos: ["acme/api"] }
 restrict:
   agents: [coding]
   repos: ["acme/api"]
@@ -10083,14 +10087,13 @@ workspaceDir: __WORKDIR__
     vi.mocked(runPiHarnessOpen).mockClear();
   });
 
-  it("channel guard: agent:ship over a dispatch whose handle cannot open a thread (HTTP/MCP) is refused with the spawn's reason and a run-page pointer, nothing handed to the runner", async () => {
+  it("channel guard: agent:ship over a handle without openThread is refused before the runner", async () => {
     const { deps, provider, created } = shipDeps();
     // An unrestricted repo (open-when-absent), so the CHANNEL refusal is the
     // one that fires — not the repo allowlist, which has its own test above.
     deps.resolveRepoContext = () => ({ repo: "acme/web" });
     const { io, replies } = fakeIO();
-    // The real HTTP and MCP handles have no `openThread` (thread-admission
-    // item 6): the preflight admits by that capability, never a prefix list.
+    // The preflight admits by the handle's capability, never a prefix list.
     delete io.openThread;
     await dispatch(
       deps,
@@ -10103,6 +10106,64 @@ workspaceDir: __WORKDIR__
     expect(replies[0]).toContain("/runs");
     expect(provider.requests).toHaveLength(0);
     expect(created).toEqual([]);
+  });
+
+  it("HTTP and MCP job handles admit the same Ship hand-off as chat", async () => {
+    for (const platform of ["http", "mcp"] as const) {
+      const { deps, instances, created } = shipDeps();
+      const threadKey = `${platform}:ops:t1`;
+      const io = platform === "http" ? new HttpIO([], threadKey) : new McpIO([], threadKey);
+      await dispatch(deps, { channelId: `${platform}:ops`, userId: `${platform}:job`, threadKey, text: TASK_MSG }, io);
+      expect(created, platform).toHaveLength(1);
+      const { instance } = await handed(instances, (await io.started).id);
+      expect(instance, platform).toMatchObject({ threadKey, userId: `${platform}:job` });
+    }
+  });
+
+  it("the HTTP and MCP wire adapters both hand an authenticated Ship request to the runner", async () => {
+    for (const platform of ["http", "mcp"] as const) {
+      const { deps, instances, created } = shipDeps();
+      const auth = { tokens: { token: { subject: "job" } } };
+      const headers = { authorization: "Bearer token" };
+      const response =
+        platform === "http"
+          ? await handleIngressRequest(
+              {
+                method: "POST",
+                headers,
+                body: JSON.stringify({ text: TASK_MSG, channel: "ops", thread: "task", async: true }),
+              },
+              deps,
+              { auth },
+            )
+          : await handleMcpRequest(
+              {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: 1,
+                  method: "tools/call",
+                  params: {
+                    name: "dispatch",
+                    arguments: { text: TASK_MSG, channel: "ops", thread: "task", async: true },
+                  },
+                }),
+              },
+              deps,
+              { auth },
+            );
+      expect(response.status).toBe(platform === "http" ? 202 : 200);
+      const receipt =
+        platform === "http"
+          ? (response.body as { runId: string; threadKey: string })
+          : ((response.body as { result: { structuredContent: { runId: string; threadKey: string } } }).result
+              .structuredContent as { runId: string; threadKey: string });
+      expect(receipt.threadKey).toBe(`${platform}:ops:task`);
+      await vi.waitFor(() => expect(created).toHaveLength(1));
+      const { instance } = await handed(instances, receipt.runId);
+      expect(instance).toMatchObject({ threadKey: receipt.threadKey, userId: `${platform}:job` });
+    }
   });
 
   it("permission: user allowed ship but not coding → refused naming coding, nothing handed to the runner", async () => {

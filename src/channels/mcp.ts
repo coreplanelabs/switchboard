@@ -13,12 +13,14 @@ import type { McpToolInfo } from "../mcp/types.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
-import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
+import type { IncomingMessage } from "../core/types.js";
 import { boundRequester, type PersonLookup } from "./requester.js";
+import { dispatchSingleShot, SingleShotIO } from "./singleShotDispatch.js";
 import {
   authorizeRequest,
   hasDispatch,
   ingressComponentError,
+  ingressThreadKeyError,
   MAX_BODY_BYTES,
   readBody,
   type DispatchFn,
@@ -73,6 +75,7 @@ const DISPATCH_TOOL = {
       text: { type: "string", description: "the request to send to Switchboard" },
       thread: { type: "string", description: "conversation thread key (optional; defaults to a single thread)" },
       channel: { type: "string", description: "config/permission scope (optional; a token may pin this)" },
+      async: { type: "boolean", description: "return a run id now and read progress with runs_get/runs_events" },
     },
     required: ["text"],
   },
@@ -102,6 +105,8 @@ export interface McpOptions {
   /** The person an entry's `email` names (authorization.md item 15), as the
    *  HTTP ingress takes it. Absent → every token is its own requester. */
   personByEmail?: PersonLookup;
+  /** Base URL for an async run's live page. */
+  publicBaseUrl?: string;
 }
 
 /** `runs.list` → tool `runs_list`; `inputSchema` = the command's
@@ -188,29 +193,7 @@ interface JsonRpcRequest {
 /** ChannelIO for a single-shot MCP tool call: reply() collects, status() is a
  *  no-op (no live surface to edit in one shot), history() is empty (a tool call
  *  carries no prior turns — conversation state, if any, rides on threadKey). */
-export class McpIO implements ChannelIO {
-  private replies: string[] = [];
-
-  async reply(text: string): Promise<void> {
-    this.replies.push(text);
-  }
-
-  async status(_initial: StatusUpdate): Promise<StatusHandle> {
-    return {
-      update: () => {},
-      done: async () => {},
-    };
-  }
-
-  async history(): Promise<HistoryItem[]> {
-    return [];
-  }
-
-  /** The collected reply text — becomes the MCP tool result content. */
-  collected(): string {
-    return this.replies.join("\n\n");
-  }
-}
+export class McpIO extends SingleShotIO {}
 
 /** Build the `mcp:`-namespaced IncomingMessage from an authed identity + the
  *  tool arguments. Mirrors http.ts's namespacing (invariant 4) but with the
@@ -322,6 +305,9 @@ async function route(
       if (typeof args.text !== "string" || args.text.trim() === "") {
         return err(id, INVALID_PARAMS, "`text` is required and must be a non-empty string");
       }
+      if (args.async !== undefined && typeof args.async !== "boolean") {
+        return err(id, INVALID_PARAMS, "`async` must be a boolean");
+      }
       if (args.channel !== undefined) {
         if (typeof args.channel !== "string") return err(id, INVALID_PARAMS, "`channel` must be a string");
         const error = ingressComponentError("channel", args.channel);
@@ -336,25 +322,39 @@ async function route(
         const error = ingressComponentError("channel", identity.channel);
         if (error) return err(id, INVALID_PARAMS, error);
       }
-      // The request's root (docs/reference/specs/tracing.md), once the caller is known.
       const receivedAt = systemClock();
+      const incoming = await toIncomingMessage(
+        identity,
+        {
+          text: args.text,
+          channel: args.channel as string | undefined,
+          thread: args.thread as string | undefined,
+        },
+        options.personByEmail,
+      );
+      const keyError = ingressThreadKeyError(incoming.threadKey);
+      if (keyError) return err(id, INVALID_PARAMS, keyError);
+      // The request's root (docs/reference/specs/tracing.md), once the caller is known.
       const trace = startRequestRoot(deps, { channel: "mcp", receivedAt });
-      const msg: IncomingMessage = {
-        ...(await toIncomingMessage(
-          identity,
-          {
-            text: args.text,
-            channel: args.channel as string | undefined,
-            thread: args.thread as string | undefined,
-          },
-          options.personByEmail,
-        )),
-        receivedAt,
-      };
-      const io = new McpIO();
+      const msg: IncomingMessage = { ...incoming, receivedAt };
+      const io = new McpIO([], msg.threadKey);
       const dispatchFn = options.dispatch ?? realDispatch;
-      await dispatchFn(deps, msg, io, { trace });
-      return ok(id, { content: [{ type: "text", text: io.collected() }] });
+      const result = await dispatchSingleShot({
+        deps,
+        msg,
+        io,
+        dispatch: dispatchFn,
+        trace,
+        async: args.async === true,
+        publicBaseUrl: options.publicBaseUrl,
+        logPrefix: "mcp",
+      });
+      if (result.kind === "started")
+        return ok(id, {
+          content: [{ type: "text", text: `Started run ${result.receipt.runId}. Progress is available via runs_get.` }],
+          structuredContent: result.receipt,
+        });
+      return ok(id, { content: [{ type: "text", text: result.reply }] });
     }
 
     default:

@@ -357,10 +357,10 @@ export interface ChannelIO {
    * Open a thread of this channel's own for a child run
    * (docs/reference/specs/thread-admission.md item 6): post `lead` where a new
    * thread can start — top-level in this conversation's channel — and hand
-   * back the thread's key and a handle bound to it. Optional: a single-shot
-   * channel (HTTP, MCP) has no thread to open, and a spawn from such a channel
-   * is refused by name (`spawn_unsupported`); it never falls back to the
+   * back the thread's key and a handle bound to it. Optional: a handle without a thread-opening capability refuses a spawn
+   * by name (`spawn_unsupported`). Machine job channels derive stable child
+   * keys when an idempotency key is supplied; no child falls back to the
    * parent's own thread.
    */
-  openThread?(lead: string): Promise<OpenedThread>;
+  openThread?(lead: string, idempotencyKey?: string): Promise<OpenedThread>;
 }

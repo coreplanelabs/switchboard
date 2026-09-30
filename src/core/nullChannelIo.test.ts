@@ -18,18 +18,36 @@ describe("nullChannelIO", () => {
     expect(lines).toEqual(["[resume] slack:CX:1.0 reply (no channel to deliver to): 11 chars"]);
   });
 
-  it("openThread hands back a derived key and a null channel of its own, logging the lead's length and never its text", async () => {
+  it("openThread hands back distinct keys and null channels, logging the lead's length and never its text", async () => {
     const lines: string[] = [];
     const io = nullChannelIO("slack:CX:1.0", (l) => lines.push(l));
     const first = await io.openThread!("↳ research child");
     const second = await io.openThread!("↳ another");
-    expect(first.thread).toEqual({ threadKey: "slack:CX:1.0/child-1" });
-    expect(second.thread).toEqual({ threadKey: "slack:CX:1.0/child-2" });
+    expect(first.thread.threadKey).toMatch(/^slack:CX:1\.0\/child-[0-9a-f-]{36}$/);
+    expect(second.thread.threadKey).not.toBe(first.thread.threadKey);
     await first.io.reply("child answer");
     expect(lines).toEqual([
-      "[resume] slack:CX:1.0 opened child thread slack:CX:1.0/child-1 (no channel to post to): 16 chars",
-      "[resume] slack:CX:1.0 opened child thread slack:CX:1.0/child-2 (no channel to post to): 9 chars",
-      "[resume] slack:CX:1.0/child-1 reply (no channel to deliver to): 12 chars",
+      `[resume] slack:CX:1.0 opened child thread ${first.thread.threadKey} (no channel to post to): 16 chars`,
+      `[resume] slack:CX:1.0 opened child thread ${second.thread.threadKey} (no channel to post to): 9 chars`,
+      `[resume] ${first.thread.threadKey} reply (no channel to deliver to): 12 chars`,
     ]);
+  });
+
+  it("opens a stable, separate job thread for each coordinator unit across rebuilt handles", async () => {
+    const first = await nullChannelIO("mcp:ops:task", () => {}).openThread!("unit one", "pipeline:unit-a");
+    const retry = await nullChannelIO("mcp:ops:task", () => {}).openThread!("unit one", "pipeline:unit-a");
+    const second = await nullChannelIO("mcp:ops:task", () => {}).openThread!("unit two", "pipeline:unit-b");
+    expect(first.thread.threadKey).toBe(retry.thread.threadKey);
+    expect(second.thread.threadKey).not.toBe(first.thread.threadKey);
+    expect(first.io.openThread).toBeTypeOf("function");
+  });
+
+  it("keeps a long request's child key within the ledger limit", async () => {
+    const parent = `mcp:${"c".repeat(128)}:${"t".repeat(115)}`;
+    const first = await nullChannelIO(parent, () => {}).openThread!("unit", "pipeline:unit-a");
+    const retry = await nullChannelIO(parent, () => {}).openThread!("unit", "pipeline:unit-a");
+    expect(first.thread.threadKey).toBe(retry.thread.threadKey);
+    expect(first.thread.threadKey.length).toBeLessThanOrEqual(256);
+    expect(first.thread.threadKey).toMatch(/^mcp:c{128}:/);
   });
 });
