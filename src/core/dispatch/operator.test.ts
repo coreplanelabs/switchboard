@@ -233,7 +233,10 @@ channels:
     ).toMatchObject({ kind: "violation", violation: expect.stringContaining("unavailable") });
     expect(
       parseOperatorTurn(
-        { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/first", reason: "explicit choice" } },
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: { preset: "ship", shipEntry: "work", repo: "acme/first", reason: "explicit choice" },
+        },
         ctxOf({
           requestText: "In acme/first, fix the drift",
           presets: ["general", "ship"],
@@ -1844,7 +1847,7 @@ describe("the pending question's free-text answer joins the original ask (issue 
       }),
       async () => ({
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested drift change" },
+        input: { preset: "ship", shipEntry: "work", repo: "acme/infrastructure", reason: "the requested drift change" },
       }),
     );
     expect(answer.decision).toMatchObject({
@@ -1893,7 +1896,7 @@ describe("the pending question's free-text answer joins the original ask (issue 
         input({ text: joined, projection: projectionOf(["general", "ship"]) }),
         async () => ({
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "ship", repo: "acme/examples", reason: "use the referenced example" },
+          input: { preset: "ship", shipEntry: "work", repo: "acme/examples", reason: "use the referenced example" },
         }),
       );
       expect(answer.decision.kind).toBe("non_decision");
@@ -1938,9 +1941,15 @@ describe("the pending question's free-text answer joins the original ask (issue 
       userId: "slack:UREQUESTER",
       text,
     });
+    let turn = 0;
     const model = async () => ({
       tool: OPERATOR_BIND_TOOL,
-      input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested change" },
+      input: {
+        preset: "ship",
+        shipEntry: turn++ === 0 ? "work" : "work_from_thread",
+        repo: "acme/infrastructure",
+        reason: "the requested change",
+      },
     });
     const first = await operatorStage(
       { config, runLedger: runLedger as never, operatorModel: model },
@@ -1985,7 +1994,7 @@ describe("the pending question's free-text answer joins the original ask (issue 
         },
         operatorModel: async () => ({
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested change" },
+          input: { preset: "ship", shipEntry: "work", repo: "acme/infrastructure", reason: "the requested change" },
         }),
       },
       {
@@ -2030,7 +2039,7 @@ describe("the pending question's free-text answer joins the original ask (issue 
         },
         operatorModel: async () => ({
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested change" },
+          input: { preset: "ship", shipEntry: "work", repo: "acme/infrastructure", reason: "the requested change" },
         }),
       },
       {

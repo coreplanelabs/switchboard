@@ -22338,7 +22338,12 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   const parseOnlyCommands = () => (parseRegistry ??= operatorDeps(ON_YAML).deps.commands!);
   const decides = (input: {
     reason?: string;
-    binds?: { line: string; reason?: string; repo?: string }[];
+    binds?: {
+      line: string;
+      reason?: string;
+      repo?: string;
+      shipEntry?: "work" | "work_from_thread" | "review" | "plan";
+    }[];
     question?: { text: string; proposal?: string };
   }) =>
     vi.fn<RouteModel>(async () => {
@@ -22362,6 +22367,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
               request: bind.line,
               reason: bind.reason ?? "why",
               ...(bind.repo ? { repo: bind.repo } : {}),
+              ...(bind.shipEntry ? { shipEntry: bind.shipEntry } : {}),
             },
           };
         throw new Error(`the scripted line does not parse: ${bind.line}`);
@@ -22927,7 +22933,9 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         return next;
       });
     const joined = `${request} — ${question}: acme/infrastructure`;
-    deps.operatorModel = decides({ binds: [{ line: `agent:ship ${joined}`, repo: "acme/infrastructure" }] });
+    deps.operatorModel = decides({
+      binds: [{ line: `agent:ship ${joined}`, repo: "acme/infrastructure", shipEntry: "work" }],
+    });
     await dispatch(deps, msg("acme/infrastructure", "slack:UADMIN"), fakeIO().io, { thread: pending });
     expect(checkpoint).toHaveBeenCalledWith(
       expect.any(String),
