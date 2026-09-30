@@ -692,6 +692,8 @@ export interface DeliveryContext {
   shell: CardShell;
   checklistAsLeft: () => string | undefined;
   checklistCheckedOff: () => string | undefined;
+  /** The model's lease ended, not the requested work; keep the progress as left. */
+  budgetEnded?: boolean;
   /** The done card's shape and queued lines, from the finish-site diagnosis (the dispatch's `doneLines`). */
   doneLines: (diagnosis: FrictionDiagnosis | undefined) => { shape?: string; queued?: string };
   runDiagnosis: FrictionDiagnosis | undefined;
@@ -723,6 +725,7 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     shell,
     checklistAsLeft,
     checklistCheckedOff,
+    budgetEnded,
     doneLines,
     runDiagnosis,
     releaseWorkspace,
@@ -801,8 +804,8 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
           card.done(
             shell.close({
               kind: "done",
-              icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
-              detail: privateCard ? undefined : stopped ? checklistAsLeft() : checklistCheckedOff(),
+              icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : budgetEnded ? "⚠️" : "✅",
+              detail: privateCard ? undefined : stopped || budgetEnded ? checklistAsLeft() : checklistCheckedOff(),
               ...(privateCard ? {} : doneLines(runDiagnosis)),
             }),
           ),

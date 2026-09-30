@@ -2418,6 +2418,103 @@ export async function dispatch(
         ? threadArtifactsFor({ runs: runsService, thread, agent: agent.name })
         : undefined,
     ]);
+    // A bare continuation after an unanswered general budget uses the original
+    // request, not a session tail carrying source results whose grant or
+    // revision may have changed. Only the original requester can reuse it.
+    let sourceContinuation: string | undefined;
+    if (agent.name === "general" && requestText.trim().toLowerCase() === "continue" && thread) {
+      const previous = thread.find((view) => view.finished && view.agent === "general" && !view.parentInstanceId);
+      if (previous) {
+        const prior = await runsService.getRun(previous.id, { include: "messages" }).catch(() => undefined);
+        if (!prior?.ok || !prior.value.events) {
+          await refuse(
+            refusalOf(
+              "setup_failed",
+              "I couldn't recover the earlier question in this conversation; no source was read.",
+            ),
+          );
+          return ended;
+        }
+        const events = prior.value.events;
+        if (
+          events?.some((e) => e.type === "run_note" && e.kind === "time_budget_exhausted") &&
+          events.some((e) => e.type === "answer" && e.text.includes('Reply "continue" in this conversation'))
+        ) {
+          if (previous.userId !== msg.userId) {
+            await refuse(refusalOf("setup_failed", "Only the original requester can continue that source lookup."));
+            return ended;
+          }
+          const missingQuestion = () =>
+            refuse(
+              refusalOf(
+                "setup_failed",
+                "I couldn't recover the earlier question in this conversation; no source was read.",
+              ),
+            );
+          const original = events.find((e) => e.type === "input");
+          if (!original || original.type !== "input") {
+            await missingQuestion();
+            return ended;
+          }
+          let question = original.text;
+          // A continued run records its actual input ("continue"), not the
+          // reconstructed ask. Walk only verified, same-requester budget closes
+          // until we reach the original input; never use an old source result.
+          let older = thread.slice(thread.findIndex((view) => view.id === previous.id) + 1);
+          const oldest = thread.at(-1);
+          let before = oldest?.finishedAt !== undefined ? { finishedAt: oldest.finishedAt, id: oldest.id } : undefined;
+          let pages = 0;
+          while (question.trim().toLowerCase() === "continue") {
+            if (older.length === 0) {
+              if (!before || pages++ >= 10) {
+                await missingQuestion();
+                return ended;
+              }
+              const page = await runsService
+                .listRuns({
+                  status: "all",
+                  visibleTo: { kind: "all" },
+                  threadKey: msg.threadKey,
+                  limit: RUN_LIST_MAX_LIMIT,
+                  before: before.finishedAt,
+                  beforeId: before.id,
+                })
+                .catch(() => undefined);
+              if (!page || page.storeUnavailable || page.ledgerUnavailable || page.runs.length === 0) {
+                await missingQuestion();
+                return ended;
+              }
+              older = page.runs;
+              before = page.nextBefore;
+            }
+            const ancestor = older.shift()!;
+            if (!ancestor.finished || ancestor.agent !== "general" || ancestor.parentInstanceId) continue;
+            if (ancestor.userId !== msg.userId) {
+              await refuse(refusalOf("setup_failed", "Only the original requester can continue that source lookup."));
+              return ended;
+            }
+            const record = await runsService.getRun(ancestor.id, { include: "messages" }).catch(() => undefined);
+            const ancestorEvents = record?.ok ? record.value.events : undefined;
+            if (
+              !ancestorEvents?.some((e) => e.type === "run_note" && e.kind === "time_budget_exhausted") ||
+              !ancestorEvents.some(
+                (e) => e.type === "answer" && e.text.includes('Reply "continue" in this conversation'),
+              )
+            ) {
+              await missingQuestion();
+              return ended;
+            }
+            const input = ancestorEvents.find((e) => e.type === "input");
+            if (!input || input.type !== "input") {
+              await missingQuestion();
+              return ended;
+            }
+            question = input.text;
+          }
+          sourceContinuation = question;
+        }
+      }
+    }
     // GitHub, plane and MCP results have no durable grant or source revision label. A later main turn
     // starts from requester-authored Slack text and reads those sources anew;
     // it must not replay the old log through either its prompt or session tools.
@@ -2434,7 +2531,7 @@ export async function dispatch(
               part.name.startsWith("mcp__")),
         ),
       );
-    const session = staleMainRead ? undefined : fromSession?.seed;
+    const session = staleMainRead || sourceContinuation !== undefined ? undefined : fromSession?.seed;
     // If a prior main run exists but its log cannot be read, an old bot answer
     // may quote a private source. A specialist-only history has no main answer
     // to recover and can start fresh from the requester's own words.
@@ -2453,7 +2550,10 @@ export async function dispatch(
       agent.name === "orchestrator"
         ? history.filter((item) => item.role === "user" && item.user === msg.userId)
         : history;
-    const seedNotes = [...(fromSession?.notes ?? []), ...(threadArtifacts?.notes ?? [])];
+    const seedNotes = [
+      ...(sourceContinuation === undefined ? (fromSession?.notes ?? []) : []),
+      ...(threadArtifacts?.notes ?? []),
+    ];
     const recovered = resume !== undefined || restart !== undefined || opts.restartOf !== undefined;
     // Recovery cannot prove whether an indirect source was consumed before the
     // crash. Refuse before a saved plan or session can reach the model.
@@ -2506,7 +2606,9 @@ export async function dispatch(
     const channelBuilt = session
       ? undefined
       : buildConversation(
-          opts.seed ?? mainHistory,
+          sourceContinuation !== undefined
+            ? [{ role: "user", text: sourceContinuation, user: msg.userId }]
+            : (opts.seed ?? mainHistory),
           requestText,
           msg.images,
           msg.documents,
@@ -3686,7 +3788,16 @@ export async function dispatch(
       console.log(`[dispatch] ${msg.threadKey} run ${run.id} restarts from its request: ${ran.note}`);
       return ended;
     }
-    const { answer, prNote, toolCalls, runDiagnosis, checklistAsLeft, checklistCheckedOff, releaseWorkspace } = ran;
+    const {
+      answer,
+      prNote,
+      toolCalls,
+      runDiagnosis,
+      checklistAsLeft,
+      checklistCheckedOff,
+      budgetEnded,
+      releaseWorkspace,
+    } = ran;
 
     // The card's final icon tells the stop apart from a normal finish: ⏹ soft
     // (a summary was written), ⛔ hard (aborted, no summary).
@@ -3717,6 +3828,7 @@ export async function dispatch(
       shell,
       checklistAsLeft,
       checklistCheckedOff,
+      budgetEnded,
       doneLines: privateAudienceRequired(msg) || slackContext !== undefined ? () => ({}) : doneLines,
       runDiagnosis,
       releaseWorkspace,

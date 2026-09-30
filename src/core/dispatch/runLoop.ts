@@ -184,6 +184,8 @@ export interface RunOutcome {
   checklistAsLeft: () => string | undefined;
   /** The same checklist with every open item ticked ✓ — what a completed card shows. */
   checklistCheckedOff: () => string | undefined;
+  /** A time-budget ending is not proof that the requested checklist was completed. */
+  budgetEnded: boolean;
   releaseWorkspace: (span?: Span) => Promise<void>;
 }
 
@@ -2641,6 +2643,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // post-turn put in its place (a review's re-review at a moved head) stands.
     if (windDownEnding !== undefined && answer === windDownAnswer(windDownEnding, agent.maxMinutes))
       answer = windDownAnswer(windDownEnding, agent.maxMinutes, endingFacts());
+    // A source lookup without a write-up cannot turn a budget sentence into
+    // claimed findings. The next reply in this thread starts a new, authorized
+    // run from the session's question; never reuse a cut tool's result.
+    if (agent.name === "general" && windDownEnding?.kind === "time" && !windDownEnding.text.trim())
+      answer = `⚠️ I could not verify the answer before this run's ${agent.maxMinutes}-minute budget ended. The requested source findings remain unconfirmed. Reply "continue" in this conversation to continue the lookup under your access without repeating the question.`;
     // A soft stop may have landed during any awaited tail step above. Latch it
     // immediately before the synchronous publication boundary and discard
     // every review claim the tail may have computed since the prior check.
@@ -2972,6 +2979,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     runDiagnosis,
     checklistAsLeft,
     checklistCheckedOff,
+    budgetEnded: budgetEnded || windDownEnding?.kind === "time",
     releaseWorkspace,
   };
 }

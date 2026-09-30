@@ -56,6 +56,7 @@ import { runLoop, type RunLoopOutcome, type RunOutcome } from "./runLoop.js";
 import { bindSlackContext } from "./slackContextBinding.js";
 import { deliverAnswer } from "./reply.js";
 import { resumeMessage } from "../resumeLaunch.js";
+import { windDownAnswer } from "../harness/windDown.js";
 import { recoveredPrivateAudienceLatch } from "./privateAudience.js";
 
 /** The loop's answered outcome; an interruption fails the test naming its note. */
@@ -421,6 +422,80 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it("a restarted source read cut at the budget answers without invented findings and leaves the unfinished checklist open", async () => {
+    const observed = watched(piHarness);
+    observed.harness.open = async (_deps, run) => {
+      run.toolContext.reportProgress?.("✓ Read request\n✱ Read source\n○ Deliver count and records");
+      run.onEvent?.({ type: "run_note", kind: "resumed", summary: "resumed on the same run after a bot restart" });
+      run.onEvent?.({ type: "tool_call", tool: "mcp_source_read", summary: "read source", callId: "source-1" });
+      run.onEvent?.({
+        type: "tool_result",
+        tool: "mcp_source_read",
+        ok: false,
+        cut: true,
+        summary: "source call cut",
+        callId: "source-1",
+      });
+      run.onEvent?.({
+        type: "run_note",
+        kind: "time_budget_exhausted",
+        summary: "the source read was cut at the loop end",
+      });
+      const ending = { kind: "time" as const, text: "" };
+      return {
+        answer: windDownAnswer(ending, run.agent.maxMinutes),
+        ending,
+        followUp: async () => "",
+        remainingMs: () => 0,
+        end: async () => {},
+      };
+    };
+    const s = setup("unused", {
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+    });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, profile: { ...s.ctx.profile, minutes: 5 } }));
+    expect(out.answer).toContain("could not verify");
+    expect(out.answer).toContain("continue");
+    expect(out.answer).not.toContain("Partial work may exist");
+    await deliverAnswer({
+      msg: s.ctx.msg,
+      io: s.ctx.io,
+      agent: s.ctx.agent,
+      run: s.run,
+      answer: out.answer,
+      liveUrl: undefined,
+      prNote: out.prNote,
+      stopped: undefined,
+      ledgerRun: undefined,
+      ending: s.ending,
+      card: s.ctx.card,
+      shell: s.ctx.shell,
+      checklistAsLeft: out.checklistAsLeft,
+      checklistCheckedOff: out.checklistCheckedOff,
+      budgetEnded: out.budgetEnded,
+      doneLines: s.ctx.doneLines,
+      runDiagnosis: out.runDiagnosis,
+      releaseWorkspace: out.releaseWorkspace,
+      root: s.ctx.root,
+    });
+    expect(s.replies.at(-1)).toBe(out.answer);
+    expect(s.closes.at(-1)?.title).toContain("⚠");
+    expect(s.closes.at(-1)?.detail).toBe("✓ Read request\n✱ Read source\n○ Deliver count and records");
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "run_note", kind: "resumed" }),
+        expect.objectContaining({ type: "tool_result", callId: "source-1", cut: true }),
+        expect.objectContaining({ type: "answer", text: out.answer }),
+      ]),
+    );
+  });
   it("keeps a web main agent's tool result in the durable event stream", async () => {
     const harness = watched(piHarness);
     harness.harness.open = async (_deps, run) => {
@@ -6888,8 +6963,46 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     );
     expect(budgetOut.answer).toMatch(/^⚠️ _Hit the \d+-minute budget before finishing/);
     expect(budgetOut.answer).toContain("What I found before the budget ran out.");
+    expect(budgetOut.budgetEnded).toBe(true);
     expect(budget.run.control.requested).toBeUndefined();
     expect(budget.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+  });
+
+  it("a budgeted source answer recovered after a restart keeps its original partial checklist on the reply card", async () => {
+    const s = setup("", { provider: neverCalled() });
+    const resume = finishing("One source record was verified; the remaining records were not read.", {
+      state: { checklist: "✓ Verify one record\n✱ Read remaining records\n○ Deliver the full answer" },
+      events: [
+        { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
+        note("resumed", "continued the same run and conversation after a restart", 2),
+        note("time_budget_exhausted", "cut a source read at the loop end", 3),
+      ],
+    });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    await deliverAnswer({
+      msg: s.ctx.msg,
+      io: s.ctx.io,
+      agent: s.ctx.agent,
+      run: s.run,
+      answer: out.answer,
+      liveUrl: undefined,
+      prNote: out.prNote,
+      stopped: undefined,
+      ledgerRun: undefined,
+      ending: s.ending,
+      card: s.ctx.card,
+      shell: s.ctx.shell,
+      checklistAsLeft: out.checklistAsLeft,
+      checklistCheckedOff: out.checklistCheckedOff,
+      budgetEnded: out.budgetEnded,
+      doneLines: s.ctx.doneLines,
+      runDiagnosis: out.runDiagnosis,
+      releaseWorkspace: out.releaseWorkspace,
+      root: s.ctx.root,
+    });
+    expect(s.replies.at(-1)).toContain("One source record was verified");
+    expect(s.closes.at(-1)?.title).toContain("⚠");
+    expect(s.closes.at(-1)?.detail).toBe("✓ Verify one record\n✱ Read remaining records\n○ Deliver the full answer");
   });
 
   it("a review resumed with its answer in hand runs its post-steps: the verdict restored from the row is settled at the pinned head and posted, once", async () => {

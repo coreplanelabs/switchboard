@@ -18484,6 +18484,210 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     vi.mocked(makeExecutor).mockClear();
   });
 
+  it("a budget-ended source answer continues in the same conversation for its requester without replaying the cut source or another sender's access", async () => {
+    const question = "What caused the source job to fail?";
+    const unverified =
+      '⚠️ I could not verify the answer. The requested source findings remain unconfirmed. Reply "continue" in this conversation.';
+    const leaked = "stale source result from a revoked grant";
+    const t = await threadWithSession(PI_YAML, {
+      agent: "general",
+      tail: [
+        user(question),
+        { role: "assistant", content: [{ type: "tool_use", id: "source", name: "mcp__source__read", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "source", content: leaked }] },
+        assistant(unverified),
+      ],
+    });
+    const previous = (await t.store.get("run-prev"))!;
+    await t.store.put({
+      ...previous,
+      eventCount: 3,
+      storedEventCount: 3,
+      events: [
+        { type: "input", messageId: "q", text: question, seq: 1 },
+        { type: "run_note", kind: "time_budget_exhausted", summary: "source tool cut", seq: 2 },
+        { type: "answer", text: unverified, seq: 3 },
+      ],
+    });
+    const { io, replies } = fakeIO([{ role: "user", text: question, at: NOW - 20_000, user: "slack:UADMIN" }]);
+    let seeded: ChatMessage[] | undefined;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered("The verified answer after a fresh source read.");
+      },
+      async () => dispatch(t.deps, { ...followUp, text: "continue" }, io),
+    );
+    await t.writer.settled();
+    expect(JSON.stringify(seeded)).toContain(question);
+    expect(JSON.stringify(seeded)).not.toContain(leaked);
+    expect(seeded?.at(-1)?.content).toEqual([
+      { type: "text", text: question },
+      { type: "text", text: "continue" },
+    ]);
+    expect(replies.at(-1)).toBe("The verified answer after a fresh source read.");
+    expect(t.ledger.finished.get("run-next")?.seed).toBe("channel");
+
+    const another = await threadWithSession(PI_YAML, { agent: "general" });
+    await another.store.put({
+      ...previous,
+      events: [
+        { type: "input", messageId: "q", text: question, seq: 1 },
+        { type: "run_note", kind: "time_budget_exhausted", summary: "source tool cut", seq: 2 },
+        { type: "answer", text: unverified, seq: 3 },
+      ],
+      eventCount: 3,
+      storedEventCount: 3,
+    });
+    const foreign = fakeIO([{ role: "user", text: question, at: NOW - 20_000, user: "slack:UADMIN" }]);
+    await dispatch(another.deps, { ...followUp, userId: "slack:UOTHER", text: "continue" }, foreign.io);
+    expect(foreign.replies.join(" ")).toContain("Only the original requester");
+    expect(another.provider.requests).toHaveLength(0);
+  });
+
+  it("a second budget-ended continuation keeps the original question instead of seeding continue twice", async () => {
+    const question = "What caused the source job to fail?";
+    const unverified =
+      '⚠️ I could not verify the answer. The requested source findings remain unconfirmed. Reply "continue" in this conversation.';
+    const t = await threadWithSession(PI_YAML, {
+      agent: "general",
+      tail: [
+        user(question),
+        { role: "assistant", content: [{ type: "tool_use", id: "source", name: "mcp__source__read", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "source", content: "stale source result" }] },
+        user("continue"),
+        assistant(unverified),
+      ],
+    });
+    const previous = (await t.store.get("run-prev"))!;
+    await t.store.put({
+      ...previous,
+      events: [
+        { type: "input", messageId: "follow-up", text: "continue", seq: 1 },
+        { type: "run_note", kind: "time_budget_exhausted", summary: "source tool cut again", seq: 2 },
+        { type: "answer", text: unverified, seq: 3 },
+      ],
+      eventCount: 3,
+      storedEventCount: 3,
+    });
+    await t.store.put({
+      ...previous,
+      id: "run-original",
+      finishedAt: PREVIOUS_END - 20_000,
+      startedAt: PREVIOUS_END - 30_000,
+      events: [
+        { type: "input", messageId: "q", text: question, seq: 1 },
+        { type: "run_note", kind: "time_budget_exhausted", summary: "source tool cut", seq: 2 },
+        { type: "answer", text: unverified, seq: 3 },
+      ],
+      eventCount: 3,
+      storedEventCount: 3,
+    });
+    const { io, replies } = fakeIO([{ role: "user", text: question, at: NOW - 40_000, user: "slack:UADMIN" }]);
+    let seeded: ChatMessage[] | undefined;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered("The verified answer after a fresh source read.");
+      },
+      async () => dispatch(t.deps, { ...followUp, text: "continue" }, io),
+    );
+    await t.writer.settled();
+    expect(seeded?.at(-1)?.content).toEqual([
+      { type: "text", text: question },
+      { type: "text", text: "continue" },
+    ]);
+    expect(JSON.stringify(seeded)).not.toContain("stale source result");
+    expect(replies.at(-1)).toBe("The verified answer after a fresh source read.");
+  });
+
+  it("recovers the original question when several budgeted continuations exceed the thread page", async () => {
+    const question = "Why did the source job fail?";
+    const unverified = '⚠️ Findings unverified. Reply "continue" in this conversation.';
+    const t = await threadWithSession(PI_YAML, { agent: "general" });
+    const previous = (await t.store.get("run-prev"))!;
+    const continuingEvents = [
+      { type: "input" as const, messageId: "follow-up", text: "continue", seq: 1 },
+      { type: "run_note" as const, kind: "time_budget_exhausted" as const, summary: "source tool cut", seq: 2 },
+      { type: "answer" as const, text: unverified, seq: 3 },
+    ];
+    await t.store.put({ ...previous, events: continuingEvents, eventCount: 3, storedEventCount: 3 });
+    for (let i = 1; i <= 9; i++) {
+      await t.store.put({
+        ...previous,
+        id: `run-earlier-${i}`,
+        startedAt: previous.startedAt - i * 20_000,
+        finishedAt: PREVIOUS_END - i * 20_000,
+        events: continuingEvents,
+        eventCount: 3,
+        storedEventCount: 3,
+      });
+    }
+    await t.store.put({
+      ...previous,
+      id: "run-original",
+      startedAt: previous.startedAt - 220_000,
+      finishedAt: PREVIOUS_END - 220_000,
+      events: [{ type: "input", messageId: "q", text: question, seq: 1 }, ...continuingEvents.slice(1)],
+      eventCount: 3,
+      storedEventCount: 3,
+    });
+    const { io, replies } = fakeIO([{ role: "user", text: question, at: NOW - 250_000, user: "slack:UADMIN" }]);
+    let seeded: ChatMessage[] | undefined;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered("Fresh findings.");
+      },
+      async () => dispatch(t.deps, { ...followUp, text: "continue" }, io),
+    );
+    await t.writer.settled();
+    expect(seeded?.at(-1)?.content).toEqual([
+      { type: "text", text: question },
+      { type: "text", text: "continue" },
+    ]);
+    expect(replies.at(-1)).toBe("Fresh findings.");
+  });
+
+  it("refuses a repeated continuation when its original question is unavailable", async () => {
+    const t = await threadWithSession(PI_YAML, { agent: "general" });
+    const previous = (await t.store.get("run-prev"))!;
+    await t.store.put({
+      ...previous,
+      events: [
+        { type: "input", messageId: "follow-up", text: "continue", seq: 1 },
+        { type: "run_note", kind: "time_budget_exhausted", summary: "source tool cut", seq: 2 },
+        { type: "answer", text: 'No findings. Reply "continue" in this conversation.', seq: 3 },
+      ],
+      eventCount: 3,
+      storedEventCount: 3,
+    });
+    const { io, replies } = fakeIO([{ role: "user", text: "continue", at: NOW - 20_000 }]);
+    await dispatch(t.deps, { ...followUp, text: "continue" }, io);
+    expect(replies.join(" ")).toContain("couldn't recover the earlier question");
+    expect(t.provider.requests).toHaveLength(0);
+
+    // An older budget close belonging to another sender is not the ask to recover.
+    await t.store.put({
+      ...previous,
+      id: "run-other-requester",
+      userId: "slack:UOTHER",
+      startedAt: previous.startedAt - 20_000,
+      finishedAt: PREVIOUS_END - 20_000,
+      events: [
+        { type: "input", messageId: "q", text: "A private source question", seq: 1 },
+        { type: "run_note", kind: "time_budget_exhausted", summary: "source tool cut", seq: 2 },
+        { type: "answer", text: 'No findings. Reply "continue" in this conversation.', seq: 3 },
+      ],
+      eventCount: 3,
+      storedEventCount: 3,
+    });
+    const foreign = fakeIO([{ role: "user", text: "continue", at: NOW - 20_000 }]);
+    await dispatch(t.deps, { ...followUp, text: "continue" }, foreign.io);
+    expect(foreign.replies.join(" ")).toContain("Only the original requester");
+    expect(t.provider.requests).toHaveLength(0);
+  });
+
   it("stops an unverified later Slack DM before reading a prior private session", async () => {
     const channelId = "slack:DMAIN";
     const threadKey = `${channelId}:1.0`;
