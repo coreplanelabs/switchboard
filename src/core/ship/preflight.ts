@@ -8,6 +8,7 @@ import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { nearMatch } from "../nearMatch.js";
 import { resolveBaseRef, type PullRequestFacts, type RepoShipInfo } from "../../execution/githubPulls.js";
 import type { RepoContext } from "../repoContext.js";
+import type { RedispatchConfirmation } from "../confirmations.js";
 import { parseShipPlanRequest, isUnitBranch } from "./coordinator.js";
 
 // ---- naming -------------------------------------------------------
@@ -101,7 +102,7 @@ export type ShipPreflightResult =
       reply: string;
       refusal: Refusal;
       /** A runnable redispatch line for record 0054's Yes/No question. */
-      guess?: { line: string; evidence: string };
+      guess?: { line: string; evidence: string; binding?: RedispatchConfirmation["binding"] };
     };
 
 /** The operator's starting stage for a Ship request. This is a decision about
@@ -130,8 +131,8 @@ export interface ShipPreflightInput {
   workObjective?: string;
   /** Earlier actor-stamped turns from this requester, never assistant prose. */
   requesterWorkText?: readonly string[];
-  /** A Yes on this exact PR-work question, carried by the confirmation store. */
-  confirmedPrWork?: boolean;
+  /** A Yes on this exact PR and objective, carried by the confirmation store. */
+  confirmedPrWork?: RedispatchConfirmation["binding"];
   repoCtx: Pick<
     RepoContext,
     "repo" | "pr" | "prFromMessage" | "prIsThreadOwn" | "ref" | "refFromPr" | "baseRef" | "headSha" | "prUnpostable"
@@ -280,17 +281,26 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       "not started (work unclear)",
       `🚫 I couldn't tell what new change you want alongside ${repo}#${repoCtx.pr}. Ask Ship to review that PR, or name the separate change.`,
     );
-  if (workCitesPr && !barePrReference && !input.confirmedPrWork)
+  const confirmedPrWork = input.confirmedPrWork;
+  if (
+    workCitesPr &&
+    !barePrReference &&
+    (confirmedPrWork?.kind !== "ship_pr_work" ||
+      confirmedPrWork.repo !== repo ||
+      confirmedPrWork.pr !== repoCtx.pr ||
+      confirmedPrWork.objective !== objective)
+  )
     return {
       ...refuse(
         "ship_preflight_pr_work_question",
         "PR cited beside new work",
         "not started (confirm separate work)",
-        `🚫 This request cites ${repo}#${repoCtx.pr}. Do you want Ship to start a separate code change based on this request?`,
+        `🚫 This request cites ${repo}#${repoCtx.pr}. The proposed separate change is: ${objective}. Do you want Ship to start it?`,
       ),
       guess: {
         line: input.messageText ?? input.requestText,
-        evidence: `The operator selected separate coding work: ${objective}`,
+        evidence: `This would start coding work separate from reviewing ${repo}#${repoCtx.pr}.`,
+        binding: { kind: "ship_pr_work", repo, pr: repoCtx.pr!, objective: objective! },
       },
     };
   const task =

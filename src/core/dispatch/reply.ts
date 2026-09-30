@@ -479,6 +479,7 @@ async function offerQuestion(refusal: Refusal, io: ChannelIO, store: Confirmatio
         line: guess.line,
         evidence: guess.evidence,
         code: refusal.code,
+        ...(guess.binding ? { binding: guess.binding } : {}),
       },
       // The question's own day, not the write's ten minutes: Yes only
       // re-dispatches the proposal, which meets its own gates when it runs.

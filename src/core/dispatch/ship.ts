@@ -10,6 +10,7 @@
 // this branch and a bot death under a pipeline interrupts a child, never the
 // pipeline. The branch reads the run slice plus the seams only ship needs.
 import type { AgentDef } from "../../agents/registry.js";
+import type { RedispatchConfirmation } from "../confirmations.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
@@ -179,7 +180,7 @@ export interface ShipContext {
   /** The operator's typed starting stage; preflight validates the PR facts. */
   shipEntry?: ShipEntryIntent;
   /** Only a Yes on the stored PR-work question can grant this continuation. */
-  confirmedPrWork?: boolean;
+  confirmedPrWork?: RedispatchConfirmation["binding"];
   /** The validated source of the operator's repository slot. */
   shipRepoSource?: "request" | "attachment" | "thread" | "channel";
   /** The stable generated plan this ended thread is re-issuing. */
@@ -316,7 +317,7 @@ export async function runShipBranch(
       requestText: directives.text,
       messageText: msg.text,
       ...(ctx.shipEntry !== undefined ? { intent: ctx.shipEntry } : {}),
-      ...(ctx.confirmedPrWork ? { confirmedPrWork: true } : {}),
+      ...(ctx.confirmedPrWork ? { confirmedPrWork: ctx.confirmedPrWork } : {}),
       ...(ctx.operator?.binds?.[0]?.workObjective !== undefined
         ? { workObjective: ctx.operator.binds[0].workObjective }
         : {}),
@@ -346,6 +347,7 @@ export async function runShipBranch(
               proposal: { ...msg, text: pre.guess.line },
               line: pre.guess.line,
               evidence: pre.guess.evidence,
+              ...(pre.guess.binding ? { binding: pre.guess.binding } : {}),
             },
           };
     await refuse(refusal, () =>

@@ -62,6 +62,8 @@ export interface RedispatchConfirmation {
   line: string;
   evidence: string;
   code: string;
+  /** Exact PR and objective shown by a Ship work question. */
+  binding?: { kind: "ship_pr_work"; repo: string; pr: number; objective: string };
   expiresAt: number;
 }
 
@@ -193,12 +195,21 @@ function isRunShape(v: Record<string, unknown>): boolean {
 }
 
 function isRedispatchShape(v: Record<string, unknown>): boolean {
+  const binding = v.binding;
   return (
     typeof v.id === "string" &&
     isMessage(v.message) &&
     typeof v.line === "string" &&
     typeof v.evidence === "string" &&
-    typeof v.code === "string"
+    typeof v.code === "string" &&
+    (binding === undefined ||
+      (isRecord(binding) &&
+        binding.kind === "ship_pr_work" &&
+        typeof binding.repo === "string" &&
+        typeof binding.pr === "number" &&
+        Number.isSafeInteger(binding.pr) &&
+        binding.pr > 0 &&
+        typeof binding.objective === "string"))
   );
 }
 

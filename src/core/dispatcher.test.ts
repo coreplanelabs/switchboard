@@ -10698,7 +10698,7 @@ workspaceDir: __WORKDIR__
     expect(offers).toHaveLength(1);
     expect(offers[0]).toMatchObject({
       line: request,
-      question: { text: expect.stringContaining("separate code change") },
+      question: { text: expect.stringContaining("proposed separate change is: fix the failing check") },
     });
     const click = await dispatchClick(deps, {
       kind: "confirm",
@@ -10708,6 +10708,37 @@ workspaceDir: __WORKDIR__
     });
     expect(click).toEqual({ status: "completed" });
     expect(created).toHaveLength(1);
+  });
+
+  it("a PR-work Yes cannot authorize a different objective chosen on redispatch", async () => {
+    const { deps, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, prFromMessage: true });
+    let objective = "fix the first check";
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "ship", shipEntry: "work", workObjective: objective, repo: "acme/api", reason: "separate work" },
+    }));
+    const now = 1_000_000;
+    deps.clock = () => now;
+    deps.confirmations = new InMemoryConfirmationStore({ clock: () => now });
+    const request = `agent:ship review ${PR_URL}; examples: fix the first check, fix the second check`;
+    const f = fakeIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    f.io.offer = vi.fn(async (offer) => void offers.push(offer));
+    await dispatch(deps, msg(request, "slack:UADMIN"), f.io);
+    expect(offers).toHaveLength(1);
+    expect(offers[0]!.question?.text).toContain("fix the first check");
+    objective = "fix the second check";
+    const click = await dispatchClick(deps, {
+      kind: "confirm",
+      id: offers[0]!.id,
+      actor: { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS },
+      io: f.io,
+    });
+    expect(click).toEqual({ status: "refused", refusal: "ship_preflight_pr_work_question", cause: "request" });
+    expect(created).toEqual([]);
+    expect(offers).toHaveLength(2);
+    expect(offers[1]!.question?.text).toContain("fix the second check");
   });
 
   it("an operator-bound ship on a seeded request (`plan <path>.md`) is refused naming `agent:ship`, nothing written — the guard reads operator like route", async () => {

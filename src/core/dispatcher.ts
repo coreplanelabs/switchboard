@@ -32,6 +32,7 @@ import {
 } from "./dispatch/admission.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
 import { actorIdsOf, cancelPending, consumeAndRun, REFUSED_REASON } from "./dispatch/confirm.js";
+import type { RedispatchConfirmation } from "./confirmations.js";
 import {
   postSettledOutcome,
   recordOperatorDecision,
@@ -528,7 +529,7 @@ export interface DispatchOptions {
    *  in a `run_note` ([run-history.md](../../docs/reference/specs/run-history.md) item 2)
    *  — and the click's one drain slot is handed over: this dispatch counts no
    *  second one. Absent for every other request. */
-  redispatch?: { code: string };
+  redispatch?: { code: string; binding?: RedispatchConfirmation["binding"] };
 }
 
 /** How a request ended, for whoever started it (dispatch/outcome.ts): the
@@ -2392,7 +2393,9 @@ export async function dispatch(
         card,
         directives,
         ...(operatorShipEntry !== undefined ? { shipEntry: operatorShipEntry } : {}),
-        ...(opts.redispatch?.code === "ship_preflight_pr_work_question" ? { confirmedPrWork: true } : {}),
+        ...(opts.redispatch?.code === "ship_preflight_pr_work_question" && opts.redispatch.binding
+          ? { confirmedPrWork: opts.redispatch.binding }
+          : {}),
         ...(operatorRepoSource !== undefined ? { shipRepoSource: operatorRepoSource } : {}),
         ...(reissuePlanId !== undefined ? { reissuePlanId } : {}),
         ...(beforeCoordinatorStart !== undefined ? { beforeCoordinatorStart } : {}),
@@ -4363,7 +4366,9 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     // through `dispatch()` whole — the proposal as the requester's own message,
     // the click's drain slot handed over, the question's code on the record.
     const res = await consumeAndRun(deps, { id: click.id, actorIds }, io, ending, trace, (row) =>
-      dispatch(deps, row.message, io, { redispatch: { code: row.code } }),
+      dispatch(deps, row.message, io, {
+        redispatch: { code: row.code, ...(row.binding ? { binding: row.binding } : {}) },
+      }),
     );
     if (res.kind === "redispatched") {
       redispatched = res.outcome;

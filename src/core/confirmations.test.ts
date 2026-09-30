@@ -408,6 +408,17 @@ describe("the offer's words and the stored message", () => {
     expect(
       parsePendingConfirmation({ kind: "redispatch", id: "q1", message, line: "l", evidence: "e", code: "c" }),
     ).toEqual({ kind: "redispatch", id: "q1", message, line: "l", evidence: "e", code: "c" });
+    const prWork = {
+      kind: "redispatch",
+      id: "q2",
+      message,
+      line: "agent:ship fix CI",
+      evidence: "a separate code change",
+      code: "ship_preflight_pr_work_question",
+      binding: { kind: "ship_pr_work", repo: "acme/api", pr: 7, objective: "fix CI" },
+    };
+    expect(parsePendingConfirmation(prWork)).toEqual(prWork);
+    expect(parsePendingConfirmation({ ...prWork, binding: { ...prWork.binding, pr: "7" } })).toBeUndefined();
   });
 });
 

@@ -62,7 +62,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
         intent: "work",
         requestText: `investigate the failing check at ${PR_URL}`,
         workObjective: "investigate the failing check",
-        confirmedPrWork: true,
+        confirmedPrWork: { kind: "ship_pr_work", repo: "acme/api", pr: 7, objective: "investigate the failing check" },
         repoCtx: { repo: "acme/api", pr: 7, prFromMessage: true, ref: "feat/rate-limit", refFromPr: true },
         prFacts: async () => undefined,
       }),
@@ -180,7 +180,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
         requestText: `fix it on ${PR_URL}`,
         workObjective: "fix the failing check",
         requesterWorkText: ["Please fix the failing check."],
-        confirmedPrWork: true,
+        confirmedPrWork: { kind: "ship_pr_work", repo: "acme/api", pr: 7, objective: "fix the failing check" },
         repoCtx: { repo: "acme/api", pr: 7, prFromMessage: true },
         prFacts: async () => openPr(),
       }),
@@ -200,8 +200,30 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     const pending = await shipPreflight(input(fields));
     expect(pending).toMatchObject({ ok: false, refusal: { code: "ship_preflight_pr_work_question" } });
     if (!pending.ok) expect(pending.guess?.line).toBe(requestText);
-    const confirmed = await shipPreflight(input({ ...fields, confirmedPrWork: true }));
+    const confirmed = await shipPreflight(
+      input({
+        ...fields,
+        confirmedPrWork: { kind: "ship_pr_work", repo: "acme/api", pr: 7, objective: "fix the failing check" },
+      }),
+    );
     expect(confirmed).toMatchObject({ ok: true, entry: { repo: "acme/api", base: "main" } });
+    const changedObjective = await shipPreflight(
+      input({
+        ...fields,
+        workObjective: "fix the next failing check",
+        requestText: `${requestText}; fix the next failing check`,
+        confirmedPrWork: { kind: "ship_pr_work", repo: "acme/api", pr: 7, objective: "fix the failing check" },
+      }),
+    );
+    expect(changedObjective).toMatchObject({ ok: false, refusal: { code: "ship_preflight_pr_work_question" } });
+    const changedPr = await shipPreflight(
+      input({
+        ...fields,
+        repoCtx: { repo: "acme/api", pr: 9, prFromMessage: true },
+        confirmedPrWork: { kind: "ship_pr_work", repo: "acme/api", pr: 7, objective: "fix the failing check" },
+      }),
+    );
+    expect(changedPr).toMatchObject({ ok: false, refusal: { code: "ship_preflight_pr_work_question" } });
   });
 
   it("context: a FOREIGN in-message pull request (not the thread's own) beside task text stays context — a fresh entry off the default branch, even when its facts cannot be fetched or its head is a fork", async () => {
