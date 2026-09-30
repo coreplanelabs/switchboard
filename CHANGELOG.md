@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.270.1](https://github.com/coreplanelabs/switchboard/compare/v1.270.0...v1.270.1) (2026-09-30)
+
+
+### Bug fixes
+
+* **agents:** keep budget-ended source answers unfinished ([#2509](https://github.com/coreplanelabs/switchboard/issues/2509)) ([d651763](https://github.com/coreplanelabs/switchboard/commit/d651763f13489bba06160cf1bfdefa7827545426))
+* **dispatcher:** ignore foreign URLs as thread targets ([#2514](https://github.com/coreplanelabs/switchboard/issues/2514)) ([3caa56d](https://github.com/coreplanelabs/switchboard/commit/3caa56df7d5eb68b333c862b5607878e00369457))
+* **dispatcher:** preserve requester targets for thread fixes ([#2512](https://github.com/coreplanelabs/switchboard/issues/2512)) ([be722f9](https://github.com/coreplanelabs/switchboard/commit/be722f9e28b0ae4dba4df7f6c44fe2f82927ec15))
+* **dispatcher:** route natural-language cross-repo PR batches ([#2511](https://github.com/coreplanelabs/switchboard/issues/2511)) ([72df8c0](https://github.com/coreplanelabs/switchboard/commit/72df8c0bf89e56f98c0303169aeaacb9df99c2fa))
+
 ## [1.270.0](https://github.com/coreplanelabs/switchboard/compare/v1.269.0...v1.270.0) (2026-09-30)
 
 
