@@ -64,6 +64,7 @@ import { compoundBrief, type RouteDecided, type RouteModel } from "./dispatch/ro
 import type { ProviderTable } from "./harness/piAi.js";
 import {
   executeOperatorDecision,
+  answeredRepositoryTarget,
   checkpointRequesterMessageTarget,
   isYesAnswer,
   joinedAnswerRequest,
@@ -1167,10 +1168,14 @@ export async function dispatch(
       // have been — mention or not, never reduced to a bare answer. The joined
       // line is what the operator's loop and its floor bind, so the fragment
       // never becomes a request by itself.
-      const pendingQuestion = operatorMode === "on" ? pendingQuestionOf(operatorThread) : undefined;
+      const pendingQuestion = operatorMode === "on" ? pendingQuestionOf(operatorThread, msg.userId) : undefined;
       const joinedAnswer =
         pendingQuestion !== undefined && !(pendingQuestion.proposal !== undefined && isYesAnswer(msg.text))
           ? joinedAnswerRequest(pendingQuestion, msg.text)
+          : undefined;
+      const answeredTarget =
+        joinedAnswer !== undefined && pendingQuestion !== undefined
+          ? answeredRepositoryTarget(msg.userId, pendingQuestion, msg.text)
           : undefined;
       const doorMsg = joinedAnswer !== undefined ? { ...msg, text: joinedAnswer } : msg;
       const threadOwner: OperatorThreadOwner | undefined =
@@ -1208,6 +1213,7 @@ export async function dispatch(
           ...(operatorThread ? { thread: operatorThread } : {}),
           ...(opts.intake ? { intake: opts.intake } : {}),
           ...(threadOwner ? { owner: threadOwner } : {}),
+          ...(answeredTarget ? { answeredTarget } : {}),
         });
         if (event) {
           const repoSource = event.binds?.find((bind) => bind.repoSource !== undefined)?.repoSource;

@@ -8,11 +8,13 @@ import {
   operatorStage,
   bindFromAnswer,
   buildOperatorPrompt,
+  answeredRepositoryTarget,
   checkpointRequesterMessageTarget,
   isOperatorReadTool,
   isYesAnswer,
   joinedAnswerRequest,
   OPERATOR_ASK_TOOL,
+  OPERATOR_ASK_REPO_TOOL,
   OPERATOR_BIND_TOOL,
   OPERATOR_QUESTION_MARKER,
   OPERATOR_READ_TOOLS,
@@ -180,7 +182,7 @@ channels:
       binds: [{ line: "agent:ship ship F0PLAN", repo: "acme/atlas", repoSource: "attachment" }],
     });
   });
-  it("the turn's tools are ask, bind_preset with the projection's presets as the enum, each command's own tool, then the reads — no decide tool and no refusal exists", () => {
+  it("the turn's tools include only applicable typed questions, binds, commands and reads", () => {
     const tools = operatorTools(input());
     const names = tools.map((t) => t.name);
     expect(names).toEqual([
@@ -200,6 +202,73 @@ channels:
     expect(properties.repo.pattern).toBe("^[\\w.-]+/[\\w.-]+$");
     expect(names).not.toContain("decide");
     expect(names.some((n) => n.includes("refus"))).toBe(false);
+    expect(operatorTools(input({ projection: projectionOf(["general", "ship"]) })).map((t) => t.name)).toContain(
+      OPERATOR_ASK_REPO_TOOL,
+    );
+  });
+
+  it("does not offer a typed target question when prior requester targets conflict", () => {
+    const turn = input({
+      projection: projectionOf(["general", "ship"]),
+      requesterId: "slack:UREQUESTER",
+      requesterTarget: { repo: "acme/first", provenance: "two targets", conflict: true },
+    });
+    expect(operatorTools(turn).map((tool) => tool.name)).not.toContain(OPERATOR_ASK_REPO_TOOL);
+    const parsed = parseOperatorTurn(
+      { tool: OPERATOR_ASK_REPO_TOOL, input: { preset: "ship", reason: "which target" } },
+      ctxOf({ requestText: turn.text, presets: ["general", "ship"], requesterRepoConflict: true }),
+    );
+    expect(parsed).toMatchObject({ kind: "violation", violation: expect.stringContaining("conflicting") });
+    const unavailable = input({
+      projection: projectionOf(["general", "ship"]),
+      requesterId: "slack:UREQUESTER",
+      targetStoreUnavailable: true,
+    });
+    expect(operatorTools(unavailable).map((tool) => tool.name)).not.toContain(OPERATOR_ASK_REPO_TOOL);
+    expect(
+      parseOperatorTurn(
+        { tool: OPERATOR_ASK_REPO_TOOL, input: { preset: "ship", reason: "which target" } },
+        ctxOf({ requestText: unavailable.text, presets: ["general", "ship"], targetStoreUnavailable: true }),
+      ),
+    ).toMatchObject({ kind: "violation", violation: expect.stringContaining("unavailable") });
+    expect(
+      parseOperatorTurn(
+        { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/first", reason: "explicit choice" } },
+        ctxOf({
+          requestText: "In acme/first, fix the drift",
+          presets: ["general", "ship"],
+          requesterRepoConflict: true,
+        }),
+      ),
+    ).toMatchObject({ kind: "decision", decision: { binds: [{ repo: "acme/first", repoSource: "request" }] } });
+  });
+
+  it("does not offer a typed target question without durable target storage", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-operator-no-target-store-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
+    );
+    const result = await operatorStage(
+      {
+        config: new ConfigStore(path, join(dir, "overrides.json")),
+        operatorModel: async (prompt) => {
+          expect([prompt.tool, ...(prompt.tools ?? [])].map((tool) => tool.name)).not.toContain(OPERATOR_ASK_REPO_TOOL);
+          return { tool: OPERATOR_ASK_TOOL, input: { text: "Which repository?", reason: "storage unavailable" } };
+        },
+      },
+      {
+        msg: {
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
+          userId: "slack:UREQUESTER",
+          text: "Add hourly drift detection to the infrastructure repo",
+        },
+        mode: "on",
+      },
+    );
+    expect(result).toMatchObject({ outcome: "question" });
   });
 
   it("an owned thread's turn offers no bind_preset tool and only the steer and read commands", () => {
@@ -1616,10 +1685,284 @@ describe("the pending question's free-text answer joins the original ask (issue 
     expect(joinedAnswerRequest({ question: QUESTION, request: REQUEST }, "   ")).toBeUndefined();
   });
 
+  it("a write-target question must select an authorized repository writer", () => {
+    const context = ctxOf({
+      requestText: "Which repository has an example of this hook?",
+      presets: ["general", "ship"],
+    });
+    expect(
+      parseOperatorTurn({ tool: OPERATOR_ASK_REPO_TOOL, input: { reason: "a source repo" } }, context),
+    ).toMatchObject({
+      kind: "violation",
+      violation: expect.stringContaining("write preset"),
+    });
+    expect(
+      parseOperatorTurn(
+        { tool: OPERATOR_ASK_REPO_TOOL, input: { preset: "general", reason: "a source repo" } },
+        context,
+      ),
+    ).toMatchObject({ kind: "violation", violation: expect.stringContaining("write preset") });
+  });
+
+  it("a typed repository question lets its requester's bare answer bind Ship", async () => {
+    const request = "agents:ship add hourly drift detection for the infrastructure repo";
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_ASK_REPO_TOOL, input: { preset: "ship", reason: "the write destination is missing" } },
+      ctxOf({ requestText: request, presets: ["general", "ship"] }),
+    );
+    expect(turn).toMatchObject({
+      kind: "decision",
+      decision: { kind: "question", questionKind: "target_repository", questionWriter: "ship" },
+    });
+    if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
+    const question = renderOperatorQuestion(turn.decision);
+    expect(question).toContain("receive this change");
+    const pending = pendingQuestionOf(
+      [
+        {
+          userId: "slack:UREQUESTER",
+          operator: { ...operatorEventOf("on", { decision: turn.decision, latencyMs: 0, outputTokens: 0 }), request },
+        },
+      ],
+      "slack:UREQUESTER",
+    )!;
+    expect(pending).toMatchObject({ questionWriter: "ship" });
+    expect(
+      pendingQuestionOf(
+        [
+          {
+            userId: "slack:UREQUESTER",
+            operator: { ...operatorEventOf("on", { decision: turn.decision, latencyMs: 0, outputTokens: 0 }), request },
+          },
+        ],
+        "slack:UOTHER",
+      ),
+    ).toBeUndefined();
+    const joined = joinedAnswerRequest(pending, "acme/infrastructure")!;
+    expect(joined).not.toContain("in acme/infrastructure");
+    const provisional = answeredRepositoryTarget("slack:UREQUESTER", pending, "acme/infrastructure");
+    expect(provisional).toMatchObject({
+      actor: "slack:UREQUESTER",
+      target: { repo: "acme/infrastructure", provenance: expect.stringContaining(request) },
+    });
+    const answer = await runOperator(
+      input({
+        text: joined,
+        projection: projectionOf(["general", "ship"]),
+        requesterId: "slack:UREQUESTER",
+        requesterTarget: provisional?.target,
+      }),
+      async () => ({
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested drift change" },
+      }),
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/infrastructure", repoSource: "thread" }],
+    });
+    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
+  });
+
+  it("question wording and another person's reply cannot authorize a write target", async () => {
+    const pending = {
+      question: "Which repository should I update?",
+      request: "Add hourly drift detection",
+      requesterId: "slack:UREQUESTER",
+    };
+    expect(answeredRepositoryTarget("slack:UREQUESTER", pending, "acme/examples")).toBeUndefined();
+    expect(
+      answeredRepositoryTarget("slack:UOTHER", { ...pending, questionKind: "target_repository" }, "acme/examples"),
+    ).toBeUndefined();
+    expect(
+      answeredRepositoryTarget(
+        "slack:UREQUESTER",
+        { ...pending, questionKind: "target_repository" },
+        "acme/examples and another repo",
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each(["Which repository has an example of the hook?", "Which repository is the example repo?"])(
+    "a repository named as a reference does not authorize a write target: %s",
+    async (question) => {
+      const pending = {
+        requesterId: "slack:UREQUESTER",
+        question,
+        request: "Add the hook to my infrastructure repo",
+      };
+      expect(answeredRepositoryTarget("slack:UREQUESTER", pending, "acme/examples")).toBeUndefined();
+      const joined = joinedAnswerRequest(
+        {
+          question,
+          request: "Add the hook to my infrastructure repo",
+        },
+        "acme/examples",
+      );
+      const answer = await runOperator(
+        input({ text: joined, projection: projectionOf(["general", "ship"]) }),
+        async () => ({
+          tool: OPERATOR_BIND_TOOL,
+          input: { preset: "ship", repo: "acme/examples", reason: "use the referenced example" },
+        }),
+      );
+      expect(answer.decision.kind).toBe("non_decision");
+      expect(answer.attempts).toEqual(
+        expect.arrayContaining([expect.objectContaining({ violation: expect.stringContaining("no evidence") })]),
+      );
+    },
+  );
+
+  it("a target answered after a question survives the bounded session tail", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "swb-answered-target-")), "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
+    );
+    const config = new ConfigStore(path, join(path, "../overrides.json"));
+    let checkpoint: { repo: string; provenance: string } | undefined;
+    const runLedger = {
+      readSessionTail: async () => ({
+        transcript: { complete: true as const, turns: 0, messages: [], compactions: [], actors: [] },
+      }),
+      readRequesterTarget: async () => checkpoint ?? null,
+      checkpointRequesterTarget: async (_key: string, _actor: string, target: { repo: string; provenance: string }) => {
+        checkpoint = target;
+        return target;
+      },
+    };
+    const request = "Add hourly drift detection to the infrastructure repo";
+    const pending = {
+      question: "Which repository should receive this change? Reply with owner/name.",
+      questionKind: "target_repository" as const,
+      questionWriter: "ship",
+      requesterId: "slack:UREQUESTER",
+      request,
+    };
+    const joined = joinedAnswerRequest(pending, "acme/infrastructure")!;
+    const answeredTarget = answeredRepositoryTarget("slack:UREQUESTER", pending, "acme/infrastructure");
+    expect(checkpoint).toBeUndefined();
+    const message = (text: string) => ({
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+      userId: "slack:UREQUESTER",
+      text,
+    });
+    const model = async () => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested change" },
+    });
+    const first = await operatorStage(
+      { config, runLedger: runLedger as never, operatorModel: model },
+      { msg: message(joined), mode: "on", answeredTarget },
+    );
+    expect(first).toMatchObject({ outcome: "binds", binds: [{ repo: "acme/infrastructure" }] });
+    expect(checkpoint).toMatchObject({ repo: "acme/infrastructure", provenance: expect.stringContaining(request) });
+    const followUp = await operatorStage(
+      { config, runLedger: runLedger as never, operatorModel: model },
+      { msg: message("Fix it."), mode: "on" },
+    );
+    expect(followUp).toMatchObject({
+      outcome: "binds",
+      binds: [{ repo: "acme/infrastructure", repoSource: "thread" }],
+    });
+  });
+
+  it("refuses a writer when the answered target cannot be saved", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-answered-target-failure-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
+    );
+    const request = "Add hourly drift detection to the infrastructure repo";
+    const answeredTarget = answeredRepositoryTarget(
+      "slack:UREQUESTER",
+      { questionKind: "target_repository", questionWriter: "ship", requesterId: "slack:UREQUESTER", request },
+      "acme/infrastructure",
+    );
+    const result = await operatorStage(
+      {
+        config: new ConfigStore(path, join(dir, "overrides.json")),
+        runLedger: {
+          readSessionTail: async () => ({
+            transcript: { complete: true as const, turns: 0, messages: [], compactions: [], actors: [] },
+          }),
+          readRequesterTarget: async () => null,
+          checkpointRequesterTarget: async () => {
+            throw new Error("storage failed");
+          },
+        },
+        operatorModel: async () => ({
+          tool: OPERATOR_BIND_TOOL,
+          input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested change" },
+        }),
+      },
+      {
+        msg: {
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
+          userId: "slack:UREQUESTER",
+          text: `${request} — Which repository?: acme/infrastructure`,
+        },
+        mode: "on",
+        answeredTarget,
+      },
+    );
+    expect(result).toMatchObject({ outcome: "refusal", reason: "target_store_unavailable" });
+  });
+
+  it("refuses a different writer than the one saved with the target question", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-answered-target-writer-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
+    );
+    const checkpoint = vi.fn(
+      async (_key: string, _actor: string, target: { repo: string; provenance: string }) => target,
+    );
+    const request = "Add hourly drift detection to the infrastructure repo";
+    const answeredTarget = answeredRepositoryTarget(
+      "slack:UREQUESTER",
+      { questionKind: "target_repository", questionWriter: "coding", requesterId: "slack:UREQUESTER", request },
+      "acme/infrastructure",
+    );
+    const result = await operatorStage(
+      {
+        config: new ConfigStore(path, join(dir, "overrides.json")),
+        runLedger: {
+          readSessionTail: async () => ({
+            transcript: { complete: true as const, turns: 0, messages: [], compactions: [], actors: [] },
+          }),
+          readRequesterTarget: async () => null,
+          checkpointRequesterTarget: checkpoint,
+        },
+        operatorModel: async () => ({
+          tool: OPERATOR_BIND_TOOL,
+          input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested change" },
+        }),
+      },
+      {
+        msg: {
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
+          userId: "slack:UREQUESTER",
+          text: `${request} — Which repository?: acme/infrastructure`,
+        },
+        mode: "on",
+        answeredTarget,
+      },
+    );
+    expect(result).toMatchObject({ outcome: "refusal", reason: "target_writer_mismatch" });
+    expect(checkpoint).not.toHaveBeenCalled();
+  });
+
   it("the prompt's rules bind a named-repo write ask instead of asking, and hold a question's proposal to a line that would do the work", () => {
     const prompt = buildOperatorPrompt(input());
     expect(prompt.system).toContain("A write ask in a named or inherited repository binds the write preset");
     expect(prompt.system).toContain("a question's proposal must be a line that would do the asked work");
+    expect(prompt.system).toContain("When a requested change has no grounded repository, use `ask_repository_target`");
   });
 
   it("a pending question rides the user turn with the join rule — the marker line with a proposal, the pending sentence without one", () => {

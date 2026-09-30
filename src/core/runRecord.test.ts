@@ -18,6 +18,7 @@ import {
   matchesVisibility,
   normalizeDiagnosis,
   normalizeStored,
+  operatorOfEvents,
   prOfEvents,
   pushedBranchesOf,
   pushedHeadsOf,
@@ -62,6 +63,26 @@ function record(over: Partial<RunRecord> = {}): RunRecord {
     ...over,
   };
 }
+
+it("a typed repository question survives the event-to-record projection and JSON storage", () => {
+  const event: RunEvent = {
+    type: "operator",
+    mode: "on",
+    outcome: "question",
+    reason: "missing write target",
+    question: "Which repository should receive this change? Reply with owner/name.",
+    questionKind: "target_repository",
+    questionWriter: "ship",
+    request: "Add hourly drift detection",
+  };
+  const stored = JSON.parse(JSON.stringify(record({ events: [event], operator: operatorOfEvents([event]) })));
+  expect(isRunRecord(stored)).toBe(true);
+  expect(stored.operator).toMatchObject({
+    questionKind: "target_repository",
+    questionWriter: "ship",
+    request: "Add hourly drift detection",
+  });
+});
 
 function item(id: string, finishedAt: number, bytes?: number): RunListItem {
   const { events: _events, ...rest } = record({ id, finishedAt });

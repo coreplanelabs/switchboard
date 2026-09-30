@@ -495,6 +495,8 @@ export interface RunOperatorDecision {
     confirmed?: true;
   }[];
   question?: string;
+  questionKind?: "target_repository";
+  questionWriter?: string;
   /** A question's proposed line — what the next turn's "yes" binds. */
   proposal?: string;
   /** A question's original ask — what the person's next words join back onto
@@ -542,6 +544,8 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
         }
       : {}),
     ...(e.question !== undefined ? { question: e.question } : {}),
+    ...(e.questionKind !== undefined ? { questionKind: e.questionKind } : {}),
+    ...(e.questionWriter !== undefined ? { questionWriter: e.questionWriter } : {}),
     ...(e.proposal !== undefined ? { proposal: e.proposal } : {}),
     ...(e.request !== undefined ? { request: e.request } : {}),
     ...(e.refusalCause !== undefined ? { refusalCause: e.refusalCause } : {}),

@@ -22796,6 +22796,88 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(events.find((e) => e.type === "operator")).toMatchObject({ outcome: "binds" });
   });
 
+  it("on: a typed target answer stays provisional when the operator binds a read", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    const request = "Which repository has an example of the drift hook?";
+    const question = "Which repository should receive this change? Reply with owner/name.";
+    const pending = [
+      {
+        id: "prev",
+        startedAt: 0,
+        finished: true,
+        eventCount: 2,
+        userId: "slack:UADMIN",
+        operator: {
+          mode: "on",
+          outcome: "question",
+          reason: "missing target",
+          questionKind: "target_repository",
+          questionWriter: "ship",
+          question,
+          request,
+        },
+      },
+    ] as RunView[];
+    let target: { repo: string; provenance: string } | null = null;
+    vi.spyOn(deps.runLedger, "readRequesterTarget").mockImplementation(async () => target);
+    const checkpoint = vi
+      .spyOn(deps.runLedger, "checkpointRequesterTarget")
+      .mockImplementation(async (_key, _actor, next) => {
+        target = next;
+        return next;
+      });
+    const joined = `${request} — ${question}: acme/examples`;
+    const operator = decides({ binds: [{ line: `agent:general ${joined}`, repo: "acme/examples" }] });
+    deps.operatorModel = operator;
+    await dispatch(deps, msg("acme/examples", "slack:UADMIN"), fakeIO().io, { thread: pending });
+    expect(checkpoint).not.toHaveBeenCalled();
+    expect(target).toBeNull();
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      outcome: "binds",
+      binds: [{ repo: "acme/examples", repoSource: "thread" }],
+    });
+  });
+
+  it("on: a typed target answer is saved before the operator starts its selected writer", async () => {
+    const { deps } = operatorDeps(ON_YAML);
+    const request = "Add hourly drift detection to the infrastructure repo";
+    const question = "Which repository should receive this change? Reply with owner/name.";
+    const pending = [
+      {
+        id: "prev",
+        startedAt: 0,
+        finished: true,
+        eventCount: 2,
+        userId: "slack:UADMIN",
+        operator: {
+          mode: "on",
+          outcome: "question",
+          reason: "missing target",
+          questionKind: "target_repository",
+          questionWriter: "ship",
+          question,
+          request,
+        },
+      },
+    ] as RunView[];
+    let target: { repo: string; provenance: string } | null = null;
+    vi.spyOn(deps.runLedger, "readRequesterTarget").mockImplementation(async () => target);
+    const checkpoint = vi
+      .spyOn(deps.runLedger, "checkpointRequesterTarget")
+      .mockImplementation(async (_key, _actor, next) => {
+        target = next;
+        return next;
+      });
+    const joined = `${request} — ${question}: acme/infrastructure`;
+    deps.operatorModel = decides({ binds: [{ line: `agent:ship ${joined}`, repo: "acme/infrastructure" }] });
+    await dispatch(deps, msg("acme/infrastructure", "slack:UADMIN"), fakeIO().io, { thread: pending });
+    expect(checkpoint).toHaveBeenCalledWith(
+      expect.any(String),
+      "slack:UADMIN",
+      expect.objectContaining({ repo: "acme/infrastructure", provenance: expect.stringContaining(request) }),
+    );
+  });
+
   it("on: a pending question's no-call answer is re-asked once, then the door binds general on the joined ask without a reader hand-off (issue 2046)", async () => {
     const FALLBACK_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
     const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);

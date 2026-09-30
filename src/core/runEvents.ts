@@ -1156,6 +1156,10 @@ export type RunEvent =
         confirmed?: true;
       }>;
       question?: string;
+      /** A typed write-target question; only the original requester may answer with a bare slug. */
+      questionKind?: "target_repository";
+      /** The selected repository writer the answer may start. */
+      questionWriter?: string;
       /** A question's proposed line, redacted and cut like the receipt — what
        *  the next turn's "yes" binds (`bindFromAnswer`). */
       proposal?: string;
