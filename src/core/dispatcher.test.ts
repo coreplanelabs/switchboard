@@ -10595,8 +10595,151 @@ workspaceDir: __WORKDIR__
   const shipOperator = (request: string) =>
     vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", request, reason: "the ask" },
+      input: { preset: "ship", shipEntry: "work", request, reason: "the ask" },
     }));
+
+  it("an explicit Ship plan request keeps its runner grant after the operator binds the plan stage", async () => {
+    const { deps, instances } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.githubApi = new InMemoryGithubApi({
+      "acme/api": { files: { "docs/plans/fixture.md": "### U10. First unit\n- **Dependencies**: none\n" } },
+    });
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "ship", shipEntry: "plan", repo: "acme/api", reason: "the explicit plan" },
+    }));
+    deps.runRegistry = new RunRegistry({ genId: () => "run-ship-explicit-plan", genToken: () => "tok" });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:ship in acme/api: plan docs/plans/fixture.md", "slack:UADMIN"), io);
+    const { instance } = await handed(instances, "run-ship-explicit-plan");
+    expect(instance).toMatchObject({ plan: { id: "fixture", path: "docs/plans/fixture.md" }, merge: "runner" });
+  });
+
+  it("an explicit Ship review request uses the operator's review entry and starts at review on the verified PR", async () => {
+    for (const request of [`agent:ship review ${PR_URL}`, `agents:ship review ${PR_URL}`]) {
+      const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
+      deps.resolveRepoContext = () => ({
+        repo: "acme/api",
+        pr: 7,
+        prFromMessage: true,
+        headSha: HEAD_A,
+        baseRef: "main",
+      });
+      deps.fetchPrFacts = vi.fn(async () => openBotPr());
+      deps.operatorModel = vi.fn<RouteModel>(async () => ({
+        tool: "bind_preset",
+        input: { preset: "ship", shipEntry: "review", repo: "acme/api", reason: "review the named PR" },
+      }));
+      deps.runRegistry = new RunRegistry({ genId: () => "run-ship-review-entry", genToken: () => "tok" });
+      const { io } = fakeIO();
+      await dispatch(deps, msg(request, "slack:UADMIN"), io);
+      expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+      expect(created).toHaveLength(1);
+      const { unit } = await handed(instances, "run-ship-review-entry");
+      expect(unit).toMatchObject({ resume: { pr: 7, headSha: HEAD_A } });
+    }
+  });
+
+  it("an explicit Ship review request fails closed if the operator binds another preset", async () => {
+    const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "general", reason: "uncertain" },
+    }));
+    deps.runRegistry = new RunRegistry({ genId: () => "run-ship-no-stage", genToken: () => "tok" });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(`agent:ship review ${PR_URL}`, "slack:UADMIN"), io);
+    expect(replies.join("\n")).toContain("nothing started");
+    expect(created).toEqual([]);
+    expect((await handed(instances, "run-ship-no-stage")).instance).toBeNull();
+  });
+
+  it("an explicit Ship review request fails closed when the operator returns no stage", async () => {
+    const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+      headSha: HEAD_A,
+      baseRef: "main",
+    });
+    deps.fetchPrFacts = vi.fn(async () => openBotPr());
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({ tool: "refuse", input: { text: "invented refusal" } }));
+    deps.runRegistry = new RunRegistry({ genId: () => "run-ship-no-decision", genToken: () => "tok" });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(`agent:ship review ${PR_URL}`, "slack:UADMIN"), io);
+    expect(replies.join("\n")).toContain("I couldn't bind this Ship request");
+    expect(created).toEqual([]);
+    expect((await handed(instances, "run-ship-no-decision")).instance).toBeNull();
+  });
+
+  it("PR-citing Ship work waits for the requester's Yes before round zero", async () => {
+    const { deps, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, prFromMessage: true });
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: {
+        preset: "ship",
+        shipEntry: "work",
+        workObjective: "fix the failing check",
+        repo: "acme/api",
+        reason: "a separate change",
+      },
+    }));
+    const now = 1_000_000;
+    deps.clock = () => now;
+    const store = new InMemoryConfirmationStore({ clock: () => now });
+    deps.confirmations = store;
+    const request = `agent:ship review ${PR_URL}; example: \`fix the failing check\``;
+    const f = fakeIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    f.io.offer = vi.fn(async (offer) => void offers.push(offer));
+    await dispatch(deps, msg(request, "slack:UADMIN"), f.io);
+    expect(created).toEqual([]);
+    expect(offers).toHaveLength(1);
+    expect(offers[0]).toMatchObject({
+      line: request,
+      question: { text: expect.stringContaining("proposed separate change is: fix the failing check") },
+    });
+    const click = await dispatchClick(deps, {
+      kind: "confirm",
+      id: offers[0]!.id,
+      actor: { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS },
+      io: fakeIO().io,
+    });
+    expect(click).toEqual({ status: "completed" });
+    expect(created).toHaveLength(1);
+  });
+
+  it("a PR-work Yes cannot authorize a different objective chosen on redispatch", async () => {
+    const { deps, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, prFromMessage: true });
+    let objective = "fix the first check";
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "ship", shipEntry: "work", workObjective: objective, repo: "acme/api", reason: "separate work" },
+    }));
+    const now = 1_000_000;
+    deps.clock = () => now;
+    deps.confirmations = new InMemoryConfirmationStore({ clock: () => now });
+    const request = `agent:ship review ${PR_URL}; examples: fix the first check, fix the second check`;
+    const f = fakeIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    f.io.offer = vi.fn(async (offer) => void offers.push(offer));
+    await dispatch(deps, msg(request, "slack:UADMIN"), f.io);
+    expect(offers).toHaveLength(1);
+    expect(offers[0]!.question?.text).toContain("fix the first check");
+    objective = "fix the second check";
+    const click = await dispatchClick(deps, {
+      kind: "confirm",
+      id: offers[0]!.id,
+      actor: { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS },
+      io: f.io,
+    });
+    expect(click).toEqual({ status: "refused", refusal: "ship_preflight_pr_work_question", cause: "request" });
+    expect(created).toEqual([]);
+    expect(offers).toHaveLength(2);
+    expect(offers[1]!.question?.text).toContain("fix the second check");
+  });
 
   it("an operator-bound ship on a seeded request (`plan <path>.md`) is refused naming `agent:ship`, nothing written — the guard reads operator like route", async () => {
     const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
@@ -10646,7 +10789,10 @@ workspaceDir: __WORKDIR__
     deps.operatorModel = vi.fn<RouteModel>(async (prompt) => {
       expect(prompt.user).toContain("Release api-v3.39.0 changed the dashboard");
       expect(prompt.user).toContain("Onboarded repository candidates: `acme/api`");
-      return { tool: "bind_preset", input: { preset: "ship", repo: "acme/api", reason: "the attached plan" } };
+      return {
+        tool: "bind_preset",
+        input: { preset: "ship", shipEntry: "work", repo: "acme/api", reason: "the attached plan" },
+      };
     });
     deps.runRegistry = new RunRegistry({ genId: () => "run-ship-file", genToken: () => "tok" });
     const { io } = fakeIO();
@@ -19879,7 +20025,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const s = await repeatedEndedPrSetup();
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", reason: "continue the prior work" },
+      input: { preset: "ship", shipEntry: "work", reason: "continue the prior work" },
     }));
     const { io, replies } = fakeIO();
     await dispatch(s.deps, msg("continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
@@ -20002,7 +20148,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
   it("an exact-PR non-review decision after the round cap cannot replay the ledger or start a writer", async () => {
     for (const answer of [
       { tool: mcpToolName("runs.findings"), input: { target: "acme/api#7", reason: "show the findings" } },
-      { tool: "bind_preset", input: { preset: "ship", reason: "fix the findings" } },
+      { tool: "bind_preset", input: { preset: "ship", shipEntry: "work", reason: "fix the findings" } },
     ]) {
       const s = await endedPrContinuationSetup();
       const unit = {
@@ -20078,7 +20224,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     ]);
     expect(s.deps.fetchPrFacts).toHaveBeenCalledExactlyOnceWith({ repo: "acme/api", number: 7 });
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
     expect(s.deps.invoked).toEqual([]);
   });
 
@@ -20107,7 +20253,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
     ]);
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
     expect(s.deps.invoked).toEqual([]);
   });
 
@@ -20134,7 +20280,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
     ]);
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
     expect(s.deps.invoked).toEqual([]);
   });
 
@@ -20209,7 +20355,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.deps.fetchPrFacts).toHaveBeenCalledTimes(2);
     expect(s.deps.fetchPrFacts).toHaveBeenCalledWith({ repo: "acme/api", number: 7 });
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).toHaveBeenCalledOnce();
+    expect(s.operator).toHaveBeenCalledTimes(2);
   });
 
   it("an exact PR reply ignores a prefetched short page and reaches its original unit", async () => {
@@ -20297,7 +20443,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
     ]);
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
   });
 
   it("an exact PR reply refuses an ended owner when a newer unfinished unit owns the same PR", async () => {
@@ -20461,7 +20607,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const task = "Please fix PR #7's title so it passes the repository's title check.";
     const operator = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", request: task, reason: "new work on the existing pull request" },
+      input: { preset: "ship", shipEntry: "work", request: task, reason: "new work on the existing pull request" },
     }));
     s.deps.operatorModel = operator;
     // A hosted ship record carries no PR field: the completed unit does.
@@ -20659,7 +20805,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const task = "Please fix this PR's title.";
     s.deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", request: task, reason: "new work on the latest pull request" },
+      input: { preset: "ship", shipEntry: "work", request: task, reason: "new work on the latest pull request" },
     }));
     s.deps.resolveRepoContext = vi.fn((_msg, _history, records) => {
       expect(records).toMatchObject({ pr: { repo: "acme/api", number: 8 } });
@@ -22328,7 +22474,12 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   const parseOnlyCommands = () => (parseRegistry ??= operatorDeps(ON_YAML).deps.commands!);
   const decides = (input: {
     reason?: string;
-    binds?: { line: string; reason?: string; repo?: string }[];
+    binds?: {
+      line: string;
+      reason?: string;
+      repo?: string;
+      shipEntry?: "work" | "work_from_thread" | "review" | "plan";
+    }[];
     question?: { text: string; proposal?: string };
   }) =>
     vi.fn<RouteModel>(async () => {
@@ -22352,6 +22503,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
               request: bind.line,
               reason: bind.reason ?? "why",
               ...(bind.repo ? { repo: bind.repo } : {}),
+              ...(bind.shipEntry ? { shipEntry: bind.shipEntry } : {}),
             },
           };
         throw new Error(`the scripted line does not parse: ${bind.line}`);
@@ -22917,7 +23069,9 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         return next;
       });
     const joined = `${request} — ${question}: acme/infrastructure`;
-    deps.operatorModel = decides({ binds: [{ line: `agent:ship ${joined}`, repo: "acme/infrastructure" }] });
+    deps.operatorModel = decides({
+      binds: [{ line: `agent:ship ${joined}`, repo: "acme/infrastructure", shipEntry: "work" }],
+    });
     await dispatch(deps, msg("acme/infrastructure", "slack:UADMIN"), fakeIO().io, { thread: pending });
     expect(checkpoint).toHaveBeenCalledWith(
       expect.any(String),

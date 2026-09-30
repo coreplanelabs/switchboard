@@ -10,6 +10,7 @@
 // this branch and a bot death under a pipeline interrupts a child, never the
 // pipeline. The branch reads the run slice plus the seams only ship needs.
 import type { AgentDef } from "../../agents/registry.js";
+import type { PrWorkBinding } from "../ship/prWorkBinding.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
@@ -46,7 +47,7 @@ import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../
 import { parseUnitKey } from "../coordinator/contract.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../coordinator/instancesRoute.js";
 import { resolveAddressSeverity, resolveGrant, resolveIdleDays, resolveShipCaps } from "../shipPipeline.js";
-import { shipPreflight } from "../ship/preflight.js";
+import { shipPreflight, type ShipEntryIntent } from "../ship/preflight.js";
 import { redactSecrets, type AgentSource } from "../runEvents.js";
 import type { LiveThread } from "../threadAdmission.js";
 import type { RouteDecided } from "./route.js";
@@ -176,6 +177,12 @@ export interface ShipContext {
    *  runner's `round` route redraws it from the boundaries the machine reports. */
   card: StatusHandle;
   directives: RequestDirectives;
+  /** The operator's typed starting stage; preflight validates the PR facts. */
+  shipEntry?: ShipEntryIntent;
+  /** Only a Yes on the stored PR-work question can grant this continuation. */
+  confirmedPrWork?: PrWorkBinding;
+  /** The validated source of the operator's repository slot. */
+  shipRepoSource?: "request" | "attachment" | "thread" | "channel";
   /** The stable generated plan this ended thread is re-issuing. */
   reissuePlanId?: string;
   /** Deferred legacy repair and ownership reservation, after every hand-off
@@ -308,6 +315,15 @@ export async function runShipBranch(
       // channel is that it can — never a prefix list.
       canOpenThread: io.openThread !== undefined,
       requestText: directives.text,
+      messageText: msg.text,
+      ...(ctx.shipEntry !== undefined ? { intent: ctx.shipEntry } : {}),
+      ...(ctx.confirmedPrWork ? { confirmedPrWork: ctx.confirmedPrWork } : {}),
+      ...(ctx.operator?.binds?.[0]?.workObjective !== undefined
+        ? { workObjective: ctx.operator.binds[0].workObjective }
+        : {}),
+      requesterWorkText: ctx.history
+        .filter((turn) => turn.role === "user" && turn.user === msg.userId)
+        .map((turn) => turn.text),
       repoCtx,
       ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates } : {}),
       gates: {
@@ -331,6 +347,7 @@ export async function runShipBranch(
               proposal: { ...msg, text: pre.guess.line },
               line: pre.guess.line,
               evidence: pre.guess.evidence,
+              ...(pre.guess.binding ? { binding: pre.guess.binding } : {}),
             },
           };
     await refuse(refusal, () =>
@@ -642,8 +659,7 @@ export async function runShipBranch(
     // neither assistant text nor a foreign turn can select a work target.
     const requiresThreadEvidence =
       ctx.agentSource === "operator" &&
-      ctx.operator?.binds?.some((bind) => bind.repoSource === "thread") === true &&
-      /^(?:please\s+)?fix\s+(?:it|this)[.!]?$/i.test(directives.text.trim());
+      (ctx.shipEntry === "work_from_thread" || (ctx.shipEntry === "work" && ctx.shipRepoSource === "thread"));
     let threadEvidence: string | undefined;
     if (requiresThreadEvidence && repoCtx.repo !== undefined && deps.runLedger !== undefined) {
       try {
@@ -680,6 +696,7 @@ export async function runShipBranch(
             {
               entry,
               requestText: directives.text,
+              ...(ctx.shipEntry !== undefined ? { intent: ctx.shipEntry } : {}),
               ...(threadEvidence !== undefined ? { threadEvidence } : {}),
               ...(requiresThreadEvidence ? { requiresThreadEvidence: true } : {}),
               ...(ctx.reissuePlanId !== undefined ? { reissuePlanId: ctx.reissuePlanId } : {}),

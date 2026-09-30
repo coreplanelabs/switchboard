@@ -8,6 +8,7 @@ import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { nearMatch } from "../nearMatch.js";
 import { resolveBaseRef, type PullRequestFacts, type RepoShipInfo } from "../../execution/githubPulls.js";
 import type { RepoContext } from "../repoContext.js";
+import type { PrWorkBinding } from "./prWorkBinding.js";
 import { parseShipPlanRequest, isUnitBranch } from "./coordinator.js";
 
 // ---- naming -------------------------------------------------------
@@ -69,6 +70,8 @@ export function shipUnitText(requestText: string, repo: string): string {
 /** What the preflight decided the pipeline starts FROM. */
 export interface ShipEntry {
   repo: string;
+  /** The author explicitly selected a seeded plan through the Ship door. */
+  plan?: true;
   /** The pipeline branch, set only when the entry resumes or adopts (the PR's
    *  own head branch). A fresh entry names none: the hand-off is the one branch
    *  namer — the generated plan's `plan/<id>/u1` (agent-ship item 3). */
@@ -99,8 +102,13 @@ export type ShipPreflightResult =
       reply: string;
       refusal: Refusal;
       /** A runnable redispatch line for record 0054's Yes/No question. */
-      guess?: { line: string; evidence: string };
+      guess?: { line: string; evidence: string; binding?: PrWorkBinding };
     };
+
+/** The operator's starting stage for a Ship request. This is a decision about
+ * the requested work, not permission or a PR identity; preflight still checks
+ * the resolved target and its current GitHub facts. */
+export type ShipEntryIntent = "work" | "work_from_thread" | "review" | "plan";
 
 export interface ShipPreflightInput {
   /** Platform-namespaced channel id (AGENTS.md invariant 4) — names the
@@ -115,6 +123,16 @@ export interface ShipPreflightInput {
   canOpenThread: boolean;
   /** Directive-stripped request text. */
   requestText: string;
+  /** Original authored message for a confirmation that re-enters the door. */
+  messageText?: string;
+  /** The operator's typed starting stage. Legacy typed ingress may omit it. */
+  intent?: ShipEntryIntent;
+  /** The operator's separate code-change objective when work cites a PR. */
+  workObjective?: string;
+  /** Earlier actor-stamped turns from this requester, never assistant prose. */
+  requesterWorkText?: readonly string[];
+  /** A Yes on this exact PR and objective, carried by the confirmation store. */
+  confirmedPrWork?: PrWorkBinding;
   repoCtx: Pick<
     RepoContext,
     "repo" | "pr" | "prFromMessage" | "prIsThreadOwn" | "ref" | "refFromPr" | "baseRef" | "headSha" | "prUnpostable"
@@ -242,12 +260,69 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   const info = await input.repoInfo(repo).catch(() => undefined);
   // Entry checks (spec item 10). The thread→PR inference reads USER turns only
   // (repoContext.ts), so `repoCtx.pr` set means a user turn named the PR.
-  const task = shipTaskText(input.requestText, repo);
+  // A bare PR reference has no new task even if the operator chose `work`.
+  // Keep the referenced URL in real work requests; this check only prevents
+  // an empty request from taking the fresh-coding path.
+  const barePrReference = repoCtx.prFromMessage === true && shipTaskText(input.requestText, repo) === "";
+  // A cited PR plus an alleged work stage can mean either review or a new
+  // change. The operator must name the separate change before round zero may
+  // code; the raw request remains intact as the unit's brief.
+  const workCitesPr =
+    (input.intent === "work" || input.intent === "work_from_thread") && repoCtx.prFromMessage === true;
+  const objective = input.workObjective?.trim();
+  const authoredTurns =
+    input.intent === "work_from_thread" ? [input.requestText, ...(input.requesterWorkText ?? [])] : [input.requestText];
+  const objectiveIsAuthored =
+    objective !== undefined && objective !== "" && authoredTurns.some((turn) => turn.includes(objective));
+  if (workCitesPr && !barePrReference && !objectiveIsAuthored)
+    return refuse(
+      "ship_preflight_no_task",
+      "work objective missing beside pull request",
+      "not started (work unclear)",
+      `🚫 I couldn't tell what new change you want alongside ${repo}#${repoCtx.pr}. Ask Ship to review that PR, or name the separate change.`,
+    );
+  const confirmedPrWork = input.confirmedPrWork;
+  if (
+    workCitesPr &&
+    !barePrReference &&
+    (confirmedPrWork?.kind !== "ship_pr_work" ||
+      confirmedPrWork.repo !== repo ||
+      confirmedPrWork.pr !== repoCtx.pr ||
+      confirmedPrWork.objective !== objective)
+  )
+    return {
+      ...refuse(
+        "ship_preflight_pr_work_question",
+        "PR cited beside new work",
+        "not started (confirm separate work)",
+        `🚫 This request cites ${repo}#${repoCtx.pr}. The proposed separate change is: ${objective}. Do you want Ship to start it?`,
+      ),
+      guess: {
+        line: input.messageText ?? input.requestText,
+        evidence: `This would start coding work separate from reviewing ${repo}#${repoCtx.pr}.`,
+        binding: { kind: "ship_pr_work", repo, pr: repoCtx.pr!, objective: objective! },
+      },
+    };
+  const task =
+    input.intent === "review" || barePrReference
+      ? ""
+      : input.intent === "work" || input.intent === "work_from_thread"
+        ? input.requestText.trim()
+        : shipTaskText(input.requestText, repo);
   // A seeded plan request keeps the plan graph's own `plan/<id>/u<n>` branches:
   // a pull request in its thread is context, never adopted — so its facts are
   // never needed, and a thread pull request that could not be fetched refuses
   // nothing on the seeded path.
-  const seeded = parseShipPlanRequest(task) !== undefined;
+  const seeded =
+    input.intent === "plan" ||
+    (input.intent === undefined && parseShipPlanRequest(shipTaskText(input.requestText, repo)) !== undefined);
+  if (input.intent === "plan" && parseShipPlanRequest(task) === undefined)
+    return refuse(
+      "ship_preflight_no_task",
+      "invalid plan request",
+      "not started (invalid plan request)",
+      `🚫 Name the seeded plan as \`agent:ship in ${repo}: plan <path>.md\`.`,
+    );
   if (!seeded && repoCtx.prUnpostable?.reason === "unreachable") {
     return refuse(
       "ship_preflight_pr_unreachable",
@@ -391,7 +466,9 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       "ship_preflight_no_task",
       "no task",
       "not started (no task)",
-      `🚫 Nothing to ship: give ship a task (\`agent:ship in ${repo}: <task>\`), or name an open ship PR by URL to resume its review loop.`,
+      input.intent === "review"
+        ? `🚫 Name the open pull request in ${repo} whose review loop Ship should run.`
+        : `🚫 Nothing to ship: give ship a task (\`agent:ship in ${repo}: <task>\`), or name an open ship PR by URL to resume its review loop.`,
     );
   }
   // The round-0 base is a typed ref token or the repo default — never
@@ -421,11 +498,20 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
     if (exists === false)
       return {
         ok: true,
-        entry: { repo, base: info?.defaultBranch, baseFallback: { requested: ref } },
+        entry: {
+          repo,
+          base: info?.defaultBranch,
+          baseFallback: { requested: ref },
+          ...(input.intent === "plan" ? { plan: true } : {}),
+        },
       };
   }
   return {
     ok: true,
-    entry: { repo, base: resolveBaseRef([ref], info?.defaultBranch) },
+    entry: {
+      repo,
+      base: resolveBaseRef([ref], info?.defaultBranch),
+      ...(input.intent === "plan" ? { plan: true } : {}),
+    },
   };
 }

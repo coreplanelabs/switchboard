@@ -472,7 +472,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       // sentence when the publication fence is rebuilding.
       "publication_ownership_unknown",
       // (record 0054): each producer's own test proves its sentences
-      // byte-identical — the ship preflight's ten (preflight.test.ts), the
+      // byte-identical — the ship preflight's eleven (preflight.test.ts), the
       // plan hand-off's fifteen (handOff.test.ts), the resolve parser
       // (resolve's dispatcher coverage), the typed commands' `chatErrorLine`
       // (commandChat.test.ts), and the resident attach errors
@@ -486,6 +486,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       "ship_preflight_head_unknown",
       "ship_preflight_closed_resume",
       "ship_preflight_no_task",
+      "ship_preflight_pr_work_question",
       "ship_preflight_base_missing",
       "plan_base_unknown",
       "plan_routed_seed",
@@ -609,6 +610,23 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
         "one edit from `acme/infrastructure`, which is onboarded",
     ]);
     expect(offer).not.toHaveBeenCalled();
+  });
+
+  it("a PR-work confirmation cannot be bypassed by retyping its line where no button is available", async () => {
+    const { io, replies } = capture();
+    const proposal = {
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      threadKey: "slack:CX:1.0",
+      text: "agent:ship fix it on PR #7",
+    };
+    await renderRefusal(
+      refusalOf("ship_preflight_pr_work_question", "Confirm separate coding work?", {
+        guess: { proposal, line: proposal.text, evidence: "The cited PR is context." },
+      }),
+      io,
+    );
+    expect(replies).toEqual(["Confirm separate coding work? Confirmation is unavailable right now; nothing started."]);
   });
 });
 

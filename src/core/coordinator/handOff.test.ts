@@ -350,6 +350,18 @@ describe("main-agent work hand-off", () => {
 });
 
 describe("handOffToCoordinator — the ship request as a plan runner instance (item 16)", () => {
+  it("a typed work entry keeps a URL as the generated task instead of stripping it from a probe", async () => {
+    const h = harness();
+    const url = "https://github.com/acme/api/pull/7";
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({ requestText: url, intent: "work", entry: { repo: "acme/api", base: "main" } }),
+    );
+    expect(out.status).toBe("completed");
+    const row = (await h.instances.listUnits(h.created[0]!))[0]!;
+    expect(row.title).toBe(url);
+  });
+
   it("refuses a terse inherited target when its durable source turns cannot be read again", async () => {
     const h = harness();
     const out = await handOffToCoordinator(

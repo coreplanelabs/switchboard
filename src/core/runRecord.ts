@@ -492,6 +492,8 @@ export interface RunOperatorDecision {
     model?: string;
     repo?: string;
     repoSource?: "request" | "attachment" | "thread" | "channel";
+    shipEntry?: "work" | "work_from_thread" | "review" | "plan";
+    workObjective?: string;
     confirmed?: true;
   }[];
   question?: string;
@@ -539,6 +541,7 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
             ...(b.model !== undefined ? { model: b.model } : {}),
             ...(b.repo !== undefined ? { repo: b.repo } : {}),
             ...(b.repoSource !== undefined ? { repoSource: b.repoSource } : {}),
+            ...(b.shipEntry !== undefined ? { shipEntry: b.shipEntry } : {}),
             ...(b.confirmed ? { confirmed: true as const } : {}),
           })),
         }

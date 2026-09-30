@@ -138,10 +138,11 @@ const ENV_DUMP =
  *  bearer, while no App token enters the workspace. */
 const CREDENTIAL_VAR =
   /\$\{?[A-Z][A-Z0-9_]*(_API_KEY|_TOKEN|_SECRET|_BEARER|_PASSWORD)\b|printenv\s+[A-Z][A-Z0-9_]*(_API_KEY|_TOKEN|_SECRET|_BEARER|_PASSWORD)\b/;
-/** Merging or approving a pull request, by the GitHub CLI or the REST API —
- *  the ship pipeline's rule for every coding child, and the review agent's
- *  read-only rule. */
-const MERGE_OR_APPROVE = /\bgh\s+pr\s+(merge|review)\b|\/pulls\/\d+\/(merge|reviews)\b/;
+/** The CLI review and merge verbs cross the runner-owned verdict and merge
+ *  seams. A REST endpoint is protected only on a write: reading reviews is
+ *  ordinary evidence for a coding or review child. */
+const GH_PR_MERGE_OR_REVIEW = /\bgh\s+pr\s+(merge|review)\b/;
+const PR_MERGE_OR_REVIEW_ENDPOINT = /\/pulls\/\d+\/(merge|reviews)\b/;
 /** `git push`, with git's own options between the two words allowed for —
  *  `-C <dir>`, `--git-dir=`, `--work-tree=`, `-c key=value`, `--no-pager` —
  *  so a push aimed from another directory is the same push. */
@@ -236,7 +237,10 @@ function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
   if (CREDENTIAL_FILE.test(command)) return refused("credential — reads the executor's credential store");
   if (ENV_DUMP.test(command)) return refused("credential — dumps the process environment");
   if (CREDENTIAL_VAR.test(command)) return refused("credential — expands a credential variable");
-  if (MERGE_OR_APPROVE.test(command)) {
+  if (
+    GH_PR_MERGE_OR_REVIEW.test(command) ||
+    (PR_MERGE_OR_REVIEW_ENDPOINT.test(command) && (GH_API_WRITE.test(command) || CURL_GITHUB_WRITE.test(command)))
+  ) {
     return refused("merge/approve — a coding run never merges or approves a pull request");
   }
   const pushCommand = withoutShellContinuations(command);

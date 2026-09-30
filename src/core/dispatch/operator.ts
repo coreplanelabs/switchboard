@@ -54,6 +54,7 @@ import type { ConfigStore } from "../../config.js";
 import type { ProviderTable } from "../harness/piAi.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { RequesterTarget } from "../runLedger/ledger.js";
+import type { ShipEntryIntent } from "../ship/preflight.js";
 import { sessionKey, threadSessionKey } from "../runLedger/sessionLog.js";
 import { chatActorOf } from "../authz/actor.js";
 import { renderRepoFacts } from "./repoFacts.js";
@@ -254,6 +255,12 @@ export interface OperatorBind {
   repo?: string;
   /** Evidence for the typed repository, never the onboarded-candidate list alone. */
   repoSource?: "request" | "attachment" | "thread" | "channel";
+  /** The Ship unit's first stage, selected by the operator rather than by
+   * stripping links or tokens from the admitted message. */
+  shipEntry?: ShipEntryIntent;
+  /** For Ship work citing a PR, the requester's exact words for the separate change.
+   *  The original request still reaches the unit unchanged. */
+  workObjective?: string;
   /** The bind is a pending question's confirmed proposal (`bindFromAnswer`):
    *  the LINE carries the task — the person's message was the word "yes" — so
    *  a preset line routes its own tail as the request (`presetRequestOf`),
@@ -487,6 +494,7 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
       : []),
     "A write ask in a named or inherited repository binds the write preset even when a detail inside it is unresolved — the run it starts resolves the detail with the repository in front of it. For a terse fix, inherit only the same requester's actor-stamped explicit target in the thread; a prior general run's repository and other people's or assistant turns do not authorize a write. Conflicting requester targets require one question. Ask a question only for a fork the run itself could not resolve, and a question's proposal must be a line that would do the asked work: a write line for a write ask, never a read (an exploration, a listing, a summary) standing in for the work.",
     "A request to review or ship several linked pull requests is one conductor bind, even when the links span repositories. Omit the repository slot: each child uses its own exact pull request URL. The conductor may start Ship children only for the pull requests explicitly listed in a 'ship these' request.",
+    "For one Ship request, choose `shipEntry` in `bind_preset`: `review` when the person asks Ship to review an existing pull request, `work` for a self-contained change, `work_from_thread` when the requested change depends on earlier requester context in this thread (for example, 'fix it'), or `plan` for an explicit `agent:ship plan <path>.md` request. A review starts in the review round of that exact PR; never turn the word 'review' or its URL into a coding task. If work cites a PR as evidence for a separate change, give `workObjective` as an exact quote of the requester's distinct code-change ask, from this turn or an earlier requester turn. Omit it for review or continuation of the cited PR; without requester-backed words a work bind citing a PR stops before coding. A request naming `agent:ship` still passes through this door and keeps Ship as its preset. The runner verifies the PR, head, repository and permissions after the bind.",
     "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a proposal that would do the write built from them — the person's yes runs it, and their next words refine it.",
     "A question about whether the person has config overrides uses `config show`: it describes their own scope, this channel's scope and the effective settings. `config overrides` lists channels with scopes; use it only when they ask which channels have settings.",
     "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run. Pass that ref as `bind_preset`'s `model` and one exact model-name word from the person's request as `modelWord` (such as 'astra', 'o3', or 'gpt-6'): the run then uses it, exactly as a typed `model:` directive would. The request still rides verbatim — never strip the model word from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model omits both `model` and `modelWord`.",
@@ -638,6 +646,17 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
                   pattern: "^[\\w.-]+/[\\w.-]+$",
                   description:
                     "the target repository as owner/name from the explicit request, an evidenced attached file, the same requester's explicit thread target, or the channel default; the newest run alone authorizes a review, not a write",
+                },
+                shipEntry: {
+                  type: "string",
+                  enum: ["work", "work_from_thread", "review", "plan"],
+                  description:
+                    "required for ship: review starts at the verified existing PR's review round; work starts coding for a self-contained change; work_from_thread starts coding from the requester's earlier thread context; plan uses the explicitly requested seeded plan. Omit for other presets",
+                },
+                workObjective: {
+                  type: "string",
+                  description:
+                    "Only for ship work or work_from_thread citing an existing pull request: quote exactly the requester's distinct code-change ask from this turn or an earlier requester turn, without the PR reference. Omit for review or continuation. The original request remains the unit's text.",
                 },
                 reason: { type: "string", description: "one line, under 100 characters: why this preset" },
               },
@@ -1042,7 +1061,7 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
       ...(typeof input.filter === "string" && input.filter.trim().length > 0 ? { filter: input.filter } : {}),
     };
   if (answer.tool === OPERATOR_BIND_TOOL) {
-    const { preset, reason, model, modelWord, repo } = input;
+    const { preset, reason, model, modelWord, repo, shipEntry, workObjective } = input;
     if (typeof preset !== "string" || !ctx.presets.includes(preset))
       return {
         kind: "violation",
@@ -1052,6 +1071,24 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     if (batch !== undefined && !ctx.presets.includes("conductor"))
       return { kind: "violation", violation: "a pull request batch needs the conductor preset" };
     const selectedPreset = batch === undefined ? preset : "conductor";
+    if (
+      selectedPreset === "ship" &&
+      shipEntry !== "work" &&
+      shipEntry !== "work_from_thread" &&
+      shipEntry !== "review" &&
+      shipEntry !== "plan"
+    )
+      return {
+        kind: "violation",
+        violation: "bind_preset for ship needs shipEntry: work, work_from_thread, review or plan",
+      };
+    if (selectedPreset !== "ship" && shipEntry !== undefined && batch === undefined)
+      return { kind: "violation", violation: "shipEntry is only for the ship preset" };
+    if (
+      workObjective !== undefined &&
+      ((shipEntry !== "work" && shipEntry !== "work_from_thread") || typeof workObjective !== "string")
+    )
+      return { kind: "violation", violation: "workObjective is only for a Ship work bind" };
     // The plain-words model (the plain-words model unit): an optional ref the
     // run then uses at directive precedence. The parse holds its shape and its
     // provider here; the loop holds it against the catalogue (`runOperator`),
@@ -1170,6 +1207,8 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         };
       repository = trimmed;
     }
+    if (shipEntry === "work_from_thread" && repoSource !== "thread")
+      return { kind: "violation", violation: "work_from_thread needs the requester's established thread repository" };
     const words = stripDirectiveHead(ctx.requestText, selectedPreset);
     const line = operatorLine(redactSecrets(`agent:${selectedPreset} ${words}`));
     return {
@@ -1183,6 +1222,10 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
             ...(ref !== undefined ? { model: ref } : {}),
             ...(repository !== undefined ? { repo: repository } : {}),
             ...(repoSource !== undefined ? { repoSource } : {}),
+            ...(selectedPreset === "ship" ? { shipEntry: shipEntry as ShipEntryIntent } : {}),
+            ...(typeof workObjective === "string" && workObjective.trim()
+              ? { workObjective: tidy(workObjective.trim()) }
+              : {}),
           },
         ],
         reason: tidy(reason),
@@ -2059,6 +2102,8 @@ export function operatorEventOf(
     model?: string;
     repo?: string;
     repoSource?: "request" | "attachment" | "thread" | "channel";
+    shipEntry?: ShipEntryIntent;
+    workObjective?: string;
     confirmed?: true;
   }[];
   question?: string;
@@ -2086,6 +2131,8 @@ export function operatorEventOf(
             ...(b.model !== undefined ? { model: b.model } : {}),
             ...(b.repo !== undefined ? { repo: b.repo } : {}),
             ...(b.repoSource !== undefined ? { repoSource: b.repoSource } : {}),
+            ...(b.shipEntry !== undefined ? { shipEntry: b.shipEntry } : {}),
+            ...(b.workObjective !== undefined ? { workObjective: b.workObjective } : {}),
             ...(b.confirmed ? { confirmed: true as const } : {}),
           })),
         }
@@ -2546,6 +2593,10 @@ export type OperatorExecution =
       model?: string;
       /** The typed repository slot from bind_preset, when the door filled it. */
       repo?: string;
+      /** How the repository was evidenced, for a thread-dependent Ship brief. */
+      repoSource?: OperatorBind["repoSource"];
+      /** The starting stage for a Ship unit, chosen by the operator. */
+      shipEntry?: ShipEntryIntent;
       carried: boolean;
     };
 
@@ -2703,6 +2754,8 @@ export async function executeOperatorDecision(
         ...(request !== undefined ? { request } : {}),
         ...(bind.model !== undefined ? { model: bind.model } : {}),
         ...(bind.repo !== undefined ? { repo: bind.repo } : {}),
+        ...(bind.repoSource !== undefined ? { repoSource: bind.repoSource } : {}),
+        ...(bind.shipEntry !== undefined ? { shipEntry: bind.shipEntry } : {}),
         carried,
       };
     }

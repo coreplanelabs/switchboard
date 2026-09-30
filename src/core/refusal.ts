@@ -5,6 +5,7 @@
 // table does not know is a type error — so the trace, the run record and the
 // door report count refusals by the same names.
 import type { IncomingMessage } from "./types.js";
+import type { PrWorkBinding } from "./ship/prWorkBinding.js";
 
 /** Why the bot refused, in the record's three classes: a different sentence
  *  from the person would work (`request`), the person may not (`policy`), or
@@ -20,6 +21,8 @@ export interface Guess {
   proposal: IncomingMessage;
   line: string;
   evidence: string;
+  /** A click can authorize only this exact offered target and objective. */
+  binding?: PrWorkBinding;
 }
 
 /** A command handler's guess hint (record 0054): the corrected chat form and
@@ -83,7 +86,7 @@ const CAUSE_OF = {
   reference_fetch_failed: "system",
   // the catch-all: an uncaught throw in dispatch()
   uncaught: "system",
-  // the ship preflight's nine results (record 0054's plan): the old
+  // the ship preflight's eleven results (record 0054's plan): the old
   // `ship_preflight` code is kept as these codes' prefix, so a query on the
   // old code still finds them; the sentence did not split with the code.
   ship_preflight_channel: "system",
@@ -95,6 +98,7 @@ const CAUSE_OF = {
   ship_preflight_head_unknown: "system",
   ship_preflight_closed_resume: "request",
   ship_preflight_no_task: "request",
+  ship_preflight_pr_work_question: "request",
   ship_preflight_base_missing: "request",
   // the plan hand-off's fifteen sentences (two share `plan_history_unavailable`)
   plan_base_unknown: "request",

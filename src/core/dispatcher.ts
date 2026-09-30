@@ -32,6 +32,7 @@ import {
 } from "./dispatch/admission.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
 import { actorIdsOf, cancelPending, consumeAndRun, REFUSED_REASON } from "./dispatch/confirm.js";
+import type { PrWorkBinding } from "./ship/prWorkBinding.js";
 import {
   postSettledOutcome,
   recordOperatorDecision,
@@ -528,7 +529,7 @@ export interface DispatchOptions {
    *  in a `run_note` ([run-history.md](../../docs/reference/specs/run-history.md) item 2)
    *  — and the click's one drain slot is handed over: this dispatch counts no
    *  second one. Absent for every other request. */
-  redispatch?: { code: string };
+  redispatch?: { code: string; binding?: PrWorkBinding };
 }
 
 /** How a request ended, for whoever started it (dispatch/outcome.ts): the
@@ -1027,7 +1028,8 @@ export async function dispatch(
     const mainDm =
       msg.channelId.startsWith("slack:D") &&
       (mainScopes.user.agent ?? mainScopes.channel.agent ?? deps.config.config.defaults.agent) === "orchestrator";
-    let operatorMode = configuredOperator === "on" && (typedDecision || mainDm) ? "off" : configuredOperator;
+    let operatorMode =
+      configuredOperator === "on" && (typedDecision || mainDm) && typedAgent !== "ship" ? "off" : configuredOperator;
     // The preset an `on` decision binds on the person's own words, with the
     // decision's event on the run.
     let operatorPreset: string | undefined;
@@ -1041,6 +1043,8 @@ export async function dispatch(
     let operatorModel: string | undefined;
     // The accepted bind is authority, not the thread/channel fallback facts.
     let operatorRepo: string | undefined;
+    let operatorRepoSource: ShipContext["shipRepoSource"];
+    let operatorShipEntry: ShipContext["shipEntry"];
     // An ended generated pipeline's stable plan id and remaining caps: read
     // from its coordinator rows and handed to ship so neither a formatted
     // durable input nor today's config can mint a new identity or budget.
@@ -1291,6 +1295,8 @@ export async function dispatch(
           operatorRequest = execution.request;
           operatorModel = execution.model;
           operatorRepo = execution.repo;
+          operatorRepoSource = execution.repoSource;
+          operatorShipEntry = execution.shipEntry;
         }
         // `kind: "fold"` (issue 2027; thread-admission item 9): the decision was
         // neither steers-and-reads nor a question in an owned thread, so the
@@ -1319,6 +1325,32 @@ export async function dispatch(
       operatorEvent = undefined;
       await recordOperatorDecision(deps, msg, event, ending, trace);
     };
+
+    // A typed Ship request now asks the operator for its starting stage. A
+    // repaired or floored bind to another preset must not fall through to the
+    // legacy directive and silently start coding without that stage.
+    if (
+      typedAgent === "ship" &&
+      operatorMode === "on" &&
+      pageOwner?.kind !== "live" &&
+      pageOwner?.kind !== "unit" &&
+      pageOwner?.kind !== "pipeline" &&
+      pageOwner?.kind !== "pipeline_ambiguous" &&
+      (operatorPreset !== "ship" || operatorShipEntry === undefined)
+    ) {
+      await refuse(
+        refusalOf("setup_failed", "I couldn't bind this Ship request to review, work or a plan, so nothing started."),
+      );
+      await recordPendingOperator();
+      return ended;
+    }
+    if (operatorShipEntry === "plan" && typedAgent !== "ship") {
+      await refuse(
+        refusalOf("setup_failed", "A seeded Ship plan needs an explicit `agent:ship` request, so nothing started."),
+      );
+      await recordPendingOperator();
+      return ended;
+    }
 
     // Stage A (dispatch/fastPath.ts): a message that names a registered chat
     // command is answered inline — never a model turn, and before the history
@@ -2397,6 +2429,11 @@ export async function dispatch(
         startedAt,
         card,
         directives,
+        ...(operatorShipEntry !== undefined ? { shipEntry: operatorShipEntry } : {}),
+        ...(opts.redispatch?.code === "ship_preflight_pr_work_question" && opts.redispatch.binding
+          ? { confirmedPrWork: opts.redispatch.binding }
+          : {}),
+        ...(operatorRepoSource !== undefined ? { shipRepoSource: operatorRepoSource } : {}),
         ...(reissuePlanId !== undefined ? { reissuePlanId } : {}),
         ...(beforeCoordinatorStart !== undefined ? { beforeCoordinatorStart } : {}),
         ...(reissueCaps !== undefined
@@ -4366,7 +4403,9 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     // through `dispatch()` whole — the proposal as the requester's own message,
     // the click's drain slot handed over, the question's code on the record.
     const res = await consumeAndRun(deps, { id: click.id, actorIds }, io, ending, trace, (row) =>
-      dispatch(deps, row.message, io, { redispatch: { code: row.code } }),
+      dispatch(deps, row.message, io, {
+        redispatch: { code: row.code, ...(row.binding ? { binding: row.binding } : {}) },
+      }),
     );
     if (res.kind === "redispatched") {
       redispatched = res.outcome;

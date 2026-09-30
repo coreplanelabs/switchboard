@@ -34,7 +34,7 @@ const bindModel =
   (preset: string): RouteModel =>
   async () => ({
     tool: OPERATOR_BIND_TOOL,
-    input: { preset, reason: "fixture route" },
+    input: { preset, reason: "fixture route", ...(preset === "ship" ? { shipEntry: "work" } : {}) },
   });
 
 const boundPreset = (decision: OperatorDecision): string | undefined => {

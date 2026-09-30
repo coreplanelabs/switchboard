@@ -138,7 +138,7 @@ channels:
           expect(prompt.system).toContain("A generic repository name in prose is insufficient");
           return {
             tool: OPERATOR_BIND_TOOL,
-            input: { preset: "ship", repo: "acme/atlas", reason: "the attached plan targets atlas" },
+            input: { preset: "ship", shipEntry: "work", repo: "acme/atlas", reason: "the attached plan targets atlas" },
           };
         },
       },
@@ -233,7 +233,10 @@ channels:
     ).toMatchObject({ kind: "violation", violation: expect.stringContaining("unavailable") });
     expect(
       parseOperatorTurn(
-        { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/first", reason: "explicit choice" } },
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: { preset: "ship", shipEntry: "work", repo: "acme/first", reason: "explicit choice" },
+        },
         ctxOf({
           requestText: "In acme/first, fix the drift",
           presets: ["general", "ship"],
@@ -326,6 +329,107 @@ channels:
         ctxOf(),
       ),
     ).toMatchObject({ kind: "violation", violation: expect.stringContaining("owner/name") as unknown as string });
+  });
+
+  it("bind_preset requires Ship's starting stage and preserves a review request's PR URL", () => {
+    const requestText = "agents:ship review https://github.com/acme/api/pull/3931";
+    const ctx = ctxOf({ requestText, presets: ["ship"] });
+    expect(
+      parseOperatorTurn({ tool: OPERATOR_BIND_TOOL, input: { preset: "ship", reason: "review" } }, ctx),
+    ).toMatchObject({
+      kind: "violation",
+      violation: expect.stringContaining("shipEntry"),
+    });
+    const answer = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "review", repo: "acme/api", reason: "review" } },
+      ctx,
+    );
+    expect(answer).toMatchObject({
+      kind: "decision",
+      decision: {
+        kind: "binds",
+        binds: [
+          {
+            shipEntry: "review",
+            repo: "acme/api",
+            line: expect.stringContaining("https://github.com/acme/api/pull/3931"),
+          },
+        ],
+      },
+    });
+  });
+
+  it("bind_preset carries a separate code-change objective when Ship work cites a PR", () => {
+    const answer = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "ship",
+          shipEntry: "work",
+          workObjective: "fix the failing check",
+          repo: "acme/api",
+          reason: "the PR is evidence for a new change",
+        },
+      },
+      ctxOf({ requestText: "fix the failing check seen on https://github.com/acme/api/pull/7", presets: ["ship"] }),
+    );
+    expect(answer).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ workObjective: "fix the failing check" }] },
+    });
+    if (answer.kind !== "decision") throw new Error("not a decision");
+    expect(operatorEventOf("on", { decision: answer.decision, latencyMs: 0, outputTokens: 0 })).toMatchObject({
+      binds: [{ workObjective: "fix the failing check" }],
+    });
+  });
+
+  it("bind_preset marks a terse write as depending on the requester's thread target", () => {
+    const answer = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "ship",
+          shipEntry: "work_from_thread",
+          workObjective: "fix the prior issue",
+          repo: "acme/api",
+          reason: "fix the prior issue",
+        },
+      },
+      ctxOf({ requestText: "Fix it.", presets: ["ship"], requesterRepo: "acme/api" }),
+    );
+    expect(answer).toMatchObject({
+      kind: "decision",
+      decision: {
+        binds: [{ shipEntry: "work_from_thread", workObjective: "fix the prior issue", repoSource: "thread" }],
+      },
+    });
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: { preset: "ship", shipEntry: "work_from_thread", repo: "acme/api", reason: "guess" },
+        },
+        ctxOf({ requestText: "Fix it.", presets: ["ship"] }),
+      ),
+    ).toMatchObject({ kind: "violation" });
+  });
+
+  it("bind_preset carries an explicit seeded-plan stage without rewriting its path", () => {
+    const answer = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "plan", repo: "acme/api", reason: "explicit plan" },
+      },
+      ctxOf({ requestText: "agent:ship in acme/api: plan docs/plans/fixture.md", presets: ["ship"] }),
+    );
+    expect(answer).toMatchObject({
+      kind: "decision",
+      decision: {
+        binds: [
+          { shipEntry: "plan", line: expect.stringContaining("plan docs/plans/fixture.md") as unknown as string },
+        ],
+      },
+    });
   });
 
   it("rejects a repository absent from the request and inherited context, even when it is onboarded", () => {
@@ -532,7 +636,7 @@ channels:
 
   it("a bind_preset naming a preset outside the projection is a violation the loop re-asks — never a hand-back", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", request: "x", reason: "r" } },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "work", request: "x", reason: "r" } },
       ctxOf(),
     );
     expect(turn).toMatchObject({ kind: "violation" });
@@ -917,7 +1021,7 @@ describe("runOperator — the loop over a scripted model", () => {
       }),
       async () => ({
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", repo: "acme/api", reason: "ship the linked PRs" },
+        input: { preset: "ship", shipEntry: "work", repo: "acme/api", reason: "ship the linked PRs" },
       }),
     );
     expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ line: "agent:conductor ship these:" }] });
@@ -928,7 +1032,10 @@ describe("runOperator — the loop over a scripted model", () => {
 
   it("a PR batch ignores conflicting inherited thread targets and binds no single repository", () => {
     const answer = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/api", reason: "ship both PRs" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "work", repo: "acme/api", reason: "ship both PRs" },
+      },
       ctxOf({
         requestText: "ship these:\n- https://github.com/acme/api/pull/7\n- https://github.com/acme/web/pull/9",
         presets: ["ship", "conductor"],
@@ -966,8 +1073,14 @@ describe("runOperator — the loop over a scripted model", () => {
 
   it("an attachment's explicit slug outranks a generic repository name in its prose", async () => {
     const answers: RouteToolCall[] = [
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/api", reason: "mentions API" } },
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/web", reason: "plan target" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "work", repo: "acme/api", reason: "mentions API" },
+      },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "work", repo: "acme/web", reason: "plan target" },
+      },
     ];
     const answer = await runOperator(
       input({
@@ -1002,7 +1115,10 @@ describe("runOperator — the loop over a scripted model", () => {
           },
         ],
       }),
-      async () => ({ tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/web", reason: "plan target" } }),
+      async () => ({
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "work", repo: "acme/web", reason: "plan target" },
+      }),
     );
     expect(answer.decision).toMatchObject({
       kind: "binds",
@@ -1015,8 +1131,11 @@ describe("runOperator — the loop over a scripted model", () => {
     { repo: undefined, reason: "implicit channel default" },
   ])("a unique attachment target outranks a different channel default: $reason", async ({ repo, reason }) => {
     const answers: RouteToolCall[] = [
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", ...(repo ? { repo } : {}), reason } },
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/web", reason: "plan target" } },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "work", ...(repo ? { repo } : {}), reason } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "work", repo: "acme/web", reason: "plan target" },
+      },
     ];
     const answer = await runOperator(
       input({
@@ -1036,7 +1155,10 @@ describe("runOperator — the loop over a scripted model", () => {
 
   it("a repository link in an attachment still conflicts with another release target", async () => {
     const answers: RouteToolCall[] = [
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/web", reason: "linked repository" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "work", repo: "acme/web", reason: "linked repository" },
+      },
       { tool: OPERATOR_ASK_TOOL, input: { text: "Which repository is the target?", reason: "conflicting evidence" } },
     ];
     const answer = await runOperator(
@@ -1078,7 +1200,7 @@ describe("runOperator — the loop over a scripted model", () => {
 
   it("conflicting attachment targets still require a question for a repository preset without a typed repo", async () => {
     const answers: RouteToolCall[] = [
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", reason: "ship it" } },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "work", reason: "ship it" } },
       { tool: OPERATOR_ASK_TOOL, input: { text: "Which repository is the target?", reason: "conflicting evidence" } },
     ];
     const answer = await runOperator(
@@ -1097,7 +1219,10 @@ describe("runOperator — the loop over a scripted model", () => {
 
   it("conflicting attachment slug and release token require a target question, even with a channel default", async () => {
     const answers: RouteToolCall[] = [
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/api", reason: "related service" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "work", repo: "acme/api", reason: "related service" },
+      },
       {
         tool: OPERATOR_ASK_TOOL,
         input: { text: "Which repository is the plan's target?", reason: "conflicting file evidence" },
@@ -1138,7 +1263,7 @@ describe("runOperator — the loop over a scripted model", () => {
       }),
       async () => ({
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", repo: "acme/web", reason: "requested target" },
+        input: { preset: "ship", shipEntry: "work", repo: "acme/web", reason: "requested target" },
       }),
     );
     expect(answer.decision).toMatchObject({
@@ -1257,7 +1382,7 @@ describe("runOperator — the loop over a scripted model", () => {
 
   it("an invalid call is re-asked with the violation named, then the corrected call is accepted — two attempts on the event", async () => {
     const answers: (RouteToolCall | string)[] = [
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", request: "x", reason: "r" } },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "work", request: "x", reason: "r" } },
       { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "list the runs", reason: "r" } },
     ];
     const answer = await runOperator(input(), async () => answers.shift()!);
@@ -1754,7 +1879,7 @@ describe("the pending question's free-text answer joins the original ask (issue 
       }),
       async () => ({
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested drift change" },
+        input: { preset: "ship", shipEntry: "work", repo: "acme/infrastructure", reason: "the requested drift change" },
       }),
     );
     expect(answer.decision).toMatchObject({
@@ -1803,7 +1928,7 @@ describe("the pending question's free-text answer joins the original ask (issue 
         input({ text: joined, projection: projectionOf(["general", "ship"]) }),
         async () => ({
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "ship", repo: "acme/examples", reason: "use the referenced example" },
+          input: { preset: "ship", shipEntry: "work", repo: "acme/examples", reason: "use the referenced example" },
         }),
       );
       expect(answer.decision.kind).toBe("non_decision");
@@ -1848,9 +1973,15 @@ describe("the pending question's free-text answer joins the original ask (issue 
       userId: "slack:UREQUESTER",
       text,
     });
+    let turn = 0;
     const model = async () => ({
       tool: OPERATOR_BIND_TOOL,
-      input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested change" },
+      input: {
+        preset: "ship",
+        shipEntry: turn++ === 0 ? "work" : "work_from_thread",
+        repo: "acme/infrastructure",
+        reason: "the requested change",
+      },
     });
     const first = await operatorStage(
       { config, runLedger: runLedger as never, operatorModel: model },
@@ -1895,7 +2026,7 @@ describe("the pending question's free-text answer joins the original ask (issue 
         },
         operatorModel: async () => ({
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested change" },
+          input: { preset: "ship", shipEntry: "work", repo: "acme/infrastructure", reason: "the requested change" },
         }),
       },
       {
@@ -1940,7 +2071,7 @@ describe("the pending question's free-text answer joins the original ask (issue 
         },
         operatorModel: async () => ({
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "ship", repo: "acme/infrastructure", reason: "the requested change" },
+          input: { preset: "ship", shipEntry: "work", repo: "acme/infrastructure", reason: "the requested change" },
         }),
       },
       {
@@ -2136,7 +2267,10 @@ describe("requester-authored repository inheritance for a plain fix", () => {
   const issue = "https://github.com/acme/sensors/issues/3814";
   const base = () =>
     input({ text: "Fix it.", projection: projectionOf(["ship"]), newestFinishedRun: { agent: "general" } });
-  const bind = { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/sensors", reason: "fix the issue" } };
+  const bind = {
+    tool: OPERATOR_BIND_TOOL,
+    input: { preset: "ship", shipEntry: "work", repo: "acme/sensors", reason: "fix the issue" },
+  };
 
   it("carries the requester's issue target through general research and reconciliation, after restart", async () => {
     const tail = [
@@ -2153,7 +2287,7 @@ describe("requester-authored repository inheritance for a plain fix", () => {
     const tail = [turn(`Investigate ${issue}`, requester)];
     const answer = await runOperator({ ...base(), tail, requesterId: requester }, async () => ({
       tool: OPERATOR_BIND_TOOL,
-      input: { preset: "ship", reason: "fix it" },
+      input: { preset: "ship", shipEntry: "work", reason: "fix it" },
     }));
     expect(answer.decision).toMatchObject({ kind: "non_decision" });
     expect(answer.attempts).toEqual(
@@ -2239,6 +2373,7 @@ describe("requester-authored repository inheritance for a plain fix", () => {
       targetRepo: "acme/sensors",
       followUpText: "Fix it.",
       preset: "ship",
+      shipEntry: "work",
       channelId: "slack:C1",
     },
     {
@@ -2321,7 +2456,15 @@ describe("requester-authored repository inheritance for a plain fix", () => {
           runLedger: ledger as never,
           operatorModel: async (p) => {
             prompt = p.user;
-            return { tool: OPERATOR_BIND_TOOL, input: { preset, repo: targetRepo, reason: "follow up" } };
+            return {
+              tool: OPERATOR_BIND_TOOL,
+              input: {
+                preset,
+                ...(preset === "ship" ? { shipEntry: "work" } : {}),
+                repo: targetRepo,
+                reason: "follow up",
+              },
+            };
           },
         },
         {
