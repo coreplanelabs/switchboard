@@ -674,6 +674,333 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     ]);
   });
 
+  it("a generated unit with no PR keeps its original branch when a retry inherits an unrelated thread PR", async () => {
+    const referencedPr = `PR ${"#"}42`;
+    const requestText = `in acme/api: fix sandbox recovery, not release ${referencedPr}`;
+    const planId = generatedPlanId(`fix sandbox recovery, not release ${referencedPr}`, "slack:C1:1.0");
+    const id = `plan-${planId}`;
+    const branch = `plan/${planId}/u1`;
+    const h = harness({ status: { [id]: { kind: "status", status: "errored" } } });
+    const req = input({ entry: { repo: "acme/api", base: "main" }, requestText });
+    await handOffToCoordinator(h.deps, req);
+    const [original] = await h.instances.listUnits(id);
+    await h.instances.putUnits([{ ...original!, ending: { kind: "aborted", report: "coding failed", at: NOW } }]);
+
+    const retry = await handOffToCoordinator(h.deps, {
+      ...req,
+      entry: {
+        repo: "acme/api",
+        branch: "release-please--main",
+        base: "release-base",
+        adopt: { pr: 42, headSha: "a".repeat(40) },
+      },
+    });
+
+    expect(retry).toMatchObject({ status: "completed", instanceId: `${id}-2` });
+    expect(retry.reply).toContain(`the unit runs on \`${branch}\``);
+    expect(retry.reply).not.toContain(referencedPr);
+    expect(await h.instances.get(`${id}-2`)).toMatchObject({ branch, base: "main" });
+    expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([{ branch, unit: ["U", "1"].join("") }]);
+    expect((await h.instances.listUnits(`${id}-2`))[0]).not.toHaveProperty("publication");
+  });
+
+  it("keeps the original base when a no-PR retry has no entry branch", async () => {
+    const requestText = "in acme/api: fix sandbox recovery";
+    const planId = generatedPlanId("fix sandbox recovery", "slack:C1:1.0");
+    const id = `plan-${planId}`;
+    const h = harness({ status: { [id]: { kind: "status", status: "errored" } } });
+    await handOffToCoordinator(h.deps, input({ entry: { repo: "acme/api", base: "main" }, requestText }));
+
+    const retry = await handOffToCoordinator(
+      h.deps,
+      input({ entry: { repo: "acme/api", base: "release-base" }, requestText }),
+    );
+
+    expect(retry).toMatchObject({ status: "completed", instanceId: `${id}-2` });
+    expect(await h.instances.get(`${id}-2`)).toMatchObject({ base: "main" });
+    expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([{ branch: `plan/${planId}/u1` }]);
+  });
+
+  it("keeps the original base when a no-PR retry retains its entry branch", async () => {
+    const requestText = "in acme/api: fix sandbox recovery";
+    const planId = generatedPlanId("fix sandbox recovery", "slack:C1:1.0");
+    const id = `plan-${planId}`;
+    const branch = `plan/${planId}/u1`;
+    const h = harness({ status: { [id]: { kind: "status", status: "errored" } } });
+    await handOffToCoordinator(h.deps, input({ entry: { repo: "acme/api", base: "main" }, requestText }));
+
+    const retry = await handOffToCoordinator(
+      h.deps,
+      input({ entry: { repo: "acme/api", branch, base: "release-base" }, requestText }),
+    );
+
+    expect(retry).toMatchObject({ status: "completed", instanceId: `${id}-2` });
+    expect(await h.instances.get(`${id}-2`)).toMatchObject({ branch, base: "main" });
+  });
+
+  it("refuses to discard a PR first recorded in a later attempt", async () => {
+    const requestText = "in acme/api: fix sandbox recovery";
+    const planId = generatedPlanId("fix sandbox recovery", "slack:C1:1.0");
+    const id = `plan-${planId}`;
+    const secondId = `${id}-2`;
+    const h = harness({
+      status: {
+        [id]: { kind: "status", status: "errored" },
+        [secondId]: { kind: "status", status: "terminated" },
+      },
+    });
+    const req = input({ entry: { repo: "acme/api", base: "main" }, requestText });
+    await handOffToCoordinator(h.deps, req);
+    await handOffToCoordinator(h.deps, req);
+    const [second] = await h.instances.listUnits(secondId);
+    await h.instances.putUnits([
+      {
+        ...second!,
+        pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+        lastPush: "b".repeat(40),
+        ending: { kind: "stopped", report: "stopped", at: NOW },
+      },
+    ]);
+
+    const retry = await handOffToCoordinator(h.deps, {
+      ...req,
+      entry: {
+        repo: "acme/api",
+        branch: "release-please--main",
+        base: "main",
+        adopt: { pr: 43, headSha: "c".repeat(40) },
+      },
+    });
+
+    expect(retry).toMatchObject({ status: "aborted", refusal: { code: "plan_runner_conflict" } });
+    expect(await h.instances.get(`${id}-3`)).toBeNull();
+
+    const samePr = await handOffToCoordinator(h.deps, {
+      ...req,
+      entry: {
+        repo: "acme/api",
+        branch: `plan/${planId}/u1`,
+        base: "main",
+        adopt: { pr: 42, headSha: "c".repeat(40) },
+      },
+    });
+    expect(samePr).toMatchObject({ status: "completed", instanceId: `${id}-3` });
+    expect(await h.instances.listUnits(`${id}-3`)).toMatchObject([
+      { publication: { pr: 42 }, lastPush: "b".repeat(40) },
+    ]);
+  });
+
+  it("replaces an absent first Workflow after its instance was written without a unit", async () => {
+    const requestText = "in acme/api: fix sandbox recovery";
+    const planId = generatedPlanId("fix sandbox recovery", "slack:C1:1.0");
+    const id = `plan-${planId}`;
+    const req = input({ entry: { repo: "acme/api", base: "main" }, requestText });
+    const initial = harness();
+    await handOffToCoordinator(initial.deps, req);
+    const first = (await initial.instances.get(id))!;
+    const store = new InMemoryCoordinatorInstanceStore();
+    await store.put(first);
+    const h = harness({ store, status: { [id]: { kind: "absent" } } });
+
+    const retry = await handOffToCoordinator(h.deps, {
+      ...req,
+      entry: {
+        repo: "acme/api",
+        branch: "release-please--main",
+        base: "release-base",
+        adopt: { pr: 42, headSha: "a".repeat(40) },
+      },
+    });
+
+    expect(retry).toMatchObject({ status: "completed", instanceId: id });
+    expect(await h.instances.get(id)).toMatchObject({ branch: `plan/${planId}/u1`, base: "main" });
+    expect(await h.instances.listUnits(id)).toMatchObject([{ branch: `plan/${planId}/u1` }]);
+  });
+
+  it("carries a recovered legacy unit's saved push and record into the generated unit", async () => {
+    const requestText = "in acme/api: fix sandbox recovery";
+    const planId = generatedPlanId("fix sandbox recovery", "slack:C1:1.0");
+    const id = `plan-${planId}`;
+    const branch = `plan/${planId}/u12`;
+    const initial = harness();
+    await handOffToCoordinator(initial.deps, input({ entry: { repo: "acme/api", base: "main" }, requestText }));
+    const first = (await initial.instances.get(id))!;
+    const [firstUnit] = await initial.instances.listUnits(id);
+    const store = new InMemoryCoordinatorInstanceStore();
+    await store.put({ ...first, branch });
+    await store.putUnits([
+      {
+        ...firstUnit!,
+        unit: ["U", "12"].join(""),
+        slug: "u12",
+        branch,
+        pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+        lastPush: "b".repeat(40),
+        record: "0050",
+      },
+    ]);
+    const h = harness({ store, status: { [id]: { kind: "status", status: "errored" } } });
+
+    const retry = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", branch, base: "main", adopt: { pr: 42, headSha: "b".repeat(40) } },
+        requestText,
+      }),
+    );
+
+    expect(retry).toMatchObject({ status: "completed", instanceId: `${id}-2` });
+    expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([
+      { unit: ["U", "1"].join(""), branch, lastPush: "b".repeat(40), record: "0050" },
+    ]);
+  });
+
+  it("refuses to carry work recorded on another branch into a generated unit's original branch", async () => {
+    const referencedPr = `PR ${"#"}42`;
+    const requestText = `in acme/api: fix sandbox recovery, not release ${referencedPr}`;
+    const planId = generatedPlanId(`fix sandbox recovery, not release ${referencedPr}`, "slack:C1:1.0");
+    const id = `plan-${planId}`;
+    const secondId = `${id}-2`;
+    const h = harness({
+      status: {
+        [id]: { kind: "status", status: "errored" },
+        [secondId]: { kind: "status", status: "terminated" },
+      },
+    });
+    const req = input({ entry: { repo: "acme/api", base: "main" }, requestText });
+    await handOffToCoordinator(h.deps, req);
+    const originalInstance = (await h.instances.get(id))!;
+    const [original] = await h.instances.listUnits(id);
+    await h.instances.put({ ...originalInstance, id: secondId, attempt: 2, branch: "release-please--main" });
+    await h.instances.putUnits([
+      {
+        ...original!,
+        instanceId: secondId,
+        branch: "release-please--main",
+        pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+        rounds: [{ index: 0, agent: "coding", outcome: "stopped", at: NOW }],
+        ending: { kind: "stopped", report: "stopped", at: NOW },
+      },
+    ]);
+
+    const retry = await handOffToCoordinator(h.deps, {
+      ...req,
+      entry: {
+        repo: "acme/api",
+        branch: "release-please--main",
+        base: "main",
+        adopt: { pr: 42, headSha: "a".repeat(40) },
+      },
+    });
+
+    expect(retry).toMatchObject({ status: "aborted", refusal: { code: "plan_runner_conflict" } });
+    expect(retry.reply).toContain("branch history cannot be reconciled");
+    expect(await h.instances.get(`${id}-3`)).toBeNull();
+  });
+
+  it("refuses foreign-branch work even when the next retry has no entry branch", async () => {
+    const requestText = "in acme/api: fix sandbox recovery";
+    const planId = generatedPlanId("fix sandbox recovery", "slack:C1:1.0");
+    const id = `plan-${planId}`;
+    const secondId = `${id}-2`;
+    const h = harness({
+      status: {
+        [id]: { kind: "status", status: "errored" },
+        [secondId]: { kind: "status", status: "terminated" },
+      },
+    });
+    const req = input({ entry: { repo: "acme/api", base: "main" }, requestText });
+    await handOffToCoordinator(h.deps, req);
+    const originalInstance = (await h.instances.get(id))!;
+    const [original] = await h.instances.listUnits(id);
+    await h.instances.put({ ...originalInstance, id: secondId, attempt: 2, branch: "release-please--main" });
+    await h.instances.putUnits([
+      {
+        ...original!,
+        instanceId: secondId,
+        branch: "release-please--main",
+        lastPush: "b".repeat(40),
+        rounds: [{ index: 0, agent: "coding", outcome: "stopped", at: NOW }],
+        ending: { kind: "stopped", report: "stopped", at: NOW },
+      },
+    ]);
+
+    const retry = await handOffToCoordinator(h.deps, req);
+
+    expect(retry).toMatchObject({ status: "aborted", refusal: { code: "plan_runner_conflict" } });
+    expect(retry.reply).toContain("branch history cannot be reconciled");
+    expect(await h.instances.get(`${id}-3`)).toBeNull();
+  });
+
+  it("refuses to abandon or replace an originally adopted PR on retry", async () => {
+    const requestText = "in acme/api: fix sandbox recovery";
+    const planId = generatedPlanId("fix sandbox recovery", "slack:C1:1.0");
+    const id = `plan-${planId}`;
+    for (const retryEntry of [
+      { repo: "acme/api", base: "main" },
+      {
+        repo: "acme/api",
+        branch: "feat/recovery",
+        base: "main",
+        adopt: { pr: 43, headSha: "b".repeat(40) },
+      },
+    ]) {
+      const h = harness({ status: { [id]: { kind: "status", status: "errored" } } });
+      await handOffToCoordinator(
+        h.deps,
+        input({
+          entry: {
+            repo: "acme/api",
+            branch: "feat/recovery",
+            base: "main",
+            adopt: { pr: 42, headSha: "a".repeat(40) },
+          },
+          requestText,
+        }),
+      );
+      const [original] = await h.instances.listUnits(id);
+      await h.instances.putUnits([{ ...original!, lastPush: "a".repeat(40) }]);
+
+      const retry = await handOffToCoordinator(h.deps, input({ entry: retryEntry, requestText }));
+
+      expect(retry).toMatchObject({ status: "aborted", refusal: { code: "plan_runner_conflict" } });
+      expect(await h.instances.get(`${id}-2`)).toBeNull();
+    }
+  });
+
+  it("keeps an originally adopted PR when the same PR is still the entry", async () => {
+    const requestText = "in acme/api: fix sandbox recovery";
+    const planId = generatedPlanId("fix sandbox recovery", "slack:C1:1.0");
+    const id = `plan-${planId}`;
+    const h = harness({ status: { [id]: { kind: "status", status: "errored" } } });
+    const entry = {
+      repo: "acme/api",
+      branch: "feat/recovery",
+      base: "main",
+      adopt: { pr: 42, headSha: "a".repeat(40) },
+    };
+    await handOffToCoordinator(h.deps, input({ entry, requestText }));
+    const [original] = await h.instances.listUnits(id);
+    await h.instances.putUnits([{ ...original!, lastPush: "a".repeat(40) }]);
+
+    const retry = await handOffToCoordinator(
+      h.deps,
+      input({ entry: { ...entry, adopt: { pr: 42, headSha: "b".repeat(40) } }, requestText }),
+    );
+
+    expect(retry).toMatchObject({ status: "completed", instanceId: `${id}-2` });
+    expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([
+      {
+        branch: "feat/recovery",
+        publication: {
+          pr: 42,
+          expectedHeadSha: "b".repeat(40),
+          owner: { instanceId: `${id}-2`, unit: ["U", "1"].join("") },
+        },
+      },
+    ]);
+  });
+
   it("an owned generated thread pins its re-issue to the recorded plan id and branch even if the durable task's display text would hash differently", async () => {
     const id = "plan-owned-task";
     const h = harness({ status: { [id]: { kind: "status", status: "complete" } } });

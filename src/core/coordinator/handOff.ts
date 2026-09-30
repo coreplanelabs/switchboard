@@ -585,7 +585,7 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
   }
   const planned = await plan(deps, input);
   if (!planned.ok) return refused(planned.code, planned.reply);
-  const p = planned.planned;
+  let p = planned.planned;
   // The instance's plan: a seeded one names its path; a generated one carries
   // only the id — the mark every reader keys on. A seeded plan's units are the
   // runner's to merge (record 0031's merge grant); a generated one's a person's.
@@ -646,8 +646,10 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
   // review round when the open pull request still heads exactly there. The
   // latest attempt's word wins.
   const carried = new Map<string, { lastPush?: string; record?: string }>();
+  const priorRows: CoordinatorUnit[] = [];
   for (let n = 1; n <= attempt; n++)
     for (const row of await deps.instances.listUnits(planInstanceId(p.planId, n))) {
+      priorRows.push(row);
       if (row.ending?.kind === "merged") merged.add(row.unit);
       const prior = carried.get(row.unit) ?? {};
       carried.set(row.unit, {
@@ -656,6 +658,131 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
         ...(row.record !== undefined ? { record: row.record } : {}),
       });
     }
+  // An earlier generated unit is the branch authority for the same plan. A
+  // later request can inherit a PR merely because it was mentioned in this
+  // thread; that PR cannot move a re-issued unit onto another branch. If a
+  // prior attempt actually worked on another branch, stop for inspection
+  // even when this request carries no PR branch.
+  const originalUnit = p.graph.units[0];
+  const firstRows = priorRows.filter((row) => row.instanceId === firstId);
+  // Older one-unit records may use a different unit id; the recovered row is
+  // still the authority when it is the first instance's only unit.
+  const original =
+    firstRows.find((row) => row.unit === originalUnit?.id) ?? (firstRows.length === 1 ? firstRows[0] : undefined);
+  if (
+    p.path === undefined &&
+    original !== undefined &&
+    originalUnit !== undefined &&
+    original.unit !== originalUnit.id
+  ) {
+    carried.set(originalUnit.id, { ...carried.get(original.unit), ...carried.get(originalUnit.id) });
+    if (merged.has(original.unit)) merged.add(originalUnit.id);
+  }
+  const replacingMissingFirst =
+    p.path === undefined &&
+    original === undefined &&
+    firstRows.length === 0 &&
+    priorRows.length === 0 &&
+    attempt === 1 &&
+    status.kind === "absent" &&
+    first.branch === originalUnit?.branch;
+  if (
+    p.path === undefined &&
+    (first.plan?.id !== p.planId ||
+      first.plan.path !== undefined ||
+      first.repo !== p.identity.repo ||
+      first.threadKey !== input.msg.threadKey ||
+      first.base === undefined ||
+      (original?.branch !== first.branch && !replacingMissingFirst))
+  )
+    return refused(
+      "plan_runner_conflict",
+      `🚫 The earlier unit of ${where} does not match this request's repository, conversation, or branch; no runner started.`,
+    );
+  const unitRows = priorRows.filter((row) => row.unit === original?.unit || row.unit === originalUnit?.id);
+  if (
+    p.path === undefined &&
+    unitRows.some(
+      (row) =>
+        row.branch !== first.branch && (row.lastPush !== undefined || row.pr !== undefined || row.rounds.length > 0),
+    )
+  )
+    return refused(
+      "plan_runner_conflict",
+      `🚫 The earlier unit of ${where} owns \`${first.branch}\`, but a prior attempt recorded work on another branch; the branch history cannot be reconciled, so no runner started.`,
+    );
+  // A PR can first appear in any attempt. Keep its identity when a later
+  // request loses the entry PR or picks another one; older rows with only a
+  // PR number are recovered by the caller after the hand-off.
+  const priorPrs = new Set<number>();
+  for (const row of unitRows) {
+    if (row.pr !== undefined) priorPrs.add(row.pr.number);
+    if (row.publication !== undefined) priorPrs.add(row.publication.pr);
+    if (row.resume !== undefined) priorPrs.add(row.resume.pr);
+  }
+  const priorPr = [...priorPrs][0];
+  const badPublication = unitRows.some(
+    (row) =>
+      row.publication !== undefined &&
+      (row.publication.repo !== first.repo ||
+        row.publication.headRef !== first.branch ||
+        row.publication.baseRef !== first.base ||
+        row.publication.owner.instanceId !== row.instanceId ||
+        row.publication.owner.unit !== row.unit),
+  );
+  if (
+    p.path === undefined &&
+    (priorPrs.size > 1 ||
+      badPublication ||
+      (priorPr !== undefined &&
+        (p.entryBranch !== first.branch || p.base !== first.base || (p.adopt ?? p.resume)?.pr !== priorPr)) ||
+      (priorPr === undefined && first.branch !== originalUnit?.branch))
+  )
+    return refused(
+      "plan_runner_conflict",
+      `🚫 The earlier unit of ${where} owns a pull request on \`${first.branch}\`, but this retry cannot preserve that publication binding; no runner started.`,
+    );
+  if (p.path === undefined && p.entryBranch !== undefined && p.entryBranch !== first.branch) {
+    const originalBranch = originalUnit?.branch;
+    if (
+      first.plan?.id !== p.planId ||
+      first.plan.path !== undefined ||
+      first.repo !== p.identity.repo ||
+      first.threadKey !== input.msg.threadKey ||
+      first.branch !== originalBranch ||
+      (original?.branch !== first.branch && !replacingMissingFirst) ||
+      original?.pr !== undefined ||
+      original?.publication !== undefined ||
+      original?.resume !== undefined ||
+      first.base === undefined
+    )
+      return refused(
+        "plan_runner_conflict",
+        `🚫 The earlier unit of ${where} owns \`${first.branch}\`, but this retry selected \`${p.entryBranch}\`; the branch history cannot be reconciled, so no runner started.`,
+      );
+    const {
+      entryBranch: _entryBranch,
+      adopt: _adopt,
+      resume: _resume,
+      autoMergeEnabled: _autoMergeEnabled,
+      baseFallback: _baseFallback,
+      ...originalPlan
+    } = p;
+    p = { ...originalPlan, base: first.base, identity: { ...originalPlan.identity, base: first.base } };
+  }
+  if (p.path === undefined && p.base !== first.base) {
+    if (first.base === undefined)
+      return refused(
+        "plan_runner_conflict",
+        `🚫 The earlier unit of ${where} has no recorded base; no runner started.`,
+      );
+    if (p.entryBranch !== undefined && (p.adopt !== undefined || p.resume !== undefined))
+      return refused(
+        "plan_runner_conflict",
+        `🚫 The earlier unit of ${where} owns base \`${first.base}\`, but this pull request now targets \`${p.base}\`; no runner started.`,
+      );
+    p = { ...p, base: first.base, identity: { ...p.identity, base: first.base } };
+  }
   const remaining = p.selected.filter((u) => !merged.has(u));
   if (remaining.length === 0)
     return refused(
