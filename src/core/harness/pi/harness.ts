@@ -90,6 +90,8 @@ import {
 } from "../container.js";
 import {
   classifyLoopFailure,
+  classifyTransportLoss,
+  TRANSPORT_ALIVE_REATTACH_NOTE,
   CONTROL_RESET_RESUMED_NOTE,
   HeldSends,
   MAX_INPLACE_REATTACHES,
@@ -1663,6 +1665,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  control plane, or a word nothing refuted by a record — never turned into
      *  the verdict, which would relaunch a second pi beside the live one. The
      *  word the pid cannot refute, and every other failure, is the caller's. */
+    const probe: ProbeWait = {
+      sleep: deps.sleep,
+      now,
+      note: (text) => note("harness_error", text),
+      ...(run.control ? { signal: run.control.hardSignal } : {}),
+      deadline,
+    };
     const recoverInPlace = async (
       err: unknown,
       /** When the wait for an in-flight write gives up: the lease's end from
@@ -1670,9 +1679,40 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
        *  deadline plus its finale allowance, since a turn's write-up runs past
        *  its deadline — from a follow-up turn. */
       until: number,
-    ): Promise<ReattachOutcome | { kind: "run-ended" }> => {
-      const outcome = await classifyLoopFailure(err, { container, pid });
-      if (outcome.kind !== "control-reset" && outcome.kind !== "word-alive") return outcome;
+    ): Promise<ReattachOutcome | { kind: "run-ended" } | { kind: "transport-replaced"; was: string; now: string }> => {
+      if (finaleAborted && err instanceof Error && saysTransportLost(err)) return { kind: "not-mine" };
+      let outcome: ReattachOutcome = await classifyLoopFailure(err, {
+        container,
+        pid,
+        probe: { ...probe, deadline: until },
+      });
+      if (outcome.kind === "unresolved") {
+        if (run.control?.requested === "hard") return { kind: "run-ended" };
+        throw new Error(
+          "the recorded pi's liveness could not be established after the executor said replaced; the run cannot continue safely",
+          { cause: err },
+        );
+      }
+      if (outcome.kind === "not-mine" && err instanceof Error && saysTransportLost(err)) {
+        const transport = await classifyTransportLoss(container, facts?.container, pid, { ...probe, deadline: until });
+        if (run.control?.requested === "hard") return { kind: "run-ended" };
+        if (transport.kind === "replaced") {
+          if (transport.verdict.condition === "word") return { kind: "word-gone", said: transport.verdict.said };
+          return { kind: "transport-replaced", was: transport.verdict.was, now: transport.verdict.now };
+        }
+        if (transport.kind !== "live") {
+          const msg =
+            transport.kind === "dead"
+              ? `a container command failed on its transport (${redactAndCap(err instanceof Error ? err.message : String(err), 240)}); the one more command named no replacement, so the failure stands`
+              : "the container transport failed and the recorded pi's liveness could not be established; the run cannot continue safely";
+          note("harness_error", msg);
+          if (transport.kind === "dead") throw err;
+          throw new Error(msg, { cause: err });
+        }
+        outcome = { kind: "transport-alive" };
+      }
+      if (outcome.kind !== "control-reset" && outcome.kind !== "word-alive" && outcome.kind !== "transport-alive")
+        return outcome;
       if (reattaches >= MAX_INPLACE_REATTACHES) {
         const msg = reattachBoundMessage(outcome.kind, reattaches, "pi");
         note("harness_error", msg);
@@ -1695,10 +1735,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // write takes.
       const settled = transport!.flushed().then(() => "settled" as const);
       const pause: ProbeWait = { sleep: deps.sleep, now, ...(run.control ? { signal: run.control.hardSignal } : {}) };
-      if (run.control?.requested === "hard") {
-        hardStop();
-        return { kind: "run-ended" };
-      }
+      if (run.control?.requested === "hard") return { kind: "run-ended" };
       for (;;) {
         const waited = await Promise.race([
           settled,
@@ -1719,13 +1756,22 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           throw new Error(msg, { cause: err });
         }
       }
-      const res = resolveControlResetWrite(transport!.pendingSend, (id) => echoedIds.has(id));
+      const res = resolveControlResetWrite(transport!.pendingSend, (id) => echoedIds.has(id), {
+        failWithoutEcho: outcome.kind === "transport-alive",
+      });
       if (res.kind === "fail") {
         note("harness_error", res.message);
         throw new Error(res.message, { cause: err });
       }
       reattaches++;
-      note("resumed", outcome.kind === "word-alive" ? WORD_ALIVE_REATTACH_NOTE : CONTROL_RESET_RESUMED_NOTE);
+      note(
+        "resumed",
+        outcome.kind === "word-alive"
+          ? WORD_ALIVE_REATTACH_NOTE
+          : outcome.kind === "transport-alive"
+            ? TRANSPORT_ALIVE_REATTACH_NOTE
+            : CONTROL_RESET_RESUMED_NOTE,
+      );
       // No second wait on the chain before the abandon: nothing chained since
       // the wait began can be an abort — every abort's sender is this loop or
       // the turn, suspended in the wait itself, and a stop owed by an abort
@@ -1749,7 +1795,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // and the writes held behind it — as a stop must, never waiting out the
       // echo bound; those held writes are the ending loop's, dropped when it ends.
       if (res.kind === "resend") sends.send(res.command);
-      if (res.kind === "await-echo") sends.await(res.command);
+      if (res.kind === "await-echo") sends.await(res.command, { failWithoutEcho: outcome.kind === "transport-alive" });
       for (const command of unsent) sends.send(command);
       return outcome;
     };
@@ -1814,12 +1860,19 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // the process cannot refute is the verdict; past the bound the run
         // fails by name, whichever word it met.
         const outcome = await recoverInPlace(err, deadline);
-        if (outcome.kind === "control-reset" || outcome.kind === "word-alive") continue;
+        if (outcome.kind === "control-reset" || outcome.kind === "word-alive" || outcome.kind === "transport-alive")
+          continue;
         if (outcome.kind === "run-ended") break; // the wait ended with the run's own stop: the loop ends as it
 
         if (outcome.kind === "word-gone") {
           containerSaid = outcome.said;
           break;
+        }
+        if (outcome.kind === "transport-replaced") {
+          replaced = new PiContainerReplacedError(undefined, outcome.was, outcome.now, recordNow(), "identity");
+          bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
+          note("sandbox_restarted", replaced.message);
+          throw replaced;
         }
         // A failure on the command's transport with no word (the platform's
         // replacement closes the WebSocket under the read before any word can
@@ -2086,16 +2139,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // behind a bound this loop was waiting out. Dropped, delivering nothing;
     // a wrap-up among them clears the label the answer would have worn.
     dropHeld("run");
+    if (run.control?.requested === "hard") hardStop();
     /** What the one more command waits with: the harness's sleep and clock,
      *  the notes on the record, and the run itself — its hard-stop signal and
      *  its deadline end the wait as they end the run. */
-    const probe: ProbeWait = {
-      sleep: deps.sleep,
-      now,
-      note: (text) => note("harness_error", text),
-      ...(run.control ? { signal: run.control.hardSignal } : {}),
-      deadline,
-    };
+
     /** pi is gone before the run settled, or its container stopped answering.
      *  A container replaced under the run (item 16) — the executor's word on a
      *  container command — ends the run by the redispatch path: the call in
@@ -2114,9 +2162,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  container that is down (the restore window) rather than judging by its
      *  silence, and ends its wait with the run's own stop — then nothing is
      *  thrown here, and the run ends as the stop below; past both the failure
-     *  stands, named as the transport error it was — on every backend but the
-     *  resident, where the registered run resumes through the replaced
-     *  verdict's transport condition instead. */
+     *  stands, named as the transport error it was. */
     const judgeUnsettled = async (): Promise<void> => {
       // The log can report a dead pi while the first FIFO write is still
       // waiting on its own command timeout. Let that one write settle before
@@ -2144,25 +2190,6 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       if (run.control?.requested === "hard") return;
       if (transportLost !== undefined) {
-        // A resident-backed run is registered on its resident from attach to
-        // release, so its worktree and its record survive whatever broke the
-        // transport (a container the resident restarted under it included):
-        // the standing transport failure is the replaced verdict by the
-        // transport condition, and the run enters the resume path — the
-        // relaunch re-attaches the workspace through the resident's restore —
-        // never an ending (resident-repos item 44).
-        if (run.backend === "resident") {
-          replaced = new PiContainerReplacedError(
-            transportLost.message,
-            facts?.container,
-            undefined,
-            recordNow(),
-            "transport",
-          );
-          bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
-          note("sandbox_restarted", replaced.message);
-          throw replaced;
-        }
         note(
           "harness_error",
           `a container command failed on its transport (${redactAndCap(transportLost.message, 240)}); the one more command named no replacement, so the failure stands`,
@@ -2416,11 +2443,24 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             // is the turn's, as it always was — a control file lost among
             // them, noted once by the turn's own catch below.
             const outcome = await recoverInPlace(err, turnEnd);
-            if (outcome.kind === "control-reset" || outcome.kind === "word-alive") continue;
+            if (outcome.kind === "control-reset" || outcome.kind === "word-alive" || outcome.kind === "transport-alive")
+              continue;
             if (outcome.kind === "run-ended") break; // the wait ended with the run's own stop: the turn ends as it
             if (outcome.kind === "word-gone") {
               turnContainerSaid = outcome.said;
               break;
+            }
+            if (outcome.kind === "transport-replaced") {
+              const verdict = new PiContainerReplacedError(
+                undefined,
+                outcome.was,
+                outcome.now,
+                recordNow(),
+                "identity",
+              );
+              bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
+              note("sandbox_restarted", verdict.message);
+              throw verdict;
             }
             if (err instanceof Error && saysTransportLost(err)) {
               turnTransportLost = err;
@@ -2558,6 +2598,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // wrap-up steer, a prompt in doubt it settled without — never the next
         // turn's to receive; a wrap-up among it clears the label below.
         dropHeld("turn");
+        if (run.control?.requested === "hard") hardStop();
         if (hardStopped) {
           note("stopped", hardStopNote(), "hard");
           return HARD_STOP_MESSAGE;
@@ -2603,22 +2644,6 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             return HARD_STOP_MESSAGE;
           }
           if (turnTransportLost !== undefined) {
-            // The loop's rule (`judgeUnsettled`): a resident-backed run's
-            // standing transport failure is the replaced verdict by the
-            // transport condition, and the run resumes rather than ends.
-            if (run.backend === "resident") {
-              const turnVerdict = new PiContainerReplacedError(
-                turnTransportLost.message,
-                facts?.container,
-                undefined,
-                recordNow(),
-                "transport",
-              );
-              replaced = turnVerdict;
-              bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
-              note("sandbox_restarted", turnVerdict.message);
-              throw turnVerdict;
-            }
             note(
               "harness_error",
               `a container command failed on its transport (${redactAndCap(turnTransportLost.message, 240)}); the one more command named no replacement, so the failure stands`,

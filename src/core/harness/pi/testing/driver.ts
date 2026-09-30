@@ -1,3 +1,4 @@
+import { ExecInfraError } from "../../../../execution/executor.js";
 // pi's driver for the conformance table (docs/reference/specs/harness.md item
 // 11): a run over the fake container with pi scripted from the row's model
 // turns (`scriptPiFromProvider`), opened through `PiHarness` — the object the
@@ -280,6 +281,20 @@ export function piDriver(): HarnessDriver {
           // completes, the run answers) and the next drained read fails once
           // with the word while `alive` keeps answering yes, so the harness
           // re-attaches in place rather than judging the container replaced.
+          if (script.transportLossBoundOnFeed === turn + 1) {
+            container.resetOnDrain = new ExecInfraError("resident /exec: Network connection lost.", "transport-lost");
+            return true;
+          }
+          if (
+            script.transportLostWithPidAlive === turn + 1 ||
+            script.transportLostWithPidAliveAndIdentityUnknown === turn + 1
+          ) {
+            container.failReadOnceThenAlive = new ExecInfraError(
+              "resident /exec: Network connection lost.",
+              "transport-lost",
+            );
+            if (script.transportLostWithPidAliveAndIdentityUnknown === turn + 1) container.vm = undefined;
+          }
           if (script.replacedWordWithPidAlive === turn + 1) {
             container.failReadOnceThenAlive = new HarnessContainerRuntimeReplacedError(
               "read",

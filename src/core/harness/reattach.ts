@@ -13,7 +13,18 @@
 // Lifted here so the next rule lands in pi and OpenCode at once; the
 // conformance table runs both against it.
 
-import { isControlReset, saysContainerReplaced, type HarnessContainer } from "./container.js";
+import {
+  HarnessContainerDownError,
+  isControlReset,
+  PROBE_WAIT_BACKOFF_MS,
+  PROBE_WAIT_MAX_MS,
+  replacedVerdict,
+  saysContainerReplaced,
+  sleepUnlessStopped,
+  type HarnessContainer,
+  type ProbeWait,
+  type ReplacedVerdict,
+} from "./container.js";
 import { PiRpcTransport, type Landing, type PiRpcTransportDeps } from "./pi/transport.js";
 
 /** How many times a live run re-attaches in place with no record read between
@@ -48,8 +59,80 @@ export const WORD_ALIVE_REATTACH_NOTE =
 export const CONTROL_RESET_RESUMED_NOTE =
   "the resident's control plane reset under the run (a deploy); the container and pi are unchanged; re-attached";
 
+export const TRANSPORT_ALIVE_REATTACH_NOTE =
+  "the container command lost its transport; the recorded process answered alive; re-attached at the last consumed record";
+
+export type TransportLossOutcome =
+  { kind: "live" } | { kind: "replaced"; verdict: ReplacedVerdict } | { kind: "dead" } | { kind: "unresolved" };
+
+/** A lost /exec is not evidence of a replacement. Check the container's
+ * identity first (never probe an old pid in a renamed container), then the
+ * recorded pid. Neither an unverified identity nor an unanswerable pid is
+ * permission to reattach or relaunch: a new container may reuse the old pid. */
+export async function classifyTransportLoss(
+  container: Pick<HarnessContainer, "identity" | "alive">,
+  recorded: string | undefined,
+  pid: number | undefined,
+  probe?: ProbeWait,
+): Promise<TransportLossOutcome> {
+  let identityVerified = false;
+  // Keep replacedVerdict's bounded down/reset wait and its word handling as
+  // the single identity probe; it returns undefined for both "same" and
+  // "unknown", so remember which answer it actually saw before trusting pid.
+  const verdict = await replacedVerdict(
+    {
+      identity: async () => {
+        const name = await container.identity();
+        if (recorded !== undefined && name === recorded) identityVerified = true;
+        return name;
+      },
+    },
+    recorded,
+    probe,
+  );
+  if (verdict?.condition === "identity") return { kind: "replaced", verdict };
+  if (!identityVerified && verdict === undefined) return { kind: "unresolved" };
+  const status = await probeRecordedPid(container, pid, probe);
+  if (status === "live") return identityVerified ? { kind: "live" } : { kind: "unresolved" };
+  if (status === "unresolved") return { kind: "unresolved" };
+  if (typeof status === "object") return { kind: "replaced", verdict: { condition: "word", said: status.said } };
+  return verdict ? { kind: "replaced", verdict } : { kind: "dead" };
+}
+
+/** A failed liveness question is unknown, never a dead pid. Retry only down/reset
+ * answers, within the run's deadline, probe window and hard-stop signal. */
+async function probeRecordedPid(
+  container: Pick<HarnessContainer, "alive">,
+  pid: number | undefined,
+  probe?: ProbeWait,
+): Promise<"live" | "dead" | "unresolved" | { said: Error }> {
+  if (pid === undefined || probe?.signal?.aborted || (probe?.deadline !== undefined && probe.now() >= probe.deadline))
+    return "unresolved";
+  const began = probe?.now();
+  for (let attempt = 0; ; attempt++) {
+    if (probe?.signal?.aborted || (probe?.deadline !== undefined && probe.now() >= probe.deadline)) return "unresolved";
+    try {
+      const alive = await container.alive(pid);
+      return alive ? "live" : "dead";
+    } catch (err) {
+      if (err instanceof Error && saysContainerReplaced(err)) return { said: err };
+      if (probe === undefined || !(err instanceof HarnessContainerDownError || isControlReset(err)))
+        return "unresolved";
+      const pause = PROBE_WAIT_BACKOFF_MS[Math.min(attempt, PROBE_WAIT_BACKOFF_MS.length - 1)];
+      if (
+        probe.signal?.aborted ||
+        (probe.deadline !== undefined && probe.now() + pause > probe.deadline) ||
+        (began !== undefined && probe.now() - began + pause > PROBE_WAIT_MAX_MS)
+      )
+        return "unresolved";
+      probe.note?.("the recorded pid's liveness probe found the container down; waiting for it to answer");
+      if (!(await sleepUnlessStopped(probe, pause))) return "unresolved";
+    }
+  }
+}
+
 /** The two failures a loop re-attaches in place on. */
-export type ReattachKind = "control-reset" | "word-alive";
+export type ReattachKind = "control-reset" | "word-alive" | "transport-alive";
 
 /** The `harness_error` the run fails by name with at `MAX_INPLACE_REATTACHES`
  *  re-attaches that read no record between them. A control reset that keeps
@@ -58,10 +141,14 @@ export type ReattachKind = "control-reset" | "word-alive";
  *  into the verdict at the bound, since that would relaunch beside a live pi
  *  (the orphan the guard exists to prevent). */
 export function reattachBoundMessage(kind: ReattachKind, reattaches: number, processName: "pi" | "OpenCode"): string {
-  return kind === "control-reset"
-    ? `the resident's control plane reset under the run ${reattaches} times with no progress; the run cannot continue safely`
-    : `the executor said replaced ${reattaches} times with no progress while the row's ${processName} answered alive in this container; ` +
-        `the word was never refuted by a record, and the run cannot continue safely — never a relaunch beside a live ${processName}`;
+  if (kind === "control-reset")
+    return `the resident's control plane reset under the run ${reattaches} times with no progress; the run cannot continue safely`;
+  if (kind === "transport-alive")
+    return `the container transport failed ${reattaches} times without a record while the row's ${processName} answered alive; the run cannot continue safely`;
+  return (
+    `the executor said replaced ${reattaches} times with no progress while the row's ${processName} answered alive in this container; ` +
+    `the word was never refuted by a record, and the run cannot continue safely — never a relaunch beside a live ${processName}`
+  );
 }
 
 /** What the loop does about the container command that failed under it, decided
@@ -71,18 +158,30 @@ export function reattachBoundMessage(kind: ReattachKind, reattaches: number, pro
  *  is the loop's to apply (`reattachBoundMessage`): the process's answer alone
  *  decides between `word-alive` and `word-gone`, never the count. */
 export type ReattachOutcome =
-  { kind: "control-reset" } | { kind: "word-alive" } | { kind: "word-gone"; said: Error } | { kind: "not-mine" };
+  | { kind: "control-reset" }
+  | { kind: "word-alive" }
+  | { kind: "transport-alive" }
+  | { kind: "word-gone"; said: Error }
+  | { kind: "unresolved" }
+  | { kind: "not-mine" };
 
 /** Classify a failed container command and, for the replaced word, probe the
  *  row's process in the container the run holds before deciding (ask 2). */
 export async function classifyLoopFailure(
   err: unknown,
-  ctx: { container: Pick<HarnessContainer, "alive">; pid: number | undefined },
+  ctx: { container: Pick<HarnessContainer, "alive">; pid: number | undefined; probe?: ProbeWait },
 ): Promise<ReattachOutcome> {
   if (err instanceof Error && isControlReset(err)) return { kind: "control-reset" };
   if (err instanceof Error && saysContainerReplaced(err)) {
-    const aliveHere = ctx.pid !== undefined && (await ctx.container.alive(ctx.pid).catch(() => false));
-    return aliveHere ? { kind: "word-alive" } : { kind: "word-gone", said: err };
+    if (ctx.pid === undefined) return { kind: "word-gone", said: err };
+    const status = await probeRecordedPid(ctx.container, ctx.pid, ctx.probe);
+    return status === "live"
+      ? { kind: "word-alive" }
+      : status === "dead"
+        ? { kind: "word-gone", said: err }
+        : typeof status === "object"
+          ? { kind: "word-gone", said: status.said }
+          : { kind: "unresolved" };
   }
   return { kind: "not-mine" };
 }
@@ -118,13 +217,16 @@ const RESEND_AS_IS = new Set(["set_auto_retry", "get_state", "extension_ui_respo
 
 /** How to resolve the write a reset left unknown, by pi's echo — one rule for
  *  the control-reset word and for the replaced word the process refuted:
- *  - `none`: nothing was in flight (a read reset); a `steer`, whose landed copy
- *    pi echoes and whose unlanded copy the loop requeues — never re-sent, a
- *    landed steer must not double; or a command whose id pi has ALREADY echoed
+ *  - `none`: nothing was in flight (a read reset); a `steer` after a control
+ *    reset, whose landed copy pi echoes and whose unlanded copy the loop
+ *    requeues (after a transport loss, no id proves delivery, so fail closed);
+ *    or a command whose id pi has ALREADY echoed
  *    (`echoed`), which landed before the failure was seen — the echo may sit in
  *    the very chunk read before the transport surfaced its send error.
- *  - `resend`: an id-carrying control command or the gate reply — safe to
- *    re-send as it was (its id dedups). An abort is never in doubt: the
+ *  - `resend`: an id-carrying control command or the gate reply after a
+ *    control reset (its id dedups). After a lost /exec transport, lack of an
+ *    echo does not prove it was not delivered: fail rather than replay it.
+ *    An abort is never in doubt: the
  *    transport writes it as its own step past any spent chain, and a failed
  *    one its sender asks again on the next tick, so it needs nothing here.
  *  - `await-echo`: a `prompt` with an id, re-sent only if pi does not echo that
@@ -143,8 +245,17 @@ export type WriteResolution =
 export function resolveControlResetWrite(
   command: Record<string, unknown> | undefined,
   echoed: (id: string) => boolean = () => false,
+  opts?: { failWithoutEcho?: boolean },
 ): WriteResolution {
-  if (command === undefined || command.type === "steer" || command.type === "abort") return { kind: "none" };
+  if (command === undefined || command.type === "abort") return { kind: "none" };
+  if (command.type === "steer")
+    return opts?.failWithoutEcho
+      ? {
+          kind: "fail",
+          message:
+            "a steer was in flight when the container lost its transport; no id echoes its delivery, so the run cannot continue safely without re-issuing an uncertain write",
+        }
+      : { kind: "none" };
   const type = typeof command.type === "string" ? command.type : "unknown";
   const id = typeof command.id === "string" ? command.id : undefined;
   if (id !== undefined && echoed(id)) return { kind: "none" };
@@ -158,7 +269,13 @@ export function resolveControlResetWrite(
       };
     return { kind: "await-echo", command };
   }
-  if (RESEND_AS_IS.has(type)) return { kind: "resend", command };
+  if (RESEND_AS_IS.has(type))
+    return opts?.failWithoutEcho
+      ? {
+          kind: "fail",
+          message: `a ${type} command was in flight when the container lost its transport; its echo is missing, so the run cannot continue safely without replaying an uncertain write`,
+        }
+      : { kind: "resend", command };
   return {
     kind: "fail",
     message:
@@ -174,6 +291,8 @@ export function resolveControlResetWrite(
 interface HeldSend {
   command: Record<string, unknown>;
   state: "send" | "await" | "landed";
+  /** A transport loss gives no proof an un-echoed write did not land. */
+  failWithoutEcho?: boolean;
 }
 
 /** A landing the write's sender hears about: the write is over, one way or the
@@ -262,8 +381,8 @@ export class HeldSends {
   /** A prompt whose landing a failure left in doubt: awaited until its echo or
    *  the bound. Appended behind an earlier one, never overwriting it; its clock
    *  starts at the first quiet moment once it is the head. */
-  await(command: Record<string, unknown>): void {
-    this.queue.push({ command, state: "await" });
+  await(command: Record<string, unknown>, opts?: { failWithoutEcho?: boolean }): void {
+    this.queue.push({ command, state: "await", failWithoutEcho: opts?.failWithoutEcho });
   }
 
   /** pi echoed `id`: a prompt in doubt under that id landed — never re-sent,
@@ -292,6 +411,10 @@ export class HeldSends {
       return;
     }
     if (now - this.headSince < PROMPT_ECHO_WAIT_MS) return;
+    if (head.failWithoutEcho)
+      throw new Error(
+        "the prompt's write was unresolved after the container transport failed; its echo never arrived, so the run cannot continue safely without duplicate delivery",
+      );
     this.queue.shift();
     this.headSince = undefined;
     // The re-send is a steer-delivered copy. No callback follows it: a prompt

@@ -14,7 +14,7 @@ import {
   type PiHarnessFacts,
 } from "../contract.js";
 import { HarnessRegistry, relayToolCall, type LiveHarness } from "../pi/relay.js";
-import { CONTROL_RESET_RESUMED_NOTE } from "../reattach.js";
+import { CONTROL_RESET_RESUMED_NOTE, TRANSPORT_ALIVE_REATTACH_NOTE } from "../reattach.js";
 import { RunRegistry } from "../../runRegistry.js";
 import { followUpPrompt } from "../../threadAdmission.js";
 import { PROXY_PROVIDER } from "../pi/process.js";
@@ -1790,6 +1790,25 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     longSeed.push({ role: "user", content: [{ type: "text", text: `question ${i}` }] });
     longSeed.push({ role: "assistant", content: [{ type: "text", text: `answer ${i}` }] });
   }
+
+  it("a live server's prompt POST loses /exec after landing: the store echo resolves the write, one prompt is delivered and the final verdict arrives", async () => {
+    const r = await openCodeDriver({ transportLostOnPrompt: "landed" }).run(oneTurn);
+    expect(answered(r)).toBe("done");
+    expect(posts(r, "/prompt")).toHaveLength(1);
+    expect(storeReads(r)).toHaveLength(1);
+    expect(
+      notes(r)
+        .filter((n) => n.kind === "resumed")
+        .map((n) => n.summary),
+    ).toContain(TRANSPORT_ALIVE_REATTACH_NOTE);
+  });
+
+  it("an unresolved prompt POST after /exec loss fails without a second delivery", async () => {
+    const r = await openCodeDriver({ transportLostOnPrompt: "lost" }).run(oneTurn);
+    expect(r.outcome.kind).toBe("failed");
+    expect(answered(r)).toMatch(/delivery is unresolved/);
+    expect(posts(r, "/prompt")).toHaveLength(1);
+  });
 
   it("a prompt the reset cut after the server took it is not re-issued: the store lists its message, the feed is re-attached in place under one resumed note, and the run answers on the one execution", async () => {
     const r = await openCodeDriver({ controlResetOnPrompt: "landed" }).run(oneTurn);

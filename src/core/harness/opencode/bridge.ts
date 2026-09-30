@@ -65,6 +65,8 @@ import {
 } from "../container.js";
 import {
   classifyLoopFailure,
+  classifyTransportLoss,
+  TRANSPORT_ALIVE_REATTACH_NOTE,
   CONTROL_RESET_RESUMED_NOTE,
   MAX_INPLACE_REATTACHES,
   reattachBoundMessage,
@@ -2348,11 +2350,6 @@ export async function driveOpenCode(
    *  read having failed with the word — what the one more container command
    *  before the crash judgement said (`replacedVerdict`). */
   let replacedBy: ReplacedVerdict | undefined;
-  /** A feed read failed on its transport with no word (`saysTransportLost`;
-   *  the third failure shape, harness.md item 6): the one more command ran,
-   *  and the failure stands, named as it was, when that command named no
-   *  replacement. */
-  let transportLost: Error | undefined;
   /** What the one more command waits with: the harness's sleep and clock, the
    *  notes on the record, and the run itself — its hard-stop signal and its
    *  deadline end the wait as they end the run. */
@@ -2778,8 +2775,8 @@ export async function driveOpenCode(
    *  the write re-issued only where the state says it never landed; a state
    *  that cannot be read, or a re-issue that meets the reset again, fails the
    *  run by name. OpenCode's counterpart of pi's echo (harness-pi item 16). */
-  const resetUnder = (): void => {
-    note("resumed", CONTROL_RESET_RESUMED_NOTE);
+  const resetUnder = (summary = CONTROL_RESET_RESUMED_NOTE): void => {
+    note("resumed", summary);
     reattachInPlace();
   };
   /** Whether a `queue` prompt the reset cut landed. The store is read newest
@@ -2902,6 +2899,16 @@ export async function driveOpenCode(
           // whether it landed. Never re-sent blind.
           resetUnder();
           resolution = await resolveReplyAgainstPending(route, body, reply.requestID, "reset");
+        } else if (err instanceof Error && saysTransportLost(err)) {
+          const outcome = await classifyTransportLoss(conn.container, conn.containerWord, conn.pid, probe);
+          if (outcome.kind === "live") {
+            resetUnder(TRANSPORT_ALIVE_REATTACH_NOTE);
+            resolution = await resolveReplyAgainstPending(route, body, reply.requestID, "reset");
+          } else
+            resolution = {
+              outcome: "failed",
+              failure: new OpenCodeWriteUnresolvedError("the gate's reply", `transport lost; process ${outcome.kind}`),
+            };
         } else resolution = { outcome: "failed", failure: err instanceof Error ? err : new Error(String(err)) };
       }
       if (resolution.outcome === "withdrawn") {
@@ -2960,9 +2967,23 @@ export async function driveOpenCode(
     try {
       admitted = await request(sessionRoutes["session.prompt"], promptBody);
     } catch (err) {
-      if (!(err instanceof Error && isControlReset(err))) throw err;
-      resetUnder();
+      if (!(err instanceof Error && (isControlReset(err) || saysTransportLost(err)))) throw err;
+      const lostTransport = saysTransportLost(err);
+      if (lostTransport) {
+        const outcome = await classifyTransportLoss(conn.container, conn.containerWord, conn.pid, probe);
+        if (outcome.kind !== "live") {
+          const message = `the prompt's transport failed; the recorded OpenCode process is ${outcome.kind}; its write cannot be safely resolved`;
+          note("harness_error", message);
+          throw new OpenCodeWriteUnresolvedError(promptName, message);
+        }
+      }
+      resetUnder(lostTransport ? TRANSPORT_ALIVE_REATTACH_NOTE : CONTROL_RESET_RESUMED_NOTE);
       try {
+        if (delivery === "steer" && lostTransport)
+          throw new OpenCodeWriteUnresolvedError(
+            promptName,
+            "a steer lost its transport before its echo; it cannot be re-issued safely",
+          );
         if (delivery === "steer") {
           // The re-attach's continue steered into an execution under way: pi's
           // rule for a steer — never re-sent. The execution it nudged runs on
@@ -2973,6 +2994,11 @@ export async function driveOpenCode(
           promptId = await promptLanded(promptBody.text, promptName, knownAtPrompt);
           if (promptId !== undefined) admitted = "landed";
           else {
+            if (lostTransport)
+              throw new OpenCodeWriteUnresolvedError(
+                promptName,
+                "the store has no echo of the prompt after the transport loss; its delivery is unresolved",
+              );
             try {
               admitted = await request(sessionRoutes["session.prompt"], promptBody);
             } catch (again) {
@@ -3030,7 +3056,17 @@ export async function driveOpenCode(
         // re-attaches the run fails by name, noted as pi does — never a silent
         // throw, and never the verdict for a word the pid still refutes (that
         // would relaunch a second server beside the live one).
-        const outcome = await classifyLoopFailure(err, { container: conn.container, pid: conn.pid });
+        const outcome = await classifyLoopFailure(err, { container: conn.container, pid: conn.pid, probe });
+        if (outcome.kind === "unresolved") {
+          if (run.control?.requested === "hard") {
+            check();
+            break;
+          }
+          throw new Error(
+            "the recorded OpenCode process's liveness could not be established after the executor said replaced; the run cannot continue safely",
+            { cause: err },
+          );
+        }
         if (outcome.kind === "control-reset" || outcome.kind === "word-alive") {
           if (reattaches >= MAX_INPLACE_REATTACHES) {
             const msg = reattachBoundMessage(outcome.kind, reattaches, "OpenCode");
@@ -3050,11 +3086,33 @@ export async function driveOpenCode(
         // command (which waits through a container that is down) before the
         // verdict; any other failure propagates to the finally.
         if (!(err instanceof Error && saysTransportLost(err))) throw err;
-        transportLost = err;
-        replacedBy = await replacedVerdict(conn.container, conn.containerWord, probe);
-        // The wait ends with the run's own stop: read it here once it has.
-        check();
-        break;
+        const result = await classifyTransportLoss(conn.container, conn.containerWord, conn.pid, probe);
+        if (run.control?.requested === "hard") {
+          check();
+          break;
+        }
+        if (result.kind === "live") {
+          if (reattaches >= MAX_INPLACE_REATTACHES) {
+            const msg = reattachBoundMessage("transport-alive", reattaches, "OpenCode");
+            note("harness_error", msg);
+            throw new Error(msg, { cause: err });
+          }
+          reattaches++;
+          note("resumed", TRANSPORT_ALIVE_REATTACH_NOTE);
+          reattachInPlace();
+          continue;
+        }
+        if (result.kind === "replaced") {
+          replacedBy = result.verdict;
+          break;
+        }
+        const msg =
+          result.kind === "dead"
+            ? `a container command failed on its transport (${redactAndCap(err.message, 240)}); the one more command named no replacement, so the failure stands`
+            : "the container transport failed and the recorded OpenCode process's liveness could not be established; the run cannot continue safely";
+        note("harness_error", msg);
+        if (result.kind === "dead") throw err;
+        throw new Error(msg, { cause: err });
       }
       if (next === "tick") {
         check();
@@ -3248,7 +3306,6 @@ export async function driveOpenCode(
         bypass ||
         replyFailed ||
         replacedBy ||
-        transportLost ||
         refused ||
         windDownFailed ||
         providerError !== undefined
@@ -3308,18 +3365,6 @@ export async function driveOpenCode(
             : `${open.tool} was cut at the loop's end and its outcome never reached the record before the write-up settled`,
       { cut: true },
     );
-  }
-  // The read failed on its transport and the one more command named no
-  // replacement: the failure stands, named as the transport error it was —
-  // never a crash judgement of the harness's own — and the caller ends the
-  // server, its tailer and the root as after any failed run. A wait the run's
-  // own stop ended is the stop's ending, below, not this failure's.
-  if (transportLost !== undefined && ended !== "hard") {
-    note(
-      "harness_error",
-      `a container command failed on its transport (${redactAndCap(transportLost.message, 240)}); the one more command named no replacement, so the failure stands`,
-    );
-    throw transportLost;
   }
   if (bypass) throw bypass;
   if (replyFailed) throw replyFailed;

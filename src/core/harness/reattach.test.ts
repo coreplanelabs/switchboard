@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Landing } from "./pi/transport.js";
-import { HeldSends, PROMPT_ECHO_WAIT_MS, reattachBoundMessage } from "./reattach.js";
+import {
+  HeldSends,
+  PROMPT_ECHO_WAIT_MS,
+  classifyTransportLoss,
+  reattachBoundMessage,
+  resolveControlResetWrite,
+} from "./reattach.js";
+import { HarnessContainerDownError, HarnessContainerRuntimeReplacedError } from "./container.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 16 — the one gate every write
 // to pi takes after a re-attach left a prompt in doubt: while that prompt awaits
@@ -96,6 +103,17 @@ describe("HeldSends — the one gate every write to pi takes (harness-pi item 16
     expect(sent).toEqual([]);
     held.quiet(T0 + PROMPT_ECHO_WAIT_MS); // one quiet read past the bound, no loop tick ever fired
     expect(sent).toEqual([{ ...P1, streamingBehavior: "steer" }]);
+  });
+
+  it("a prompt unresolved after /exec transport loss waits for its echo and fails closed instead of resending on silence", () => {
+    const { sent, held } = gate();
+    held.await(P1, { failWithoutEcho: true });
+    held.send(S1);
+    held.quiet(T0);
+    expect(() => held.quiet(T0 + PROMPT_ECHO_WAIT_MS)).toThrow(/echo never arrived.*duplicate delivery/);
+    expect(sent).toEqual([]);
+    held.echoed("p1");
+    expect(sent).toEqual([S1]);
   });
 
   it("the echo of the awaited prompt means it landed: it is never re-sent, and the writes held behind it go out in order", () => {
@@ -291,6 +309,136 @@ describe("HeldSends — the one gate every write to pi takes (harness-pi item 16
     held.send(gone);
     await landed();
     expect(landedOnes).toEqual(["S1", "S2", "wrapUp:landed", "lost:failed", "gone:dropped"]);
+  });
+});
+
+describe("resolveControlResetWrite — an in-flight write after /exec loss", () => {
+  it("fails closed on an un-echoed steer, gate reply or control command after transport loss; a matching id echo proves delivery", () => {
+    expect(resolveControlResetWrite(S1, () => false, { failWithoutEcho: true })).toMatchObject({
+      kind: "fail",
+      message: expect.stringMatching(/steer.*transport.*cannot continue safely/),
+    });
+    expect(resolveControlResetWrite(REPLY, () => false, { failWithoutEcho: true })).toMatchObject({
+      kind: "fail",
+      message: expect.stringMatching(/extension_ui_response.*transport.*echo.*cannot continue safely/),
+    });
+    expect(
+      resolveControlResetWrite({ type: "get_state", id: "state-1" }, () => false, { failWithoutEcho: true }),
+    ).toMatchObject({ kind: "fail" });
+    expect(resolveControlResetWrite(REPLY, (id) => id === "d1", { failWithoutEcho: true })).toEqual({ kind: "none" });
+    expect(resolveControlResetWrite(REPLY, () => false)).toEqual({ kind: "resend", command: REPLY });
+  });
+});
+
+describe("classifyTransportLoss — a cold sandbox's lost exec is not a dead process", () => {
+  it("reattaches when the recorded pid answers alive despite Network connection lost and the same container name", async () => {
+    let probes = 0;
+    const result = await classifyTransportLoss(
+      {
+        identity: async () => "vm-a",
+        alive: async (pid: number) => {
+          expect(pid).toBe(4242);
+          probes++;
+          return true;
+        },
+      },
+      "vm-a",
+      4242,
+    );
+    expect(result).toEqual({ kind: "live" });
+    expect(probes).toBe(1);
+  });
+
+  it("does not reattach to a reused pid when a recorded container identity cannot be confirmed", async () => {
+    for (const { recorded, identity } of [
+      { recorded: "vm-a", identity: async () => undefined },
+      {
+        recorded: "vm-a",
+        identity: async (): Promise<string> => {
+          throw new Error("Network connection lost.");
+        },
+      },
+      { recorded: undefined, identity: async () => "vm-b" },
+    ]) {
+      let pidProbes = 0;
+      expect(
+        await classifyTransportLoss(
+          {
+            identity,
+            alive: async (pid) => {
+              expect(pid).toBe(4242);
+              pidProbes++;
+              return true; // a replacement may reuse the recorded pid
+            },
+          },
+          recorded,
+          4242,
+        ),
+      ).toEqual({ kind: "unresolved" });
+      expect(pidProbes).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("relaunches only on a proven different container or the executor's word with a dead pid", async () => {
+    const replaced = { identity: async () => "vm-b", alive: async () => true };
+    expect(await classifyTransportLoss(replaced, "vm-a", 4242)).toMatchObject({
+      kind: "replaced",
+      verdict: { condition: "identity" },
+    });
+    const word = new HarnessContainerRuntimeReplacedError("identity", "runtime-replaced");
+    expect(
+      await classifyTransportLoss(
+        {
+          identity: async () => {
+            throw word;
+          },
+          alive: async () => false,
+        },
+        "vm-a",
+        4242,
+      ),
+    ).toMatchObject({ kind: "replaced", verdict: { condition: "word" } });
+    expect(
+      await classifyTransportLoss({ identity: async () => "vm-a", alive: async () => false }, "vm-a", 4242),
+    ).toEqual({ kind: "dead" });
+    expect(
+      await classifyTransportLoss(
+        {
+          identity: async () => "vm-a",
+          alive: async () => {
+            throw word;
+          },
+        },
+        "vm-a",
+        4242,
+      ),
+    ).toEqual({ kind: "replaced", verdict: { condition: "word", said: word } });
+  });
+
+  it("fails closed on an ambiguous liveness probe, bounded by deadline or a hard stop", async () => {
+    let now = 0;
+    let asks = 0;
+    const down = {
+      identity: async () => "vm-a",
+      alive: async () => {
+        asks++;
+        throw new HarnessContainerDownError("alive", "Network connection lost.");
+      },
+    };
+    const wait = {
+      now: () => now,
+      sleep: async (ms: number) => {
+        now += ms;
+      },
+      deadline: 5_000,
+    };
+    expect(await classifyTransportLoss(down, "vm-a", 4242, wait)).toEqual({ kind: "unresolved" });
+    expect(asks).toBe(1);
+    const stop = new AbortController();
+    stop.abort();
+    expect(await classifyTransportLoss(down, "vm-a", 4242, { ...wait, signal: stop.signal })).toEqual({
+      kind: "unresolved",
+    });
   });
 });
 
