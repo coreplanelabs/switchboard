@@ -1159,6 +1159,14 @@ describe("review prompts: the unit contract check (agent-review item 17)", () =>
 // job depends on: a command is capped at twenty minutes, and a job past it is
 // detached with `setsid -f` (a `nohup` job dies with the command that started it).
 describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
+  it("conductor's prompt reports review verdicts from the recorded post result instead of inferring them from closing prose", () => {
+    const sys = AGENTS.conductor.system;
+    expect(sys).toContain("reviewPost");
+    expect(sys).toContain("reviewVerdict");
+    expect(sys).toMatch(/finalReply.*verdict/i);
+    expect(sys).toMatch(/posted.*target.*head/i);
+  });
+
   it("conductor: machine none, identity none, the conductor toolset, 1440 minutes for broad batches, no built-in effort and no resident prompt", () => {
     expect(AGENTS.conductor.machine).toBe("none");
     expect(AGENTS.conductor.identity).toBe("none");
