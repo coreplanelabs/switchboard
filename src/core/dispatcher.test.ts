@@ -12029,7 +12029,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     // transcript grew by this step's assistant turn (and, by the second call,
     // its results turn is not yet written — that rides with the next step).
     expect(seen.stepsAtSecondCall).toEqual([
-      expect.objectContaining({ step: 0, turnIndex: seedTurns, inFlight: [], remainingMs: 5 * 60_000 }), // general: 5 min
+      expect.objectContaining({ step: 0, turnIndex: seedTurns, inFlight: [], remainingMs: 60 * 60_000 }), // general: 60 min
       expect.objectContaining({
         step: 1,
         turnIndex: seedTurns + 1,
@@ -16627,7 +16627,7 @@ describe("no gaps: every awaited step runs inside a span (docs/reference/specs/t
     // The follow-up carries its platform stamp (a Slack `ts`): the fresh turn
     // must not turn that into a `queued … before we saw it`.
     await dispatch(deps, { ...msg("and also the numbers", "slack:UY"), originAt: clock.now() - 5_000 }, second);
-    clock.tick(100_000); // the follow-up waits behind the run — inside the loop's time (general: a 5-minute lease ends its loop at 2), so the provider's failure is the run's, not a note under the wind-down
+    clock.tick(100_000); // the follow-up waits behind the run — inside general's loop time, so the provider's failure is the run's, not a note under the wind-down
     fail(new Error("provider exploded"));
     await run;
     // Three requests: the first run's, the steered follow-up's own (no run), the fresh turn's.
@@ -18045,11 +18045,11 @@ describe("the model proxy's run bearer through dispatch()", () => {
       providerName: "anthropic",
       providerWire: "anthropic-messages",
       model: "general-model",
-      maxTurns: 30, // the general preset's turn guard: its five minutes × RUNAWAY_TURNS_PER_MINUTE
+      maxTurns: 360, // the general preset's turn guard: its 60 minutes × RUNAWAY_TURNS_PER_MINUTE
       maxTokens: 16000,
       turns: 1, // the one model call, metered as the proxy meters it
       revoked: true,
-      expiresAt: bearerExpiresAt(clock.now + 5 * 60_000), // the lease started at the harness's clock: the general preset's five minutes, plus the grace
+      expiresAt: bearerExpiresAt(clock.now + 60 * 60_000), // the lease started at the harness's clock: the general preset's 60 minutes, plus the grace
     });
     expect(store.issue(runId!)).toBeUndefined(); // nothing buys a call after the run's end
   });

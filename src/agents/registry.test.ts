@@ -29,9 +29,9 @@ import { TIMEOUT_ON_LONG_COMMANDS } from "../core/ship/contract.js";
 // change forces a feature-file update (and vice versa).
 
 describe("agent registry matches the feature specs", () => {
-  it("general: the assistant toolset (GitHub reads + issue writes + web_fetch, no shell), 5 min", () => {
+  it("general: the assistant toolset (GitHub reads + issue writes + web_fetch, no shell), 60 min", () => {
     expect(AGENTS.general.toolset).toBe("assistant");
-    expect(AGENTS.general.maxMinutes).toBe(5);
+    expect(AGENTS.general.maxMinutes).toBe(60);
   });
 
   it("review: readonly toolset, 25 min", () => {
@@ -189,11 +189,11 @@ describe("the turn cap is a runaway guard derived from the wall clock (docs/refe
     expect(AGENTS.ship.maxTurns).toBe(1);
   });
 
-  it("the derived caps: coding 540 in 90, review 150 in 25, research 48 in 8, general 30 in 5, explore and conductor 720 in 120", () => {
+  it("the derived caps: coding 540 in 90, review 150 in 25, research 48 in 8, general 360 in 60, explore and conductor 720 in 120", () => {
     expect(AGENTS.coding.maxTurns).toBe(540);
     expect(AGENTS.review.maxTurns).toBe(150);
     expect(AGENTS.research.maxTurns).toBe(48);
-    expect(AGENTS.general.maxTurns).toBe(30);
+    expect(AGENTS.general.maxTurns).toBe(360);
     expect(AGENTS.explore.maxTurns).toBe(720);
     expect(AGENTS.conductor.maxTurns).toBe(720);
   });

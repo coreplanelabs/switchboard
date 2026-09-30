@@ -39,9 +39,9 @@ import {
 const SHIP_DEFAULT = { maxMinutes: ASKS.ship, maxRounds: 3 };
 
 describe("the budgets module — one table every wall clock derives from (docs/decisions/0046)", () => {
-  it("the asks: coding 90, review 25, research 8, general 5, explore 120, conductor 120, orchestrator 10, ship 240", () => {
+  it("the asks: coding 90, review 25, research 8, general 60, explore 120, conductor 120, orchestrator 10, ship 240", () => {
     expect(ASKS).toEqual({
-      general: 5,
+      general: 60,
       coding: 90,
       review: 25,
       ship: 240,
@@ -310,10 +310,13 @@ describe("the loop's clocks — the loop ends inside the lease, so the write-up 
     });
     expect(c.deadline - c.loopEnd).toBe((ALLOWANCES.writeUp + POST_STEP_MINUTES.coding) * MINUTE_MS);
   });
-  it("a preset without a post-step holds back the write-up alone: a general lease of 5 ends its loop at 2, and its warning is a quarter of the loop before that", () => {
-    const c = loopClock(T0, 5 * MINUTE_MS, "general");
-    expect(c.loopEnd).toBe(T0 + 2 * MINUTE_MS);
-    expect(c.warnAt).toBe(T0 + 1.5 * MINUTE_MS);
+  it("general holds back only the write-up: its 60-minute ask runs a 57-minute loop, while a clipped 5-minute lease warns a quarter-loop early", () => {
+    const c = loopClock(T0, ASKS.general * MINUTE_MS, "general");
+    expect(c.loopEnd).toBe(T0 + 57 * MINUTE_MS);
+    expect(c.warnAt).toBe(T0 + 54 * MINUTE_MS);
+    const clipped = loopClock(T0, 5 * MINUTE_MS, "general");
+    expect(clipped.loopEnd).toBe(T0 + 2 * MINUTE_MS);
+    expect(clipped.warnAt).toBe(T0 + 1.5 * MINUTE_MS);
     expect(WRAP_UP_WARNING).toEqual({ minutes: 3, fraction: 0.25 });
   });
   it("a lease shorter than its hold-back has no loop time: the loop ends at its start, never before it", () => {

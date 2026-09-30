@@ -151,7 +151,7 @@ describe("writeTombstone — the provisional interrupted record at the loop's st
       status: "interrupted",
       agent: "general",
       model: "anthropic/general-model",
-      profile: { preset: "general", machine: "none", identity: "none", minutes: 5 },
+      profile: { preset: "general", machine: "none", identity: "none", minutes: 60 },
       // The provisional flag rides the persisted record (run-history item 27):
       // a store-only reader can distinguish "no finish recorded yet" from a real
       // interrupt that owns no live row.

@@ -277,8 +277,7 @@ function compareCapability(a: RoutablePreset, b: RoutablePreset): number {
   const machine = Number(a.machine !== "none") - Number(b.machine !== "none");
   if (machine !== 0) return machine;
   const identity = IDENTITY_RANK[a.identity] - IDENTITY_RANK[b.identity];
-  if (identity !== 0) return identity;
-  return a.maxMinutes - b.maxMinutes;
+  return identity;
 }
 
 /** Map a caller's MCP catalog to the authorized projection. The server's own
@@ -291,6 +290,8 @@ export function operatorSources(
   for (const entry of catalog) {
     if (out.length >= OPERATOR_SOURCES_MAX) break;
     const receivers = presets.filter((preset) => entry.agents.includes(preset.name));
+    // Duration is a run limit, not a capability. Registry order resolves equal
+    // machine and identity profiles, so changing an ask cannot reroute a source.
     const receiver = receivers.reduce<RoutablePreset | undefined>(
       (best, preset) => (best === undefined || compareCapability(preset, best) < 0 ? preset : best),
       undefined,
