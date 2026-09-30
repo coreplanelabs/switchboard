@@ -80,6 +80,13 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.general.system).toMatch(/never claim an action you did not perform/);
   });
 
+  it("general continues a budget-ended source question in its conversation without trusting a cut source result", () => {
+    expect(AGENTS.general.system).toContain('the requester replies "continue"');
+    expect(AGENTS.general.system).toContain("continue the earlier question from this conversation's context");
+    expect(AGENTS.general.system).toContain("Re-read sources with this requester's access");
+    expect(AGENTS.general.system).toContain("a cut or failed source read is not evidence");
+  });
+
   it("general's prompt never promises a hand-off and never sends the person to a new top-level message — the door reads thread replies (issue 2046)", () => {
     // The retype hand-back record 0069 retires: under the operator (on by
     // default) the door reads every message, thread replies included, so
