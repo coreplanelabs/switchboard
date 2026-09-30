@@ -155,7 +155,7 @@ describe("original-unit recovery accounting", () => {
       input({
         merge: "person",
         grant: { renewals: 2, costCapUsd: 50 },
-        recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+        recovery: { remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
       }),
       T0,
       {
@@ -205,7 +205,7 @@ describe("original-unit recovery accounting", () => {
         input({
           merge: "person",
           grant: { renewals: 2, costCapUsd: 50 },
-          recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+          recovery: { remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
         }),
         T0,
         {
@@ -943,7 +943,7 @@ describe("completed findings recovery — typed completion plus independently ve
           merge: "person",
           generated: true,
           grant: { renewals: 0, costCapUsd: 2 },
-          recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+          recovery: { remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
         }),
         T0,
         {
@@ -1625,7 +1625,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     });
     expect(capped.action).toMatchObject({
       type: "end",
-      ending: { kind: "wall_clock_cap", reviewRounds: 1, refused: { round: "findings", minutes: 6, floor: 15 } },
+      ending: { kind: "wall_clock_cap", reviewRounds: 1, refused: { round: "findings", minutes: 2, floor: 15 } },
     });
     expect(capped.state.findingsRunByRound).toEqual({});
     expect(capped.state.lastCodingRunId).toBe("run-c0");
@@ -1744,27 +1744,27 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     );
     expect(d.action).toMatchObject({
       type: "end",
-      ending: { kind: "wall_clock_cap", refused: { round: "findings", minutes: 6, floor: 15 } },
+      ending: { kind: "wall_clock_cap", refused: { round: "findings", minutes: 2, floor: 15 } },
     });
     const report = renderUnitReport(d.state);
     expect(report).toContain("cannot hold another round");
-    expect(report).toContain("the findings round would get 6 min, under its floor of 15");
+    expect(report).toContain("the findings round would get 2 min, under its floor of 15");
   });
 
-  it("the coding child's carve leaves the reserve for the whole loop the config allows: a 100-minute pipeline at three rounds hands the child 30 (100 − 70), a 240-minute one its whole 90, a 60-minute one at one round 42", () => {
+  it("the coding child's carve leaves the reserve for the whole loop the config allows: a 100-minute pipeline at three rounds hands the child 24 (100 − 76), a 240-minute one its whole 90, a 60-minute one at one round 40", () => {
     const short = fresh(input({ caps: { maxRounds: 3, maxMinutes: 100 }, merge: "person" }));
     short.answer({ type: "branch", ok: true, at: T0 });
-    expect(short.action).toMatchObject({ type: "spawn", preset: "coding", budgetMinutes: 30 });
+    expect(short.action).toMatchObject({ type: "spawn", preset: "coding", budgetMinutes: 24 });
     const full = fresh(input({ merge: "person" }));
     full.answer({ type: "branch", ok: true, at: T0 });
     expect(full.action).toMatchObject({ type: "spawn", preset: "coding", budgetMinutes: 90 });
     // Fewer review rounds hold less back: at one round the reserve is a review, its provisioning and the merge floor.
     const one = fresh(input({ caps: { maxRounds: 1, maxMinutes: 60 }, merge: "person" }));
     one.answer({ type: "branch", ok: true, at: T0 });
-    expect(one.action).toMatchObject({ type: "spawn", preset: "coding", budgetMinutes: 42 });
+    expect(one.action).toMatchObject({ type: "spawn", preset: "coding", budgetMinutes: 40 });
   });
 
-  it("a findings child's carve leaves the rounds after it — the re-review, a second fix, the last review and the merge — never the whole loop's reserve: with 225 minutes left it gets its whole 90, with 60 left it gets 16", () => {
+  it("a findings child's carve leaves the rounds after it — the re-review, a second fix, the last review and the merge — never the whole loop's reserve: with 225 minutes left it gets its whole 90, with 64 left it gets 16", () => {
     const d = fresh(input({ merge: "person" }));
     throughRoundZero(d);
     expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 1, kind: "review" } });
@@ -1786,7 +1786,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       budgetMinutes: 90,
     });
 
-    const late = fresh(input({ caps: { maxRounds: 3, maxMinutes: 100 }, merge: "person" }));
+    const late = fresh(input({ caps: { maxRounds: 3, maxMinutes: 104 }, merge: "person" }));
     throughRoundZero(late);
     runChild(
       late,
@@ -1811,7 +1811,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     const d = fresh(input({ merge: "person" }));
     d.answer({ type: "branch", ok: true, at: T0 });
     // The coding child ships its pull request with 60 minutes left on the pipeline:
-    // the review holds 62 for the rounds after it, so it falls under its floor of 5.
+    // the review holds 66 for the rounds after it, so it falls under its floor of 7.
     runChild(
       d,
       "run-c0",
@@ -2072,7 +2072,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     );
     d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 });
     d.answer({ type: "branch", ok: true, at: T0 });
-    expect(d.action).toMatchObject({ type: "spawn", step: "U10/r1/0/coding", budgetMinutes: 50 });
+    expect(d.action).toMatchObject({ type: "spawn", step: "U10/r1/0/coding", budgetMinutes: 44 });
   });
 
   it("a refusal names its clause on the abort: no progress under a grant with renewals says what actually spends one; spend at the cap stops even with progress; a grant of zero with nothing pushed keeps the plain abort", () => {

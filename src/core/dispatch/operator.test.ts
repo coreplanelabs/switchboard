@@ -17,6 +17,7 @@ import {
   OPERATOR_READ_TOOLS,
   operatorEventOf,
   operatorProjection,
+  operatorPresets,
   operatorSources,
   operatorThreadTail,
   requesterRepoContext,
@@ -805,6 +806,73 @@ restrict:
 });
 
 describe("runOperator — the loop over a scripted model", () => {
+  it("a cross-repository PR review batch binds the conductor without choosing one PR's repository", async () => {
+    const text =
+      "review these:\n" +
+      "- https://github.com/acme/api/pull/7\n" +
+      "- https://github.com/acme/web/pull/9\n" +
+      "- https://github.com/acme/api/pull/11";
+    const model = vi.fn(async () => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: { preset: "conductor", repo: "acme/api", reason: "coordinate the three reviews" },
+    }));
+    const answer = await runOperator(
+      input({
+        text,
+        projection: operatorProjection({
+          presets: operatorPresets(),
+          commands: [command("runs.list")],
+          allowedPresets: ["conductor", "review", "general"],
+        }),
+      }),
+      model,
+    );
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ reason: "coordinate the three reviews" }] });
+    if (answer.decision.kind !== "binds") return;
+    expect(answer.decision.binds[0]?.line).toContain("agent:conductor review these:");
+    expect(answer.decision.binds[0]?.repo).toBeUndefined();
+    expect(model).toHaveBeenCalledTimes(1);
+  });
+
+  it("a plain-words ship batch binds the conductor even when the model chose single-repository ship", async () => {
+    const text = "ship these:\n" + "- https://github.com/acme/api/pull/7\n" + "- https://github.com/acme/web/pull/9";
+    const answer = await runOperator(
+      input({
+        text,
+        projection: operatorProjection({
+          presets: operatorPresets(),
+          commands: [],
+          allowedPresets: ["conductor", "ship", "general"],
+        }),
+      }),
+      async () => ({
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", repo: "acme/api", reason: "ship the linked PRs" },
+      }),
+    );
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ line: "agent:conductor ship these:" }] });
+    if (answer.decision.kind !== "binds") return;
+    expect(answer.decision.binds[0]?.repo).toBeUndefined();
+    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
+  });
+
+  it("a PR batch ignores conflicting inherited thread targets and binds no single repository", () => {
+    const answer = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/api", reason: "ship both PRs" } },
+      ctxOf({
+        requestText: "ship these:\n- https://github.com/acme/api/pull/7\n- https://github.com/acme/web/pull/9",
+        presets: ["ship", "conductor"],
+        threadRepo: "acme/api",
+        requesterRepo: "acme/api",
+        requesterRepoConflict: true,
+      }),
+    );
+    expect(answer).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
+    if (answer.kind !== "decision" || answer.decision.kind !== "binds") return;
+    expect(answer.decision.binds[0]?.line).toContain("agent:conductor ship these:");
+    expect(answer.decision.binds[0]?.repo).toBeUndefined();
+  });
+
   it("an incidental slug is repaired into a repository question rather than a review bind", async () => {
     const answers: RouteToolCall[] = [
       { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "mentions API" } },

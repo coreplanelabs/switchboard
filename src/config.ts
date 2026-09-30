@@ -452,8 +452,8 @@ export interface AppConfig {
   review?: ReviewConfig;
   /**
    * agent:ship pipeline caps (docs/reference/specs/agent-ship.md item 8): `maxRounds`
-   * review rounds (default 3) and `maxMinutes`, the ship preset's declared
-   * wall-clock budget (default the registry's 120) — a profile field, so a
+   * review rounds (default 48) and `maxMinutes`, the ship preset's declared
+   * wall-clock budget (default the registry's 1440) — a profile field, so a
    * scope's boundary or a `budget:` directive clips it per run; whichever cap
    * hits first ends the loop, and each child round runs its own agent budget
    * clipped to the remaining pipeline time. Deployment-level like `review`;
@@ -462,8 +462,9 @@ export interface AppConfig {
   ship?: ShipConfig;
   /**
    * The fan-out cap a spawning run meets (docs/reference/specs/agent-conductor.md
-   * item 5): `maxChildren` live children per run (default 3, at least 1); a
-   * spawn past it is refused by name until one finishes. Deployment-level like
+   * item 5): `maxChildren` live read children per run (default 8, at least 1);
+   * an exact-PR Ship batch starts independent durable units. A read spawn past
+   * the cap is refused by name until one finishes. Deployment-level like
    * `ship`; validated at load.
    */
   spawn?: SpawnConfig;

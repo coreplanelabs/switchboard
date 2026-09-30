@@ -29,7 +29,14 @@ import {
   type PullRequestFacts,
 } from "../../execution/githubPulls.js";
 import { handOffToCoordinator, type BeforeCoordinatorStart, type HandOffOutcome } from "../coordinator/handOff.js";
-import { ALLOWANCES, ASKS, fit, HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "../budgets.js";
+import {
+  affordableShipRounds,
+  ALLOWANCES,
+  ASKS,
+  fit,
+  HOSTED_DEADLINE_MARGIN_MINUTES,
+  minutesToMs,
+} from "../budgets.js";
 import {
   createInstanceViaShim,
   fetchInstanceStatusViaShim,
@@ -332,26 +339,25 @@ export async function runShipBranch(
   }
   const entry = pre.entry;
 
-  // The runner's caps (agent-ship.md item 8): the rounds cap is the config
-  // block's; the wall clock is the parent's effective budget — the preset's
+  // The runner's caps (agent-ship.md item 8): the configured rounds ceiling
+  // is clipped to what the effective wall clock can hold. That clock is the parent's effective budget — the preset's
   // declared `ship.maxMinutes` as a boundary or a `budget:` directive clipped
   // it — so every child round the runner spawns is clipped to what remains of
   // THAT. A re-issued ended pipeline also carries its durable remainder; the
   // current config may tighten it, but can never replenish either cap.
   const configuredCaps = resolveShipCaps(deps.config.config.ship);
-  const caps = {
-    maxRounds: Math.min(configuredCaps.maxRounds, ctx.reissueCaps?.maxRounds ?? configuredCaps.maxRounds),
-    maxMinutes: Math.min(profile.minutes, ctx.reissueCaps?.maxMinutes ?? profile.minutes),
-  };
+  const maxMinutes = Math.min(profile.minutes, ctx.reissueCaps?.maxMinutes ?? profile.minutes);
+  const maxRounds = Math.min(configuredCaps.maxRounds, ctx.reissueCaps?.maxRounds ?? configuredCaps.maxRounds);
+  const caps = { maxRounds: affordableShipRounds(maxMinutes, maxRounds), maxMinutes };
   // The fit at the fork (agent-ship item 8, decision 0046): a boundary or a
-  // `budget:` directive that clipped the pipeline under the loop it allows is
+  // `budget:` directive that clipped the pipeline below one round is
   // refused here with the sum on the card, never carved into a child that
   // cannot do useful work. The check runs BEFORE the run record or ledger row
   // is created, so a refused start writes no live row and the thread's next
   // run is tracked.
   const held = fit(caps);
   if (!held.ok) {
-    const reason = `budget ${caps.maxMinutes} min cannot hold the ship loop (${caps.maxRounds} review rounds need ${held.need} min)`;
+    const reason = `budget ${caps.maxMinutes} min cannot hold the ship loop (${caps.maxRounds} review ${caps.maxRounds === 1 ? "round needs" : "rounds need"} ${held.need} min)`;
     console.log(`[ship] ${msg.threadKey} not started: ${reason}`);
     await refuse(
       refusalOf(

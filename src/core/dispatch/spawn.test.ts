@@ -6,6 +6,7 @@ import { AGENTS } from "../../agents/registry.js";
 import { ConfigStore } from "../../config.js";
 import type { ChatMessage } from "../chatMessage.js";
 import { RunRegistry } from "../runRegistry.js";
+import type { RunsService } from "../runsService.js";
 import type { ChannelIO, IncomingMessage, OpenedThread } from "../types.js";
 import type { CoreDeps, DispatchOptions, DispatchOutcome } from "../dispatcher.js";
 import {
@@ -140,6 +141,64 @@ const parent = (io: ChannelIO, over: Partial<SpawnParent> = {}): SpawnParent => 
 });
 
 describe("spawnChild — the one path a child run is born through", () => {
+  it("an explicit cross-repository ship batch spawns only an exact listed PR and binds its repository", async () => {
+    const text =
+      "<@U123|switchboard> ship these\n" +
+      "- <https://github.com/acme/api/pull/7|#7 — API>\n" +
+      "- <https://github.com/acme/web/pull/9|#9 — Web>";
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const d = deps(dispatch);
+    const ch = channel();
+    const p = parent(ch.io, {
+      msg: { ...PARENT_MSG, text },
+      conversation: [{ role: "user", content: [{ type: "text", text }] }],
+    });
+    const exact = await spawnChild(d, p, {
+      preset: "ship",
+      prompt: "https://github.com/acme/web/pull/9",
+      repo: "acme/web",
+    });
+    expect(exact).toMatchObject({ kind: "spawned" });
+    expect(calls[0]?.msg.text).toBe("agent:ship in acme/web: https://github.com/acme/web/pull/9");
+    expect(calls[0]?.opts).toMatchObject({ operationTarget: { repo: "acme/web" } });
+    expect(calls[0]?.opts?.parent).toEqual({ runId: "run-p", depth: 1 });
+    expect(calls[0]?.opts?.seed).toBeUndefined();
+
+    const unlisted = await spawnChild(d, p, { preset: "ship", prompt: "https://github.com/acme/web/pull/10" });
+    expect(unlisted).toMatchObject({ kind: "refused", reason: "spawn_ship_target" });
+    const wrongRepo = await spawnChild(d, p, {
+      preset: "ship",
+      prompt: "https://github.com/acme/web/pull/9",
+      repo: "acme/api",
+    });
+    expect(wrongRepo).toMatchObject({ kind: "refused", reason: "spawn_ship_target" });
+    const extraTask = await spawnChild(d, p, {
+      preset: "ship",
+      prompt: "https://github.com/acme/web/pull/9 and https://github.com/acme/api/pull/7",
+    });
+    expect(extraTask).toMatchObject({ kind: "refused", reason: "spawn_ship_target" });
+    const branch = await spawnChild(d, p, {
+      preset: "ship",
+      prompt: "https://github.com/acme/web/pull/9",
+      ref: "feature/other",
+    });
+    expect(branch).toMatchObject({ kind: "refused", reason: "spawn_ship_target" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a Ship batch with thirteen linked PRs still starts an exact target", async () => {
+    const text = `ship these:\n${Array.from({ length: 13 }, (_, i) => `- https://github.com/acme/api/pull/${i + 1}`).join("\n")}`;
+    const ch = channel();
+    const { dispatch } = fakeDispatch(registers("run-child"));
+    const out = await spawnChild(deps(dispatch), parent(ch.io, { msg: { ...PARENT_MSG, text } }), {
+      preset: "ship",
+      prompt: "https://github.com/acme/api/pull/1",
+    });
+    expect(out).toMatchObject({ kind: "spawned" });
+    expect(ch.leads).toHaveLength(1);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
   it("carries the parent's repository and ref beside the prompt, not only in it", async () => {
     const { dispatch, calls } = fakeDispatch(registers("run-child"));
     const prompt = "Inspect the defect illustrated by https://github.com/acme/web/pull/7";
@@ -249,8 +308,8 @@ describe("spawnChild — the one path a child run is born through", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  // decision 0046: a child is refused under its preset's floor (research 3, general 2 minutes), never under one global number.
-  it("a parent with less left than the child preset's floor is refused `spawn_budget` naming the floor: research under 3 minutes, general under 2; the floor is the preset's, so 2 minutes spawn a general child and not a research one", async () => {
+  // decision 0046: the floor covers each child's loop, write-up and post-step.
+  it("a child with less than its preset's floor is refused before a thread opens", async () => {
     const { dispatch } = fakeDispatch(registers("run-child"));
     const ch = channel();
     const out = await spawnChild(deps(dispatch), parent(ch.io, { remainingMs: 2 * 60_000 + 30_000 }), {
@@ -260,7 +319,7 @@ describe("spawnChild — the one path a child run is born through", () => {
     expect(out).toMatchObject({ kind: "refused", reason: "spawn_budget" });
     expect(
       (out as { message?: string; reason: string } & Record<string, unknown>).message ?? JSON.stringify(out),
-    ).toContain("3-minute floor");
+    ).toContain("4-minute floor");
     expect(dispatch).not.toHaveBeenCalled();
     const general = await spawnChild(deps(dispatch), parent(ch.io, { remainingMs: 119_000 }), {
       preset: "general",
@@ -268,9 +327,13 @@ describe("spawnChild — the one path a child run is born through", () => {
     });
     expect(general).toMatchObject({ kind: "refused", reason: "spawn_budget" });
     expect(dispatch).not.toHaveBeenCalled();
+    expect(
+      await spawnChild(deps(dispatch), parent(ch.io), { preset: "research", prompt: "q", budget: 3 }),
+    ).toMatchObject({ kind: "refused", reason: "spawn_budget" });
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it("the fourth live child under the default cap of 3 is refused `spawn_fanout`; a finished child does not count, and a configured cap replaces the default", async () => {
+  it("the fourth live child under a configured cap of 3 is refused `spawn_fanout`; a finished child frees a slot", async () => {
     const registry = new RunRegistry({ genId: () => "run-new", genToken: () => "tok" });
     const child = (id: string, parentRunId = "run-p") =>
       registry.create(
@@ -283,7 +346,7 @@ describe("spawnChild — the one path a child run is born through", () => {
     child("c3");
     child("other-parent", "run-q"); // another parent's child never counts
     const { dispatch } = fakeDispatch(registers("run-new"));
-    const d = deps(dispatch, { registry });
+    const d = deps(dispatch, { registry, yaml: `${YAML}spawn:\n  maxChildren: 3\n` });
     const ch = channel();
     const refused = await spawnChild(d, parent(ch.io), { preset: "research", prompt: "q" });
     expect(refused).toMatchObject({ kind: "refused", reason: "spawn_fanout" });
@@ -332,10 +395,9 @@ describe("spawnChild — the one path a child run is born through", () => {
     expect(ch.replies).toEqual([]);
   });
 
-  // docs/reference/specs/agent-conductor.md item 3: a child is a reader. The
-  // line is the registry's identity column, never a list kept here — a preset
-  // that gains or loses `write` crosses it the day its def does.
-  it("a preset whose identity is `write` is refused `spawn_identity` before anything is opened — no thread, no dispatch — and every preset that reads or holds no credential passes the rule", async () => {
+  // docs/reference/specs/agent-conductor.md items 3 and 12: outside the exact
+  // Ship batch exception, a writer is refused before a thread opens.
+  it("a writer outside an explicit Ship batch is refused `spawn_identity` before anything opens, while readers pass", async () => {
     const { dispatch } = fakeDispatch(registers("run-child"));
     const ch = channel();
     const writers = Object.values(AGENTS).filter((a) => a.identity === "write");
@@ -345,7 +407,7 @@ describe("spawnChild — the one path a child run is born through", () => {
       expect(out, name).toEqual({
         kind: "refused",
         reason: "spawn_identity",
-        message: `\`${name}\` runs as a \`write\` identity — it pushes branches and opens pull requests — so this run was not started: spawned children read this conversation and report, but never write`,
+        message: `\`${name}\` runs as a \`write\` identity, so this run was not started: only an exact PR in an explicit "ship these" request may spawn a write child`,
       });
     }
     expect(ch.leads).toEqual([]);
@@ -434,6 +496,132 @@ describe("spawnChild — the one path a child run is born through", () => {
 });
 
 describe("spawnCapabilityFor — the capability a spawning run's tools hold", () => {
+  it("refuses a Ship target already launched by this parent before a restarted capability opens a thread", async () => {
+    const target = "https://github.com/acme/api/pull/7";
+    const text = `ship these:\n- ${target}\n- https://github.com/acme/web/pull/9`;
+    const history = {
+      listRuns: vi.fn(async () => ({ runs: [{ id: "old-ship", agent: "ship" }] })),
+      getRun: vi.fn(async () => ({
+        ok: true,
+        value: { events: [{ type: "input", text: `in acme/api: ${target}` }] },
+      })),
+    } as unknown as Pick<RunsService, "listRuns" | "getRun">;
+    const { dispatch } = fakeDispatch(registers("new-ship"));
+    const ch = channel();
+    const cap = spawnCapabilityFor(
+      deps(dispatch),
+      { runId: "run-p", depth: 0, agentName: "conductor", msg: { ...PARENT_MSG, text }, io: ch.io },
+      history,
+    );
+    expect(
+      await cap.spawn({ preset: "ship", prompt: target, repo: "acme/api" }, { remainingMs: 30 * 60_000 }),
+    ).toMatchObject({
+      kind: "refused",
+      reason: "spawn_ship_duplicate",
+    });
+    expect(ch.leads).toHaveLength(0);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps a Ship target closed when prior child history is unavailable", async () => {
+    const target = "https://github.com/acme/api/pull/7";
+    const text = `ship these:\n- ${target}\n- https://github.com/acme/web/pull/9`;
+    const history = {
+      listRuns: vi.fn(async () => ({ runs: [], storeUnavailable: true })),
+    } as unknown as Pick<RunsService, "listRuns" | "getRun">;
+    const { dispatch } = fakeDispatch(registers("new-ship"));
+    const ch = channel();
+    const cap = spawnCapabilityFor(
+      deps(dispatch),
+      { runId: "run-p", depth: 0, agentName: "conductor", msg: { ...PARENT_MSG, text }, io: ch.io },
+      history,
+    );
+    expect(await cap.spawn({ preset: "ship", prompt: target }, { remainingMs: 30 * 60_000 })).toMatchObject({
+      kind: "refused",
+      reason: "spawn_ship_history_unavailable",
+    });
+    expect(ch.leads).toHaveLength(0);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("starts Ship once per PR in the original batch", async () => {
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const text = "ship these:\n- https://github.com/acme/api/pull/7\n- https://github.com/acme/web/pull/9";
+    const cap = spawnCapabilityFor(deps(dispatch), {
+      runId: "run-p",
+      depth: 0,
+      agentName: "conductor",
+      msg: { ...PARENT_MSG, text },
+      io: channel().io,
+    });
+    const request = { preset: "ship", prompt: "https://github.com/acme/api/pull/7", repo: "acme/api" };
+    const at = { remainingMs: 30 * 60_000 };
+    expect(await cap.spawn(request, at)).toMatchObject({ kind: "spawned" });
+    expect(await cap.spawn(request, at)).toMatchObject({ kind: "refused", reason: "spawn_ship_duplicate" });
+    expect(
+      await cap.spawn({ preset: "ship", prompt: "https://github.com/acme/web/pull/9", budget: 112 }, at),
+    ).toMatchObject({ kind: "refused", reason: "spawn_budget" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("starts all six independent Ship units even when the read-child cap is one", async () => {
+    const registry = new RunRegistry({ genId: () => "run-x", genToken: () => "tok" });
+    const targets = [
+      { repo: "acme/api", number: 7 },
+      { repo: "acme/api", number: 8 },
+      { repo: "acme/api", number: 9 },
+      { repo: "acme/web", number: 10 },
+      { repo: "acme/web", number: 11 },
+      { repo: "acme/web", number: 12 },
+    ];
+    const text = `ship these:\n${targets.map((t) => `- https://github.com/${t.repo}/pull/${t.number}`).join("\n")}`;
+    let nextId = 0;
+    const { dispatch, calls } = fakeDispatch(async (msg, io) => {
+      const id = `run-child-${++nextId}`;
+      registry.create(
+        "c",
+        {
+          agent: msg.text.startsWith("agent:ship") ? "ship" : "research",
+          channelId: msg.channelId,
+          userId: msg.userId,
+          threadKey: msg.threadKey,
+          parentRunId: "run-p",
+        },
+        { id },
+      );
+      io.runStarted?.({ id });
+      return { status: "completed" };
+    });
+    const cap = spawnCapabilityFor(deps(dispatch, { registry, yaml: `${YAML}spawn:\n  maxChildren: 1\n` }), {
+      runId: "run-p",
+      depth: 0,
+      agentName: "conductor",
+      msg: { ...PARENT_MSG, text },
+      io: channel().io,
+    });
+    const outcomes = await Promise.all(
+      targets.map((target) =>
+        cap.spawn(
+          {
+            preset: "ship",
+            prompt: `https://github.com/${target.repo}/pull/${target.number}`,
+            repo: target.repo,
+          },
+          { remainingMs: 5 * 60_000 },
+        ),
+      ),
+    );
+    expect(outcomes).toHaveLength(6);
+    expect(outcomes.every((outcome) => outcome.kind === "spawned")).toBe(true);
+    expect(calls).toHaveLength(6);
+    for (const call of calls) expect(call.opts?.parent).toEqual({ runId: "run-p", depth: 1 });
+    expect(
+      await cap.spawn({ preset: "research", prompt: "read the batch status" }, { remainingMs: 5 * 60_000 }),
+    ).toMatchObject({
+      kind: "spawned",
+    });
+  });
+
   it("spawns with the parent's remaining wall clock at the call, and remembers how a child that registered ended when its dispatch returns later", async () => {
     let finish!: (o: DispatchOutcome) => void;
     const { dispatch } = fakeDispatch(async (_msg, io) => {
@@ -603,10 +791,10 @@ describe("childRequestText / maxChildrenOf", () => {
     expect(noNames).toContain("slack:UALICE");
   });
 
-  it("maxChildrenOf: 3 by default, the configured value otherwise", () => {
-    expect(DEFAULT_MAX_CHILDREN).toBe(3);
-    expect(maxChildrenOf(undefined)).toBe(3);
-    expect(maxChildrenOf({})).toBe(3);
+  it("maxChildrenOf: the bounded default, the configured value otherwise", () => {
+    expect(DEFAULT_MAX_CHILDREN).toBe(8);
+    expect(maxChildrenOf(undefined)).toBe(8);
+    expect(maxChildrenOf({})).toBe(8);
     expect(maxChildrenOf({ maxChildren: 5 })).toBe(5);
   });
 });

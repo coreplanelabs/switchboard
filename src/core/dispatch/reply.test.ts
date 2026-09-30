@@ -426,7 +426,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
         code: "ship_budget",
         built: REFUSAL_SENTENCES.ship_budget({ maxMinutes: 10, maxRounds: 1, need: 25, provision: 5, coding: 15 }),
         quoted:
-          "🚫 Ship cannot start under a 10-minute budget: the loop it allows (1 review rounds) needs 25 minutes — " +
+          "🚫 Ship cannot start under a 10-minute budget: the loop it allows (1 review round) needs 25 minutes — " +
           "5 to provision, the coding child's 15, and the reserve for the rounds after it at their floors. " +
           "Switchboard left the budget and boundary unchanged and did not start either the review loop or a single coding pass.",
       },

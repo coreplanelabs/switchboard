@@ -22,10 +22,10 @@ import { DEFAULT_GRANT, IDLE_DAYS_DEFAULT, type Grant, type GrantSource } from "
  *  preset's, which is the per-scope layering these caps have. Validated at
  *  load (`validateShip`): any other key is refused by name. */
 export interface ShipConfig {
-  /** Review rounds per pipeline (>= 1). Default 3. */
+  /** Review rounds per pipeline (>= 1). Default 48. */
   maxRounds?: number;
   /** The ship preset's declared wall-clock budget in minutes (>= 1). Default:
-   *  the registry's `AGENTS.ship.maxMinutes` (120). */
+   *  the registry's `AGENTS.ship.maxMinutes` (1440). */
   maxMinutes?: number;
   /** The grant a ship request carries by default in this deployment (decision
    *  0046, the renewable lease): renewals and a cost cap; overridable per
@@ -94,7 +94,7 @@ export function resolveIdleDays(layers: { org?: number; channel?: number; user?:
   return layers.user ?? layers.channel ?? layers.org ?? IDLE_DAYS_DEFAULT;
 }
 
-export const SHIP_DEFAULT_MAX_ROUNDS = 3;
+export const SHIP_DEFAULT_MAX_ROUNDS = 48;
 /** One number: the ship preset's own declared budget is the default the knob replaces. */
 export const SHIP_DEFAULT_MAX_MINUTES = AGENTS.ship.maxMinutes;
 

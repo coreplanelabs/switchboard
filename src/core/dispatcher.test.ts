@@ -10370,7 +10370,7 @@ workspaceDir: __WORKDIR__
       repo: "acme/api",
       branch: SHIP_BRANCH,
       base: "main",
-      caps: { maxRounds: 3, maxMinutes: 240 },
+      caps: { maxRounds: 48, maxMinutes: 1440 },
       runId: "run-ship1",
     });
     expect(unit).toMatchObject({ unit: "U1", slug: "u1", branch: SHIP_BRANCH, dependsOn: [], rounds: [] });
@@ -10430,15 +10430,15 @@ workspaceDir: __WORKDIR__
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     await deps.runHistoryWriter.settled();
     expect(replies[0]).toContain("Handed to the plan runner");
-    expect((await handed(instances, "run-shipb")).instance?.caps).toEqual({ maxRounds: 3, maxMinutes: 200 });
+    expect((await handed(instances, "run-shipb")).instance?.caps).toEqual({ maxRounds: 4, maxMinutes: 200 });
     expect(
       statuses
         .map((s) => JSON.stringify(s))
-        .some((s) => s.includes("budget 200 min (channel boundary; preset asks 240)")),
+        .some((s) => s.includes("budget 200 min (channel boundary; preset asks 1440)")),
     ).toBe(true);
     const profile = { preset: "ship", machine: "repo-resident", identity: "write", minutes: 200, boundedBy: "channel" };
     expect((await store.get("run-shipb"))!.profile).toEqual(profile);
-    expect(AGENTS.ship.maxMinutes).toBe(240); // the shared def is never mutated
+    expect(AGENTS.ship.maxMinutes).toBe(1440); // the shared def is never mutated
 
     // The fit at the fork (agent-ship item 8): a boundary of 10 cannot hold the
     // loop's 163, so the request is refused with the sum and no instance opens.
@@ -10447,7 +10447,7 @@ workspaceDir: __WORKDIR__
     const tightIo = fakeIO();
     await dispatch(tight.deps, msg(TASK_MSG, "slack:UADMIN"), tightIo.io);
     expect(tightIo.replies[0]).toContain("Ship cannot start under a 10-minute budget");
-    expect(tightIo.replies[0]).toContain("needs 163 minutes");
+    expect(tightIo.replies[0]).toContain("needs 113 minutes");
     expect(tight.created).toEqual([]);
   });
 
