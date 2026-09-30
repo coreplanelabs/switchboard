@@ -10741,7 +10741,7 @@ workspaceDir: __WORKDIR__
     expect(offers[1]!.question?.text).toContain("fix the second check");
   });
 
-  it("an operator-bound ship on a seeded request (`plan <path>.md`) is refused naming `agent:ship`, nothing written — the guard reads operator like route", async () => {
+  it("an operator-bound work request with plan-shaped text stays a generated person-merged task", async () => {
     const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
     deps.githubApi = new InMemoryGithubApi({
       "acme/api": { files: { "docs/plans/fixture.md": "### U10. First unit\n- **Dependencies**: none\n" } },
@@ -10752,11 +10752,12 @@ workspaceDir: __WORKDIR__
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("plan docs/plans/fixture.md", "slack:UADMIN"), io);
     expect(deps.operatorModel).toHaveBeenCalledTimes(1);
-    expect(replies[replies.length - 1]).toContain("🚫");
-    expect(replies[replies.length - 1]).toContain("`agent:ship plan docs/plans/fixture.md`");
-    expect(created).toEqual([]);
-    const { instance } = await handed(instances, "run-shipopseed");
-    expect(instance).toBeNull();
+    expect(replies[replies.length - 1]).toContain("Handed to the plan runner");
+    expect(created).toHaveLength(1);
+    const { instance, unit } = await handed(instances, "run-shipopseed");
+    expect(instance).toMatchObject({ merge: "person", plan: { id: expect.any(String) } });
+    expect(instance?.plan?.path).toBeUndefined();
+    expect(unit?.title).toBe("plan docs/plans/fixture.md");
   });
 
   it("an operator-bound ship on a task hands off merge: person, the run's run_meta reads agentSource operator and the decision's event rides the ship run", async () => {

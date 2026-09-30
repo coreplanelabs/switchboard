@@ -362,6 +362,62 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(row.title).toBe(url);
   });
 
+  it("a typed work entry keeps the whole authored task without a Ship prefix parser", async () => {
+    const h = harness();
+    const text = "in acme/api: fix the failing check at https://github.com/acme/api/pull/7";
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({ requestText: text, intent: "work", entry: { repo: "acme/api", base: "main" } }),
+    );
+    expect(out.status).toBe("completed");
+    const row = (await h.instances.listUnits(h.created[0]!))[0]!;
+    expect(row.title).toBe(text);
+  });
+
+  it("a typed work entry that spells a seeded plan remains a person-merged generated task", async () => {
+    const h = harness();
+    // Dispatch has already consumed the typed agent prefix, leaving the
+    // plan-shaped words. The operator may still have bound them as work.
+    const text = "plan docs/plans/fixture.md";
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({ requestText: text, intent: "work", agentSource: "directive", entry: { repo: "acme/api", base: "main" } }),
+    );
+    expect(out.status).toBe("completed");
+    expect(h.reads).toEqual([]);
+    const id = h.created[0]!;
+    expect(await h.instances.get(id)).toMatchObject({ merge: "person", plan: { id: expect.any(String) } });
+    expect((await h.instances.listUnits(id))[0]!.title).toBe(text);
+  });
+
+  it("a typed plan entry needs the validated plan flag before it can read a seeded plan", async () => {
+    const h = harness();
+    const requestText = "plan docs/plans/fixture.md";
+    const refused = await handOffToCoordinator(
+      h.deps,
+      input({ requestText, intent: "plan", agentSource: "directive", entry: { repo: "acme/api", base: "main" } }),
+    );
+    expect(refused).toMatchObject({ status: "aborted", refusal: { code: "setup_failed" } });
+    expect(h.reads).toEqual([]);
+    expect(h.created).toEqual([]);
+
+    const accepted = await handOffToCoordinator(
+      h.deps,
+      input({
+        requestText,
+        intent: "plan",
+        agentSource: "directive",
+        entry: { repo: "acme/api", base: "main", plan: true },
+      }),
+    );
+    expect(accepted.status).toBe("completed");
+    expect(h.reads).toEqual([["acme/api", "docs/plans/fixture.md", "main"]]);
+    expect(await h.instances.get(h.created[0]!)).toMatchObject({
+      merge: "runner",
+      plan: { path: "docs/plans/fixture.md" },
+    });
+  });
+
   it("refuses a terse inherited target when its durable source turns cannot be read again", async () => {
     const h = harness();
     const out = await handOffToCoordinator(

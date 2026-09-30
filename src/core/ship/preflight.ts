@@ -260,10 +260,11 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   const info = await input.repoInfo(repo).catch(() => undefined);
   // Entry checks (spec item 10). The thread→PR inference reads USER turns only
   // (repoContext.ts), so `repoCtx.pr` set means a user turn named the PR.
-  // A bare PR reference has no new task even if the operator chose `work`.
-  // Keep the referenced URL in real work requests; this check only prevents
-  // an empty request from taking the fresh-coding path.
-  const barePrReference = repoCtx.prFromMessage === true && shipTaskText(input.requestText, repo) === "";
+  // Legacy untyped ingress still needs its PR-only probe. A typed operator
+  // decision is never replaced by that text parser: a work misbind refuses
+  // below without a requester-backed change objective.
+  const barePrReference =
+    input.intent === undefined && repoCtx.prFromMessage === true && shipTaskText(input.requestText, repo) === "";
   // A cited PR plus an alleged work stage can mean either review or a new
   // change. The operator must name the separate change before round zero may
   // code; the raw request remains intact as the unit's brief.

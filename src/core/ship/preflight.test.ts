@@ -125,7 +125,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     });
   });
 
-  it("a bare PR URL resumes review even if the operator selected work", async () => {
+  it("a bare PR URL misbound as work refuses instead of letting a text probe choose review", async () => {
     const res = await shipPreflight(
       input({
         intent: "work",
@@ -134,7 +134,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
         prFacts: async () => openPr(),
       }),
     );
-    expect(res).toMatchObject({ ok: true, entry: { resume: { pr: 7, headSha: HEAD } } });
+    expect(res).toMatchObject({ ok: false, refusal: { code: "ship_preflight_no_task" } });
   });
 
   it("a misbound explicit PR review refuses coding without a separate work objective", async () => {
