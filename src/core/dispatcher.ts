@@ -1042,6 +1042,7 @@ export async function dispatch(
     let operatorModel: string | undefined;
     // The accepted bind is authority, not the thread/channel fallback facts.
     let operatorRepo: string | undefined;
+    let operatorRepoSource: ShipContext["shipRepoSource"];
     let operatorShipEntry: ShipContext["shipEntry"];
     // An ended generated pipeline's stable plan id and remaining caps: read
     // from its coordinator rows and handed to ship so neither a formatted
@@ -1278,6 +1279,7 @@ export async function dispatch(
           operatorRequest = execution.request;
           operatorModel = execution.model;
           operatorRepo = execution.repo;
+          operatorRepoSource = execution.repoSource;
           operatorShipEntry = execution.shipEntry;
         }
         // `kind: "fold"` (issue 2027; thread-admission item 9): the decision was
@@ -2387,6 +2389,7 @@ export async function dispatch(
         card,
         directives,
         ...(operatorShipEntry !== undefined ? { shipEntry: operatorShipEntry } : {}),
+        ...(operatorRepoSource !== undefined ? { shipRepoSource: operatorRepoSource } : {}),
         ...(reissuePlanId !== undefined ? { reissuePlanId } : {}),
         ...(beforeCoordinatorStart !== undefined ? { beforeCoordinatorStart } : {}),
         ...(reissueCaps !== undefined

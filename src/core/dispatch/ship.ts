@@ -178,6 +178,8 @@ export interface ShipContext {
   directives: RequestDirectives;
   /** The operator's typed starting stage; preflight validates the PR facts. */
   shipEntry?: ShipEntryIntent;
+  /** The validated source of the operator's repository slot. */
+  shipRepoSource?: "request" | "attachment" | "thread" | "channel";
   /** The stable generated plan this ended thread is re-issuing. */
   reissuePlanId?: string;
   /** Deferred legacy repair and ownership reservation, after every hand-off
@@ -643,7 +645,9 @@ export async function runShipBranch(
     // actor-stamped prior question and reconciliation travel as data on the
     // original unit. The accepted repository and preflight are already fixed;
     // neither assistant text nor a foreign turn can select a work target.
-    const requiresThreadEvidence = ctx.agentSource === "operator" && ctx.shipEntry === "work_from_thread";
+    const requiresThreadEvidence =
+      ctx.agentSource === "operator" &&
+      (ctx.shipEntry === "work_from_thread" || (ctx.shipEntry === "work" && ctx.shipRepoSource === "thread"));
     let threadEvidence: string | undefined;
     if (requiresThreadEvidence && repoCtx.repo !== undefined && deps.runLedger !== undefined) {
       try {

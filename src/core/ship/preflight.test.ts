@@ -123,6 +123,18 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     });
   });
 
+  it("a bare PR URL resumes review even if the operator selected work", async () => {
+    const res = await shipPreflight(
+      input({
+        intent: "work",
+        requestText: PR_URL,
+        repoCtx: { repo: "acme/api", pr: 7, prFromMessage: true },
+        prFacts: async () => openPr(),
+      }),
+    );
+    expect(res).toMatchObject({ ok: true, entry: { resume: { pr: 7, headSha: HEAD } } });
+  });
+
   it("context: a FOREIGN in-message pull request (not the thread's own) beside task text stays context — a fresh entry off the default branch, even when its facts cannot be fetched or its head is a fork", async () => {
     const unfetchable = await shipPreflight(
       input({

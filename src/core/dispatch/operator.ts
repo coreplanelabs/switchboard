@@ -2575,6 +2575,8 @@ export type OperatorExecution =
       model?: string;
       /** The typed repository slot from bind_preset, when the door filled it. */
       repo?: string;
+      /** How the repository was evidenced, for a thread-dependent Ship brief. */
+      repoSource?: OperatorBind["repoSource"];
       /** The starting stage for a Ship unit, chosen by the operator. */
       shipEntry?: ShipEntryIntent;
       carried: boolean;
@@ -2734,6 +2736,7 @@ export async function executeOperatorDecision(
         ...(request !== undefined ? { request } : {}),
         ...(bind.model !== undefined ? { model: bind.model } : {}),
         ...(bind.repo !== undefined ? { repo: bind.repo } : {}),
+        ...(bind.repoSource !== undefined ? { repoSource: bind.repoSource } : {}),
         ...(bind.shipEntry !== undefined ? { shipEntry: bind.shipEntry } : {}),
         carried,
       };
