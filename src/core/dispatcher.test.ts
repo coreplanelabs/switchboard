@@ -20390,6 +20390,54 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.operator).not.toHaveBeenCalled();
   });
 
+  it("a typed Ship task in an existing thread does not become fresh work when its history read fails", async () => {
+    const s = await endedPrContinuationSetup();
+    s.deps.runs!.listRuns = vi.fn(async () => {
+      throw new Error("run history unavailable");
+    });
+    const { io, replies } = fakeIO([{ role: "user", text: "earlier work" }]);
+
+    await dispatch(s.deps, msg("agent:ship in acme/api: fix the login flow", "slack:UADMIN"), io);
+
+    expect(replies).toEqual(["This thread's earlier work could not be verified, so no new work started."]);
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.operator).not.toHaveBeenCalled();
+  });
+
+  it("a Slack reply with an empty channel history still checks its durable owner when the operator is off", async () => {
+    const s = await unitOwnedSetup();
+    s.deps.runs = {
+      listRuns: vi.fn(async () => {
+        throw new Error("run history unavailable");
+      }),
+    } as unknown as NonNullable<CoreDeps["runs"]>;
+    const shipBranch = vi.fn<NonNullable<CoreDeps["shipBranch"]>>(async () => ({ hostedLive: false }));
+    s.deps.shipBranch = shipBranch;
+    const { io, replies } = fakeIO([]);
+
+    await dispatch(
+      s.deps,
+      { ...msg("agent:ship in acme/api: fix the login flow", "slack:UADMIN"), threadReply: true },
+      io,
+    );
+
+    expect(replies).toEqual(["This thread's earlier work could not be verified, so no new work started."]);
+    expect(shipBranch).not.toHaveBeenCalled();
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
+  it("a plain follow-up does not leave an owned pipeline when its unit rows are unavailable", async () => {
+    const s = await endedPrContinuationSetup();
+    vi.spyOn(s.instances, "listUnits").mockRejectedValue(new Error("unit store down"));
+    const { io, replies } = fakeIO([{ role: "user", text: "earlier work" }]);
+
+    await dispatch(s.deps, msg("Fix it", "slack:UADMIN"), io);
+
+    expect(replies).toEqual(["This thread's work owner could not be verified, so no new work started."]);
+    expect(s.shipBranch).not.toHaveBeenCalled();
+    expect(s.operator).not.toHaveBeenCalled();
+  });
+
   it("a task after a completed merge-ready pipeline routes through the operator as fresh ship work on its PR", async () => {
     const s = await endedPrContinuationSetup();
     const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };

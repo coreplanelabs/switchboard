@@ -365,8 +365,8 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   }
 }
 
-/** The store of a process without a durable state Worker: no instance exists
- *  and none can be written, so every coordinator route answers by name. */
+/** Without a durable state Worker, writes refuse and unit-owner reads are
+ *  unavailable rather than evidence that the instance has no units. */
 export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
   async recordRequesterTurn(_input: RequesterTurnInput): Promise<RecordRequesterTurnResult> {
     return { ok: false, reason: "unavailable" };
@@ -404,7 +404,7 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
     return { ok: false, reason: "unavailable" };
   }
   async listUnits(_instanceId: string): Promise<CoordinatorUnit[]> {
-    return [];
+    throw new Error("coordinator instance store unavailable");
   }
   async listActiveRecoveries(): Promise<CoordinatorUnit[]> {
     return [];

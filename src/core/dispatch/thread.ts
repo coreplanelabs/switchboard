@@ -23,14 +23,15 @@ export const THREAD_READ_LIMIT = 8;
 export const THREAD_PR_OWNER_READ_LIMIT = 100;
 const THREAD_PR_OWNER_MAX_PAGES = 10;
 
-/** The thread's newest runs, newest first (a live one ahead of the finished);
- *  undefined when the read failed — the request runs as if the thread were
- *  new, and the log says so. */
+/** A missing history read is unknown, not an empty conversation. */
+export type ThreadRead = { kind: "available"; runs: RunView[] } | { kind: "unavailable" };
+
+/** The thread's newest runs, newest first (a live one ahead of the finished). */
 export async function readThread(
   service: Pick<RunsService, "listRuns">,
   threadKey: string,
   limit = THREAD_READ_LIMIT,
-): Promise<RunView[] | undefined> {
+): Promise<ThreadRead> {
   try {
     const page = await service.listRuns({
       status: "all",
@@ -38,11 +39,11 @@ export async function readThread(
       threadKey,
       limit,
     });
-    if (page.storeUnavailable || page.ledgerUnavailable) return undefined;
-    return page.runs;
+    if (page.storeUnavailable || page.ledgerUnavailable) return { kind: "unavailable" };
+    return { kind: "available", runs: page.runs };
   } catch (err) {
     console.warn(`[thread] ${threadKey}: thread read failed — ${err instanceof Error ? err.message : String(err)}`);
-    return undefined;
+    return { kind: "unavailable" };
   }
 }
 
@@ -265,10 +266,10 @@ export function instanceOf(runs: readonly RunView[]): string | undefined {
  *  ended generated pipeline whose same-thread unit still needs continuation;
  *  the newest continuable session a person addressed (`stickyAgentOf` — a
  *  coordinator's child is never the owner); none. `unitsOf` is the caller's one extra read,
- *  asked only when the page names an instance; a read that fails leaves the
- *  unit out rather than guessing. */
+ *  asked only when the page names an instance; a failed read is unavailable
+ *  ownership rather than permission to start unrelated work. */
 export type ThreadOwner = (
-  | { kind: "live"; run: RunView }
+  | { kind: "live"; run: RunView; units?: CoordinatorUnit[] }
   | { kind: "unit"; instanceId: string; unit: CoordinatorUnit }
   /** A generated unit whose runner ended before completing its task: the
    *  thread still owns that pipeline's task, branch and pull request, so its
@@ -277,6 +278,8 @@ export type ThreadOwner = (
   /** More than one ended unit claims the same thread. No continuation may
    *  guess which durable task the person's words address. */
   | { kind: "pipeline_ambiguous"; instanceId: string; run: RunView; units: CoordinatorUnit[] }
+  /** A named coordinator instance exists but its unit rows could not be read. */
+  | { kind: "unavailable"; instanceId: string }
   | { kind: "session"; agent: string }
   | { kind: "none" }
 ) & { releasedPr?: ThreadPullRequest };
@@ -313,9 +316,7 @@ export async function releasedPrOf(
       runs.flatMap((run) => [run.instanceId, run.parentInstanceId].filter((id): id is string => id !== undefined)),
     ),
   ];
-  const reads = await Promise.all(
-    ids.map(async (id) => ({ id, units: await unitsOf(id).catch(() => [] as CoordinatorUnit[]) })),
-  );
+  const reads = await Promise.all(ids.map(async (id) => ({ id, units: await unitsOf(id) })));
   const matches = reads.flatMap(({ id, units }) =>
     units.flatMap((unit) => {
       const pr = publishedPrOf(unit, id, threadKey);
@@ -337,12 +338,17 @@ export async function ownerOf(
   const instanceId = instanceOf(runs);
   let releasedPr: ThreadPullRequest | undefined;
   if (instanceId !== undefined) {
-    const units = await unitsOf(instanceId).catch(() => [] as CoordinatorUnit[]);
+    let units: CoordinatorUnit[];
+    try {
+      units = await unitsOf(instanceId);
+    } catch {
+      return { kind: "unavailable", instanceId };
+    }
     const unit = units.find((u) => u.threadKey === threadKey && u.ending === undefined);
     if (unit !== undefined) return { kind: "unit", instanceId, unit };
     // The hosted parent takes no thread slot. It still guards the seed thread
     // when none of its units claim this thread, so no rival starts beside it.
-    if (hosted !== undefined) return { kind: "live", run: hosted };
+    if (hosted !== undefined) return { kind: "live", run: hosted, units };
     const ended = units.filter(
       (u) =>
         u.threadKey === threadKey &&

@@ -74,6 +74,9 @@ export interface IncomingMessage {
    * workspace/sandbox. e.g. "slack:C0123:1712345.6789".
    */
   threadKey: string;
+  /** True when the adapter verified this message replies to an earlier turn in
+   *  the thread. An empty channel-history fetch cannot erase this fact. */
+  threadReply?: boolean;
   /** Present after Slack verifies a one-person internal DM at ingress. Replays must verify it again. */
   directAudience?: SlackDirectAudience;
   /** The request text, already stripped of platform artifacts (mentions etc.). */
