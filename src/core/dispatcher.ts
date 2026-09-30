@@ -1316,7 +1316,10 @@ export async function dispatch(
     if (
       typedAgent === "ship" &&
       operatorMode === "on" &&
-      operatorPreset !== undefined &&
+      pageOwner?.kind !== "live" &&
+      pageOwner?.kind !== "unit" &&
+      pageOwner?.kind !== "pipeline" &&
+      pageOwner?.kind !== "pipeline_ambiguous" &&
       (operatorPreset !== "ship" || operatorShipEntry === undefined)
     ) {
       await refuse(

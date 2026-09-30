@@ -126,6 +126,8 @@ export interface ShipPreflightInput {
   intent?: ShipEntryIntent;
   /** The operator's separate code-change objective when work cites a PR. */
   workObjective?: string;
+  /** Earlier actor-stamped turns from this requester, never assistant prose. */
+  requesterWorkText?: readonly string[];
   repoCtx: Pick<
     RepoContext,
     "repo" | "pr" | "prFromMessage" | "prIsThreadOwn" | "ref" | "refFromPr" | "baseRef" | "headSha" | "prUnpostable"
@@ -260,7 +262,14 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   // A cited PR plus an alleged work stage can mean either review or a new
   // change. The operator must name the separate change before round zero may
   // code; the raw request remains intact as the unit's brief.
-  if (input.intent === "work" && repoCtx.prFromMessage === true && !barePrReference && !input.workObjective?.trim())
+  const workCitesPr =
+    (input.intent === "work" || input.intent === "work_from_thread") && repoCtx.prFromMessage === true;
+  const objective = input.workObjective?.trim();
+  const authoredTurns =
+    input.intent === "work_from_thread" ? [input.requestText, ...(input.requesterWorkText ?? [])] : [input.requestText];
+  const objectiveIsAuthored =
+    objective !== undefined && objective !== "" && authoredTurns.some((turn) => turn.includes(objective));
+  if (workCitesPr && !barePrReference && !objectiveIsAuthored)
     return refuse(
       "ship_preflight_no_task",
       "work objective missing beside pull request",

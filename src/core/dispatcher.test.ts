@@ -10653,6 +10653,25 @@ workspaceDir: __WORKDIR__
     expect((await handed(instances, "run-ship-no-stage")).instance).toBeNull();
   });
 
+  it("an explicit Ship review request fails closed when the operator returns no stage", async () => {
+    const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+      headSha: HEAD_A,
+      baseRef: "main",
+    });
+    deps.fetchPrFacts = vi.fn(async () => openBotPr());
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({ tool: "refuse", input: { text: "invented refusal" } }));
+    deps.runRegistry = new RunRegistry({ genId: () => "run-ship-no-decision", genToken: () => "tok" });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(`agent:ship review ${PR_URL}`, "slack:UADMIN"), io);
+    expect(replies.join("\n")).toContain("I couldn't bind this Ship request");
+    expect(created).toEqual([]);
+    expect((await handed(instances, "run-ship-no-decision")).instance).toBeNull();
+  });
+
   it("an operator-bound ship on a seeded request (`plan <path>.md`) is refused naming `agent:ship`, nothing written — the guard reads operator like route", async () => {
     const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
     deps.githubApi = new InMemoryGithubApi({

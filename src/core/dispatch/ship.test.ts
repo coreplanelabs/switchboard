@@ -171,6 +171,23 @@ const openBotPr = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
 });
 
 describe("runShipBranch — the agent:ship fork hands every admitted request to the plan runner", () => {
+  it("a PR-citing work bind cannot borrow another person’s turn as its objective", async () => {
+    const s = setup("slack:UADMIN", {
+      text: `agent:ship review ${PR_URL}`,
+      repoCtx: { pr: 7, prFromMessage: true },
+    });
+    s.deps.fetchPrFacts = async () => openBotPr();
+    Object.assign(s.ctx, {
+      agentSource: "operator",
+      shipEntry: "work_from_thread",
+      operator: { binds: [{ workObjective: "fix the failing check" }] },
+      history: [{ role: "user", user: "slack:UOTHER", text: "Please fix the failing check." }],
+    });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.created).toEqual([]);
+    expect(s.refusals).toContain("ship_preflight_no_task");
+  });
+
   it.each(["work", "work_from_thread"] as const)(
     "attaches actor-stamped general research to a thread-sourced %s unit after repo preflight",
     async (shipEntry) => {

@@ -316,6 +316,9 @@ export async function runShipBranch(
       ...(ctx.operator?.binds?.[0]?.workObjective !== undefined
         ? { workObjective: ctx.operator.binds[0].workObjective }
         : {}),
+      requesterWorkText: ctx.history
+        .filter((turn) => turn.role === "user" && turn.user === msg.userId)
+        .map((turn) => turn.text),
       repoCtx,
       ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates } : {}),
       gates: {

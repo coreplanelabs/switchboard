@@ -387,13 +387,21 @@ channels:
     const answer = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", shipEntry: "work_from_thread", repo: "acme/api", reason: "fix the prior issue" },
+        input: {
+          preset: "ship",
+          shipEntry: "work_from_thread",
+          workObjective: "fix the prior issue",
+          repo: "acme/api",
+          reason: "fix the prior issue",
+        },
       },
       ctxOf({ requestText: "Fix it.", presets: ["ship"], requesterRepo: "acme/api" }),
     );
     expect(answer).toMatchObject({
       kind: "decision",
-      decision: { binds: [{ shipEntry: "work_from_thread", repoSource: "thread" }] },
+      decision: {
+        binds: [{ shipEntry: "work_from_thread", workObjective: "fix the prior issue", repoSource: "thread" }],
+      },
     });
     expect(
       parseOperatorTurn(

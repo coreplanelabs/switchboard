@@ -148,6 +148,44 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     expect(res).toMatchObject({ ok: false, refusal: { code: "ship_preflight_no_task" } });
   });
 
+  it("a PR-citing work objective must quote the requester, not an operator invention", async () => {
+    for (const intent of ["work", "work_from_thread"] as const) {
+      const invented = await shipPreflight(
+        input({
+          intent,
+          requestText: `review ${PR_URL}`,
+          workObjective: "fix the failing check",
+          requesterWorkText: ["please inspect the failing check"],
+          repoCtx: { repo: "acme/api", pr: 7, prFromMessage: true },
+          prFacts: async () => openPr(),
+        }),
+      );
+      expect(invented).toMatchObject({ ok: false, refusal: { code: "ship_preflight_no_task" } });
+    }
+    const stale = await shipPreflight(
+      input({
+        intent: "work",
+        requestText: `review ${PR_URL}`,
+        workObjective: "fix the failing check",
+        requesterWorkText: ["Please fix the failing check."],
+        repoCtx: { repo: "acme/api", pr: 7, prFromMessage: true },
+        prFacts: async () => openPr(),
+      }),
+    );
+    expect(stale).toMatchObject({ ok: false, refusal: { code: "ship_preflight_no_task" } });
+    const grounded = await shipPreflight(
+      input({
+        intent: "work_from_thread",
+        requestText: `fix it on ${PR_URL}`,
+        workObjective: "fix the failing check",
+        requesterWorkText: ["Please fix the failing check."],
+        repoCtx: { repo: "acme/api", pr: 7, prFromMessage: true },
+        prFacts: async () => openPr(),
+      }),
+    );
+    expect(grounded).toMatchObject({ ok: true });
+  });
+
   it("context: a FOREIGN in-message pull request (not the thread's own) beside task text stays context — a fresh entry off the default branch, even when its facts cannot be fetched or its head is a fork", async () => {
     const unfetchable = await shipPreflight(
       input({
