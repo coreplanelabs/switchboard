@@ -10,6 +10,7 @@ import { PiAiProviders } from "../harness/piAi.js";
 import { shapeToolSchemasForWire } from "../providerToolSchemas.js";
 import type { IncomingMessage } from "../types.js";
 import {
+  OPERATOR_ASK_REPO_TOOL,
   operatorMaxOutputTokens,
   operatorPresets,
   operatorProjection,
@@ -149,6 +150,7 @@ describe("the direct operator on the Responses wire", () => {
     };
 
     expect(tools).toHaveLength(52);
+    expect(tools.map((tool) => tool.name)).not.toContain(OPERATOR_ASK_REPO_TOOL);
     expect(lookaroundPatterns(unpatchedWire.tools)).toHaveLength(4);
     expect(validateResponsesPayload(unpatchedWire).status).toBe(400);
 

@@ -19,7 +19,7 @@ import { classifyProviderFailure, type ProviderConfig, type ToolDef } from "../c
 import { shapeToolSchemasForWire } from "../core/providerToolSchemas.js";
 import { CommandRegistry } from "../core/commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
-import { operatorProjection, operatorTools } from "../core/dispatch/operator.js";
+import { OPERATOR_ASK_REPO_TOOL, operatorProjection, operatorTools } from "../core/dispatch/operator.js";
 import { routableCommands, routablePresets } from "../core/dispatch/route.js";
 import {
   ANTHROPIC_MESSAGES_PATH,
@@ -771,7 +771,8 @@ describe("tool-schema conformance on each wire", () => {
 
   it("the operator catalogue is clean of every construct known to be refused on each wire", async () => {
     const catalogue = operatorCatalogue();
-    expect(catalogue).toHaveLength(52);
+    expect(catalogue).toHaveLength(53);
+    expect(catalogue.map((tool) => tool.name)).toContain(OPERATOR_ASK_REPO_TOOL);
     expect(
       catalogue
         .filter((tool) => lookaroundPatterns(tool.inputSchema).length > 0)
