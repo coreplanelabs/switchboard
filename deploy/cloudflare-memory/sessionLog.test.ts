@@ -46,6 +46,37 @@ const result = (idx: number, part: number, callId: string, t: string) => ({
 const stubOf = (key: string) => env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(key));
 const indices = (rows: unknown) => (rows as Array<{ idx: number; part: number }>).map((r) => [r.idx, r.part]);
 
+describe("requester target checkpoint independent of session transcript", () => {
+  it("retains actor provenance through a long tail, replay and conflicting issue without granting another actor", async () => {
+    const key = sessionKey();
+    const actor = "slack:UALICE";
+    const first = {
+      repo: "acme/sensors",
+      issue: "acme/sensors#3814",
+      provenance: "Investigate https://github.com/acme/sensors/issues/3814",
+    };
+    expect((await post("/runs/session/requester-target/write", { key, actor, target: first })).data).toMatchObject({
+      target: first,
+    });
+    await post("/runs/session/owner", { key, runId: "r1", gen: "g1" });
+    await post("/runs/session/write", { key, gen: "g1", rows: [text(0, 0, "x".repeat(195_978))], attachments: [] });
+    expect((await post("/runs/session/requester-target", { key, actor })).data).toMatchObject({ target: first });
+    expect((await post("/runs/session/requester-target", { key, actor: "slack:UBOB" })).data).toEqual({ target: null });
+    expect((await post("/runs/session/requester-target/write", { key, actor, target: first })).data).toMatchObject({
+      target: first,
+    });
+    const conflicting = { ...first, issue: "acme/sensors#12" };
+    expect(
+      (await post("/runs/session/requester-target/write", { key, actor, target: conflicting })).data,
+    ).toMatchObject({ target: { conflict: true } });
+    expect((await post("/runs/session/requester-target", { key, actor })).data).toMatchObject({
+      target: { conflict: true },
+    });
+    await runInDurableObject(stubOf(key), (inst: SessionLogDO) => inst.drop());
+    expect((await post("/runs/session/requester-target", { key, actor })).data).toEqual({ target: null });
+  });
+});
+
 describe("session log object — the owner fence and the rows", () => {
   it("an empty log's tail is 0; a write before any owner is unknown-run; the owner's writes land, another generation is fenced; a range read answers rows in (idx, part) order with their attachments", async () => {
     const key = sessionKey();

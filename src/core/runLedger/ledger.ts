@@ -100,6 +100,21 @@ export interface FinishResult {
   stored?: boolean;
 }
 
+export interface RequesterTarget {
+  repo: string;
+  issue?: string;
+  /** Quote/code-stripped requester words that established the target, not a model answer. */
+  provenance: string;
+  conflict?: true;
+}
+
+export function mergeRequesterTarget(prior: RequesterTarget | null, next: RequesterTarget): RequesterTarget {
+  if (!prior) return next;
+  if (prior.conflict || prior.repo !== next.repo || (prior.issue && next.issue && prior.issue !== next.issue))
+    return { ...prior, conflict: true };
+  return { ...prior, ...(prior.issue ? {} : next.issue ? { issue: next.issue, provenance: next.provenance } : {}) };
+}
+
 export interface RunLedger {
   /** Atomically mint a monotonic resident attachment fence for the live ledger owner. */
   residentClaim(
@@ -149,6 +164,10 @@ export interface RunLedger {
    *  and the gap markers that lie between the oldest and the newest hit — what
    *  `recall` answers (item 10). */
   searchSession(key: string, query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }>;
+  /** Actor-keyed thread target, retained independently of transcript tail and model compaction. */
+  readRequesterTarget(key: string, actor: string): Promise<RequesterTarget | null>;
+  /** Atomic merge: repeat is idempotent, a second distinct issue/repo makes a sticky conflict. */
+  checkpointRequesterTarget(key: string, actor: string, target: RequesterTarget): Promise<RequesterTarget>;
   /** The session's notepad, or null when nothing has written it (item 10). */
   readNotepad(key: string): Promise<Notepad | null>;
   /** Replace the notepad whole under the owner's fence (item 10); `text` is at

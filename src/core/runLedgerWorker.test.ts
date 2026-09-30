@@ -307,6 +307,28 @@ describe("WorkerRunLedger", () => {
     expect("actor" in JSON.parse(rows[1].json)).toBe(false);
   });
 
+  it("reads and checkpoints the actor-keyed requester target through the session store", async () => {
+    const target = {
+      repo: "acme/api",
+      issue: "acme/api#2430",
+      provenance: "Investigate https://github.com/acme/api/issues/2430",
+    };
+    const w = stubWorker((path) => ({
+      status: 200,
+      data: path.endsWith("requester-target") ? { target: null } : { target },
+    }));
+    const key = "slack:C1:1.0:@thread";
+    expect(await w.ledger.readRequesterTarget(key, "slack:UALICE")).toBeNull();
+    expect(await w.ledger.checkpointRequesterTarget(key, "slack:UALICE", target)).toEqual(target);
+    expect(w.calls.map((c) => c.body)).toEqual([
+      { key, actor: "slack:UALICE" },
+      { key, actor: "slack:UALICE", target },
+    ]);
+    await expect(
+      stubWorker(() => ({ status: 404, data: {} })).ledger.readRequesterTarget(key, "slack:UALICE"),
+    ).rejects.toBeInstanceOf(RouteMissingError);
+  });
+
   // session-log.md item 10: the routes `recall` and `notes` read and write through.
   it("the search and notepad routes: search posts the key, query and limit and answers the hits and gaps as sent (nothing when the Worker sends none); the notepad read answers the text and time or null; the notepad write is fenced like a row write", async () => {
     const hits = [{ idx: 4, part: 0, role: "user", kind: "text", text: "fix the lockfile" }];

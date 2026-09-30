@@ -834,6 +834,24 @@ describe("InMemoryRunLedger", () => {
   });
 });
 
+describe("requester target checkpoint", () => {
+  it("keeps actor-specific issue provenance outside session rows and marks replay conflicts", async () => {
+    const ledger = new InMemoryRunLedger();
+    const key = "slack:C1:1.0:@thread";
+    const original = {
+      repo: "acme/api",
+      issue: "acme/api#2430",
+      provenance: "Investigate https://github.com/acme/api/issues/2430",
+    };
+    expect(await ledger.checkpointRequesterTarget(key, "slack:UALICE", original)).toEqual(original);
+    expect(await ledger.checkpointRequesterTarget(key, "slack:UALICE", original)).toEqual(original);
+    expect(await ledger.readRequesterTarget(key, "slack:UBOB")).toBeNull();
+    expect(
+      await ledger.checkpointRequesterTarget(key, "slack:UALICE", { ...original, issue: "acme/api#12" }),
+    ).toMatchObject({ conflict: true });
+  });
+});
+
 describe("intake receipts (run-history item 59)", () => {
   const receipt = (over: Partial<IntakeReceipt> = {}): IntakeReceipt => ({
     verdict: "silent",

@@ -15,7 +15,14 @@ import {
   selectReclaim,
   unreadInbox,
 } from "./decisions.js";
-import type { FinishResult, HeartbeatFacts, HeartbeatResult, RunLedger } from "./ledger.js";
+import {
+  mergeRequesterTarget,
+  type RequesterTarget,
+  type FinishResult,
+  type HeartbeatFacts,
+  type HeartbeatResult,
+  type RunLedger,
+} from "./ledger.js";
 import {
   causeOfClose,
   causeOfReclaim,
@@ -80,6 +87,8 @@ export interface SessionLog {
   maxBytes: number;
   /** The `(idx, part)` keys the byte policy already replaced, so a pass never picks them again. */
   trimmed: Set<string>;
+  /** Actor-stamped targets stay separate from turns and byte trimming. */
+  requesterTargets?: Map<string, RequesterTarget>;
   /** The session's notepad (item 10), once a run wrote it. */
   notepad?: Notepad;
   /** The row ids the keyed append has seen (item 13), so a replay appends nothing twice. */
@@ -626,6 +635,18 @@ export class InMemoryRunLedger implements RunLedger {
       ),
     ].sort((a, b) => a - b);
     return { hits, gaps };
+  }
+
+  async readRequesterTarget(key: string, actor: string): Promise<RequesterTarget | null> {
+    return this.sessions.get(key)?.requesterTargets?.get(actor) ?? null;
+  }
+
+  async checkpointRequesterTarget(key: string, actor: string, target: RequesterTarget): Promise<RequesterTarget> {
+    const log = this.session(key);
+    const targets = (log.requesterTargets ??= new Map());
+    const merged = mergeRequesterTarget(targets.get(actor) ?? null, target);
+    targets.set(actor, merged);
+    return merged;
   }
 
   async readNotepad(key: string): Promise<Notepad | null> {
