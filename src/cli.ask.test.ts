@@ -21,11 +21,8 @@ let script: Script = { kind: "answer", text: "four" };
 let dir: string;
 
 beforeAll(async () => {
-  // Two callers reach this fake in one `ask`: the run loop's compatible adapter
-  // asks for a whole completion, and the router — on pi's model library, which
-  // always streams Chat Completions (harness-pi.md item 13) — asks with
-  // `stream: true`. The same scripted answer is served in whichever form the
-  // request names, as the load harness's scripted provider serves it.
+  // Two callers reach this fake in one `ask`: the operator streams a typed
+  // bind, then the run loop's compatible adapter asks for the text answer.
   server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -35,7 +32,10 @@ beforeAll(async () => {
         res.end(script.body);
         return;
       }
-      const { stream } = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { stream?: boolean };
+      const { stream, tools } = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+        stream?: boolean;
+        tools?: Array<{ function?: { name?: string } }>;
+      };
       if (stream === true) {
         const chunk = (delta: Record<string, unknown>, finish: string | null, usage?: Record<string, number>) =>
           `data: ${JSON.stringify({
@@ -48,9 +48,32 @@ beforeAll(async () => {
           })}\n\n`;
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.end(
-          chunk({ role: "assistant", content: script.text }, null) +
-            chunk({}, "stop", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }) +
-            "data: [DONE]\n\n",
+          tools?.some((tool) => tool.function?.name === "bind_preset")
+            ? chunk(
+                {
+                  role: "assistant",
+                  tool_calls: [
+                    { index: 0, id: "call1", type: "function", function: { name: "bind_preset", arguments: "" } },
+                  ],
+                },
+                null,
+              ) +
+                chunk(
+                  {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        function: { arguments: JSON.stringify({ preset: "general", reason: "answer the ask" }) },
+                      },
+                    ],
+                  },
+                  null,
+                ) +
+                chunk({}, "tool_calls", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }) +
+                "data: [DONE]\n\n"
+            : chunk({ role: "assistant", content: script.text }, null) +
+                chunk({}, "stop", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }) +
+                "data: [DONE]\n\n",
         );
         return;
       }

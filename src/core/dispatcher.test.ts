@@ -10698,7 +10698,7 @@ workspaceDir: __WORKDIR__
     deps.runRegistry = new RunRegistry({ genId: () => "run-ship-no-decision", genToken: () => "tok" });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(`agent:ship review ${PR_URL}`, "slack:UADMIN"), io);
-    expect(replies.join("\n")).toContain("I couldn't bind this Ship request");
+    expect(replies).toContain("I couldn't bind this request to an action, so nothing started.");
     expect(created).toEqual([]);
     expect((await handed(instances, "run-ship-no-decision")).instance).toBeNull();
   });
@@ -23190,21 +23190,18 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     );
   });
 
-  it("on: a pending question's no-call answer is re-asked once, then the door binds general on the joined ask without a reader hand-off (issue 2046)", async () => {
+  it("on: a pending question's no-call answer is re-asked once, then stops without a reader hand-off (issue 2046)", async () => {
     const FALLBACK_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
     const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);
     deps.operatorModel = vi.fn<RouteModel>(async () => "sure, acme/tools it is");
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread: questionThread() });
     expect(deps.operatorModel).toHaveBeenCalledTimes(2);
-    expect(JSON.stringify(provider.requests[0])).toContain(JOINED);
-    expect(provider.requests[0].model).toBe("general-model");
-    expect(replies).toContain("answer");
+    expect(provider.requests).toHaveLength(0);
+    expect(replies).toContain("I couldn't bind this request to an action, so nothing started.");
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
       mode: "on",
-      outcome: "binds",
-      reason: "no_decision",
-      binds: [{ line: expect.stringContaining(JOINED) as unknown as string, reason: "no_decision" }],
+      outcome: "non_decision",
     });
   });
 
@@ -24471,31 +24468,46 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
   });
 
-  it("on: a turn ending with no tool call is re-asked once, then binds general with no_decision on the run's operator field", async () => {
+  it("on: a turn ending with no tool call is re-asked once, then stops at the door", async () => {
     const FALLBACK_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
     const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);
     deps.operatorModel = vi.fn<RouteModel>(async () => "sure, I will run that for you");
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("review it for me", "slack:UADMIN"), io);
+    const outcome = await dispatch(deps, msg("review it for me", "slack:UADMIN"), io);
     expect(deps.operatorModel).toHaveBeenCalledTimes(2);
-    expect(provider.requests[0].model).toBe("general-model");
-    expect(replies).toContain("answer");
-    expect(replies.every((r) => !r.includes("no tool call") && !r.includes("non_decision"))).toBe(true);
+    expect(outcome.status).toBe("failed");
+    expect(provider.requests).toHaveLength(0);
+    expect(replies).toContain("I couldn't bind this request to an action, so nothing started.");
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
       mode: "on",
-      outcome: "binds",
-      reason: "no_decision",
-      binds: [{ line: "agent:general review it for me", reason: "no_decision" }],
+      outcome: "non_decision",
+      reason: expect.stringContaining("no tool call"),
+    });
+    expect(registry.getById("r1")?.status).toBe("failed");
+  });
+
+  it("on: an unavailable operator records failure and starts no default run", async () => {
+    const { deps, provider, registry } = operatorDeps(ON_YAML);
+    Reflect.deleteProperty(deps, "completions");
+    const { io, replies } = fakeIO();
+    const outcome = await dispatch(deps, msg("explain this change", "slack:UADMIN"), io);
+    expect(outcome.status).toBe("failed");
+    expect(provider.requests).toHaveLength(0);
+    expect(replies).toContain("I couldn't bind this request to an action, so nothing started.");
+    expect(registry.getById("r1")?.status).toBe("failed");
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "non_decision",
+      reason: "operator_unavailable",
     });
   });
 
-  it("on: a refusal is unrepresentable — a refuse call is re-asked and the request falls to the configured default with no second model", async () => {
+  it("on: a refusal is unrepresentable — a refuse call is re-asked and then stops at the door", async () => {
     const FALLBACK_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
     const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);
     // The incident's shape, in the loop's vocabulary: the model tries to
     // refuse a plain-words docs ask. No refuse tool exists — only the policy
-    // table refuses — so the call is a violation, re-asked and then resolved
-    // on the configured default with no second model.
+    // table refuses — so the call is a violation, re-asked and then ends.
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "refuse",
       input: { text: "privileged administrative updates to control plane records require admin access" },
@@ -24503,8 +24515,8 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("in acme/api: record 0070 — flip the record's status to accepted", "slack:UADMIN"), io);
     expect(deps.operatorModel).toHaveBeenCalledTimes(3);
-    expect(provider.requests[0].model).toBe("general-model");
-    expect(replies).toContain("answer");
+    expect(provider.requests).toHaveLength(0);
+    expect(replies).toContain("I couldn't bind this request to an action, so nothing started.");
     // The invented authority never reached the person.
     expect(replies.every((r) => !r.includes("admin access"))).toBe(true);
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({

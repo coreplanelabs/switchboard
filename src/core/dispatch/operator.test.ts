@@ -1511,7 +1511,7 @@ describe("runOperator — the loop over a scripted model", () => {
     expect(answer.attempts).toHaveLength(3);
   });
 
-  it("a no-call turn is re-asked once with the violation named; a second binds general through bind_preset and records no_decision", async () => {
+  it("a no-call turn is re-asked once with the violation named; a second ends without a bind", async () => {
     const prompts: { retries?: readonly { answer: string; violation: string }[] }[] = [];
     const answer = await runOperator(input(), async (prompt) => {
       prompts.push(prompt);
@@ -1521,19 +1521,14 @@ describe("runOperator — the loop over a scripted model", () => {
     expect(prompts[1].retries).toEqual([
       { answer: "", violation: expect.stringContaining("no tool call") as unknown as string },
     ]);
-    expect(answer.decision).toEqual({
-      kind: "binds",
-      binds: [{ line: "agent:general list the runs", reason: "no_decision" }],
-      reason: "no_decision",
-    });
+    expect(answer.decision).toMatchObject({ kind: "non_decision", reason: expect.stringContaining("no tool call") });
     expect(answer.attempts).toEqual([
       { outcome: "violation", violation: expect.stringContaining("no tool call") as unknown as string },
-      { outcome: "accepted" },
+      { outcome: "violation", violation: expect.stringContaining("no tool call") as unknown as string },
     ]);
     expect(operatorEventOf("on", answer)).toMatchObject({
-      outcome: "binds",
-      reason: "no_decision",
-      binds: [{ line: "agent:general list the runs", reason: "no_decision" }],
+      outcome: "non_decision",
+      reason: expect.stringContaining("no tool call"),
     });
   });
 
@@ -1704,7 +1699,7 @@ describe("runOperator — the loop over a scripted model", () => {
     expect(requests[1]!.maxTokens).toBeGreaterThan(requests[0]!.maxTokens);
   });
 
-  it("a second cut floors through the typed general bind, so a cut answer never ends a pipeline", async () => {
+  it("a second output-cap cut ends without inventing a general bind", async () => {
     const requests: CompletionRequest[] = [];
     const provider: Provider = {
       name: "openai",
@@ -1717,11 +1712,7 @@ describe("runOperator — the loop over a scripted model", () => {
     const answer = await runOperator(input(), providerStructuredModel(provider, "gpt-5.4"));
 
     expect(requests).toHaveLength(2);
-    expect(answer.decision).toEqual({
-      kind: "binds",
-      binds: [{ line: "agent:general list the runs", reason: "output_cap" }],
-      reason: "output_cap",
-    });
+    expect(answer.decision).toEqual({ kind: "non_decision", reason: "output_cap" });
   });
 
   it("the prompt is open: the tool set carries no forced choice, so the model may end the turn", () => {

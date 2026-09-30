@@ -79,7 +79,7 @@ describe("the door row owns every checked-in routed fixture", () => {
     }
   });
 
-  it("a no-call turn is re-asked once and the second no-call lands on general with no_decision recorded", async () => {
+  it("a no-call turn is re-asked once and the second no-call stops at the door", async () => {
     const fixture = ROUTE_DOOR_FIXTURES.find((row) => row.defect === "D14")!;
     let calls = 0;
     const answer = await runOperator(input(fixture.text), async () => {
@@ -87,14 +87,32 @@ describe("the door row owns every checked-in routed fixture", () => {
       return "I do not have an action";
     });
     expect(calls).toBe(2);
-    expect(answer.decision).toMatchObject({
-      kind: "binds",
-      reason: "no_decision",
-      binds: [{ line: `agent:general ${fixture.text}`, reason: "no_decision" }],
+    expect(answer.decision).toMatchObject({ kind: "non_decision", reason: expect.stringContaining("no tool call") });
+    expect(judgeDoorFixture(answer.decision, fixture)).toMatchObject({
+      hit: true,
+      reason: expect.stringContaining("no tool call"),
     });
-    expect(judgeDoorFixture(answer.decision, fixture)).toMatchObject({ hit: true, reason: "no_decision" });
     const replayed = await replayDoorFixtures([fixture], async () => answer.decision, { now: () => 0 });
-    expect(replayed).toMatchObject([{ hit: true, outcome: "binds", reason: "no_decision" }]);
+    expect(replayed).toMatchObject([
+      { hit: true, outcome: "non_decision", reason: expect.stringContaining("no tool call") },
+    ]);
+  });
+
+  it("does not count an exhausted operator turn as an owned-thread fold", () => {
+    const fixture = ROUTE_DOOR_FIXTURES.find((row) => row.defect === "D7")!;
+    expect(judgeDoorFixture({ kind: "non_decision", reason: "the turn ended with no tool call" }, fixture).hit).toBe(
+      false,
+    );
+  });
+
+  it("does not count a provider refusal as an owned-thread fold", () => {
+    const fixture = ROUTE_DOOR_FIXTURES.find((row) => row.defect === "D7")!;
+    expect(
+      judgeDoorFixture(
+        { kind: "refusal", cause: "provider", providerFailure: "transient", text: "Provider failed", reason: "down" },
+        fixture,
+      ).hit,
+    ).toBe(false);
   });
 });
 

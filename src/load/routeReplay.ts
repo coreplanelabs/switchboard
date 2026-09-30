@@ -625,10 +625,10 @@ export function partitionDoorFixtures(
  *  decision binds a line carrying the pasted words — the paste starts a run
  *  through the table's `run` or `route` cell instead of dying as a dead
  *  hand-back. The loop unit (E2) extended the judge with its own kinds: a
- *  `fold` hits when the decision is anything an owned thread folds (everything
- *  but a question, the `steer_owned` row); a `rebind` hits when the parked question's answer,
- *  joined onto the original ask before the loop saw it, carried the ask's
- *  words and the decision bound. */
+ *  `fold` hits when the decision binds into the owner or policy refuses the fold
+ *  (the `steer_owned` row); a failed operator turn is never a fold. A `rebind`
+ *  hits when the parked question's answer, joined onto the original ask before
+ *  the loop saw it, carried the ask's words and the decision bound. */
 export function judgeDoorFixture(
   decision: OperatorDecision,
   fixture: RouteDoorFixture,
@@ -654,6 +654,12 @@ export function judgeDoorFixture(
   if (expected.kind === "refusal") {
     const hit = decision.kind === "refusal" && decision.text.includes(expected.naming);
     return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
+  }
+  if (expected.kind === "non_decision") {
+    return {
+      hit: decision.kind === "non_decision" && decision.reason.includes(expected.reasonContains),
+      reason: decision.reason,
+    };
   }
   if (expected.kind === "click") {
     const hit =
@@ -689,11 +695,10 @@ export function judgeDoorFixture(
   }
   if (expected.kind === "fold") {
     // The loop unit (E2): under the owner rule a reply into an owned thread
-    // folds before the loop's answer posts — every decision but a question is
-    // the fold of the whole message (`decideExecution`'s `steer_owned` row),
-    // so only a question (a rival prose answer) misses.
+    // folds before the loop's answer posts. A bind or policy refusal is the
+    // owned outcome; a failed provider turn cannot count as a completed fold.
     const folds = decideExecution({ kind: "steer_owned" }, "chat").cell === "run";
-    const hit = folds && decision.kind !== "question";
+    const hit = folds && (decision.kind === "binds" || (decision.kind === "refusal" && decision.cause === "policy"));
     return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
   }
   // `rebind` (the loop unit, E2): the parked question's answer was joined
