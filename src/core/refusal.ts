@@ -83,7 +83,7 @@ const CAUSE_OF = {
   reference_fetch_failed: "system",
   // the catch-all: an uncaught throw in dispatch()
   uncaught: "system",
-  // the ship preflight's nine results (record 0054's plan): the old
+  // the ship preflight's eleven results (record 0054's plan): the old
   // `ship_preflight` code is kept as these codes' prefix, so a query on the
   // old code still finds them; the sentence did not split with the code.
   ship_preflight_channel: "system",
@@ -95,6 +95,7 @@ const CAUSE_OF = {
   ship_preflight_head_unknown: "system",
   ship_preflight_closed_resume: "request",
   ship_preflight_no_task: "request",
+  ship_preflight_pr_work_question: "request",
   ship_preflight_base_missing: "request",
   // the plan hand-off's fifteen sentences (two share `plan_history_unavailable`)
   plan_base_unknown: "request",

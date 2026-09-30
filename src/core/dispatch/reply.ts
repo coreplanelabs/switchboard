@@ -454,6 +454,10 @@ export async function renderRefusal(
   // reads (the record's channel-without-offer shape).
   if (refusal.cause === "request" && refusal.guess) {
     if (await offerQuestion(refusal, io, ctx.confirmations)) return;
+    // This proposal is the SAME message, authorized only by its Yes receipt.
+    // Rendering it as a line to type would re-ask forever without that receipt.
+    if (refusal.code === "ship_preflight_pr_work_question")
+      return io.reply(`${refusal.text} Confirmation is unavailable right now; nothing started.`);
     return io.reply(refusalQuestion(refusal));
   }
   return io.reply(refusalLine(refusal));

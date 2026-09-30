@@ -10672,6 +10672,44 @@ workspaceDir: __WORKDIR__
     expect((await handed(instances, "run-ship-no-decision")).instance).toBeNull();
   });
 
+  it("PR-citing Ship work waits for the requester's Yes before round zero", async () => {
+    const { deps, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, prFromMessage: true });
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: {
+        preset: "ship",
+        shipEntry: "work",
+        workObjective: "fix the failing check",
+        repo: "acme/api",
+        reason: "a separate change",
+      },
+    }));
+    const now = 1_000_000;
+    deps.clock = () => now;
+    const store = new InMemoryConfirmationStore({ clock: () => now });
+    deps.confirmations = store;
+    const request = `agent:ship review ${PR_URL}; example: \`fix the failing check\``;
+    const f = fakeIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    f.io.offer = vi.fn(async (offer) => void offers.push(offer));
+    await dispatch(deps, msg(request, "slack:UADMIN"), f.io);
+    expect(created).toEqual([]);
+    expect(offers).toHaveLength(1);
+    expect(offers[0]).toMatchObject({
+      line: request,
+      question: { text: expect.stringContaining("separate code change") },
+    });
+    const click = await dispatchClick(deps, {
+      kind: "confirm",
+      id: offers[0]!.id,
+      actor: { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS },
+      io: fakeIO().io,
+    });
+    expect(click).toEqual({ status: "completed" });
+    expect(created).toHaveLength(1);
+  });
+
   it("an operator-bound ship on a seeded request (`plan <path>.md`) is refused naming `agent:ship`, nothing written — the guard reads operator like route", async () => {
     const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
     deps.githubApi = new InMemoryGithubApi({

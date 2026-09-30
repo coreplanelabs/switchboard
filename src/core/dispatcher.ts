@@ -2392,6 +2392,7 @@ export async function dispatch(
         card,
         directives,
         ...(operatorShipEntry !== undefined ? { shipEntry: operatorShipEntry } : {}),
+        ...(opts.redispatch?.code === "ship_preflight_pr_work_question" ? { confirmedPrWork: true } : {}),
         ...(operatorRepoSource !== undefined ? { shipRepoSource: operatorRepoSource } : {}),
         ...(reissuePlanId !== undefined ? { reissuePlanId } : {}),
         ...(beforeCoordinatorStart !== undefined ? { beforeCoordinatorStart } : {}),

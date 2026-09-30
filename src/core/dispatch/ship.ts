@@ -178,6 +178,8 @@ export interface ShipContext {
   directives: RequestDirectives;
   /** The operator's typed starting stage; preflight validates the PR facts. */
   shipEntry?: ShipEntryIntent;
+  /** Only a Yes on the stored PR-work question can grant this continuation. */
+  confirmedPrWork?: boolean;
   /** The validated source of the operator's repository slot. */
   shipRepoSource?: "request" | "attachment" | "thread" | "channel";
   /** The stable generated plan this ended thread is re-issuing. */
@@ -312,7 +314,9 @@ export async function runShipBranch(
       // channel is that it can — never a prefix list.
       canOpenThread: io.openThread !== undefined,
       requestText: directives.text,
+      messageText: msg.text,
       ...(ctx.shipEntry !== undefined ? { intent: ctx.shipEntry } : {}),
+      ...(ctx.confirmedPrWork ? { confirmedPrWork: true } : {}),
       ...(ctx.operator?.binds?.[0]?.workObjective !== undefined
         ? { workObjective: ctx.operator.binds[0].workObjective }
         : {}),

@@ -122,12 +122,16 @@ export interface ShipPreflightInput {
   canOpenThread: boolean;
   /** Directive-stripped request text. */
   requestText: string;
+  /** Original authored message for a confirmation that re-enters the door. */
+  messageText?: string;
   /** The operator's typed starting stage. Legacy typed ingress may omit it. */
   intent?: ShipEntryIntent;
   /** The operator's separate code-change objective when work cites a PR. */
   workObjective?: string;
   /** Earlier actor-stamped turns from this requester, never assistant prose. */
   requesterWorkText?: readonly string[];
+  /** A Yes on this exact PR-work question, carried by the confirmation store. */
+  confirmedPrWork?: boolean;
   repoCtx: Pick<
     RepoContext,
     "repo" | "pr" | "prFromMessage" | "prIsThreadOwn" | "ref" | "refFromPr" | "baseRef" | "headSha" | "prUnpostable"
@@ -276,6 +280,19 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       "not started (work unclear)",
       `🚫 I couldn't tell what new change you want alongside ${repo}#${repoCtx.pr}. Ask Ship to review that PR, or name the separate change.`,
     );
+  if (workCitesPr && !barePrReference && !input.confirmedPrWork)
+    return {
+      ...refuse(
+        "ship_preflight_pr_work_question",
+        "PR cited beside new work",
+        "not started (confirm separate work)",
+        `🚫 This request cites ${repo}#${repoCtx.pr}. Do you want Ship to start a separate code change based on this request?`,
+      ),
+      guess: {
+        line: input.messageText ?? input.requestText,
+        evidence: `The operator selected separate coding work: ${objective}`,
+      },
+    };
   const task =
     input.intent === "review" || barePrReference
       ? ""
