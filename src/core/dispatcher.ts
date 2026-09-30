@@ -1027,7 +1027,8 @@ export async function dispatch(
     const mainDm =
       msg.channelId.startsWith("slack:D") &&
       (mainScopes.user.agent ?? mainScopes.channel.agent ?? deps.config.config.defaults.agent) === "orchestrator";
-    let operatorMode = configuredOperator === "on" && (typedDecision || mainDm) ? "off" : configuredOperator;
+    let operatorMode =
+      configuredOperator === "on" && (typedDecision || mainDm) && typedAgent !== "ship" ? "off" : configuredOperator;
     // The preset an `on` decision binds on the person's own words, with the
     // decision's event on the run.
     let operatorPreset: string | undefined;
@@ -1041,6 +1042,7 @@ export async function dispatch(
     let operatorModel: string | undefined;
     // The accepted bind is authority, not the thread/channel fallback facts.
     let operatorRepo: string | undefined;
+    let operatorShipEntry: ShipContext["shipEntry"];
     // An ended generated pipeline's stable plan id and remaining caps: read
     // from its coordinator rows and handed to ship so neither a formatted
     // durable input nor today's config can mint a new identity or budget.
@@ -1276,6 +1278,7 @@ export async function dispatch(
           operatorRequest = execution.request;
           operatorModel = execution.model;
           operatorRepo = execution.repo;
+          operatorShipEntry = execution.shipEntry;
         }
         // `kind: "fold"` (issue 2027; thread-admission item 9): the decision was
         // neither steers-and-reads nor a question in an owned thread, so the
@@ -2360,6 +2363,7 @@ export async function dispatch(
         startedAt,
         card,
         directives,
+        ...(operatorShipEntry !== undefined ? { shipEntry: operatorShipEntry } : {}),
         ...(reissuePlanId !== undefined ? { reissuePlanId } : {}),
         ...(beforeCoordinatorStart !== undefined ? { beforeCoordinatorStart } : {}),
         ...(reissueCaps !== undefined

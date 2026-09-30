@@ -284,6 +284,12 @@ describe("judgeToolCall — bash", () => {
       reason: "merge/approve — a coding run never merges or approves a pull request",
     });
     expect(bash("gh pr view 12")).toEqual({ verdict: "allowed" });
+    expect(bash("gh api -X GET repos/o/r/pulls/12/reviews")).toEqual({ verdict: "allowed" });
+    expect(bash("curl https://api.github.com/repos/o/r/pulls/12/reviews")).toEqual({ verdict: "allowed" });
+    expect(bash("gh api -X POST repos/o/r/pulls/12/reviews -f event=APPROVE")).toEqual({
+      verdict: "refused",
+      reason: "merge/approve — a coding run never merges or approves a pull request",
+    });
   });
   it("refuses reading credential material the executor keeps beside the worktree", () => {
     expect(bash("cat .git/github-credentials")).toEqual({

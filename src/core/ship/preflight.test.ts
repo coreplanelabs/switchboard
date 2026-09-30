@@ -38,6 +38,36 @@ function input(over: Partial<ShipPreflightInput> = {}): ShipPreflightInput {
 }
 
 describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-merge fact (item 9)", () => {
+  it("an operator review entry starts at review on the named foreign PR even though the request contains the word review", async () => {
+    const res = await shipPreflight(
+      input({
+        intent: "review",
+        requestText: `review ${PR_URL}`,
+        repoCtx: { repo: "acme/api", pr: 7, prFromMessage: true },
+        prFacts: async () => openPr(),
+      }),
+    );
+    expect(res).toMatchObject({ ok: true, entry: { resume: { pr: 7, headSha: HEAD, url: PR_URL } } });
+  });
+
+  it("an operator review entry with no verified PR refuses before round zero", async () => {
+    const res = await shipPreflight(input({ intent: "review", requestText: "review it" }));
+    expect(res).toMatchObject({ ok: false, refusal: { code: "ship_preflight_no_task" } });
+    if (!res.ok) expect(res.reply).toContain("Name the open pull request");
+  });
+
+  it("an operator work entry treats a cited foreign PR as context and keeps the request intact", async () => {
+    const res = await shipPreflight(
+      input({
+        intent: "work",
+        requestText: `investigate the failing check at ${PR_URL}`,
+        repoCtx: { repo: "acme/api", pr: 7, prFromMessage: true, ref: "feat/rate-limit", refFromPr: true },
+        prFacts: async () => undefined,
+      }),
+    );
+    expect(res).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
+  });
+
   it("adopt: a generated task in a thread carrying an open pull request runs ON it — branch is the PR's head, base its own base, the PR named on the entry", async () => {
     const res = await shipPreflight(
       input({

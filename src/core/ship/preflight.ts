@@ -102,6 +102,11 @@ export type ShipPreflightResult =
       guess?: { line: string; evidence: string };
     };
 
+/** The operator's starting stage for a Ship request. This is a decision about
+ * the requested work, not permission or a PR identity; preflight still checks
+ * the resolved target and its current GitHub facts. */
+export type ShipEntryIntent = "work" | "review";
+
 export interface ShipPreflightInput {
   /** Platform-namespaced channel id (AGENTS.md invariant 4) — names the
    *  adapter in the channel refusal; the capability below decides it. */
@@ -115,6 +120,8 @@ export interface ShipPreflightInput {
   canOpenThread: boolean;
   /** Directive-stripped request text. */
   requestText: string;
+  /** The operator's typed starting stage. Legacy typed ingress may omit it. */
+  intent?: ShipEntryIntent;
   repoCtx: Pick<
     RepoContext,
     "repo" | "pr" | "prFromMessage" | "prIsThreadOwn" | "ref" | "refFromPr" | "baseRef" | "headSha" | "prUnpostable"
@@ -242,12 +249,18 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   const info = await input.repoInfo(repo).catch(() => undefined);
   // Entry checks (spec item 10). The thread→PR inference reads USER turns only
   // (repoContext.ts), so `repoCtx.pr` set means a user turn named the PR.
-  const task = shipTaskText(input.requestText, repo);
+  const task =
+    input.intent === "review"
+      ? ""
+      : input.intent === "work"
+        ? input.requestText.trim()
+        : shipTaskText(input.requestText, repo);
   // A seeded plan request keeps the plan graph's own `plan/<id>/u<n>` branches:
   // a pull request in its thread is context, never adopted — so its facts are
   // never needed, and a thread pull request that could not be fetched refuses
   // nothing on the seeded path.
-  const seeded = parseShipPlanRequest(task) !== undefined;
+  const seeded =
+    input.intent === "review" ? false : parseShipPlanRequest(shipTaskText(input.requestText, repo)) !== undefined;
   if (!seeded && repoCtx.prUnpostable?.reason === "unreachable") {
     return refuse(
       "ship_preflight_pr_unreachable",
@@ -391,7 +404,9 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       "ship_preflight_no_task",
       "no task",
       "not started (no task)",
-      `🚫 Nothing to ship: give ship a task (\`agent:ship in ${repo}: <task>\`), or name an open ship PR by URL to resume its review loop.`,
+      input.intent === "review"
+        ? `🚫 Name the open pull request in ${repo} whose review loop Ship should run.`
+        : `🚫 Nothing to ship: give ship a task (\`agent:ship in ${repo}: <task>\`), or name an open ship PR by URL to resume its review loop.`,
     );
   }
   // The round-0 base is a typed ref token or the repo default — never

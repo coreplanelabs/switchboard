@@ -1153,6 +1153,8 @@ export type RunEvent =
         repo?: string;
         /** The admissible fact behind the model's typed repo choice. */
         repoSource?: "request" | "attachment" | "thread" | "channel";
+        /** The operator-selected first stage of a Ship unit. */
+        shipEntry?: "work" | "review";
         confirmed?: true;
       }>;
       question?: string;

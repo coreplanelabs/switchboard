@@ -46,7 +46,7 @@ import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../
 import { parseUnitKey } from "../coordinator/contract.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../coordinator/instancesRoute.js";
 import { resolveAddressSeverity, resolveGrant, resolveIdleDays, resolveShipCaps } from "../shipPipeline.js";
-import { shipPreflight } from "../ship/preflight.js";
+import { shipPreflight, type ShipEntryIntent } from "../ship/preflight.js";
 import { redactSecrets, type AgentSource } from "../runEvents.js";
 import type { LiveThread } from "../threadAdmission.js";
 import type { RouteDecided } from "./route.js";
@@ -176,6 +176,8 @@ export interface ShipContext {
    *  runner's `round` route redraws it from the boundaries the machine reports. */
   card: StatusHandle;
   directives: RequestDirectives;
+  /** The operator's typed starting stage; preflight validates the PR facts. */
+  shipEntry?: ShipEntryIntent;
   /** The stable generated plan this ended thread is re-issuing. */
   reissuePlanId?: string;
   /** Deferred legacy repair and ownership reservation, after every hand-off
@@ -308,6 +310,7 @@ export async function runShipBranch(
       // channel is that it can — never a prefix list.
       canOpenThread: io.openThread !== undefined,
       requestText: directives.text,
+      ...(ctx.shipEntry !== undefined ? { intent: ctx.shipEntry } : {}),
       repoCtx,
       ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates } : {}),
       gates: {

@@ -10595,8 +10595,31 @@ workspaceDir: __WORKDIR__
   const shipOperator = (request: string) =>
     vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", request, reason: "the ask" },
+      input: { preset: "ship", shipEntry: "work", request, reason: "the ask" },
     }));
+
+  it("an explicit Ship review request uses the operator's review entry and starts at review on the verified PR", async () => {
+    const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+      headSha: HEAD_A,
+      baseRef: "main",
+    });
+    deps.fetchPrFacts = vi.fn(async () => openBotPr());
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "ship", shipEntry: "review", repo: "acme/api", reason: "review the named PR" },
+    }));
+    deps.runRegistry = new RunRegistry({ genId: () => "run-ship-review-entry", genToken: () => "tok" });
+    const { io } = fakeIO();
+    await dispatch(deps, msg(`agent:ship review ${PR_URL}`, "slack:UADMIN"), io);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(created).toHaveLength(1);
+    const { unit } = await handed(instances, "run-ship-review-entry");
+    expect(unit).toMatchObject({ resume: { pr: 7, headSha: HEAD_A } });
+  });
 
   it("an operator-bound ship on a seeded request (`plan <path>.md`) is refused naming `agent:ship`, nothing written — the guard reads operator like route", async () => {
     const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
@@ -10646,7 +10669,10 @@ workspaceDir: __WORKDIR__
     deps.operatorModel = vi.fn<RouteModel>(async (prompt) => {
       expect(prompt.user).toContain("Release api-v3.39.0 changed the dashboard");
       expect(prompt.user).toContain("Onboarded repository candidates: `acme/api`");
-      return { tool: "bind_preset", input: { preset: "ship", repo: "acme/api", reason: "the attached plan" } };
+      return {
+        tool: "bind_preset",
+        input: { preset: "ship", shipEntry: "work", repo: "acme/api", reason: "the attached plan" },
+      };
     });
     deps.runRegistry = new RunRegistry({ genId: () => "run-ship-file", genToken: () => "tok" });
     const { io } = fakeIO();
@@ -19879,7 +19905,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const s = await repeatedEndedPrSetup();
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", reason: "continue the prior work" },
+      input: { preset: "ship", shipEntry: "work", reason: "continue the prior work" },
     }));
     const { io, replies } = fakeIO();
     await dispatch(s.deps, msg("continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
@@ -20002,7 +20028,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
   it("an exact-PR non-review decision after the round cap cannot replay the ledger or start a writer", async () => {
     for (const answer of [
       { tool: mcpToolName("runs.findings"), input: { target: "acme/api#7", reason: "show the findings" } },
-      { tool: "bind_preset", input: { preset: "ship", reason: "fix the findings" } },
+      { tool: "bind_preset", input: { preset: "ship", shipEntry: "work", reason: "fix the findings" } },
     ]) {
       const s = await endedPrContinuationSetup();
       const unit = {
@@ -20078,7 +20104,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     ]);
     expect(s.deps.fetchPrFacts).toHaveBeenCalledExactlyOnceWith({ repo: "acme/api", number: 7 });
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
     expect(s.deps.invoked).toEqual([]);
   });
 
@@ -20107,7 +20133,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
     ]);
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
     expect(s.deps.invoked).toEqual([]);
   });
 
@@ -20134,7 +20160,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
     ]);
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
     expect(s.deps.invoked).toEqual([]);
   });
 
@@ -20209,7 +20235,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.deps.fetchPrFacts).toHaveBeenCalledTimes(2);
     expect(s.deps.fetchPrFacts).toHaveBeenCalledWith({ repo: "acme/api", number: 7 });
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).toHaveBeenCalledOnce();
+    expect(s.operator).toHaveBeenCalledTimes(2);
   });
 
   it("an exact PR reply ignores a prefetched short page and reaches its original unit", async () => {
@@ -20297,7 +20323,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
     ]);
     expect(s.shipBranch).not.toHaveBeenCalled();
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
   });
 
   it("an exact PR reply refuses an ended owner when a newer unfinished unit owns the same PR", async () => {
@@ -20413,7 +20439,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const task = "Please fix PR #7's title so it passes the repository's title check.";
     const operator = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", request: task, reason: "new work on the existing pull request" },
+      input: { preset: "ship", shipEntry: "work", request: task, reason: "new work on the existing pull request" },
     }));
     s.deps.operatorModel = operator;
     // A hosted ship record carries no PR field: the completed unit does.
@@ -20611,7 +20637,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const task = "Please fix this PR's title.";
     s.deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", request: task, reason: "new work on the latest pull request" },
+      input: { preset: "ship", shipEntry: "work", request: task, reason: "new work on the latest pull request" },
     }));
     s.deps.resolveRepoContext = vi.fn((_msg, _history, records) => {
       expect(records).toMatchObject({ pr: { repo: "acme/api", number: 8 } });
