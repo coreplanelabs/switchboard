@@ -1550,6 +1550,7 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
       userId: "slack:UASKER",
       threadKey: "slack:DMAIN:120.000001",
     });
+    expect(accepted?.message.threadReply).toBe(false);
     metadata.mockResolvedValue({ ok: true, channel: { ...safe, is_shared: true } });
     const refused = await receiveSlackMessage(s.client, { ...event, ts: "121.000001" }, spanStub().span, POLICY, []);
     expect(refused?.message.directAudience).toBeUndefined();
@@ -1867,6 +1868,7 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     stubDownloads(bare.calls);
     const a = await receiveSlackMessage(bare.client, followUp(), spanStub().span, POLICY, []);
     expect(a?.message.text).toBe("and the tests?");
+    expect(a?.message.threadReply).toBe(true);
     const gated = gateClient();
     stubDownloads(gated.calls);
     const { gate, decide } = gateOf({ mode: "always" });

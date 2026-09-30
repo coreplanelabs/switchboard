@@ -74,7 +74,7 @@ describe("readThread — one page of the thread's newest runs", () => {
   it("asks the runs service for the thread's runs, live and finished, under no visibility predicate, newest first", async () => {
     const runs = [run({ id: "r2" }), run({ id: "r1" })];
     const listRuns = vi.fn(async () => ({ runs }));
-    expect(await readThread({ listRuns }, "slack:C1:1.0")).toEqual(runs);
+    expect(await readThread({ listRuns }, "slack:C1:1.0")).toEqual({ kind: "available", runs });
     expect(listRuns).toHaveBeenCalledWith({
       status: "all",
       visibleTo: { kind: "all" },
@@ -83,13 +83,18 @@ describe("readThread — one page of the thread's newest runs", () => {
     });
   });
 
-  it("a read that fails is no thread: undefined, one warning naming the thread", async () => {
+  it("a read that fails is unavailable, not an empty thread", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const listRuns = vi.fn(async () => {
       throw new Error("store down");
     });
-    expect(await readThread({ listRuns }, "slack:C1:1.0")).toBeUndefined();
+    expect(await readThread({ listRuns }, "slack:C1:1.0")).toEqual({ kind: "unavailable" });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("slack:C1:1.0: thread read failed — store down"));
+  });
+
+  it("a degraded page is unavailable even when it contains runs", async () => {
+    const listRuns = vi.fn(async () => ({ runs: [run({ id: "r1" })], storeUnavailable: true as const }));
+    expect(await readThread({ listRuns } as never, "slack:C1:1.0")).toEqual({ kind: "unavailable" });
   });
 });
 
@@ -415,6 +420,20 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
     expect(await releasedPrOf([stopped, completed], unitsOf, THREAD, 7)).toBeUndefined();
   });
 
+  it("does not turn an unavailable publication owner read into no matching PR", async () => {
+    const ship = run({ id: "r-ship", agent: "ship", instanceId: "ship_acme_api_1", session: closed });
+    await expect(
+      releasedPrOf(
+        [ship],
+        async () => {
+          throw new Error("unit store down");
+        },
+        THREAD,
+        7,
+      ),
+    ).rejects.toThrow("unit store down");
+  });
+
   it("owner is the live run when one is live — before any unit or session", async () => {
     const live = run({ id: "r-live", finished: false, instanceId: "ship_acme_api_1" });
     const unitsOf = vi.fn(async () => [unit()]);
@@ -462,6 +481,7 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
     expect(await ownerOf([hosted], async () => [unit({ threadKey: "slack:C1:9.9" })], THREAD)).toEqual({
       kind: "live",
       run: hosted,
+      units: [unit({ threadKey: "slack:C1:9.9" })],
     });
   });
 
@@ -569,7 +589,7 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
     expect(await ownerOf([], async () => [], THREAD)).toEqual({ kind: "none" });
   });
 
-  it("instanceOf reads the newest run's instance — a ship run's own instanceId or a child's parentInstanceId — and a failed unit read leaves the unit out", async () => {
+  it("instanceOf reads the newest run's instance — a ship run's own instanceId or a child's parentInstanceId — and a failed unit read is unknown ownership", async () => {
     expect(instanceOf([run({ id: "a", instanceId: "i_1" }), run({ id: "b", parentInstanceId: "i_2" })])).toBe("i_1");
     expect(instanceOf([run({ id: "b", parentInstanceId: "i_2" })])).toBe("i_2");
     expect(instanceOf([run({ id: "c" })])).toBeUndefined();
@@ -582,6 +602,6 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
         },
         THREAD,
       ),
-    ).toEqual({ kind: "session", agent: "ship" });
+    ).toEqual({ kind: "unavailable", instanceId: "ship_acme_api_1" });
   });
 });

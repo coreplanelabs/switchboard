@@ -548,12 +548,12 @@ describe("WorkerCoordinatorInstanceStore — the wire", () => {
 });
 
 describe("NullCoordinatorInstanceStore and the builder", () => {
-  it("the null store knows no instance and no unit, and refuses a put as unavailable", async () => {
+  it("the null store refuses unit reads instead of reporting an empty durable owner", async () => {
     const store = new NullCoordinatorInstanceStore();
     expect(await store.get(instance.id)).toBeNull();
     expect(await store.put(instance)).toEqual({ ok: false, reason: "unavailable" });
     expect(await store.replace(instance)).toEqual({ ok: false, reason: "unavailable" });
-    expect(await store.listUnits(instance.id)).toEqual([]);
+    await expect(store.listUnits(instance.id)).rejects.toThrow("unavailable");
     expect(await store.putUnits([unitRow("U12")])).toEqual({ ok: false, reason: "unavailable" });
     expect(await store.compareAndReplaceUnit(unitRow("U12"), unitRow("U12"))).toEqual({
       ok: false,

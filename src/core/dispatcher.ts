@@ -1064,9 +1064,16 @@ export async function dispatch(
     let canReviewEndedPr = false;
     if (operatorMode !== "off") {
       const runsService = deps.runs ?? createRunsService({ registry, store: deps.runStore });
-      operatorThread = exactPrReply
-        ? await readPrOwnerThread(runsService, msg.threadKey)
-        : (opts.thread ?? (await readThread(runsService, msg.threadKey)));
+      if (exactPrReply) operatorThread = await readPrOwnerThread(runsService, msg.threadKey);
+      else if (opts.thread !== undefined) operatorThread = opts.thread;
+      else {
+        const read = await readThread(runsService, msg.threadKey);
+        if (read.kind === "unavailable") {
+          await io.reply("This thread's earlier work could not be verified, so no new work started.");
+          return ended;
+        }
+        operatorThread = read.runs;
+      }
       if (exactPrReply && operatorThread === undefined) {
         await io.reply("This thread's earlier Ship runs could not be verified, so no new plan started.");
         return ended;
@@ -1101,6 +1108,10 @@ export async function dispatch(
           return read;
         };
         pageOwner = await ownerOf(operatorThread, unitsOf, msg.threadKey);
+        if (pageOwner.kind === "unavailable") {
+          await io.reply("This thread's work owner could not be verified, so no new work started.");
+          return ended;
+        }
         const unfinishedOwner = pageOwner.kind === "unit";
         if (exactPrReply && pageOwner.kind !== "live") {
           try {
@@ -1129,6 +1140,10 @@ export async function dispatch(
                   unitsOf,
                   msg.threadKey,
                 );
+          if (continuationOwner.kind === "unavailable") {
+            await io.reply("This thread's work owner could not be verified, so no new work started.");
+            return ended;
+          }
           if (continuationOwner.kind === "pipeline" || continuationOwner.kind === "pipeline_ambiguous") {
             const endedPrOwner =
               pageOwner.kind === "pipeline" || pageOwner.kind === "pipeline_ambiguous" ? pageOwner : undefined;
@@ -1339,13 +1354,28 @@ export async function dispatch(
     // agent by transcript (routing-and-config item 3) and, once the agent is
     // resolved, the previous run its seed continues from (session-log item 9).
     const runsService = deps.runs ?? createRunsService({ registry, store: deps.runStore });
-    const thread =
-      exactPrReply && !originalUnitRecovery
-        ? (operatorThread ?? (await readPrOwnerThread(runsService, msg.threadKey)))
-        : (opts.thread ??
-          (opts.parent || opts.coordinator || resume || restart || (history.length === 0 && !establishedMainDm)
-            ? undefined
-            : (operatorThread ?? (await readThread(runsService, msg.threadKey)))));
+    let thread: RunView[] | undefined;
+    if (exactPrReply && !originalUnitRecovery)
+      thread = operatorThread ?? (await readPrOwnerThread(runsService, msg.threadKey));
+    else if (opts.thread !== undefined) thread = opts.thread;
+    else if (
+      !opts.parent &&
+      !opts.coordinator &&
+      !resume &&
+      !restart &&
+      (history.length > 0 || establishedMainDm || msg.threadReply === true)
+    ) {
+      if (operatorThread !== undefined) thread = operatorThread;
+      else {
+        const read = await readThread(runsService, msg.threadKey);
+        if (read.kind === "unavailable") {
+          await io.reply("This thread's earlier work could not be verified, so no new work started.");
+          await recordPendingOperator();
+          return ended;
+        }
+        thread = read.runs;
+      }
+    }
     if (
       thread === undefined &&
       !opts.parent &&
@@ -1396,12 +1426,18 @@ export async function dispatch(
     const currentPrNumber = explicitPr?.number ?? barePrNumber;
     let namedReleasedPr: ThreadPullRequest | undefined;
     if (thread && barePrNumber !== undefined && deps.coordinatorInstances !== undefined) {
-      namedReleasedPr = await releasedPrOf(
-        thread,
-        (id) => deps.coordinatorInstances!.listUnits(id),
-        msg.threadKey,
-        barePrNumber,
-      );
+      try {
+        namedReleasedPr = await releasedPrOf(
+          thread,
+          (id) => deps.coordinatorInstances!.listUnits(id),
+          msg.threadKey,
+          barePrNumber,
+        );
+      } catch {
+        await io.reply("This thread's pull request owner could not be verified, so no new work started.");
+        await recordPendingOperator();
+        return ended;
+      }
       if (namedReleasedPr !== undefined) threadPr = namedReleasedPr;
     }
     const inheritedRepo =
@@ -1456,6 +1492,11 @@ export async function dispatch(
     // the ordinary sticky or door-bound path.
     if (thread && !threadLive && deps.coordinatorInstances !== undefined) {
       let owner = pageOwner ?? (await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey));
+      if (owner.kind === "unavailable") {
+        await io.reply("This thread's work owner could not be verified, so no new work started.");
+        await recordPendingOperator();
+        return ended;
+      }
       if (
         !originalUnitRecovery &&
         (directives.agent === undefined || directives.agent === "ship") &&
@@ -1496,11 +1537,7 @@ export async function dispatch(
         // runner's for its life — nothing runs beside it. A reply, directive
         // or not, is refused naming the owner and the unit thread to reply in,
         // never started as a rival run beside the live pipeline.
-        const units =
-          owner.run.instanceId === undefined
-            ? []
-            : await deps.coordinatorInstances.listUnits(owner.run.instanceId).catch(() => [] as CoordinatorUnit[]);
-        const open = units.filter((u) => u.ending === undefined);
+        const open = (owner.units ?? []).filter((u) => u.ending === undefined);
         await refuse(
           refusalOf(
             "pipeline_thread_owned",

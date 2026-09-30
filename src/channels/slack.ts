@@ -1046,6 +1046,7 @@ export async function receiveSlackMessage(
       ...(requester.relayedBy !== undefined ? { relayedBy: requester.relayedBy } : {}),
       ...(requester.postedBy !== undefined ? { postedBy: requester.postedBy } : {}),
       threadKey: `${PLATFORM}:${ev.channel}:${ev.threadTs}`,
+      threadReply: ev.threadTs !== ev.ts,
       ...(verifiedAudience ? { directAudience: verifiedAudience } : {}),
       text: ev.text + note,
       messageId: ev.ts,
@@ -1174,12 +1175,13 @@ async function intakeEvidence(
   parentPage: SlackThreadMessage[] = page,
 ): Promise<{ turns: IntakeTurn[]; facts: IntakeFacts; thread?: RunView[] }> {
   const now = intake.deps.now();
-  const [thread, pending] = await Promise.all([
+  const [threadRead, pending] = await Promise.all([
     intake.runs ? readThread(intake.runs, threadKey) : Promise.resolve(undefined),
     intake.confirmations
       ? intake.confirmations.pendingByThread(threadKey).catch(() => undefined)
       : Promise.resolve(undefined),
   ]);
+  const thread = threadRead?.kind === "available" ? threadRead.runs : undefined;
   const requester = thread ? requesterOf(thread) : undefined;
   // The labeller compares each turn's `user` to the bot's own user id (no role
   // change in `threadTurns`): the bot's posts carry it, a relay app's post
