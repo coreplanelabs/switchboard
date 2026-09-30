@@ -128,6 +128,23 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.url === "string" && typeof o.number === "number" && typeof o.created === "boolean";
     case "pushed_head":
       return typeof o.ref === "string" && typeof o.sha === "string" && (o.by === "push" || o.by === "salvage");
+    case "unfinished_patch":
+      return (
+        typeof o.runId === "string" &&
+        typeof o.key === "string" &&
+        o.key === `runs/${o.runId}/out/0-unfinished-${o.baseHeadSha}-${o.targetHeadSha}-${o.sourceHeadSha}.patch` &&
+        typeof o.size === "number" &&
+        Number.isSafeInteger(o.size) &&
+        o.size > 0 &&
+        typeof o.sha256 === "string" &&
+        /^[0-9a-f]{64}$/.test(o.sha256) &&
+        typeof o.baseHeadSha === "string" &&
+        /^[0-9a-f]{40}$/.test(o.baseHeadSha) &&
+        typeof o.targetHeadSha === "string" &&
+        /^[0-9a-f]{40}$/.test(o.targetHeadSha) &&
+        typeof o.sourceHeadSha === "string" &&
+        /^[0-9a-f]{40}$/.test(o.sourceHeadSha)
+      );
     case "run_state":
       return (
         typeof o.state === "string" &&

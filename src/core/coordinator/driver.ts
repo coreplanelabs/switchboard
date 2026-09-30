@@ -834,8 +834,8 @@ async function perform(
         ),
       );
     case "pr-check":
-      // `recover` rides only after a dead coding child: the bot opens the pull
-      // request from the pushed branch itself instead of answering `none`.
+      // `recover` identifies the coding child whose push the bot must verify;
+      // a dead child may also need its pull request opened from the branch.
       // `pr` is the machine's adopted pull request (issue 1799): the bot
       // follows it when nothing heads the unit's branch and answers its live
       // state instead of `none` over a minutes-old record fact.
@@ -851,6 +851,7 @@ async function perform(
               // listing, so a re-issued plan's unit resumes instead of recoding.
               ...(action.entry === true ? { entry: true } : {}),
               ...(action.recover !== undefined ? { recover: action.recover } : {}),
+              ...(action.adopt !== undefined ? { adopt: action.adopt } : {}),
               ...(action.pr !== undefined ? { pr: action.pr } : {}),
             }),
           ),

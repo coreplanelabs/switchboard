@@ -1188,6 +1188,7 @@ export async function runBot(): Promise<void> {
       watch: mergeWatch,
       ownerOf: (repo, prNumber) => runnerOwnership.owner(repo, prNumber),
       instances: coordinatorInstances,
+      ...(artifacts !== undefined ? { artifacts } : {}),
       commenterAuthorized,
       checksSettled: async (repo, headSha) => {
         const checks = await fetchCommitChecks(repo, headSha);

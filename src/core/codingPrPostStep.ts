@@ -67,6 +67,9 @@
 // base".
 
 import { shellQuote } from "../execution/shellQuote.js";
+import { SEED_CHECKOUT_DIR } from "../execution/seedPlan.js";
+import { outboundKey } from "../artifacts/keys.js";
+import type { ArtifactStore } from "../artifacts/store.js";
 import { shows, type Verbosity } from "./verbosity.js";
 import {
   resolveBaseRef,
@@ -86,6 +89,7 @@ import { EMPTY_START_STATE, type BranchStartState, type RewriteResult } from "..
 import { submittedPrDescriptionArtifact } from "./reviewDescription.js";
 import { normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { parseExitPrefix, type RunEvent } from "./runEvents.js";
+import type { SavedFindingsPatch } from "./coordinator/contract.js";
 import { systemClock } from "./trace/clock.js";
 import type { Span } from "./trace/types.js";
 import type { ExecTraceOptions } from "../execution/executor.js";
@@ -241,7 +245,7 @@ export function salvageTargetOf(opts: {
   /** A coordinator's durable publication ref outranks an auxiliary push. */
   ownedBranch?: string;
 }): { branch: string } | { skipped: string } {
-  if (opts.ownedBranch !== undefined && opts.checkedOut !== opts.ownedBranch)
+  if (opts.ownedBranch !== undefined && opts.checkedOut !== undefined && opts.checkedOut !== opts.ownedBranch)
     return {
       skipped: `the ending checkpoint kept work on \`${opts.checkedOut ?? "an unreadable checkout"}\`: the owned branch is \`${opts.ownedBranch}\``,
     };
@@ -266,7 +270,7 @@ export function salvageTargetOf(opts: {
 export const nothingToSalvageNote = (branch: string): string =>
   `the budget ended with nothing to salvage: the tree is clean and \`${branch}\` holds no unpushed commits`;
 
-const CLONED_REPO_PROBE = "ls -d */.git 2>/dev/null | head -1";
+const CLONED_REPO_PROBE = "ls -d */.git 2>/dev/null";
 
 /** Whether the observation found work for the budget-end salvage to push:
  *  measured work — uncommitted changes or unpushed commits — wins whatever the
@@ -308,11 +312,22 @@ export async function salvageBudgetPush(
   opts: {
     branch: string;
     checkout?: string;
+    /** Verify a discovered cold clone against the run's repository before staging. */
+    repo?: string;
+    /** Prove the owned repository and branch before staging checkpoint work. */
+    requireBranchProof?: boolean;
     cue?: "budget" | "compaction" | "ending" | "completion";
     publication?: { ref: string; expectedHeadSha: string } | { blocked: string };
+    unfinished?: { runId: string; baseHeadSha: string; store: ArtifactStore };
   },
   span?: Span,
-): Promise<{ pushed: boolean; summary: string; head?: string; publicationBlocked?: string }> {
+): Promise<{
+  pushed: boolean;
+  summary: string;
+  head?: string;
+  publicationBlocked?: string;
+  patch?: SavedFindingsPatch;
+}> {
   const trace = span ? { span } : undefined;
   const run = async (cmd: string) => {
     const output = await executor.exec(cmd, trace);
@@ -364,10 +379,28 @@ export async function salvageBudgetPush(
         !/not a git repository/i.test(err instanceof Error ? err.message : String(err))
       )
         throw err;
-      const dir = parseCloneDirOutput(await probe(CLONED_REPO_PROBE));
-      if (dir === undefined) throw err;
-      git = `git -C ${shellQuote(dir)}`;
+      // A seeded sandbox's executor may start outside /workspace, where the
+      // relative clone probe sees nothing even though its attached checkout
+      // remains at the documented seed path.
+      const cloneOutput = await probe(CLONED_REPO_PROBE);
+      const dir = parseCloneDirOutput(cloneOutput);
+      // Ambiguous discovery is not permission to fall back to another tree.
+      if (dir === undefined && cloneOutput.trim() !== "") throw err;
+      if (opts.repo === undefined) throw new Error("the checkout's repository is unknown", { cause: err });
+      git = `git -C ${shellQuote(dir ?? SEED_CHECKOUT_DIR)}`;
+      const origin = parseOriginRemoteOutput(await run(`${git} remote get-url origin`));
+      if (origin !== opts.repo.toLowerCase())
+        throw new Error("the checkout's origin does not match the bound repository", { cause: err });
+      if (dir === undefined && (await run(`${git} symbolic-ref --quiet --short HEAD`)).trim() !== opts.branch)
+        throw new Error("the seeded checkout is not on the owned branch", { cause: err });
       status = (await run(`${git} status --porcelain`)).trim();
+    }
+    if (opts.requireBranchProof) {
+      if ((await run(`${git} symbolic-ref --quiet --short HEAD`)).trim() !== opts.branch)
+        throw new Error("the checkpoint checkout is not on the owned branch");
+      if (opts.repo === undefined) throw new Error("the checkpoint repository is unknown");
+      if (parseOriginRemoteOutput(await run(`${git} remote get-url origin`)) !== opts.repo.toLowerCase())
+        throw new Error("the checkpoint checkout's origin does not match the bound repository");
     }
     const dirty = status !== "" && status !== "(no output)";
     const endingCheckpoint = opts.cue !== "compaction" && opts.cue !== "completion";
@@ -383,11 +416,65 @@ export async function salvageBudgetPush(
     }
     const unpushed = parseCountOutput(await run(`${git} rev-list --count HEAD --not --remotes`)) ?? 0;
     if (!dirty && !endingCheckpoint && unpushed === 0) return { pushed: false, summary: words.nothing };
-    if (opts.publication !== undefined && "blocked" in opts.publication)
+    const keepUnpublished = async (): Promise<{ patch?: SavedFindingsPatch; note: string }> => {
+      const saved = opts.unfinished;
+      if (saved === undefined)
+        return { note: "unfinished patch was not saved: private artifact storage is unavailable" };
+      try {
+        const branch = (await run(`${git} symbolic-ref --quiet --short HEAD`)).trim();
+        if (branch !== opts.branch) throw new Error("the checkout is no longer on the owned branch");
+        const remote = parseLsRemoteOutput(
+          await run(`${git} ls-remote --exit-code origin ${shellQuote(`refs/heads/${branch}`)}`),
+          branch,
+        );
+        if (remote.kind !== "found") throw new Error("the remote head cannot be read");
+        const head = parseRevParseOutput(await run(`${git} rev-parse HEAD`));
+        if (head === undefined || head === remote.sha) throw new Error("no distinct local head to preserve");
+        const base = saved.baseHeadSha;
+        if (!/^[0-9a-f]{40}$/.test(base) || base === remote.sha)
+          throw new Error("the original publication head cannot be verified");
+        await run(`${git} cat-file -e ${shellQuote(`${base}^{commit}`)}`);
+        await run(`${git} merge-base --is-ancestor ${shellQuote(base)} ${shellQuote(head)}`);
+        const path = `/tmp/ship-unfinished-${saved.runId}.patch`;
+        await run(`${git} diff --binary --full-index ${shellQuote(base)} ${shellQuote(head)} > ${shellQuote(path)}`);
+        const size = Number((await run(`wc -c < ${shellQuote(path)}`)).trim());
+        const digest = /^([0-9a-f]{64})\s/.exec(await run(`sha256sum ${shellQuote(path)}`))?.[1];
+        if (!Number.isSafeInteger(size) || size <= 0 || digest === undefined)
+          throw new Error("the patch size or digest could not be verified");
+        const key = outboundKey(saved.runId, 0, `unfinished-${base}-${remote.sha}-${head}.patch`);
+        const url = await saved.store.presignPut(key, "text/plain");
+        await run(
+          `curl -fsS -T ${shellQuote(path)} -H ${shellQuote("Content-Type: text/plain")} -o /dev/null ${shellQuote(url)}`,
+        );
+        const stored = await saved.store.head(key);
+        if (stored?.size !== size || stored.contentType !== "text/plain")
+          throw new Error("the private artifact store did not confirm the patch");
+        return {
+          patch: {
+            runId: saved.runId,
+            key,
+            size,
+            sha256: digest,
+            baseHeadSha: base,
+            targetHeadSha: remote.sha,
+            sourceHeadSha: head,
+          },
+          note: `unfinished patch saved privately at ${key} (${size} bytes)`,
+        };
+      } catch (error) {
+        return {
+          note: `unfinished patch was not saved: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    };
+    if (opts.publication !== undefined && "blocked" in opts.publication) {
+      const kept = await keepUnpublished();
       return {
         pushed: false,
-        summary: `${words.failedLead}: existing-PR publication is blocked (${opts.publication.blocked}) — the commit remains unpublished in the bound workspace; no alternate ref was created`,
+        summary: `${words.failedLead}: existing-PR publication is blocked (${opts.publication.blocked}) — the commit remains unpublished in the bound workspace; ${kept.note}; no alternate ref was created`,
+        ...(kept.patch !== undefined ? { patch: kept.patch } : {}),
       };
+    }
     const lease =
       opts.publication !== undefined
         ? ` --force-with-lease=${shellQuote(`refs/heads/${opts.publication.ref}:${opts.publication.expectedHeadSha}`)}`
@@ -398,10 +485,12 @@ export async function salvageBudgetPush(
       if (opts.publication !== undefined) {
         const detail = err instanceof Error ? err.message : String(err);
         const publicationBlocked = `the atomic leased push was rejected: ${detail}`;
+        const kept = await keepUnpublished();
         return {
           pushed: false,
           publicationBlocked,
-          summary: `${words.failedLead}: existing-PR publication is blocked (${publicationBlocked}) — the commit remains unpublished in the bound workspace; no alternate ref was created`,
+          summary: `${words.failedLead}: existing-PR publication is blocked (${publicationBlocked}) — the commit remains unpublished in the bound workspace; ${kept.note}; no alternate ref was created`,
+          ...(kept.patch !== undefined ? { patch: kept.patch } : {}),
         };
       }
       throw err;
@@ -424,6 +513,53 @@ export async function salvageBudgetPush(
       summary: `${words.failedLead}: ${err instanceof Error ? err.message : String(err)} — partial work may sit unpushed in the workspace`,
     };
   }
+}
+
+/** A recovered findings child receives saved work only at the exact head
+ * it was captured against. The checksum is verified in the executor before
+ * the patch reaches Git; a missing object or dirty checkout fails closed. */
+export async function stageSavedFindingsPatch(
+  executor: { exec: (cmd: string) => Promise<string> },
+  store: Pick<ArtifactStore, "head" | "presignGet">,
+  patch: SavedFindingsPatch,
+  target: { checkout?: string; repo: string; branch: string },
+): Promise<void> {
+  const run = async (cmd: string) => {
+    const output = await executor.exec(cmd);
+    if (parseExitPrefix(output).failed) throw new Error(output.trim());
+    return output.trim();
+  };
+  let checkout = target.checkout;
+  if (checkout === undefined) {
+    const root = await run("git rev-parse --show-toplevel").catch(() => "");
+    if (root !== "") checkout = root;
+    else {
+      const cloneOutput = await run(CLONED_REPO_PROBE).catch(() => "");
+      const dir = parseCloneDirOutput(cloneOutput);
+      if (dir === undefined && cloneOutput.trim() !== "") throw new Error("saved findings patch checkout is ambiguous");
+      checkout = dir ?? SEED_CHECKOUT_DIR;
+    }
+  }
+  const git = `git -C ${shellQuote(checkout)}`;
+  if (parseOriginRemoteOutput(await run(`${git} remote get-url origin`)) !== target.repo.toLowerCase())
+    throw new Error("saved findings patch checkout is not the bound repository");
+  if ((await run(`${git} symbolic-ref --quiet --short HEAD`)) !== target.branch)
+    throw new Error("saved findings patch checkout is not on the bound branch");
+  if ((await run(`${git} rev-parse HEAD`)) !== patch.targetHeadSha)
+    throw new Error("saved findings patch target no longer matches the checkout");
+  if ((await run(`${git} status --porcelain`)) !== "")
+    throw new Error("saved findings patch requires a clean checkout");
+  const head = await store.head(patch.key);
+  if (head?.size !== patch.size || head.contentType !== "text/plain")
+    throw new Error("saved findings patch is missing from private storage");
+  const url = await store.presignGet(patch.key);
+  const path = `/tmp/ship-recovery-${patch.runId}.patch`;
+  await run(`curl -fsS -o ${shellQuote(path)} ${shellQuote(url)}`);
+  const size = Number(await run(`wc -c < ${shellQuote(path)}`));
+  const digest = /^([0-9a-f]{64})\s/.exec(await run(`sha256sum ${shellQuote(path)}`))?.[1];
+  if (size !== patch.size || digest !== patch.sha256) throw new Error("saved findings patch bytes failed verification");
+  await run(`${git} apply --check ${shellQuote(path)}`);
+  await run(`${git} apply ${shellQuote(path)}`);
 }
 
 // git's per-ref push status line — `" %c %-*s %-*s -> %s"` in git's own format:
@@ -1412,17 +1548,18 @@ export function parseLsRemoteOutput(
   return answered ? { kind: "absent" } : { kind: "failed" };
 }
 
-/** The single cloned repo directory from `ls -d *\/.git` output, or undefined.
+/** The uniquely discovered clone, never the first of multiple checkouts.
  *  Conservative on purpose: the name is interpolated into a `git -C` command
  *  (shell-quoted as well), so anything but a plain repo-name-shaped directory
  *  — spaces, a leading dash an option parser could eat, dot traversal — is
  *  refused rather than probed. */
 function parseCloneDirOutput(output: string): string | undefined {
-  const first = output
+  const candidates = output
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  const dir = first?.match(/^(.+)\/\.git\/?$/)?.[1];
+    .filter((line) => line.length > 0);
+  if (candidates.length !== 1) return undefined;
+  const dir = candidates[0]?.match(/^(.+)\/\.git\/?$/)?.[1];
   if (!dir || !/^[A-Za-z0-9._-]{1,100}$/.test(dir) || /^\.+$/.test(dir) || dir.startsWith("-")) return undefined;
   return dir;
 }

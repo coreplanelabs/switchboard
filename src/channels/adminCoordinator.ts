@@ -72,6 +72,7 @@ import {
   idempotencyKeyFor,
   IDLE_WHY_MAX,
   isHumanGatePending,
+  isSavedFindingsPatch,
   INSTANCE_ID_PATTERN,
   STEP_NAME_PATTERN,
   unitOfIdempotencyKey,
@@ -81,6 +82,7 @@ import {
   type ExistingPrPublicationBinding,
   type RecoveryAccounting,
   type RecoveryReviewEvidence,
+  type SavedFindingsPatch,
   type ThreadEvent,
   type UnitIdle,
   type UnitWakeAnswer,
@@ -89,6 +91,7 @@ import { foldThreadAttachments } from "../core/dispatch/admission.js";
 import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import type { ArtifactStore } from "../artifacts/store.js";
 import type { PrivateWorkerLog } from "../core/privateWorkerLog.js";
 import { PRIVATE_WORKER_INTERNAL_READ } from "../core/runsService.js";
 import {
@@ -223,6 +226,8 @@ export interface AdminCoordinatorDeps {
   grantsFor: GrantsLookup;
   /** The parent ship records (run-history item 49). */
   instances: CoordinatorInstanceStore;
+  /** Private saved-work evidence must exist before a terminal findings retry can be claimed. */
+  artifacts?: Pick<ArtifactStore, "head">;
   /** Admit the separate durable checkpoint after the original row is claimed. */
   startRecovery?: (id: string, params: OriginalUnitRecoveryParams) => Promise<CreateInstanceAnswer>;
   recoveryStatus?: (id: string) => Promise<InstanceStatusAnswer>;
@@ -1229,6 +1234,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
             baseRef: row.publication.baseRef,
             expectedHeadSha: row.recovery.expectedHeadSha,
             deadlineAt: row.recovery.deadlineAt,
+            ...(row.recovery.patch !== undefined ? { patch: row.recovery.patch } : {}),
           },
         }
       : {}),
@@ -2201,6 +2207,30 @@ async function reconcileMissingFindingsPush(
   );
 }
 
+/** The machine can start findings after a changes request, a failed check,
+ * a gated approval or a removal from the merge queue. A bare approval cannot
+ * authorize a coding child to advance the durable publication head. */
+function findingsRoundAuthorized(
+  row: CoordinatorUnit,
+  review: CoordinatorUnit["rounds"][number],
+  childStartedAt: number,
+): boolean {
+  if (childStartedAt < review.at) return false;
+  if (review.outcome === "request_changes" || review.outcome === "checks_failed") return true;
+  return (
+    review.outcome === "approve" &&
+    ((review.gate?.findings.length ?? 0) > 0 ||
+      row.rounds.some(
+        (round) =>
+          round.agent === "coding" &&
+          round.outcome === "dequeued" &&
+          round.index === review.index &&
+          round.at >= review.at &&
+          round.at <= childStartedAt,
+      ))
+  );
+}
+
 /** Advance a publication binding only to the exact head recorded by its completed
  * authorized findings child. An unrelated force-push can never rewrite the durable
  * publication binding merely because the branch currently points there. */
@@ -2229,9 +2259,9 @@ async function advanceFindingsPublication(
     if (
       row.ending !== undefined ||
       row.idle !== undefined ||
-      latestReview?.outcome !== "request_changes" ||
+      latestReview === undefined ||
       !child.ok ||
-      child.value.startedAt < latestReview.at ||
+      !findingsRoundAuthorized(row, latestReview, child.value.startedAt) ||
       tag?.parentInstanceId !== instance.id ||
       tag.unit !== row.unit ||
       tag.base !== instance.base ||
@@ -2319,6 +2349,21 @@ async function advanceFindingsPublication(
     !samePublicationOwner(row.publication.owner, owner)
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
+  // Child evidence can take longer to read than the ref remains at that head.
+  // Never credit a push against an initial PR snapshot that has since moved.
+  const fresh = await deps.fetchPrFacts({ repo: instance.repo, number: row.publication.pr }).catch(() => undefined);
+  if (
+    fresh?.state !== "open" ||
+    fresh.sameRepoHead !== true ||
+    fresh.headBranchExists !== true ||
+    fresh.headRef !== row.publication.headRef ||
+    fresh.baseRef !== row.publication.baseRef ||
+    fresh.headSha !== facts.headSha ||
+    fresh.verifiedHead?.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    fresh.verifiedHead.ref !== row.publication.publicationRef ||
+    fresh.verifiedHead.sha !== facts.headSha
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
   try {
     if (row.recovery !== undefined && deps.runnerOwnership?.claim(instance.repo, row.publication.pr, owner) !== true)
       throw new PublicationBindingRefusal("publication_ownership_changed");
@@ -2357,6 +2402,289 @@ async function advanceFindingsPublication(
   if (!stillOwned) {
     const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
     if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
+    throw new PublicationBindingRefusal("publication_ownership_changed");
+  }
+  return updated;
+}
+
+/** Round zero can update an already-adopted PR. Its ordinary check names the
+ * writer, not an adopt action; credit only its exact completed push under the
+ * original binding, never the remote head by itself. */
+async function advanceCodingPublication(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  facts: PullRequestFacts,
+  runId: string,
+): Promise<CoordinatorUnit> {
+  const binding = row.publication;
+  if (binding === undefined || binding.expectedHeadSha === facts.headSha) return row;
+  const owner = { instanceId: instance.id, unit: row.unit };
+  const prefix = `${instance.id}:${publicationStepPrefix(row)}/0/coding`;
+  const coding = row.rounds.filter((note) => note.agent === "coding" && note.index === 0 && note.outcome === "started");
+  if (
+    row.ending !== undefined ||
+    row.idle !== undefined ||
+    row.rounds.some((note) => note.agent === "review") ||
+    coding.length !== 1 ||
+    row.rounds.length !== 1 ||
+    row.pr?.number !== binding.pr ||
+    binding.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    binding.baseRef !== instance.base ||
+    binding.headRef !== row.branch ||
+    binding.publicationRef !== row.branch ||
+    !samePublicationOwner(binding.owner, owner)
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  const listing = await deps.runs.listRuns({
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    status: "all",
+    visibleTo: EVERY_RUN,
+    limit: RUN_LIST_MAX_LIMIT,
+    recoveryEvidence: {
+      instanceId: instance.id,
+      unit: row.unit,
+      threadKeys: [row.threadKey ?? instance.threadKey],
+    },
+  });
+  const attempts = listing.runs.filter((run) => isStepAttempt(run.idempotencyKey, prefix));
+  const result = await deps.runs.getRun(runId, {
+    include: "messages",
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+  });
+  const child = result.ok ? result.value : undefined;
+  const tags = child?.events?.filter((event) => event.type === "coordinator_tag") ?? [];
+  if (
+    listing.storeUnavailable ||
+    listing.ledgerUnavailable ||
+    listing.nextBefore !== undefined ||
+    listing.runs.length >= RUN_LIST_MAX_LIMIT ||
+    attempts.length !== 1 ||
+    attempts[0]?.id !== runId ||
+    listing.runs.some(
+      (run) =>
+        run.id !== runId &&
+        ((!run.finished &&
+          (run.parentInstanceId === instance.id || run.idempotencyKey?.startsWith(`${instance.id}:${row.unit}/`))) ||
+          ((run.finishedAt === undefined || run.finishedAt >= coding[0]!.at) &&
+            run.pushed?.some((push) => push.ref === row.branch))),
+    ) ||
+    child?.finished !== true ||
+    child.persisted !== true ||
+    child.truncated !== false ||
+    child.events === undefined ||
+    child.eventCount !== child.storedEventCount ||
+    child.status !== "completed" ||
+    child.agent !== "coding" ||
+    child.parentInstanceId !== instance.id ||
+    !isStepAttempt(child.idempotencyKey, prefix) ||
+    child.userId !== instance.userId ||
+    child.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+    child.threadKey !== (row.threadKey ?? instance.threadKey) ||
+    (child.pr !== undefined &&
+      (child.pr.number !== binding.pr ||
+        child.pr.url !== row.pr?.url ||
+        (child.pr.head !== undefined && child.pr.head !== row.branch))) ||
+    child.headSha !== facts.headSha ||
+    child.pushed?.length !== 1 ||
+    child.pushed[0]?.ref !== row.branch ||
+    child.pushed[0]?.sha !== facts.headSha ||
+    child.startedAt < (row.startedAt ?? coding[0]!.at) ||
+    child.finishedAt === undefined ||
+    child.finishedAt < coding[0]!.at ||
+    child.finishedAt < child.startedAt ||
+    tags.length !== 1 ||
+    tags[0]?.parentInstanceId !== instance.id ||
+    tags[0].unit !== row.unit ||
+    tags[0].base !== instance.base ||
+    !samePublicationBinding(tags[0].publication, binding) ||
+    facts.state !== "open" ||
+    facts.sameRepoHead !== true ||
+    facts.headBranchExists !== true ||
+    facts.headRef !== binding.headRef ||
+    facts.baseRef !== binding.baseRef ||
+    !fullHead(facts.headSha) ||
+    facts.verifiedHead?.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    facts.verifiedHead.ref !== binding.publicationRef ||
+    facts.verifiedHead.sha !== facts.headSha
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  const fresh = await deps.fetchPrFacts({ repo: instance.repo, number: binding.pr }).catch(() => undefined);
+  if (
+    fresh?.state !== "open" ||
+    fresh.sameRepoHead !== true ||
+    fresh.headBranchExists !== true ||
+    fresh.headRef !== binding.headRef ||
+    fresh.baseRef !== binding.baseRef ||
+    fresh.headSha !== facts.headSha ||
+    fresh.verifiedHead?.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    fresh.verifiedHead.ref !== binding.publicationRef ||
+    fresh.verifiedHead.sha !== facts.headSha
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  try {
+    if (!samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, binding.pr), owner))
+      throw new PublicationBindingRefusal("publication_ownership_changed");
+  } catch (err) {
+    if (err instanceof PublicationBindingRefusal) throw err;
+    throw new PublicationBindingRefusal("publication_ownership_unknown");
+  }
+  const updated = { ...row, lastPush: facts.headSha, publication: { ...binding, expectedHeadSha: facts.headSha } };
+  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
+  try {
+    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
+  } catch {
+    const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
+    const current = reread?.filter((candidate) => candidate.unit === row.unit);
+    if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(updated)) replaced = { ok: true };
+  }
+  if (replaced?.ok !== true)
+    throw new PublicationBindingRefusal(
+      replaced?.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
+    );
+  let stillOwned = false;
+  try {
+    stillOwned = samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, binding.pr), owner);
+  } catch {
+    /* An unknown owner cannot credit the child either. */
+  }
+  if (!stillOwned) {
+    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
+    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
+    throw new PublicationBindingRefusal("publication_ownership_changed");
+  }
+  return updated;
+}
+
+/** A drained child may have lost the ref to another writer. Adopt that head
+ * only as the next review target; it is never attributed to the child push. */
+async function adoptSupersededHead(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  facts: PullRequestFacts,
+  source: { runId: string; childStep: string; previousHeadSha: string },
+): Promise<CoordinatorUnit> {
+  const binding = row.publication;
+  if (binding === undefined) throw new PublicationBindingRefusal("publication_facts_mismatch");
+  const owner = { instanceId: instance.id, unit: row.unit };
+  const latestReview = [...row.rounds].reverse().find((round) => round.agent === "review");
+  const prefix = publicationStepPrefix(row);
+  const reviewStep = `${prefix}/${latestReview?.index}/review`;
+  const findingsStep = `${prefix}/${latestReview?.index}/findings`;
+  const review = isStepAttempt(source.childStep, reviewStep);
+  const findings = isStepAttempt(source.childStep, findingsStep);
+  const validFacts = (candidate: PullRequestFacts | undefined) =>
+    candidate?.state === "open" &&
+    candidate.sameRepoHead === true &&
+    candidate.headBranchExists === true &&
+    candidate.headRef === binding.headRef &&
+    candidate.baseRef === binding.baseRef &&
+    fullHead(candidate.headSha) &&
+    candidate.headSha !== source.previousHeadSha &&
+    candidate.verifiedHead?.repo.toLowerCase() === instance.repo.toLowerCase() &&
+    candidate.verifiedHead.ref === binding.publicationRef &&
+    candidate.verifiedHead.sha === candidate.headSha;
+  if (
+    instance.stop !== undefined ||
+    row.instanceId !== instance.id ||
+    row.ending !== undefined ||
+    row.idle !== undefined ||
+    row.recovery !== undefined ||
+    row.pr?.number !== binding.pr ||
+    binding.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    binding.baseRef !== instance.base ||
+    binding.headRef !== row.branch ||
+    binding.publicationRef !== row.branch ||
+    !samePublicationOwner(binding.owner, owner) ||
+    !fullHead(source.previousHeadSha) ||
+    binding.expectedHeadSha !== source.previousHeadSha ||
+    latestReview === undefined ||
+    (!review && !findings) ||
+    !validFacts(facts)
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  const result = await deps.runs.getRun(source.runId, {
+    include: "messages",
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+  });
+  const child = result.ok ? result.value : undefined;
+  const tags = child?.events?.filter((event) => event.type === "coordinator_tag") ?? [];
+  if (
+    child?.finished !== true ||
+    child.parentInstanceId !== instance.id ||
+    child.userId !== instance.userId ||
+    child.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+    (review && child.threadKey !== (row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey)) ||
+    (findings && child.threadKey !== (row.threadKey ?? instance.threadKey)) ||
+    child.idempotencyKey !== `${instance.id}:${source.childStep}` ||
+    child.agent !== (review ? "review" : "coding") ||
+    (findings && child !== undefined && !findingsRoundAuthorized(row, latestReview, child.startedAt)) ||
+    (findings &&
+      ((child.status === "completed" &&
+        (!fullHead(child.headSha) ||
+          (child.headSha !== facts.headSha &&
+            child.pushed?.some((push) => push.ref === row.branch && push.sha === facts.headSha) === true))) ||
+        tags.length !== 1 ||
+        tags[0]?.parentInstanceId !== instance.id ||
+        tags[0].unit !== row.unit ||
+        tags[0].base !== instance.base ||
+        !samePublicationBinding(tags[0].publication, binding)))
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  // The child's own head is a publication, not a foreign review target.
+  // Reuse the completed-findings proof and CAS so only a verified push
+  // receives lastPush credit; incomplete evidence must not become adoption.
+  if (findings && child.status === "completed" && child.headSha === facts.headSha)
+    return advanceFindingsPublication(deps, instance, row, facts, source.runId);
+  const fence = deps.runnerOwnership;
+  if (fence === undefined) throw new PublicationBindingRefusal("publication_ownership_unknown");
+  let priorOwner: { instanceId: string; unit: string } | undefined;
+  try {
+    priorOwner = fence.owner(instance.repo, binding.pr);
+    if (priorOwner !== undefined && !samePublicationOwner(priorOwner, owner))
+      throw new PublicationBindingRefusal("publication_ownership_changed");
+    if (!fence.claim(instance.repo, binding.pr, owner))
+      throw new PublicationBindingRefusal("publication_ownership_changed");
+  } catch (err) {
+    if (err instanceof PublicationBindingRefusal) throw err;
+    throw new PublicationBindingRefusal("publication_ownership_unknown");
+  }
+  const releaseClaim = () => {
+    if (priorOwner === undefined) fence.release(instance.repo, binding.pr, owner);
+  };
+  const fresh = await deps.fetchPrFacts({ repo: instance.repo, number: binding.pr }).catch(() => undefined);
+  if (fresh === undefined || !validFacts(fresh) || fresh.headSha !== facts.headSha) {
+    releaseClaim();
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  }
+  const updated: CoordinatorUnit = {
+    ...row,
+    publication: { ...binding, expectedHeadSha: fresh.headSha! },
+  };
+  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>>;
+  try {
+    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
+  } catch {
+    releaseClaim();
+    throw new PublicationBindingRefusal("publication_store_unavailable");
+  }
+  if (!replaced.ok) {
+    releaseClaim();
+    throw new PublicationBindingRefusal(
+      replaced.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
+    );
+  }
+  let stillOwned = false;
+  try {
+    stillOwned = samePublicationOwner(fence.owner(instance.repo, binding.pr), owner);
+  } catch {
+    /* Unknown ownership also requires rollback. */
+  }
+  if (!stillOwned) {
+    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
+    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
+    releaseClaim();
     throw new PublicationBindingRefusal("publication_ownership_changed");
   }
   return updated;
@@ -2957,11 +3285,14 @@ export async function recoverOriginalUnit(
   // unit-end cannot populate `lastPush`. The existing publication binding is
   // still the durable reviewed-head authority; completed findings evidence
   // below may advance it, but an absent optional continuation hint must not
-  // hide that authority.
-  let expectedHead = row.lastPush ?? publication?.expectedHeadSha;
+  // hide that authority. A verified review-target move can leave lastPush at
+  // the last attributed push; the owned review and fresh PR facts below prove
+  // the newer target before recovery can claim it.
+  let expectedHead = publication?.expectedHeadSha ?? row.lastPush;
   if (
     pr === undefined ||
     base === undefined ||
+    (row.lastPush !== undefined && !fullHead(row.lastPush)) ||
     (expectedHead !== undefined && !fullHead(expectedHead)) ||
     (publication !== undefined &&
       (publication.repo.toLowerCase() !== instance.repo.toLowerCase() ||
@@ -2997,6 +3328,7 @@ export async function recoverOriginalUnit(
   let findings: Finding[] | undefined;
   let findingsRunId: string | undefined;
   let findingsKey: string | undefined;
+  let savedPatch: SavedFindingsPatch | undefined;
   let externalReview: RecoveryReviewEvidence | undefined;
   let accounting: RecoveryAccounting | undefined;
   let claimRow = row;
@@ -3015,6 +3347,7 @@ export async function recoverOriginalUnit(
       findings,
       findingsRunId,
       findingsKey,
+      patch: savedPatch,
       externalReview,
       accounting,
     } = existingClaim);
@@ -3264,7 +3597,17 @@ export async function recoverOriginalUnit(
         run.threadKey !== reviewThreadKey
       )
         return false;
-      if (!fullHead(run.reviewHead) || (publication !== undefined && run.reviewHead !== publication.expectedHeadSha))
+      const originalFindingsHead =
+        kind === "findings" &&
+        row.ending?.kind === "aborted" &&
+        fullHead(row.lastPush) !== undefined &&
+        run.reviewHead === row.lastPush &&
+        publication !== undefined &&
+        publication.expectedHeadSha !== row.lastPush;
+      if (
+        !fullHead(run.reviewHead) ||
+        (publication !== undefined && run.reviewHead !== publication.expectedHeadSha && !originalFindingsHead)
+      )
         return false;
       const reviewedHead = run.reviewHead;
       if (postApproval)
@@ -3479,8 +3822,22 @@ export async function recoverOriginalUnit(
       const attempts = listing.runs.filter(
         (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, findingsPrefix),
       );
-      const completed = attempts.filter((run) => run.finished && run.status === "completed");
-      const selected = completed.length === 1 ? completed[0] : undefined;
+      const pushedOrCompleted = attempts.filter(
+        (run) =>
+          run.finished &&
+          (run.status === "completed" ||
+            ((run.status === "failed" || run.status === "interrupted") && (run.pushed?.length ?? 0) > 0)),
+      );
+      const unpushed = attempts.filter(
+        (run) =>
+          run.finished &&
+          (run.status === "completed" || run.status === "failed" || run.status === "interrupted") &&
+          (run.pushed?.length ?? 0) === 0 &&
+          fullHead(run.headSha) !== undefined &&
+          run.headSha !== facts!.headSha,
+      );
+      const eligible = pushedOrCompleted.length > 0 ? pushedOrCompleted : unpushed;
+      const selected = eligible.length === 1 ? eligible[0] : undefined;
       const full =
         selected === undefined
           ? undefined
@@ -3491,16 +3848,48 @@ export async function recoverOriginalUnit(
       const child = full?.ok === true ? full.value : undefined;
       const tags = child?.events?.filter((event) => event.type === "coordinator_tag") ?? [];
       const tag = tags.length === 1 ? tags[0] : undefined;
+      const patchEvents = child?.events?.filter((event) => event.type === "unfinished_patch") ?? [];
+      const patch = patchEvents.length === 1 && isSavedFindingsPatch(patchEvents[0]) ? patchEvents[0] : undefined;
+      const movedHead = facts.headSha;
+      // The live superseded check may already have advanced the uncredited
+      // review target from H0 to H1. The child tag still pins immutable H0.
+      const originalBinding = tag?.publication;
+      const currentBinding = row.publication;
+      const patchBindingMatches =
+        originalBinding !== undefined &&
+        currentBinding !== undefined &&
+        originalBinding.expectedHeadSha === reviewedHead &&
+        (currentBinding.expectedHeadSha === reviewedHead || currentBinding.expectedHeadSha === movedHead) &&
+        samePublicationBinding({ ...originalBinding, expectedHeadSha: currentBinding.expectedHeadSha }, currentBinding);
+      const unfinishedPatch =
+        patch !== undefined &&
+        child !== undefined &&
+        patchBindingMatches &&
+        patch.runId === child.id &&
+        patch.baseHeadSha === originalBinding?.expectedHeadSha &&
+        patch.targetHeadSha === movedHead &&
+        patch.sourceHeadSha === child.headSha &&
+        (child.pushed ?? []).every((push) => push.ref === row.branch && push.sha !== movedHead);
+      const storedPatch =
+        unfinishedPatch && deps.artifacts !== undefined ? await deps.artifacts.head(patch.key).catch(() => null) : null;
+      const patchVerified =
+        unfinishedPatch && storedPatch?.size === patch.size && storedPatch.contentType === "text/plain";
+      if (child !== undefined && (child.pushed?.length ?? 0) === 0 && child.headSha !== facts.headSha && !patchVerified)
+        return json(409, { ok: false, error: "recovery_patch_unavailable", at });
       const reviewFinishedAt = review.finishedAt;
       const missingOutputs =
         child !== undefined &&
-        (child.events?.some((event) => event.type === "pr_description") !== true ||
+        (patchVerified ||
+          child.status !== "completed" ||
+          child.events?.some((event) => event.type === "pr_description") !== true ||
           (review.verdict?.findings ?? []).some(
             (finding) => !child.dispositions?.some((disposition) => disposition.findingId === finding.id),
           ));
       if (
         row.publication === undefined ||
-        (row.ending.cause !== undefined && row.ending.cause !== "incomplete_outputs") ||
+        (row.ending.cause !== undefined &&
+          row.ending.cause !== "incomplete_outputs" &&
+          row.ending.cause !== "step_threw") ||
         (row.ending.step !== undefined && !isStepAttempt(row.ending.step, findingsStep)) ||
         (row.ending.round !== undefined && row.ending.round !== boundary.index) ||
         codingBoundary.agent !== "coding" ||
@@ -3512,7 +3901,7 @@ export async function recoverOriginalUnit(
         !Number.isFinite(reviewFinishedAt) ||
         child === undefined ||
         child.finished !== true ||
-        child.status !== "completed" ||
+        (child.status !== "completed" && child.status !== "failed" && child.status !== "interrupted") ||
         child.agent !== "coding" ||
         child.parentInstanceId !== instance.id ||
         child.idempotencyKey !== selected!.idempotencyKey ||
@@ -3520,22 +3909,25 @@ export async function recoverOriginalUnit(
         child.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
         child.threadKey !== unitThreadKey ||
         child.truncated === true ||
+        (patchVerified && child.truncated !== false) ||
         child.events === undefined ||
+        (patchVerified && child.eventCount !== child.storedEventCount) ||
         tag?.parentInstanceId !== instance.id ||
         tag.unit !== row.unit ||
         tag.base !== base ||
-        !samePublicationBinding(tag.publication, row.publication) ||
+        (patchVerified ? !patchBindingMatches : !samePublicationBinding(tag.publication, row.publication)) ||
         !missingOutputs ||
         (child.pr !== undefined &&
           (child.pr.number !== pr.number ||
             child.pr.url !== pr.url ||
             (child.pr.head !== undefined && child.pr.head !== row.branch))) ||
-        child.headSha !== facts.headSha ||
+        (!patchVerified && child.headSha !== facts.headSha) ||
         (expectedHead !== reviewedHead && expectedHead !== facts.headSha) ||
-        child.pushed?.length !== 1 ||
-        child.pushed[0]?.ref !== row.branch ||
-        child.pushed[0]?.sha !== facts.headSha ||
-        child.pushed[0]?.by !== "salvage" ||
+        (!patchVerified &&
+          (child.pushed?.length !== 1 ||
+            child.pushed[0]?.ref !== row.branch ||
+            child.pushed[0]?.sha !== facts.headSha ||
+            child.pushed[0]?.by !== "salvage")) ||
         codingStart === undefined ||
         !Number.isFinite(codingStart.at) ||
         !Number.isFinite(codingBoundary.at) ||
@@ -3576,11 +3968,12 @@ export async function recoverOriginalUnit(
       )
         return json(409, { ok: false, error: "recovery_head_moved", at });
       expectedHead = facts.headSha;
-      // This push grants a findings completion, not re-review. Leave the
-      // findingsRunId unset so no missing disposition or description is consumed.
+      if (patchVerified) savedPatch = patch;
+      // A failed child's salvaged head is a review target, not publication
+      // credit. Both paths must redo the missing findings contract before review.
       claimRow = {
         ...claimRow,
-        lastPush: expectedHead,
+        ...(child.status === "completed" && !patchVerified ? { lastPush: expectedHead } : {}),
         publication: { ...publication, expectedHeadSha: expectedHead },
       };
     } else {
@@ -3693,6 +4086,17 @@ export async function recoverOriginalUnit(
       return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
     }
   if (facts === undefined) return json(502, { ok: false, error: "github_unavailable", at });
+  if (savedPatch !== undefined) {
+    const object = await deps.artifacts?.head(savedPatch.key).catch(() => null);
+    if (!isSavedFindingsPatch(savedPatch) || object?.size !== savedPatch.size || object.contentType !== "text/plain")
+      return json(409, { ok: false, error: "recovery_patch_unavailable", at });
+    try {
+      facts = await deps.fetchPrFacts({ repo: instance.repo, number: pr.number });
+    } catch (err) {
+      return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
+    }
+    if (facts === undefined) return json(502, { ok: false, error: "github_unavailable", at });
+  }
   const verified = facts.verifiedHead;
   if (
     facts.state !== "open" ||
@@ -3755,6 +4159,7 @@ export async function recoverOriginalUnit(
         ...(findingsRunId !== undefined ? { findingsRunId } : {}),
         ...(findingsKey !== undefined ? { findingsKey } : {}),
         ...(findings !== undefined ? { findings } : {}),
+        ...(savedPatch !== undefined ? { patch: savedPatch } : {}),
         previousEnding: row.ending!,
         ...(claimRow !== row
           ? {
@@ -3848,12 +4253,34 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     RUN_ID_PATTERN.test((body.recover as Record<string, unknown>).runId as string)
       ? { runId: (body.recover as Record<string, unknown>).runId as string }
       : undefined;
+  if (body.adopt !== undefined && (typeof body.adopt !== "object" || body.adopt === null))
+    return json(400, { ok: false, error: "adopt must name a drained child and previous head" });
+  const adoptBody = body.adopt as Record<string, unknown> | undefined;
+  const adopt =
+    adoptBody !== undefined &&
+    typeof adoptBody.runId === "string" &&
+    RUN_ID_PATTERN.test(adoptBody.runId) &&
+    typeof adoptBody.childStep === "string" &&
+    typeof adoptBody.previousHeadSha === "string" &&
+    fullHead(adoptBody.previousHeadSha)
+      ? {
+          runId: adoptBody.runId,
+          childStep: adoptBody.childStep,
+          previousHeadSha: adoptBody.previousHeadSha,
+        }
+      : undefined;
+  if (body.adopt !== undefined && adopt === undefined)
+    return json(400, { ok: false, error: "adopt must name a drained child and previous head" });
+  if (adopt !== undefined && (recover !== undefined || body.entry === true || body.checks === true))
+    return json(400, { ok: false, error: "adopt cannot be combined with another PR check" });
   // The pull request the machine has adopted (issue 1799): followed by number
   // when nothing heads the unit's branch, so the answer is the pull request's
   // live state, never `none` over a record fact written minutes earlier.
   if (body.pr !== undefined && (typeof body.pr !== "number" || !Number.isInteger(body.pr) || body.pr <= 0))
     return json(400, { ok: false, error: "pr must be a pull request number" });
   const follow = typeof body.pr === "number" ? body.pr : undefined;
+  if (adopt !== undefined && follow === undefined)
+    return json(400, { ok: false, error: "adopt requires the adopted pull request" });
   // The unit-start's pre-check (issue 1689): read the entry facts beside the
   // listing — the branch's own tip, whether the bot's approval stands at it,
   // and the checks there — so a re-issued plan's unit resumes at review, or
@@ -3892,8 +4319,12 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       }
       const bindingRow =
         unit.row !== undefined && recover !== undefined
-          ? await advanceFindingsPublication(deps, instance, unit.row, facts, recover.runId)
-          : unit.row;
+          ? unit.row.rounds.some((note) => note.agent === "review")
+            ? await advanceFindingsPublication(deps, instance, unit.row, facts, recover.runId)
+            : await advanceCodingPublication(deps, instance, unit.row, facts, recover.runId)
+          : unit.row !== undefined && adopt !== undefined && facts.headSha !== unit.row.publication?.expectedHeadSha
+            ? await adoptSupersededHead(deps, instance, unit.row, facts, adopt)
+            : unit.row;
       await bindOpenPullRequest(deps, instance, bindingRow, followedPr, facts);
       const prRef = { repo: instance.repo, number: follow };
       const headSha = facts.headSha;
@@ -5228,6 +5659,72 @@ async function codingHandoffOf(
  * instead: merged from the facts, still `enqueued`, or `removed` with the
  * queue's own reason for the machine's finding round.
  */
+/** A runner rebase reports its own pushed commit. Verify that report against
+ * the PR ref before making the new head durable for later checks and rounds. */
+async function advanceRunnerRebasePublication(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  from: string,
+  reportedHead?: string,
+): Promise<string | undefined> {
+  const binding = row.publication;
+  if (binding === undefined) return undefined;
+  const owner = { instanceId: instance.id, unit: row.unit };
+  if (
+    instance.stop !== undefined ||
+    row.ending !== undefined ||
+    row.pr?.number !== binding.pr ||
+    !samePublicationOwner(binding.owner, owner) ||
+    binding.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    binding.headRef !== row.branch ||
+    binding.publicationRef !== row.branch ||
+    binding.baseRef !== instance.base ||
+    !fullHead(from) ||
+    (reportedHead !== undefined && !fullHead(reportedHead)) ||
+    binding.expectedHeadSha !== from
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  const facts = await deps.fetchPrFacts({ repo: instance.repo, number: binding.pr });
+  if (
+    facts?.state !== "open" ||
+    facts.sameRepoHead !== true ||
+    facts.headBranchExists !== true ||
+    facts.headRef !== binding.headRef ||
+    facts.baseRef !== binding.baseRef ||
+    !fullHead(facts.headSha) ||
+    (reportedHead !== undefined && facts.headSha !== reportedHead) ||
+    facts.verifiedHead?.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    facts.verifiedHead.ref !== binding.publicationRef ||
+    facts.verifiedHead.sha !== facts.headSha
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  const to = facts.headSha;
+  if (to === from) return undefined;
+  const updated: CoordinatorUnit = {
+    ...row,
+    ...(reportedHead !== undefined ? { lastPush: to } : {}),
+    publication: { ...binding, expectedHeadSha: to },
+  };
+  const replaced = await deps.instances.compareAndReplaceUnit(row, updated).catch(() => undefined);
+  if (replaced?.ok !== true)
+    throw new PublicationBindingRefusal(
+      replaced?.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
+    );
+  let stillOwned = false;
+  try {
+    stillOwned = samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, binding.pr), owner);
+  } catch {
+    /* Unknown ownership also requires rollback. */
+  }
+  if (!stillOwned) {
+    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
+    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
+    throw new PublicationBindingRefusal("publication_ownership_changed");
+  }
+  return to;
+}
+
 async function rebaseStep(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -5257,18 +5754,35 @@ async function rebaseStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   }
   if (deps.runnerRebase === undefined)
     return json(200, { ok: true, outcome: "refused", reason: "the runner's rebase resolver is unavailable", at });
+  let report: SweepReport;
   try {
-    const report = await deps.runnerRebase(instance, body.prNumber);
+    report = await deps.runnerRebase(instance, body.prNumber);
+  } catch (err) {
+    try {
+      const observed = await advanceRunnerRebasePublication(deps, instance, row, body.headSha);
+      if (observed !== undefined) return json(200, { ok: true, outcome: "changed", headSha: observed, at });
+    } catch {
+      /* An unverifiable head cannot be adopted after an unrecorded rebase. */
+    }
+    return json(200, { ok: true, outcome: "refused", reason: describe(err), at });
+  }
+  try {
     const result = report.results.find((r) => r.number === body.prNumber);
-    if (result?.outcome === "carried" && result.headSha !== undefined)
+    if (result?.outcome === "carried" && result.headSha !== undefined) {
+      await advanceRunnerRebasePublication(deps, instance, row, body.headSha, result.headSha);
       return json(200, {
         ok: true,
         outcome: result.approvalCarried === true ? "carried" : "changed",
         headSha: result.headSha,
         at,
       });
-    if (result?.outcome === "delta-review" && result.headSha !== undefined)
+    }
+    if (result?.outcome === "delta-review" && result.headSha !== undefined) {
+      await advanceRunnerRebasePublication(deps, instance, row, body.headSha, result.headSha);
       return json(200, { ok: true, outcome: "changed", headSha: result.headSha, at });
+    }
+    // Only a lost rebase outcome (the throw above) permits an unattributed
+    // head reconciliation. An explicit result cannot credit another writer.
     if (result?.outcome === "conflict") return json(200, { ok: true, outcome: "conflict", reason: result.line, at });
     if (result?.outcome === "skipped") return json(200, { ok: true, outcome: "carried", headSha: body.headSha, at });
     return json(200, {

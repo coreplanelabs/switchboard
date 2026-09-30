@@ -6215,6 +6215,178 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     });
   });
 
+  it("the runner's rebase durably advances its publication binding to its verified pushed head", async () => {
+    const newHead = "b".repeat(40);
+    const binding = {
+      repo: PLAN_INSTANCE.repo,
+      pr: 7,
+      headRef: "plan/fixture/u10-warm",
+      baseRef: "main",
+      expectedHeadSha: HEAD,
+      publicationRef: "plan/fixture/u10-warm",
+      owner: { instanceId: PLAN_INSTANCE.id, unit: "U10" },
+    };
+    const h = await mergeHarness(
+      {
+        prFacts: {
+          ...facts({ headSha: newHead }),
+          verifiedHead: { repo: PLAN_INSTANCE.repo, ref: binding.headRef, sha: newHead },
+        },
+        runnerRebase: async () => ({
+          repo: PLAN_INSTANCE.repo,
+          results: [
+            { repo: PLAN_INSTANCE.repo, number: 7, outcome: "delta-review", line: "changed", headSha: newHead },
+          ],
+        }),
+      },
+      { publication: binding, lastPush: HEAD },
+    );
+    expect(await call(h, "rebase", body)).toMatchObject({
+      status: 200,
+      body: { outcome: "changed", headSha: newHead },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
+      publication: { ...binding, expectedHeadSha: newHead },
+      lastPush: newHead,
+    });
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          pr: 7,
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200, body: { headSha: newHead } });
+  });
+
+  it("the runner's rebase refuses a reported push when the PR ref points elsewhere", async () => {
+    const newHead = "b".repeat(40);
+    const otherHead = "c".repeat(40);
+    const binding = {
+      repo: PLAN_INSTANCE.repo,
+      pr: 7,
+      headRef: "plan/fixture/u10-warm",
+      baseRef: "main",
+      expectedHeadSha: HEAD,
+      publicationRef: "plan/fixture/u10-warm",
+      owner: { instanceId: PLAN_INSTANCE.id, unit: "U10" },
+    };
+    const h = await mergeHarness(
+      {
+        prFacts: {
+          ...facts({ headSha: otherHead }),
+          verifiedHead: { repo: PLAN_INSTANCE.repo, ref: binding.headRef, sha: otherHead },
+        },
+        runnerRebase: async () => ({
+          repo: PLAN_INSTANCE.repo,
+          results: [
+            { repo: PLAN_INSTANCE.repo, number: 7, outcome: "delta-review", line: "changed", headSha: newHead },
+          ],
+        }),
+      },
+      { publication: binding, lastPush: HEAD },
+    );
+    expect(await call(h, "rebase", body)).toMatchObject({
+      status: 200,
+      body: { outcome: "refused", reason: "publication_facts_mismatch" },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
+      publication: binding,
+      lastPush: HEAD,
+    });
+  });
+
+  it("a reported rebase conflict wins over an unrelated verified head move without rebinding it", async () => {
+    const otherHead = "c".repeat(40);
+    const binding = {
+      repo: PLAN_INSTANCE.repo,
+      pr: 7,
+      headRef: "plan/fixture/u10-warm",
+      baseRef: "main",
+      expectedHeadSha: HEAD,
+      publicationRef: "plan/fixture/u10-warm",
+      owner: { instanceId: PLAN_INSTANCE.id, unit: "U10" },
+    };
+    const h = await mergeHarness(
+      {
+        prFacts: {
+          ...facts({ headSha: otherHead }),
+          verifiedHead: { repo: PLAN_INSTANCE.repo, ref: binding.headRef, sha: otherHead },
+        },
+        runnerRebase: async () => ({
+          repo: PLAN_INSTANCE.repo,
+          results: [{ repo: PLAN_INSTANCE.repo, number: 7, outcome: "conflict", line: "#7 conflict in config.ts" }],
+        }),
+      },
+      { publication: binding, lastPush: HEAD },
+    );
+    expect(await call(h, "rebase", body)).toMatchObject({
+      status: 200,
+      body: { outcome: "conflict", reason: "#7 conflict in config.ts" },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({ publication: binding, lastPush: HEAD });
+  });
+
+  it("a rebase report without a result cannot adopt an unrelated head move", async () => {
+    const otherHead = "c".repeat(40);
+    const binding = {
+      repo: PLAN_INSTANCE.repo,
+      pr: 7,
+      headRef: "plan/fixture/u10-warm",
+      baseRef: "main",
+      expectedHeadSha: HEAD,
+      publicationRef: "plan/fixture/u10-warm",
+      owner: { instanceId: PLAN_INSTANCE.id, unit: "U10" },
+    };
+    const h = await mergeHarness(
+      {
+        prFacts: {
+          ...facts({ headSha: otherHead }),
+          verifiedHead: { repo: PLAN_INSTANCE.repo, ref: binding.headRef, sha: otherHead },
+        },
+        runnerRebase: async () => ({ repo: PLAN_INSTANCE.repo, results: [] }),
+      },
+      { publication: binding, lastPush: HEAD },
+    );
+    expect(await call(h, "rebase", body)).toMatchObject({ status: 200, body: { outcome: "refused" } });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({ publication: binding, lastPush: HEAD });
+  });
+
+  it("an unrecorded rebase head is adopted only for review without claiming a push", async () => {
+    const newHead = "b".repeat(40);
+    const binding = {
+      repo: PLAN_INSTANCE.repo,
+      pr: 7,
+      headRef: "plan/fixture/u10-warm",
+      baseRef: "main",
+      expectedHeadSha: HEAD,
+      publicationRef: "plan/fixture/u10-warm",
+      owner: { instanceId: PLAN_INSTANCE.id, unit: "U10" },
+    };
+    const h = await mergeHarness(
+      {
+        prFacts: {
+          ...facts({ headSha: newHead }),
+          verifiedHead: { repo: PLAN_INSTANCE.repo, ref: binding.headRef, sha: newHead },
+        },
+        runnerRebase: async () => {
+          throw new Error("result lost after push");
+        },
+      },
+      { publication: binding, lastPush: HEAD },
+    );
+    expect(await call(h, "rebase", body)).toMatchObject({
+      status: 200,
+      body: { outcome: "changed", headSha: newHead },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
+      publication: { ...binding, expectedHeadSha: newHead },
+      lastPush: HEAD,
+    });
+  });
+
   it("the runner's rebase returns the named transient while periodic ownership recovery is in flight", async () => {
     const runnerRebase = vi.fn();
     const h = await mergeHarness({ runnerRebase });
@@ -7181,6 +7353,57 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       threadKey: INSTANCE.threadKey,
     });
 
+  it("recovers a reviewed target advanced without crediting a push", async () => {
+    const target = "b".repeat(40);
+    const h = harness({ prFacts: exactRecoveryFacts(target) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([
+      {
+        ...requestChangesRow(),
+        publication: { ...publication, expectedHeadSha: target },
+        lastPush: HEAD,
+      },
+    ]);
+    await h.store.put(
+      reviewRecord({
+        reviewHead: target,
+        reviewPost: {
+          posted: true,
+          target: { repo: INSTANCE.repo, number: PR.number },
+          head: target,
+          verdict: "request_changes",
+        },
+      }),
+    );
+
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed).toMatchObject({
+      lastPush: HEAD,
+      publication: { expectedHeadSha: target },
+      recovery: { kind: "findings", expectedHeadSha: target },
+    });
+  });
+
+  it("refuses an advanced target without its own review or a verified original-head patch", async () => {
+    const target = "b".repeat(40);
+    const h = harness({ prFacts: exactRecoveryFacts(target) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([
+      {
+        ...requestChangesRow(),
+        publication: { ...publication, expectedHeadSha: target },
+        lastPush: HEAD,
+      },
+    ]);
+    await h.store.put(reviewRecord());
+    const before = await h.instances.listUnits(INSTANCE.id);
+
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_head_moved" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.recoveries).toEqual([]);
+  });
+
   const SALVAGED = "b".repeat(40);
   const salvageFindings = [
     { id: "F1", severity: "minor" as const, file: "src/a.ts", title: "keep the fence" },
@@ -7228,6 +7451,131 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     return h;
   };
 
+  const unpushedHarness = async (stored = true, priorPushSha?: string) => {
+    const h = await salvageHarness();
+    const source = "c".repeat(40);
+    const patch = {
+      type: "unfinished_patch" as const,
+      runId: "run-original-findings",
+      key: `runs/run-original-findings/out/0-unfinished-${HEAD}-${SALVAGED}-${source}.patch`,
+      size: 123,
+      sha256: "d".repeat(64),
+      baseHeadSha: HEAD,
+      targetHeadSha: SALVAGED,
+      sourceHeadSha: source,
+    };
+    h.deps.artifacts = {
+      head: async () => (stored ? { size: patch.size, contentType: "text/plain" } : null),
+    };
+    const child = (await h.store.get("run-original-findings"))!;
+    await h.store.put({
+      ...child,
+      headSha: source,
+      pushed: priorPushSha === undefined ? [] : [{ ref: INSTANCE.branch, sha: priorPushSha, by: "push" }],
+      dispositions: undefined,
+      events: [
+        { type: "coordinator_tag", parentInstanceId: INSTANCE.id, unit: "U12", base: "main", publication },
+        patch,
+      ],
+    });
+    return { h, patch };
+  };
+  const adoptRecoveryTarget = async (h: Awaited<ReturnType<typeof salvageHarness>>, headSha: string) => {
+    const [row] = await h.instances.listUnits(INSTANCE.id);
+    await h.instances.putUnits([{ ...row!, publication: { ...row!.publication!, expectedHeadSha: headSha } }]);
+  };
+
+  it("a saved unpushed findings child restarts required findings at the requester-moved head without push credit", async () => {
+    const { h, patch } = await unpushedHarness();
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed).toMatchObject({
+      lastPush: HEAD,
+      publication: { expectedHeadSha: SALVAGED },
+      recovery: { kind: "findings", round: 1, expectedHeadSha: SALVAGED, patch },
+    });
+    expect(claimed!.recovery).not.toHaveProperty("findingsRunId");
+  });
+
+  it("restores unfinished findings after an earlier child push without crediting the requester head", async () => {
+    const { h, patch } = await unpushedHarness(true, "e".repeat(40));
+    expect(await callRecovery(h)).toMatchObject({ status: 200 });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed).toMatchObject({
+      lastPush: HEAD,
+      publication: { expectedHeadSha: SALVAGED },
+      recovery: { kind: "findings", expectedHeadSha: SALVAGED, patch },
+    });
+  });
+
+  it("restores H0-based findings after the live check already adopted H1 without push credit", async () => {
+    const { h, patch } = await unpushedHarness(true, "e".repeat(40));
+    await adoptRecoveryTarget(h, SALVAGED);
+    expect(await callRecovery(h)).toMatchObject({ status: 200 });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed).toMatchObject({
+      lastPush: HEAD,
+      publication: { expectedHeadSha: SALVAGED },
+      recovery: { kind: "findings", expectedHeadSha: SALVAGED, patch },
+    });
+  });
+
+  it("refuses a saved patch when the durable target is neither H0 nor its verified H1", async () => {
+    const { h } = await unpushedHarness(true, "e".repeat(40));
+    await adoptRecoveryTarget(h, "f".repeat(40));
+    const before = await h.instances.listUnits(INSTANCE.id);
+    expect(await callRecovery(h)).toMatchObject({ status: 409 });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+  });
+
+  it("refuses an adopted H1 target when its H0-based patch is missing", async () => {
+    const { h } = await unpushedHarness(false, "e".repeat(40));
+    await adoptRecoveryTarget(h, SALVAGED);
+    const before = await h.instances.listUnits(INSTANCE.id);
+    expect(await callRecovery(h)).toMatchObject({ status: 409 });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+  });
+
+  it("refuses an unfinished patch when the child already pushed the requester head", async () => {
+    const { h } = await unpushedHarness(true, SALVAGED);
+    const before = await h.instances.listUnits(INSTANCE.id);
+    expect(await callRecovery(h)).toMatchObject({ status: 409 });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+  });
+
+  it.each(["missing patch", "second head move"] as const)(
+    "refuses unfinished findings after an earlier child push with %s",
+    async (scenario) => {
+      const { h } = await unpushedHarness(scenario !== "missing patch", "e".repeat(40));
+      if (scenario === "second head move") {
+        let reads = 0;
+        h.deps.fetchPrFacts = async () => exactRecoveryFacts(++reads === 1 ? SALVAGED : "f".repeat(40));
+      }
+      const before = await h.instances.listUnits(INSTANCE.id);
+      expect(await callRecovery(h)).toMatchObject({ status: 409 });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+      expect(h.recoveries).toEqual([]);
+    },
+  );
+
+  it.each(["missing patch", "second head move"] as const)(
+    "refuses unpushed findings recovery with %s without changing the original row",
+    async (scenario) => {
+      const { h } = await unpushedHarness(scenario !== "missing patch");
+      if (scenario === "second head move") {
+        let reads = 0;
+        h.deps.fetchPrFacts = async () => exactRecoveryFacts(++reads === 1 ? SALVAGED : "e".repeat(40));
+      }
+      const before = await h.instances.listUnits(INSTANCE.id);
+      expect(await callRecovery(h)).toMatchObject({
+        status: 409,
+        body: { error: scenario === "missing patch" ? "recovery_patch_unavailable" : "recovery_head_moved" },
+      });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+      expect(h.recoveries).toEqual([]);
+    },
+  );
+
   it("salvage recovery claims one original findings completion at the observed head without consuming its missing outputs", async () => {
     const h = await salvageHarness();
     const [before] = await h.instances.listUnits(INSTANCE.id);
@@ -7260,6 +7608,58 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.branches).toEqual([]);
     expect(h.opens).toEqual([]);
   });
+
+  it("an ended failed findings child with one salvaged head resumes the original findings round without push credit", async () => {
+    const h = await salvageHarness();
+    const failed = (await h.store.get("run-original-findings"))!;
+    await h.store.put({ ...failed, status: "failed", dispositions: undefined, events: failed.events.slice(0, 1) });
+    const original = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed).toMatchObject({
+      unit: original.unit,
+      branch: original.branch,
+      pr: original.pr,
+      lastPush: HEAD,
+      publication: { ...publication, expectedHeadSha: SALVAGED },
+      recovery: { kind: "findings", round: 1, expectedHeadSha: SALVAGED, findings: salvageFindings },
+    });
+    expect(claimed!.recovery).not.toHaveProperty("findingsRunId");
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "already_started" } });
+    expect(h.opens).toEqual([]);
+    expect(h.branches).toEqual([]);
+  });
+
+  it.each(["no salvage receipt", "foreign authority", "competing push", "moving ref", "rival owner"])(
+    "an ended failed child cannot claim recovery with %s",
+    async (scenario) => {
+      const h = await salvageHarness();
+      const child = (await h.store.get("run-original-findings"))!;
+      child.status = "failed";
+      if (scenario === "no salvage receipt") child.pushed = [];
+      if (scenario === "foreign authority") child.events = [];
+      await h.store.put(child);
+      if (scenario === "competing push")
+        await h.store.put(
+          completedOriginalFindings("c".repeat(40), {
+            id: "run-competing",
+            idempotencyKey: `${INSTANCE.id}:U12/1/findings/a2`,
+            status: "failed",
+            pushed: [{ ref: INSTANCE.branch, sha: "c".repeat(40), by: "salvage" }],
+            startedAt: NOW - minutesToMs(14),
+            finishedAt: NOW - minutesToMs(9),
+          }),
+        );
+      if (scenario === "moving ref") h.deps.fetchPrFacts = async () => exactRecoveryFacts("c".repeat(40));
+      if (scenario === "rival owner")
+        h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      const before = await h.instances.listUnits(INSTANCE.id);
+      expect((await callRecovery(h)).status).toBe(409);
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+      expect(h.recoveries).toEqual([]);
+      expect(h.opens).toEqual([]);
+    },
+  );
 
   it("salvage recovery accepts a child that started 2686 ms before its coding-start event was recorded", async () => {
     const h = await salvageHarness();
@@ -10202,6 +10602,102 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
   });
 
+  const roundZeroBoundHarness = async () => {
+    const next = "b".repeat(40);
+    const h = harness({ prFacts: exactRecoveryFacts(next) });
+    await h.instances.put(recoveryInstance());
+    const row = {
+      ...requestChangesRow(),
+      rounds: [{ index: 0, agent: "coding" as const, outcome: "started" as const, at: NOW - minutesToMs(15) }],
+    };
+    delete row.ending;
+    await h.instances.putUnits([row]);
+    h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner);
+    await h.store.put(
+      originalCoding({
+        id: "run-original-coding",
+        parentInstanceId: INSTANCE.id,
+        idempotencyKey: `${INSTANCE.id}:U12/0/coding`,
+        startedAt: NOW - minutesToMs(16),
+        finishedAt: NOW - minutesToMs(10),
+        headSha: next,
+        pushed: [{ ref: INSTANCE.branch, sha: next, by: "push" }],
+        events: [{ type: "coordinator_tag", parentInstanceId: INSTANCE.id, unit: "U12", base: "main", publication }],
+      }),
+    );
+    const check = () =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          pr: PR.number,
+          recover: { runId: "run-original-coding" },
+        }),
+        h.deps,
+      );
+    return { h, row, next, check };
+  };
+
+  it("round-zero coding/pr-check advances only the original PR binding for its verified completed writer", async () => {
+    const { h, row, next, check } = await roundZeroBoundHarness();
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          pr: PR.number,
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "publication_facts_mismatch" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(await check()).toMatchObject({ status: 200, body: { headSha: next, prNumber: PR.number } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      branch: INSTANCE.branch,
+      pr: PR,
+      lastPush: next,
+      publication: { ...publication, expectedHeadSha: next },
+    });
+    expect(await check()).toMatchObject({ status: 200 });
+    expect(h.opens).toEqual([]);
+    expect(h.branches).toEqual([]);
+  });
+
+  it.each([
+    "missing writer",
+    "failed writer",
+    "unverified push",
+    "wrong head",
+    "wrong tag",
+    "competing writer",
+    "moving ref",
+    "rival owner",
+  ])("round-zero coding/pr-check refuses %s without rebinding the original PR", async (scenario) => {
+    const { h, row, check } = await roundZeroBoundHarness();
+    const run = (await h.store.get("run-original-coding"))!;
+    if (scenario === "missing writer") run.idempotencyKey = `${INSTANCE.id}:U12/1/findings`;
+    if (scenario === "failed writer") run.status = "failed";
+    if (scenario === "unverified push") run.pushed = [];
+    if (scenario === "wrong head") run.headSha = "c".repeat(40);
+    if (scenario === "wrong tag") run.events = [];
+    await h.store.put(run);
+    if (scenario === "competing writer")
+      await h.store.put({ ...run, id: "run-competing", idempotencyKey: `${INSTANCE.id}:U12/0/coding/a2` });
+    if (scenario === "moving ref")
+      h.deps.fetchPrFacts = vi
+        .fn()
+        .mockResolvedValueOnce(exactRecoveryFacts("b".repeat(40)))
+        .mockResolvedValue(exactRecoveryFacts("c".repeat(40)));
+    if (scenario === "rival owner") {
+      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
+      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    }
+    expect((await check()).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.opens).toEqual([]);
+    expect(h.branches).toEqual([]);
+  });
+
   it("ordinary findings publication advances the exact authorized binding by CAS before re-review", async () => {
     const h = await ordinaryFindingsHarness();
     expect(await ordinaryPrCheck(h)).toMatchObject({ status: 200, body: { headSha: "b".repeat(40) } });
@@ -10214,6 +10710,295 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await ordinaryPrCheck(h)).toMatchObject({ status: 200 });
     expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
   });
+
+  it("a superseded check accepts a returned bound head without adopting or changing its push", async () => {
+    const h = await ordinaryFindingsHarness();
+    h.deps.fetchPrFacts = async () => exactRecoveryFacts(HEAD);
+    const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    const replace = vi.spyOn(h.instances, "compareAndReplaceUnit");
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          pr: PR.number,
+          adopt: { runId: "run-original-findings", childStep: "U12/1/findings", previousHeadSha: HEAD },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200, body: { headSha: HEAD } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(before);
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it.each(["request_changes", "checks_failed", "dequeued", "gated_approve"] as const)(
+    "a superseded check credits a completed %s findings child's own verified push before returning it",
+    async (outcome) => {
+      const h = await ordinaryFindingsHarness();
+      const childHead = "b".repeat(40);
+      if (outcome !== "request_changes") {
+        await h.store.put(
+          reviewRecord({
+            verdict: {
+              verdict: "approve",
+              summary: "approved at the original head",
+              findings:
+                outcome === "gated_approve"
+                  ? [{ id: "F1", severity: "minor", file: "src/a.ts", title: "keep the fence" }]
+                  : [],
+            },
+            reviewPost: {
+              posted: true,
+              target: { repo: INSTANCE.repo, number: PR.number },
+              head: HEAD,
+              verdict: "approve",
+            },
+          }),
+        );
+        const [row] = await h.instances.listUnits(INSTANCE.id);
+        await h.instances.putUnits([
+          {
+            ...row!,
+            rounds: [
+              row!.rounds[0]!,
+              {
+                index: 1,
+                agent: "review",
+                outcome: "approve",
+                at: NOW - minutesToMs(30),
+                ...(outcome === "gated_approve" ? { gate: { level: "minor" as const, findings: ["F1 (minor)"] } } : {}),
+              },
+              ...(outcome === "checks_failed"
+                ? [{ index: 1, agent: "review" as const, outcome: "checks_failed" as const, at: NOW - minutesToMs(25) }]
+                : outcome === "dequeued"
+                  ? [{ index: 1, agent: "coding" as const, outcome: "dequeued" as const, at: NOW - minutesToMs(25) }]
+                  : []),
+            ],
+          },
+        ]);
+      }
+      expect(
+        await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+            parentInstanceId: INSTANCE.id,
+            unit: "U12",
+            pr: PR.number,
+            adopt: { runId: "run-original-findings", childStep: "U12/1/findings", previousHeadSha: HEAD },
+          }),
+          h.deps,
+        ),
+      ).toMatchObject({ status: 200, body: { headSha: childHead } });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+        publication: { ...publication, expectedHeadSha: childHead },
+        lastPush: childHead,
+      });
+    },
+  );
+
+  it("a superseded check refuses to credit a bare approval without findings authorization", async () => {
+    const h = await ordinaryFindingsHarness();
+    const [row] = await h.instances.listUnits(INSTANCE.id);
+    await h.instances.putUnits([
+      {
+        ...row!,
+        rounds: [row!.rounds[0]!, { index: 1, agent: "review", outcome: "approve", at: NOW - minutesToMs(30) }],
+      },
+    ]);
+    const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          pr: PR.number,
+          adopt: { runId: "run-original-findings", childStep: "U12/1/findings", previousHeadSha: HEAD },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "publication_facts_mismatch" } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(before);
+  });
+
+  it("a failed findings child with a salvaged push hands its head to the findings gate without publication credit", async () => {
+    const h = await ordinaryFindingsHarness();
+    const child = (await h.store.get("run-original-findings"))!;
+    await h.store.put({
+      ...child,
+      status: "failed",
+      pushed: [{ ref: INSTANCE.branch, sha: "b".repeat(40), by: "salvage" }],
+    });
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          pr: PR.number,
+          adopt: { runId: "run-original-findings", childStep: "U12/1/findings", previousHeadSha: HEAD },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200, body: { headSha: "b".repeat(40) } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      publication: { expectedHeadSha: "b".repeat(40) },
+      lastPush: HEAD,
+    });
+  });
+
+  it("a superseded check cannot credit a child's head after the ref moves during findings proof", async () => {
+    const h = await ordinaryFindingsHarness();
+    h.deps.fetchPrFacts = vi
+      .fn()
+      .mockResolvedValueOnce(exactRecoveryFacts("b".repeat(40)))
+      .mockResolvedValue(exactRecoveryFacts("c".repeat(40)));
+    const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          pr: PR.number,
+          adopt: { runId: "run-original-findings", childStep: "U12/1/findings", previousHeadSha: HEAD },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "publication_facts_mismatch" } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(before);
+  });
+
+  it("a superseded check cannot credit a child's head without verified findings publication", async () => {
+    const h = await ordinaryFindingsHarness();
+    const child = (await h.store.get("run-original-findings"))!;
+    await h.store.put({ ...child, pushed: undefined });
+    const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          pr: PR.number,
+          adopt: { runId: "run-original-findings", childStep: "U12/1/findings", previousHeadSha: HEAD },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "publication_facts_mismatch" } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(before);
+  });
+
+  it("a drained findings child hands a foreign moved head to the findings gate without claiming its push", async () => {
+    const h = await ordinaryFindingsHarness();
+    const moved = "c".repeat(40);
+    h.deps.fetchPrFacts = async () => exactRecoveryFacts(moved);
+    const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    const checked = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        pr: PR.number,
+        adopt: { runId: "run-original-findings", childStep: "U12/1/findings", previousHeadSha: HEAD },
+      }),
+      h.deps,
+    );
+    expect(checked).toMatchObject({ status: 200, body: { headSha: moved } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      publication: { ...publication, expectedHeadSha: moved },
+      lastPush: before.lastPush,
+    });
+  });
+
+  it("a failed findings child with no push receipt hands a moved head to the findings gate", async () => {
+    const h = await ordinaryFindingsHarness();
+    const moved = "c".repeat(40);
+    h.deps.fetchPrFacts = async () => exactRecoveryFacts(moved);
+    const child = (await h.store.get("run-original-findings"))!;
+    await h.store.put({ ...child, status: "failed", headSha: undefined, pushed: undefined });
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          pr: PR.number,
+          adopt: { runId: "run-original-findings", childStep: "U12/1/findings", previousHeadSha: HEAD },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200, body: { headSha: moved } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      publication: { expectedHeadSha: moved },
+      lastPush: HEAD,
+    });
+  });
+
+  it("a drained review child can adopt the moved head for re-review", async () => {
+    const h = await ordinaryFindingsHarness();
+    const moved = "c".repeat(40);
+    h.deps.fetchPrFacts = async () => exactRecoveryFacts(moved);
+    const [row] = await h.instances.listUnits(INSTANCE.id);
+    await h.instances.putUnits([
+      {
+        ...row!,
+        rounds: [...row!.rounds, { index: 2, agent: "review", outcome: "started", at: NOW - minutesToMs(5) }],
+      },
+    ]);
+    await h.store.put(
+      reviewRecord({
+        id: "run-moved-review",
+        idempotencyKey: `${INSTANCE.id}:U12/2/review`,
+        startedAt: NOW - minutesToMs(5),
+        finishedAt: NOW - minutesToMs(1),
+      }),
+    );
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          pr: PR.number,
+          adopt: { runId: "run-moved-review", childStep: "U12/2/review", previousHeadSha: HEAD },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200, body: { headSha: moved } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      publication: { expectedHeadSha: moved },
+      lastPush: HEAD,
+    });
+  });
+
+  it.each(["no child proof", "foreign child", "changed owner", "moving ref"])(
+    "a foreign moved head refuses %s without rebinding the published head",
+    async (scenario) => {
+      const h = await ordinaryFindingsHarness();
+      const moved = "c".repeat(40);
+      let reads = 0;
+      h.deps.fetchPrFacts = async () =>
+        exactRecoveryFacts(scenario === "moving ref" && ++reads > 1 ? "d".repeat(40) : moved);
+      if (scenario === "foreign child") {
+        const child = (await h.store.get("run-original-findings"))!;
+        await h.store.put({ ...child, userId: "slack:UOTHER" });
+      }
+      if (scenario === "changed owner") {
+        h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
+        h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U99" });
+      }
+      const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      const checked = await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          pr: PR.number,
+          ...(scenario === "no child proof"
+            ? {}
+            : { adopt: { runId: "run-original-findings", childStep: "U12/1/findings", previousHeadSha: HEAD } }),
+        }),
+        h.deps,
+      );
+      expect(checked).toMatchObject({
+        status: 409,
+        body: { error: scenario === "changed owner" ? "publication_ownership_changed" : "publication_facts_mismatch" },
+      });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(before);
+    },
+  );
 
   it.each(["failed", "interrupted"] as const)(
     "ordinary findings publication accepts one completed retry after an earlier %s attempt without a push",

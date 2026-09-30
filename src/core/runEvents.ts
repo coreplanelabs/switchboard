@@ -952,6 +952,9 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
+  /** A private patch stored before a superseded findings child's workspace
+   * can be released. This is recovery evidence, never publication credit. */
+  | ({ type: "unfinished_patch"; seq?: number; at?: number } & import("./coordinator/contract.js").SavedFindingsPatch)
   /** The server gate admitted this exact leased push, not a child's claim. */
   | {
       type: "publication_push_authorized";
