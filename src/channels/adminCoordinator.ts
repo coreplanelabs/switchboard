@@ -1043,7 +1043,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   if (!io) return json(503, { ok: false, error: "no_channel", at });
   // The child's turn: the caller's prompt, or the brief composed from what the
   // bot holds — the plan at the base ref, the prior rounds' records.
-  let turn: { prompt: string; ref?: string; contract?: DispatchOptions["contract"] };
+  let turn: { prompt: string; ref?: string; contract?: DispatchOptions["contract"]; issuedFindingIds?: string[] };
   if (req.brief !== undefined) {
     if (row === undefined) return json(400, { ok: false, error: "a brief needs the unit it runs for" });
     try {
@@ -1240,6 +1240,9 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       : {}),
     ...(instance.base !== undefined ? { base: instance.base } : {}),
     ...(publication !== undefined ? { publication } : {}),
+    ...(req.brief?.kind === "findings" && turn.issuedFindingIds !== undefined
+      ? { issuedFindingIds: turn.issuedFindingIds }
+      : {}),
   };
   let dispatching: Promise<DispatchOutcome>;
   try {

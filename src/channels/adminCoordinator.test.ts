@@ -3968,10 +3968,10 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         idempotencyKey: "plan-fixture:U10/1/findings",
         branch: "plan/fixture/u10",
         base: "main",
+        issuedFindingIds: ["F1"],
       },
     });
-    // No dispatch of this route carries a finding-id tag: the tool records what the run submits and the
-    // runner matches the ids.
+    // The runner still matches the recorded set against its round on completion.
     for (const d of h.dispatched) expect("fixRound" in d.opts!).toBe(false);
 
     const noThread = await planHarness();

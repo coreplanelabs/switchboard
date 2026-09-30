@@ -71,6 +71,7 @@ export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent
   const tag = events.find((e) => e.type === "coordinator_tag");
   const base = tag?.type === "coordinator_tag" ? tag.base : undefined;
   const publication = tag?.type === "coordinator_tag" ? tag.publication : undefined;
+  const issuedFindingIds = tag?.type === "coordinator_tag" ? tag.issuedFindingIds : undefined;
   const transportWorkflowId = tag?.type === "coordinator_tag" ? tag.transportWorkflowId : undefined;
   const recovery = tag?.type === "coordinator_tag" ? tag.recovery : undefined;
   const costCapUsd = (tag?.type === "coordinator_tag" ? tag.costCapUsd : undefined) ?? row.meta.costCapUsd;
@@ -84,6 +85,7 @@ export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent
     ...(recovery !== undefined ? { recovery } : {}),
     ...(base !== undefined ? { base } : {}),
     ...(publication !== undefined ? { publication } : {}),
+    ...(issuedFindingIds !== undefined ? { issuedFindingIds } : {}),
   };
 }
 

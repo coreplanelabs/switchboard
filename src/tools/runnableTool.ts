@@ -182,11 +182,11 @@ export interface ToolContext {
    *  run record carries it; a ship round posts it to the unit's board issue.
    *  Absent → the tool says nothing is recording it. */
   onHandoff?: (handoff: Handoff) => void;
-  /** Receives a coding run's per-finding dispositions from
-   *  `submit_dispositions` (docs/reference/specs/agent-ship.md item 6). Injected by
-   *  the run loop for every run; the last valid call wins and the set rides the
-   *  run record, where the plan runner matches it to its round's findings.
-   *  Absent → the tool still accepts the call. */
+  /** Exact finding IDs carried by the coordinator's durable findings-child tag.
+   *  Absent on non-findings runs and legacy children: no disposition authority. */
+  issuedFindingIds?: readonly string[];
+  /** Receives a coding run's validated per-finding dispositions. The last valid
+   *  call wins; the runner matches them again as a defense in depth. */
   onDispositions?: (dispositions: FindingDisposition[]) => void;
 }
 

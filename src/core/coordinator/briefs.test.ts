@@ -617,7 +617,7 @@ describe("composeChild — the child a brief names", () => {
     expect(child.contract).toBeUndefined();
   });
 
-  it("a findings brief is the review's findings as a message into the unit thread: a coding child on the unit's branch whose text carries every finding verbatim, the review's final words and the ask (a disposition per finding, the description resubmitted, the branch pushed, never a merge or an approve), with no contract and no finding-id tag; a review run the history lacks throws by name; no `fix` brief composes", async () => {
+  it("a findings brief binds exact review and check IDs beside its message, with no contract; a review run the history lacks throws by name; no `fix` brief composes", async () => {
     const { r } = readers({ runs: { "run-r1": { findings: [FINDING], finalReply: "Changes requested: one nit." } } });
     const findings = await composeChild(
       { kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-r1" },
@@ -635,7 +635,24 @@ describe("composeChild — the child a brief names", () => {
     expect(findings.prompt).toContain("Never merge and never approve.");
     expect(findings.prompt.endsWith("Review:\nChanges requested: one nit.")).toBe(true);
     expect(findings.contract).toBeUndefined();
-    expect(Object.keys(findings).sort()).toEqual(["preset", "prompt", "ref"]);
+    expect(findings.issuedFindingIds).toEqual(["F1"]);
+    expect(Object.keys(findings).sort()).toEqual(["issuedFindingIds", "preset", "prompt", "ref"]);
+    const withChecks = await composeChild(
+      {
+        kind: "findings",
+        unit: "U10",
+        pr: 7,
+        reviewRunId: "run-r1",
+        checks: [
+          { ...FINDING, id: "check:ci / bot", file: "ci / bot", check: true },
+          { ...FINDING, id: "check:ci / workers", file: "ci / workers", check: true },
+        ],
+      },
+      instance,
+      unit,
+      r,
+    );
+    expect(withChecks.issuedFindingIds).toEqual(["F1", "check:ci / bot", "check:ci / workers"]);
     // A review that listed no structured findings is addressed by its prose, said so.
     const prose = readers({ runs: { "run-r1": { findings: [], finalReply: "Please tighten the tests." } } });
     const byProse = await composeChild(
@@ -645,6 +662,7 @@ describe("composeChild — the child a brief names", () => {
       prose.r,
     );
     expect(byProse.prompt).toContain("Findings:\n(the review listed no structured findings, address its prose)");
+    expect(byProse.issuedFindingIds).toEqual([]);
     const answered = await composeChild(
       {
         kind: "findings",
