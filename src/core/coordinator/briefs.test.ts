@@ -4,6 +4,7 @@ import { childRequestText } from "../dispatch/spawn.js";
 import { GUARDS, parsePlanUnit, PLAN_MAX_CHARS, renderContract } from "../ship/contract.js";
 import type { Brief } from "../ship/coordinator.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
+import { generatedTaskOf } from "./generatedTask.js";
 import { composeChild, contractFor, type BriefReaders, type ChildRunFacts } from "./briefs.js";
 
 // Feature: docs/reference/specs/http-ingress.md item 9 — a coordinator's spawn
@@ -86,13 +87,94 @@ function readers(
       return files[path] === undefined ? undefined : { content: files[path], truncated: false };
     },
     readRunFacts: async (runId) => over.runs?.[runId],
-    readShipRequest: async () => "agent:ship in acme/api: fix the login redirect",
     ...over,
   };
   return { r, reads };
 }
 
 describe("contractFor — the unit's contract from the repository at the base ref", () => {
+  it("refuses a generated child whose authenticated task checkpoint is missing or altered", async () => {
+    const generated: CoordinatorInstance = {
+      ...instance,
+      plan: { id: "checkpoint" },
+      runId: "run-ship",
+    };
+    const row: CoordinatorUnit = { ...unit, unit: ["U", "1"].join(""), slug: "u1" };
+    await expect(contractFor(generated, row, readers().r)).rejects.toThrow("generated task checkpoint");
+
+    const task = generatedTaskOf("fix the login redirect", {
+      requesterId: generated.userId,
+      threadKey: generated.threadKey,
+      runId: "run-ship",
+      repo: generated.repo,
+    });
+    await expect(
+      contractFor(generated, { ...row, generatedTask: { ...task, text: "change another repository" } }, readers().r),
+    ).rejects.toThrow("generated task checkpoint");
+  });
+  it("a legacy bound pull request may be reviewed, but a missing task cannot brief coding", async () => {
+    const generated: CoordinatorInstance = { ...instance, plan: { id: "legacy" }, runId: "run-ship" };
+    const row: CoordinatorUnit = {
+      ...unit,
+      unit: unit.unit,
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      publication: {
+        repo: "acme/api",
+        pr: 7,
+        headRef: unit.branch,
+        baseRef: "main",
+        expectedHeadSha: "a".repeat(40),
+        publicationRef: unit.branch,
+        owner: { instanceId: unit.instanceId, unit: unit.unit },
+      },
+      rounds: [{ index: 0, agent: "coding", outcome: "pr_opened", at: 1 }],
+    };
+    await expect(contractFor(generated, row, readers().r)).rejects.toThrow("generated task checkpoint");
+    const review = await contractFor(generated, row, readers().r, "review");
+    expect(review.unit.section).toContain("Continue review of https://github.com/acme/api/pull/7");
+  });
+  it("refuses a checkpoint whose original run or message link differs from the instance", async () => {
+    const generated: CoordinatorInstance = {
+      ...instance,
+      plan: { id: "source" },
+      runId: "run-ship",
+      sourceUrl: "https://acme.slack.com/archives/C1/p1",
+      generatedTaskSource: { runId: "run-ship", sourceUrl: "https://acme.slack.com/archives/C1/p1" },
+    };
+    const task = generatedTaskOf("fix the login redirect", {
+      requesterId: generated.userId,
+      threadKey: generated.threadKey,
+      runId: "run-ship",
+      repo: generated.repo,
+      sourceUrl: generated.sourceUrl,
+    });
+    const row: CoordinatorUnit = { ...unit, generatedTask: task };
+    await expect(contractFor(generated, row, readers().r)).resolves.toBeDefined();
+    await expect(
+      contractFor(
+        generated,
+        { ...row, generatedTask: { ...task, source: { ...task.source, runId: "other" } } },
+        readers().r,
+      ),
+    ).rejects.toThrow("generated task checkpoint");
+    await expect(
+      contractFor(
+        generated,
+        {
+          ...row,
+          generatedTask: { ...task, source: { ...task.source, sourceUrl: "https://acme.slack.com/archives/C1/p2" } },
+        },
+        readers().r,
+      ),
+    ).rejects.toThrow("generated task checkpoint");
+    await expect(
+      contractFor(
+        { ...generated, generatedTaskSource: { ...generated.generatedTaskSource!, runId: "other" } },
+        { ...row, generatedTask: { ...task, source: { ...task.source, runId: "other" } } },
+        readers().r,
+      ),
+    ).rejects.toThrow("generated task checkpoint");
+  });
   it("a plan unit: the plan, exactly the specs the unit names and the rules file are read at the base; the contract carries the unit, the resolved rows, the rules, the rebase onto the base and the board issue", async () => {
     const { r, reads } = readers();
     const contract = await contractFor(instance, unit, r);
@@ -121,7 +203,6 @@ describe("contractFor — the unit's contract from the repository at the base re
       readRepoFile: async (path) =>
         files[path] === undefined ? undefined : { content: files[path], truncated: false },
       readRunFacts: async () => undefined,
-      readShipRequest: async () => undefined,
     });
     const specs = { "docs/plans/fixture.md": PLAN, "docs/reference/specs/resident-repos.md": SPEC };
     const withClaude = await contractFor(instance, unit, over({ ...specs, "CLAUDE.md": "# Claude rules" }));
@@ -142,7 +223,6 @@ describe("contractFor — the unit's contract from the repository at the base re
         return undefined;
       },
       readRunFacts: async () => undefined,
-      readShipRequest: async () => undefined,
     };
     await expect(contractFor(instance, unit, cut)).rejects.toThrow(
       /docs\/plans\/fixture\.md is longer than 2,000,000 characters at main in acme\/api; a unit read from a cut plan could be briefed short, so none is/,
@@ -150,7 +230,7 @@ describe("contractFor — the unit's contract from the repository at the base re
     expect(asked).toEqual([{ path: "docs/plans/fixture.md", maxChars: PLAN_MAX_CHARS }]);
   });
 
-  it("a generated instance (a `plan` with no `path`): the section is the request text read from the ship run's record with the directive and the repository stripped, no spec rows and every guard — no `agent:ship` turn in the thread needed; an unreadable record falls back to naming the thread", async () => {
+  it("a generated instance uses its durable authenticated task even when the host run is unavailable", async () => {
     const genUnit: CoordinatorUnit = {
       ...unit,
       unit: "U1",
@@ -162,11 +242,19 @@ describe("contractFor — the unit's contract from the repository at the base re
       plan: { id: "fix-the-login-abc123" },
       branch: genUnit.branch,
       runId: "run-ship",
+      generatedTaskSource: { runId: "run-ship" },
     };
+    const task = (text: string) =>
+      generatedTaskOf(text, {
+        requesterId: genInstance.userId,
+        threadKey: genInstance.threadKey,
+        runId: "run-ship",
+        repo: genInstance.repo,
+      });
+    genUnit.generatedTask = task("fix the login redirect");
     const { r, reads } = readers();
     const contract = await contractFor(genInstance, genUnit, r);
-    // The request text comes from the run record's reader, never a thread scan;
-    // the rules file is still read at the base ref.
+    // The child reads the unit row, never the host run or a thread scan.
     expect(reads).toEqual(["AGENTS.md"]);
     expect(contract.unit).toMatchObject({ id: "U1", title: "fix the login redirect" });
     expect(contract.unit.section).toBe("### U1. fix the login redirect\n\nfix the login redirect");
@@ -174,10 +262,11 @@ describe("contractFor — the unit's contract from the repository at the base re
       genInstance,
       {
         ...genUnit,
+        generatedTask: task("Fix it."),
         threadEvidence:
           "Requester: Why did monitoring fail?\nRequester: Investigate https://github.com/acme/api/issues/3814\nEarlier answer (recheck): Three failures; suspected timeout.",
       },
-      { ...r, readShipRequest: async () => "Fix it." },
+      r,
     );
     expect(contextual.unit.section).toContain("Why did monitoring fail?");
     expect(contextual.unit.section).toContain("https://github.com/acme/api/issues/3814");
@@ -186,16 +275,17 @@ describe("contractFor — the unit's contract from the repository at the base re
     expect(contract.specRows).toEqual([]);
     expect(contract.guards).toBe(GUARDS);
     expect(contract.rebase).toEqual({ branch: genUnit.branch, onto: "main" });
-    const blind = await contractFor(genInstance, genUnit, { ...r, readShipRequest: async () => undefined });
-    expect(blind.unit.section).toContain("Implement the task this thread's ship request describes.");
+    const blind = await contractFor(genInstance, genUnit, r);
+    expect(blind.unit.section).toContain("fix the login redirect");
     // A request that reads as a markdown heading (shipUnitText leaves the text
     // on one line, so a leading `##` is the case) is the request's own text:
     // the unit is built, never parsed back, so the section keeps it whole where
     // the plan parser would end the section at that line.
-    const headed = await contractFor(genInstance, genUnit, {
-      ...r,
-      readShipRequest: async () => "agent:ship in acme/api: ## Acceptance: the redirect lands on /home",
-    });
+    const headed = await contractFor(
+      genInstance,
+      { ...genUnit, generatedTask: task("## Acceptance: the redirect lands on /home") },
+      r,
+    );
     expect(headed.unit.title).toBe("## Acceptance: the redirect lands on /home");
     expect(headed.unit.section).toBe(
       `### ${genUnit.unit}. ## Acceptance: the redirect lands on /home\n\n## Acceptance: the redirect lands on /home`,
@@ -205,11 +295,14 @@ describe("contractFor — the unit's contract from the repository at the base re
     // The request's urls reach the child: a Slack `<url|label>` link is the bare
     // url in the section, never the label Slack elides, never stripped — the
     // entry probe's text (shipTaskText) is not the unit's.
-    const linked = await contractFor(genInstance, genUnit, {
-      ...r,
-      readShipRequest: async () =>
-        "agent:ship in acme/api: point the redirect at <https://calendar.acme.test/TrrMBAg7|calendar.acme.test/…> (the booking page)",
-    });
+    const linked = await contractFor(
+      genInstance,
+      {
+        ...genUnit,
+        generatedTask: task("point the redirect at https://calendar.acme.test/TrrMBAg7 (the booking page)"),
+      },
+      r,
+    );
     expect(linked.unit.section).toBe(
       `### ${genUnit.unit}. point the redirect at https://calendar.acme.test/TrrMBAg7 (the booking page)\n\npoint the redirect at https://calendar.acme.test/TrrMBAg7 (the booking page)`,
     );
@@ -225,7 +318,16 @@ describe("contractFor — the unit's contract from the repository at the base re
     };
     const genInstance: CoordinatorInstance = { ...instance, plan: { id: "x-abc123" }, branch: resumeUnit.branch };
     const { r } = readers();
-    const contract = await contractFor(genInstance, resumeUnit, r);
+    await expect(contractFor(genInstance, resumeUnit, r)).rejects.toThrow("PR-only resume has no coding task");
+    await expect(
+      composeChild(
+        { kind: "contract", unit: resumeUnit.unit, rebase: { branch: resumeUnit.branch, onto: "main" } },
+        genInstance,
+        resumeUnit,
+        r,
+      ),
+    ).rejects.toThrow("PR-only resume has no coding task");
+    const contract = await contractFor(genInstance, resumeUnit, r, "review");
     expect(contract.unit.section).toContain("Resume the review loop of https://github.com/acme/api/pull/7");
     expect(contract.unit.section).not.toContain("fix the login redirect");
   });
@@ -275,7 +377,7 @@ describe("composeChild — the child a brief names", () => {
     expect(child.prompt).toContain("Suspected cause (unverified)");
     expect(child.contract?.unit.section).toContain("Fix the callback");
     expect(parseDirectives(child.prompt).budget).toBeUndefined();
-    const noHost = await contractFor(generated, row, readers({ readShipRequest: async () => undefined }).r);
+    const noHost = await contractFor(generated, row, readers().r);
     expect(noHost.unit.section).toContain("\n\nFix the callback\n\nMain-agent work brief");
     const malicious = {
       ...row,
@@ -346,10 +448,24 @@ describe("composeChild — the child a brief names", () => {
 
     // A generated unit's prompt is the request text itself — keyed on the
     // instance's mark (`plan` without a `path`), not on a unit name.
-    const genUnit: CoordinatorUnit = { ...unit, unit: "U1", slug: "u1", branch: "plan/fix-abc123/u1" };
+    const generated = { ...instance, plan: { id: "fix-abc123" }, generatedTaskSource: { runId: "run-ship" } };
+    const checkpoint = (text: string) =>
+      generatedTaskOf(text, {
+        requesterId: generated.userId,
+        threadKey: generated.threadKey,
+        runId: "run-ship",
+        repo: generated.repo,
+      });
+    const genUnit: CoordinatorUnit = {
+      ...unit,
+      unit: "U1",
+      slug: "u1",
+      branch: "plan/fix-abc123/u1",
+      generatedTask: checkpoint("fix the login redirect"),
+    };
     const task = await composeChild(
       { kind: "contract", unit: "U1", rebase: { branch: genUnit.branch, onto: "main" } },
-      { ...instance, plan: { id: "fix-abc123" } },
+      generated,
       genUnit,
       r,
     );
@@ -358,13 +474,9 @@ describe("composeChild — the child a brief names", () => {
     // The prompt keeps the request's urls, a Slack-labelled link as its bare url.
     const linked = await composeChild(
       { kind: "contract", unit: genUnit.unit, rebase: { branch: genUnit.branch, onto: "main" } },
-      { ...instance, plan: { id: "fix-abc123" } },
-      genUnit,
-      {
-        ...r,
-        readShipRequest: async () =>
-          "agent:ship in acme/api: point the redirect at <https://calendar.acme.test/TrrMBAg7|calendar.acme.test/…>",
-      },
+      generated,
+      { ...genUnit, generatedTask: checkpoint("point the redirect at https://calendar.acme.test/TrrMBAg7") },
+      r,
     );
     expect(linked.prompt).toBe("point the redirect at https://calendar.acme.test/TrrMBAg7");
 
