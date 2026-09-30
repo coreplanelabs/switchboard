@@ -1989,6 +1989,69 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect((old as ExecInfraError).reason).toBe("answered");
   });
 
+  it("a pre-admission checked recycle waits for re-attach and re-sends the same command once, while an untyped refusal remains an answer", async () => {
+    const refusal = {
+      error: "recreate-in-progress: new resident work is paused during the operator's checked VM recycle",
+      status: 503,
+      reason: "recreate-in-progress",
+      stdout: "",
+      stderr: "",
+      exitCode: 127,
+    };
+    const { calls } = stubFetch(
+      { body: { ...refusal, transient: true } },
+      status("warm"),
+      { body: ATTACH_OK },
+      { body: { stdout: "recovered", stderr: "", exitCode: 0 } },
+    );
+    await expect(new ResidentExecutor(OPTS).exec("true")).resolves.toBe("recovered");
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/attach", "/exec"]);
+    expect(sentBody(calls[3])).toEqual(sentBody(calls[0]));
+    stubFetch({ body: refusal });
+    const untyped = await new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    expect((untyped as ExecInfraError).reason).toBe("answered");
+  });
+
+  it("a checked recycle still in progress after re-attach does not re-send exec a second time", async () => {
+    const refusal = {
+      error: "recreate-in-progress: new resident work is paused during the operator's checked VM recycle",
+      status: 503,
+      reason: "recreate-in-progress",
+      transient: true,
+      stdout: "",
+      stderr: "",
+      exitCode: 127,
+    };
+    const { calls } = stubFetch({ body: refusal }, status("warm"), { body: ATTACH_OK }, { body: refusal });
+    const err = await new ResidentExecutor(OPTS).exec("true").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("worker-unavailable");
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/attach", "/exec"]);
+  });
+
+  it("a checked recycle that never serves spends the command's wake budget without re-sending exec", async () => {
+    const refusal = {
+      error: "recreate-in-progress: new resident work is paused during the operator's checked VM recycle",
+      status: 503,
+      reason: "recreate-in-progress",
+      transient: true,
+      stdout: "",
+      stderr: "",
+      exitCode: 127,
+    };
+    const { calls } = stubFetch(
+      { body: refusal },
+      status("restoring", "rehydrating"),
+      status("restoring", "rehydrating"),
+    );
+    const p = new ResidentExecutor(OPTS).exec("true", { timeoutMs: 5_000 }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("worker-unavailable");
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status"]);
+  });
+
   it("a refusal streamed by /exec over HTTP 200 is typed by the status and the lifecycle pair IN the document, as the Worker's stream writes them: a busy mirror on a degraded-but-serviceable resident is the resident unavailable, never a deterministic answer; a definite state refuses", async () => {
     const streamed = (state: string, stateReason: string) => ({
       body: {

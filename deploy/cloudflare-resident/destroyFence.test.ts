@@ -72,4 +72,8 @@ describe("resident VM destroy uncertainty", () => {
     expect(method("reconcileForDeploy")).toContain('result: "deferred", verified: false');
     expect(method("getResidentInfo")).toContain("recreateAdmissionHeld:");
   });
+
+  it("types the pre-admission recreate refusal as temporary", () => {
+    expect(method("recreateRefusal")).toContain("transient: true");
+  });
 });

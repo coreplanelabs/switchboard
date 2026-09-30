@@ -1911,6 +1911,7 @@ export class ResidentDO extends Sandbox<Env> {
       error: "recreate-in-progress: new resident work is paused during the operator's checked VM recycle",
       status: 503,
       reason: "recreate-in-progress",
+      transient: true,
       cause: "system",
     };
   }

@@ -1595,6 +1595,24 @@ export class ResidentExecutor implements Executor {
     // op's call bound is the command's, and the wake budget bounds the
     // probing alone.
     let r = await send();
+    // The checked recycle refused admission before /exec could run. Only this
+    // typed refusal permits re-sending the same command: a generic transient
+    // exec failure may have started the command, so its outcome stays unknown.
+    // The existing wake wait probes and re-attaches under the command's budget;
+    // one re-send then lets any further answer take the normal failure path.
+    if (
+      route === "/exec" &&
+      r.data.reason === "recreate-in-progress" &&
+      isTransientRefusal({ status: answeredStatus(r.status, r.data), data: r.data })
+    ) {
+      await this.awaitWake(route, String(r.data.error), {
+        origin: "transient-refusal",
+        signal,
+        budgetMs: waitLeft(),
+        span,
+      });
+      r = await send();
+    }
     if (isContainerRolling(r.data.error)) {
       const woke = await this.awaitWake(route, String(r.data.error), {
         origin: "container-exited",
