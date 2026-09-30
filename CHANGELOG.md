@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.270.2](https://github.com/coreplanelabs/switchboard/compare/v1.270.1...v1.270.2) (2026-09-30)
+
+
+### Bug fixes
+
+* **conductor:** report posted review verdicts in batch recaps ([#2516](https://github.com/coreplanelabs/switchboard/issues/2516)) ([45c0208](https://github.com/coreplanelabs/switchboard/commit/45c0208fcc6e843d35d98cec7a58bf14eeab0454))
+* **dispatcher:** retain requester issues beyond the session tail ([#2519](https://github.com/coreplanelabs/switchboard/issues/2519)) ([cf2f0a6](https://github.com/coreplanelabs/switchboard/commit/cf2f0a6f5c945a3b23df919e218a78272922b4be))
+* **dispatcher:** use repository answers for Ship requests ([#2520](https://github.com/coreplanelabs/switchboard/issues/2520)) ([98b0fbb](https://github.com/coreplanelabs/switchboard/commit/98b0fbbb7b7c6e4ce34ebcd668f1cb03627ccd42))
+* **main:** refuse writes when thread owner reads fail ([#2521](https://github.com/coreplanelabs/switchboard/issues/2521)) ([86608a4](https://github.com/coreplanelabs/switchboard/commit/86608a46e0587f301578d8ebde3dd7c7bc4fbfe5))
+* **ship:** honor requested PR review stage ([#2522](https://github.com/coreplanelabs/switchboard/issues/2522)) ([78a89a1](https://github.com/coreplanelabs/switchboard/commit/78a89a1420c0d97fd257873ea8770b79151addbb))
+* **ship:** keep generated tasks through child handoff ([#2518](https://github.com/coreplanelabs/switchboard/issues/2518)) ([bd09038](https://github.com/coreplanelabs/switchboard/commit/bd09038dd6f348c6139913bc9fdff93cfc3a8dba))
+
+
+### Refactoring
+
+* **ship:** preserve typed work requests through handoff ([#2523](https://github.com/coreplanelabs/switchboard/issues/2523)) ([f0d0cf3](https://github.com/coreplanelabs/switchboard/commit/f0d0cf3758cd1d510d0e4e18f771444e214050bd))
+
 ## [1.270.1](https://github.com/coreplanelabs/switchboard/compare/v1.270.0...v1.270.1) (2026-09-30)
 
 
