@@ -747,6 +747,9 @@ export interface CoordinatorUnit {
   dependsOn: string[];
   /** The optional main conversation's evidence and request, frozen at admission. */
   workBrief?: WorkBrief;
+  /** Bounded, attributed prior thread context for a terse generated task; data,
+   * never repository or publication authority. Frozen on the original unit. */
+  threadEvidence?: string;
   /** The unit's thread, once opened; a generated plan's is the requesting thread from the start. */
   threadKey?: string;
   sourceUrl?: string;
@@ -819,7 +822,11 @@ export interface CoordinatorUnit {
 
 /** A claimed unit's original evidence survives every later whole-row update. */
 export function preserveWorkBrief(current: CoordinatorUnit | undefined, replacement: CoordinatorUnit): CoordinatorUnit {
-  return current?.workBrief === undefined ? replacement : { ...replacement, workBrief: current.workBrief };
+  return {
+    ...replacement,
+    ...(current?.workBrief !== undefined ? { workBrief: current.workBrief } : {}),
+    ...(current?.threadEvidence !== undefined ? { threadEvidence: current.threadEvidence } : {}),
+  };
 }
 
 const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -1010,6 +1017,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isText(r.unit, 32) || !isText(r.slug) || !isText(r.branch) || !isOptionalText(r.title)) return false;
   if (!Array.isArray(r.dependsOn) || !r.dependsOn.every((d) => isText(d, 32))) return false;
   if (r.workBrief !== undefined && !isWorkBrief(r.workBrief)) return false;
+  if (r.threadEvidence !== undefined && !isText(r.threadEvidence, 6_000)) return false;
   if (!isOptionalText(r.threadKey) || !isOptionalText(r.sourceUrl)) return false;
   if (r.reviewThread !== undefined && !isThread(r.reviewThread)) return false;
   if (r.issue !== undefined && !isFinite(r.issue)) return false;

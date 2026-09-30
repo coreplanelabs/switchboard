@@ -22165,6 +22165,19 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         ? "Check the same defect as https://github.com/acme/web/pull/7"
         : "In acme/switchboard: investigate the defect illustrated by https://github.com/acme/web/pull/7";
       const history: HistoryItem[] = followUp ? [{ role: "user", text: "in acme/switchboard: investigate" }] : [];
+      if (followUp) {
+        // The historical message alone has no author stamp; only the durable
+        // requester's turn may establish a target for a later operation.
+        vi.spyOn(deps.runLedger, "readSessionTail").mockResolvedValue({
+          transcript: {
+            complete: true,
+            turns: 1,
+            messages: [{ role: "user", content: [{ type: "text", text: "in acme/switchboard: investigate" }] }],
+            compactions: [],
+            actors: ["slack:UADMIN"],
+          },
+        } as never);
+      }
       await dispatch(deps, msg(text, "slack:UADMIN"), fakeIO(history).io, {
         thread: followUp
           ? [

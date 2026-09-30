@@ -170,6 +170,19 @@ describe("contractFor — the unit's contract from the repository at the base re
     expect(reads).toEqual(["AGENTS.md"]);
     expect(contract.unit).toMatchObject({ id: "U1", title: "fix the login redirect" });
     expect(contract.unit.section).toBe("### U1. fix the login redirect\n\nfix the login redirect");
+    const contextual = await contractFor(
+      genInstance,
+      {
+        ...genUnit,
+        threadEvidence:
+          "Requester: Why did monitoring fail?\nRequester: Investigate https://github.com/acme/api/issues/3814\nEarlier answer (recheck): Three failures; suspected timeout.",
+      },
+      { ...r, readShipRequest: async () => "Fix it." },
+    );
+    expect(contextual.unit.section).toContain("Why did monitoring fail?");
+    expect(contextual.unit.section).toContain("https://github.com/acme/api/issues/3814");
+    expect(contextual.unit.section).toContain("Three failures; suspected timeout.");
+    expect(contextual.unit.section).toContain("Fix it.");
     expect(contract.specRows).toEqual([]);
     expect(contract.guards).toBe(GUARDS);
     expect(contract.rebase).toEqual({ branch: genUnit.branch, onto: "main" });

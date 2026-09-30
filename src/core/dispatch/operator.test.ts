@@ -19,6 +19,8 @@ import {
   operatorProjection,
   operatorSources,
   operatorThreadTail,
+  requesterRepoContext,
+  requesterThreadEvidence,
   operatorTools,
   parseOperatorTurn,
   pendingQuestionOf,
@@ -1713,6 +1715,234 @@ describe("presetBindOf — a bound line that names a preset starts a run, never 
     expect(presetBindOf("agent:coding on branch x", presets)).toBeUndefined();
     expect(presetBindOf("not a command at all", presets)).toBeUndefined();
     expect(presetBindOf("", presets)).toBeUndefined();
+  });
+});
+
+describe("requester-authored repository inheritance for a plain fix", () => {
+  const requester = "slack:UALICE";
+  const turn = (text: string, actor?: string) => ({ text: `user: ${text}`, ...(actor ? { actor } : {}) });
+  const issue = "https://github.com/acme/sensors/issues/3814";
+  const base = () =>
+    input({ text: "Fix it.", projection: projectionOf(["ship"]), newestFinishedRun: { agent: "general" } });
+  const bind = { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", repo: "acme/sensors", reason: "fix the issue" } };
+
+  it("carries the requester's issue target through general research and reconciliation, after restart", async () => {
+    const tail = [
+      turn("Why are the monitoring checks failing?", requester),
+      { text: "assistant: I will investigate the monitoring checks." },
+      turn(`Investigate ${issue}`, requester),
+      { text: "assistant: Three runs failed; suspected cause is a missing timeout. No fix has started." },
+    ];
+    const answer = await runOperator({ ...base(), tail, requesterId: requester }, async () => bind);
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ repo: "acme/sensors", repoSource: "thread" }] });
+  });
+
+  it("holds a write bind that omits the inherited target instead of falling back to untrusted history", async () => {
+    const tail = [turn(`Investigate ${issue}`, requester)];
+    const answer = await runOperator({ ...base(), tail, requesterId: requester }, async () => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: { preset: "ship", reason: "fix it" },
+    }));
+    expect(answer.decision).toMatchObject({ kind: "non_decision" });
+    expect(answer.attempts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ violation: expect.stringContaining("bind") })]),
+    );
+  });
+
+  it("ignores assistant, tool, foreign-person and code/example targets, even when a general run recorded a repository", async () => {
+    const tail = [
+      turn("Why are the checks failing?", requester),
+      turn("Fix https://github.com/acme/sensors/issues/3814", "slack:UBOB"),
+      { text: `assistant: Read ${issue} and fix acme/sensors` },
+      { text: `user: ${issue}` }, // old rows without an actor cannot authorize a write
+      turn(`Example: \`${issue}\`; see ${issue} for context`, requester),
+      turn(`> Fix ${issue}`, requester),
+    ];
+    const answer = await runOperator(
+      { ...base(), tail, requesterId: requester, newestFinishedRun: { agent: "general", repo: "acme/sensors" } },
+      async () => bind,
+    );
+    expect(answer.decision).toMatchObject({ kind: "non_decision" });
+    expect(answer.attempts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ violation: expect.stringContaining("no evidence") })]),
+    );
+  });
+
+  it("asks once instead of choosing between two explicit requester targets or issues", async () => {
+    for (const later of ["https://github.com/acme/other/issues/12", "https://github.com/acme/sensors/issues/12"]) {
+      const tail = [turn(`Investigate ${issue}`, requester), turn(`Also fix ${later}`, requester)];
+      const answers: RouteToolCall[] = [
+        bind,
+        { tool: OPERATOR_ASK_TOOL, input: { text: "Which issue should I fix?", reason: "conflicting targets" } },
+      ];
+      const answer = await runOperator({ ...base(), tail, requesterId: requester }, async () => answers.shift()!);
+      expect(answer.decision).toMatchObject({ kind: "question", text: "Which issue should I fix?" });
+      expect(answers).toHaveLength(0);
+    }
+  });
+
+  it("uses the actor-stamped thread session on a later operator stage, not a process-local general run", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-operator-thread-target-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
+    );
+    const config = new ConfigStore(path, join(dir, "overrides.json"));
+    const messages = [
+      { role: "user" as const, content: [{ type: "text" as const, text: "Why did monitoring fail?" }] },
+      { role: "assistant" as const, content: [{ type: "text" as const, text: "I am researching." }] },
+      { role: "user" as const, content: [{ type: "text" as const, text: `Investigate ${issue}` }] },
+      {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: "Three failures; suspected timeout. No fix started." }],
+      },
+    ];
+    const readSessionTail = vi.fn(async () => ({
+      transcript: {
+        complete: true as const,
+        turns: 4,
+        messages,
+        compactions: [],
+        actors: [requester, undefined, requester, undefined],
+      },
+    }));
+    const result = await operatorStage(
+      { config, runLedger: { readSessionTail } as never, operatorModel: async () => bind },
+      {
+        msg: { channelId: "slack:C1", threadKey: "slack:C1:1.0", userId: requester, text: "Fix it." },
+        mode: "on",
+        thread: [{ finished: true, agent: "general" }],
+      },
+    );
+    expect(readSessionTail).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ outcome: "binds", binds: [{ repo: "acme/sensors", repoSource: "thread" }] });
+  });
+
+  it("does not choose between different issue URLs inside one requester turn", () => {
+    expect(
+      requesterRepoContext([turn(`Fix ${issue} and https://github.com/acme/other/issues/12`, requester)], requester),
+    ).toEqual({ requesterRepoConflict: true });
+  });
+
+  it("ignores a quoted foreign issue when inheriting the requester's explicit issue target", async () => {
+    for (const quote of [
+      `Investigate ${issue}\n> Example: https://github.com/acme/other/issues/12`,
+      `> Example: https://github.com/acme/other/issues/12\nInvestigate ${issue}`,
+      `Investigate ${issue}\n> Example: https://github.com/acme/sensors/issues/12`,
+    ]) {
+      const tail = [turn(quote, requester)];
+      expect(requesterRepoContext(tail, requester)).toEqual({ requesterRepo: "acme/sensors" });
+      const answer = await runOperator({ ...base(), tail, requesterId: requester }, async () => bind);
+      expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ repo: "acme/sensors", repoSource: "thread" }] });
+    }
+  });
+
+  it("still detects conflicting GitHub links inside prose wrappers", () => {
+    const foreign = "https://github.com/acme/other/issues/12";
+    for (const wrapped of [`"${foreign}"`, `'${foreign}'`, `[example](${foreign})`, `<${foreign}|example>`]) {
+      expect(requesterRepoContext([turn(`Investigate ${issue}; also ${wrapped}`, requester)], requester)).toEqual({
+        requesterRepoConflict: true,
+      });
+    }
+  });
+
+  it("does not treat a nested or spoofed GitHub URL as a second requester issue", () => {
+    const fake = "https://evil.test/https://github.com/acme/other/issues/12";
+    const tail = [turn(`Investigate ${issue}; logs: ${fake}`, requester)];
+    expect(requesterRepoContext(tail, requester)).toEqual({ requesterRepo: "acme/sensors" });
+    expect(requesterThreadEvidence(tail, requester, "acme/sensors")).toContain(issue);
+  });
+
+  it("keeps the real issue when a later addressed turn only cites a nested GitHub URL", () => {
+    const evidence = requesterThreadEvidence(
+      [
+        turn(`Investigate ${issue}`, requester),
+        { text: "assistant: The cause is a timeout." },
+        turn("In acme/sensors: logs https://evil.test/https://github.com/acme/sensors/issues/12", requester),
+      ],
+      requester,
+      "acme/sensors",
+    );
+    expect(evidence).toContain(issue);
+    expect(evidence).toContain("The cause is a timeout.");
+    expect(evidence).not.toContain("Requester: In acme/sensors: logs");
+  });
+
+  it("hands one attributed question, issue and prior reconciliation to Ship without foreign turns", () => {
+    const evidence = requesterThreadEvidence(
+      [
+        turn("Why did monitoring fail?", requester),
+        turn("Fix https://github.com/acme/other/issues/2", "slack:UBOB"),
+        turn(`Investigate ${issue}`, requester),
+        { text: "assistant: Three failures; suspected timeout. No fix started." },
+      ],
+      requester,
+      "acme/sensors",
+    );
+    expect(evidence).toContain("Why did monitoring fail?");
+    expect(evidence).toContain(issue);
+    expect(evidence).toContain("Three failures; suspected timeout");
+    expect(evidence).not.toContain("acme/other");
+  });
+
+  it("keeps the real issue and its reconciliation when a later requester turn quotes another issue", () => {
+    for (const example of [
+      "> Fix https://github.com/acme/sensors/issues/12",
+      "In acme/sensors: for example\n> Fix https://github.com/acme/sensors/issues/12",
+      "Fix `https://github.com/acme/sensors/issues/12`",
+      "Fix\n```text\nhttps://github.com/acme/sensors/issues/12\n```",
+    ]) {
+      const evidence = requesterThreadEvidence(
+        [
+          turn("Why did monitoring fail?", requester),
+          turn(`Investigate ${issue}`, requester),
+          { text: "assistant: Three failures; suspected timeout. No fix started." },
+          turn(example, requester),
+          { text: "assistant: Issue 12 needs a different fix." },
+        ],
+        requester,
+        "acme/sensors",
+      );
+      expect(evidence).toContain(issue);
+      expect(evidence).toContain("Three failures; suspected timeout. No fix started.");
+      expect(evidence).not.toContain("issues/12");
+      expect(evidence).not.toContain("Issue 12 needs a different fix.");
+    }
+  });
+
+  it("omits an assistant reply after someone else's question from the requester's issue evidence", () => {
+    const evidence = requesterThreadEvidence(
+      [
+        turn("Why did monitoring fail?", requester),
+        turn(`Investigate ${issue}`, requester),
+        turn("What is the weather?", "slack:UBOB"),
+        { text: "assistant: Rain is forecast tomorrow." },
+      ],
+      requester,
+      "acme/sensors",
+    );
+    expect(evidence).toContain(issue);
+    expect(evidence).not.toContain("Rain is forecast tomorrow");
+    expect(evidence).not.toContain("Earlier answer");
+  });
+
+  it("omits a later assistant reply after the requester changes subjects", () => {
+    const evidence = requesterThreadEvidence(
+      [
+        turn(`Investigate ${issue}`, requester),
+        turn("What is the weather?", requester),
+        { text: "assistant: Rain is forecast tomorrow." },
+      ],
+      requester,
+      "acme/sensors",
+    );
+    expect(evidence).toContain(issue);
+    expect(evidence).not.toContain("Earlier answer");
+  });
+
+  it("does not turn a foreign actor's target into requester authority", () => {
+    expect(requesterRepoContext([turn(`Fix ${issue}`, "slack:UBOB")], requester)).toEqual({});
   });
 });
 

@@ -348,6 +348,29 @@ describe("main-agent work hand-off", () => {
 });
 
 describe("handOffToCoordinator — the ship request as a plan runner instance (item 16)", () => {
+  it("refuses a terse inherited target when its durable source turns cannot be read again", async () => {
+    const h = harness();
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({ requestText: "Fix it.", entry: { repo: "acme/api", base: "main" }, requiresThreadEvidence: true }),
+    );
+    expect(out).toMatchObject({ status: "aborted", refusal: { code: "plan_history_unavailable" } });
+    expect(h.created).toEqual([]);
+  });
+
+  it("persists the prior requester question, issue and reconciliation on the one generated unit without changing the task identity", async () => {
+    const h = harness();
+    const evidence =
+      "Requester: Why did monitoring fail?\nRequester: Investigate https://github.com/acme/api/issues/3814\nEarlier answer (recheck): Three failures; suspected timeout.";
+    const result = await handOffToCoordinator(
+      h.deps,
+      input({ requestText: "Fix it.", entry: { repo: "acme/api", base: "main" }, threadEvidence: evidence }),
+    );
+    expect(result.status).toBe("completed");
+    const row = (await h.instances.listUnits(h.created[0]!))[0]!;
+    expect(row.threadEvidence).toBe(evidence);
+    expect(row.title).toBe("Fix it.");
+  });
   it("a hand-off refusal before the final start gate never reserves a legacy transition", async () => {
     const h = harness();
     let reserved = 0;
