@@ -208,6 +208,21 @@ describe("handleIngressRequest (transport gating + dispatch)", () => {
     expect(d.calls).toHaveLength(0);
   });
 
+  it("rejects channel and thread pairs whose hosted run key exceeds the ledger limit", async () => {
+    const d = fakeDispatch();
+    const res = await handleIngressRequest(
+      {
+        method: "POST",
+        headers: bearer("tok"),
+        body: JSON.stringify({ text: "hi", channel: "c".repeat(128), thread: "t".repeat(128) }),
+      },
+      deps,
+      { auth: good, dispatch: d.fn },
+    );
+    expect(res.status).toBe(400);
+    expect(d.calls).toHaveLength(0);
+  });
+
   // authorization.md item 15: a token entry's `email` binds the credential to a person.
   it("a token bound to a person by email → the message is the person's (userId, userName) and names the credential as authenticatedAs; the dispatch gate still asks about the credential", async () => {
     const d = fakeDispatch();
@@ -432,6 +447,16 @@ describe("HttpIO (single-shot ChannelIO)", () => {
 
   it("defaults to empty history", async () => {
     expect(await new HttpIO().history()).toEqual([]);
+  });
+
+  it("opens stable coordinator job threads when bound to a request thread", async () => {
+    const key = "http:ops:t1";
+    const first = await new HttpIO([], key).openThread!("unit one", "pipeline:unit-a");
+    const retry = await new HttpIO([], key).openThread!("unit one", "pipeline:unit-a");
+    const second = await new HttpIO([], key).openThread!("unit two", "pipeline:unit-b");
+    expect(first.thread.threadKey).toBe(retry.thread.threadKey);
+    expect(second.thread.threadKey).not.toBe(first.thread.threadKey);
+    expect(first.thread.threadKey).toMatch(/^http:ops:t1\/child-[0-9a-f]{32}$/);
   });
 });
 

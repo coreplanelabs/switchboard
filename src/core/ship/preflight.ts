@@ -196,8 +196,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   const { repoCtx } = input;
   // Spec item 1 (record 0060): the runner posts its card and opens each unit's
   // thread through the requesting thread's channel, so the request handle's
-  // own capability decides — a handle without `openThread` (HTTP /ingress, the
-  // MCP dispatch tool) is refused with the spawn's reason.
+  // own capability decides — a handle without `openThread` is refused with the spawn's reason.
   if (!input.canOpenThread) {
     const base = input.runsBase?.trim();
     const page = base ? `${base.replace(/\/+$/, "")}/runs` : "the bot's /runs page";

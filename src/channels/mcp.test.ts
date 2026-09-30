@@ -86,7 +86,7 @@ describe("handleMcpRequest — initialize", () => {
 });
 
 describe("handleMcpRequest — tools/list", () => {
-  it("advertises exactly one tool with a text/thread/channel input schema", async () => {
+  it("advertises exactly one tool with a text/thread/channel/async input schema", async () => {
     const res = await handleMcpRequest(rpc("tools/list", {}), deps, { auth: good });
     expect(res.status).toBe(200);
     const tools = (res.body as RpcResult).result.tools as Array<{
@@ -98,7 +98,7 @@ describe("handleMcpRequest — tools/list", () => {
     expect(tools[0].name).toBe("dispatch");
     expect(tools[0].description).toBeTruthy();
     expect(tools[0].inputSchema.type).toBe("object");
-    expect(Object.keys(tools[0].inputSchema.properties).sort()).toEqual(["channel", "text", "thread"]);
+    expect(Object.keys(tools[0].inputSchema.properties).sort()).toEqual(["async", "channel", "text", "thread"]);
     expect(tools[0].inputSchema.required).toEqual(["text"]);
   });
 });
@@ -123,6 +123,60 @@ describe("handleMcpRequest — tools/call", () => {
       text: "hi",
       receivedAt: expect.any(Number), // stamped at receipt (docs/reference/specs/tracing.md)
     });
+  });
+
+  it("acknowledges a Ship run by id while dispatch continues, then exposes its final receipt", async () => {
+    let finish!: () => void;
+    const completed = new Promise<void>((resolve) => (finish = resolve));
+    let jobIO: McpIO | undefined;
+    const dispatch: DispatchFn = async (_deps, msg, io) => {
+      expect(msg.text).toBe("agent:ship in acme/api: repair the endpoint");
+      expect(io.openThread).toBeTypeOf("function");
+      jobIO = io as McpIO;
+      io.runStarted?.({ id: "ship-42" });
+      await completed;
+      io.runFinished?.({ id: "ship-42", status: "completed" });
+      await io.reply("Ship finished");
+    };
+    const res = await handleMcpRequest(
+      rpc("tools/call", {
+        name: "dispatch",
+        arguments: { text: "agent:ship in acme/api: repair the endpoint", channel: "ops", thread: "t1", async: true },
+      }),
+      deps,
+      { auth: good, dispatch, publicBaseUrl: "https://bot.example/" },
+    );
+    expect(res.status).toBe(200);
+    expect((res.body as RpcResult).result).toMatchObject({
+      structuredContent: {
+        runId: "ship-42",
+        runUrl: "https://bot.example/runs/ship-42",
+        threadKey: "mcp:ops:t1",
+      },
+    });
+    finish();
+    await vi.waitFor(() => expect(jobIO?.collected()).toBe("Ship finished"));
+  });
+
+  it("an async no-run answer returns the normal tool result", async () => {
+    const d = fakeDispatch("a direct answer");
+    const res = await handleMcpRequest(
+      rpc("tools/call", { name: "dispatch", arguments: { text: "help", async: true } }),
+      deps,
+      { auth: good, dispatch: d.fn },
+    );
+    expect((res.body as RpcResult).result).toEqual({ content: [{ type: "text", text: "a direct answer" }] });
+  });
+
+  it("rejects a non-boolean async flag before dispatch", async () => {
+    const d = fakeDispatch();
+    const res = await handleMcpRequest(
+      rpc("tools/call", { name: "dispatch", arguments: { text: "agent:ship fix it", async: "yes" } }),
+      deps,
+      { auth: good, dispatch: d.fn },
+    );
+    expect((res.body as RpcError).error.code).toBe(-32602);
+    expect(d.calls).toHaveLength(0);
   });
 
   // authorization.md item 15: the same binding the HTTP ingress applies, in the mcp: namespace.
@@ -237,6 +291,20 @@ describe("handleMcpRequest — tools/call", () => {
       });
       expect((res.body as RpcError).error.code).toBe(-32602);
     }
+    expect(d.calls).toHaveLength(0);
+  });
+
+  it("rejects channel and thread pairs whose hosted run key exceeds the ledger limit", async () => {
+    const d = fakeDispatch();
+    const res = await handleMcpRequest(
+      rpc("tools/call", {
+        name: "dispatch",
+        arguments: { text: "hi", channel: "c".repeat(128), thread: "t".repeat(128) },
+      }),
+      deps,
+      { auth: good, dispatch: d.fn },
+    );
+    expect((res.body as RpcError).error.code).toBe(-32602);
     expect(d.calls).toHaveLength(0);
   });
 

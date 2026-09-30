@@ -914,8 +914,8 @@ export async function runBot(): Promise<void> {
   // channel and ts (and the row's card, when it has one); the web from the
   // key's sub — history as the session's own actor, `openThread` minting a
   // conversation in the same lane, replies logged as undeliverable (record
-  // 0060); HTTP and MCP have no thread to speak into, so their handle logs;
-  // any other platform, none.
+  // 0060); HTTP and MCP rebuild logical job threads whose replies are recorded
+  // on runs, while the handle logs undeliverable channel replies; any other platform, none.
   const threadIoFor = (
     thread: { threadKey: string; userId: string; cardTs?: string },
     request?: IncomingMessage,
@@ -1068,7 +1068,13 @@ export async function runBot(): Promise<void> {
     // A token entry's `email` binds it to a person (authorization.md item 15):
     // the same cached reverse lookup the dashboard link uses.
     const ingress = createIngressHandler(deps, { auth, publicBaseUrl: process.env.PUBLIC_BASE_URL, personByEmail });
-    const mcp = createMcpHandler(deps, { auth, commands, grantsFor: (id) => config.grantsFor(id), personByEmail });
+    const mcp = createMcpHandler(deps, {
+      auth,
+      commands,
+      grantsFor: (id) => config.grantsFor(id),
+      personByEmail,
+      publicBaseUrl: process.env.PUBLIC_BASE_URL,
+    });
     // The model proxy (docs/reference/specs/model-proxy.md): a run's bearer buys
     // model calls through this process — pinned to its preset's model and caps,
     // metered as its own `model.turn` spans, forwarded to the real provider with

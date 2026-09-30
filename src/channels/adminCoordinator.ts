@@ -724,13 +724,14 @@ type OpenedThreadRef = { threadKey: string; sourceUrl?: string };
 async function openThreadFromRequester(
   deps: AdminCoordinatorDeps,
   instance: CoordinatorInstance,
+  unit: string,
   lead: string,
   at: number,
 ): Promise<{ ok: true; thread: OpenedThreadRef } | { ok: false; response: IngressResponse }> {
   const parent = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId });
   if (!parent?.openThread) return { ok: false, response: json(503, { ok: false, error: "no_channel", at }) };
   try {
-    const opened = await parent.openThread(lead);
+    const opened = await parent.openThread(lead, `${instance.id}:${unit}`);
     return {
       ok: true,
       thread: {
@@ -4285,7 +4286,7 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
         ...(instance.sourceUrl !== undefined ? { sourceUrl: instance.sourceUrl } : {}),
       };
     } else {
-      const opened = await openThreadFromRequester(deps, instance, unitLead(instance, row), at);
+      const opened = await openThreadFromRequester(deps, instance, row.unit, unitLead(instance, row), at);
       if (!opened.ok) return opened.response;
       row = { ...row, ...opened.thread };
     }

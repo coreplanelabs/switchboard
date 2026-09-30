@@ -541,8 +541,6 @@ export interface WebLane {
 export class WebIO extends HttpIO {
   private runId: string | undefined;
   private offerShown: ConfirmationOffer | undefined;
-  /** Present when this handle can open a thread of its own (thread-admission item 6). */
-  openThread?: (lead: string) => Promise<OpenedThread>;
   /** Set on a rebuilt handle: the seal reads it (`replyOk: false`). */
   readonly undeliverable?: string;
   private replyLog?: (text: string) => void;
