@@ -493,6 +493,7 @@ export interface RunOperatorDecision {
     repo?: string;
     repoSource?: "request" | "attachment" | "thread" | "channel";
     shipEntry?: "work" | "work_from_thread" | "review" | "plan";
+    workObjective?: string;
     confirmed?: true;
   }[];
   question?: string;

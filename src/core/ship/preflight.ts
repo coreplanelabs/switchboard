@@ -124,6 +124,8 @@ export interface ShipPreflightInput {
   requestText: string;
   /** The operator's typed starting stage. Legacy typed ingress may omit it. */
   intent?: ShipEntryIntent;
+  /** The operator's separate code-change objective when work cites a PR. */
+  workObjective?: string;
   repoCtx: Pick<
     RepoContext,
     "repo" | "pr" | "prFromMessage" | "prIsThreadOwn" | "ref" | "refFromPr" | "baseRef" | "headSha" | "prUnpostable"
@@ -255,6 +257,16 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   // Keep the referenced URL in real work requests; this check only prevents
   // an empty request from taking the fresh-coding path.
   const barePrReference = repoCtx.prFromMessage === true && shipTaskText(input.requestText, repo) === "";
+  // A cited PR plus an alleged work stage can mean either review or a new
+  // change. The operator must name the separate change before round zero may
+  // code; the raw request remains intact as the unit's brief.
+  if (input.intent === "work" && repoCtx.prFromMessage === true && !barePrReference && !input.workObjective?.trim())
+    return refuse(
+      "ship_preflight_no_task",
+      "work objective missing beside pull request",
+      "not started (work unclear)",
+      `🚫 I couldn't tell what new change you want alongside ${repo}#${repoCtx.pr}. Ask Ship to review that PR, or name the separate change.`,
+    );
   const task =
     input.intent === "review" || barePrReference
       ? ""

@@ -1155,6 +1155,7 @@ export type RunEvent =
         repoSource?: "request" | "attachment" | "thread" | "channel";
         /** The operator-selected first stage of a Ship unit. */
         shipEntry?: "work" | "work_from_thread" | "review" | "plan";
+        workObjective?: string;
         confirmed?: true;
       }>;
       question?: string;

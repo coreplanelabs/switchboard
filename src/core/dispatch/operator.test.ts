@@ -359,6 +359,30 @@ channels:
     });
   });
 
+  it("bind_preset carries a separate code-change objective when Ship work cites a PR", () => {
+    const answer = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "ship",
+          shipEntry: "work",
+          workObjective: "fix the failing check",
+          repo: "acme/api",
+          reason: "the PR is evidence for a new change",
+        },
+      },
+      ctxOf({ requestText: "fix the failing check seen on https://github.com/acme/api/pull/7", presets: ["ship"] }),
+    );
+    expect(answer).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ workObjective: "fix the failing check" }] },
+    });
+    if (answer.kind !== "decision") throw new Error("not a decision");
+    expect(operatorEventOf("on", { decision: answer.decision, latencyMs: 0, outputTokens: 0 })).toMatchObject({
+      binds: [{ workObjective: "fix the failing check" }],
+    });
+  });
+
   it("bind_preset marks a terse write as depending on the requester's thread target", () => {
     const answer = parseOperatorTurn(
       {

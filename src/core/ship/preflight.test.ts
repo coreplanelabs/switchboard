@@ -61,6 +61,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
       input({
         intent: "work",
         requestText: `investigate the failing check at ${PR_URL}`,
+        workObjective: "investigate the failing check",
         repoCtx: { repo: "acme/api", pr: 7, prFromMessage: true, ref: "feat/rate-limit", refFromPr: true },
         prFacts: async () => undefined,
       }),
@@ -133,6 +134,18 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
       }),
     );
     expect(res).toMatchObject({ ok: true, entry: { resume: { pr: 7, headSha: HEAD } } });
+  });
+
+  it("a misbound explicit PR review refuses coding without a separate work objective", async () => {
+    const res = await shipPreflight(
+      input({
+        intent: "work",
+        requestText: `review ${PR_URL}`,
+        repoCtx: { repo: "acme/api", pr: 7, prFromMessage: true },
+        prFacts: async () => openPr(),
+      }),
+    );
+    expect(res).toMatchObject({ ok: false, refusal: { code: "ship_preflight_no_task" } });
   });
 
   it("context: a FOREIGN in-message pull request (not the thread's own) beside task text stays context — a fresh entry off the default branch, even when its facts cannot be fetched or its head is a fork", async () => {

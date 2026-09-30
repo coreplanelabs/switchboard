@@ -313,6 +313,9 @@ export async function runShipBranch(
       canOpenThread: io.openThread !== undefined,
       requestText: directives.text,
       ...(ctx.shipEntry !== undefined ? { intent: ctx.shipEntry } : {}),
+      ...(ctx.operator?.binds?.[0]?.workObjective !== undefined
+        ? { workObjective: ctx.operator.binds[0].workObjective }
+        : {}),
       repoCtx,
       ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates } : {}),
       gates: {
