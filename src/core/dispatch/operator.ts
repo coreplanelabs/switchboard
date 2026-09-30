@@ -63,7 +63,7 @@ import { chatActorOf } from "../authz/actor.js";
 import { renderRepoFacts } from "./repoFacts.js";
 import { barePrNumberOf, explicitRepoOf, type ResidentSlugs } from "../repoContext.js";
 import { parseSlug } from "../residentAdmin.js";
-import { linkedPullRequestsOf, prBatchBindingOf, type PrBatchBinding } from "../prBatchBinding.js";
+import { prBatchBindingOf, type PrBatchBinding } from "../prBatchBinding.js";
 import { residentSlugsLister } from "../../execution/factory.js";
 import type { ProviderModelsReader } from "./providerModels.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
@@ -526,8 +526,8 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
         ]
       : []),
     "A write ask in a named or inherited repository binds the write preset even when a detail inside it is unresolved — the run it starts resolves the detail with the repository in front of it. For a terse fix, inherit only the same requester's actor-stamped explicit target in the thread; a prior general run's repository and other people's or assistant turns do not authorize a write. Conflicting requester targets require one question. Ask a question only for a fork the run itself could not resolve, and a question's proposal must be a line that would do the asked work: a write line for a write ask, never a read (an exploration, a listing, a summary) standing in for the work.",
-    "An explicit positive request to review or ship several linked pull requests uses `bind_pr_batch`, even when the links span repositories or Slack flattens their bullets. Choose the action word and every PR link destination in that one list, in order; omit context, negated and quoted links. If the action or list is ambiguous, ask. That typed choice starts the conductor with no single repository target. Each child is held to one selected URL at its spawn boundary.",
-    "For one Ship request, choose `shipEntry` in `bind_preset`: `review` when the person asks Ship to review an existing pull request, `work` for a self-contained change, `work_from_thread` when the requested change depends on earlier requester context in this thread (for example, 'fix it'), or `plan` for an explicit `agent:ship plan <path>.md` request. A review starts in the review round of that exact PR; never turn the word 'review' or its URL into a coding task. If work cites a PR as evidence for a separate change, give `workObjective` as an exact quote of the requester's distinct code-change ask, from this turn or an earlier requester turn. Omit it for review or continuation of the cited PR; without requester-backed words a work bind citing a PR stops before coding. A request naming `agent:ship` still passes through this door and keeps Ship as its preset. The runner verifies the PR, head, repository and permissions after the bind.",
+    "An explicit positive request to review or ship several linked pull requests uses `bind_pr_batch`, even when links span repositories or Slack flattens their bullets. Choose the action and every PR link destination in order; omit context, negated and quoted links. Supply `actionQuote` as an exact authored action span and one exact destination URL in `targetQuotes` for each chosen URL. If the action or list is ambiguous, ask. That typed choice starts the conductor with no single repository target. Each child is held to one selected URL at its spawn boundary.",
+    "For one Ship request, choose `shipEntry` in `bind_preset`: `continue` only to resume this thread's unfinished Ship unit on its owned pull request; `review` when the person asks Ship to review an existing pull request without resuming its writer; `work` for a self-contained new change; `work_from_thread` when new work depends on earlier requester context; or `plan` for an explicit seeded plan. A review starts in the review round of that exact PR; never turn the word 'review' or its URL into a coding task. If work cites a PR as evidence for a separate change, give `workObjective` as an exact quote of the requester's distinct code-change ask, from this turn or an earlier requester turn. Omit it for review or continuation. A request naming `agent:ship` still passes through this door. The runner verifies the PR, head, repository, owner and permissions after the bind.",
     "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a proposal that would do the write built from them — the person's yes runs it, and their next words refine it.",
     "A question about whether the person has config overrides uses `config show`: it describes their own scope, this channel's scope and the effective settings. `config overrides` lists channels with scopes; use it only when they ask which channels have settings.",
     "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run. Pass that ref as `bind_preset`'s `model` and one exact model-name word from the person's request as `modelWord` (such as 'astra', 'o3', or 'gpt-6'). When the person wrote the full `<provider>/<model>` ref, pass it as `model` and omit `modelWord`; the exact authored ref is its evidence. The run uses either at request precedence. The request still rides verbatim — never strip the model choice from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model omits both fields.",
@@ -721,9 +721,9 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
                 },
                 shipEntry: {
                   type: "string",
-                  enum: ["work", "work_from_thread", "review", "plan"],
+                  enum: ["work", "work_from_thread", "review", "plan", "continue"],
                   description:
-                    "required for ship: review starts at the verified existing PR's review round; work starts coding for a self-contained change; work_from_thread starts coding from the requester's earlier thread context; plan uses the explicitly requested seeded plan. Omit for other presets",
+                    "required for ship: continue resumes only the thread's unfinished owned unit; review starts at an existing PR's review round; work and work_from_thread start new changes; plan uses the explicitly requested seeded plan. Omit for other presets",
                 },
                 workObjective: {
                   type: "string",
@@ -745,10 +745,18 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
           inputSchema: {
             type: "object",
             additionalProperties: false,
-            required: ["kind", "targets", "reason"],
+            required: ["kind", "targets", "actionQuote", "targetQuotes", "reason"],
             properties: {
               kind: { type: "string", enum: ["review", "ship"] },
               targets: { type: "array", minItems: 2, maxItems: 32, items: { type: "string" } },
+              actionQuote: { type: "string", description: "one exact action span in this request" },
+              targetQuotes: {
+                type: "array",
+                minItems: 2,
+                maxItems: 32,
+                items: { type: "string" },
+                description: "the complete destination URL span for each selected target in the same order",
+              },
               reason: { type: "string", description: "one line: why these PRs need coordinated runs" },
             },
           },
@@ -1243,7 +1251,7 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
   if (answer.tool === OPERATOR_BATCH_TOOL) {
     if (!ctx.presets.includes("conductor"))
       return { kind: "violation", violation: "a PR batch needs the conductor preset" };
-    const parsed = prBatchBindingOf(input, stripDirectiveHead(ctx.requestText, "conductor"));
+    const parsed = prBatchBindingOf(input, ctx.requestText);
     if ("error" in parsed) return { kind: "violation", violation: parsed.error };
     const reason = tidy(input.reason);
     const line = operatorLine(redactSecrets(`agent:conductor ${stripDirectiveHead(ctx.requestText, "conductor")}`));
@@ -1260,18 +1268,17 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         violation: `bind_preset named "${String(preset)}", not a preset the projection offers`,
       };
     const selectedPreset = preset;
-    if (linkedPullRequestsOf(ctx.requestText).length >= 2)
-      return { kind: "violation", violation: "a multi-PR Review or Ship request needs bind_pr_batch" };
     if (
       selectedPreset === "ship" &&
       shipEntry !== "work" &&
       shipEntry !== "work_from_thread" &&
       shipEntry !== "review" &&
-      shipEntry !== "plan"
+      shipEntry !== "plan" &&
+      shipEntry !== "continue"
     )
       return {
         kind: "violation",
-        violation: "bind_preset for ship needs shipEntry: work, work_from_thread, review or plan",
+        violation: "bind_preset for ship needs shipEntry: work, work_from_thread, review, plan or continue",
       };
     if (
       selectedPreset === "ship" &&
@@ -1565,7 +1572,12 @@ function runnableProposal(proposal: string, ctx: OperatorTurnContext): boolean {
  *  no reply text. A question is normally the caller's to render before this
  *  is asked; an ended pipeline is the exception, because every action there
  *  folds to its deterministic continuation except an explicitly enabled review. */
-function ownedDecisionRuns(event: OperatorEventFields, owner: OperatorThreadOwner, commands?: ChatCommands): boolean {
+function ownedDecisionRuns(
+  event: OperatorEventFields,
+  owner: OperatorThreadOwner,
+  commands?: ChatCommands,
+  requestText?: string,
+): boolean {
   if (event.outcome !== "binds") return false;
   // Only an unconfirmed review of the explicitly named, ended unit's PR is
   // independent work. Every other decision still reaches continuation's gates.
@@ -1591,11 +1603,13 @@ function ownedDecisionRuns(event: OperatorEventFields, owner: OperatorThreadOwne
     // has no live steer target either: folding reaches the dispatcher's durable
     // task re-issue path instead of letting a transcript's stale run id answer.
     if (def.id === "steer.run") return !(owner.kind === "live" && owner.runId === undefined);
-    // An idle unit owns this thread even when the operator infers a read from
-    // an action request. A plain reply reaches the unit's durable event path;
-    // a person's explicitly typed command is still handled by the command
-    // fast path in dispatch, without relying on this model decision.
-    return owner.kind !== "unit" && boundBlastRadius(def as CommandDef<unknown>, parsed.input) === "read";
+    // An inferred read cannot answer an idle unit's action request. The
+    // author's exact command line is evidence for a separate read without
+    // a second grammar interpreting the incoming message.
+    return (
+      boundBlastRadius(def as CommandDef<unknown>, parsed.input) === "read" &&
+      (owner.kind !== "unit" || requestText?.trim() === bind.line.trim())
+    );
   });
 }
 
@@ -2931,7 +2945,8 @@ export async function executeOperatorDecision(
   // Ownership already resolved this event to one ended pipeline. The operator
   // may select a separately requested review only when that owner allowed it.
   // Reads, writes, questions and stale steers still fold to continuation.
-  if (ctx.owner?.kind === "pipeline" && !ownedDecisionRuns(event, ctx.owner, deps.commands)) return { kind: "fold" };
+  if (ctx.owner?.kind === "pipeline" && !ownedDecisionRuns(event, ctx.owner, deps.commands, msg.text))
+    return { kind: "fold" };
   if (event.outcome === "question") {
     // The `question` cell: rendered, then parked as the thread's pending
     // question on a door record — the person's next words are its answer.
@@ -2957,7 +2972,7 @@ export async function executeOperatorDecision(
   // 9): a decision that is not a steer, a read or the question above is the
   // steer of the whole message — the `steer_owned` row's fold — and no reply
   // text is posted here.
-  if (ctx.owner !== undefined && !ownedDecisionRuns(event, ctx.owner, deps.commands)) {
+  if (ctx.owner !== undefined && !ownedDecisionRuns(event, ctx.owner, deps.commands, msg.text)) {
     // A confirmed "yes" to a question minted before the thread became owned
     // folds the proposal's own words — a preset line's tail, the whole line
     // otherwise — never the literal "yes" (review F2 of the owned-thread fold).

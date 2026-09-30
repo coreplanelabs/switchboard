@@ -1163,11 +1163,12 @@ export type RunEvent =
         /** The admissible fact behind the model's typed repo choice. */
         repoSource?: "request" | "attachment" | "thread" | "channel";
         /** The operator-selected first stage of a Ship unit. */
-        shipEntry?: "work" | "work_from_thread" | "review" | "plan";
+        shipEntry?: "work" | "work_from_thread" | "review" | "plan" | "continue";
         workObjective?: string;
         prBatch?: {
           kind: "review" | "ship";
           targets: ReadonlyArray<{ repo: string; number: number; url: string }>;
+          evidence?: { action: string; targets: ReadonlyArray<string> };
         };
         confirmed?: true;
       }>;

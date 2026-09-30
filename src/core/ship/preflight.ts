@@ -108,7 +108,7 @@ export type ShipPreflightResult =
 /** The operator's starting stage for a Ship request. This is a decision about
  * the requested work, not permission or a PR identity; preflight still checks
  * the resolved target and its current GitHub facts. */
-export type ShipEntryIntent = "work" | "work_from_thread" | "review" | "plan";
+export type ShipEntryIntent = "work" | "work_from_thread" | "review" | "plan" | "continue";
 
 export interface ShipPreflightInput {
   /** Platform-namespaced channel id (AGENTS.md invariant 4) — names the
@@ -212,6 +212,13 @@ function noRepoGuess(
  */
 export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPreflightResult> {
   const { repoCtx } = input;
+  if (input.intent === "continue")
+    return refuse(
+      "ship_preflight_no_task",
+      "no owned unit for continuation",
+      "not started (no unit to continue)",
+      "This thread has no unfinished Ship unit to continue. Nothing started.",
+    );
   // Spec item 1 (record 0060): the runner posts its card and opens each unit's
   // thread through the requesting thread's channel, so the request handle's
   // own capability decides — a handle without `openThread` is refused with the spawn's reason.

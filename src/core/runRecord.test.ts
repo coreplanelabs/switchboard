@@ -120,6 +120,10 @@ it("a typed PR batch survives the operator event and JSON storage for a resumed 
             { repo: "acme/api", number: 7, url: "https://github.com/acme/api/pull/7" },
             { repo: "acme/web", number: 9, url: "https://github.com/acme/web/pull/9" },
           ],
+          evidence: {
+            action: "review these",
+            targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
+          },
         },
       },
     ],
