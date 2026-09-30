@@ -29,6 +29,7 @@ import type { SkillStore } from "../skills/index.js";
 import type { ArtifactsCapability, AttachCapability, UploadTicketCapability } from "./attach.js";
 import type { GithubCapability } from "./github.js";
 import type { MainWorkCapability } from "./mainWork.js";
+import type { MainStartCapability } from "./mainStart.js";
 import type { PlaneReadCapability } from "./plane.js";
 import type { RunsReadCapability, SteerCapability } from "./runs.js";
 import type { SessionCapability } from "./session.js";
@@ -96,6 +97,8 @@ export interface ToolContext {
   github?: GithubCapability;
   /** Requester-bound Slack source reads; only a Slack main run may receive it. */
   slackContext?: SlackContextCapability;
+  /** One private Ship worker start, bound to this run's requester and message. */
+  mainStart?: MainStartCapability;
   /** Repo-bound CI operations at the credential-holding Worker; never a Depot token. */
   depotCi?: DepotCi;
   /** The calling agent's name — scopes list_skills/use_skill so an agent only

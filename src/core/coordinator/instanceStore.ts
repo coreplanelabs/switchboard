@@ -28,6 +28,16 @@ import {
   type ThreadEvent,
   type UnitWakeAnswer,
 } from "./contract.js";
+import {
+  compareSlackMessageId,
+  isRequesterTurnInput,
+  sameMainTaskAuthority,
+  type MainTaskAuthority,
+  type RecordRequesterTurnResult,
+  type RequesterKey,
+  type RequesterTurn,
+  type RequesterTurnInput,
+} from "./requesterAuthority.js";
 
 /** `exists`: a different record already holds the id (an identical put is
  *  idempotent); `unavailable`: no durable store in this process. */
@@ -43,6 +53,8 @@ export type ReserveDecisionRecordResult = { ok: true; number: string } | { ok: f
 export interface MainTaskLink {
   instanceId: string;
   unit: string;
+  /** Missing on legacy links, which cannot authorize a new Workflow create. */
+  authority?: MainTaskAuthority;
 }
 export type ClaimMainTaskResult =
   { ok: true; created: boolean; link: MainTaskLink } | { ok: false; reason: "conflict" | "unavailable" };
@@ -58,11 +70,19 @@ export interface UnitEventKey {
 export type ThreadEventInput = Omit<ThreadEvent, "seq" | "consumedBy">;
 
 export interface CoordinatorInstanceStore {
+  /** The authenticated requester turn, outside model and session content. */
+  recordRequesterTurn(input: RequesterTurnInput): Promise<RecordRequesterTurnResult>;
+  latestRequesterTurn(key: RequesterKey): Promise<RequesterTurn | null>;
   /** An index from one main-agent decision to the existing Ship unit. */
   getMainTask(key: MainTaskKey): Promise<MainTaskLink | null>;
   /** Atomically claim the index, instance and first unit. A replay returns the
    * original link; another key cannot take an existing instance id. */
-  claimMainTask(key: MainTaskKey, instance: CoordinatorInstance, unit: CoordinatorUnit): Promise<ClaimMainTaskResult>;
+  claimMainTask(
+    key: MainTaskKey,
+    instance: CoordinatorInstance,
+    unit: CoordinatorUnit,
+    authority: MainTaskAuthority,
+  ): Promise<ClaimMainTaskResult>;
   put(instance: CoordinatorInstance): Promise<PutInstanceResult>;
   /** The record written over whatever the id holds and the id's unit rows
    *  dropped — an attempt starting over: the leftover of one whose Workflow
@@ -133,10 +153,35 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   private readonly units = new Map<string, string>();
   private readonly decisionRecords = new Map<string, string>();
   private readonly mainTasks = new Map<string, MainTaskLink>();
+  private readonly requesterTurns = new Map<string, RequesterTurn>();
   /** The unit event lists, by unit key — the Worker's `coordinator_unit_events` table mirrored. */
   private readonly events = new Map<string, ThreadEvent[]>();
   private mainTaskKey(key: MainTaskKey): string {
     return `${key.mainThreadKey}\0${key.actId}`;
+  }
+  private requesterKey(key: RequesterKey): string {
+    return `${key.threadKey}\0${key.requesterId}`;
+  }
+  async recordRequesterTurn(input: RequesterTurnInput): Promise<RecordRequesterTurnResult> {
+    if (!isRequesterTurnInput(input)) return { ok: false, reason: "conflict" };
+    const key = this.requesterKey(input);
+    const previous = this.requesterTurns.get(key);
+    if (previous && previous.messageId === input.messageId)
+      return previous.questionTarget === input.questionTarget
+        ? { ok: true, turn: previous }
+        : { ok: false, reason: "conflict" };
+    if (previous && compareSlackMessageId(input.messageId, previous.messageId) <= 0)
+      return { ok: false, reason: "conflict" };
+    const turn: RequesterTurn = {
+      ...input,
+      revision: (previous?.revision ?? 0) + 1,
+      ...(previous?.questionTarget !== undefined ? { priorQuestionTarget: previous.questionTarget } : {}),
+    };
+    this.requesterTurns.set(key, turn);
+    return { ok: true, turn };
+  }
+  async latestRequesterTurn(key: RequesterKey): Promise<RequesterTurn | null> {
+    return this.requesterTurns.get(this.requesterKey(key)) ?? null;
   }
   async getMainTask(key: MainTaskKey): Promise<MainTaskLink | null> {
     return this.mainTasks.get(this.mainTaskKey(key)) ?? null;
@@ -145,18 +190,29 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     key: MainTaskKey,
     instance: CoordinatorInstance,
     unit: CoordinatorUnit,
+    authority: MainTaskAuthority,
   ): Promise<ClaimMainTaskResult> {
     if (
       !isMainTaskKey(key) ||
       !isCoordinatorInstance(instance) ||
       !isCoordinatorUnit(unit) ||
-      !mainTaskClaimMatches(key, instance, unit)
+      !mainTaskClaimMatches(key, instance, unit) ||
+      authority.requesterId !== instance.userId ||
+      authority.repo.toLowerCase() !== instance.repo.toLowerCase()
     )
       return { ok: false, reason: "conflict" };
     const prior = this.mainTasks.get(this.mainTaskKey(key));
-    if (prior !== undefined) return { ok: true, created: false, link: prior };
+    if (prior !== undefined)
+      return sameMainTaskAuthority(prior.authority, authority)
+        ? { ok: true, created: false, link: prior }
+        : { ok: false, reason: "conflict" };
+    const current = this.requesterTurns.get(
+      this.requesterKey({ threadKey: key.mainThreadKey, requesterId: authority.requesterId }),
+    );
+    if (current?.messageId !== authority.sourceMessageId || current.revision !== authority.revision)
+      return { ok: false, reason: "conflict" };
     if (this.rows.has(instance.id) || this.units.has(unitKey(unit))) return { ok: false, reason: "conflict" };
-    const link = { instanceId: instance.id, unit: unit.unit };
+    const link = { instanceId: instance.id, unit: unit.unit, authority };
     this.rows.set(instance.id, JSON.stringify(instance));
     this.units.set(unitKey(unit), JSON.stringify(unit));
     this.mainTasks.set(this.mainTaskKey(key), link);
@@ -312,6 +368,12 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
 /** The store of a process without a durable state Worker: no instance exists
  *  and none can be written, so every coordinator route answers by name. */
 export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async recordRequesterTurn(_input: RequesterTurnInput): Promise<RecordRequesterTurnResult> {
+    return { ok: false, reason: "unavailable" };
+  }
+  async latestRequesterTurn(_key: RequesterKey): Promise<RequesterTurn | null> {
+    return null;
+  }
   async getMainTask(_key: MainTaskKey): Promise<MainTaskLink | null> {
     return null;
   }
@@ -319,6 +381,7 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
     _key: MainTaskKey,
     _instance: CoordinatorInstance,
     _unit: CoordinatorUnit,
+    _authority: MainTaskAuthority,
   ): Promise<ClaimMainTaskResult> {
     return { ok: false, reason: "unavailable" };
   }
@@ -421,6 +484,22 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     return { status: res.status, data };
   }
 
+  async recordRequesterTurn(input: RequesterTurnInput): Promise<RecordRequesterTurnResult> {
+    const r = await this.post("/runs/coordinator/requester-turn/record", { input });
+    const d = r.data as { ok?: unknown; reason?: unknown; turn?: unknown };
+    if (r.status === 409 && d.reason === "conflict") return { ok: false, reason: "conflict" };
+    if (d.ok === true && d.turn && typeof d.turn === "object") return { ok: true, turn: d.turn as RequesterTurn };
+    throw new Error(`coordinator store requester-turn/record: unexpected answer (HTTP ${r.status})`);
+  }
+
+  async latestRequesterTurn(key: RequesterKey): Promise<RequesterTurn | null> {
+    const r = await this.post("/runs/coordinator/requester-turn/latest", { key });
+    const d = r.data as { turn?: unknown };
+    if (d.turn === null) return null;
+    if (d.turn && typeof d.turn === "object") return d.turn as RequesterTurn;
+    throw new Error(`coordinator store requester-turn/latest: unexpected answer (HTTP ${r.status})`);
+  }
+
   async getMainTask(key: MainTaskKey): Promise<MainTaskLink | null> {
     const r = await this.post("/runs/coordinator/main-task/get", { key });
     const d = r.data as { link?: unknown };
@@ -439,8 +518,9 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     key: MainTaskKey,
     instance: CoordinatorInstance,
     unit: CoordinatorUnit,
+    authority: MainTaskAuthority,
   ): Promise<ClaimMainTaskResult> {
-    const r = await this.post("/runs/coordinator/main-task/claim", { key, instance, unit });
+    const r = await this.post("/runs/coordinator/main-task/claim", { key, instance, unit, authority });
     const d = r.data as { ok?: unknown; created?: unknown; link?: unknown; reason?: unknown };
     if (r.status === 409 && d.reason === "conflict") return { ok: false, reason: "conflict" };
     if (

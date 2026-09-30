@@ -1851,7 +1851,12 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
   it("a follow-up's steer whose answer the reset cut after the row landed is learned from the store — folded in, its row's id known — so a later lost prompt of the same text is still re-issued", async () => {
     const NOW = 1_700_000_000_000;
     const sameWords = followUpPrompt([{ text: "same words", userId: "user:conformance", at: NOW }]);
-    const r = await openCodeDriver({ controlResetOnSteer: "landed", controlResetOnPrompt: "lost" }).run({
+    const confirmed: string[] = [];
+    const r = await openCodeDriver({
+      controlResetOnSteer: "landed",
+      controlResetOnPrompt: "lost",
+      onConfirmedFollowUp: (text) => confirmed.push(text),
+    }).run({
       ...oneTurn,
       request: sameWords,
       followUp: "same words",
@@ -1868,6 +1873,7 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(followUps.some((s) => /follow-up folded in/.test(s))).toBe(true);
     expect(followUps.some((s) => /not delivered/.test(s))).toBe(false);
     expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(confirmed).toEqual(["same words"]);
   });
 
   it("a steer that lands after the cut prompt — its row newer than the prompt's, known by its answer — does not hide a landed prompt: the read stops at what was known when the prompt was posted, so the prompt is not re-issued", async () => {
@@ -2052,7 +2058,11 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
   });
 
   it("a steer the server answered without a message id and recorded nothing: no row in the idle store is the steer lost — handed back for a fresh turn once the loop has left and never steered again by this loop: one steer POST, one store read, the follow-up in the inbox after the run and never shown to the model", async () => {
-    const r = await openCodeDriver({ steerAnswersNoId: "dropped" }).run({
+    const confirmed: string[] = [];
+    const r = await openCodeDriver({
+      steerAnswersNoId: "dropped",
+      onConfirmedFollowUp: (text) => confirmed.push(text),
+    }).run({
       ...toolTurn,
       followUp: "also check the docs",
     });
@@ -2074,6 +2084,7 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(storeReads(r)).toHaveLength(1);
     expect(r.inboxLeft.map((i) => i.text)).toEqual(["also check the docs"]);
     expect(modelSaw(r, "also check the docs")).toBe(false);
+    expect(confirmed).toEqual([]);
   });
 
   it("a batch of two follow-ups whose first steer the store told lost: the second is held with it — the batch handed back in order for the fresh turn once the loop has left, one steer POST, neither shown to the model", async () => {

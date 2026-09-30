@@ -407,6 +407,49 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     expect(ledger.handle!.events.map((e) => e.event.type)).toEqual(["input"]);
   });
 
+  it("only a direct requester Slack DM main run advertises private work start to the model", async () => {
+    const names = async (visibility: "dm" | "public" | "unknown", attested = true, verifier = true) => {
+      const { deps, ledger, base } = setup();
+      const agent = getAgent("orchestrator");
+      const dmMsg = {
+        ...base.msg,
+        channelId: "slack:D1",
+        threadKey: "slack:D1:1",
+        userId: "slack:UADMIN",
+        ...(attested
+          ? {
+              directAudience: {
+                kind: "slack-unshared-im" as const,
+                channelId: "slack:D1",
+                userId: "slack:UADMIN",
+                threadKey: "slack:D1:1",
+              },
+            }
+          : {}),
+      };
+      deps.mainTaskStart = async () => ({ kind: "refused", reply: "fixture" });
+      await claimRun(deps, {
+        ...base,
+        msg: dmMsg,
+        privateWorkVerifierAvailable: verifier,
+        ...(verifier ? { verifyDirectAudience: async () => true } : {}),
+        agent,
+        profile: declaredProfile(agent),
+        resolved: { ...base.resolved, agentName: agent.name },
+        channelVisibility: visibility,
+        reserved: new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} }),
+        resume: undefined,
+        ledgerRun: undefined,
+      });
+      return ledger.opened[0]!.tools.map((tool) => tool.name);
+    };
+    expect(await names("dm")).toContain("work_start");
+    expect(await names("dm", false)).not.toContain("work_start");
+    expect(await names("dm", true, false)).not.toContain("work_start");
+    expect(await names("public")).not.toContain("work_start");
+    expect(await names("unknown")).not.toContain("work_start");
+  });
+
   // run-history item 48a: the coordinator tag is a fact of the run — the claim
   // publishes it as a typed event, so it lands on the ledger row and a resume
   // after a bot roll reads the plan's base back off the run's own events.

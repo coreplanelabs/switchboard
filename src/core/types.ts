@@ -53,7 +53,7 @@ export interface StagedFile {
   workspaceIndex?: number;
 }
 
-/** A Slack adapter claim about the reply address; consumers recheck it before use. */
+/** A Slack adapter claim about a one-person internal DM; consumers recheck it before use. */
 export interface SlackDirectAudience {
   kind: "slack-unshared-im";
   channelId: string;

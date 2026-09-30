@@ -642,6 +642,8 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
 
   it("a thread follow-up is steered into pi with the loop's follow-up prompt, recorded as an input and a follow_up note; the ledger counts it consumed once pi echoes the steer, not before", async () => {
     const w = world();
+    const confirmed: string[] = [];
+    w.run.confirmedFollowUps = (inputs) => confirmed.push(...inputs.map((input) => input.text));
     scriptedPi(w.container, () => {
       w.inbox.push({ text: "also bump the version", userId: "slack:UANN", userName: "ann", at: NOW, ledgerSeq: 3 });
       bashTurn(w, "c1", "ls", "files");
@@ -675,10 +677,13 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     // The bash step's record predates the echo; the final turn's record says the seq is consumed.
     expect(w.steps.map((s) => s.inboxConsumedSeq)).toEqual([0, 3]);
     expect(w.inbox.size).toBe(0);
+    expect(confirmed).toEqual(["also bump the version"]);
   });
 
   it("a follow-up steered into pi that the loop then fails before pi echoes it goes back to the inbox — the run stage's fresh turn, never the floor; one pi settled before the steer could go too", async () => {
     const failed = world();
+    const confirmed: string[] = [];
+    failed.run.confirmedFollowUps = (inputs) => confirmed.push(...inputs.map((input) => input.text));
     scriptedPi(failed.container, (_n, c) => {
       failed.inbox.push({ text: "also bump the version", userId: "slack:UANN", at: NOW, ledgerSeq: 3 });
       bashTurn(failed, "c1", "ls", "files");
@@ -700,6 +705,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(failed.container.commands().some((c) => c.type === "steer")).toBe(true);
     expect(failed.inbox.drain().map((i) => i.text)).toEqual(["also bump the version"]);
     expect(failed.steps.every((s) => s.inboxConsumedSeq === 0)).toBe(true);
+    expect(confirmed).toEqual([]);
 
     const settled = world();
     scriptedPi(settled.container, (n, c) => {

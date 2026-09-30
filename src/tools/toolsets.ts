@@ -19,6 +19,7 @@ import { planeShowTool } from "./plane.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS } from "./github.js";
 import { MAIN_WORK_TOOLS } from "./mainWork.js";
+import { workStartTool } from "./mainStart.js";
 import type { RunnableTool } from "./runnableTool.js";
 import { RUN_TOOLS } from "./runs.js";
 import { slackContextTool } from "./slackContext.js";
@@ -103,19 +104,32 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
   conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
   /** The orchestrator (record 0070; docs/reference/specs/orchestration-plane.md
    *  item 12): plane, requester-scoped GitHub and session reads; bounded
-   *  Slack context and linked-work controls require a verified requester DM.
-   *  No public status, shell or generic run tool. */
-  orchestrator: [planeShowTool, slackContextTool, ...MAIN_WORK_TOOLS, ...GITHUB_READ_TOOLS, ...SESSION_TOOLS],
+   *  Slack context, linked-work controls and private work start require a
+   *  verified requester DM. No public status, shell or generic run tool. */
+  orchestrator: [
+    planeShowTool,
+    slackContextTool,
+    ...MAIN_WORK_TOOLS,
+    workStartTool,
+    ...GITHUB_READ_TOOLS,
+    ...SESSION_TOOLS,
+  ],
   none: [],
 };
 
 /** Keep linked-work names out of a model's tool list when its conversation
  * audience cannot receive the tool call and result in private. */
-export function toolsForRun(toolset: string, linkedWorkAllowed: boolean): RunnableTool[] {
+export function toolsForRun(
+  toolset: string,
+  linkedWorkAllowed: boolean,
+  privateWorkStartAllowed = false,
+): RunnableTool[] {
   const tools = TOOLSETS[toolset] ?? [];
-  return linkedWorkAllowed || toolset !== "orchestrator"
-    ? tools
-    : tools.filter((tool) => !MAIN_WORK_TOOLS.includes(tool));
+  if (toolset !== "orchestrator") return tools;
+  return tools.filter(
+    (tool) =>
+      (linkedWorkAllowed || !MAIN_WORK_TOOLS.includes(tool)) && (privateWorkStartAllowed || tool !== workStartTool),
+  );
 }
 
 /** The static toolset plus this run's extra tools (the bridged MCP tools,

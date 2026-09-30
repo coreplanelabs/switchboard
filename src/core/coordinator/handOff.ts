@@ -50,7 +50,8 @@ import {
   type ThreadEventAttachment,
   type WorkBrief,
 } from "./contract.js";
-import type { CoordinatorInstanceStore } from "./instanceStore.js";
+import type { CoordinatorInstanceStore, MainTaskLink } from "./instanceStore.js";
+import { isMainTaskAuthority, sameMainTaskAuthority, type MainTaskAuthority } from "./requesterAuthority.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
 import { privateWorkerThreadKey, type PrivateWorkerLog } from "../privateWorkerLog.js";
 
@@ -74,7 +75,10 @@ export interface HandOffInput {
   requestText: string;
   /** An opt-in main-agent decision. Its key is stable across message retries;
    * the brief is context for the existing Ship unit, not publication authority. */
-  mainTask?: MainTaskKey & { brief: Omit<WorkBrief, "requesterId" | "mainThreadKey" | "actId" | "repo" | "base"> };
+  mainTask?: MainTaskKey & {
+    brief: Omit<WorkBrief, "requesterId" | "mainThreadKey" | "actId" | "repo" | "base">;
+    authority?: MainTaskAuthority;
+  };
   /** Set by the trusted caller only when the private worker log is configured. */
   privateWorkerReady?: boolean;
   /** A generated plan this thread already owns and is re-issuing. Internal:
@@ -236,6 +240,19 @@ async function privateWorkerLogReachable(deps: HandOffDeps, instanceId: string, 
     return true;
   } catch {
     return false;
+  }
+}
+
+async function requesterRevisionCurrent(
+  deps: HandOffDeps,
+  threadKey: string,
+  authority: MainTaskAuthority,
+): Promise<"current" | "newer" | "unavailable"> {
+  try {
+    const turn = await deps.instances.latestRequesterTurn({ threadKey, requesterId: authority.requesterId });
+    return turn?.messageId === authority.sourceMessageId && turn.revision === authority.revision ? "current" : "newer";
+  } catch {
+    return "unavailable";
   }
 }
 
@@ -540,6 +557,8 @@ function planWhere(
  * attempts did not merge.
  */
 export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInput): Promise<HandOffOutcome> {
+  if (input.mainTask !== undefined && !isMainTaskAuthority(input.mainTask.authority))
+    return refused("setup_failed", "I couldn't verify the request that started this work; no worker started.");
   if (input.mainTask !== undefined && (!input.privateWorkerReady || input.stillPrivate === undefined))
     return refused("setup_failed", "⚠️ The private worker conversation is unavailable; no worker started.");
   if (input.mainTask !== undefined && !mainRunLiveAtGate(input))
@@ -828,11 +847,7 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
 
 /** A replay reads the original authority and, only when the Workflow is
  * absent, retries create under its original id. It never plans a new attempt. */
-async function linkedTask(
-  deps: HandOffDeps,
-  input: HandOffInput,
-  link: { instanceId: string; unit: string },
-): Promise<HandOffOutcome> {
+async function linkedTask(deps: HandOffDeps, input: HandOffInput, link: MainTaskLink): Promise<HandOffOutcome> {
   let instance: CoordinatorInstance | null;
   let unit: CoordinatorUnit | undefined;
   try {
@@ -857,6 +872,8 @@ async function linkedTask(
     instance.threadKey !== key.mainThreadKey ||
     brief.repo !== instance.repo ||
     brief.base !== instance.base ||
+    key.authority === undefined ||
+    !sameMainTaskAuthority(link.authority, key.authority) ||
     instance.repo !== input.entry.repo ||
     instance.base !== input.entry.base
   )
@@ -876,6 +893,14 @@ async function linkedTask(
       `⚠️ The linked worker's state could not be read (${answer.reason}); no new worker started.`,
     );
   if (answer.kind === "absent") {
+    const revision = await requesterRevisionCurrent(deps, key.mainThreadKey, key.authority!);
+    if (revision === "unavailable")
+      return refused(
+        "plan_history_unavailable",
+        "I couldn't verify the request for this saved worker; no worker started.",
+      );
+    if (revision === "newer")
+      return refused("setup_failed", "A newer request arrived before this worker started; no worker started.");
     if (!mainRunLiveAtGate(input))
       return refused("setup_failed", "The main run stopped; its linked worker was not started.");
     if (!(await privateAtGate(input)))
@@ -884,6 +909,16 @@ async function linkedTask(
       return refused("setup_failed", "The private worker conversation could not be verified; no worker started.");
     if (!(await privateAtGate(input)))
       return refused("setup_failed", "This is no longer a private conversation; no worker started.");
+    if (!mainRunLiveAtGate(input))
+      return refused("setup_failed", "The main run stopped; its linked worker was not started.");
+    const finalRevision = await requesterRevisionCurrent(deps, key.mainThreadKey, key.authority!);
+    if (finalRevision === "unavailable")
+      return refused(
+        "plan_history_unavailable",
+        "I couldn't verify the request for this saved worker; no worker started.",
+      );
+    if (finalRevision === "newer")
+      return refused("setup_failed", "A newer request arrived before this worker started; no worker started.");
     if (!mainRunLiveAtGate(input))
       return refused("setup_failed", "The main run stopped; its linked worker was not started.");
     let created: CreateInstanceAnswer;
@@ -946,7 +981,7 @@ async function start(
     try {
       mainClaim =
         input.mainTask !== undefined
-          ? await deps.instances.claimMainTask(input.mainTask, instance, units[0]!)
+          ? await deps.instances.claimMainTask(input.mainTask, instance, units[0]!, input.mainTask.authority!)
           : undefined;
     } catch (err) {
       return refused(
@@ -1041,6 +1076,18 @@ async function start(
       return refused("setup_failed", "The private worker conversation could not be verified; no worker started.");
     if (!(await privateAtGate(input)))
       return refused("setup_failed", "This is no longer a private conversation; its task is saved for a safe retry.");
+    if (!mainRunLiveAtGate(input))
+      return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
+    if (input.mainTask !== undefined) {
+      const revision = await requesterRevisionCurrent(deps, input.mainTask.mainThreadKey, input.mainTask.authority!);
+      if (revision === "unavailable")
+        return refused(
+          "plan_history_unavailable",
+          "I couldn't verify this request; its task is saved for a safe retry.",
+        );
+      if (revision === "newer")
+        return refused("setup_failed", "A newer request arrived before this worker started; no worker started.");
+    }
     if (!mainRunLiveAtGate(input))
       return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
     try {

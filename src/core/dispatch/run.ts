@@ -16,11 +16,13 @@ import {
   type WorkflowSender,
 } from "../coordinator/contract.js";
 import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
+import type { MainStartInput, MainStartResult } from "../coordinator/mainStart.js";
 import type { RunProfile } from "../../config/profile.js";
 import { mergeTools, toolsForRun } from "../../tools/toolsets.js";
 import type { SlackContextBinding } from "./slackContextBinding.js";
 import type { VerifiedSlackContextCapability } from "../../tools/slackContext.js";
 import { mainWorkAudienceAllowed, type DirectAudience } from "../../tools/mainWork.js";
+import { canOfferMainStart } from "../../tools/mainStart.js";
 import { chatActorOf } from "../authz/actor.js";
 import { makeWebCapability } from "../../tools/web.js";
 import { RestGithubApi, type GithubApi } from "../../execution/githubApi.js";
@@ -143,6 +145,9 @@ export interface RunDeps
    * reported as lost.
    */
   coordinatorInstances?: CoordinatorInstanceStore;
+  /** Production's private Ship starter. The run loop binds its resolved actor,
+   * current message and run id before exposing it to the main agent. */
+  mainTaskStart?: (input: MainStartInput) => Promise<MainStartResult>;
   /**
    * The Workflow sender over the shim's event relay (`shimWorkflowSender`) —
    * the sender the check-run intake already uses — through which the
@@ -254,6 +259,8 @@ export interface RunDeps
 /** What `claimRun` reads off the dispatch. */
 export interface ClaimContext {
   msg: IncomingMessage;
+  /** A live channel verifier must exist before its private tool enters a durable seed. */
+  privateWorkVerifierAvailable?: boolean;
   agent: AgentDef;
   /** The run's effective profile: the budget the seed carries and the
    *  read-only flag on the row are read from here, never from the preset. */
@@ -377,10 +384,11 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         message: msg,
         channelVisibility,
       });
-    const verifiedWorkAudience =
-      workAudienceCandidate && directAudience !== undefined && ctx.verifyDirectAudience !== undefined
+    const verifiedDirectAudience =
+      directAudience !== undefined && ctx.verifyDirectAudience !== undefined
         ? await ctx.verifyDirectAudience(directAudience).catch(() => false)
         : false;
+    const verifiedWorkAudience = workAudienceCandidate && verifiedDirectAudience;
     const ledger = deps.runLedger;
     const opened = await root.span("dispatch.ledger_claim", () =>
       ledger.open({
@@ -424,9 +432,18 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         reservation: reserved,
         system,
         tools: mergeTools(
-          toolsForRun(agent.toolset, verifiedWorkAudience).filter(
-            (tool) => ctx.slackContext !== undefined || tool.name !== "slack_context",
-          ),
+          toolsForRun(
+            agent.toolset,
+            verifiedWorkAudience,
+            verifiedDirectAudience &&
+              canOfferMainStart(
+                agent.name,
+                channelVisibility,
+                msg,
+                chatActorOf(deps.config, msg),
+                deps.mainTaskStart !== undefined && ctx.privateWorkVerifierAvailable === true,
+              ),
+          ).filter((tool) => ctx.slackContext !== undefined || tool.name !== "slack_context"),
           mcpForRun?.tools,
         ).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
         // The seed carries the EFFECTIVE budget, so a resume runs on what

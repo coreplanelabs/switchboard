@@ -1396,6 +1396,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const at = unechoed.findIndex((u) => echoKey(u.message) === key);
       if (at < 0) return;
       const [echoed] = unechoed.splice(at, 1);
+      run.confirmedFollowUps?.(echoed!.inputs);
       if (echoed!.seq > mirror.inboxConsumedSeq) mirror.inboxConsumedSeq = echoed!.seq;
     };
     unechoedSeqs = () =>

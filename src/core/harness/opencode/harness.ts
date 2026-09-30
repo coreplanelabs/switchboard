@@ -1062,6 +1062,7 @@ function drainFollowUps(
           deferred.push(input);
           continue;
         }
+        run.confirmedFollowUps?.([input]);
         const source = {
           ...(input.sourceUrl ? { url: input.sourceUrl } : {}),
           ...(input.userName ? { user: input.userName } : {}),

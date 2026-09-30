@@ -230,6 +230,8 @@ export type MutatedClause = "credential" | "gate" | "relay" | "record" | "conver
 
 /** Faults the fake serve can be told to commit, beyond the row's script. */
 export interface FakeServeOptions {
+  /** Observe which follow-ups the harness confirmed as delivered. */
+  onConfirmedFollowUp?: (text: string) => void;
   /** How many permission-reply POSTs answer 500 (and leave the ask pending) before one would succeed. */
   failReplyPosts?: number;
   /** Every permission-reply POST throws (the container gone under the request), the ask left pending. */
@@ -2629,6 +2631,9 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     rules: { checkout: "/workspace/threads/t/main", protectedBranches: ["main"] },
     control,
     inbox,
+    ...(options.onConfirmedFollowUp
+      ? { confirmedFollowUps: (inputs) => inputs.forEach((input) => options.onConfirmedFollowUp!(input.text)) }
+      : {}),
     onEvent: (e) => void events.push(e),
     onProgress: (n) => void progress.push(n),
     onStep: async (r) => void steps.push(r),

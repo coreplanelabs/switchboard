@@ -1303,7 +1303,17 @@ describe("orchestrator agent (record 0070 — the plane's chat preset)", () => {
     expect(sys).toMatch(/`work_status` is the current source; cite its unit key/);
     expect(sys).toMatch(/These tools bind the person and this thread/);
     expect(sys).toMatch(/Do not ask the person to type a command or special syntax/);
-    expect(sys).toMatch(/You cannot start work, edit code or merge from here/);
+    expect(sys).toMatch(/You cannot edit code or merge yourself/);
+  });
+
+  it("starts requested private work only in a verified direct requester conversation", () => {
+    const sys = AGENTS.orchestrator.system;
+    expect(sys).toContain("`work_start`");
+    expect(sys).toContain(
+      "When the latest person turn in a verified direct requester Slack DM asks you to fix or build something",
+    );
+    expect(sys).toContain("a later refusal or correction overrides an earlier fix phrase");
+    expect(sys).toMatch(/private worker follows the existing review and person-merge gates/);
   });
 
   it("answers non-fleet questions in this same thread from authorized GitHub and explicitly scoped MCP reads, citing the source and time window", () => {

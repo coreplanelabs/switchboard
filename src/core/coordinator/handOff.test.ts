@@ -21,6 +21,12 @@ import { InMemoryPrivateWorkerLog, UnavailablePrivateWorkerLog } from "../privat
 // runs. Every refusal is a reply, never a throw, and nothing is created on one.
 
 const NOW = 1_700_000_000_000;
+const MAIN_AUTHORITY = {
+  requesterId: "slack:UALICE",
+  sourceMessageId: "1",
+  revision: 1,
+  repo: "acme/api",
+};
 const PLAN = [
   "# Fixture - Plan",
   "",
@@ -55,7 +61,9 @@ function input(over: Partial<HandOffInput> = {}): HandOffInput {
     caps: { maxRounds: 3, maxMinutes: 45 },
     card: { channel: "C1", ts: "1.5" },
     now: NOW,
+    ...(over.mainTask ? { privateWorkerReady: true, stillPrivate: async () => true } : {}),
     ...over,
+    ...(over.mainTask ? { mainTask: { ...over.mainTask, authority: over.mainTask.authority ?? MAIN_AUTHORITY } } : {}),
   };
 }
 
@@ -71,6 +79,11 @@ function harness(
 ) {
   const files = over.files ?? { "docs/plans/fixture.md": PLAN };
   const instances = over.store ?? new InMemoryCoordinatorInstanceStore();
+  void instances.recordRequesterTurn({
+    threadKey: "slack:C1:1.0",
+    requesterId: "slack:UALICE",
+    messageId: "1",
+  });
   const created: string[] = [];
   const statusAsked: string[] = [];
   const reads: Array<[string, string, string]> = [];
@@ -151,6 +164,95 @@ describe("main-agent work hand-off", () => {
     expect(h.created).toHaveLength(1);
   });
 
+  it("does not create a claimed but absent Workflow after a newer requester turn", async () => {
+    const h = harness({ create: new Error("Workflow unavailable") });
+    const request = input({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "fix signup",
+      mainTask: {
+        mainThreadKey: "slack:C1:1.0",
+        actId: "act-private",
+        brief: { question: "Why?", findings: [], requestedChange: "Fix signup" },
+      },
+      stillLive: () => true,
+    });
+    expect((await handOffToCoordinator(h.deps, request)).status).toBe("aborted");
+    expect(h.created).toHaveLength(1);
+    await h.instances.recordRequesterTurn({
+      threadKey: "slack:C1:1.0",
+      requesterId: "slack:UALICE",
+      messageId: "2",
+    });
+    const retried = await handOffToCoordinator(h.deps, request);
+    expect(retried.status).toBe("aborted");
+    expect(retried.reply).toContain("newer request");
+    expect(h.created).toHaveLength(1);
+  });
+
+  it("does not create a newly claimed Workflow when the requester changes during final privacy checks", async () => {
+    const h = harness();
+    let checks = 0;
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "fix signup",
+        mainTask: {
+          mainThreadKey: "slack:C1:1.0",
+          actId: "act-private",
+          brief: { question: "Why?", findings: [], requestedChange: "Fix signup" },
+        },
+        stillLive: () => true,
+        stillPrivate: async () => {
+          if (++checks === 4)
+            await h.instances.recordRequesterTurn({
+              threadKey: "slack:C1:1.0",
+              requesterId: "slack:UALICE",
+              messageId: "2",
+            });
+          return true;
+        },
+      }),
+    );
+    expect(checks).toBe(4);
+    expect(out.status).toBe("aborted");
+    expect(out.reply).toContain("newer request");
+    expect(h.created).toEqual([]);
+  });
+
+  it("does not retry a saved Workflow when the requester changes during final privacy checks", async () => {
+    const h = harness({ create: new Error("Workflow unavailable") });
+    const request = input({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "fix signup",
+      mainTask: {
+        mainThreadKey: "slack:C1:1.0",
+        actId: "act-private",
+        brief: { question: "Why?", findings: [], requestedChange: "Fix signup" },
+      },
+      stillLive: () => true,
+    });
+    expect((await handOffToCoordinator(h.deps, request)).status).toBe("aborted");
+    expect(h.created).toHaveLength(1);
+    let checks = 0;
+    const retried = await handOffToCoordinator(h.deps, {
+      ...request,
+      stillPrivate: async () => {
+        if (++checks === 2)
+          await h.instances.recordRequesterTurn({
+            threadKey: "slack:C1:1.0",
+            requesterId: "slack:UALICE",
+            messageId: "2",
+          });
+        return true;
+      },
+    });
+    expect(checks).toBe(2);
+    expect(retried.status).toBe("aborted");
+    expect(retried.reply).toContain("newer request");
+    expect(h.created).toHaveLength(1);
+  });
+
   it("describes a private worker without promising a requester-thread unit or card", async () => {
     const h = harness();
     const out = await handOffToCoordinator(
@@ -191,6 +293,7 @@ describe("main-agent work hand-off", () => {
             requestedChange: "Fix the failure",
           },
         },
+        privateWorkerReady: false,
       }),
     );
     expect(out).toMatchObject({ status: "aborted", refusal: { code: "setup_failed" } });
@@ -1359,6 +1462,245 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     );
     const threw = harness({ create: new Error("boom") });
     expect((await handOffToCoordinator(threw.deps, input())).reply).toContain("could not be started (boom)");
+  });
+});
+
+describe("main-agent work hand-off", () => {
+  const mainTask = (actId: string) => ({
+    mainThreadKey: "slack:C1:1.0",
+    actId,
+    brief: {
+      question: "How many signups failed yesterday?",
+      findings: [
+        {
+          kind: "analysis" as const,
+          text: "17 of 120 failed",
+          query: "SELECT failed_signups FROM daily_signups",
+          result: "17 failed of 120 attempts",
+          timeWindow: "previous UTC day",
+          sourceUrl: "https://example.com/metrics/signups",
+        },
+      ],
+      suspectedCause: "The callback may reject expired state",
+      requestedChange: "Fix the callback and keep the failure visible",
+      acceptance: "The regression test passes and a reviewed PR is ready",
+    },
+  });
+
+  const mainInput = (over: Partial<HandOffInput>) =>
+    input({ privateWorkerReady: true, stillLive: () => true, stillPrivate: async () => true, ...over });
+
+  it("an act replay keeps one durable unit and no second attempt despite changed text", async () => {
+    const status: Record<string, InstanceStatusAnswer> = {};
+    const h = harness({ status });
+    const first = await handOffToCoordinator(
+      h.deps,
+      mainInput({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "fix failed signups",
+        mainTask: mainTask("act-1"),
+      }),
+    );
+    status[first.instanceId!] = { kind: "status", status: "running" };
+    const second = await handOffToCoordinator(
+      h.deps,
+      mainInput({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "different wording",
+        mainTask: mainTask("act-1"),
+      }),
+    );
+    expect(first.status, first.reply).toBe("completed");
+    expect(second.status, second.reply).toBe("completed");
+    expect(second.instanceId).toBe(first.instanceId);
+    expect(h.created).toEqual([first.instanceId]);
+    expect(await h.instances.listUnits(first.instanceId!)).toHaveLength(1);
+    expect((await h.instances.get(first.instanceId!))?.runId).toBeUndefined();
+    expect((await h.instances.listUnits(first.instanceId!))[0]?.workBrief).toMatchObject({
+      requesterId: "slack:UALICE",
+      mainThreadKey: "slack:C1:1.0",
+      actId: "act-1",
+      repo: "acme/api",
+      base: "main",
+      question: "How many signups failed yesterday?",
+    });
+  });
+
+  it("refuses an act claimed or replayed from a different conversation", async () => {
+    const h = harness();
+    const otherThread = "slack:COTHER:2.0";
+    const altered = mainInput({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "fix failed signups",
+      mainTask: mainTask("act-1"),
+    });
+    const refused = await handOffToCoordinator(h.deps, {
+      ...altered,
+      msg: { ...altered.msg, threadKey: otherThread, channelId: "slack:COTHER" },
+    });
+    expect(refused.status).toBe("aborted");
+    expect(h.created).toEqual([]);
+    expect(await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-1" })).toBeNull();
+
+    const first = await handOffToCoordinator(h.deps, altered);
+    expect(first.status).toBe("completed");
+    const replay = await handOffToCoordinator(h.deps, {
+      ...altered,
+      msg: { ...altered.msg, threadKey: otherThread, channelId: "slack:COTHER" },
+    });
+    expect(replay.status).toBe("aborted");
+    expect(h.created).toEqual([first.instanceId]);
+  });
+
+  it("a different act may start a second generated unit in the same main thread", async () => {
+    const h = harness();
+    const ask = (actId: string) =>
+      handOffToCoordinator(
+        h.deps,
+        mainInput({
+          entry: { repo: "acme/api", base: "main" },
+          requestText: "fix failed signups",
+          mainTask: mainTask(actId),
+        }),
+      );
+    const first = await ask("act-1");
+    const second = await ask("act-2");
+    expect(second.status).toBe("completed");
+    expect(second.instanceId).not.toBe(first.instanceId);
+    expect(h.created).toEqual([first.instanceId, second.instanceId]);
+  });
+
+  it("a failed start replays the same recorded instance instead of minting another attempt", async () => {
+    const h = harness({ create: new Error("offline") });
+    const request = mainInput({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "fix failed signups",
+      mainTask: mainTask("act-retry"),
+    });
+    const failed = await handOffToCoordinator(h.deps, request);
+    expect(failed.status).toBe("aborted");
+    const link = await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-retry" });
+    expect(link?.unit).toBe(["U", "1"].join(""));
+    h.deps.create = async (id) => {
+      h.created.push(id);
+      return { kind: "created", id };
+    };
+    const retried = await handOffToCoordinator(h.deps, { ...request, requestText: "changed wording" });
+    expect(retried.status).toBe("completed");
+    expect(retried.instanceId).toBe(link?.instanceId);
+    expect(await h.instances.listUnits(link!.instanceId)).toHaveLength(1);
+  });
+
+  it("stops before a claim and before Workflow create, preserving a safe same-act retry", async () => {
+    const h = harness();
+    const request = mainInput({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "fix failed signups",
+      mainTask: mainTask("act-stop"),
+    });
+    const beforeClaim = await handOffToCoordinator(h.deps, { ...request, stillLive: () => false });
+    expect(beforeClaim.status).toBe("aborted");
+    expect(await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-stop" })).toBeNull();
+    expect(h.created).toEqual([]);
+
+    let live = true;
+    const originalClaim = h.deps.instances.claimMainTask.bind(h.deps.instances);
+    h.deps.instances.claimMainTask = async (...args) => {
+      const result = await originalClaim(...args);
+      live = false;
+      return result;
+    };
+    const stopped = await handOffToCoordinator(h.deps, { ...request, stillLive: () => live });
+    expect(stopped.status).toBe("aborted");
+    expect(h.created).toEqual([]);
+    const link = await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-stop" });
+    expect(link).not.toBeNull();
+
+    const retried = await handOffToCoordinator(h.deps, { ...request, stillLive: () => true });
+    expect(retried.status).toBe("completed");
+    expect(retried.instanceId).toBe(link?.instanceId);
+    expect(h.created).toEqual([link?.instanceId]);
+  });
+
+  it("a replay cannot silently retarget an act to another repository", async () => {
+    const status: Record<string, InstanceStatusAnswer> = {};
+    const h = harness({ status });
+    const request = mainInput({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "fix signups",
+      mainTask: mainTask("act-target"),
+    });
+    const first = await handOffToCoordinator(h.deps, request);
+    status[first.instanceId!] = { kind: "status", status: "running" };
+    const moved = await handOffToCoordinator(h.deps, { ...request, entry: { repo: "other/repo", base: "main" } });
+    expect(moved.status).toBe("aborted");
+    expect(moved.reply).toContain("target");
+    expect(h.created).toEqual([first.instanceId]);
+  });
+
+  it("the exact query result and time window persist on the original unit", async () => {
+    const h = harness();
+    const out = await handOffToCoordinator(
+      h.deps,
+      mainInput({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "fix failed signups",
+        mainTask: mainTask("act-query"),
+      }),
+    );
+    expect(out.status).toBe("completed");
+    expect((await h.instances.listUnits(out.instanceId!))[0]?.workBrief?.findings[0]).toMatchObject({
+      query: "SELECT failed_signups FROM daily_signups",
+      result: "17 failed of 120 attempts",
+      timeWindow: "previous UTC day",
+      sourceUrl: "https://example.com/metrics/signups",
+    });
+    const invalid = await handOffToCoordinator(
+      h.deps,
+      mainInput({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "fix",
+        mainTask: {
+          ...mainTask("act-long-query"),
+          brief: {
+            ...mainTask("act-long-query").brief,
+            findings: [
+              {
+                kind: "analysis",
+                text: "failed",
+                query: "x".repeat(5000),
+                result: "17",
+                timeWindow: "previous UTC day",
+                sourceUrl: "https://example.com/metrics/signups",
+              },
+            ],
+          },
+        },
+      }),
+    );
+    expect(invalid.status).toBe("aborted");
+    expect(h.created).toEqual([out.instanceId]);
+  });
+
+  it("an invalid brief or unavailable durable claim starts nothing", async () => {
+    const h = harness();
+    const invalid = await handOffToCoordinator(
+      h.deps,
+      mainInput({
+        entry: { repo: "acme/api", base: "main" },
+        requestText: "fix",
+        mainTask: { ...mainTask("act-1"), brief: { ...mainTask("act-1").brief, question: "x".repeat(5000) } },
+      }),
+    );
+    expect(invalid.status).toBe("aborted");
+    const unavailable = harness({ store: new NullCoordinatorInstanceStore() });
+    const missing = await handOffToCoordinator(
+      unavailable.deps,
+      mainInput({ entry: { repo: "acme/api", base: "main" }, requestText: "fix", mainTask: mainTask("act-1") }),
+    );
+    expect(missing.status).toBe("aborted");
+    expect(h.created).toEqual([]);
+    expect(unavailable.created).toEqual([]);
   });
 });
 
