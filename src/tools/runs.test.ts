@@ -172,6 +172,27 @@ describe("list_runs — the runs the requester may see", () => {
 });
 
 describe("get_run_status — one run as the requester may see it", () => {
+  it("a review result is taken from the durable verdict and post record, not the closing prose", async () => {
+    const w = world();
+    const head = "a".repeat(40);
+    await w.store.put(
+      persisted("r-review", {
+        agent: "review",
+        parentRunId: "run-p",
+        events: [{ type: "answer", text: "Docs-only; no local checks apply.", seq: 1 }],
+        verdict: { verdict: "approve", summary: "No findings", findings: [] },
+        reviewPost: { posted: true, target: { repo: "sample/cli", number: 120 }, head, verdict: "approve" },
+      }),
+    );
+    const done = JSON.parse(String(await getRunStatusTool.run({ id: "r-review" }, ctxFor(w, alice))));
+    expect(done).toMatchObject({
+      status: "completed",
+      reviewVerdict: { verdict: "approve", findings: 0 },
+      reviewPost: { posted: true, target: { repo: "sample/cli", number: 120 }, head, verdict: "approve" },
+    });
+    expect(done.finalReply).toContain("Docs-only; no local checks apply.");
+  });
+
   it("a live child: running, with its activity line; a finished one: its terminal status and the final reply's text wrapped as untrusted content", async () => {
     const w = world();
     const live = w.registry.create("research · child", {
@@ -572,6 +593,68 @@ const report = (out: unknown) =>
   };
 
 describe("await_runs — the children's ends, as data, within the parent's budget", () => {
+  it("a review child returns its posted verdict even when its closing prose omits it", async () => {
+    const w = world();
+    const head = "b".repeat(40);
+    await w.store.put(
+      persisted("r-review", {
+        agent: "review",
+        parentRunId: "run-p",
+        events: [{ type: "answer", text: "Docs-only; no local checks apply.", seq: 1 }],
+        verdict: { verdict: "approve", summary: "No findings", findings: [] },
+        reviewPost: { posted: true, target: { repo: "sample/cli", number: 120 }, head, verdict: "approve" },
+      }),
+    );
+    await w.store.put(
+      persisted("r-skipped", {
+        agent: "review",
+        parentRunId: "run-p",
+        verdict: { verdict: "request_changes", summary: "A finding" },
+        reviewPost: { posted: false, reason: "head moved" },
+      }),
+    );
+    const recent = w.registry.create("review · child", {
+      agent: "review",
+      channelId: "slack:CX",
+      userId: "slack:UALICE",
+      threadKey: "slack:CX:recent-review",
+      channelVisibility: "public",
+      parentRunId: "run-p",
+    });
+    w.registry.publish(recent.id, { type: "answer", text: "Docs-only; no local checks apply." });
+    await w.store.put(
+      persisted(recent.id, {
+        agent: "review",
+        parentRunId: "run-p",
+        threadKey: "slack:CX:recent-review",
+        verdict: { verdict: "approve", summary: "No findings" },
+        reviewPost: { posted: true, target: { repo: "sample/cli", number: 121 }, head, verdict: "approve" },
+      }),
+    );
+    w.registry.finish(recent.id, "completed");
+    w.registry.seal(recent.id, { replyOk: true });
+    const { wait } = waitFor(w);
+    const out = report(
+      await awaitRunsTool.run(
+        { ids: ["r-review", "r-skipped", recent.id] },
+        ctxFor(w, alice, { runId: "run-p", wait, remainingMs: () => 30 * 60_000 }),
+      ),
+    );
+    expect(out.runs[0]).toMatchObject({
+      reviewVerdict: { verdict: "approve", findings: 0 },
+      reviewPost: { posted: true, target: { repo: "sample/cli", number: 120 }, head, verdict: "approve" },
+    });
+    expect(out.runs[1]).toMatchObject({
+      reviewVerdict: { verdict: "request_changes", findings: 0 },
+      reviewPost: { posted: false, reason: "head moved" },
+    });
+    expect(out.runs[2]).toMatchObject({
+      reviewVerdict: { verdict: "approve", findings: 0 },
+      reviewPost: { posted: true, target: { repo: "sample/cli", number: 121 }, head, verdict: "approve" },
+    });
+    expect(out.runs[0].finalReply).toContain("Docs-only; no local checks apply.");
+  });
+
   it("every named run ended: each end comes back with its status — a completed child with its final reply wrapped as untrusted content, an interrupted child as `interrupted` (nothing restarts it), an id the requester may not read as `not_found` — and the wait never slept", async () => {
     const w = world();
     await w.store.put(persisted("r-done", { parentRunId: "run-p" }));
@@ -817,6 +900,47 @@ describe("await_runs — the children's ends, as data, within the parent's budge
 // there, and the parent's reads of the child follow the thread's newest run —
 // never the first reply alone.
 describe("a child is its thread — the reads follow the thread's newest run", () => {
+  it("a review child's continuation does not carry the old posted verdict into a later run", async () => {
+    const w = world();
+    const threadKey = "slack:CX:review-child";
+    await w.store.put(
+      persisted("r-review-first", {
+        agent: "review",
+        parentRunId: "run-p",
+        threadKey,
+        verdict: { verdict: "approve", summary: "No findings" },
+        reviewPost: {
+          posted: true,
+          target: { repo: "sample/cli", number: 120 },
+          head: "a".repeat(40),
+          verdict: "approve",
+        },
+      }),
+    );
+    await w.store.put(
+      persisted("r-general-later", {
+        agent: "general",
+        parentRunId: "run-p",
+        threadKey,
+        startedAt: NOW - 10_000,
+        finishedAt: NOW - 1_000,
+      }),
+    );
+    const status = JSON.parse(String(await getRunStatusTool.run({ id: "r-review-first" }, ctxFor(w, alice))));
+    const { wait } = waitFor(w);
+    const out = report(
+      await awaitRunsTool.run(
+        { ids: ["r-review-first"] },
+        ctxFor(w, alice, { runId: "run-p", wait, remainingMs: () => 30 * 60_000 }),
+      ),
+    );
+    for (const row of [status, out.runs[0]]) {
+      expect(row).toMatchObject({ continuedBy: "r-general-later" });
+      expect("reviewVerdict" in row).toBe(false);
+      expect("reviewPost" in row).toBe(false);
+    }
+  });
+
   /** A finished child in the store, and a later run of the same thread live in the registry. */
   function continuedChild(w: ReturnType<typeof world>) {
     const threadKey = "slack:CX:child";

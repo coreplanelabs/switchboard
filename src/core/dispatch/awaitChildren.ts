@@ -13,7 +13,7 @@
 // restarted: telling is this module's whole job.
 import { RUN_DEADLINE_RESERVE_MS } from "../../execution/bashTimeout.js";
 import type { StopMode } from "../runEvents.js";
-import type { RunStatus } from "../runRecord.js";
+import type { RunRecord, RunStatus } from "../runRecord.js";
 import type { RunRegistry } from "../runRegistry.js";
 import type { RunControl } from "../runRegistry/runControl.js";
 import type { FollowUpInbox, FollowUpInput } from "../threadAdmission.js";
@@ -45,6 +45,8 @@ export type ChildState =
       status: ChildEndStatus;
       activity?: string;
       finalReply?: string;
+      reviewVerdict?: { verdict: NonNullable<RunRecord["verdict"]>["verdict"]; findings: number };
+      reviewPost?: RunRecord["reviewPost"];
       refusal?: string;
       continuedBy?: string;
     }
