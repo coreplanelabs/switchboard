@@ -74,6 +74,7 @@ import {
   CONTROL_RESET_RESUMED_NOTE,
   MAX_INPLACE_REATTACHES,
   PROMPT_ECHO_WAIT_MS,
+  TRANSPORT_ALIVE_REATTACH_NOTE,
   resolveControlResetWrite,
   WORD_ALIVE_REATTACH_NOTE,
 } from "../reattach.js";
@@ -3529,28 +3530,15 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(w.container.removed).toEqual([paths.dir]);
   });
 
-  it("the same transport loss on a resident-backed run — registered from attach to release, its worktree and record surviving whatever broke the transport — is the replaced verdict by the transport condition: the run enters the resume path for the loop's relaunch, never the plain failure; one sandbox_restarted note, the call in flight settled with the restart note, pi ended best-effort (it may still run where the transport broke)", async () => {
+  it("a resident-backed run also refuses to relaunch after /exec loss when its recorded pid is proven dead and no replacement was named", async () => {
     const w = world({ withSpans: true });
     piMidCall(w, (c) => c.loseTransport("same", "vm-new"));
     const err = await w.start().catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(PiContainerReplacedError);
-    expect(err).toMatchObject({ was: "vm-fake", now: undefined, condition: "transport" });
-    expect((err as PiContainerReplacedError).said).toMatch(/resident \/exec: Peer closed WebSocket: 1006/);
-    expect((err as Error).message).toMatch(
-      /^the container running pi stopped answering \(vm-fake; a container command failed on its transport \(resident \/exec: Peer closed WebSocket: 1006 .*\) and the one more command named no replacement; the run is registered on its resident, so it resumes through a re-attach instead of ending\)$/,
-    );
-    expect(w.events.filter((e) => e.type === "tool_result")).toEqual([
-      expect.objectContaining({ tool: "bash", ok: false, callId: "c1", summary: replacedCallNote("bash") }),
-    ]);
-    expect((err as PiContainerReplacedError).record.settlements.map((s) => s.toolUse.id)).toEqual(["c1"]);
-    expect(noteKinds(w)).toEqual(["sandbox_restarted"]);
-    expect(noteSummaries(w)).toEqual([(err as Error).message]);
-    // The transport condition's container may still run the old pi, so the
-    // teardown ends it best-effort — unlike the word/identity verdicts, whose
-    // container is known gone and gets no kill.
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe(TRANSPORT_LOST_TEXT);
+    expect(noteKinds(w)).toEqual(["harness_error"]);
+    expect(noteKinds(w)).not.toContain("sandbox_restarted");
     expect(w.container.killed).toEqual([4242]);
-    expect(w.container.removed).toEqual([paths.dir]);
-    expect(w.registry.get("run-7")).toBeDefined();
   });
 
   it("the live shape, typed: the container command fails with the executor's `Network connection lost.` typed transport-lost at a rollout's onset — the third shape by the type, whatever the words: the one more command runs, waits through the container restoring, and the word after the wait is the replaced verdict with the record, never the run failed at once", async () => {
@@ -3687,7 +3675,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
     await new Promise((r) => setImmediate(r));
     expect(answer).toBe(HARD_STOP_MESSAGE);
     expect(abortWrites).toBe(1); // the stop was sent
-    expect(noteKinds(w).at(-1)).toBe("stopped"); // and nothing was said after the answer's own note
+    expect(noteKinds(w).at(-1), JSON.stringify(noteSummaries(w))).toBe("stopped"); // and nothing was said after the answer's own note
     expect(noteSummaries(w).some((n) => n.startsWith("the abort's write failed"))).toBe(false);
     expect(noteSummaries(w).some((n) => /the stop landed|the stop still unheard|the stop's write failed/.test(n))).toBe(
       false,
@@ -3741,16 +3729,14 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(w.notes).toContain("finale timed out — closing the run without a write-up");
     expect(noteKinds(w)).not.toContain("sandbox_restarted");
     expect(noteSummaries(w)).toContainEqual(
-      expect.stringMatching(
-        /^a container command failed on its transport \(resident \/exec: Peer closed WebSocket: 1006 .*\) while the finale was being aborted; the wind-down's answer stands$/,
-      ),
+      expect.stringMatching(/while the finale was being aborted; the wind-down's answer stands$/),
     );
     // Not judged: the one more command was never taken (the launch's own name is the only ask).
     expect(w.container.identityAsked).toBe(1);
     expect(w.container.killed).toEqual([4242]);
   });
 
-  it("a follow-up turn meets the three shapes as the loop does: a read that fails on its transport takes the one more command — the word on it is the replaced verdict thrown from the turn with the record, the same identity leaves a sandbox-backed turn failing with the transport error named and a harness_error note, and pi is ended — while a resident-backed turn resumes on the transport condition", async () => {
+  it("a follow-up turn meets the three shapes as the loop does: a read that fails on its transport takes the one more command — the word on it is the replaced verdict thrown from the turn with the record, the same identity leaves a sandbox-backed turn failing with the transport error named and a harness_error note, and pi is ended — and the resident-backed turn also fails when the pid is proven dead", async () => {
     const word = world();
     scriptedPi(word.container, (n, c) => {
       if (n === 0) {
@@ -3806,9 +3792,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
     await s2.end();
     expect(same.container.killed).toEqual([4242]);
 
-    // The resident-backed turn: the same standing transport failure is the
-    // replaced verdict by the transport condition, thrown from the turn for
-    // the loop's relaunch — the resume path — never the plain failure.
+    // A resident binding does not authorize a second process after a transport loss.
     const resident = world();
     scriptedPi(resident.container, (n, c) => {
       if (n === 0) {
@@ -3823,12 +3807,11 @@ describe("runPiHarness — the container replaced under a live run", () => {
     const err3 = await s3
       .followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } })
       .catch((e: unknown) => e);
-    expect(err3).toBeInstanceOf(PiContainerReplacedError);
-    expect(err3).toMatchObject({ was: "vm-fake", now: undefined, condition: "transport" });
-    expect(noteKinds(resident)).toContain("sandbox_restarted");
-    expect(noteSummaries(resident)).not.toContainEqual(expect.stringMatching(/so the failure stands$/));
+    expect(err3).toBeInstanceOf(ExecInfraError);
+    expect(noteKinds(resident)).not.toContain("sandbox_restarted");
+    expect(noteSummaries(resident)).toContainEqual(expect.stringMatching(/so the failure stands$/));
     await s3.end();
-    // The transport condition's teardown ends a pi that may still run there.
+    // The failed turn's teardown ends the process.
     expect(resident.container.killed).toEqual([4242]);
   });
 
@@ -4038,6 +4021,51 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     const prompts = w.container.commands().filter((c) => c.type === "prompt");
     expect(prompts).toHaveLength(1);
     expect(prompts[0].streamingBehavior).toBe("steer");
+  });
+
+  it("a cold sandbox loses /exec while a prompt write is in flight: pi echoes the prompt id on the re-attach, so it is NOT re-sent — exactly one prompt, never a second, steer-delivered copy (finding 2)", async () => {
+    const w = world();
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "ok"));
+    const scripted = w.container.onStdin!;
+    let landedPromptId: string | undefined;
+    // The prompt's bytes reach pi (the line is pushed to stdin) but the write
+    // then rejects with the reset — the channel closed after delivery. pi WILL
+    // echo the prompt id, so the re-attach must wait for that echo, not re-send.
+    w.container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt" && cmd.streamingBehavior === undefined && landedPromptId === undefined) {
+        landedPromptId = String(cmd.id);
+        throw new ExecInfraError(NETWORK_LOST_TEXT, "transport-lost"); // the write landed before the transport lost its answer
+      }
+      scripted(line, c);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let echoed = false;
+    const reattached = () => resumedSummaries(w).length > 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      // On the first drained read AFTER the re-attach, pi echoes the prompt it
+      // already received and answers — no re-send needed. Gated on the resumed
+      // note so the echo lands on the fresh transport, past the last boundary.
+      if (chunk.length === 0 && landedPromptId !== undefined && reattached() && !echoed) {
+        echoed = true;
+        w.container.emit(
+          { id: landedPromptId, type: "response", command: "prompt", success: true },
+          { type: "agent_start" },
+        );
+        finalTurn(w.container, "ok");
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    expect(resumedSummaries(w)).toEqual([TRANSPORT_ALIVE_REATTACH_NOTE]);
+    expect(noteKinds(w)).not.toContain("sandbox_restarted");
+    // The original prompt only — never a second, steer-delivered re-send.
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].streamingBehavior).toBeUndefined();
   });
 
   it("a control reset that raced a prompt whose bytes already reached pi: pi echoes the prompt id on the re-attach, so it is NOT re-sent — exactly one prompt, never a second, steer-delivered copy (finding 2)", async () => {

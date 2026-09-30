@@ -20,7 +20,7 @@ import type { RunEvent, StopMode } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { identityChangedCondition, type HarnessRequest, type HarnessStart } from "../container.js";
-import { WORD_ALIVE_REATTACH_NOTE } from "../reattach.js";
+import { TRANSPORT_ALIVE_REATTACH_NOTE, WORD_ALIVE_REATTACH_NOTE } from "../reattach.js";
 import {
   HarnessContainerReplacedError,
   HarnessMismatchError,
@@ -180,6 +180,12 @@ export interface RunScript {
    *  records the disagreement, and the run goes on to its answer with
    *  `relaunches` untouched, never the replaced verdict. */
   replacedWordWithPidAlive?: number;
+  /** The cold sandbox loses /exec with Network connection lost while its recorded pid keeps running. */
+  transportLostWithPidAlive?: number;
+  /** The replacement reuses the recorded pid, but its identity probe returns no name. */
+  transportLostWithPidAliveAndIdentityUnknown?: number;
+  /** Every drained read loses /exec while the pid remains live, with no progress. */
+  transportLossBoundOnFeed?: number;
   /** The resident's control plane keeps resetting the feed with no progress from
    *  this 1-based model call on — every drained read fails with a control reset
    *  over the unchanged container (harness-pi item 16). The driver arms a
@@ -1436,6 +1442,54 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       deadWithoutWordThen: "same",
     },
     check: checkDeadWithoutWordSame,
+  },
+  {
+    id: "survival-cold-transport-loss-repeats",
+    clause: "survival",
+    title:
+      "repeated /exec loss with a live recorded pid and no output fails at the re-attach bound, never relaunching beside it",
+    script: { turns: [call("c1", "bash", { command: "echo one" }), text("never")], transportLossBoundOnFeed: 2 },
+    check: (run) => {
+      assert.match(failed(run).message, /container transport failed 8 times without a record/);
+      assert.equal(notes(run).filter((n) => n.kind === "sandbox_restarted").length, 0);
+      assert.equal(run.starts.length, 1);
+      assert.ok(notes(run).filter((n) => n.kind === "resumed").length >= 8);
+    },
+  },
+  {
+    id: "survival-cold-transport-lost-live-pid",
+    clause: "survival",
+    title:
+      "a cold sandbox loses /exec with Network connection lost while the recorded pid stays alive: re-attach at the consumed output boundary, deliver the call once and complete the final verdict without relaunch",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("final verdict")],
+      transportLostWithPidAlive: 2,
+    },
+    check: (run) => {
+      assert.equal(answered(run), "final verdict");
+      assert.equal(run.starts.length, 1, "a live process must not be started twice");
+      assert.equal(run.modelCalls.length, 2, "the model must not receive a duplicate turn");
+      assert.equal(toolResults(run).filter((r) => r.callId === "c1").length, 1, "the call must not be delivered twice");
+      assert.ok(notes(run).some((n) => n.kind === "resumed" && n.summary === TRANSPORT_ALIVE_REATTACH_NOTE));
+      assert.equal(notes(run).filter((n) => n.kind === "sandbox_restarted").length, 0);
+      assert.ok(run.facts.every((f) => f.relaunches === 0));
+    },
+  },
+  {
+    id: "survival-cold-transport-lost-identity-unknown",
+    clause: "survival",
+    title:
+      "a cold sandbox loses /exec and the identity probe returns no name: an alive reused pid cannot authorize re-attach, so both harnesses fail closed without relaunch or a duplicate verdict",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("never")],
+      transportLostWithPidAliveAndIdentityUnknown: 2,
+    },
+    check: (run) => {
+      assert.match(failed(run).message, /liveness could not be established.*cannot continue safely/);
+      assert.equal(run.starts.length, 1, "neither reattach nor relaunch may start another process");
+      assert.equal(notes(run).filter((n) => n.kind === "resumed" || n.kind === "sandbox_restarted").length, 0);
+      assert.ok(run.facts.every((f) => f.relaunches === 0));
+    },
   },
   {
     id: "survival-transport-lost-then-word",

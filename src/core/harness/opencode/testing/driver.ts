@@ -1,3 +1,4 @@
+import { ExecInfraError } from "../../../../execution/executor.js";
 // OpenCode's driver for the conformance table (docs/reference/specs/harness.md
 // item 11): a run driven through the REAL `OpenCodeHarness` object — its full
 // `open` (the launch through the seam, the seed imported as an authored
@@ -442,6 +443,8 @@ export interface FakeServeOptions {
    *  the prompt before the reset cut the answer; `lost`, the prompt never
    *  reached it; `again`, lost, and the re-issued prompt meets the reset too. */
   controlResetOnPrompt?: "landed" | "lost" | "again";
+  /** An OpenCode prompt whose POST loses /exec while the server stays live. */
+  transportLostOnPrompt?: "landed" | "lost";
   /** The resident's control plane resets under the run's first permission-reply
    *  POST: `landed`, the server took the reply (the ask gone, the tool run);
    *  `lost`, the ask still pending; `unlistable`, lost, and the pending-asks
@@ -606,6 +609,7 @@ class ScriptedServe {
   private readonly interruptSettlesLate: "interrupted" | "failed" | "budget" | undefined;
   private readonly lateTailNoise: boolean;
   private readonly controlResetOnPrompt: "landed" | "lost" | "again" | undefined;
+  private readonly transportLostOnPrompt: "landed" | "lost" | undefined;
   private readonly controlResetOnReply:
     "landed" | "lost" | "unlistable" | "lost-then-dropped" | "lost-then-refused" | undefined;
   /** How the re-issue after a lost reply answers (`controlResetOnReply: "lost-then-*"`). */
@@ -750,6 +754,7 @@ class ScriptedServe {
       (this.hangToolCall !== undefined || options.hangAtAsk !== undefined ? "interrupted" : undefined);
     this.lateTailNoise = options.lateTailNoise === true;
     this.controlResetOnPrompt = options.controlResetOnPrompt;
+    this.transportLostOnPrompt = options.transportLostOnPrompt;
     this.controlResetOnReply = options.controlResetOnReply;
     this.hungToolSettlesOnPlay = options.hungToolSettlesOnPlay ?? 2;
     this.hungToolSettlesDuringInterrupt = options.hungToolSettlesDuringInterrupt === true;
@@ -1226,6 +1231,10 @@ class ScriptedServe {
           this.promptResets++;
           throw controlReset("request");
         }
+        if (this.transportLostOnPrompt === "lost" && this.queuePrompts === 0) {
+          this.queuePrompts++;
+          throw new ExecInfraError("resident /exec: Network connection lost.", "transport-lost");
+        }
         this.queuePrompts++;
         // The prompt the server refuses (the harness must fail by name, not wait on the feed).
         if (this.promptPostFails === this.queuePrompts) return j(500, { error: "the store hiccuped" });
@@ -1279,6 +1288,8 @@ class ScriptedServe {
             this.promptResets++;
             throw controlReset("request");
           }
+          if (this.transportLostOnPrompt === "landed" && this.queuePrompts === 1)
+            throw new ExecInfraError("resident /exec: Network connection lost.", "transport-lost");
           // Measured: the answer names the user message the prompt became.
           return j(200, {
             data: {
@@ -1704,6 +1715,10 @@ class ScriptedServe {
     // (harness-pi item 16): every drained feed read fails with a control reset,
     // so the bridge re-attaches until the runaway bound closes the run by name.
     // Nothing more is emitted; the bridge's loop hits the bound on its own.
+    if (this.script.transportLossBoundOnFeed !== undefined) {
+      this.container.resetOnDrain = new ExecInfraError("resident /exec: Network connection lost.", "transport-lost");
+      return;
+    }
     if (this.script.controlResetBoundOnFeed !== undefined) {
       this.container.resetOnDrain = controlReset("read");
       return;
@@ -2303,6 +2318,20 @@ class ScriptedServe {
     // word and re-attached (the fake clears the flag on the failing read), so
     // the re-attach happens with this call in flight; then the tool completes
     // and the run answers. A deterministic window, no race.
+    const unknownIdentityAt = this.script.transportLostWithPidAliveAndIdentityUnknown;
+    if (
+      (this.script.transportLostWithPidAlive !== undefined &&
+        turnIndex === this.script.transportLostWithPidAlive - 2) ||
+      (unknownIdentityAt !== undefined && turnIndex === unknownIdentityAt - 2)
+    ) {
+      this.container.failReadOnceThenAlive = new ExecInfraError(
+        "resident /exec: Network connection lost.",
+        "transport-lost",
+      );
+      if (unknownIdentityAt !== undefined && turnIndex === unknownIdentityAt - 2) this.container.vm = undefined;
+      for (let i = 0; this.container.failReadOnceThenAlive !== undefined && i < 2000; i++)
+        await this.deps.sleep(this.deps.tickMs ?? 1);
+    }
     if (this.script.replacedWordWithPidAlive !== undefined && turnIndex === this.script.replacedWordWithPidAlive - 2) {
       this.container.failReadOnceThenAlive = new HarnessContainerRuntimeReplacedError(
         "read",
