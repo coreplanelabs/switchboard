@@ -39,12 +39,12 @@ export interface ThreadErr {
    *  (execution.md item 9); reading `reason` there would take a busy mirror on
    *  a degraded-but-serviceable resident for a repo failure. */
   stateReason?: string;
-  /** On the 500 for a throw no route named (`catchAllErr`, at the fetch
+  /** A temporary refusal issued before admission (the checked VM recycle),
+   *  or a 500 for a throw no route named (`catchAllErr`, at the fetch
    *  handler's catch-all, a streamed route's rejection, a route's own catch
-   *  around its body, the thread data plane's last resort): whether the throw
-   *  it wrapped was the platform's own transient (`isTransientPlatformThrow`)
-   *  — a re-probe clears it — or a deterministic throw in the route, judged at
-   *  once. */
+   *  around its body, the thread data plane's last resort). For an unnamed
+   *  throw, `isTransientPlatformThrow` decides whether a re-probe clears it
+   *  or the route's deterministic failure stands. */
   transient?: boolean;
   /** The steps the request ran before it failed (docs/reference/specs/tracing.md item 19):
    *  a failed attach's trace is the one that says which step blew the budget. */
