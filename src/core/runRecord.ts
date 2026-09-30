@@ -502,6 +502,7 @@ export interface RunOperatorDecision {
     repoSource?: "request" | "attachment" | "thread" | "channel";
     shipEntry?: "work" | "work_from_thread" | "review" | "plan";
     workObjective?: string;
+    prBatch?: { kind: "review" | "ship"; targets: { repo: string; number: number; url: string }[] };
     confirmed?: true;
   }[];
   question?: string;
@@ -564,6 +565,9 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
             ...(b.repo !== undefined ? { repo: b.repo } : {}),
             ...(b.repoSource !== undefined ? { repoSource: b.repoSource } : {}),
             ...(b.shipEntry !== undefined ? { shipEntry: b.shipEntry } : {}),
+            ...(b.prBatch !== undefined
+              ? { prBatch: { kind: b.prBatch.kind, targets: b.prBatch.targets.map((target) => ({ ...target })) } }
+              : {}),
             ...(b.confirmed ? { confirmed: true as const } : {}),
           })),
         }

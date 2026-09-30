@@ -63,7 +63,7 @@ import { chatActorOf } from "../authz/actor.js";
 import { renderRepoFacts } from "./repoFacts.js";
 import { barePrNumberOf, explicitRepoOf, type ResidentSlugs } from "../repoContext.js";
 import { parseSlug } from "../residentAdmin.js";
-import { prBatchOf } from "../prBatch.js";
+import { linkedPullRequestsOf, prBatchBindingOf, type PrBatchBinding } from "../prBatchBinding.js";
 import { residentSlugsLister } from "../../execution/factory.js";
 import type { ProviderModelsReader } from "./providerModels.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
@@ -116,6 +116,7 @@ export type { OperatorEventFields } from "./commandRun.js";
  *  `ask` parks one question as the thread's pending question; each registry
  *  command the projection offers rides as its own typed tool. A no-call turn gets one named repair, then ends. */
 export const OPERATOR_BIND_TOOL = "bind_preset";
+export const OPERATOR_BATCH_TOOL = "bind_pr_batch";
 
 /** The presets the one door may bind. The conductor keeps its compound door:
  * the old readers' router no longer owns that path, so the operator offers it
@@ -286,6 +287,8 @@ export interface OperatorBind {
   /** For Ship work citing a PR, the requester's exact words for the separate change.
    *  The original request still reaches the unit unchanged. */
   workObjective?: string;
+  /** The exact linked PRs the operator selected for a conductor batch. */
+  prBatch?: PrBatchBinding;
   /** The bind is a pending question's confirmed proposal (`bindFromAnswer`):
    *  the LINE carries the task — the person's message was the word "yes" — so
    *  a preset line routes its own tail as the request (`presetRequestOf`),
@@ -511,7 +514,7 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
     .join("\n");
   const system = [
     // 1. Rules.
-    "You are the operator: the one door every chat request to Switchboard passes. You read one admitted chat event with the thread's tail and act with ONE typed tool call — never several in one answer: `bind_preset` (a preset on the person's request, which rides to the run by reference — never re-typed, plus the typed repository when the facts name one), one of the registry command tools (typed arguments, never a line), `ask` (one question when the request holds a fork only the person can decide, with a runnable best-guess proposal when possible), or `ask_repository_target` (select the requested repository writer and ask the fixed write-destination question when its target is missing). Ending the turn with no tool call is a violation: you will be asked once more to make one offered action call; a second no-call turn ends without starting work. You may first call the read tools (`thread_state`, `repo_facts`, `registry_help`, `provider_models`) to ground the decision. `thread_state` includes the newest finished run's agent, repository and pull request plus the channel's default repository, so a bare re-review inherits its target.",
+    "You are the operator: the one door every chat request to Switchboard passes. You read one admitted chat event with the thread's tail and act with ONE typed tool call — never several in one answer: `bind_preset` (one preset on the person's request), `bind_pr_batch` (a typed Review or Ship list for conductor), one of the registry command tools (typed arguments, never a line), `ask` (one question when the request holds a fork only the person can decide, with a runnable best-guess proposal when possible), or `ask_repository_target` (select the requested repository writer and ask the fixed write-destination question when its target is missing). Ending the turn with no tool call is a violation: you will be asked once more to make one offered action call; a second no-call turn ends without starting work. You may first call the read tools (`thread_state`, `repo_facts`, `registry_help`, `provider_models`) to ground the decision. `thread_state` includes the newest finished run's agent, repository and pull request plus the channel's default repository, so a bare re-review inherits its target.",
     "You never refuse: a refusal exists only where the authorization policy makes one, and that gate runs after you. There is no administrator, admin access or internal tooling beyond the presets and commands below. When you cannot act, ask one question or end the turn.",
     "The installation organization is context, not a target repository. An onboarded repository list gives candidates, not evidence that any one contains a PR. A bare PR number does not identify a repository; use an unquoted GitHub URL, PR shorthand or repository address, a durable thread target, or the channel default. A bare PR review with no grounded repository must ask for one. A later PR link offered as context does not replace a bare review PR's inherited target; a repository link offered only as context does not identify that PR's repository. Two different PR targets without a context cue require clarification, even when one has an addressed repository. Code examples, context paths and mere slug mentions are not request targets. When a requested change has no grounded repository, use `ask_repository_target` if offered; for a source or example repository, use ordinary `ask`. When requester targets already conflict, use ordinary `ask` and request an explicitly addressed target such as `in owner/name`; a bare answer cannot erase the conflict. Never guess a repo from the model provider, a source-tree fact, or the candidate list. An attached file that names an onboarded repository can ground its target.",
     "Decision records and plans are ordinary repository docs changes. Resolve their paths in the requested repository; a docs write is not a privileged administrative update. The `repo_facts` read describes Switchboard's own source tree only.",
@@ -523,7 +526,7 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
         ]
       : []),
     "A write ask in a named or inherited repository binds the write preset even when a detail inside it is unresolved — the run it starts resolves the detail with the repository in front of it. For a terse fix, inherit only the same requester's actor-stamped explicit target in the thread; a prior general run's repository and other people's or assistant turns do not authorize a write. Conflicting requester targets require one question. Ask a question only for a fork the run itself could not resolve, and a question's proposal must be a line that would do the asked work: a write line for a write ask, never a read (an exploration, a listing, a summary) standing in for the work.",
-    "A request to review or ship several linked pull requests is one conductor bind, even when the links span repositories. Omit the repository slot: each child uses its own exact pull request URL. The conductor may start Ship children only for the pull requests explicitly listed in a 'ship these' request.",
+    "An explicit positive request to review or ship several linked pull requests uses `bind_pr_batch`, even when the links span repositories or Slack flattens their bullets. Choose the action word and every PR link destination in that one list, in order; omit context, negated and quoted links. If the action or list is ambiguous, ask. That typed choice starts the conductor with no single repository target. Each child is held to one selected URL at its spawn boundary.",
     "For one Ship request, choose `shipEntry` in `bind_preset`: `review` when the person asks Ship to review an existing pull request, `work` for a self-contained change, `work_from_thread` when the requested change depends on earlier requester context in this thread (for example, 'fix it'), or `plan` for an explicit `agent:ship plan <path>.md` request. A review starts in the review round of that exact PR; never turn the word 'review' or its URL into a coding task. If work cites a PR as evidence for a separate change, give `workObjective` as an exact quote of the requester's distinct code-change ask, from this turn or an earlier requester turn. Omit it for review or continuation of the cited PR; without requester-backed words a work bind citing a PR stops before coding. A request naming `agent:ship` still passes through this door and keeps Ship as its preset. The runner verifies the PR, head, repository and permissions after the bind.",
     "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a proposal that would do the write built from them — the person's yes runs it, and their next words refine it.",
     "A question about whether the person has config overrides uses `config show`: it describes their own scope, this channel's scope and the effective settings. `config overrides` lists channels with scopes; use it only when they ask which channels have settings.",
@@ -733,6 +736,25 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
           },
         ]
       : [];
+  const batch: ToolDef[] = presets.includes("conductor")
+    ? [
+        {
+          name: OPERATOR_BATCH_TOOL,
+          description:
+            "Start one conductor for an explicit positive Review or Ship list across repositories. Select every PR link destination in that one list, in order; omit excluded or contextual links. Ambiguous requests need a question. The authored request rides unchanged.",
+          inputSchema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["kind", "targets", "reason"],
+            properties: {
+              kind: { type: "string", enum: ["review", "ship"] },
+              targets: { type: "array", minItems: 2, maxItems: 32, items: { type: "string" } },
+              reason: { type: "string", description: "one line: why these PRs need coordinated runs" },
+            },
+          },
+        },
+      ]
+    : [];
   const ask: ToolDef = {
     name: OPERATOR_ASK_TOOL,
     description:
@@ -841,6 +863,7 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
     ask,
     ...(mayAskRepositoryTarget ? [askRepositoryTarget] : []),
     ...bind,
+    ...batch,
     ...projection.commands.map((c) => commandToolWithIntent(c.tool)),
     ...reads,
   ];
@@ -1217,6 +1240,18 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
       tool: answer.tool,
       ...(typeof input.filter === "string" && input.filter.trim().length > 0 ? { filter: input.filter } : {}),
     };
+  if (answer.tool === OPERATOR_BATCH_TOOL) {
+    if (!ctx.presets.includes("conductor"))
+      return { kind: "violation", violation: "a PR batch needs the conductor preset" };
+    const parsed = prBatchBindingOf(input, stripDirectiveHead(ctx.requestText, "conductor"));
+    if ("error" in parsed) return { kind: "violation", violation: parsed.error };
+    const reason = tidy(input.reason);
+    const line = operatorLine(redactSecrets(`agent:conductor ${stripDirectiveHead(ctx.requestText, "conductor")}`));
+    return {
+      kind: "decision",
+      decision: { kind: "binds", binds: [{ line, reason, prBatch: parsed.binding }], reason },
+    };
+  }
   if (answer.tool === OPERATOR_BIND_TOOL) {
     const { preset, reason, repo, shipEntry, workObjective } = input;
     if (typeof preset !== "string" || !ctx.presets.includes(preset))
@@ -1224,10 +1259,9 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         kind: "violation",
         violation: `bind_preset named "${String(preset)}", not a preset the projection offers`,
       };
-    const batch = prBatchOf(ctx.requestText);
-    if (batch !== undefined && !ctx.presets.includes("conductor"))
-      return { kind: "violation", violation: "a pull request batch needs the conductor preset" };
-    const selectedPreset = batch === undefined ? preset : "conductor";
+    const selectedPreset = preset;
+    if (linkedPullRequestsOf(ctx.requestText).length >= 2)
+      return { kind: "violation", violation: "a multi-PR Review or Ship request needs bind_pr_batch" };
     if (
       selectedPreset === "ship" &&
       shipEntry !== "work" &&
@@ -1249,11 +1283,11 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     if ("violation" in requestSettings) return { kind: "violation", violation: requestSettings.violation };
     let repository: string | undefined;
     let repoSource: OperatorBind["repoSource"];
-    const requestRepo = batch === undefined ? explicitRepoOf(ctx.requestText) : undefined;
+    const requestRepo = explicitRepoOf(ctx.requestText);
     const needsRepo = AGENTS[selectedPreset] !== undefined && machineNeedsRepo(AGENTS[selectedPreset].machine);
     if (needsRepo && selectedPreset !== "review" && ctx.targetStoreUnavailable && requestRepo === undefined)
       return { kind: "violation", violation: "requester thread target store is unavailable; ask for the repository" };
-    const suppliedRepo = batch === undefined ? repo : undefined;
+    const suppliedRepo = repo;
     const threadRepo =
       selectedPreset === "review"
         ? ctx.threadRepo
@@ -2273,6 +2307,7 @@ export function operatorEventOf(
     repoSource?: "request" | "attachment" | "thread" | "channel";
     shipEntry?: ShipEntryIntent;
     workObjective?: string;
+    prBatch?: PrBatchBinding;
     confirmed?: true;
   }[];
   question?: string;
@@ -2308,6 +2343,7 @@ export function operatorEventOf(
             ...(b.repoSource !== undefined ? { repoSource: b.repoSource } : {}),
             ...(b.shipEntry !== undefined ? { shipEntry: b.shipEntry } : {}),
             ...(b.workObjective !== undefined ? { workObjective: b.workObjective } : {}),
+            ...(b.prBatch !== undefined ? { prBatch: b.prBatch } : {}),
             ...(b.confirmed ? { confirmed: true as const } : {}),
           })),
         }
@@ -2811,6 +2847,8 @@ export type OperatorExecution =
       repoSource?: OperatorBind["repoSource"];
       /** The starting stage for a Ship unit, chosen by the operator. */
       shipEntry?: ShipEntryIntent;
+      /** Exact PR targets for a coordinated Review or Ship batch. */
+      prBatch?: PrBatchBinding;
       carried: boolean;
     };
 
@@ -2991,6 +3029,7 @@ export async function executeOperatorDecision(
         ...(bind.repo !== undefined ? { repo: bind.repo } : {}),
         ...(bind.repoSource !== undefined ? { repoSource: bind.repoSource } : {}),
         ...(bind.shipEntry !== undefined ? { shipEntry: bind.shipEntry } : {}),
+        ...(bind.prBatch !== undefined ? { prBatch: bind.prBatch } : {}),
         carried,
       };
     }

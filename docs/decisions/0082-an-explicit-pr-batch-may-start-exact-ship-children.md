@@ -19,3 +19,15 @@ A Ship unit can remain live for its full delivery lease. If it inherited the con
 ## Amended: One-day delivery lease
 
 The conductor and each Ship unit ask for one day by default. A Ship unit permits at most 48 review rounds within that lease. When a configured or scoped lease is shorter, the fork selects the greatest round count that fits its effective minutes; a lease too short for even one round is refused. An explicitly configured round count and wall clock must fit together at config load. The read-child fan-out cap remains separate from independent Ship units.
+
+## Amended 2026-09-30: The operator binds exact targets as data
+
+The operator selects Review or Ship and the exact linked PR destinations in one typed `bind_pr_batch` call. Code validates that each selected URL is a real GitHub PR destination in the request, stores the choice on the conductor run, and checks every Review or Ship child against it before opening a thread. This works when Slack flattens bullets and does not infer intent from list punctuation. A conductor with several linked PRs but no typed batch cannot start Review or Ship children. The requester's text remains the child's context, but it grants no additional PR targets beyond the stored typed choice.
+
+Re-evaluation: the original bounded-write exception still holds because every Ship child must match one stored target and still passes the normal requester, repository, ownership and exact-head gates. The typed binding removes list-layout parsing from the authorization boundary.
+
+## Amended 2026-09-30: Require explicit action and list evidence
+
+The typed choice is a proposal, not sufficient authority: a wrong `ship` choice for a Review request, or a selected URL under “do not ship,” would otherwise pass a presence-only check. A bounded lexical gate accepts one explicit positive `review` or `ship` list and requires the typed action and complete target set to match it. It never infers an action or expands targets. Negated, contextual, postfix or ambiguous prose attached to a list item closes the batch for clarification. The narrow grammar still accepts `re-review these` and `ship all of these`. A bare URL is consumed as one span, so a GitHub-looking suffix after a foreign URL's pipe cannot become separate evidence. Any untyped preset bind with two distinct literal PR links is re-asked before a run starts, even if list validation fails. An explicit `agent:conductor` prefix is removed before validating a typed batch. This keeps ordinary “ship these” and “review these” requests direct while refusing uncertain authority before child launch.
+
+Re-evaluation: the bounded-write exception still holds because the typed choice can only narrow one explicit affirmative list, and every Ship child still passes the existing requester, repository, ownership and exact-head gates. Requests outside the proven list grammar need clarification rather than a speculative child.

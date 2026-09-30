@@ -9,7 +9,7 @@
 // the parent's remaining clock and conversation as text turns. An exact-PR
 // Ship child gets its own lease and no parent seed. What this
 // stage decides for itself it refuses by name before anything is opened: a
-// child cannot spawn (`spawn_depth`), a writer outside an explicit Ship batch
+// child cannot spawn (`spawn_depth`), a writer outside a typed Ship batch
 // is refused (`spawn_identity`), a parent with
 // under two minutes left has no budget to hand on (`spawn_budget`), a parent
 // at `spawn.maxChildren` live read children waits (`spawn_fanout`), a channel with
@@ -45,7 +45,7 @@ import { waitCapabilityFor, type WaitCapability } from "./awaitChildren.js";
 import { textTurnsOf, type TextTurn } from "./textTurns.js";
 import type { DispatchOutcome } from "./outcome.js";
 import type { OperationTarget } from "../repoContext.js";
-import { prBatchOf } from "../prBatch.js";
+import { linkedPullRequestsOf, type PrBatchBinding } from "../prBatchBinding.js";
 
 /** The `spawn` block of `config.yaml` (docs/reference/specs/agent-conductor.md item 5). */
 export interface SpawnConfig {
@@ -138,6 +138,8 @@ export interface SpawnParent extends ParentRun {
   /** The wall clock the parent has left: a spawned child is always bounded by it. */
   remainingMs: number;
   agentName: string;
+  /** A typed operator batch survives on the conductor's run event. */
+  prBatch?: PrBatchBinding;
   msg: IncomingMessage;
   io: ChannelIO;
   conversation?: readonly ChatMessage[];
@@ -294,28 +296,35 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   // coding, ship or review child never runs on the fast tier.
   const tierProblem = spawnTierRefusal(request, deps.core.config.config);
   if (tierProblem !== undefined) return refused("spawn_tier", tierProblem);
-  // An explicit Ship batch authorizes only its exact PR URLs. The child gets
-  // that PR's repository as an operation target; no model-chosen repository,
-  // branch or extra task text can turn one listed PR into another write.
-  const batch = parent.agentName === "conductor" ? prBatchOf(parent.msg.text) : undefined;
-  const shipTarget =
-    request.preset === "ship" && batch?.kind === "ship"
-      ? batch.targets.find((target) => target.url === request.prompt.trim())
+  // A typed batch authorizes only its exact PR URLs. Without the typed bind,
+  // multiple linked PRs cannot grant Review or Ship child authority.
+  const typedBatch = parent.agentName === "conductor" ? parent.prBatch : undefined;
+  if (
+    parent.agentName === "conductor" &&
+    typedBatch === undefined &&
+    (request.preset === "review" || request.preset === "ship") &&
+    linkedPullRequestsOf(parent.msg.text).length >= 2
+  )
+    return refused("spawn_batch_binding", "select the exact Review or Ship targets at the operator door first");
+  const selectedTarget =
+    typedBatch?.kind === request.preset
+      ? typedBatch.targets.find((target) => target.url === request.prompt.trim())
       : undefined;
   if (
-    request.preset === "ship" &&
-    batch?.kind === "ship" &&
-    (shipTarget === undefined ||
+    typedBatch !== undefined &&
+    (request.preset === "review" || request.preset === "ship") &&
+    (selectedTarget === undefined ||
       request.ref !== undefined ||
-      (request.repo !== undefined && request.repo !== shipTarget.repo))
+      (request.repo !== undefined && request.repo !== selectedTarget.repo))
   )
-    return refused("spawn_ship_target", "ship only an exact pull request URL listed in the parent's request");
+    return refused("spawn_batch_target", "start only the exact pull requests selected for this Review or Ship batch");
+  const shipTarget = selectedTarget && request.preset === "ship" ? selectedTarget : undefined;
   // Other writers still cannot be spawned from a conductor. A Ship child
   // passes this one exception only after its target was checked above.
   if (AGENTS[request.preset]?.identity === "write" && shipTarget === undefined) {
     return refused(
       "spawn_identity",
-      `\`${request.preset}\` runs as a \`write\` identity, so this run was not started: only an exact PR in an explicit "ship these" request may spawn a write child`,
+      `\`${request.preset}\` runs as a \`write\` identity, so this run was not started: only an exact PR in a typed Ship batch may spawn a write child`,
     );
   }
   const shipBudgetFit =
@@ -402,8 +411,8 @@ export async function spawnChild<D extends SpawnCoreDeps>(
     request.preset === "ship" ? undefined : parent.conversation ? textTurnsOf(parent.conversation) : undefined;
   const settled = deps
     .dispatch(deps.core, child, io, {
-      ...(shipTarget !== undefined
-        ? { operationTarget: { repo: shipTarget.repo } }
+      ...(selectedTarget !== undefined
+        ? { operationTarget: { repo: selectedTarget.repo } }
         : request.repo !== undefined
           ? { operationTarget: { repo: request.repo, ...(request.ref !== undefined ? { ref: request.ref } : {}) } }
           : {}),

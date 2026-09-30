@@ -141,7 +141,71 @@ const parent = (io: ChannelIO, over: Partial<SpawnParent> = {}): SpawnParent => 
 });
 
 describe("spawnChild — the one path a child run is born through", () => {
-  it("an explicit cross-repository ship batch spawns only an exact listed PR and binds its repository", async () => {
+  it("a typed flattened Ship batch starts only selected exact PRs across repositories", async () => {
+    const text = "ship these: • https://github.com/acme/api/pull/7 • https://github.com/acme/web/pull/9";
+    const ch = channel();
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const p = parent(ch.io, {
+      msg: { ...PARENT_MSG, text },
+      prBatch: {
+        kind: "ship",
+        targets: [
+          { repo: "acme/api", number: 7, url: "https://github.com/acme/api/pull/7" },
+          { repo: "acme/web", number: 9, url: "https://github.com/acme/web/pull/9" },
+        ],
+      },
+    });
+    const exact = await spawnChild(deps(dispatch), p, {
+      preset: "ship",
+      prompt: "https://github.com/acme/web/pull/9",
+    });
+    expect(exact).toMatchObject({ kind: "spawned" });
+    expect(calls[0]?.opts).toMatchObject({ operationTarget: { repo: "acme/web" } });
+    expect(calls[0]?.opts?.parent).toEqual({ runId: "run-p", depth: 1 });
+    expect(
+      await spawnChild(deps(dispatch), p, { preset: "ship", prompt: "https://github.com/acme/web/pull/10" }),
+    ).toMatchObject({
+      kind: "refused",
+      reason: "spawn_batch_target",
+    });
+    expect(
+      await spawnChild(deps(dispatch), p, { preset: "review", prompt: "https://github.com/acme/api/pull/7" }),
+    ).toMatchObject({
+      kind: "refused",
+      reason: "spawn_batch_target",
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a typed Review batch binds each child to its selected repository", async () => {
+    const ch = channel();
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const p = parent(ch.io, {
+      msg: {
+        ...PARENT_MSG,
+        text: "review these: • https://github.com/acme/api/pull/7 • https://github.com/acme/web/pull/9",
+      },
+      prBatch: {
+        kind: "review",
+        targets: [
+          { repo: "acme/api", number: 7, url: "https://github.com/acme/api/pull/7" },
+          { repo: "acme/web", number: 9, url: "https://github.com/acme/web/pull/9" },
+        ],
+      },
+    });
+    expect(
+      await spawnChild(deps(dispatch), p, { preset: "review", prompt: "https://github.com/acme/web/pull/9" }),
+    ).toMatchObject({ kind: "spawned" });
+    expect(calls[0]?.opts).toMatchObject({ operationTarget: { repo: "acme/web" } });
+    expect(
+      await spawnChild(deps(dispatch), p, { preset: "review", prompt: "https://github.com/acme/api/pull/8" }),
+    ).toMatchObject({
+      kind: "refused",
+      reason: "spawn_batch_target",
+    });
+  });
+
+  it("an unbound cross-repository list cannot start Review or Ship children", async () => {
     const text =
       "<@U123|switchboard> ship these\n" +
       "- <https://github.com/acme/api/pull/7|#7 — API>\n" +
@@ -153,47 +217,40 @@ describe("spawnChild — the one path a child run is born through", () => {
       msg: { ...PARENT_MSG, text },
       conversation: [{ role: "user", content: [{ type: "text", text }] }],
     });
-    const exact = await spawnChild(d, p, {
+    const ship = await spawnChild(d, p, {
       preset: "ship",
       prompt: "https://github.com/acme/web/pull/9",
       repo: "acme/web",
     });
-    expect(exact).toMatchObject({ kind: "spawned" });
-    expect(calls[0]?.msg.text).toBe("agent:ship in acme/web: https://github.com/acme/web/pull/9");
-    expect(calls[0]?.opts).toMatchObject({ operationTarget: { repo: "acme/web" } });
-    expect(calls[0]?.opts?.parent).toEqual({ runId: "run-p", depth: 1 });
-    expect(calls[0]?.opts?.seed).toBeUndefined();
-
-    const unlisted = await spawnChild(d, p, { preset: "ship", prompt: "https://github.com/acme/web/pull/10" });
-    expect(unlisted).toMatchObject({ kind: "refused", reason: "spawn_ship_target" });
-    const wrongRepo = await spawnChild(d, p, {
-      preset: "ship",
-      prompt: "https://github.com/acme/web/pull/9",
-      repo: "acme/api",
-    });
-    expect(wrongRepo).toMatchObject({ kind: "refused", reason: "spawn_ship_target" });
-    const extraTask = await spawnChild(d, p, {
-      preset: "ship",
-      prompt: "https://github.com/acme/web/pull/9 and https://github.com/acme/api/pull/7",
-    });
-    expect(extraTask).toMatchObject({ kind: "refused", reason: "spawn_ship_target" });
-    const branch = await spawnChild(d, p, {
-      preset: "ship",
-      prompt: "https://github.com/acme/web/pull/9",
-      ref: "feature/other",
-    });
-    expect(branch).toMatchObject({ kind: "refused", reason: "spawn_ship_target" });
-    expect(calls).toHaveLength(1);
+    expect(ship).toMatchObject({ kind: "refused", reason: "spawn_batch_binding" });
+    const review = await spawnChild(d, p, { preset: "review", prompt: "https://github.com/acme/api/pull/7" });
+    expect(review).toMatchObject({ kind: "refused", reason: "spawn_batch_binding" });
+    expect(ch.leads).toHaveLength(0);
+    expect(calls).toHaveLength(0);
   });
 
   it("a Ship batch with thirteen linked PRs still starts an exact target", async () => {
     const text = `ship these:\n${Array.from({ length: 13 }, (_, i) => `- https://github.com/acme/api/pull/${i + 1}`).join("\n")}`;
     const ch = channel();
     const { dispatch } = fakeDispatch(registers("run-child"));
-    const out = await spawnChild(deps(dispatch), parent(ch.io, { msg: { ...PARENT_MSG, text } }), {
-      preset: "ship",
-      prompt: "https://github.com/acme/api/pull/1",
-    });
+    const out = await spawnChild(
+      deps(dispatch),
+      parent(ch.io, {
+        msg: { ...PARENT_MSG, text },
+        prBatch: {
+          kind: "ship",
+          targets: Array.from({ length: 13 }, (_, i) => ({
+            repo: "acme/api",
+            number: i + 1,
+            url: `https://github.com/acme/api/pull/${i + 1}`,
+          })),
+        },
+      }),
+      {
+        preset: "ship",
+        prompt: "https://github.com/acme/api/pull/1",
+      },
+    );
     expect(out).toMatchObject({ kind: "spawned" });
     expect(ch.leads).toHaveLength(1);
     expect(dispatch).toHaveBeenCalledTimes(1);
@@ -397,7 +454,7 @@ describe("spawnChild — the one path a child run is born through", () => {
 
   // docs/reference/specs/agent-conductor.md items 3 and 12: outside the exact
   // Ship batch exception, a writer is refused before a thread opens.
-  it("a writer outside an explicit Ship batch is refused `spawn_identity` before anything opens, while readers pass", async () => {
+  it("a writer outside a typed Ship batch is refused `spawn_identity` before anything opens, while readers pass", async () => {
     const { dispatch } = fakeDispatch(registers("run-child"));
     const ch = channel();
     const writers = Object.values(AGENTS).filter((a) => a.identity === "write");
@@ -407,7 +464,7 @@ describe("spawnChild — the one path a child run is born through", () => {
       expect(out, name).toEqual({
         kind: "refused",
         reason: "spawn_identity",
-        message: `\`${name}\` runs as a \`write\` identity, so this run was not started: only an exact PR in an explicit "ship these" request may spawn a write child`,
+        message: `\`${name}\` runs as a \`write\` identity, so this run was not started: only an exact PR in a typed Ship batch may spawn a write child`,
       });
     }
     expect(ch.leads).toEqual([]);
@@ -510,7 +567,20 @@ describe("spawnCapabilityFor — the capability a spawning run's tools hold", ()
     const ch = channel();
     const cap = spawnCapabilityFor(
       deps(dispatch),
-      { runId: "run-p", depth: 0, agentName: "conductor", msg: { ...PARENT_MSG, text }, io: ch.io },
+      {
+        runId: "run-p",
+        depth: 0,
+        agentName: "conductor",
+        msg: { ...PARENT_MSG, text },
+        io: ch.io,
+        prBatch: {
+          kind: "ship",
+          targets: [
+            { repo: "acme/api", number: 7, url: target },
+            { repo: "acme/web", number: 9, url: "https://github.com/acme/web/pull/9" },
+          ],
+        },
+      },
       history,
     );
     expect(
@@ -533,7 +603,20 @@ describe("spawnCapabilityFor — the capability a spawning run's tools hold", ()
     const ch = channel();
     const cap = spawnCapabilityFor(
       deps(dispatch),
-      { runId: "run-p", depth: 0, agentName: "conductor", msg: { ...PARENT_MSG, text }, io: ch.io },
+      {
+        runId: "run-p",
+        depth: 0,
+        agentName: "conductor",
+        msg: { ...PARENT_MSG, text },
+        io: ch.io,
+        prBatch: {
+          kind: "ship",
+          targets: [
+            { repo: "acme/api", number: 7, url: target },
+            { repo: "acme/web", number: 9, url: "https://github.com/acme/web/pull/9" },
+          ],
+        },
+      },
       history,
     );
     expect(await cap.spawn({ preset: "ship", prompt: target }, { remainingMs: 30 * 60_000 })).toMatchObject({
@@ -552,6 +635,13 @@ describe("spawnCapabilityFor — the capability a spawning run's tools hold", ()
       depth: 0,
       agentName: "conductor",
       msg: { ...PARENT_MSG, text },
+      prBatch: {
+        kind: "ship",
+        targets: [
+          { repo: "acme/api", number: 7, url: "https://github.com/acme/api/pull/7" },
+          { repo: "acme/web", number: 9, url: "https://github.com/acme/web/pull/9" },
+        ],
+      },
       io: channel().io,
     });
     const request = { preset: "ship", prompt: "https://github.com/acme/api/pull/7", repo: "acme/api" };
@@ -597,6 +687,13 @@ describe("spawnCapabilityFor — the capability a spawning run's tools hold", ()
       depth: 0,
       agentName: "conductor",
       msg: { ...PARENT_MSG, text },
+      prBatch: {
+        kind: "ship",
+        targets: targets.map((target) => ({
+          ...target,
+          url: `https://github.com/${target.repo}/pull/${target.number}`,
+        })),
+      },
       io: channel().io,
     });
     const outcomes = await Promise.all(
