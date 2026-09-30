@@ -57,6 +57,7 @@ import type { DispatchFollowUp } from "./admission.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { contextMessageTexts } from "./messages.js";
 import { operatorThreadTail, requesterThreadEvidence } from "./operator.js";
+import { threadSessionKey } from "../runLedger/sessionLog.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { githubCapabilityFor, shutdownNotice, type RunDeps } from "./run.js";
 import { defaultRunRegistry, REPLAY_EVERYTHING } from "../runRegistry.js";
@@ -643,14 +644,21 @@ export async function runShipBranch(
       ctx.agentSource === "operator" &&
       ctx.operator?.binds?.some((bind) => bind.repoSource === "thread") === true &&
       /^(?:please\s+)?fix\s+(?:it|this)[.!]?$/i.test(directives.text.trim());
-    const threadEvidence =
-      requiresThreadEvidence && repoCtx.repo !== undefined && deps.runLedger !== undefined
-        ? requesterThreadEvidence(
+    let threadEvidence: string | undefined;
+    if (requiresThreadEvidence && repoCtx.repo !== undefined && deps.runLedger !== undefined) {
+      try {
+        const target = await deps.runLedger.readRequesterTarget(threadSessionKey(msg.threadKey), msg.userId);
+        if (target && !target.conflict && target.repo === repoCtx.repo)
+          threadEvidence = requesterThreadEvidence(
             await operatorThreadTail(deps.runLedger, [{ agent: "general" }], msg.threadKey),
             msg.userId,
             repoCtx.repo,
-          )
-        : undefined;
+            target,
+          );
+      } catch {
+        // A lost target checkpoint cannot be replaced by the model's tail.
+      }
+    }
     outcome = hostRefused
       ? {
           status: "aborted",

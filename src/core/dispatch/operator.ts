@@ -52,6 +52,7 @@ import type { IntakeVerdict } from "../intake.js";
 import type { ConfigStore } from "../../config.js";
 import type { ProviderTable } from "../harness/piAi.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
+import type { RequesterTarget } from "../runLedger/ledger.js";
 import { sessionKey, threadSessionKey } from "../runLedger/sessionLog.js";
 import { chatActorOf } from "../authz/actor.js";
 import { renderRepoFacts } from "./repoFacts.js";
@@ -426,6 +427,10 @@ export interface OperatorInput {
   /** Only durable turns stamped with this requester's identity can establish
    *  a thread write target. */
   requesterId?: string;
+  /** The store's actor-keyed target survives a model/session tail cut. */
+  requesterTarget?: RequesterTarget;
+  /** Refuse an inherited write when durable target authority could not be read. */
+  targetStoreUnavailable?: boolean;
   /** The newest run's repository is review context, not write authority. */
   newestFinishedRun?: NewestFinishedRun;
   /** The channel-scope default repository, when configured. */
@@ -488,13 +493,21 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
     // 3. Briefs.
     ...(input.briefs && input.briefs.length > 0 ? ["", "Repository briefs:", ...input.briefs] : []),
   ].join("\n");
-  const requesterTarget = input.requesterId ? requesterRepoContext(input.tail, input.requesterId) : {};
+  const requesterTarget =
+    input.requesterId && !input.targetStoreUnavailable
+      ? requesterRepoContext(input.tail, input.requesterId, input.requesterTarget)
+      : {};
   const user = [
     ...(requesterTarget.requesterRepoConflict
       ? ["Requester turns in this thread name conflicting targets; ask which one to fix."]
       : requesterTarget.requesterRepo
         ? [`Requester's established thread repository: \`${requesterTarget.requesterRepo}\`.`]
         : []),
+    ...(input.requesterTarget?.issue && !requesterTarget.requesterRepoConflict
+      ? [
+          `Requester's established issue: \`${input.requesterTarget.issue}\` (requester-authored target, not a prior run's claim).`,
+        ]
+      : []),
     ...(input.newestFinishedRun?.repo
       ? [`Thread's newest finished run repository: \`${input.newestFinishedRun.repo}\`.`]
       : []),
@@ -717,11 +730,14 @@ export function answerOperatorRead(tool: string, input: OperatorInput): string {
     const channel = input.channelRepo
       ? `The channel default repository: \`${input.channelRepo}\`.`
       : "The channel has no default repository.";
-    const requester = input.requesterId ? requesterRepoContext(input.tail, input.requesterId) : {};
+    const requester =
+      input.requesterId && !input.targetStoreUnavailable
+        ? requesterRepoContext(input.tail, input.requesterId, input.requesterTarget)
+        : {};
     const target = requester.requesterRepoConflict
       ? "The requester named conflicting thread targets; ask which repository to fix."
       : requester.requesterRepo
-        ? `The requester's explicit thread repository: \`${requester.requesterRepo}\`.`
+        ? `The requester's explicit thread repository: \`${requester.requesterRepo}\`${input.requesterTarget?.issue ? `, issue \`${input.requesterTarget.issue}\`` : ""}.`
         : "No actor-stamped requester turn established a thread repository for a write.";
     return `${owner}\n${pending}\n${runFacts}\n${channel}\n${target}`;
   }
@@ -831,7 +847,9 @@ export interface OperatorTurnContext {
   commands: readonly RoutableCommand[];
   threadRepo?: string;
   requesterRepo?: string;
+  requesterIssue?: string;
   requesterRepoConflict?: boolean;
+  targetStoreUnavailable?: boolean;
   channelRepo?: string;
   /** Null means the attachment names conflicting plausible targets. */
   attachmentRepos?: readonly string[] | null;
@@ -1016,8 +1034,15 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     let repoSource: OperatorBind["repoSource"];
     const requestRepo = batch === undefined ? explicitRepoOf(ctx.requestText) : undefined;
     const needsRepo = AGENTS[selectedPreset] !== undefined && machineNeedsRepo(AGENTS[selectedPreset].machine);
+    if (needsRepo && selectedPreset !== "review" && ctx.targetStoreUnavailable && requestRepo === undefined)
+      return { kind: "violation", violation: "requester thread target store is unavailable; ask for the repository" };
     const suppliedRepo = batch === undefined ? repo : undefined;
-    const threadRepo = selectedPreset === "review" ? ctx.threadRepo : needsRepo ? ctx.requesterRepo : ctx.threadRepo;
+    const threadRepo =
+      selectedPreset === "review"
+        ? ctx.threadRepo
+        : needsRepo
+          ? ctx.requesterRepo
+          : (ctx.requesterRepo ?? ctx.threadRepo);
     if (needsRepo && selectedPreset !== "review" && ctx.requesterRepoConflict && requestRepo === undefined)
       return {
         kind: "violation",
@@ -1116,6 +1141,19 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     const { text, proposal, reason } = input;
     if (typeof text !== "string" || text.trim().length === 0)
       return { kind: "violation", violation: "an ask with no text" };
+    const issueNumber = ctx.requesterIssue?.split("#")[1];
+    if (
+      ctx.requesterRepo &&
+      !ctx.requesterRepoConflict &&
+      issueNumber &&
+      (ctx.requestText.includes(`#${issueNumber}`) ||
+        /^(?:please\s+)?fix\s+(?:it|this)[.!]?$/i.test(ctx.requestText.trim())) &&
+      /(?:which|what)\s+(?:repo(?:sitory)?|project)|(?:repo(?:sitory)?|project)\s+(?:is|owns|should)/i.test(text)
+    )
+      return {
+        kind: "violation",
+        violation: `the requester's issue ${ctx.requesterIssue} already established repository ${ctx.requesterRepo}; continue that request`,
+      };
     if (typeof proposal === "string" && proposal.trim().length > 0 && !runnableProposal(proposal, ctx))
       return {
         kind: "violation",
@@ -1517,6 +1555,34 @@ function requesterGitHubLinks(text: string): { repo: string; issue?: string }[] 
   });
 }
 
+function requesterTargetsOf(text: string): RequesterTarget[] {
+  const unquoted = requesterTargetText(text);
+  const context = requesterRepoContext([{ text: `user: ${text}`, actor: "requester" }], "requester");
+  const links = requesterGitHubLinks(unquoted);
+  const repo = context.requesterRepo;
+  const provenance = redactSecrets(unquoted).slice(0, 1_000);
+  if (context.requesterRepoConflict) {
+    // A conflict in one turn must be sticky even if that turn later leaves the tail.
+    return links.map((link) => ({ repo: link.repo, ...(link.issue ? { issue: link.issue } : {}), provenance }));
+  }
+  if (!repo || !provenance) return [];
+  const issue = links.find((link) => link.repo === repo)?.issue;
+  return [{ repo, ...(issue ? { issue } : {}), provenance }];
+}
+
+/** Checkpoint an admitted human message even when an explicit directive bypasses
+ * the operator. Worker-spawned and replayed requests are excluded by the caller. */
+export async function checkpointRequesterMessageTarget(
+  ledger: Pick<NonNullable<OperatorStageDeps["runLedger"]>, "checkpointRequesterTarget"> | undefined,
+  threadKey: string,
+  actor: string,
+  text: string,
+): Promise<void> {
+  if (!ledger?.checkpointRequesterTarget) return;
+  const key = threadSessionKey(threadKey);
+  for (const target of requesterTargetsOf(text)) await ledger.checkpointRequesterTarget(key, actor, target);
+}
+
 /** Only the requester's actor-stamped user turns can authorize a later write.
  * The session tail survives process restarts; missing actor stamps, machine
  * turns and quoted examples grant nothing. Distinct targets are a question,
@@ -1524,9 +1590,11 @@ function requesterGitHubLinks(text: string): { repo: string; issue?: string }[] 
 export function requesterRepoContext(
   tail: readonly OperatorTailTurn[],
   requesterId: string,
+  checkpoint?: RequesterTarget,
 ): { requesterRepo?: string; requesterRepoConflict?: boolean } {
-  let repo: string | undefined;
-  let issue: string | undefined;
+  let repo: string | undefined = checkpoint?.repo;
+  let issue: string | undefined = checkpoint?.issue;
+  if (checkpoint?.conflict) return { requesterRepoConflict: true };
   for (const turn of tail) {
     if (turn.actor !== requesterId || !turn.text.startsWith("user: ")) continue;
     // Both target selection and conflict checks use the same requester-only,
@@ -1553,8 +1621,9 @@ export function requesterThreadEvidence(
   tail: readonly OperatorTailTurn[],
   requesterId: string,
   repo: string,
+  checkpoint?: RequesterTarget,
 ): string | undefined {
-  if (requesterRepoContext(tail, requesterId).requesterRepo !== repo) return undefined;
+  if (requesterRepoContext(tail, requesterId, checkpoint).requesterRepo !== repo) return undefined;
   const turns = tail.filter((turn) => turn.actor === requesterId && turn.text.startsWith("user: "));
   // A quoted or code-only issue is not the requester's issue, even when it
   // names the same repository. Use the write-target gate's text for both
@@ -1562,13 +1631,19 @@ export function requesterThreadEvidence(
   const addressed = turns.filter(
     (turn) => explicitRepoOf(requesterAddressableText(requesterTargetText(turn.text.slice(6)))) === repo,
   );
-  if (addressed.length === 0) return undefined;
-  const issueTurn =
-    addressed
-      .slice()
-      .reverse()
-      .find((turn) => requesterGitHubLinks(requesterTargetText(turn.text.slice(6))).some((link) => link.issue)) ??
-    addressed.at(-1)!;
+  // The bounded provenance can end before the issue URL in a long turn;
+  // recover the separately checkpointed canonical target for either fallback.
+  const fallback =
+    checkpoint?.repo === repo && !checkpoint.conflict
+      ? `Requester: ${checkpoint.provenance}${checkpoint.issue ? `\nRequester issue: https://github.com/${checkpoint.issue.replace("#", "/issues/")}` : ""}`
+      : undefined;
+  if (addressed.length === 0) return fallback;
+  const matchedIssueTurn = addressed
+    .slice()
+    .reverse()
+    .find((turn) => requesterGitHubLinks(requesterTargetText(turn.text.slice(6))).some((link) => link.issue));
+  if (!matchedIssueTurn && checkpoint?.issue && checkpoint.repo === repo) return fallback;
+  const issueTurn = matchedIssueTurn ?? addressed.at(-1)!;
   const issueIndex = tail.indexOf(issueTurn);
   // An answer belongs to the issue only if it immediately follows that
   // request. A later reply may answer an intervening person's question.
@@ -1615,13 +1690,20 @@ export async function runOperator(
   // (issue 2027): a call naming a tool the owned turn was not offered is a
   // decision the executor folds into the owner, never a violation the loop
   // re-asks.
-  const requesterTarget = input.requesterId ? requesterRepoContext(input.tail, input.requesterId) : {};
+  const requesterTarget =
+    input.requesterId && !input.targetStoreUnavailable
+      ? requesterRepoContext(input.tail, input.requesterId, input.requesterTarget)
+      : {};
   const ctx: OperatorTurnContext = {
     requestText: input.text,
     presets: input.projection.presets.map((p) => p.name),
     commands: input.projection.commands,
     ...(input.newestFinishedRun?.repo ? { threadRepo: input.newestFinishedRun.repo } : {}),
     ...requesterTarget,
+    ...(input.requesterTarget?.issue && !requesterTarget.requesterRepoConflict
+      ? { requesterIssue: input.requesterTarget.issue }
+      : {}),
+    ...(input.targetStoreUnavailable ? { targetStoreUnavailable: true } : {}),
     ...(input.channelRepo ? { channelRepo: input.channelRepo } : {}),
     ...(input.residentRepos ? { residentRepos: input.residentRepos } : {}),
     attachmentRepos: attachmentRepoEvidence(input.attachments, input.repoCandidates),
@@ -1899,7 +1981,11 @@ export interface OperatorStageDeps {
    *  tests and compositions without MCP; production CoreDeps always carries it. */
   mcp?: Pick<McpToolSource, "catalogFor">;
   /** The session logs the tail is read from; absent (history off) → no tail. */
-  runLedger?: { readSessionTail(key: string, maxBytes: number): Promise<{ transcript: AssembledTranscript }> };
+  runLedger?: {
+    readSessionTail(key: string, maxBytes: number): Promise<{ transcript: AssembledTranscript }>;
+    readRequesterTarget?(key: string, actor: string): Promise<RequesterTarget | null>;
+    checkpointRequesterTarget?(key: string, actor: string, target: RequesterTarget): Promise<RequesterTarget>;
+  };
   /** The resident registry's read-only repository listing. */
   residentSlugs?: ResidentSlugs;
 }
@@ -2063,6 +2149,27 @@ export async function operatorStage(
     operatorThreadTail(deps.runLedger, ctx.thread, msg.threadKey),
     candidateRead ?? Promise.resolve(undefined),
   ]);
+  let requesterTarget: RequesterTarget | undefined;
+  let targetStoreUnavailable = false;
+  const targetStore = deps.runLedger;
+  if (targetStore?.readRequesterTarget && targetStore.checkpointRequesterTarget) {
+    const key = threadSessionKey(msg.threadKey);
+    try {
+      requesterTarget = (await targetStore.readRequesterTarget(key, msg.userId)) ?? undefined;
+      // Migrate actor-stamped turns still visible in older logs, then checkpoint
+      // this admitted request before the model decides. No bot/foreign turn writes.
+      for (const turn of tail) {
+        if (turn.actor !== msg.userId || !turn.text.startsWith("user: ")) continue;
+        for (const target of requesterTargetsOf(turn.text.slice(6)))
+          requesterTarget = await targetStore.checkpointRequesterTarget(key, msg.userId, target);
+      }
+      for (const target of requesterTargetsOf(msg.text))
+        requesterTarget = await targetStore.checkpointRequesterTarget(key, msg.userId, target);
+    } catch {
+      targetStoreUnavailable = true;
+      requesterTarget = undefined;
+    }
+  }
   const authorizedRepos = candidates
     ?.filter((repo) => /^[\w.-]+\/[\w.-]+$/.test(repo) && deps.config.canUseRepo(actor, repo))
     .sort();
@@ -2102,6 +2209,8 @@ export async function operatorStage(
           projection,
           tail,
           requesterId: msg.userId,
+          ...(requesterTarget ? { requesterTarget } : {}),
+          ...(targetStoreUnavailable ? { targetStoreUnavailable: true } : {}),
           ...(attachments.length > 0 ? { attachments } : {}),
           ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates: repoCandidates.slice(0, 50) } : {}),
           organization: cfg.organization,
@@ -2128,7 +2237,9 @@ export async function operatorStage(
       );
   if (answer.operatorDiagnostic !== undefined)
     console.log(`[operator] ${msg.threadKey} provider refusal: ${answer.operatorDiagnostic}`);
-  const threadRepo = requesterRepoContext(tail, msg.userId).requesterRepo ?? newestFinishedRun?.repo;
+  const threadRepo =
+    (targetStoreUnavailable ? undefined : requesterRepoContext(tail, msg.userId, requesterTarget).requesterRepo) ??
+    newestFinishedRun?.repo;
   const event: OperatorEventFields = {
     ...operatorEventOf(mode, answer, ctx.intake),
     repoContext: {

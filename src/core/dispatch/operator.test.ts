@@ -8,6 +8,7 @@ import {
   operatorStage,
   bindFromAnswer,
   buildOperatorPrompt,
+  checkpointRequesterMessageTarget,
   isOperatorReadTool,
   isYesAnswer,
   joinedAnswerRequest,
@@ -1885,6 +1886,280 @@ describe("requester-authored repository inheritance for a plain fix", () => {
     );
     expect(readSessionTail).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ outcome: "binds", binds: [{ repo: "acme/sensors", repoSource: "thread" }] });
+  });
+
+  const privateSourceIssue = 2430;
+  it.each([
+    {
+      sequence: "public explore",
+      targetIssue: issue,
+      targetRepo: "acme/sensors",
+      followUpText: "Fix it.",
+      preset: "ship",
+      channelId: "slack:C1",
+    },
+    {
+      sequence: "private DM source answer",
+      targetIssue: `https://github.com/acme/api/issues/${privateSourceIssue}`,
+      targetRepo: "acme/api",
+      followUpText: `What about those 11 resident observations and remaining #${privateSourceIssue} acceptance checks?`,
+      preset: "general",
+      channelId: "slack:D1",
+    },
+  ])(
+    "keeps the requester issue through a completed $sequence with a long session tail and restart",
+    async ({ targetIssue, targetRepo, followUpText, preset, channelId }) => {
+      const targets = new Map<string, { repo: string; issue?: string; provenance: string; conflict?: boolean }>();
+      const ledger = {
+        readSessionTail: async () => ({
+          transcript: {
+            complete: true as const,
+            turns: 3,
+            messages: [
+              { role: "user" as const, content: [{ type: "text" as const, text: `Investigate ${targetIssue}` }] },
+              {
+                role: "assistant" as const,
+                content: [
+                  {
+                    type: "text" as const,
+                    text: "A source answer: 11 resident observations remain; check acceptance.".repeat(4500),
+                  },
+                ],
+              },
+              { role: "user" as const, content: [{ type: "text" as const, text: followUpText }] },
+            ],
+            compactions: [],
+            actors: [requester, undefined, requester],
+          },
+        }),
+        readRequesterTarget: async (_threadKey: string, actor: string) => targets.get(actor),
+        checkpointRequesterTarget: async (
+          _threadKey: string,
+          actor: string,
+          target: { repo: string; issue?: string; provenance: string },
+        ) => {
+          const prior = targets.get(actor);
+          const conflict =
+            prior?.conflict ||
+            (prior !== undefined &&
+              (prior.repo !== target.repo || (prior.issue && target.issue && prior.issue !== target.issue)));
+          const next = conflict ? { ...prior!, conflict: true } : (prior ?? target);
+          targets.set(actor, next);
+          return next;
+        },
+      };
+      const path = join(mkdtempSync(join(tmpdir(), "swb-target-")), "config.yaml");
+      writeFileSync(
+        path,
+        `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
+      );
+      const config = new ConfigStore(path, join(path, "../overrides.json"));
+      const threadKey = `${channelId}:1.0`;
+      const first = await operatorStage(
+        {
+          config,
+          runLedger: ledger as never,
+          operatorModel: async () => ({
+            tool: OPERATOR_BIND_TOOL,
+            input: { preset: "general", reason: "investigate" },
+          }),
+        },
+        {
+          msg: { channelId, threadKey, userId: requester, text: `Investigate ${targetIssue}` },
+          mode: "on",
+          thread: [{ agent: "general", finished: true }],
+        },
+      );
+      expect(first?.outcome).toBe("binds");
+      let prompt = "";
+      const followUp = await operatorStage(
+        {
+          config,
+          runLedger: ledger as never,
+          operatorModel: async (p) => {
+            prompt = p.user;
+            return { tool: OPERATOR_BIND_TOOL, input: { preset, repo: targetRepo, reason: "follow up" } };
+          },
+        },
+        {
+          msg: { channelId, threadKey, userId: requester, text: followUpText },
+          mode: "on",
+          thread: [{ agent: "general", finished: true }],
+        },
+      );
+      expect(followUp).toMatchObject({ outcome: "binds", binds: [{ repo: targetRepo, repoSource: "thread" }] });
+      expect(prompt).toContain(`Requester's established issue: \`${targetRepo}#${targetIssue.split("/").at(-1)}\``);
+      expect(targets.get(requester)).toMatchObject({
+        issue: `${targetRepo}#${targetIssue.split("/").at(-1)}`,
+        provenance: expect.stringContaining(targetIssue),
+      });
+    },
+  );
+
+  it("repairs a redundant repository question about the stored issue into a source-answer continuation", async () => {
+    const issueNumber = 2430;
+    const answers: RouteToolCall[] = [
+      { tool: OPERATOR_ASK_TOOL, input: { text: `Which repository owns #${issueNumber}?`, reason: "target unclear" } },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", repo: "acme/api", reason: "continue the answer" } },
+    ];
+    const answer = await runOperator(
+      {
+        ...base(),
+        text: `What about those 11 resident observations and remaining #${issueNumber} acceptance checks?`,
+        projection: projectionOf(["general"]),
+        tail: [],
+        requesterId: requester,
+        requesterTarget: {
+          repo: "acme/api",
+          issue: `acme/api#${issueNumber}`,
+          provenance: `Investigate https://github.com/acme/api/issues/${issueNumber}`,
+        },
+      },
+      async () => answers.shift()!,
+    );
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ repo: "acme/api", repoSource: "thread" }] });
+    expect(answer.attempts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ violation: expect.stringContaining("already established") })]),
+    );
+  });
+
+  it("never checkpoints a foreign actor or a quoted requester issue", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "swb-target-quoted-")), "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
+    );
+    const writes = vi.fn(async (_key: string, _actor: string, target: { repo: string; provenance: string }) => target);
+    const result = await operatorStage(
+      {
+        config: new ConfigStore(path, join(path, "../overrides.json")),
+        runLedger: {
+          readSessionTail: async () => ({
+            transcript: {
+              complete: true as const,
+              turns: 2,
+              messages: [
+                { role: "user" as const, content: [{ type: "text" as const, text: `Fix ${issue}` }] },
+                { role: "user" as const, content: [{ type: "text" as const, text: `> Fix ${issue}` }] },
+              ],
+              actors: ["slack:UBOB", requester],
+              compactions: [],
+            },
+          }),
+          readRequesterTarget: async () => null,
+          checkpointRequesterTarget: writes,
+        } as never,
+        operatorModel: async () => bind,
+      },
+      {
+        msg: { channelId: "slack:C1", threadKey: "slack:C1:1.0", userId: requester, text: "Fix it." },
+        mode: "on",
+        thread: [{ agent: "general", finished: true }],
+      },
+    );
+    expect(writes).not.toHaveBeenCalled();
+    expect(result?.outcome).not.toBe("binds");
+  });
+
+  it("refuses a stored issue conflict after both requester turns leave the model tail", async () => {
+    const answer = await runOperator(
+      {
+        ...base(),
+        tail: [],
+        requesterId: requester,
+        requesterTarget: {
+          repo: "acme/sensors",
+          issue: "acme/sensors#3814",
+          provenance: `Investigate ${issue}`,
+          conflict: true,
+        },
+      },
+      async (_prompt, _opts) => ({
+        tool: OPERATOR_ASK_TOOL,
+        input: { text: "Which issue should I fix?", reason: "conflicting targets" },
+      }),
+    );
+    expect(answer.decision).toMatchObject({ kind: "question", text: "Which issue should I fix?" });
+    expect(
+      requesterThreadEvidence([], requester, "acme/sensors", {
+        repo: "acme/sensors",
+        provenance: issue,
+        conflict: true,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("keeps a canonical issue in fallback evidence when a long requester turn truncates its link", async () => {
+    const longRequest = `Investigate ${"the incident details ".repeat(65)}${issue}`;
+    let checkpoint: { repo: string; issue?: string; provenance: string } | undefined;
+    await checkpointRequesterMessageTarget(
+      {
+        checkpointRequesterTarget: async (_key, _actor, target) => {
+          checkpoint = target;
+          return target;
+        },
+      },
+      "slack:C1:1.0",
+      requester,
+      longRequest,
+    );
+    expect(checkpoint).toMatchObject({ repo: "acme/sensors", issue: "acme/sensors#3814" });
+    expect(checkpoint!.provenance).not.toContain(issue);
+    for (const tail of [[], [turn("In acme/sensors, fix it.", requester)]]) {
+      const evidence = requesterThreadEvidence(tail, requester, "acme/sensors", checkpoint);
+      expect(evidence).toContain(issue);
+      expect(evidence).toContain(checkpoint!.provenance);
+    }
+  });
+
+  it("keeps the original issue provenance when the answer and issue turn fall outside the bounded tail", () => {
+    const checkpoint = { repo: "acme/sensors", issue: "acme/sensors#3814", provenance: `Investigate ${issue}` };
+    const evidence = requesterThreadEvidence(
+      [turn("What about those observations?", requester), { text: "assistant: An unrelated answer." }],
+      requester,
+      "acme/sensors",
+      checkpoint,
+    );
+    expect(evidence).toContain(`Requester: Investigate ${issue}`);
+    expect(evidence).toContain(`Requester issue: ${issue}`);
+    expect(evidence).not.toContain("unrelated answer");
+  });
+
+  it("rejects an inherited write if the checkpoint store is unavailable even when the truncated tail has a tempting target", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "swb-target-down-")), "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
+    );
+    const result = await operatorStage(
+      {
+        config: new ConfigStore(path, join(path, "../overrides.json")),
+        runLedger: {
+          readSessionTail: async () => ({
+            transcript: {
+              complete: true,
+              turns: 1,
+              messages: [{ role: "user", content: [{ type: "text", text: `Investigate ${issue}` }] }],
+              actors: [requester],
+              compactions: [],
+            },
+          }),
+          readRequesterTarget: async () => {
+            throw new Error("store offline");
+          },
+          checkpointRequesterTarget: async () => {
+            throw new Error("store offline");
+          },
+        } as never,
+        operatorModel: async () => bind,
+      },
+      {
+        msg: { channelId: "slack:C1", threadKey: "slack:C1:1.0", userId: requester, text: "Fix it." },
+        mode: "on",
+        thread: [{ agent: "general", finished: true }],
+      },
+    );
+    expect(result?.outcome).not.toBe("binds");
   });
 
   it("does not choose between different issue URLs inside one requester turn", () => {

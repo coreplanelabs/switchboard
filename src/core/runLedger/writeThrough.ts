@@ -23,7 +23,7 @@ import type { AssembledTranscript } from "./transcript.js";
 import type { FenceResult, Notepad, SessionHit } from "./types.js";
 import { PermanentStoreError, RouteMissingError } from "../runStoreWorker.js";
 import { createAppendFlusher } from "./flusher.js";
-import type { HeartbeatFacts, RunLedger } from "./ledger.js";
+import type { HeartbeatFacts, RequesterTarget, RunLedger } from "./ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost } from "../plane/decide.js";
 import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./ledger.js";
 import { requestIndex, sessionKey } from "./sessionLog.js";
@@ -369,6 +369,9 @@ export interface LedgerWriteThrough {
   ): Promise<{ ok: boolean; appended: boolean }>;
   /** The full-text search `recall` makes (item 10): hits in relevance order, and the gap markers between them. */
   searchSession(key: string, query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }>;
+  /** Actor-stamped thread target independent of the model transcript. */
+  readRequesterTarget(key: string, actor: string): Promise<RequesterTarget | null>;
+  checkpointRequesterTarget(key: string, actor: string, target: RequesterTarget): Promise<RequesterTarget>;
   /** The session's notepad, or null when nothing wrote it (item 10). */
   readNotepad(key: string): Promise<Notepad | null>;
   /** Replace the notepad whole under this generation's fence (item 10). */
@@ -456,6 +459,12 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   }
   async searchSession(_key: string, _query: string, _limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }> {
     return { hits: [], gaps: [] };
+  }
+  async readRequesterTarget(_key: string, _actor: string): Promise<RequesterTarget | null> {
+    return null;
+  }
+  async checkpointRequesterTarget(_key: string, _actor: string, _target: RequesterTarget): Promise<RequesterTarget> {
+    throw new PermanentStoreError("requester target checkpoint store is unavailable");
   }
   async readNotepad(_key: string): Promise<Notepad | null> {
     return null;
@@ -1455,6 +1464,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     readSession: (key, from, to) => ledger.readSession(key, from, to),
     appendSession: (key, rowId, rows) => ledger.appendSession(key, rowId, rows),
     searchSession: (key, query, limit) => ledger.searchSession(key, query, limit),
+    readRequesterTarget: (key, actor) => ledger.readRequesterTarget(key, actor),
+    checkpointRequesterTarget: (key, actor, target) => ledger.checkpointRequesterTarget(key, actor, target),
     readNotepad: (key) => ledger.readNotepad(key),
     writeNotepad: (key, text) => ledger.writeNotepad(key, gen, text),
 

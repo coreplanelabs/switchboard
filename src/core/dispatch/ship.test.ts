@@ -175,6 +175,11 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     const s = setup("slack:UADMIN", { text: "Fix it." });
     Object.assign(s.ctx, { agentSource: "operator", operator: { binds: [{ repoSource: "thread" }] } });
     Object.assign(s.deps.runLedger!, {
+      readRequesterTarget: async () => ({
+        repo: "acme/api",
+        issue: "acme/api#3814",
+        provenance: "Investigate https://github.com/acme/api/issues/3814",
+      }),
       readSessionTail: async () => ({
         transcript: {
           complete: true,
@@ -199,6 +204,56 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect(row.threadEvidence).toContain("Why did monitoring fail?");
     expect(row.threadEvidence).toContain("https://github.com/acme/api/issues/3814");
     expect(row.threadEvidence).toContain("Three failures; suspected timeout");
+  });
+
+  it("uses the durable requester issue for a terse Ship brief after the source answer leaves the tail", async () => {
+    const s = setup("slack:UADMIN", { text: "Fix it." });
+    Object.assign(s.ctx, { agentSource: "operator", operator: { binds: [{ repoSource: "thread" }] } });
+    Object.assign(s.deps.runLedger!, {
+      readRequesterTarget: async () => ({
+        repo: "acme/api",
+        issue: "acme/api#3814",
+        provenance: "Investigate https://github.com/acme/api/issues/3814",
+      }),
+      readSessionTail: async () => ({
+        transcript: {
+          complete: true,
+          turns: 1,
+          compactions: [],
+          messages: [{ role: "user", content: [{ type: "text", text: "What about the observations?" }] }],
+          actors: ["slack:UADMIN"],
+        },
+      }),
+    });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.created).toHaveLength(1);
+    const row = (await s.instances.listUnits(s.created[0]!))[0]!;
+    expect(row.threadEvidence).toContain("https://github.com/acme/api/issues/3814");
+    expect(row.threadEvidence).not.toContain("observations");
+  });
+
+  it("refuses a terse Ship hand-off if its requester checkpoint becomes unavailable after binding", async () => {
+    const s = setup("slack:UADMIN", { text: "Fix it." });
+    Object.assign(s.ctx, { agentSource: "operator", operator: { binds: [{ repoSource: "thread" }] } });
+    Object.assign(s.deps.runLedger!, {
+      readRequesterTarget: async () => {
+        throw new Error("target store unavailable");
+      },
+      readSessionTail: async () => ({
+        transcript: {
+          complete: true,
+          turns: 1,
+          compactions: [],
+          messages: [
+            { role: "user", content: [{ type: "text", text: "Investigate https://github.com/acme/api/issues/3814" }] },
+          ],
+          actors: ["slack:UADMIN"],
+        },
+      }),
+    });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.created).toHaveLength(0);
+    expect(s.replies.join(" ")).toMatch(/evidence|thread/i);
   });
   beforeEach(() => vi.stubEnv("PUBLIC_BASE_URL", ""));
   afterEach(() => vi.unstubAllEnvs());

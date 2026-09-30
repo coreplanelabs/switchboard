@@ -66,6 +66,7 @@ import {
   tailCut,
   textOfStoredRow,
 } from "../../src/core/runLedger/sessionLog.ts";
+import { mergeRequesterTarget, type RequesterTarget } from "../../src/core/runLedger/ledger.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
 import {
   isRunUsage,
@@ -5418,6 +5419,7 @@ export class SessionLogDO extends DurableObject<Env> {
         bytes INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS notepad (k INTEGER PRIMARY KEY CHECK (k = 1), text TEXT NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS requester_target (actor TEXT PRIMARY KEY, repo TEXT NOT NULL, issue TEXT, provenance TEXT NOT NULL, conflict INTEGER NOT NULL DEFAULT 0);
     `);
     // The keyed append's identity (session-log item 13): a row group's id, on
     // its first part; a partial unique index holds the idempotency line. Added
@@ -5756,6 +5758,54 @@ export class SessionLogDO extends DurableObject<Env> {
       .map((r) => r.idx);
   }
 
+  async requesterTarget(actor: string): Promise<RequesterTarget | null> {
+    const row = this.sql
+      .exec<{ repo: string; issue: string | null; provenance: string; conflict: number }>(
+        `SELECT repo, issue, provenance, conflict FROM requester_target WHERE actor = ?`,
+        actor,
+      )
+      .toArray()[0];
+    return row
+      ? {
+          repo: row.repo,
+          ...(row.issue ? { issue: row.issue } : {}),
+          provenance: row.provenance,
+          ...(row.conflict ? { conflict: true } : {}),
+        }
+      : null;
+  }
+
+  async checkpointRequesterTarget(actor: string, target: RequesterTarget): Promise<RequesterTarget> {
+    let merged: RequesterTarget = target;
+    this.ctx.storage.transactionSync(() => {
+      const row = this.sql
+        .exec<{ repo: string; issue: string | null; provenance: string; conflict: number }>(
+          `SELECT repo, issue, provenance, conflict FROM requester_target WHERE actor = ?`,
+          actor,
+        )
+        .toArray()[0];
+      const prior: RequesterTarget | null = row
+        ? {
+            repo: row.repo,
+            ...(row.issue ? { issue: row.issue } : {}),
+            provenance: row.provenance,
+            ...(row.conflict ? { conflict: true as const } : {}),
+          }
+        : null;
+      merged = mergeRequesterTarget(prior, target);
+      this.sql.exec(
+        `INSERT INTO requester_target (actor, repo, issue, provenance, conflict) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(actor) DO UPDATE SET repo = excluded.repo, issue = excluded.issue, provenance = excluded.provenance, conflict = excluded.conflict`,
+        actor,
+        merged.repo,
+        merged.issue ?? null,
+        merged.provenance,
+        merged.conflict ? 1 : 0,
+      );
+    });
+    return merged;
+  }
+
   /** The notepad, replaced whole by the live run (session-log item 10): the
    *  same fence as a row write — unknown-run before an owner, fenced for
    *  another generation — and the write's time kept beside the text. */
@@ -5806,6 +5856,7 @@ export class SessionLogDO extends DurableObject<Env> {
       this.sql.exec(`DELETE FROM turns`);
       this.sql.exec(`DELETE FROM attachments`);
       this.sql.exec(`DELETE FROM notepad`);
+      this.sql.exec(`DELETE FROM requester_target`);
       this.sql.exec(`DELETE FROM meta`);
     });
     return { ok: true };
@@ -5867,6 +5918,8 @@ const LEDGER_ROUTES = new Set([
   "/runs/session/read-tail",
   "/runs/session/clear-owner",
   "/runs/session/search",
+  "/runs/session/requester-target",
+  "/runs/session/requester-target/write",
   "/runs/session/notepad",
   "/runs/session/notepad/write",
 ]);
@@ -6393,6 +6446,33 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
           : [];
       console.log(`[runs/session/search] ${key.value} -> ${hits.length} hit(s), ${gaps.length} gap(s)`);
       return json({ hits, gaps });
+    }
+    if (pathname === "/runs/session/requester-target" || pathname === "/runs/session/requester-target/write") {
+      const actor = b.actor;
+      if (typeof actor !== "string" || !/^[a-z][\w-]*:[^\s]{1,150}$/.test(actor))
+        return json({ error: "actor must be a namespaced identity" }, 400);
+      if (pathname === "/runs/session/requester-target") return json({ target: await stub.requesterTarget(actor) });
+      const target = b.target as Record<string, unknown> | undefined;
+      if (
+        !target ||
+        typeof target.repo !== "string" ||
+        !/^[\w.-]+\/[\w.-]+$/.test(target.repo) ||
+        typeof target.provenance !== "string" ||
+        utf8ByteLength(target.provenance) > 2_000 ||
+        !target.provenance ||
+        (target.issue !== undefined &&
+          (typeof target.issue !== "string" ||
+            !target.issue.startsWith(`${target.repo}#`) ||
+            !/^\d+$/.test(target.issue.slice(target.repo.length + 1))))
+      )
+        return json({ error: "invalid requester target" }, 400);
+      return json({
+        target: await stub.checkpointRequesterTarget(actor, {
+          repo: target.repo,
+          provenance: target.provenance,
+          ...(target.issue ? { issue: target.issue as string } : {}),
+        }),
+      });
     }
     if (pathname === "/runs/session/notepad") return json({ notepad: await stub.notepad() });
     if (pathname === "/runs/session/notepad/write") {

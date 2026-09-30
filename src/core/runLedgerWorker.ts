@@ -53,7 +53,7 @@ import {
   RUN_STORE_TIMEOUT_MS,
   TransientStoreError,
 } from "./runStoreWorker.js";
-import type { FinishResult, HeartbeatFacts, HeartbeatResult, RunLedger } from "./runLedger/ledger.js";
+import type { FinishResult, HeartbeatFacts, HeartbeatResult, RequesterTarget, RunLedger } from "./runLedger/ledger.js";
 import type {
   PlaneAckOutcome,
   PlaneAskAnswer,
@@ -358,6 +358,19 @@ export class WorkerRunLedger implements RunLedger {
       hits: Array.isArray(r.data.hits) ? (r.data.hits as SessionHit[]) : [],
       gaps: Array.isArray(r.data.gaps) ? (r.data.gaps as number[]) : [],
     };
+  }
+
+  async readRequesterTarget(key: string, actor: string): Promise<RequesterTarget | null> {
+    this.checkSessionKey(key);
+    const r = await this.post("/runs/session/requester-target", { key, actor });
+    return (r.data.target as RequesterTarget | null) ?? null;
+  }
+
+  async checkpointRequesterTarget(key: string, actor: string, target: RequesterTarget): Promise<RequesterTarget> {
+    this.checkSessionKey(key);
+    const r = await this.post("/runs/session/requester-target/write", { key, actor, target });
+    if (!r.data.target) throw new PermanentStoreError("run ledger: requester target checkpoint missing");
+    return r.data.target as RequesterTarget;
   }
 
   async readNotepad(key: string): Promise<Notepad | null> {

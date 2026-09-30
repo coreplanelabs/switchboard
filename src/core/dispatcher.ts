@@ -64,6 +64,7 @@ import { compoundBrief, type RouteDecided, type RouteModel } from "./dispatch/ro
 import type { ProviderTable } from "./harness/piAi.js";
 import {
   executeOperatorDecision,
+  checkpointRequesterMessageTarget,
   isYesAnswer,
   joinedAnswerRequest,
   operatorStage,
@@ -957,6 +958,16 @@ export async function dispatch(
       } catch {
         // The main agent may still answer; work_start fails closed when the
         // private authority record cannot be read.
+      }
+    }
+    // An explicit human turn can bypass the operator (a typed agent, a main
+    // DM, or stage A). Keep its target before the model transcript can grow.
+    // Child requests and replay are not requester-authored evidence.
+    if (!resume && !restart && !opts.parent && !opts.coordinator) {
+      try {
+        await checkpointRequesterMessageTarget(deps.runLedger, msg.threadKey, msg.userId, msg.text);
+      } catch {
+        // An inherited write still requires a readable checkpoint at the door.
       }
     }
     // The operator (record 0057; routing-and-config item 29): under

@@ -18484,6 +18484,25 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     vi.mocked(makeExecutor).mockClear();
   });
 
+  it("checkpoints a typed general issue request even though the operator is bypassed", async () => {
+    const t = await threadWithSession(PI_YAML, { agent: "general" });
+    const { io } = fakeIO();
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async () => piAnswered("Sourced answer."),
+      async () =>
+        dispatch(
+          t.deps,
+          { ...followUp, text: "agent:general Investigate https://github.com/acme/api/issues/2430" },
+          io,
+        ),
+    );
+    expect(await t.ledger.readRequesterTarget(`${THREAD}:@thread`, "slack:UADMIN")).toMatchObject({
+      repo: "acme/api",
+      issue: "acme/api#2430",
+      provenance: expect.stringContaining("issues/2430"),
+    });
+  });
+
   it("a budget-ended source answer continues in the same conversation for its requester without replaying the cut source or another sender's access", async () => {
     const question = "What caused the source job to fail?";
     const unverified =
@@ -22372,6 +22391,13 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       if (followUp) {
         // The historical message alone has no author stamp; only the durable
         // requester's turn may establish a target for a later operation.
+        vi.spyOn(deps.runLedger, "readRequesterTarget").mockResolvedValue({
+          repo: "acme/switchboard",
+          provenance: "in acme/switchboard: investigate",
+        });
+        vi.spyOn(deps.runLedger, "checkpointRequesterTarget").mockImplementation(
+          async (_key, _actor, target) => target,
+        );
         vi.spyOn(deps.runLedger, "readSessionTail").mockResolvedValue({
           transcript: {
             complete: true,
