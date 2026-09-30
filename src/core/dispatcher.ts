@@ -1308,6 +1308,29 @@ export async function dispatch(
       await recordOperatorDecision(deps, msg, event, ending, trace);
     };
 
+    // A typed Ship request now asks the operator for its starting stage. A
+    // repaired or floored bind to another preset must not fall through to the
+    // legacy directive and silently start coding without that stage.
+    if (
+      typedAgent === "ship" &&
+      operatorMode === "on" &&
+      operatorPreset !== undefined &&
+      (operatorPreset !== "ship" || operatorShipEntry === undefined)
+    ) {
+      await refuse(
+        refusalOf("setup_failed", "I couldn't bind this Ship request to review, work or a plan, so nothing started."),
+      );
+      await recordPendingOperator();
+      return ended;
+    }
+    if (operatorShipEntry === "plan" && typedAgent !== "ship") {
+      await refuse(
+        refusalOf("setup_failed", "A seeded Ship plan needs an explicit `agent:ship` request, so nothing started."),
+      );
+      await recordPendingOperator();
+      return ended;
+    }
+
     // Stage A (dispatch/fastPath.ts): a message that names a registered chat
     // command is answered inline — never a model turn, and before the history
     // fetch, so a command costs none. A decision that routes a preset has

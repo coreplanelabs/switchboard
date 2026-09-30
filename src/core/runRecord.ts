@@ -492,7 +492,7 @@ export interface RunOperatorDecision {
     model?: string;
     repo?: string;
     repoSource?: "request" | "attachment" | "thread" | "channel";
-    shipEntry?: "work" | "review";
+    shipEntry?: "work" | "work_from_thread" | "review" | "plan";
     confirmed?: true;
   }[];
   question?: string;

@@ -172,6 +172,22 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     expect(prFacts).not.toHaveBeenCalled();
   });
 
+  it("a typed plan entry keeps an unrelated thread PR as context and rejects a missing plan path", async () => {
+    const prFacts = vi.fn(async () => openPr());
+    const res = await shipPreflight(
+      input({
+        intent: "plan",
+        requestText: "in acme/api: plan docs/plans/fixture.md",
+        repoCtx: { repo: "acme/api", pr: 7 },
+        prFacts,
+      }),
+    );
+    expect(res).toEqual({ ok: true, entry: { repo: "acme/api", base: "main", plan: true } });
+    expect(prFacts).not.toHaveBeenCalled();
+    const invalid = await shipPreflight(input({ intent: "plan", requestText: "ship the plan" }));
+    expect(invalid).toMatchObject({ ok: false, refusal: { code: "ship_preflight_no_task" } });
+  });
+
   it("seeded: a thread pull request that could not be fetched refuses nothing — the seeded path never needs its facts", async () => {
     const prFacts = vi.fn(async () => undefined);
     const res = await shipPreflight(

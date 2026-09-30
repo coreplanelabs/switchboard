@@ -10598,27 +10598,59 @@ workspaceDir: __WORKDIR__
       input: { preset: "ship", shipEntry: "work", request, reason: "the ask" },
     }));
 
-  it("an explicit Ship review request uses the operator's review entry and starts at review on the verified PR", async () => {
-    const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
-    deps.resolveRepoContext = () => ({
-      repo: "acme/api",
-      pr: 7,
-      prFromMessage: true,
-      headSha: HEAD_A,
-      baseRef: "main",
+  it("an explicit Ship plan request keeps its runner grant after the operator binds the plan stage", async () => {
+    const { deps, instances } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.githubApi = new InMemoryGithubApi({
+      "acme/api": { files: { "docs/plans/fixture.md": "### U10. First unit\n- **Dependencies**: none\n" } },
     });
-    deps.fetchPrFacts = vi.fn(async () => openBotPr());
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "review", repo: "acme/api", reason: "review the named PR" },
+      input: { preset: "ship", shipEntry: "plan", repo: "acme/api", reason: "the explicit plan" },
     }));
-    deps.runRegistry = new RunRegistry({ genId: () => "run-ship-review-entry", genToken: () => "tok" });
+    deps.runRegistry = new RunRegistry({ genId: () => "run-ship-explicit-plan", genToken: () => "tok" });
     const { io } = fakeIO();
+    await dispatch(deps, msg("agent:ship in acme/api: plan docs/plans/fixture.md", "slack:UADMIN"), io);
+    const { instance } = await handed(instances, "run-ship-explicit-plan");
+    expect(instance).toMatchObject({ plan: { id: "fixture", path: "docs/plans/fixture.md" }, merge: "runner" });
+  });
+
+  it("an explicit Ship review request uses the operator's review entry and starts at review on the verified PR", async () => {
+    for (const request of [`agent:ship review ${PR_URL}`, `agents:ship review ${PR_URL}`]) {
+      const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
+      deps.resolveRepoContext = () => ({
+        repo: "acme/api",
+        pr: 7,
+        prFromMessage: true,
+        headSha: HEAD_A,
+        baseRef: "main",
+      });
+      deps.fetchPrFacts = vi.fn(async () => openBotPr());
+      deps.operatorModel = vi.fn<RouteModel>(async () => ({
+        tool: "bind_preset",
+        input: { preset: "ship", shipEntry: "review", repo: "acme/api", reason: "review the named PR" },
+      }));
+      deps.runRegistry = new RunRegistry({ genId: () => "run-ship-review-entry", genToken: () => "tok" });
+      const { io } = fakeIO();
+      await dispatch(deps, msg(request, "slack:UADMIN"), io);
+      expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+      expect(created).toHaveLength(1);
+      const { unit } = await handed(instances, "run-ship-review-entry");
+      expect(unit).toMatchObject({ resume: { pr: 7, headSha: HEAD_A } });
+    }
+  });
+
+  it("an explicit Ship review request fails closed if the operator binds another preset", async () => {
+    const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "general", reason: "uncertain" },
+    }));
+    deps.runRegistry = new RunRegistry({ genId: () => "run-ship-no-stage", genToken: () => "tok" });
+    const { io, replies } = fakeIO();
     await dispatch(deps, msg(`agent:ship review ${PR_URL}`, "slack:UADMIN"), io);
-    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
-    expect(created).toHaveLength(1);
-    const { unit } = await handed(instances, "run-ship-review-entry");
-    expect(unit).toMatchObject({ resume: { pr: 7, headSha: HEAD_A } });
+    expect(replies.join("\n")).toContain("nothing started");
+    expect(created).toEqual([]);
+    expect((await handed(instances, "run-ship-no-stage")).instance).toBeNull();
   });
 
   it("an operator-bound ship on a seeded request (`plan <path>.md`) is refused naming `agent:ship`, nothing written — the guard reads operator like route", async () => {

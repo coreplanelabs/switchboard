@@ -25,7 +25,7 @@ import {
   asksForDecisionRecord,
   decisionRecordTaskKey,
 } from "../decisionRecordReservation.js";
-import type { ShipEntry } from "../ship/preflight.js";
+import type { ShipEntry, ShipEntryIntent } from "../ship/preflight.js";
 import { shipTaskText, shipUnitText } from "../ship/preflight.js";
 import {
   generatedPlanId,
@@ -74,6 +74,8 @@ export interface HandOffInput {
   entry: ShipEntry;
   /** The request's directive-stripped text (the preflight's input). */
   requestText: string;
+  /** The operator's validated first stage, when this request passed its door. */
+  intent?: ShipEntryIntent;
   /** Attributed context from the actor-stamped session tail, for a terse
    * generated task only; never used to resolve the target or plan identity. */
   threadEvidence?: string;
@@ -312,10 +314,16 @@ async function plan(
     label: input.label,
   };
   // The probe (item 10): is there a task here at all? Never the unit's text.
-  const taskText = shipTaskText(input.requestText, entry.repo);
+  const taskText =
+    input.intent === "review"
+      ? ""
+      : input.intent === "work" || input.intent === "work_from_thread"
+        ? input.requestText.trim()
+        : shipTaskText(input.requestText, entry.repo);
   // A main-agent act is always one generated, person-merged task. Its plain
   // prose may happen to begin with the spelling of a seeded plan request.
-  const request = input.mainTask === undefined ? parseShipPlanRequest(taskText) : undefined;
+  const request =
+    input.mainTask === undefined && input.intent !== "review" ? parseShipPlanRequest(taskText) : undefined;
   if (request === undefined) {
     // A generated plan of one unit (agent-ship item 16): the request text AS
     // WRITTEN is the unit — its urls included, which the probe strips — the id
@@ -409,10 +417,11 @@ async function plan(
       reply: "🚫 A main-agent work brief needs one generated task; a seeded plan cannot use this hand-off.",
     };
   // The routed guard (agent-ship item 16; routing-and-config items 21 and 29):
-  // a seeded plan's units merge under the runner's grant, so only a typed
-  // `agent:ship` may start one — a ship the router or the operator bound from
-  // prose runs generated plans alone; both are a model's decision.
-  if (input.agentSource === "route" || input.agentSource === "operator")
+  // A seeded plan's units merge under the runner's grant, so only the
+  // explicit `agent:ship` request may start one. The operator's plan stage
+  // reaches here only after dispatch checked that request and preflight
+  // validated the plan form.
+  if (input.agentSource === "route" || (input.agentSource === "operator" && entry.plan !== true))
     return {
       ok: false,
       code: "plan_routed_seed",

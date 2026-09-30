@@ -1154,7 +1154,7 @@ export type RunEvent =
         /** The admissible fact behind the model's typed repo choice. */
         repoSource?: "request" | "attachment" | "thread" | "channel";
         /** The operator-selected first stage of a Ship unit. */
-        shipEntry?: "work" | "review";
+        shipEntry?: "work" | "work_from_thread" | "review" | "plan";
         confirmed?: true;
       }>;
       question?: string;

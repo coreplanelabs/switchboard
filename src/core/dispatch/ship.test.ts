@@ -173,7 +173,11 @@ const openBotPr = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
 describe("runShipBranch — the agent:ship fork hands every admitted request to the plan runner", () => {
   it("attaches actor-stamped general research to one terse Ship unit after repo preflight", async () => {
     const s = setup("slack:UADMIN", { text: "Fix it." });
-    Object.assign(s.ctx, { agentSource: "operator", operator: { binds: [{ repoSource: "thread" }] } });
+    Object.assign(s.ctx, {
+      agentSource: "operator",
+      shipEntry: "work_from_thread",
+      operator: { binds: [{ repoSource: "thread" }] },
+    });
     Object.assign(s.deps.runLedger!, {
       readRequesterTarget: async () => ({
         repo: "acme/api",
@@ -208,7 +212,11 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
 
   it("uses the durable requester issue for a terse Ship brief after the source answer leaves the tail", async () => {
     const s = setup("slack:UADMIN", { text: "Fix it." });
-    Object.assign(s.ctx, { agentSource: "operator", operator: { binds: [{ repoSource: "thread" }] } });
+    Object.assign(s.ctx, {
+      agentSource: "operator",
+      shipEntry: "work_from_thread",
+      operator: { binds: [{ repoSource: "thread" }] },
+    });
     Object.assign(s.deps.runLedger!, {
       readRequesterTarget: async () => ({
         repo: "acme/api",
@@ -234,7 +242,11 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
 
   it("refuses a terse Ship hand-off if its requester checkpoint becomes unavailable after binding", async () => {
     const s = setup("slack:UADMIN", { text: "Fix it." });
-    Object.assign(s.ctx, { agentSource: "operator", operator: { binds: [{ repoSource: "thread" }] } });
+    Object.assign(s.ctx, {
+      agentSource: "operator",
+      shipEntry: "work_from_thread",
+      operator: { binds: [{ repoSource: "thread" }] },
+    });
     Object.assign(s.deps.runLedger!, {
       readRequesterTarget: async () => {
         throw new Error("target store unavailable");

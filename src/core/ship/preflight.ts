@@ -69,6 +69,8 @@ export function shipUnitText(requestText: string, repo: string): string {
 /** What the preflight decided the pipeline starts FROM. */
 export interface ShipEntry {
   repo: string;
+  /** The author explicitly selected a seeded plan through the Ship door. */
+  plan?: true;
   /** The pipeline branch, set only when the entry resumes or adopts (the PR's
    *  own head branch). A fresh entry names none: the hand-off is the one branch
    *  namer — the generated plan's `plan/<id>/u1` (agent-ship item 3). */
@@ -105,7 +107,7 @@ export type ShipPreflightResult =
 /** The operator's starting stage for a Ship request. This is a decision about
  * the requested work, not permission or a PR identity; preflight still checks
  * the resolved target and its current GitHub facts. */
-export type ShipEntryIntent = "work" | "review";
+export type ShipEntryIntent = "work" | "work_from_thread" | "review" | "plan";
 
 export interface ShipPreflightInput {
   /** Platform-namespaced channel id (AGENTS.md invariant 4) — names the
@@ -252,7 +254,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   const task =
     input.intent === "review"
       ? ""
-      : input.intent === "work"
+      : input.intent === "work" || input.intent === "work_from_thread"
         ? input.requestText.trim()
         : shipTaskText(input.requestText, repo);
   // A seeded plan request keeps the plan graph's own `plan/<id>/u<n>` branches:
@@ -260,7 +262,15 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   // never needed, and a thread pull request that could not be fetched refuses
   // nothing on the seeded path.
   const seeded =
-    input.intent === "review" ? false : parseShipPlanRequest(shipTaskText(input.requestText, repo)) !== undefined;
+    input.intent === "plan" ||
+    (input.intent === undefined && parseShipPlanRequest(shipTaskText(input.requestText, repo)) !== undefined);
+  if (input.intent === "plan" && parseShipPlanRequest(task) === undefined)
+    return refuse(
+      "ship_preflight_no_task",
+      "invalid plan request",
+      "not started (invalid plan request)",
+      `🚫 Name the seeded plan as \`agent:ship in ${repo}: plan <path>.md\`.`,
+    );
   if (!seeded && repoCtx.prUnpostable?.reason === "unreachable") {
     return refuse(
       "ship_preflight_pr_unreachable",
@@ -436,11 +446,20 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
     if (exists === false)
       return {
         ok: true,
-        entry: { repo, base: info?.defaultBranch, baseFallback: { requested: ref } },
+        entry: {
+          repo,
+          base: info?.defaultBranch,
+          baseFallback: { requested: ref },
+          ...(input.intent === "plan" ? { plan: true } : {}),
+        },
       };
   }
   return {
     ok: true,
-    entry: { repo, base: resolveBaseRef([ref], info?.defaultBranch) },
+    entry: {
+      repo,
+      base: resolveBaseRef([ref], info?.defaultBranch),
+      ...(input.intent === "plan" ? { plan: true } : {}),
+    },
   };
 }

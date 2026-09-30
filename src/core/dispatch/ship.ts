@@ -643,10 +643,7 @@ export async function runShipBranch(
     // actor-stamped prior question and reconciliation travel as data on the
     // original unit. The accepted repository and preflight are already fixed;
     // neither assistant text nor a foreign turn can select a work target.
-    const requiresThreadEvidence =
-      ctx.agentSource === "operator" &&
-      ctx.operator?.binds?.some((bind) => bind.repoSource === "thread") === true &&
-      /^(?:please\s+)?fix\s+(?:it|this)[.!]?$/i.test(directives.text.trim());
+    const requiresThreadEvidence = ctx.agentSource === "operator" && ctx.shipEntry === "work_from_thread";
     let threadEvidence: string | undefined;
     if (requiresThreadEvidence && repoCtx.repo !== undefined && deps.runLedger !== undefined) {
       try {
@@ -683,6 +680,7 @@ export async function runShipBranch(
             {
               entry,
               requestText: directives.text,
+              ...(ctx.shipEntry !== undefined ? { intent: ctx.shipEntry } : {}),
               ...(threadEvidence !== undefined ? { threadEvidence } : {}),
               ...(requiresThreadEvidence ? { requiresThreadEvidence: true } : {}),
               ...(ctx.reissuePlanId !== undefined ? { reissuePlanId: ctx.reissuePlanId } : {}),

@@ -356,6 +356,47 @@ channels:
     });
   });
 
+  it("bind_preset marks a terse write as depending on the requester's thread target", () => {
+    const answer = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "work_from_thread", repo: "acme/api", reason: "fix the prior issue" },
+      },
+      ctxOf({ requestText: "Fix it.", presets: ["ship"], requesterRepo: "acme/api" }),
+    );
+    expect(answer).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ shipEntry: "work_from_thread", repoSource: "thread" }] },
+    });
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: { preset: "ship", shipEntry: "work_from_thread", repo: "acme/api", reason: "guess" },
+        },
+        ctxOf({ requestText: "Fix it.", presets: ["ship"] }),
+      ),
+    ).toMatchObject({ kind: "violation" });
+  });
+
+  it("bind_preset carries an explicit seeded-plan stage without rewriting its path", () => {
+    const answer = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "plan", repo: "acme/api", reason: "explicit plan" },
+      },
+      ctxOf({ requestText: "agent:ship in acme/api: plan docs/plans/fixture.md", presets: ["ship"] }),
+    );
+    expect(answer).toMatchObject({
+      kind: "decision",
+      decision: {
+        binds: [
+          { shipEntry: "plan", line: expect.stringContaining("plan docs/plans/fixture.md") as unknown as string },
+        ],
+      },
+    });
+  });
+
   it("rejects a repository absent from the request and inherited context, even when it is onboarded", () => {
     const turn = parseOperatorTurn(
       { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "other/tooling", reason: "review PR" } },
