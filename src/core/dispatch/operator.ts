@@ -1388,30 +1388,132 @@ function requesterTargetText(text: string): string {
 /** Parse whole URL tokens, not a GitHub-looking substring inside a hostile URL.
  * The write-target gate still decides which repository is addressed; these
  * links only detect conflicting citations and select the brief's issue. */
-function requesterGitHubLinks(text: string): { repo: string; issue?: string }[] {
-  return text.split(/[\s<>()[\]|,;]+/).flatMap((token) => {
-    let url: URL;
-    try {
-      url = new URL(token.replace(/^['"]+|[.!'"]+$/g, ""));
-    } catch {
-      return [];
+function requesterUrlWords(text: string): string[] {
+  const tokens: string[] = [];
+  let token = "";
+  let angleLink = false;
+  let angleLabel = false;
+  const finish = () => {
+    if (token) tokens.push(token);
+    token = "";
+  };
+  for (const char of text) {
+    // Parentheses, commas and semicolons are legal URL path characters. A
+    // foreign URL may contain a GitHub-looking path without naming a target.
+    if (char === "<") {
+      finish();
+      angleLink = true;
+      angleLabel = false;
+      continue;
     }
-    if (
-      !["http:", "https:"].includes(url.protocol) ||
-      !["github.com", "www.github.com"].includes(url.hostname) ||
-      url.username ||
-      url.password ||
-      url.port
-    )
-      return [];
-    const [, owner, name, kind, number, ...rest] = url.pathname.split("/");
-    if (!/^[\w.-]+$/.test(owner ?? "") || !/^[\w.-]+$/.test(name ?? "")) return [];
-    const repo = `${owner}/${name}`.toLowerCase();
-    const issue =
-      kind?.toLowerCase() === "issues" && /^\d+$/.test(number ?? "") && rest.every((part) => part === "")
-        ? `${repo}#${number}`
-        : undefined;
-    return [{ repo, ...(issue ? { issue } : {}) }];
+    if (char === ">") {
+      finish();
+      angleLink = false;
+      angleLabel = false;
+      continue;
+    }
+    // Slack's <url|label> address is the part before the pipe. A label that
+    // looks like another URL is still only display text.
+    if (angleLink && char === "|") {
+      finish();
+      angleLabel = true;
+      continue;
+    }
+    if (angleLabel) continue;
+    if (char.trim() === "") finish();
+    else token += char;
+  }
+  finish();
+  return tokens;
+}
+
+function requesterUrlText(word: string): string | undefined {
+  // In Markdown, the destination after `](` is the address; the label is
+  // prose and cannot supply a write target.
+  const destination = word.lastIndexOf("](");
+  const candidate =
+    destination < 0 || (!word.startsWith("[") && !word.startsWith("![") && word.slice(0, destination).includes("://"))
+      ? word
+      : word.slice(destination + 2);
+  const lowercase = candidate.toLowerCase();
+  const https = lowercase.indexOf("https://");
+  const http = lowercase.indexOf("http://");
+  const start = [https, http].filter((index) => index >= 0).sort((a, b) => a - b)[0];
+  if (start === undefined || [...candidate.slice(0, start)].some((char) => !"([\"'".includes(char))) return undefined;
+  let raw = candidate.slice(start);
+  while (raw && ".!'\")]},;".includes(raw.at(-1)!)) raw = raw.slice(0, -1);
+  return raw;
+}
+
+function requesterAddressableText(text: string): string {
+  return requesterUrlWords(text)
+    .map((word) => {
+      const raw = requesterUrlText(word);
+      if (raw === undefined) return word.includes("://") ? "" : word;
+      try {
+        const url = new URL(raw);
+        const valid =
+          ["http:", "https:"].includes(url.protocol) &&
+          ["github.com", "www.github.com"].includes(url.hostname) &&
+          !url.username &&
+          !url.password &&
+          !url.port;
+        return valid ? url.toString() : "";
+      } catch {
+        return "";
+      }
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+function requesterGitHubLinks(text: string): { repo: string; issue?: string }[] {
+  return requesterUrlWords(text).flatMap((word) => {
+    let raw = requesterUrlText(word);
+    const links: { repo: string; issue?: string }[] = [];
+    while (raw !== undefined) {
+      const lowerRaw = raw.toLowerCase();
+      const contentEnd = Math.min(raw.length, ...[raw.indexOf("?"), raw.indexOf("#")].filter((index) => index >= 0));
+      const adjacent = [
+        ";https://",
+        ";http://",
+        ",https://",
+        ",http://",
+        "|https://",
+        "|http://",
+        ")https://",
+        ")http://",
+      ]
+        .map((separator) => lowerRaw.indexOf(separator))
+        .filter((index) => index > 0 && index < contentEnd)
+        .sort((a, b) => a - b)[0];
+      const address = adjacent === undefined ? raw : requesterUrlText(raw.slice(0, adjacent));
+      if (address === undefined) break;
+      let url: URL;
+      try {
+        url = new URL(address);
+      } catch {
+        break;
+      }
+      if (
+        !["http:", "https:"].includes(url.protocol) ||
+        !["github.com", "www.github.com"].includes(url.hostname) ||
+        url.username ||
+        url.password ||
+        url.port
+      )
+        break;
+      const [, owner, name, kind, number, ...rest] = url.pathname.split("/");
+      if (!/^[\w.-]+$/.test(owner ?? "") || !/^[\w.-]+$/.test(name ?? "")) break;
+      const repo = `${owner}/${name}`.toLowerCase();
+      const issue =
+        kind?.toLowerCase() === "issues" && /^\d+$/.test(number ?? "") && rest.every((part) => part === "")
+          ? `${repo}#${number}`
+          : undefined;
+      links.push({ repo, ...(issue ? { issue } : {}) });
+      raw = adjacent === undefined ? undefined : requesterUrlText(raw.slice(adjacent + 1));
+    }
+    return links;
   });
 }
 
@@ -1430,11 +1532,11 @@ export function requesterRepoContext(
     // Both target selection and conflict checks use the same requester-only,
     // quote-free text; a cited issue in a block quote is not a second target.
     const unquoted = requesterTargetText(turn.text.slice(6));
-    const target = explicitRepoOf(unquoted);
     const links = requesterGitHubLinks(unquoted);
     const issues = links.flatMap((link) => (link.issue ? [link.issue] : []));
     const linkedRepos = links.map((link) => link.repo);
     if (new Set(issues).size > 1 || new Set(linkedRepos).size > 1) return { requesterRepoConflict: true };
+    const target = explicitRepoOf(requesterAddressableText(unquoted));
     if (!target) continue;
     if ((repo !== undefined && repo !== target) || issues.some((named) => issue !== undefined && issue !== named))
       return { requesterRepoConflict: true };
@@ -1457,7 +1559,9 @@ export function requesterThreadEvidence(
   // A quoted or code-only issue is not the requester's issue, even when it
   // names the same repository. Use the write-target gate's text for both
   // addressed turns and issue selection; keep the original turn as evidence.
-  const addressed = turns.filter((turn) => explicitRepoOf(requesterTargetText(turn.text.slice(6))) === repo);
+  const addressed = turns.filter(
+    (turn) => explicitRepoOf(requesterAddressableText(requesterTargetText(turn.text.slice(6)))) === repo,
+  );
   if (addressed.length === 0) return undefined;
   const issueTurn =
     addressed

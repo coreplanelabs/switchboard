@@ -1922,6 +1922,79 @@ describe("requester-authored repository inheritance for a plain fix", () => {
     expect(requesterThreadEvidence(tail, requester, "acme/sensors")).toContain(issue);
   });
 
+  it("keeps a foreign URL path with parentheses from becoming a second issue", () => {
+    for (const fake of [
+      "https://evil.test/(https://github.com/acme/other/issues/12)",
+      "https://evil.test/,https://github.com/acme/other/issues/12",
+      "https://evil.test/;https://github.com/acme/other/issues/12",
+      "https://evil.test/](https://github.com/acme/other/issues/12)",
+      "https://evil.test/|https://github.com/acme/other/issues/12",
+      "ftp://evil.test/https://github.com/acme/other/issues/12",
+      "mailto:ops@evil.test?body=https://github.com/acme/other/issues/12",
+      "mailto:ops@evil.test?body=github.com/acme/other/issues/12",
+      "//evil.test/https://github.com/acme/other/issues/12",
+      "![https://github.com/acme/other/issues/12](https://evil.test/image.png)",
+    ]) {
+      const tail = [turn(`Investigate ${issue}; logs: ${fake}`, requester)];
+      expect(requesterRepoContext(tail, requester)).toEqual({ requesterRepo: "acme/sensors" });
+      expect(requesterThreadEvidence(tail, requester, "acme/sensors")).toContain(issue);
+    }
+  });
+
+  it("still refuses two adjacent requester issue URLs without whitespace", () => {
+    const other = "https://github.com/acme/other/issues/12";
+    expect(requesterRepoContext([turn(`Investigate ${issue};${other}`, requester)], requester)).toEqual({
+      requesterRepoConflict: true,
+    });
+    expect(requesterRepoContext([turn(`Investigate ${issue}|${other}`, requester)], requester)).toEqual({
+      requesterRepoConflict: true,
+    });
+    expect(requesterRepoContext([turn(`Investigate ${issue})${other}`, requester)], requester)).toEqual({
+      requesterRepoConflict: true,
+    });
+    expect(
+      requesterRepoContext(
+        [turn(`Investigate ${issue};HTTPS://GITHUB.COM/acme/other/issues/12`, requester)],
+        requester,
+      ),
+    ).toEqual({
+      requesterRepoConflict: true,
+    });
+  });
+
+  it("does not turn an issue URL's query or fragment into a second target", () => {
+    const nested = "https://github.com/acme/other/issues/12";
+    for (const suffix of [`?next=${nested}`, `#source=${nested}`]) {
+      expect(requesterRepoContext([turn(`Investigate ${issue}${suffix}`, requester)], requester)).toEqual({
+        requesterRepo: "acme/sensors",
+      });
+    }
+  });
+
+  it("keeps an uppercase-scheme GitHub issue as a requester target", () => {
+    expect(
+      requesterRepoContext([turn("Investigate HTTPS://GITHUB.COM/acme/sensors/issues/3814", requester)], requester),
+    ).toEqual({
+      requesterRepo: "acme/sensors",
+    });
+  });
+
+  it("does not infer a target from a foreign URL alone", () => {
+    for (const unsafe of [
+      "https://evil.test/(https://github.com/acme/other/issues/12)",
+      "https://attacker@github.com/acme/other/issues/12",
+      "https://github.com:8443/acme/other/issues/12",
+      "<https://evil.test/|https://github.com/acme/other/issues/12>",
+      "https://evil.test/|https://github.com/acme/other/issues/12",
+      "mailto:ops@evil.test?body=https://github.com/acme/other/issues/12",
+      "mailto:ops@evil.test?body=github.com/acme/other/issues/12",
+      "//evil.test/https://github.com/acme/other/issues/12",
+      "![https://github.com/acme/other/issues/12](https://evil.test/image.png)",
+    ]) {
+      expect(requesterRepoContext([turn(`Logs: ${unsafe}`, requester)], requester)).toEqual({});
+    }
+  });
+
   it("keeps the real issue when a later addressed turn only cites a nested GitHub URL", () => {
     const evidence = requesterThreadEvidence(
       [
