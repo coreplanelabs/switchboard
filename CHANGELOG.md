@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.270.0](https://github.com/coreplanelabs/switchboard/compare/v1.269.0...v1.270.0) (2026-09-30)
+
+
+### Features
+
+* **general:** allow hour-long runs ([#2507](https://github.com/coreplanelabs/switchboard/issues/2507)) ([de1e689](https://github.com/coreplanelabs/switchboard/commit/de1e6891e5025c79d3724e32ef92292a4ceb0ea0))
+
+
+### Documentation
+
+* **main:** state private progress restart behavior ([#2504](https://github.com/coreplanelabs/switchboard/issues/2504)) ([5a1ae59](https://github.com/coreplanelabs/switchboard/commit/5a1ae596bbe01658d87d7cdcb3683a71a02914c9))
+
 ## [1.269.0](https://github.com/coreplanelabs/switchboard/compare/v1.268.0...v1.269.0) (2026-09-30)
 
 
