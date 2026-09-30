@@ -190,7 +190,7 @@ export type Preset = LoopPreset | "ship";
  *  its own loop at the default rounds with a findings round at that ask, not at
  *  its floor (`fit` proves the floor case; the ask leaves room above it). */
 export const ASKS: Readonly<Record<Preset, number>> = {
-  general: 5,
+  general: 60,
   coding: 90,
   review: 25,
   ship: 240,

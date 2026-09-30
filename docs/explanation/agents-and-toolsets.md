@@ -8,7 +8,7 @@ The loop: call the model, run the tool calls it asks for, append the results, re
 
 | Agent | What it does | Toolset | Machine | Identity | Budget |
 |---|---|---|---|---|---|
-| `general` | The default. Answers directly, reads repositories and manages issues, reads a URL; refers code, reviews and research onward. | `assistant`: GitHub reads and issue writes, URL fetch, status. No shell, no workspace. | `none` | `none` | 5 min |
+| `general` | The default. Answers directly, reads repositories and manages issues, reads a URL; refers code, reviews and research onward. | `assistant`: GitHub reads and issue writes, URL fetch, status. No shell, no workspace. | `none` | `none` | 60 min |
 | `coding` | Implements a change and pushes a branch; Switchboard renders its typed description and opens the PR. | `full`: bash, file read and write, a file attached into the conversation (a screenshot, a PDF), URL fetch, diff digest, PR description, skills, GitHub reads, issue writes. | `repo-resident` | `write` | 90 min |
 | `review` | Reviews a pull request with full-repository context; ranked findings and a verdict. | `readonly`: bash, file read, verdict, URL fetch, diff digest, skills, GitHub reads. | `repo-resident` | `read` | 25 min, effort `medium` |
 | `ship` | Coding, review, fixes, until LGTM; on a plan branch the pipeline merges, elsewhere a person does. | Never sent to a model; the pipeline runs each round as a child `coding` or `review` run in a thread of its own. | `repo-resident` | `write` | 240 min (`ship.maxMinutes` in config); each round clipped to what remains |
