@@ -123,6 +123,7 @@ import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 import type { RunRegistry } from "../core/runRegistry.js";
 import type { LedgerRun } from "../core/runLedger/writeThrough.js";
+import { directAudienceStampOf } from "../core/runLedger/inboxMessage.js";
 import type { HostingState } from "../core/runLedger/types.js";
 import type { RunsService, RunView } from "../core/runsService.js";
 import type { SweepReport } from "../core/pullSweep.js";
@@ -862,6 +863,8 @@ function watched(io: ChannelIO, on: { started: (id: string) => void; replied: (t
   if (io.runFinished) out.runFinished = (receipt) => io.runFinished!(receipt);
   if (io.requestFailed) out.requestFailed = () => io.requestFailed!();
   if (io.openThread) out.openThread = (lead) => io.openThread!(lead);
+  if (io.directAudience) out.directAudience = () => io.directAudience!();
+  if (io.verifyDirectAudience) out.verifyDirectAudience = (audience) => io.verifyDirectAudience!(audience);
   return out;
 }
 
@@ -1133,6 +1136,30 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // the message's own (`childRequestText`), so the findings step's `agent:coding`
   // resolves the coding preset whatever a person's detour in the thread or a
   // lost store would have made sticky.
+  // A coordinator child is synthetic: its requester and thread come from the
+  // durable instance, not a new Slack event. Rebuild private authority only
+  // from the adapter's current address and a fresh Slack verification. The
+  // dispatch gate checks it again after this handoff, so a changed audience
+  // cannot inherit the parent's former access.
+  const address = io.directAudience?.();
+  const candidate = address
+    ? directAudienceStampOf({
+        channelId: instance.channelId,
+        userId: instance.userId,
+        threadKey,
+        ...(instance.postedBy !== undefined ? { postedBy: instance.postedBy } : {}),
+        ...(instance.authenticatedAs !== undefined ? { authenticatedAs: instance.authenticatedAs } : {}),
+        directAudience: { kind: "slack-unshared-im", ...address },
+      })
+    : undefined;
+  let verifiedAudience: typeof candidate;
+  if (candidate && io.verifyDirectAudience) {
+    try {
+      if (await io.verifyDirectAudience(candidate)) verifiedAudience = candidate;
+    } catch {
+      // A failed Slack read cannot mint authority for a synthetic child.
+    }
+  }
   const msg: IncomingMessage = {
     channelId: instance.channelId,
     userId: instance.userId,
@@ -1141,6 +1168,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     ...(instance.postedBy !== undefined ? { postedBy: instance.postedBy } : {}),
     ...(instance.channelName !== undefined ? { channelName: instance.channelName } : {}),
     threadKey,
+    ...(verifiedAudience !== undefined ? { directAudience: verifiedAudience } : {}),
     ...(row?.workBrief !== undefined ? { messageId: key } : {}),
     ...(thread.sourceUrl !== undefined ? { sourceUrl: thread.sourceUrl } : {}),
     text: childRequestText({

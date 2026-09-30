@@ -553,6 +553,43 @@ describe("the coordinator routes — the bearer (item 9)", () => {
 });
 
 describe("POST /admin/coordinator/spawn — the child as the parent record's requester (item 9)", () => {
+  it("a Ship child in a direct DM carries freshly verified requester audience through its watched channel; unverified and app-authored DMs do not", async () => {
+    const instance = { ...INSTANCE, channelId: "slack:DMAIN", threadKey: "slack:DMAIN:1.0" };
+    const address = { channelId: instance.channelId, userId: instance.userId, threadKey: instance.threadKey };
+    const audience = { kind: "slack-unshared-im" as const, ...address };
+    const cases = [
+      { verified: true, postedBy: undefined, address, stamped: true },
+      { verified: false, postedBy: undefined, address, stamped: false },
+      { verified: true, postedBy: "slack:bot:BOTHER", address, stamped: false },
+      { verified: true, postedBy: undefined, address: { ...address, userId: "slack:UOTHER" }, stamped: false },
+    ];
+    for (const testCase of cases) {
+      const verify = vi.fn(async () => testCase.verified);
+      let childIO: ChannelIO | undefined;
+      const h = harness({
+        ioFor: () => ({
+          reply: async () => {},
+          status: async () => ({ update: () => {}, done: async () => {} }),
+          history: async () => [],
+          directAudience: () => testCase.address,
+          verifyDirectAudience: verify,
+        }),
+        script: async (_msg, io) => {
+          childIO = io;
+          io.runStarted?.({ id: "run-child" });
+          return { status: "completed" };
+        },
+      });
+      await h.instances.put({ ...instance, ...(testCase.postedBy ? { postedBy: testCase.postedBy } : {}) });
+      const response = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
+      expect(response.status).toBe(200);
+      expect(h.dispatched[0].msg.directAudience).toEqual(testCase.stamped ? audience : undefined);
+      expect(childIO?.directAudience?.()).toEqual(testCase.address);
+      expect(await childIO?.verifyDirectAudience?.(audience)).toBe(testCase.verified);
+      expect(verify).toHaveBeenCalled();
+    }
+  });
+
   it("dispatches the child as the instance's user, channel and thread — a body naming another user is ignored — with the preset directive, the repository and the prompt as its text and the coordinator tag as its option; answers the run id and thread at registration", async () => {
     const h = harness();
     await h.instances.put(INSTANCE);
