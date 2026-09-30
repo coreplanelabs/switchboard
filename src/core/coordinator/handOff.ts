@@ -73,6 +73,12 @@ export interface HandOffInput {
   entry: ShipEntry;
   /** The request's directive-stripped text (the preflight's input). */
   requestText: string;
+  /** Attributed context from the actor-stamped session tail, for a terse
+   * generated task only; never used to resolve the target or plan identity. */
+  threadEvidence?: string;
+  /** An inherited write must not spawn a child from `Fix it.` alone if the
+   * source tail became unavailable between binding and hand-off. */
+  requiresThreadEvidence?: boolean;
   /** An opt-in main-agent decision. Its key is stable across message retries;
    * the brief is context for the existing Ship unit, not publication authority. */
   mainTask?: MainTaskKey & {
@@ -215,6 +221,7 @@ type Planned = {
   /** Stable task keys for units whose own brief asks to write a decision record. */
   recordTasks?: Readonly<Record<string, string>>;
   workBrief?: WorkBrief;
+  threadEvidence?: string;
 };
 
 const refused = (code: RefusalCode, reply: string): HandOffOutcome => ({
@@ -352,6 +359,9 @@ async function plan(
         identity,
         merge: "person",
         ...(workBrief !== undefined ? { workBrief } : {}),
+        ...(input.threadEvidence !== undefined && input.threadEvidence.length <= 6_000
+          ? { threadEvidence: input.threadEvidence }
+          : {}),
         ...(entry.resume !== undefined ? { resume: entry.resume } : {}),
         ...(entry.adopt !== undefined ? { adopt: entry.adopt } : {}),
         ...(entry.branch !== undefined ? { entryBranch: entry.branch } : {}),
@@ -479,6 +489,7 @@ async function rowsFor(
           branch,
           dependsOn: u.dependsOn,
           ...(p.workBrief !== undefined ? { workBrief: p.workBrief } : {}),
+          ...(p.threadEvidence !== undefined ? { threadEvidence: p.threadEvidence } : {}),
           rounds: [],
           ...(p.resume !== undefined ? { resume: p.resume } : {}),
           ...(publication !== undefined ? { publication } : {}),
@@ -574,6 +585,11 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
 
 async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffInput): Promise<HandOffOutcome> {
   const log = deps.log ?? console.log;
+  if (input.requiresThreadEvidence && !input.threadEvidence)
+    return refused(
+      "plan_history_unavailable",
+      "⚠️ The earlier thread context could not be verified; no fix worker started.",
+    );
   if (input.mainTask !== undefined) {
     if (!isMainTaskKey(input.mainTask))
       return refused("setup_failed", "🚫 The main agent's act id or thread key is invalid; no worker started.");

@@ -49,6 +49,7 @@ import { attachmentSuffix, composeRunLabel, humanizeMessageText, isMrkdwnChannel
 import type { DispatchFollowUp } from "./admission.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { contextMessageTexts } from "./messages.js";
+import { operatorThreadTail, requesterThreadEvidence } from "./operator.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { githubCapabilityFor, shutdownNotice, type RunDeps } from "./run.js";
 import { defaultRunRegistry, REPLAY_EVERYTHING } from "../runRegistry.js";
@@ -628,6 +629,22 @@ export async function runShipBranch(
     // refused by name here, never run some other way. A thread whose pipeline
     // is live (the host key's `thread-live`) is refused the same way: an
     // aborted outcome through the refusal seam, nothing handed to the runner.
+    // A terse follow-up keeps its own words as the task key, while the
+    // actor-stamped prior question and reconciliation travel as data on the
+    // original unit. The accepted repository and preflight are already fixed;
+    // neither assistant text nor a foreign turn can select a work target.
+    const requiresThreadEvidence =
+      ctx.agentSource === "operator" &&
+      ctx.operator?.binds?.some((bind) => bind.repoSource === "thread") === true &&
+      /^(?:please\s+)?fix\s+(?:it|this)[.!]?$/i.test(directives.text.trim());
+    const threadEvidence =
+      requiresThreadEvidence && repoCtx.repo !== undefined && deps.runLedger !== undefined
+        ? requesterThreadEvidence(
+            await operatorThreadTail(deps.runLedger, [{ agent: "general" }], msg.threadKey),
+            msg.userId,
+            repoCtx.repo,
+          )
+        : undefined;
     outcome = hostRefused
       ? {
           status: "aborted",
@@ -649,6 +666,8 @@ export async function runShipBranch(
             {
               entry,
               requestText: directives.text,
+              ...(threadEvidence !== undefined ? { threadEvidence } : {}),
+              ...(requiresThreadEvidence ? { requiresThreadEvidence: true } : {}),
               ...(ctx.reissuePlanId !== undefined ? { reissuePlanId: ctx.reissuePlanId } : {}),
               ...(ctx.beforeCoordinatorStart !== undefined ? { beforeStart: ctx.beforeCoordinatorStart } : {}),
               msg,
