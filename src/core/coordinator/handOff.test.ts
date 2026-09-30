@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 import { InMemoryCoordinatorInstanceStore, NullCoordinatorInstanceStore } from "./instanceStore.js";
 import { handOffToCoordinator, type HandOffDeps, type HandOffInput } from "./handOff.js";
+import { generatedTaskOf } from "./generatedTask.js";
+import { contractFor } from "./briefs.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
 import { MAX_FILE_CHARS } from "../../execution/githubApi.js";
 import { PLAN_MAX_CHARS } from "../ship/contract.js";
@@ -569,7 +571,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
 
   it("a task request is a generated plan of one unit: the instance under `plan-<slug>-<hash>` carries `plan: { id }` with no `path` and `merge: person`, its one `U1` row is on `plan/<id>/u1`, and the reply says the unit runs in this thread — a task whose text contains the word runner included", async () => {
     const h = harness();
-    const id = "plan-warm-the-cache-on-wake-dfa06c";
+    const id = `plan-${generatedPlanId("warm the cache on wake", "slack:C1:1.0")}`;
     const out = await handOffToCoordinator(
       h.deps,
       input({ entry: { repo: "acme/api", base: "main" }, requestText: "in acme/api: warm the cache on wake" }),
@@ -598,9 +600,22 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
         title: "warm the cache on wake",
         branch: "plan/warm-the-cache-on-wake-dfa06c/u1",
         dependsOn: [],
+        generatedTask: generatedTaskOf("warm the cache on wake", {
+          requesterId: "slack:UALICE",
+          threadKey: "slack:C1:1.0",
+          runId: "run-s",
+          repo: "acme/api",
+          sourceUrl: "https://acme.slack.com/archives/C1/p1",
+        }),
         rounds: [],
       },
     ]);
+    const stored = (await h.instances.listUnits(id))[0]!;
+    const afterRestart = await contractFor(instance, stored, {
+      readRepoFile: async () => undefined,
+      readRunFacts: async () => undefined,
+    });
+    expect(afterRestart.unit.section).toContain("warm the cache on wake");
     // The field comes from the request's kind, never its words: "runner" in the text stays a person's merge.
     const wordy = harness();
     await handOffToCoordinator(
@@ -609,6 +624,17 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     );
     expect(await wordy.instances.get("plan-make-the-runner-warm-the-eaaa45")).toMatchObject({ merge: "person" });
     expect(await h.instances.listEvents({ instanceId: id, unit: ["U", "1"].join("") })).toEqual([]);
+  });
+
+  it("refuses a generated task with no words to checkpoint before any unit or workflow exists", async () => {
+    const h = harness();
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({ entry: { repo: "acme/api", base: "main" }, requestText: "" }),
+    );
+    expect(out.status).toBe("aborted");
+    expect(out.reply).toContain("no task to checkpoint");
+    expect(h.created).toEqual([]);
   });
 
   it("two record-writing tasks admitted together carry consecutive reservations on their unit rows, and re-issuing the same task keeps its number", async () => {
@@ -749,11 +775,12 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
   });
 
   it("a generated plan is re-issued by its id: the same text after `U1` merged is refused as merged already; after `U1` ended `merge_ready` it is attempt 2 under `plan-<id>-2` with `U1` selected on the same branch", async () => {
-    const id = "plan-warm-the-cache-on-wake-dfa06c";
+    const id = `plan-${generatedPlanId("warm the cache on wake", "slack:C1:1.0")}`;
     const req = input({
       entry: { repo: "acme/api", base: "main" },
       requestText: "in acme/api: warm the cache on wake",
     });
+    req.threadEvidence = "Requester: this cache is the one behind /healthz";
     const merged = harness({ status: { [id]: { kind: "status", status: "complete" } } });
     await handOffToCoordinator(merged.deps, req);
     const rows = await merged.instances.listUnits(id);
@@ -779,6 +806,71 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(await ready.instances.listUnits(`${id}-2`)).toMatchObject([
       { unit: "U1", branch: "plan/warm-the-cache-on-wake-dfa06c/u1" },
     ]);
+    expect((await ready.instances.listUnits(`${id}-2`))[0]?.generatedTask).toEqual(readyRows[0]?.generatedTask);
+    expect((await ready.instances.listUnits(`${id}-2`))[0]?.threadEvidence).toBe(readyRows[0]?.threadEvidence);
+  });
+
+  it("refuses reissue when the original generated task checkpoint is absent", async () => {
+    const id = `plan-${generatedPlanId("warm the cache on wake", "slack:C1:1.0")}`;
+    const req = input({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "in acme/api: warm the cache on wake",
+    });
+    const h = harness({ status: { [id]: { kind: "status", status: "complete" } } });
+    await handOffToCoordinator(h.deps, req);
+    const row = (await h.instances.listUnits(id))[0]!;
+    const { generatedTask: _missing, ...legacy } = row;
+    await h.instances.putUnits([{ ...legacy, ending: { kind: "held", report: "interrupted", at: NOW } }]);
+    const again = await handOffToCoordinator(h.deps, req);
+    expect(again.status).toBe("aborted");
+    expect(again.reply).toContain("original task checkpoint");
+    expect(h.created).toEqual([id]);
+    expect(await h.instances.listUnits(`${id}-2`)).toEqual([]);
+  });
+
+  it("refuses a legacy first instance without either task checkpoint or unit", async () => {
+    const id = "plan-warm-the-cache-on-wake-dfa06c";
+    const req = input({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "in acme/api: warm the cache on wake",
+    });
+    const initial = harness();
+    await handOffToCoordinator(initial.deps, req);
+    const first = (await initial.instances.get(id))!;
+    const { generatedTask: _missing, ...legacy } = first;
+    const store = new InMemoryCoordinatorInstanceStore();
+    await store.put(legacy);
+    const h = harness({ store, status: { [id]: { kind: "absent" } } });
+    const again = await handOffToCoordinator(h.deps, req);
+    expect(again.status).toBe("aborted");
+    expect(again.reply).toContain("original task checkpoint");
+    expect(h.created).toEqual([]);
+  });
+
+  it("refuses a changed original task source before starting another attempt", async () => {
+    const id = "plan-warm-the-cache-on-wake-dfa06c";
+    const req = input({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "in acme/api: warm the cache on wake",
+    });
+    const h = harness({ status: { [id]: { kind: "status", status: "complete" } } });
+    await handOffToCoordinator(h.deps, req);
+    const row = (await h.instances.listUnits(id))[0]!;
+    await h.instances.putUnits([
+      {
+        ...row,
+        generatedTask: {
+          ...row.generatedTask!,
+          source: { ...row.generatedTask!.source, runId: "other-run" },
+        },
+        ending: { kind: "held", report: "interrupted", at: NOW },
+      },
+    ]);
+    const again = await handOffToCoordinator(h.deps, req);
+    expect(again.status).toBe("aborted");
+    expect(again.reply).toContain("original task checkpoint");
+    expect(h.created).toEqual([id]);
+    expect(await h.instances.listUnits(`${id}-2`)).toEqual([]);
   });
 
   it("a failed generated unit with no PR reissues on its original branch and seeds an attached plan for the new attempt", async () => {
@@ -930,6 +1022,8 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
 
     const retry = await handOffToCoordinator(h.deps, {
       ...req,
+      runId: "run-reissue",
+      msg: { ...req.msg, sourceUrl: "https://acme.slack.com/archives/C1/p2" },
       entry: {
         repo: "acme/api",
         branch: "release-please--main",
@@ -939,8 +1033,22 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     });
 
     expect(retry).toMatchObject({ status: "completed", instanceId: id });
-    expect(await h.instances.get(id)).toMatchObject({ branch: `plan/${planId}/u1`, base: "main" });
+    expect(await h.instances.get(id)).toMatchObject({
+      branch: `plan/${planId}/u1`,
+      base: "main",
+      runId: first.runId,
+      sourceUrl: first.sourceUrl,
+    });
     expect(await h.instances.listUnits(id)).toMatchObject([{ branch: `plan/${planId}/u1` }]);
+    expect((await h.instances.get(id))?.generatedTask).toEqual(first.generatedTask);
+    const restored = (await h.instances.get(id))!;
+    const [unit] = await h.instances.listUnits(id);
+    await expect(
+      contractFor(restored, unit!, {
+        readRepoFile: async () => undefined,
+        readRunFacts: async () => undefined,
+      }),
+    ).resolves.toBeDefined();
   });
 
   it("carries a recovered legacy unit's saved push and record into the generated unit", async () => {
@@ -1150,6 +1258,9 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(second.instanceId).toBe(`${id}-2`);
     expect(await h.instances.listUnits(id)).toMatchObject([{ branch: "plan/owned-task/u1" }]);
     expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([{ branch: "plan/owned-task/u1" }]);
+    expect((await h.instances.listUnits(`${id}-2`))[0]?.generatedTask).toEqual(
+      (await h.instances.listUnits(id))[0]?.generatedTask,
+    );
   });
 
   it("a re-issue after a review_pending ending carries the row's lastPush — the coding child's own last push — onto the next attempt's row, so its pre-check starts at the review round", async () => {

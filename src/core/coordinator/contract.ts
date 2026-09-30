@@ -531,10 +531,10 @@ export function coordinatorFields(tag: CoordinatorTag | undefined): {
 
 /** The parent ship record: what the bot writes at an instance's creation and
  *  the spawn route reads the requester, channel and thread from — so a step
- *  never takes an actor from its caller. Ids only, never the task text. The
- *  units the instance runs are rows of their own (`CoordinatorUnit`), so this
- *  row stays the instance's identity and its two surfaces: the card the bot
- *  redraws and the run record it writes at the end. */
+ *  never takes an actor from its caller. The first generated instance also
+ *  backs up its admitted task until its unit row is written; later unit state
+ *  lives in `CoordinatorUnit`. The parent retains the instance's identity and
+ *  its two surfaces: the card the bot redraws and the final run record. */
 export interface CoordinatorInstance {
   id: string;
   kind: "ship";
@@ -552,6 +552,12 @@ export interface CoordinatorInstance {
    *  one unit runs; a seeded plan's units each open a thread of their own. */
   threadKey: string;
   sourceUrl?: string;
+  /** Admission text survives an instance write that succeeds before its first
+   * unit row. Only the first generated instance carries this backup. */
+  generatedTask?: CoordinatorUnit["generatedTask"];
+  /** The first generated task's admission source, retained when a later Ship
+   * run reissues the same unit. The current runId/sourceUrl may then differ. */
+  generatedTaskSource?: { runId: string; sourceUrl?: string };
   /** `owner/name`, and the head branch the pipeline works on (the first unit's
    *  — each unit row names its own). */
   repo: string;
@@ -747,6 +753,20 @@ export interface CoordinatorUnit {
   dependsOn: string[];
   /** The optional main conversation's evidence and request, frozen at admission. */
   workBrief?: WorkBrief;
+  /** The generated task's authenticated, immutable request. A child never
+   * reconstructs this from a bounded transcript or an unreadable host run. */
+  generatedTask?: {
+    version: 1;
+    text: string;
+    sha256: string;
+    source: {
+      requesterId: string;
+      threadKey: string;
+      runId: string;
+      repo: string;
+      sourceUrl?: string;
+    };
+  };
   /** Bounded, attributed prior thread context for a terse generated task; data,
    * never repository or publication authority. Frozen on the original unit. */
   threadEvidence?: string;
@@ -880,6 +900,17 @@ const isPublication = (v: unknown): v is ExistingPrPublicationBinding =>
   typeof v.owner.unit === "string" &&
   UNIT_PATTERN.test(v.owner.unit);
 const isThread = (v: unknown): boolean => isObject(v) && isText(v.threadKey) && isOptionalText(v.sourceUrl);
+const isGeneratedTask = (v: unknown): boolean => {
+  if (!isObject(v) || v.version !== 1 || !isText(v.text, 100_000)) return false;
+  if (!isText(v.sha256, 64) || v.sha256.length !== 64 || !isObject(v.source)) return false;
+  return (
+    isText(v.source.requesterId) &&
+    isText(v.source.threadKey) &&
+    isText(v.source.runId) &&
+    isText(v.source.repo) &&
+    isOptionalText(v.source.sourceUrl)
+  );
+};
 
 /** Structural check on a record from outside the process (a Worker response, an HTTP body). */
 export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
@@ -889,6 +920,14 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
   if (r.kind !== "ship") return false;
   if (!isText(r.userId) || !isText(r.channelId) || !isText(r.threadKey)) return false;
   if (!isOptionalText(r.userName) || !isOptionalText(r.channelName) || !isOptionalText(r.sourceUrl)) return false;
+  if (r.generatedTask !== undefined && !isGeneratedTask(r.generatedTask)) return false;
+  if (
+    r.generatedTaskSource !== undefined &&
+    (!isObject(r.generatedTaskSource) ||
+      !isText(r.generatedTaskSource.runId) ||
+      !isOptionalText(r.generatedTaskSource.sourceUrl))
+  )
+    return false;
   if (!isOptionalText(r.authenticatedAs) || !isOptionalText(r.postedBy)) return false;
   if (typeof r.repo !== "string" || !REPO_SLUG.test(r.repo)) return false;
   if (!isText(r.branch) || !isOptionalText(r.base)) return false;
@@ -1016,7 +1055,9 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (typeof r.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(r.instanceId)) return false;
   if (!isText(r.unit, 32) || !isText(r.slug) || !isText(r.branch) || !isOptionalText(r.title)) return false;
   if (!Array.isArray(r.dependsOn) || !r.dependsOn.every((d) => isText(d, 32))) return false;
+  if (r.workBrief !== undefined && r.generatedTask !== undefined) return false;
   if (r.workBrief !== undefined && !isWorkBrief(r.workBrief)) return false;
+  if (r.generatedTask !== undefined && !isGeneratedTask(r.generatedTask)) return false;
   if (r.threadEvidence !== undefined && !isText(r.threadEvidence, 6_000)) return false;
   if (!isOptionalText(r.threadKey) || !isOptionalText(r.sourceUrl)) return false;
   if (r.reviewThread !== undefined && !isThread(r.reviewThread)) return false;

@@ -54,6 +54,7 @@ import type { CoordinatorInstanceStore, MainTaskLink } from "./instanceStore.js"
 import { isMainTaskAuthority, sameMainTaskAuthority, type MainTaskAuthority } from "./requesterAuthority.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
 import { privateWorkerThreadKey, type PrivateWorkerLog } from "../privateWorkerLog.js";
+import { generatedTaskAdmissionSource, generatedTaskOf, generatedTaskText } from "./generatedTask.js";
 
 export type BeforeCoordinatorStart = () => Promise<
   | {
@@ -221,6 +222,7 @@ type Planned = {
   /** Stable task keys for units whose own brief asks to write a decision record. */
   recordTasks?: Readonly<Record<string, string>>;
   workBrief?: WorkBrief;
+  generatedTask?: NonNullable<CoordinatorUnit["generatedTask"]>;
   threadEvidence?: string;
 };
 
@@ -321,9 +323,25 @@ async function plan(
     // `plan/<id>/u1` — the instance's absent `plan.path` is the mark that keeps
     // its unit in the requesting thread. Its merge is a person's, whatever the
     // request's words say.
-    const text =
-      (taskText ? shipUnitText(input.requestText, entry.repo) : "") ||
-      "Implement the task this thread's ship request describes.";
+    // A PR-only resume has no coding round; retain its historical plan key.
+    // This text never becomes a child task.
+    const text = taskText
+      ? shipUnitText(input.requestText, entry.repo)
+      : entry.resume !== undefined
+        ? "Implement the task this thread's ship request describes."
+        : "";
+    if (text.length === 0 && input.mainTask === undefined && entry.resume === undefined)
+      return {
+        ok: false,
+        code: "setup_failed",
+        reply: "🚫 The Ship request has no task to checkpoint; no worker started.",
+      };
+    if (text.length > 100_000)
+      return {
+        ok: false,
+        code: "setup_failed",
+        reply: "🚫 The Ship request is too long to checkpoint; no worker started.",
+      };
     const planId =
       input.mainTask !== undefined
         ? generatedPlanId(text, `${input.mainTask.mainThreadKey}:${input.mainTask.actId}`)
@@ -359,6 +377,17 @@ async function plan(
         identity,
         merge: "person",
         ...(workBrief !== undefined ? { workBrief } : {}),
+        ...(workBrief === undefined && entry.resume === undefined
+          ? {
+              generatedTask: generatedTaskOf(text, {
+                requesterId: msg.userId,
+                threadKey: msg.threadKey,
+                runId: input.runId,
+                repo: entry.repo,
+                ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+              }),
+            }
+          : {}),
         ...(input.threadEvidence !== undefined && input.threadEvidence.length <= 6_000
           ? { threadEvidence: input.threadEvidence }
           : {}),
@@ -456,7 +485,15 @@ async function rowsFor(
   p: Planned,
   selected: readonly string[],
   instanceId: string,
-  carried?: ReadonlyMap<string, { lastPush?: string; record?: string }>,
+  carried?: ReadonlyMap<
+    string,
+    {
+      lastPush?: string;
+      record?: string;
+      generatedTask?: CoordinatorUnit["generatedTask"];
+      threadEvidence?: string;
+    }
+  >,
 ): Promise<CoordinatorUnit[]> {
   const reserve = deps.reserveDecisionRecord ?? (() => Promise.reject(new DecisionRecordReservationUnavailableError()));
   return Promise.all(
@@ -489,7 +526,12 @@ async function rowsFor(
           branch,
           dependsOn: u.dependsOn,
           ...(p.workBrief !== undefined ? { workBrief: p.workBrief } : {}),
-          ...(p.threadEvidence !== undefined ? { threadEvidence: p.threadEvidence } : {}),
+          ...((previous === undefined ? p.generatedTask : previous.generatedTask) !== undefined
+            ? { generatedTask: previous === undefined ? p.generatedTask : previous.generatedTask }
+            : {}),
+          ...((previous?.threadEvidence ?? p.threadEvidence) !== undefined
+            ? { threadEvidence: previous?.threadEvidence ?? p.threadEvidence }
+            : {}),
           rounds: [],
           ...(p.resume !== undefined ? { resume: p.resume } : {}),
           ...(publication !== undefined ? { publication } : {}),
@@ -635,6 +677,17 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
     const instance: CoordinatorInstance = {
       id: firstId,
       ...p.identity,
+      ...(p.generatedTask !== undefined ? { generatedTask: p.generatedTask } : {}),
+      ...(p.generatedTask !== undefined
+        ? {
+            generatedTaskSource: {
+              runId: p.generatedTask.source.runId,
+              ...(p.generatedTask.source.sourceUrl !== undefined
+                ? { sourceUrl: p.generatedTask.source.sourceUrl }
+                : {}),
+            },
+          }
+        : {}),
       branch: units[0]!.branch,
       plan: planOf(),
       merge: p.merge,
@@ -680,7 +733,15 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
   // push): carried onto the next attempt's row, so its pre-check starts at the
   // review round when the open pull request still heads exactly there. The
   // latest attempt's word wins.
-  const carried = new Map<string, { lastPush?: string; record?: string }>();
+  const carried = new Map<
+    string,
+    {
+      lastPush?: string;
+      record?: string;
+      generatedTask?: CoordinatorUnit["generatedTask"];
+      threadEvidence?: string;
+    }
+  >();
   const priorRows: CoordinatorUnit[] = [];
   for (let n = 1; n <= attempt; n++)
     for (const row of await deps.instances.listUnits(planInstanceId(p.planId, n))) {
@@ -691,6 +752,8 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
         ...prior,
         ...(row.lastPush !== undefined ? { lastPush: row.lastPush } : {}),
         ...(row.record !== undefined ? { record: row.record } : {}),
+        ...(row.generatedTask !== undefined ? { generatedTask: row.generatedTask } : {}),
+        ...(row.threadEvidence !== undefined ? { threadEvidence: row.threadEvidence } : {}),
       });
     }
   // An earlier generated unit is the branch authority for the same plan. A
@@ -704,6 +767,38 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
   // still the authority when it is the first instance's only unit.
   const original =
     firstRows.find((row) => row.unit === originalUnit?.id) ?? (firstRows.length === 1 ? firstRows[0] : undefined);
+  const originalTaskSource = generatedTaskAdmissionSource(first);
+  const originalTask = original?.generatedTask ?? (firstRows.length === 0 ? first.generatedTask : undefined);
+  const legacyBoundPr =
+    original?.generatedTask === undefined &&
+    first.generatedTask === undefined &&
+    original?.pr !== undefined &&
+    (original.publication !== undefined || original.ending?.kind === "merge_ready") &&
+    (p.adopt?.pr === original.pr.number || p.resume?.pr === original.pr.number);
+  if (
+    !legacyBoundPr &&
+    (p.generatedTask !== undefined ||
+      original?.generatedTask !== undefined ||
+      first.generatedTask !== undefined ||
+      first.generatedTaskSource !== undefined)
+  ) {
+    let taskValid = originalTaskSource !== undefined;
+    try {
+      if (taskValid) {
+        const text = generatedTaskText(originalTask, first);
+        taskValid = first.generatedTask === undefined || generatedTaskText(first.generatedTask, first) === text;
+      }
+    } catch {
+      taskValid = false;
+    }
+    if (!taskValid)
+      return refused(
+        "plan_history_unavailable",
+        `🚫 The original task checkpoint of ${where} cannot be verified, so no runner started.`,
+      );
+  }
+  if (firstRows.length === 0 && originalTask !== undefined && originalUnit !== undefined)
+    carried.set(originalUnit.id, { ...carried.get(originalUnit.id), generatedTask: originalTask });
   if (
     p.path === undefined &&
     original !== undefined &&
@@ -832,6 +927,14 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
     const instance: CoordinatorInstance = {
       id: latest.id,
       ...p.identity,
+      ...(p.path === undefined &&
+      latest.id === first.id &&
+      originalTask !== undefined &&
+      originalTaskSource !== undefined
+        ? { runId: originalTaskSource.runId, sourceUrl: originalTaskSource.sourceUrl }
+        : {}),
+      ...(first.generatedTask !== undefined ? { generatedTask: first.generatedTask } : {}),
+      ...(originalTaskSource !== undefined ? { generatedTaskSource: originalTaskSource } : {}),
       branch: units[0]!.branch,
       plan: planOf(),
       merge: p.merge,
@@ -853,6 +956,7 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
   const instance: CoordinatorInstance = {
     id: nextId,
     ...p.identity,
+    ...(originalTaskSource !== undefined ? { generatedTaskSource: originalTaskSource } : {}),
     branch: units[0]!.branch,
     plan: planOf(),
     merge: p.merge,

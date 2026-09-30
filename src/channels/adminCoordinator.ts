@@ -6325,19 +6325,6 @@ function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance)
         ...(r.handoff !== undefined ? { handoff: r.handoff } : {}),
       };
     },
-    // The generated plan's request text: the ship run's own record
-    // (`instance.runId`, its `input` event) — never a scan of the thread, so a
-    // routed request with no `agent:ship` turn anywhere still reads back the
-    // words the person typed (agent-ship item 13).
-    readShipRequest: async () => {
-      if (instance.runId === undefined) return undefined;
-      const res = await deps.runs
-        .getRun(instance.runId, { include: "messages", privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ })
-        .catch(() => undefined);
-      if (res === undefined || !res.ok) return undefined;
-      const input = (res.value.events ?? []).find((e) => e.type === "input");
-      return input?.type === "input" ? input.text : undefined;
-    },
   };
 }
 
