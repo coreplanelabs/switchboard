@@ -10,7 +10,7 @@
 // this branch and a bot death under a pipeline interrupts a child, never the
 // pipeline. The branch reads the run slice plus the seams only ship needs.
 import type { AgentDef } from "../../agents/registry.js";
-import type { RedispatchConfirmation } from "../confirmations.js";
+import type { PrWorkBinding } from "../ship/prWorkBinding.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
@@ -180,7 +180,7 @@ export interface ShipContext {
   /** The operator's typed starting stage; preflight validates the PR facts. */
   shipEntry?: ShipEntryIntent;
   /** Only a Yes on the stored PR-work question can grant this continuation. */
-  confirmedPrWork?: RedispatchConfirmation["binding"];
+  confirmedPrWork?: PrWorkBinding;
   /** The validated source of the operator's repository slot. */
   shipRepoSource?: "request" | "attachment" | "thread" | "channel";
   /** The stable generated plan this ended thread is re-issuing. */

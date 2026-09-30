@@ -32,7 +32,7 @@ import {
 } from "./dispatch/admission.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
 import { actorIdsOf, cancelPending, consumeAndRun, REFUSED_REASON } from "./dispatch/confirm.js";
-import type { RedispatchConfirmation } from "./confirmations.js";
+import type { PrWorkBinding } from "./ship/prWorkBinding.js";
 import {
   postSettledOutcome,
   recordOperatorDecision,
@@ -529,7 +529,7 @@ export interface DispatchOptions {
    *  in a `run_note` ([run-history.md](../../docs/reference/specs/run-history.md) item 2)
    *  — and the click's one drain slot is handed over: this dispatch counts no
    *  second one. Absent for every other request. */
-  redispatch?: { code: string; binding?: RedispatchConfirmation["binding"] };
+  redispatch?: { code: string; binding?: PrWorkBinding };
 }
 
 /** How a request ended, for whoever started it (dispatch/outcome.ts): the

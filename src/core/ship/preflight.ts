@@ -8,7 +8,7 @@ import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { nearMatch } from "../nearMatch.js";
 import { resolveBaseRef, type PullRequestFacts, type RepoShipInfo } from "../../execution/githubPulls.js";
 import type { RepoContext } from "../repoContext.js";
-import type { RedispatchConfirmation } from "../confirmations.js";
+import type { PrWorkBinding } from "./prWorkBinding.js";
 import { parseShipPlanRequest, isUnitBranch } from "./coordinator.js";
 
 // ---- naming -------------------------------------------------------
@@ -102,7 +102,7 @@ export type ShipPreflightResult =
       reply: string;
       refusal: Refusal;
       /** A runnable redispatch line for record 0054's Yes/No question. */
-      guess?: { line: string; evidence: string; binding?: RedispatchConfirmation["binding"] };
+      guess?: { line: string; evidence: string; binding?: PrWorkBinding };
     };
 
 /** The operator's starting stage for a Ship request. This is a decision about
@@ -132,7 +132,7 @@ export interface ShipPreflightInput {
   /** Earlier actor-stamped turns from this requester, never assistant prose. */
   requesterWorkText?: readonly string[];
   /** A Yes on this exact PR and objective, carried by the confirmation store. */
-  confirmedPrWork?: RedispatchConfirmation["binding"];
+  confirmedPrWork?: PrWorkBinding;
   repoCtx: Pick<
     RepoContext,
     "repo" | "pr" | "prFromMessage" | "prIsThreadOwn" | "ref" | "refFromPr" | "baseRef" | "headSha" | "prUnpostable"

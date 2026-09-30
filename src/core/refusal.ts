@@ -5,7 +5,7 @@
 // table does not know is a type error — so the trace, the run record and the
 // door report count refusals by the same names.
 import type { IncomingMessage } from "./types.js";
-import type { RedispatchConfirmation } from "./confirmations.js";
+import type { PrWorkBinding } from "./ship/prWorkBinding.js";
 
 /** Why the bot refused, in the record's three classes: a different sentence
  *  from the person would work (`request`), the person may not (`policy`), or
@@ -22,7 +22,7 @@ export interface Guess {
   line: string;
   evidence: string;
   /** A click can authorize only this exact offered target and objective. */
-  binding?: RedispatchConfirmation["binding"];
+  binding?: PrWorkBinding;
 }
 
 /** A command handler's guess hint (record 0054): the corrected chat form and

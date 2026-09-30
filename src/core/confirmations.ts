@@ -6,6 +6,7 @@ import type { CommandInput } from "./commandRegistry.js";
 import { systemClock } from "./trace/clock.js";
 import type { Clock } from "./trace/types.js";
 import type { ConfirmationOffer, IncomingMessage } from "./types.js";
+import type { PrWorkBinding } from "./ship/prWorkBinding.js";
 
 // The confirmation a routed write is offered as (docs/decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md;
 // docs/reference/specs/routing-and-config.md item 25). The router bound a
@@ -63,7 +64,7 @@ export interface RedispatchConfirmation {
   evidence: string;
   code: string;
   /** Exact PR and objective shown by a Ship work question. */
-  binding?: { kind: "ship_pr_work"; repo: string; pr: number; objective: string };
+  binding?: PrWorkBinding;
   expiresAt: number;
 }
 
