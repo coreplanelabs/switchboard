@@ -35,6 +35,24 @@ export class WorkerPrivateWorkerLog implements PrivateWorkerLog {
       throw new Error("private worker log list: invalid answer");
     return answer.events;
   }
+
+  async listAfter(
+    threadKey: string,
+    afterSeq: number,
+    limit: number,
+  ): Promise<{ events: PrivateWorkerEvent[]; more: boolean }> {
+    const answer = (await this.post("/runs/private-worker/list-after", { threadKey, afterSeq, limit })) as {
+      events?: unknown;
+      more?: unknown;
+    };
+    if (
+      !Array.isArray(answer?.events) ||
+      !answer.events.every(isPrivateWorkerEvent) ||
+      typeof answer.more !== "boolean"
+    )
+      throw new Error("private worker log list-after: invalid answer");
+    return { events: answer.events, more: answer.more };
+  }
 }
 
 /** No local or memory fallback for production worker conversations. */

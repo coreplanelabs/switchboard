@@ -40,6 +40,7 @@ export interface FollowUpInput {
    *  becomes is gated on the actor they make, not the bare user id. */
   authenticatedAs?: string;
   postedBy?: string;
+  relayedBy?: string;
   sourceUrl?: string;
   /** The Slack DM claim from ingress; a consumer rechecks it before private action. */
   directAudience?: SlackDirectAudience;
@@ -86,6 +87,10 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
   private readonly observers = new Set<{ notify(input: T): void }>();
   private untrustedFollowUpSeen = false;
   private readonly untrustedObservers = new Set<() => void>();
+  /** Source facts survive a drain, so one mixed-author steer cannot restore
+   * private run capabilities on a later model turn. No message text is kept. */
+  private readonly acceptedAuthors = new Set<string>();
+  private acceptedIndirectSource = false;
   /** The ledger seqs ever pushed (item 5): a durable follow-up can reach the
    *  run by two paths — the reclaim's snapshot or the re-read at adopt, and a
    *  boot-gap steer that finds the run live once its push lands — and must
@@ -99,6 +104,14 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
       this.seen.add(input.ledgerSeq);
     }
     this.pending.push(input);
+    this.acceptedAuthors.add(input.userId);
+    if (
+      input.postedBy !== undefined ||
+      input.authenticatedAs !== undefined ||
+      input.relayedBy !== undefined ||
+      input.from !== undefined
+    )
+      this.acceptedIndirectSource = true;
     this.pushed++;
     for (const observer of this.observers) observer.notify(input);
   }
@@ -123,6 +136,14 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
     if (this.untrustedFollowUpSeen) observer();
     this.untrustedObservers.add(observer);
     return () => this.untrustedObservers.delete(observer);
+  }
+
+  hasOnlyDirectRequester(userId: string): boolean {
+    return (
+      !this.untrustedFollowUpSeen &&
+      !this.acceptedIndirectSource &&
+      [...this.acceptedAuthors].every((accepted) => accepted === userId)
+    );
   }
 
   /** Every follow-up ever accepted, drained or not. A wait in the run's own

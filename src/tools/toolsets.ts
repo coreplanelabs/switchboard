@@ -16,6 +16,7 @@
 import { DEPOT_CI_TOOLS } from "./depotCi.js";
 import { attachFileTool } from "./attach.js";
 import { planeShowTool } from "./plane.js";
+import { workProgressTool } from "./mainWorker.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS } from "./github.js";
 import { MAIN_WORK_TOOLS } from "./mainWork.js";
@@ -104,13 +105,14 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
   conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
   /** The orchestrator (record 0070; docs/reference/specs/orchestration-plane.md
    *  item 12): plane, requester-scoped GitHub and session reads; bounded
-   *  Slack context, linked-work controls and private work start require a
-   *  verified requester DM. No public status, shell or generic run tool. */
+   *  Slack context, linked-work controls, private progress and private work
+   *  start require a verified requester DM. No public status, shell or generic run tool. */
   orchestrator: [
     planeShowTool,
     slackContextTool,
     ...MAIN_WORK_TOOLS,
     workStartTool,
+    workProgressTool,
     ...GITHUB_READ_TOOLS,
     ...SESSION_TOOLS,
   ],
@@ -144,4 +146,12 @@ export function mergeTools(base: RunnableTool[], extra: RunnableTool[] | undefin
     seen.add(t.name);
   }
   return [...base, ...extra];
+}
+
+/** Hide a private tool from the model when its run-bound capability is absent.
+ * Filter after collision checking so an extra tool cannot shadow it. */
+export function filterUnavailableTools(tools: RunnableTool[], unavailableNames: readonly string[]): RunnableTool[] {
+  if (unavailableNames.length === 0) return tools;
+  const unavailable = new Set(unavailableNames);
+  return tools.filter((tool) => !unavailable.has(tool.name));
 }

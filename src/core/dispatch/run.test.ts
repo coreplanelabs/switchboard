@@ -23,6 +23,7 @@ import type { IncomingMessage } from "../types.js";
 import { chatActorOf } from "../authz/actor.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { PlaneService } from "../planeService.js";
+import { InMemoryPrivateWorkerLog } from "../privateWorkerLog.js";
 import type { ResumeContext } from "./admission.js";
 import { resolveRun } from "./resolve.js";
 import { carriedOperationTarget } from "./reattach.js";
@@ -374,6 +375,52 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
       ledgerRun: undefined,
     });
     expect(ledger.opened[0]!.meta.directAudience).toEqual(audience);
+  });
+
+  it("does not seed a shared-channel orchestrator run with the private progress tool", async () => {
+    const { deps, ledger, base } = setup();
+    await claimRun(deps, {
+      ...base,
+      agent: getAgent("orchestrator"),
+      reserved: new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} }),
+      resume: undefined,
+      ledgerRun: undefined,
+    });
+    expect(ledger.opened[0]!.tools.map((tool) => tool.name)).toContain("plane_show");
+    expect(ledger.opened[0]!.tools.map((tool) => tool.name)).not.toContain("work_progress");
+  });
+
+  it("does not seed a Slack D run with private progress without fresh unshared audience proof", async () => {
+    const { deps, ledger, base } = setup();
+    deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    deps.privateWorkerLog = new InMemoryPrivateWorkerLog();
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: base.msg.userId,
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const dm = {
+      ...base.msg,
+      channelId: directAudience.channelId,
+      threadKey: directAudience.threadKey,
+      directAudience,
+    };
+    await claimRun(deps, {
+      ...base,
+      msg: dm,
+      io: {
+        reply: async () => {},
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => [],
+      },
+      agent: getAgent("orchestrator"),
+      reserved: new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} }),
+      resume: undefined,
+      ledgerRun: undefined,
+    });
+    expect(ledger.opened[0]!.tools.map((tool) => tool.name)).not.toContain("work_progress");
+    expect(ledger.opened[0]!.meta.directAudience).toEqual(directAudience);
   });
 
   it("a reserved fresh run promotes its reservation: the row carries the identity, the prompt and tools verbatim, the seed, the card, and the hooks; every event from here on is mirrored", async () => {

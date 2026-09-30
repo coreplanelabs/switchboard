@@ -66,6 +66,33 @@ describe("private worker log on the state Worker", () => {
     expect((await append({ ...longInput, textSha256: "b".repeat(64) })).status).toBe(409);
     expect((await post("/runs/private-worker/list", { storeKey: key, threadKey: "slack:C1:1.0" })).status).toBe(400);
   });
+
+  it("pages private events after a durable cursor with a fixed bound", async () => {
+    const key = storeKey();
+    const threadKey = "worker:ship_private_2:task";
+    for (let index = 0; index < 5; index++) {
+      expect(
+        await post("/runs/private-worker/append", {
+          storeKey: key,
+          threadKey,
+          event: { kind: "reply", text: `reply ${index}`, at: index },
+        }),
+      ).toMatchObject({ status: 200 });
+    }
+    const read = (afterSeq: number, limit: number) =>
+      post("/runs/private-worker/list-after", { storeKey: key, threadKey, afterSeq, limit });
+    expect(await read(0, 2)).toMatchObject({
+      status: 200,
+      data: { events: [{ seq: 1 }, { seq: 2 }], more: true },
+    });
+    expect(await read(2, 2)).toMatchObject({
+      status: 200,
+      data: { events: [{ seq: 3 }, { seq: 4 }], more: true },
+    });
+    expect(await read(4, 2)).toMatchObject({ status: 200, data: { events: [{ seq: 5 }], more: false } });
+    expect((await read(-1, 2)).status).toBe(400);
+    expect((await read(0, 33)).status).toBe(400);
+  });
 });
 
 async function post(path: string, body: unknown, headers: Record<string, string> = AUTH) {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { GITHUB_READ_TOOLS } from "./github.js";
 import type { RunnableTool } from "./runnableTool.js";
-import { mergeTools, TOOLSETS, toolsForRun } from "./toolsets.js";
+import { filterUnavailableTools, mergeTools, toolsForRun, TOOLSETS } from "./toolsets.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 7 and docs/reference/specs/mcp-tools.md
 // item 12 — the toolset table is what the bot relays to a preset's pi, and a
@@ -29,6 +29,14 @@ describe("mergeTools — the static toolset plus a run's extra tools", () => {
   });
 });
 
+describe("filterUnavailableTools — run-bound private tools", () => {
+  it("omits an unavailable tool from the model-visible list without changing other tools", () => {
+    const tools = [named("plane_show"), named("work_progress"), named("recall")];
+    expect(filterUnavailableTools(tools, ["work_progress"]).map((tool) => tool.name)).toEqual(["plane_show", "recall"]);
+    expect(filterUnavailableTools(tools, [])).toBe(tools);
+  });
+});
+
 describe("the toolset table", () => {
   // The main agent gets bounded reads and requester-bound linked-work tools;
   // it has no shell, public status, generic spawn or merge tool.
@@ -40,6 +48,7 @@ describe("the toolset table", () => {
       "work_steer",
       "work_stop",
       "work_start",
+      "work_progress",
       ...GITHUB_READ_TOOLS.map((t) => t.name),
       "recall",
       "notes",
@@ -51,6 +60,7 @@ describe("the toolset table", () => {
     expect(toolsForRun("orchestrator", false, false).map((tool) => tool.name)).toEqual([
       "plane_show",
       "slack_context",
+      "work_progress",
       ...GITHUB_READ_TOOLS.map((t) => t.name),
       "recall",
       "notes",

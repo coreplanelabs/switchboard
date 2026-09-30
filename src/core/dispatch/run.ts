@@ -18,7 +18,7 @@ import {
 import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { MainStartInput, MainStartResult } from "../coordinator/mainStart.js";
 import type { RunProfile } from "../../config/profile.js";
-import { mergeTools, toolsForRun } from "../../tools/toolsets.js";
+import { filterUnavailableTools, mergeTools, toolsForRun } from "../../tools/toolsets.js";
 import type { SlackContextBinding } from "./slackContextBinding.js";
 import type { VerifiedSlackContextCapability } from "../../tools/slackContext.js";
 import { mainWorkAudienceAllowed, type DirectAudience } from "../../tools/mainWork.js";
@@ -46,12 +46,16 @@ import { REPLAY_EVERYTHING, type RunHandle, type RunRegistry } from "../runRegis
 import type { RunSeed } from "../runRecord.js";
 import type { RunStore } from "../runStore.js";
 import type { PlaneService } from "../planeService.js";
+import type { PrivateWorkerLog } from "../privateWorkerLog.js";
 import type { RunsService } from "../runsService.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
 import type { Actor, ChannelVisibility } from "../authz/types.js";
+import { mainWorkerCapabilityFor, privateProgressSourceTrusted } from "./mainWorkerCapability.js";
 import type { Clock, Span } from "../trace/types.js";
-import type { IncomingMessage, StatusHandle } from "../types.js";
+import type { ChannelIO, IncomingMessage, StatusHandle } from "../types.js";
+import type { LiveThread } from "../threadAdmission.js";
+import type { DispatchFollowUp } from "./admission.js";
 import type { AdmissionDeps, ResumeContext } from "./admission.js";
 import type { AuthorizeDeps } from "./authorize.js";
 import type { ProvisionDeps } from "./provision.js";
@@ -148,6 +152,8 @@ export interface RunDeps
   /** Production's private Ship starter. The run loop binds its resolved actor,
    * current message and run id before exposing it to the main agent. */
   mainTaskStart?: (input: MainStartInput) => Promise<MainStartResult>;
+  /** Durable private worker log behind the main agent's requester-bound progress read. */
+  privateWorkerLog?: PrivateWorkerLog;
   /**
    * The Workflow sender over the shim's event relay (`shimWorkflowSender`) —
    * the sender the check-run intake already uses — through which the
@@ -261,6 +267,10 @@ export interface ClaimContext {
   msg: IncomingMessage;
   /** A live channel verifier must exist before its private tool enters a durable seed. */
   privateWorkVerifierAvailable?: boolean;
+  /** The bound channel handle verifies a private audience before seeding a private tool. */
+  io?: ChannelIO;
+  /** Accepted follow-up sources survive an inbox drain. */
+  admitted?: LiveThread<DispatchFollowUp>;
   agent: AgentDef;
   /** The run's effective profile: the budget the seed carries and the
    *  read-only flag on the row are read from here, never from the preset. */
@@ -389,6 +399,13 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         ? await ctx.verifyDirectAudience(directAudience).catch(() => false)
         : false;
     const verifiedWorkAudience = workAudienceCandidate && verifiedDirectAudience;
+    const mainWorker = await mainWorkerCapabilityFor(
+      deps,
+      agent.name,
+      msg,
+      ctx.io,
+      ctx.admitted ? privateProgressSourceTrusted(msg.userId, ctx.admitted.inbox) : undefined,
+    );
     const ledger = deps.runLedger;
     const opened = await root.span("dispatch.ledger_claim", () =>
       ledger.open({
@@ -402,6 +419,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           channelId: msg.channelId,
           userId: msg.userId,
           threadKey: msg.threadKey,
+          ...(directAudience ? { directAudience } : {}),
           channelVisibility,
           ...(repoCtx.repo !== undefined && !privateMain ? { repo: repoCtx.repo } : {}),
           ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
@@ -409,7 +427,6 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
           ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
           ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
-          ...(directAudience !== undefined ? { directAudience } : {}),
           ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
           ...(repoCtx.ref !== undefined && !privateMain ? { ref: repoCtx.ref } : {}),
           ...(repoCtx.headSha !== undefined && !privateMain ? { headSha: repoCtx.headSha } : {}),
@@ -431,20 +448,23 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         // its hooks (a stop, a fence) were wired at the reservation and stay.
         reservation: reserved,
         system,
-        tools: mergeTools(
-          toolsForRun(
-            agent.toolset,
-            verifiedWorkAudience,
-            verifiedDirectAudience &&
-              canOfferMainStart(
-                agent.name,
-                channelVisibility,
-                msg,
-                chatActorOf(deps.config, msg),
-                deps.mainTaskStart !== undefined && ctx.privateWorkVerifierAvailable === true,
-              ),
-          ).filter((tool) => ctx.slackContext !== undefined || tool.name !== "slack_context"),
-          mcpForRun?.tools,
+        tools: filterUnavailableTools(
+          mergeTools(
+            toolsForRun(
+              agent.toolset,
+              verifiedWorkAudience,
+              verifiedDirectAudience &&
+                canOfferMainStart(
+                  agent.name,
+                  channelVisibility,
+                  msg,
+                  chatActorOf(deps.config, msg),
+                  deps.mainTaskStart !== undefined && ctx.privateWorkVerifierAvailable === true,
+                ),
+            ).filter((tool) => ctx.slackContext !== undefined || tool.name !== "slack_context"),
+            mcpForRun?.tools,
+          ),
+          mainWorker ? [] : ["work_progress"],
         ).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
         // The seed carries the EFFECTIVE budget, so a resume runs on what
         // this run was admitted with, not on the preset's own number — and,

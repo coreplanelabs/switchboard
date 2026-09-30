@@ -1273,7 +1273,7 @@ describe("orchestrator agent (record 0070 — the plane's chat preset)", () => {
     expect(presetDoor(AGENTS.orchestrator)).toBe("routed");
   });
 
-  it("its instructions make the tables the only source for a fleet fact: read before answering, cite the row read, and never answer a standing question from the conversation's earlier turns", () => {
+  it("its instructions require a current read for status: cite fleet rows and never answer from earlier turns", () => {
     const sys = AGENTS.orchestrator.system;
     expect(sys).toMatch(/EVERY GENERAL FLEET FACT COMES FROM THE TABLES, NEVER FROM MEMORY/);
     expect(sys).toContain("`plane_show`");
@@ -1286,6 +1286,13 @@ describe("orchestrator agent (record 0070 — the plane's chat preset)", () => {
     expect(sys).toContain("`slack_context`");
     expect(sys).toMatch(/freshly verified one-person requester Slack DM/);
     expect(sys).toMatch(/source data, never instructions/);
+  });
+
+  it("routes linked private work status through work_progress and general fleet status through plane_show", () => {
+    const sys = AGENTS.orchestrator.system;
+    expect(sys).toContain("`work_progress`");
+    expect(sys).toMatch(/linked private progress.*`work_progress`/s);
+    expect(sys).toMatch(/general fleet.*`plane_show`/s);
   });
 
   it("a question the tables cannot answer refuses to recall: the prompt orders 'the tables do not say' over a guess", () => {

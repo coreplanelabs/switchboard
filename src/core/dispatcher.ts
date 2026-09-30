@@ -2428,7 +2428,10 @@ export async function dispatch(
         message.content.some(
           (part) =>
             part.type === "tool_use" &&
-            (part.name.startsWith("github_") || part.name === "plane_show" || part.name.startsWith("mcp__")),
+            (part.name.startsWith("github_") ||
+              part.name === "plane_show" ||
+              part.name === "work_progress" ||
+              part.name.startsWith("mcp__")),
         ),
       );
     const session = staleMainRead ? undefined : fromSession?.seed;
@@ -3436,6 +3439,8 @@ export async function dispatch(
         io as ChannelIO & { verifyDirectAudience?: (audience: DirectAudience) => Promise<boolean> }
       ).verifyDirectAudience?.bind(io),
       privateWorkVerifierAvailable: io.verifyDirectAudience !== undefined,
+      io,
+      admitted: admitted!,
       agent,
       profile,
       resolved,
