@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.269.0](https://github.com/coreplanelabs/switchboard/compare/v1.268.0...v1.269.0) (2026-09-30)
+
+
+### Features
+
+* **agents:** answer sourced questions in one main conversation ([#2478](https://github.com/coreplanelabs/switchboard/issues/2478)) ([56d24e7](https://github.com/coreplanelabs/switchboard/commit/56d24e7e03c6170c38d8c80544fb739b92453e9a))
+* **coding:** bind pilot writers to ready repository head ([#2486](https://github.com/coreplanelabs/switchboard/issues/2486)) ([d0c44a0](https://github.com/coreplanelabs/switchboard/commit/d0c44a079d3ad611dede014323ff6152dcb61df9))
+* **coding:** require ready environments for pilot writers ([#2475](https://github.com/coreplanelabs/switchboard/issues/2475)) ([497d744](https://github.com/coreplanelabs/switchboard/commit/497d744eda480400f83ba436ae283f2a2dfb451b))
+* **deploy:** sync MCP access from the CI vault in one run ([#2492](https://github.com/coreplanelabs/switchboard/issues/2492)) ([6c67bb2](https://github.com/coreplanelabs/switchboard/commit/6c67bb2708ecd23c74f8b0706a42fb9f1891c27a))
+* **dispatcher:** preserve typed coding targets across recovery ([#2476](https://github.com/coreplanelabs/switchboard/issues/2476)) ([d198425](https://github.com/coreplanelabs/switchboard/commit/d198425ee5a4f608ff87af4c73d2fb37829a7477))
+* **main:** check, steer, and stop linked work in conversation ([#2482](https://github.com/coreplanelabs/switchboard/issues/2482)) ([9b65b73](https://github.com/coreplanelabs/switchboard/commit/9b65b737dcfd5de47f158852f5aedd370205cbfc))
+* **main:** control linked work from the main agent ([#2479](https://github.com/coreplanelabs/switchboard/issues/2479)) ([6df7de8](https://github.com/coreplanelabs/switchboard/commit/6df7de888efbc3d682958c47a348c7760cfab7d5))
+* **main:** read private worker progress for its requester ([#2483](https://github.com/coreplanelabs/switchboard/issues/2483)) ([b2e5c63](https://github.com/coreplanelabs/switchboard/commit/b2e5c631e180de26a766d4d066ed793cfe138df2))
+* **main:** start a private worker from a fix request ([#2484](https://github.com/coreplanelabs/switchboard/issues/2484)) ([49a828a](https://github.com/coreplanelabs/switchboard/commit/49a828ac8d13815821e81537548120d55521feb8))
+* **main:** start private work from conversation ([#2485](https://github.com/coreplanelabs/switchboard/issues/2485)) ([6e7d048](https://github.com/coreplanelabs/switchboard/commit/6e7d048bec31a6c139c75b472508a40bb1b71ead))
+* **mcp:** run Ship pipelines through machine ingress ([#2501](https://github.com/coreplanelabs/switchboard/issues/2501)) ([6d454ee](https://github.com/coreplanelabs/switchboard/commit/6d454ee34e34b9041d8d37f6fc8bd7385a33d25c))
+* **ship:** keep main agent worker reports private ([#2480](https://github.com/coreplanelabs/switchboard/issues/2480)) ([391da18](https://github.com/coreplanelabs/switchboard/commit/391da1870c8800d30f6dc11edc39b79dd54d93f0))
+* **ship:** preserve main-agent briefs on durable units ([#2477](https://github.com/coreplanelabs/switchboard/issues/2477)) ([f499f1e](https://github.com/coreplanelabs/switchboard/commit/f499f1ea65c3f68e79dd525c12636618fae16723))
+* **slack:** read bounded conversation context for the main agent ([#2481](https://github.com/coreplanelabs/switchboard/issues/2481)) ([8ca270b](https://github.com/coreplanelabs/switchboard/commit/8ca270b4acfe6592d2f5446233cbc69377b3b2ad))
+
+
+### Bug fixes
+
+* **agents:** route resident coding through Git door ([#2488](https://github.com/coreplanelabs/switchboard/issues/2488)) ([10fbec3](https://github.com/coreplanelabs/switchboard/commit/10fbec3c68537cc72a0309eb08a36b9afc70b367))
+* **coding:** bind seeded checkout through run completion ([#2498](https://github.com/coreplanelabs/switchboard/issues/2498)) ([bca974a](https://github.com/coreplanelabs/switchboard/commit/bca974a0ce64acb07518aa132d03ba586ce0492f))
+* **dispatcher:** allow fresh reviews after Ship ends ([#2473](https://github.com/coreplanelabs/switchboard/issues/2473)) ([1a72fec](https://github.com/coreplanelabs/switchboard/commit/1a72fec892d96961b2e38ac1449c925aa41ea244))
+* **dispatcher:** allow review after repeated Ship attempts ([#2491](https://github.com/coreplanelabs/switchboard/issues/2491)) ([bab4bf6](https://github.com/coreplanelabs/switchboard/commit/bab4bf646b012a7da6f3ad424ffe3bf68bdc8c46))
+* **dispatcher:** expose PR binding and count real pushes ([#2487](https://github.com/coreplanelabs/switchboard/issues/2487)) ([c67f658](https://github.com/coreplanelabs/switchboard/commit/c67f658adebcd3cc3e4440afdd5d3043b2685c29))
+* **dispatcher:** route personal config questions to config show ([#2489](https://github.com/coreplanelabs/switchboard/issues/2489)) ([fe2109b](https://github.com/coreplanelabs/switchboard/commit/fe2109bf853faf22d3c058888b098b763076fa52))
+* **harness:** align integrations with updated dependencies ([#2446](https://github.com/coreplanelabs/switchboard/issues/2446)) ([df55c71](https://github.com/coreplanelabs/switchboard/commit/df55c71f8459354854784648fd58ba55b572b72c))
+* **harness:** recover cold-sandbox transport loss safely ([#2502](https://github.com/coreplanelabs/switchboard/issues/2502)) ([aad95f0](https://github.com/coreplanelabs/switchboard/commit/aad95f01ea1072d27af9e44edd08be8799318ba1))
+* **ship:** checkpoint cold clones and honor repository gates ([#2490](https://github.com/coreplanelabs/switchboard/issues/2490)) ([6248ad0](https://github.com/coreplanelabs/switchboard/commit/6248ad0689352d67160593ce961b75907b9ab906))
+* **ship:** keep retries on the original unit branch ([#2500](https://github.com/coreplanelabs/switchboard/issues/2500)) ([de32003](https://github.com/coreplanelabs/switchboard/commit/de32003dc20949182cad1f2219ef34cbdbf9b838))
+* **ship:** preserve findings across verified PR head moves ([#2497](https://github.com/coreplanelabs/switchboard/issues/2497)) ([392a68a](https://github.com/coreplanelabs/switchboard/commit/392a68aeec8659b21041ac8bb3e0fbff294d5b45))
+* **ship:** preserve the published head through resume ([#2493](https://github.com/coreplanelabs/switchboard/issues/2493)) ([d9ee39d](https://github.com/coreplanelabs/switchboard/commit/d9ee39d80c8092c80ceade4636421fe2f23c8ebf))
+* **ship:** recover review after a concurrent findings push ([#2495](https://github.com/coreplanelabs/switchboard/issues/2495)) ([110b81a](https://github.com/coreplanelabs/switchboard/commit/110b81ac9fb12d3e38e9ae5504f98a84d3bba973))
+* **slack:** preserve Ship continuation with inline attribution ([#2499](https://github.com/coreplanelabs/switchboard/issues/2499)) ([2ca6fcb](https://github.com/coreplanelabs/switchboard/commit/2ca6fcb43f16b19840db78825fac1512565d2b4a))
+
+
+### Documentation
+
+* **mcp:** remove installation-specific access guide ([#2496](https://github.com/coreplanelabs/switchboard/issues/2496)) ([5add3ff](https://github.com/coreplanelabs/switchboard/commit/5add3ffbecc2cae871c239d02c35bfd85e17b352))
+* **mcp:** show persistent client token setup ([#2494](https://github.com/coreplanelabs/switchboard/issues/2494)) ([b57c3eb](https://github.com/coreplanelabs/switchboard/commit/b57c3ebf9bd666c01d38713bda568a5e70130325))
+
 ## [1.268.0](https://github.com/coreplanelabs/switchboard/compare/v1.267.3...v1.268.0) (2026-09-29)
 
 
