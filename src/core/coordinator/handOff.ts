@@ -320,10 +320,19 @@ async function plan(
       : input.intent === "work" || input.intent === "work_from_thread"
         ? input.requestText.trim()
         : shipTaskText(input.requestText, entry.repo);
-  // A main-agent act is always one generated, person-merged task. Its plain
-  // prose may happen to begin with the spelling of a seeded plan request.
+  // A main-agent act and a typed work/review bind stay generated even when
+  // their words spell a seeded request. Only a validated typed plan entry, or
+  // legacy untyped ingress, may select the runner-merged seeded path.
+  if (input.intent === "plan" && entry.plan !== true)
+    return {
+      ok: false,
+      code: "setup_failed",
+      reply: "🚫 The Ship plan entry could not be verified; no worker started.",
+    };
   const request =
-    input.mainTask === undefined && input.intent !== "review" ? parseShipPlanRequest(taskText) : undefined;
+    input.mainTask === undefined && (input.intent === undefined || (input.intent === "plan" && entry.plan === true))
+      ? parseShipPlanRequest(taskText)
+      : undefined;
   if (request === undefined) {
     // A generated plan of one unit (agent-ship item 16): the request text AS
     // WRITTEN is the unit — its urls included, which the probe strips — the id
@@ -334,7 +343,9 @@ async function plan(
     // A PR-only resume has no coding round; retain its historical plan key.
     // This text never becomes a child task.
     const text = taskText
-      ? shipUnitText(input.requestText, entry.repo)
+      ? input.intent === "work" || input.intent === "work_from_thread"
+        ? input.requestText.trim()
+        : shipUnitText(input.requestText, entry.repo)
       : entry.resume !== undefined
         ? "Implement the task this thread's ship request describes."
         : "";
