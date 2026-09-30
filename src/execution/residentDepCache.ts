@@ -246,9 +246,11 @@ export function depCacheScript(
    *  immutable source every view hardlinks from; the checkout stays the
    *  source for the build dirs (they are build output at the checkout's sha).
    *  Omitted → the checkout's own node_modules, the pre-store behavior. */
-  opts: { nodeModulesSrc?: string } = {},
+  opts: { nodeModulesSrc?: string; chownGroup?: string } = {},
 ): string {
-  const owner = shellQuote(`${user}:${user}`);
+  // Resident users have a same-named group. A caller exercising the real
+  // script elsewhere can name that host user's actual primary group.
+  const owner = shellQuote(`${user}:${opts.chownGroup ?? user}`);
   const blocks = DEP_CACHE_DIRS.map((dir) => {
     const src = shellQuote(
       dir === "node_modules" && opts.nodeModulesSrc ? opts.nodeModulesSrc : `${checkoutDir}/${dir}`,

@@ -142,6 +142,9 @@ export function prepareFreshTurn(
     msg: {
       ...first.msg,
       ...merged,
+      // A merged fresh turn has several source messages but only the first
+      // sender's identity. Do not offer private work against that mixed text.
+      ...(pending.length > 1 ? { directAudience: undefined } : {}),
       text: `agent:${agent} ${merged.text}`,
       receivedAt: freshAt,
       originAt: undefined,

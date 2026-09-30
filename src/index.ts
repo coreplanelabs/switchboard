@@ -145,7 +145,8 @@ import {
   recoverOriginalUnit,
   type AdminCoordinatorDeps,
 } from "./channels/adminCoordinator.js";
-import { resolveGrant } from "./core/shipPipeline.js";
+import { resolveGrant, resolveShipCaps } from "./core/shipPipeline.js";
+import { createMainTaskStarter } from "./core/coordinator/mainStart.js";
 import { createGithubWebhookHandler, GITHUB_WEBHOOK_PATH } from "./channels/githubWebhook.js";
 import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
 import { sendPullMerged } from "./core/coordinator/contract.js";
@@ -173,6 +174,7 @@ import {
   fetchDecisionRecordClaims,
   fetchPullRequestComments,
   fetchPullRequestFacts,
+  fetchRepoShipInfo,
   fetchPullRequestTitleBody,
   fixupCommitSubjects,
   fetchPullRequestReviews,
@@ -646,6 +648,27 @@ export async function runBot(): Promise<void> {
     // allowed identities before the bot opens or edits a pull request.
     identityRewrite: dispatchIdentityRewrite(config),
   };
+  // The main agent can hand one ordinary fix request to the existing Ship
+  // runner. Only dispatch supplies requester, message and run identity; a
+  // private worker log must be configured before this capability is exposed.
+  if (privateWorkerLog !== undefined)
+    deps.mainTaskStart = createMainTaskStarter({
+      instances: coordinatorInstances,
+      privateWorkerLog,
+      readFile: async () => {
+        throw new Error("A main-agent task cannot read a seeded plan");
+      },
+      reserveDecisionRecord: decisionRecordAllocator.reserve.bind(decisionRecordAllocator),
+      create: (id) => createInstanceViaShim(processShimOptions(), id),
+      status: (id) => fetchInstanceStatusViaShim(processShimOptions(), id),
+      repoInfo: fetchRepoShipInfo,
+      canUseRepo: (actor, repo) => config.canUseRepo(actor, repo),
+      canRunAgent: (actor, name) => config.canRunAgent(actor, name),
+      adminsHint: () => config.adminsHint(),
+      privateWorkerAvailable: true,
+      caps: resolveShipCaps(config.config.ship),
+      clock: systemClock,
+    });
   // --- command registry (docs/decisions/0008-one-command-definition-every-surface.md):
   // the ONE core catalogue (`buildCoreCommands`,
   // shared with src/cli.ts), bound ONCE; every adapter

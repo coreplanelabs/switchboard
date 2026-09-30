@@ -138,6 +138,15 @@ import {
   type UnitWakeAnswer,
 } from "../../src/core/coordinator/contract.ts";
 import {
+  compareSlackMessageId,
+  isMainTaskAuthority,
+  isRequesterTurnInput,
+  sameMainTaskAuthority,
+  type MainTaskAuthority,
+  type RequesterTurn,
+  type RequesterTurnInput,
+} from "../../src/core/coordinator/requesterAuthority.ts";
+import {
   GEN_PATTERN,
   isIntakeReceipt,
   type ClaimRequest,
@@ -1760,6 +1769,25 @@ export class RunHistoryDO extends DurableObject<Env> {
         unit TEXT NOT NULL,
         PRIMARY KEY (main_thread_key, act_id)
       );
+      CREATE TABLE IF NOT EXISTS coordinator_requester_turns (
+        thread_key TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        question_target TEXT,
+        prior_question_target TEXT,
+        PRIMARY KEY (thread_key, requester_id, message_id),
+        UNIQUE (thread_key, requester_id, revision)
+      );
+      CREATE TABLE IF NOT EXISTS coordinator_main_task_authority (
+        main_thread_key TEXT NOT NULL,
+        act_id TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        source_message_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        repo TEXT NOT NULL,
+        PRIMARY KEY (main_thread_key, act_id)
+      );
       CREATE TABLE IF NOT EXISTS coordinator_private_worker_events (
         thread_key TEXT NOT NULL,
         seq INTEGER NOT NULL,
@@ -2613,19 +2641,120 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   // ---- the coordinator's parent records (run-history item 49) -----------------
 
+  async recordRequesterTurn(
+    input: RequesterTurnInput,
+  ): Promise<{ ok: true; turn: RequesterTurn } | { ok: false; reason: "conflict" }> {
+    return this.ctx.storage.transactionSync(() => {
+      const rows = this.sql
+        .exec<{
+          message_id: string;
+          revision: number;
+          question_target: string | null;
+          prior_question_target: string | null;
+        }>(
+          `SELECT message_id, revision, question_target, prior_question_target
+           FROM coordinator_requester_turns WHERE thread_key = ? AND requester_id = ?
+           ORDER BY revision DESC LIMIT 1`,
+          input.threadKey,
+          input.requesterId,
+        )
+        .toArray();
+      const previous = rows[0];
+      if (previous?.message_id === input.messageId) {
+        if ((previous.question_target ?? undefined) !== input.questionTarget) return { ok: false, reason: "conflict" };
+        return {
+          ok: true,
+          turn: {
+            ...input,
+            revision: previous.revision,
+            ...(previous.prior_question_target ? { priorQuestionTarget: previous.prior_question_target } : {}),
+          },
+        };
+      }
+      if (previous && compareSlackMessageId(input.messageId, previous.message_id) <= 0)
+        return { ok: false, reason: "conflict" };
+      const revision = (previous?.revision ?? 0) + 1;
+      const priorQuestionTarget = previous?.question_target ?? undefined;
+      this.sql.exec(
+        `INSERT INTO coordinator_requester_turns
+         (thread_key, requester_id, message_id, revision, question_target, prior_question_target)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        input.threadKey,
+        input.requesterId,
+        input.messageId,
+        revision,
+        input.questionTarget ?? null,
+        priorQuestionTarget ?? null,
+      );
+      return {
+        ok: true,
+        turn: { ...input, revision, ...(priorQuestionTarget ? { priorQuestionTarget } : {}) },
+      };
+    });
+  }
+
+  async latestRequesterTurn(key: { threadKey: string; requesterId: string }): Promise<RequesterTurn | null> {
+    const row = this.sql
+      .exec<{
+        message_id: string;
+        revision: number;
+        question_target: string | null;
+        prior_question_target: string | null;
+      }>(
+        `SELECT message_id, revision, question_target, prior_question_target
+         FROM coordinator_requester_turns WHERE thread_key = ? AND requester_id = ?
+         ORDER BY revision DESC LIMIT 1`,
+        key.threadKey,
+        key.requesterId,
+      )
+      .toArray()[0];
+    return row
+      ? {
+          ...key,
+          messageId: row.message_id,
+          revision: row.revision,
+          ...(row.question_target ? { questionTarget: row.question_target } : {}),
+          ...(row.prior_question_target ? { priorQuestionTarget: row.prior_question_target } : {}),
+        }
+      : null;
+  }
+
   async getMainTask(key: {
     mainThreadKey: string;
     actId: string;
-  }): Promise<{ instanceId: string; unit: string } | null> {
+  }): Promise<{ instanceId: string; unit: string; authority?: MainTaskAuthority } | null> {
     return (
       this.sql
-        .exec<{ instance_id: string; unit: string }>(
-          `SELECT instance_id, unit FROM coordinator_main_task_links WHERE main_thread_key = ? AND act_id = ?`,
+        .exec<{
+          instance_id: string;
+          unit: string;
+          requester_id: string | null;
+          source_message_id: string | null;
+          revision: number | null;
+          repo: string | null;
+        }>(
+          `SELECT l.instance_id, l.unit, a.requester_id, a.source_message_id, a.revision, a.repo
+           FROM coordinator_main_task_links l LEFT JOIN coordinator_main_task_authority a
+           ON a.main_thread_key = l.main_thread_key AND a.act_id = l.act_id
+           WHERE l.main_thread_key = ? AND l.act_id = ?`,
           key.mainThreadKey,
           key.actId,
         )
         .toArray()
-        .map((row) => ({ instanceId: row.instance_id, unit: row.unit }))[0] ?? null
+        .map((row) => ({
+          instanceId: row.instance_id,
+          unit: row.unit,
+          ...(row.requester_id && row.source_message_id && row.revision && row.repo
+            ? {
+                authority: {
+                  requesterId: row.requester_id,
+                  sourceMessageId: row.source_message_id,
+                  revision: row.revision,
+                  repo: row.repo,
+                },
+              }
+            : {}),
+        }))[0] ?? null
     );
   }
 
@@ -2695,28 +2824,74 @@ export class RunHistoryDO extends DurableObject<Env> {
     key: { mainThreadKey: string; actId: string },
     instance: CoordinatorInstance,
     unit: CoordinatorUnit,
+    authority: MainTaskAuthority,
     now: number,
   ): Promise<
-    { ok: true; created: boolean; link: { instanceId: string; unit: string } } | { ok: false; reason: "conflict" }
+    | { ok: true; created: boolean; link: { instanceId: string; unit: string; authority: MainTaskAuthority } }
+    | {
+        ok: false;
+        reason: "conflict";
+      }
   > {
     let out:
-      { ok: true; created: boolean; link: { instanceId: string; unit: string } } | { ok: false; reason: "conflict" } = {
+      | { ok: true; created: boolean; link: { instanceId: string; unit: string; authority: MainTaskAuthority } }
+      | {
+          ok: false;
+          reason: "conflict";
+        } = {
       ok: false,
       reason: "conflict",
     };
     this.ctx.storage.transactionSync(() => {
       const prior = this.sql
-        .exec<{ instance_id: string; unit: string }>(
-          `SELECT instance_id, unit FROM coordinator_main_task_links WHERE main_thread_key = ? AND act_id = ?`,
+        .exec<{
+          instance_id: string;
+          unit: string;
+          requester_id: string | null;
+          source_message_id: string | null;
+          revision: number | null;
+          repo: string | null;
+        }>(
+          `SELECT l.instance_id, l.unit, a.requester_id, a.source_message_id, a.revision, a.repo
+           FROM coordinator_main_task_links l LEFT JOIN coordinator_main_task_authority a
+           ON a.main_thread_key = l.main_thread_key AND a.act_id = l.act_id
+           WHERE l.main_thread_key = ? AND l.act_id = ?`,
           key.mainThreadKey,
           key.actId,
         )
         .toArray()[0];
       if (prior) {
-        out = { ok: true, created: false, link: { instanceId: prior.instance_id, unit: prior.unit } };
+        const saved =
+          prior.requester_id && prior.source_message_id && prior.revision && prior.repo
+            ? {
+                requesterId: prior.requester_id,
+                sourceMessageId: prior.source_message_id,
+                revision: prior.revision,
+                repo: prior.repo,
+              }
+            : undefined;
+        if (sameMainTaskAuthority(saved, authority))
+          out = {
+            ok: true,
+            created: false,
+            link: { instanceId: prior.instance_id, unit: prior.unit, authority },
+          };
         return;
       }
+      const current = this.sql
+        .exec<{ message_id: string; revision: number }>(
+          `SELECT message_id, revision FROM coordinator_requester_turns
+           WHERE thread_key = ? AND requester_id = ? ORDER BY revision DESC LIMIT 1`,
+          key.mainThreadKey,
+          authority.requesterId,
+        )
+        .toArray()[0];
       if (
+        !current ||
+        current.message_id !== authority.sourceMessageId ||
+        current.revision !== authority.revision ||
+        authority.requesterId !== instance.userId ||
+        authority.repo.toLowerCase() !== instance.repo.toLowerCase() ||
         unit.instanceId !== instance.id ||
         this.sql.exec(`SELECT 1 FROM coordinator_instances WHERE instance_id = ?`, instance.id).toArray().length > 0
       )
@@ -2741,7 +2916,17 @@ export class RunHistoryDO extends DurableObject<Env> {
         instance.id,
         unit.unit,
       );
-      out = { ok: true, created: true, link: { instanceId: instance.id, unit: unit.unit } };
+      this.sql.exec(
+        `INSERT INTO coordinator_main_task_authority
+         (main_thread_key, act_id, requester_id, source_message_id, revision, repo) VALUES (?, ?, ?, ?, ?, ?)`,
+        key.mainThreadKey,
+        key.actId,
+        authority.requesterId,
+        authority.sourceMessageId,
+        authority.revision,
+        authority.repo,
+      );
+      out = { ok: true, created: true, link: { instanceId: instance.id, unit: unit.unit, authority } };
     });
     return out;
   }
@@ -5615,6 +5800,8 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/replace",
   "/runs/coordinator/main-task/get",
   "/runs/coordinator/main-task/claim",
+  "/runs/coordinator/requester-turn/record",
+  "/runs/coordinator/requester-turn/latest",
   "/runs/coordinator/get",
   "/runs/coordinator/stop",
   "/runs/coordinator/units/put",
@@ -6316,6 +6503,23 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (!isMainTaskKey(b.key)) return json({ error: "key must name a main thread and act id" }, 400);
     return json({ link: await stub.getMainTask(b.key) });
   }
+  if (pathname === "/runs/coordinator/requester-turn/record") {
+    if (!isRequesterTurnInput(b.input)) return json({ error: "input must name one verified Slack turn" }, 400);
+    const r = await stub.recordRequesterTurn(b.input);
+    return r.ok ? json(r) : json(r, 409);
+  }
+  if (pathname === "/runs/coordinator/requester-turn/latest") {
+    const key = b.key as { threadKey?: unknown; requesterId?: unknown } | undefined;
+    if (
+      !key ||
+      typeof key.threadKey !== "string" ||
+      !/^slack:[CDG][A-Za-z0-9]+:\d+(?:\.\d+)?$/.test(key.threadKey) ||
+      typeof key.requesterId !== "string" ||
+      !/^slack:[UW][A-Za-z0-9]+$/.test(key.requesterId)
+    )
+      return json({ error: "key must name one requester in a Slack DM" }, 400);
+    return json({ turn: await stub.latestRequesterTurn({ threadKey: key.threadKey, requesterId: key.requesterId }) });
+  }
   if (pathname === "/runs/private-worker/append" || pathname === "/runs/private-worker/list") {
     if (typeof b.threadKey !== "string" || parsePrivateWorkerThreadKey(b.threadKey) === undefined)
       return json({ error: "threadKey must name one private worker" }, 400);
@@ -6330,10 +6534,11 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       !isMainTaskKey(b.key) ||
       !isCoordinatorInstance(b.instance) ||
       !isCoordinatorUnit(b.unit) ||
+      !isMainTaskAuthority(b.authority) ||
       !mainTaskClaimMatches(b.key, b.instance, b.unit)
     )
       return json({ error: "claim must bind one generated unit and its attributed brief" }, 400);
-    const r = await stub.claimMainTask(b.key, b.instance, b.unit, now);
+    const r = await stub.claimMainTask(b.key, b.instance, b.unit, b.authority, now);
     return r.ok ? json(r) : json(r, 409);
   }
   if (pathname === "/runs/coordinator/get") {

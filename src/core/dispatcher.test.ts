@@ -441,6 +441,7 @@ describe("dispatch", () => {
   const mainDmYaml =
     YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }") +
     'channels:\n  "slack:DALICE": { agent: orchestrator }\n';
+  const pilotMainDmYaml = mainDmYaml.replace("{ agent: orchestrator }", "{ agent: orchestrator, repo: acme/api }");
   const directMainAudience = {
     kind: "slack-unshared-im" as const,
     channelId: "slack:DALICE",
@@ -474,6 +475,158 @@ describe("dispatch", () => {
     expect(deps.operatorModel).not.toHaveBeenCalled();
     expect(provider.requests[0]?.system).toContain("Switchboard's orchestrator");
     expect(replies).toContain("The answer is 17.");
+  });
+
+  it("does not infer a work target from question wording", async () => {
+    const deps = makeDeps(mainDmYaml, capturingProvider("The answer is 17."));
+    const instances = new InMemoryCoordinatorInstanceStore();
+    deps.coordinatorInstances = instances;
+    await dispatch(
+      deps,
+      { ...mainDm("agent:orchestrator Why did signup fail in acme/api?"), messageId: "1" },
+      mainDmIO().io,
+    );
+    expect(
+      await instances.latestRequesterTurn({
+        threadKey: directMainAudience.threadKey,
+        requesterId: directMainAudience.userId,
+      }),
+    ).toMatchObject({ messageId: "1", revision: 1 });
+    expect(
+      (
+        await instances.latestRequesterTurn({
+          threadKey: directMainAudience.threadKey,
+          requesterId: directMainAudience.userId,
+        })
+      )?.questionTarget,
+    ).toBeUndefined();
+  });
+
+  it("records a live DM fix or cancellation before delivering it to the running main agent", async () => {
+    for (const [initialText, followUpText] of [
+      ["Why did signup fail in acme/api?", "fix it"],
+      ["fix signup in acme/api", "stop that work"],
+    ]) {
+      let firstStarted!: () => void;
+      let releaseFirst!: () => void;
+      const started = new Promise<void>((resolve) => (firstStarted = resolve));
+      const held = new Promise<void>((resolve) => (releaseFirst = resolve));
+      const provider: Provider = {
+        name: "fake",
+        async complete() {
+          firstStarted();
+          await held;
+          return { content: [{ type: "text" as const, text: "Done." }], stopReason: "end_turn" as const };
+        },
+      };
+      const deps = makeDeps(mainDmYaml, provider);
+      deps.admission = new ThreadAdmission();
+      const instances = new InMemoryCoordinatorInstanceStore();
+      deps.coordinatorInstances = instances;
+      const first = dispatch(deps, { ...mainDm(initialText), messageId: "1" }, mainDmIO().io);
+      await started;
+      await dispatch(deps, { ...mainDm(followUpText), messageId: "2" }, mainDmIO().io);
+      expect(
+        await instances.latestRequesterTurn({
+          threadKey: directMainAudience.threadKey,
+          requesterId: directMainAudience.userId,
+        }),
+      ).toMatchObject({ messageId: "2", revision: 2 });
+      releaseFirst();
+      await first;
+    }
+  });
+
+  it("uses the configured pilot repository for a later main-run fix", async () => {
+    let turns = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        turns++;
+        return turns === 1
+          ? {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "start-fix",
+                  name: "work_start",
+                  input: {
+                    repo: "acme/api",
+                    question: "Why did signup fail?",
+                    findings: [],
+                    requestedChange: "Fix signup",
+                    sourceMessage: "fix it",
+                  },
+                },
+              ],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "I started the fix." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(pilotMainDmYaml, provider);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.recordRequesterTurn({
+      threadKey: directMainAudience.threadKey,
+      requesterId: directMainAudience.userId,
+      messageId: "1",
+    });
+    deps.coordinatorInstances = instances;
+    const starts: unknown[] = [];
+    deps.mainTaskStart = async (input) => {
+      starts.push(input);
+      return { kind: "accepted", actId: "work-one", instanceId: "unit-one", reply: "started" };
+    };
+    const { io } = mainDmIO([{ role: "user", user: "slack:UADMIN", text: "Why did signup fail in acme/api?" }]);
+    await dispatch(deps, { ...mainDm("fix it"), messageId: "2" }, io);
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({
+      authorizedRepo: "acme/api",
+      repo: "acme/api",
+      msg: { text: "fix it", messageId: "2" },
+      authority: { revision: 2, sourceMessageId: "2", requesterId: "slack:UADMIN" },
+    });
+  });
+
+  it("does not promote raw Slack history into a cross-run work target", async () => {
+    let turns = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        turns++;
+        return turns === 1
+          ? {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "start-fix",
+                  name: "work_start",
+                  input: {
+                    repo: "acme/api",
+                    question: "Why did signup fail?",
+                    findings: [],
+                    requestedChange: "Fix signup",
+                    sourceMessage: "fix it",
+                  },
+                },
+              ],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "I need a clear target." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    const starts = vi.fn(async () => ({
+      kind: "accepted" as const,
+      actId: "work-one",
+      instanceId: "unit-one",
+      reply: "started",
+    }));
+    deps.mainTaskStart = starts;
+    const { io } = mainDmIO([{ role: "user", user: "slack:UADMIN", text: "Why did signup fail in acme/api?" }]);
+    await dispatch(deps, { ...mainDm("fix it"), messageId: "2" }, io);
+    expect(starts).not.toHaveBeenCalled();
   });
 
   it("offers session recall on a first verified main DM turn", async () => {

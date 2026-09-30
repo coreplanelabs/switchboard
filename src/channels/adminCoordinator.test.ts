@@ -3266,9 +3266,20 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       channelId: "slack:DMAIN",
       userId: INSTANCE.userId,
       threadKey: "slack:DMAIN:1700000000.000001",
+      directAudience: {
+        kind: "slack-unshared-im",
+        channelId: "slack:DMAIN",
+        userId: INSTANCE.userId,
+        threadKey: "slack:DMAIN:1700000000.000001",
+      },
       messageId: "1700000000.000002",
       text: "fix it",
     };
+    await h.instances.recordRequesterTurn({
+      threadKey: msg.threadKey,
+      requesterId: msg.userId,
+      messageId: msg.messageId!,
+    });
     const start = createMainTaskStarter({
       instances: h.instances,
       privateWorkerLog: new InMemoryPrivateWorkerLog(),
@@ -3295,6 +3306,13 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       stillLive: () => true,
       stillPrivate: async () => true,
       repo: INSTANCE.repo,
+      authorizedRepo: INSTANCE.repo,
+      authority: {
+        requesterId: msg.userId,
+        sourceMessageId: msg.messageId!,
+        revision: 1,
+        repo: INSTANCE.repo,
+      },
       brief: {
         question: "Why did signup fail?",
         findings: [

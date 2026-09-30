@@ -18,6 +18,7 @@ import { chatActorOf } from "../authz/actor.js";
 import { PLANE_ACTOR_ID } from "../authz/grants.js";
 import { predicateFor } from "../authz/predicate.js";
 import { isSavedFindingsPatch, unitOfIdempotencyKey, type CoordinatorTag } from "../coordinator/contract.js";
+import { compareSlackMessageId, isRequesterTurnInput } from "../coordinator/requesterAuthority.js";
 import { DECISION_RECORD_ENV } from "../decisionRecordReservation.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
@@ -34,6 +35,7 @@ import {
   samePrivateRequesterFollowUp,
   type PrivateAudienceLatch,
 } from "./privateAudience.js";
+import { mainStartForRun } from "../../tools/mainStart.js";
 import {
   HarnessContainerReplacedError,
   HarnessGateBypassedError,
@@ -139,6 +141,7 @@ import { registerFinishRecord } from "./record.js";
 import { artifactLink, cardActivity, compactActivity, replyAck, threadPageLink } from "./reply.js";
 import { shows } from "../verbosity.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
+import { MainSourceTracker } from "./mainSource.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 import { buildDepotCi } from "../../execution/depotCi.js";
 import { privateMainEvent } from "../privateMainEvent.js";
@@ -240,6 +243,8 @@ export interface RunLoopContext {
   readyRequirementOverride?: ReadyEnvironmentRequirement;
   resume: ResumeContext | undefined;
   repoCtx: RepoContext;
+  /** A configured repository, independent of citations in this request. */
+  configuredRepo?: string;
   githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };
   isPrReview: boolean;
   isCodingPrRun: boolean;
@@ -1292,6 +1297,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     agent.name === "orchestrator" && directAudience && verifyDirectAudience
       ? await verifyDirectAudience(directAudience).catch(() => false)
       : false;
+  // A private work source comes only from a delivered requester message, never
+  // the operator's combined prompt. Follow-ups bind after confirmed delivery.
+  const mainSources = new MainSourceTracker(msg, (source) => chatActorOf(deps.config, source));
   const stageFollowUps = async (inputs: readonly FollowUpInput[]): Promise<string> => {
     const ready = async (line: string) => {
       if (privateAudienceLatch.revoked) await withdrawMainWork();
@@ -1312,6 +1320,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             input.directAudience.channelId !== msg.channelId ||
             input.directAudience.userId !== msg.userId ||
             input.directAudience.threadKey !== msg.threadKey ||
+            input.messageId === undefined ||
             input.from !== undefined,
         )
       )
@@ -1319,6 +1328,24 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       if (mainWorkTrusted && directAudience && verifyDirectAudience) {
         const stillDirect = await verifyDirectAudience(directAudience).catch(() => false);
         if (!stillDirect) await withdrawMainWork();
+      }
+      // A steer can be replayed from the durable inbox without this process's
+      // dispatch ingress. Persist the newest person turn before the harness
+      // delivers it. Earlier turns in the batch may already be superseded by
+      // ingress, so re-recording each one would falsely revoke the latest.
+      if (mainWorkTrusted && deps.coordinatorInstances) {
+        const newest = requesterInputs.at(-1)!;
+        const turn = { threadKey: msg.threadKey, requesterId: newest.userId, messageId: newest.messageId! };
+        try {
+          if (!isRequesterTurnInput(turn)) throw new Error("invalid requester turn");
+          const recorded = await deps.coordinatorInstances.recordRequesterTurn(turn);
+          if (!recorded.ok) {
+            const latest = await deps.coordinatorInstances.latestRequesterTurn(turn);
+            if (!latest || compareSlackMessageId(latest.messageId, turn.messageId) < 0) await withdrawMainWork();
+          }
+        } catch {
+          await withdrawMainWork();
+        }
       }
     }
     if (!deps.artifacts) return ready("");
@@ -1389,6 +1416,42 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (/^[^/\s]+\/[^/\s]+$/.test(repo)) githubReadRepos.add(repo.toLowerCase());
     else githubReadUnknown = true;
   };
+  const mainStart = mainStartForRun({
+    agentName: agent.name,
+    channelVisibility,
+    initial: { actor: chatActorOf(deps.config, msg), msg },
+    source: async (sourceMessage, repo) => {
+      const selected = mainSources.get(sourceMessage);
+      if (!selected || !deps.coordinatorInstances) return undefined;
+      const turn = await deps.coordinatorInstances
+        .latestRequesterTurn({
+          threadKey: selected.msg.threadKey,
+          requesterId: selected.msg.userId,
+        })
+        .catch(() => null);
+      if (!turn || turn.messageId !== selected.msg.messageId) return undefined;
+      const work = mainSources.getWorkRequest(sourceMessage, repo, ctx.configuredRepo);
+      return work
+        ? {
+            ...work,
+            authority: {
+              requesterId: selected.msg.userId,
+              sourceMessageId: turn.messageId,
+              revision: turn.revision,
+              repo: work.authorizedRepo,
+            },
+          }
+        : undefined;
+    },
+    live: () =>
+      mainWorkTrusted &&
+      !privateAudienceLatch.revoked &&
+      run.control.requested === undefined &&
+      registry.getById(run.id)?.finished === false,
+    runId: run.id,
+    ...(io.verifyDirectAudience ? { verifyDirectAudience: io.verifyDirectAudience.bind(io) } : {}),
+    ...(deps.mainTaskStart ? { start: deps.mainTaskStart } : {}),
+  });
   const toolContext = {
     executor,
     reportProgress,
@@ -1417,6 +1480,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(runs ? { runs } : {}),
     ...(plane ? { plane } : {}),
     ...(mainWork ? { mainWork } : {}),
+    ...(mainStart ? { mainStart } : {}),
     ...(steer ? { steer } : {}),
     ...(wait ? { wait } : {}),
     ...(session ? { session } : {}),
@@ -1875,9 +1939,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             system: publicationSystem,
             messages,
             tools: mergeTools(
-              toolsForRun(agent.toolset, mainWork !== undefined).filter(
-                (tool) => slackContext !== undefined || tool.name !== "slack_context",
-              ),
+              toolsForRun(
+                agent.toolset,
+                mainWork !== undefined,
+                mainStart !== undefined && verifiedAtOpen && mainWorkTrusted && !privateAudienceLatch.revoked,
+              ).filter((tool) => slackContext !== undefined || tool.name !== "slack_context"),
               mcpForRun?.tools,
             ),
             toolContext,
@@ -1934,6 +2000,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             control: run.control,
             inbox: admitted.inbox,
             stageFollowUps,
+            confirmedFollowUps: (inputs) => mainSources.accept(inputs),
             onEvent,
             onProgress,
             // The provider park's capability (model-proxy item 12a; record

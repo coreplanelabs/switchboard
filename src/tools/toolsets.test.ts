@@ -39,6 +39,7 @@ describe("the toolset table", () => {
       "work_status",
       "work_steer",
       "work_stop",
+      "work_start",
       ...GITHUB_READ_TOOLS.map((t) => t.name),
       "recall",
       "notes",
@@ -47,15 +48,17 @@ describe("the toolset table", () => {
   });
 
   it("a shared conversation's model tool list omits linked-work calls while a private one retains them", () => {
-    expect(toolsForRun("orchestrator", false).map((tool) => tool.name)).toEqual([
+    expect(toolsForRun("orchestrator", false, false).map((tool) => tool.name)).toEqual([
       "plane_show",
       "slack_context",
       ...GITHUB_READ_TOOLS.map((t) => t.name),
       "recall",
       "notes",
     ]);
-    expect(toolsForRun("orchestrator", true).map((tool) => tool.name)).toContain("work_stop");
-    expect(toolsForRun("conductor", false)).toBe(TOOLSETS.conductor);
+    expect(toolsForRun("orchestrator", true, false).map((tool) => tool.name)).toContain("work_stop");
+    expect(toolsForRun("orchestrator", true, false).map((tool) => tool.name)).not.toContain("work_start");
+    expect(toolsForRun("orchestrator", true, true).map((tool) => tool.name)).toContain("work_start");
+    expect(toolsForRun("conductor", false, false)).toBe(TOOLSETS.conductor);
   });
 
   it("every preset's key indexes a toolset, and every tool has one name across the table", () => {

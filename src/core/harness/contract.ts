@@ -500,6 +500,8 @@ export interface HarnessRun {
    *  it answers with (the attachments line, or empty) ends the steer's text. Bound by the loop
    *  only when the deployment configures a store — absent, the steer is sent as it always was. */
   stageFollowUps?: (inputs: readonly FollowUpInput[]) => Promise<string>;
+  /** Called only when the harness confirms a steer reached the model's conversation. */
+  confirmedFollowUps?: (inputs: readonly FollowUpInput[]) => void;
   onEvent?: (event: RunEvent) => void;
   onProgress?: (note: string) => void;
   onStep?: (report: StepReport) => Promise<void>;

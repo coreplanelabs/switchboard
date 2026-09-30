@@ -42,7 +42,8 @@ const instance: CoordinatorInstance = {
 function workerDouble() {
   const rows = new Map<string, string>();
   const units = new Map<string, string>();
-  const mainTasks = new Map<string, { instanceId: string; unit: string }>();
+  const mainTasks = new Map<string, { instanceId: string; unit: string; authority: Record<string, unknown> }>();
+  const requesterTurns = new Map<string, { messageId: string; revision: number; questionTarget?: string }>();
   const events = new Map<string, ThreadEvent[]>();
   const calls: Array<{ path: string; body: Record<string, unknown>; auth: string | null }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -50,6 +51,21 @@ function workerDouble() {
     const path = new URL(url).pathname;
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     calls.push({ path, body, auth: new Headers(init?.headers).get("authorization") });
+    if (path === "/runs/coordinator/requester-turn/record") {
+      const turn = body.input as { threadKey: string; requesterId: string; messageId: string; questionTarget?: string };
+      const id = `${turn.threadKey}\0${turn.requesterId}`;
+      const previous = requesterTurns.get(id);
+      const next = {
+        ...turn,
+        revision: previous?.messageId === turn.messageId ? previous.revision : (previous?.revision ?? 0) + 1,
+      };
+      requesterTurns.set(id, next);
+      return Response.json({ ok: true, turn: next });
+    }
+    if (path === "/runs/coordinator/requester-turn/latest") {
+      const key = body.key as { threadKey: string; requesterId: string };
+      return Response.json({ turn: requesterTurns.get(`${key.threadKey}\0${key.requesterId}`) ?? null });
+    }
     if (path === "/runs/coordinator/main-task/get") {
       const key = body.key as { mainThreadKey: string; actId: string };
       return Response.json({ link: mainTasks.get(`${key.mainThreadKey}\0${key.actId}`) ?? null });
@@ -68,10 +84,19 @@ function workerDouble() {
       if (prior) return Response.json({ ok: true, created: false, link: prior });
       const inst = body.instance as CoordinatorInstance;
       const unit = body.unit as CoordinatorUnit;
+      const authority = body.authority as {
+        requesterId: string;
+        sourceMessageId: string;
+        revision: number;
+        repo: string;
+      };
+      const current = requesterTurns.get(`${key.mainThreadKey}\0${authority.requesterId}`);
+      if (current?.messageId !== authority.sourceMessageId || current.revision !== authority.revision)
+        return Response.json({ ok: false, reason: "conflict" }, { status: 409 });
       if (rows.has(inst.id)) return Response.json({ ok: false, reason: "conflict" }, { status: 409 });
       rows.set(inst.id, JSON.stringify(inst));
       units.set(`${unit.instanceId}/${unit.unit}`, JSON.stringify(unit));
-      const link = { instanceId: inst.id, unit: unit.unit };
+      const link = { instanceId: inst.id, unit: unit.unit, authority };
       mainTasks.set(id, link);
       return Response.json({ ok: true, created: true, link });
     }
@@ -365,6 +390,14 @@ describe("main-agent task claims", () => {
     it(`one act atomically records a link and unit and refuses a conflicting instance (${name})`, async () => {
       const store = make();
       const key = { mainThreadKey: instance.threadKey, actId: "act-1" };
+      const authority = { requesterId: instance.userId, sourceMessageId: "1", revision: 1, repo: instance.repo };
+      expect(
+        await store.recordRequesterTurn({
+          threadKey: key.mainThreadKey,
+          requesterId: instance.userId,
+          messageId: "1",
+        }),
+      ).toMatchObject({ ok: true });
       const firstUnit = ["U", "1"].join("");
       const row = unitRow(firstUnit, {
         branch: instance.branch,
@@ -380,12 +413,12 @@ describe("main-agent task claims", () => {
         },
       });
       expect(await store.getMainTask(key)).toBeNull();
-      expect(await store.claimMainTask(key, instance, row)).toEqual({
+      expect(await store.claimMainTask(key, instance, row, authority)).toEqual({
         ok: true,
         created: true,
-        link: { instanceId: instance.id, unit: firstUnit },
+        link: { instanceId: instance.id, unit: firstUnit, authority },
       });
-      expect(await store.getMainTask(key)).toEqual({ instanceId: instance.id, unit: firstUnit });
+      expect(await store.getMainTask(key)).toEqual({ instanceId: instance.id, unit: firstUnit, authority });
       expect(await store.get(instance.id)).toEqual(instance);
       expect(await store.listUnits(instance.id)).toEqual([row]);
       await store.putUnits([{ ...row, workBrief: undefined }]);
@@ -399,23 +432,35 @@ describe("main-agent task claims", () => {
           { ...key, actId: "act-race" },
           { ...instance, id: "ship_race_a" },
           { ...row, instanceId: "ship_race_a", workBrief: { ...row.workBrief!, actId: "act-race" } },
+          authority,
         ),
         store.claimMainTask(
           { ...key, actId: "act-race" },
           { ...instance, id: "ship_race_b" },
           { ...row, instanceId: "ship_race_b", workBrief: { ...row.workBrief!, actId: "act-race" } },
+          authority,
         ),
       ]);
       expect(raced.filter((result) => result.ok && result.created)).toHaveLength(1);
       expect(await store.getMainTask({ ...key, actId: "act-race" })).toMatchObject({ instanceId: "ship_race_a" });
       expect(
-        await store.claimMainTask(key, { ...instance, id: "ship_other" }, { ...row, instanceId: "ship_other" }),
-      ).toEqual({ ok: true, created: false, link: { instanceId: instance.id, unit: firstUnit } });
+        await store.claimMainTask(
+          key,
+          { ...instance, id: "ship_other" },
+          { ...row, instanceId: "ship_other" },
+          authority,
+        ),
+      ).toEqual({ ok: true, created: false, link: { instanceId: instance.id, unit: firstUnit, authority } });
       expect(
-        await store.claimMainTask({ ...key, actId: "act-2" }, instance, {
-          ...row,
-          workBrief: { ...row.workBrief!, actId: "act-2" },
-        }),
+        await store.claimMainTask(
+          { ...key, actId: "act-2" },
+          instance,
+          {
+            ...row,
+            workBrief: { ...row.workBrief!, actId: "act-2" },
+          },
+          authority,
+        ),
       ).toEqual({
         ok: false,
         reason: "conflict",
@@ -534,5 +579,31 @@ describe("NullCoordinatorInstanceStore and the builder", () => {
     expect(
       buildCoordinatorInstanceStore({ worker: { baseUrl: "https://memory.test" } }, secretsFrom({})),
     ).toBeInstanceOf(NullCoordinatorInstanceStore);
+  });
+});
+
+describe("private requester revision before a main task claim", () => {
+  it("records each Slack turn once and makes a later turn revoke an unclaimed act", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    const key = { threadKey: "slack:D1:1.0", requesterId: "slack:UALICE" };
+    const question = { ...key, messageId: "1700000000.000001", questionTarget: "acme/api" };
+    const first = await store.recordRequesterTurn(question);
+    expect(first).toMatchObject({ ok: true, turn: { revision: 1, messageId: question.messageId } });
+    expect(await store.recordRequesterTurn(question)).toEqual(first);
+    const fix = await store.recordRequesterTurn({ ...key, messageId: "1700000000.000002" });
+    expect(fix).toMatchObject({
+      ok: true,
+      turn: { revision: 2, messageId: "1700000000.000002", priorQuestionTarget: "acme/api" },
+    });
+    expect(await store.latestRequesterTurn(key)).toEqual(fix.ok ? fix.turn : null);
+    expect(await store.recordRequesterTurn({ ...key, messageId: "1700000000.000001" })).toEqual({
+      ok: false,
+      reason: "conflict",
+    });
+    expect(await store.recordRequesterTurn({ ...key, messageId: "1700000000.000003" })).toMatchObject({
+      ok: true,
+      turn: { revision: 3, messageId: "1700000000.000003" },
+    });
+    expect((await store.latestRequesterTurn(key))?.priorQuestionTarget).toBeUndefined();
   });
 });

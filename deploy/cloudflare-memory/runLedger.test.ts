@@ -1032,6 +1032,84 @@ describe("run ledger — the coordinator instance record (item 49)", () => {
 // decision-record reservations survive bot-process restarts in the state Worker,
 // with already-persisted unit and run rows included in the claim set.
 describe("run ledger — main-agent task claims", () => {
+  it("commits a main task only at the latest private requester revision", async () => {
+    const key = storeKey();
+    const firstUnit = ["U", "1"].join("");
+    const threadKey = "slack:DMAIN:1700000000.000001";
+    const requesterId = "slack:UALICE";
+    const record = (messageId: string, questionTarget?: string) =>
+      post("/runs/coordinator/requester-turn/record", {
+        storeKey: key,
+        input: { threadKey, requesterId, messageId, ...(questionTarget ? { questionTarget } : {}) },
+      });
+    expect((await record("1700000000.000001", "acme/api")).data).toMatchObject({
+      ok: true,
+      turn: { revision: 1, questionTarget: "acme/api" },
+    });
+    expect((await record("1700000000.000002")).data).toMatchObject({
+      ok: true,
+      turn: { revision: 2, priorQuestionTarget: "acme/api" },
+    });
+    const instance: CoordinatorInstance = {
+      id: "plan_main_act_1",
+      kind: "ship",
+      userId: requesterId,
+      channelId: "slack:DMAIN",
+      threadKey,
+      repo: "acme/api",
+      branch: "plan/main-act/u1",
+      base: "main",
+      plan: { id: "main-act" },
+      merge: "person",
+      createdAt: 1_000,
+    };
+    const link = { mainThreadKey: threadKey, actId: "act-fix" };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: firstUnit,
+      slug: "u1",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      workBrief: {
+        requesterId,
+        mainThreadKey: threadKey,
+        actId: link.actId,
+        repo: instance.repo,
+        base: "main",
+        question: "Why did signup fail?",
+        findings: [],
+        requestedChange: "Fix signup",
+      },
+    };
+    const authority = { requesterId, sourceMessageId: "1700000000.000002", revision: 2, repo: "acme/api" };
+    expect(
+      (
+        await post("/runs/coordinator/main-task/claim", {
+          storeKey: key,
+          key: link,
+          instance,
+          unit,
+          authority: { ...authority, revision: 1 },
+        })
+      ).status,
+    ).toBe(409);
+    expect((await record("1700000000.000003")).status).toBe(200);
+    expect(
+      (
+        await post("/runs/coordinator/main-task/claim", {
+          storeKey: key,
+          key: link,
+          instance,
+          unit,
+          authority,
+        })
+      ).status,
+    ).toBe(409);
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data).toEqual({ instance: null });
+    expect((await post("/runs/coordinator/main-task/get", { storeKey: key, key: link })).data).toEqual({ link: null });
+  });
+
   it("claims the link with its instance and unit and replays it after a new request", async () => {
     const key = storeKey();
     const firstUnit = ["U", "1"].join("");
@@ -1067,9 +1145,18 @@ describe("run ledger — main-agent task claims", () => {
       },
     };
     const link = { mainThreadKey: "slack:CMAIN:1.0", actId: "act-1" };
-    expect(await post("/runs/coordinator/main-task/claim", { storeKey: key, key: link, instance, unit })).toEqual({
+    const authority = { requesterId: instance.userId, sourceMessageId: "1", revision: 1, repo: instance.repo };
+    expect(
+      await post("/runs/coordinator/requester-turn/record", {
+        storeKey: key,
+        input: { threadKey: link.mainThreadKey, requesterId: instance.userId, messageId: "1" },
+      }),
+    ).toMatchObject({ status: 200, data: { turn: { revision: 1 } } });
+    expect(
+      await post("/runs/coordinator/main-task/claim", { storeKey: key, key: link, instance, unit, authority }),
+    ).toEqual({
       status: 200,
-      data: { ok: true, created: true, link: { instanceId: instance.id, unit: firstUnit } },
+      data: { ok: true, created: true, link: { instanceId: instance.id, unit: firstUnit, authority } },
     });
     expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data).toEqual({ instance });
     expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data).toEqual({
@@ -1112,7 +1199,7 @@ describe("run ledger — main-agent task claims", () => {
       units: [{ ...progressed, wakes: { [waitId]: answer } }],
     });
     expect((await post("/runs/coordinator/main-task/get", { storeKey: key, key: link })).data).toEqual({
-      link: { instanceId: instance.id, unit: firstUnit },
+      link: { instanceId: instance.id, unit: firstUnit, authority },
     });
     expect(
       (
@@ -1121,9 +1208,10 @@ describe("run ledger — main-agent task claims", () => {
           key: link,
           instance: { ...instance, id: "plan_other" },
           unit: { ...unit, instanceId: "plan_other" },
+          authority,
         })
       ).data,
-    ).toEqual({ ok: true, created: false, link: { instanceId: instance.id, unit: firstUnit } });
+    ).toEqual({ ok: true, created: false, link: { instanceId: instance.id, unit: firstUnit, authority } });
     expect(
       (
         await post("/runs/coordinator/main-task/claim", {
@@ -1131,6 +1219,7 @@ describe("run ledger — main-agent task claims", () => {
           key: { ...link, actId: "act-2" },
           instance,
           unit: { ...unit, workBrief: { ...unit.workBrief!, actId: "act-2" } },
+          authority,
         })
       ).status,
     ).toBe(409);
@@ -1140,6 +1229,7 @@ describe("run ledger — main-agent task claims", () => {
           storeKey: key,
           key: { mainThreadKey: "slack:COTHER:2.0", actId: "act-3" },
           instance: { ...instance, id: "plan_other_thread" },
+          authority,
           unit: {
             ...unit,
             instanceId: "plan_other_thread",
@@ -1158,6 +1248,7 @@ describe("run ledger — main-agent task claims", () => {
           key: link,
           instance,
           unit: { ...unit, workBrief: { ...unit.workBrief!, question: "x".repeat(5000) } },
+          authority,
         })
       ).status,
     ).toBe(400);
@@ -1545,8 +1636,18 @@ describe("run ledger — the coordinator's unit events (record 0051's reply-as-e
       channelId: instance.channelId,
       requesterId: instance.userId,
     };
+    const authority = { requesterId: instance.userId, sourceMessageId: "1", revision: 1, repo: instance.repo };
     expect(
-      (await post("/runs/coordinator/main-task/claim", { storeKey: key, key: binding.key, instance, unit })).status,
+      (
+        await post("/runs/coordinator/requester-turn/record", {
+          storeKey: key,
+          input: { threadKey: instance.threadKey, requesterId: instance.userId, messageId: "1" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await post("/runs/coordinator/main-task/claim", { storeKey: key, key: binding.key, instance, unit, authority }))
+        .status,
     ).toBe(200);
     const first = event("first steer", { id: "steer-first" });
     const firstAppend = {

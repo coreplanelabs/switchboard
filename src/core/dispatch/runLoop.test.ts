@@ -1113,6 +1113,258 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(restored).toEqual({ kind: "unavailable" });
   });
 
+  it("withdraws private work start before a relayed follow-up reaches the model", async () => {
+    const started = vi.fn(async () => ({ kind: "refused" as const, reply: "fixture" }));
+    let before: unknown;
+    let after: unknown;
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      userId: "slack:UADMIN",
+      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            const brief = { question: "What failed?", findings: [], requestedChange: "Fix it" };
+            before = await run.toolContext.mainStart?.start("acme/api", brief, "fix it in acme/api");
+            await run.stageFollowUps!([
+              { text: "please start work", userId: "slack:UOTHER", postedBy: "slack:bot:B1", at: 2_000 },
+            ]);
+            after = await run.toolContext.mainStart?.start("acme/api", brief, "fix it in acme/api");
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.deps.mainTaskStart = started;
+    const channelId = "slack:DPRIVATE";
+    const threadKey = `${channelId}:1.0`;
+    const audience = { kind: "slack-unshared-im" as const, channelId, threadKey, userId: "slack:UADMIN" };
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.recordRequesterTurn({ threadKey, requesterId: audience.userId, messageId: "1.0" });
+    s.deps.coordinatorInstances = instances;
+    await runLoop(s.deps, {
+      ...s.ctx,
+      configuredRepo: "acme/api",
+      msg: { ...s.ctx.msg, ...audience, directAudience: audience, messageId: "1.0", text: "fix it in acme/api" },
+      requestText: "fix it in acme/api",
+      channelVisibility: "dm",
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(before).toEqual({ kind: "refused", reply: "fixture" });
+    expect(after).toMatchObject({ kind: "refused" });
+    expect(started).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists a verified live follow-up before it can start work or revoke an older request", async () => {
+    const runCase = async (initialText: string, followUpText: string, sourceMessage: string) => {
+      const channelId = "slack:DPRIVATE";
+      const threadKey = `${channelId}:1.0`;
+      const audience = { kind: "slack-unshared-im" as const, channelId, threadKey, userId: "slack:UADMIN" };
+      const instances = new InMemoryCoordinatorInstanceStore();
+      await instances.recordRequesterTurn({
+        threadKey,
+        requesterId: audience.userId,
+        messageId: "1.0",
+      });
+      const started = vi.fn(async () => ({
+        kind: "accepted" as const,
+        actId: "act-one",
+        instanceId: "unit-one",
+        reply: "started",
+      }));
+      let selected: unknown;
+      let stored: unknown;
+      const watchedPi = watched(piHarness);
+      const s = setup("Done.", {
+        agent: "orchestrator",
+        userId: audience.userId,
+        io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+        harness: {
+          harnesses: roster({
+            ...watchedPi.harness,
+            open: async (deps, run) => {
+              const input = {
+                text: followUpText,
+                userId: audience.userId,
+                directAudience: audience,
+                messageId: "2.0",
+                at: 2_000,
+              };
+              await run.stageFollowUps!([input]);
+              stored = await instances.latestRequesterTurn({ threadKey, requesterId: audience.userId });
+              run.confirmedFollowUps?.([input]);
+              selected = await run.toolContext.mainStart?.start(
+                "acme/api",
+                { question: "Why did signup fail?", findings: [], requestedChange: "Fix signup" },
+                sourceMessage,
+              );
+              return watchedPi.harness.open(deps, run);
+            },
+          }),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      s.deps.coordinatorInstances = instances;
+      s.deps.mainTaskStart = started;
+      await runLoop(s.deps, {
+        ...s.ctx,
+        configuredRepo: "acme/api",
+        msg: { ...s.ctx.msg, channelId, threadKey, directAudience: audience, messageId: "1.0", text: initialText },
+        requestText: initialText,
+        channelVisibility: "dm",
+      });
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      return { selected, stored, started };
+    };
+
+    const fix = await runCase("Why did signup fail in acme/api?", "fix it", "fix it");
+    expect(fix.stored).toMatchObject({ messageId: "2.0", revision: 2 });
+    expect(fix.selected).toMatchObject({ kind: "accepted" });
+    expect(fix.started).toHaveBeenCalledTimes(1);
+
+    const cancel = await runCase("fix signup in acme/api", "stop that work", "fix signup in acme/api");
+    expect(cancel.stored).toMatchObject({ messageId: "2.0", revision: 2 });
+    expect(cancel.selected).toMatchObject({ kind: "refused" });
+    expect(cancel.started).not.toHaveBeenCalled();
+  });
+
+  it("keeps the latest work request valid when an earlier follow-up is already superseded", async () => {
+    const channelId = "slack:DPRIVATE";
+    const threadKey = `${channelId}:1.0`;
+    const audience = { kind: "slack-unshared-im" as const, channelId, threadKey, userId: "slack:UADMIN" };
+    const instances = new InMemoryCoordinatorInstanceStore();
+    for (const messageId of ["1.0", "2.0", "3.0"])
+      await instances.recordRequesterTurn({ threadKey, requesterId: audience.userId, messageId });
+    const started = vi.fn(async () => ({
+      kind: "accepted" as const,
+      actId: "act-one",
+      instanceId: "unit-one",
+      reply: "started",
+    }));
+    let earlier: unknown;
+    let latest: unknown;
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      userId: audience.userId,
+      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            const inputs = [
+              { text: "fix first", userId: audience.userId, directAudience: audience, messageId: "2.0", at: 2_000 },
+              { text: "fix latest", userId: audience.userId, directAudience: audience, messageId: "3.0", at: 3_000 },
+            ];
+            await run.stageFollowUps!(inputs);
+            run.confirmedFollowUps?.(inputs);
+            earlier = await run.toolContext.mainStart?.start(
+              "acme/api",
+              { question: "Why did signup fail?", findings: [], requestedChange: "Fix signup" },
+              "fix first",
+            );
+            latest = await run.toolContext.mainStart?.start(
+              "acme/api",
+              { question: "Why did signup fail?", findings: [], requestedChange: "Fix signup" },
+              "fix latest",
+            );
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.deps.coordinatorInstances = instances;
+    s.deps.mainTaskStart = started;
+    await runLoop(s.deps, {
+      ...s.ctx,
+      configuredRepo: "acme/api",
+      msg: {
+        ...s.ctx.msg,
+        channelId,
+        threadKey,
+        directAudience: audience,
+        messageId: "1.0",
+        text: "Why did signup fail?",
+      },
+      requestText: "Why did signup fail?",
+      channelVisibility: "dm",
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(earlier).toMatchObject({ kind: "refused" });
+    expect(latest).toMatchObject({ kind: "accepted" });
+    expect(started).toHaveBeenCalledTimes(1);
+    expect(await instances.latestRequesterTurn({ threadKey, requesterId: audience.userId })).toMatchObject({
+      messageId: "3.0",
+      revision: 3,
+    });
+  });
+
+  it("does not authorize work from an operator-joined prompt when the delivered reply says no", async () => {
+    const started = vi.fn(async () => ({
+      kind: "accepted" as const,
+      actId: "act-one",
+      instanceId: "unit-one",
+      reply: "started",
+    }));
+    let result: unknown;
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      userId: "slack:UADMIN",
+      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            result = await run.toolContext.mainStart?.start(
+              "acme/api",
+              { question: "What failed?", findings: [], requestedChange: "Fix signup" },
+              "Please fix signup in acme/api",
+            );
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.deps.mainTaskStart = started;
+    const channelId = "slack:DPRIVATE";
+    const threadKey = `${channelId}:1.0`;
+    const audience = { kind: "slack-unshared-im" as const, channelId, threadKey, userId: "slack:UADMIN" };
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.recordRequesterTurn({ threadKey, requesterId: audience.userId, messageId: "1.0" });
+    s.deps.coordinatorInstances = instances;
+    await runLoop(s.deps, {
+      ...s.ctx,
+      msg: { ...s.ctx.msg, channelId, threadKey, directAudience: audience, messageId: "1.0", text: "no" },
+      requestText: "Please fix signup in acme/api\nno",
+      channelVisibility: "dm",
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(result).toMatchObject({ kind: "refused" });
+    expect(started).not.toHaveBeenCalled();
+  });
+
   it("waits for an admitted stop before a revoked private follow-up reaches the model", async () => {
     let entered!: () => void;
     let release!: () => void;
@@ -1165,25 +1417,31 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       createdAt: 1_000,
       runId: "run-parent",
     };
+    await instances.recordRequesterTurn({ threadKey, requesterId: instance.userId, messageId: "1" });
     expect(
-      await instances.claimMainTask({ mainThreadKey: threadKey, actId: "fix-signup" }, instance, {
-        instanceId: instance.id,
-        unit: "task",
-        slug: "signup",
-        branch: instance.branch,
-        dependsOn: [],
-        rounds: [],
-        workBrief: {
-          requesterId: instance.userId,
-          mainThreadKey: threadKey,
-          actId: "fix-signup",
-          repo: instance.repo,
-          base: instance.base,
-          question: "How many users failed to sign up?",
-          findings: [],
-          requestedChange: "Fix signups",
+      await instances.claimMainTask(
+        { mainThreadKey: threadKey, actId: "fix-signup" },
+        instance,
+        {
+          instanceId: instance.id,
+          unit: "task",
+          slug: "signup",
+          branch: instance.branch,
+          dependsOn: [],
+          rounds: [],
+          workBrief: {
+            requesterId: instance.userId,
+            mainThreadKey: threadKey,
+            actId: "fix-signup",
+            repo: instance.repo,
+            base: instance.base,
+            question: "How many users failed to sign up?",
+            findings: [],
+            requestedChange: "Fix signups",
+          },
         },
-      }),
+        { requesterId: instance.userId, sourceMessageId: "1", revision: 1, repo: instance.repo },
+      ),
     ).toMatchObject({ ok: true });
     s.deps.coordinatorInstances = instances;
     s.deps.plane = async () =>
@@ -1274,6 +1532,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
                   threadKey: "slack:DPRIVATE:1.0",
                   userId: "slack:UX",
                 },
+                messageId: "2.0",
                 at: 2_000,
               },
             ]);

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { ALL_GRANTS } from "../authz/grants.js";
+import { canOfferMainStart } from "../../tools/mainStart.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { RunControl } from "../runRegistry/runControl.js";
 import { ThreadAdmission } from "../threadAdmission.js";
@@ -153,6 +155,51 @@ describe("settleThread — the thread when the request is over", () => {
 });
 
 describe("prepareFreshTurn — the one request the unconsumed follow-ups run as", () => {
+  it("does not attest a merged fresh turn as one direct request", () => {
+    const first = followUp("fix signup", NOW - 2, [], "slack:UA");
+    const channelId = "slack:D1";
+    const threadKey = "slack:D1:1";
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId,
+      userId: first.msg.userId,
+      threadKey,
+    };
+    const direct = { ...first, msg: { ...first.msg, channelId, threadKey, messageId: "2", directAudience } };
+    const actor = {
+      kind: "user" as const,
+      id: direct.msg.userId,
+      origin: { channelId, threadKey },
+      grants: ALL_GRANTS,
+    };
+    expect(
+      canOfferMainStart(
+        "orchestrator",
+        "dm",
+        prepareFreshTurn({ clock: () => NOW }, { agent: "orchestrator", pending: [direct], clock: () => NOW }).msg,
+        actor,
+        true,
+      ),
+    ).toBe(true);
+    const fresh = prepareFreshTurn(
+      { clock: () => NOW },
+      {
+        agent: "orchestrator",
+        pending: [
+          direct,
+          {
+            ...followUp("fix billing", NOW - 1, [], "slack:UB"),
+            msg: { ...first.msg, channelId, threadKey, userId: "slack:UB", postedBy: "slack:bot:B1" },
+          },
+        ],
+        clock: () => NOW,
+      },
+    );
+    expect(fresh.msg.text).toContain("fix billing");
+    expect(fresh.msg.directAudience).toBeUndefined();
+    expect(canOfferMainStart("orchestrator", "dm", fresh.msg, actor, true)).toBe(false);
+  });
+
   it("merges the follow-ups into the FIRST sender's message and handle — the fresh turn's requester, credential included — each text attributed, pins the agent, stamps receivedAt now and the wait since the earliest, and drops the platform stamp", () => {
     const a: string[] = [];
     const b: string[] = [];

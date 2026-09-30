@@ -6,6 +6,7 @@ import type { ShipCaps } from "../ship/coordinator.js";
 import type { IncomingMessage } from "../types.js";
 import { handOffToCoordinator, type HandOffDeps } from "./handOff.js";
 import { isMainTaskKey, isWorkBrief, type WorkBrief } from "./contract.js";
+import { isMainTaskAuthority, type MainTaskAuthority } from "./requesterAuthority.js";
 
 /** Trusted dispatch context supplies the actor, message, gates and runner seams.
  * The model supplies only a repository and bounded evidence for one change. */
@@ -29,6 +30,10 @@ export interface MainStartInput {
   /** Freshly proves the original Slack DM is still a one-person internal audience. */
   stillPrivate: () => Promise<boolean>;
   repo: string;
+  /** Resolved from the person's delivered request, never from tool input. */
+  authorizedRepo: string;
+  /** Private durable requester revision, never supplied by the model. */
+  authority?: MainTaskAuthority;
   brief: Omit<WorkBrief, "requesterId" | "mainThreadKey" | "actId" | "repo" | "base">;
 }
 
@@ -51,12 +56,19 @@ export function createMainTaskStarter(deps: MainStartDeps) {
     // A message id survives process restarts. One user request owns one act,
     // even if the model repeats this tool call with different wording.
     if (
+      msg.directAudience?.kind !== "slack-unshared-im" ||
+      msg.directAudience.channelId !== msg.channelId ||
+      msg.directAudience.userId !== msg.userId ||
+      msg.directAudience.threadKey !== msg.threadKey ||
       actor.viewingAs ||
       (actor.kind !== "user" && actor.kind !== "agent") ||
       actor.origin?.channelId !== msg.channelId ||
       actor.origin.threadKey !== msg.threadKey ||
       !selfIdsOf(actor).includes(msg.userId) ||
       !msg.messageId ||
+      !isMainTaskAuthority(input.authority) ||
+      input.authority.requesterId !== msg.userId ||
+      input.authority.sourceMessageId !== msg.messageId ||
       !deps.privateWorkerAvailable ||
       !deps.privateWorkerLog
     )
@@ -69,8 +81,14 @@ export function createMainTaskStarter(deps: MainStartDeps) {
     const mainTaskKey = { mainThreadKey: msg.threadKey, actId };
     if (!isMainTaskKey(mainTaskKey)) return refuse("I can't identify this conversation's work safely.");
     const repo = input.repo.trim();
-    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || !deps.canUseRepo(actor, repo))
-      return refuse("I can't start work in that repository with your access.");
+    if (
+      !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ||
+      typeof input.authorizedRepo !== "string" ||
+      repo.toLowerCase() !== input.authorizedRepo.toLowerCase() ||
+      repo.toLowerCase() !== input.authority.repo.toLowerCase()
+    )
+      return refuse("I need you to name the repository for this change before starting work.");
+    if (!deps.canUseRepo(actor, repo)) return refuse("I can't start work in that repository with your access.");
     const pre = await shipPreflight({
       channelId: msg.channelId,
       threadKey: msg.threadKey,
@@ -106,7 +124,7 @@ export function createMainTaskStarter(deps: MainStartDeps) {
       const out = await handOffToCoordinator(deps, {
         entry: pre.entry,
         requestText: brief.requestedChange,
-        mainTask: { ...mainTaskKey, brief },
+        mainTask: { ...mainTaskKey, brief, authority: input.authority },
         privateWorkerReady: deps.privateWorkerAvailable,
         msg,
         runId: input.mainRunId,

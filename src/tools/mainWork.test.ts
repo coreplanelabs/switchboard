@@ -70,7 +70,15 @@ function requester(over: Partial<Actor> = {}): Actor {
 
 async function fixture(over: Partial<CoordinatorUnit> = {}) {
   const instances = new InMemoryCoordinatorInstanceStore();
-  expect(await instances.claimMainTask({ mainThreadKey: THREAD, actId: ACT }, INSTANCE, UNIT)).toMatchObject({
+  await instances.recordRequesterTurn({ threadKey: THREAD, requesterId: INSTANCE.userId, messageId: "1" });
+  expect(
+    await instances.claimMainTask({ mainThreadKey: THREAD, actId: ACT }, INSTANCE, UNIT, {
+      requesterId: INSTANCE.userId,
+      sourceMessageId: "1",
+      revision: 1,
+      repo: INSTANCE.repo,
+    }),
+  ).toMatchObject({
     ok: true,
     created: true,
   });

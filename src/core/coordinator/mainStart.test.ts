@@ -10,6 +10,12 @@ const msg: IncomingMessage = {
   channelId: "slack:D123",
   userId: "slack:U123",
   threadKey: "slack:D123:1700000000.000001",
+  directAudience: {
+    kind: "slack-unshared-im",
+    channelId: "slack:D123",
+    userId: "slack:U123",
+    threadKey: "slack:D123:1700000000.000001",
+  },
   messageId: "1700000000.000002",
   text: "fix it",
 };
@@ -37,6 +43,11 @@ const brief = {
 
 function harness(over: Partial<MainStartDeps> = {}) {
   const instances = new InMemoryCoordinatorInstanceStore();
+  void instances.recordRequesterTurn({
+    threadKey: msg.threadKey,
+    requesterId: msg.userId,
+    messageId: msg.messageId!,
+  });
   const created: string[] = [];
   const deps: MainStartDeps = {
     instances,
@@ -62,6 +73,13 @@ function harness(over: Partial<MainStartDeps> = {}) {
     msg,
     mainRunId: "main-run-1",
     repo: "acme/api",
+    authorizedRepo: "acme/api",
+    authority: {
+      requesterId: msg.userId,
+      sourceMessageId: msg.messageId!,
+      revision: 1,
+      repo: "acme/api",
+    },
     brief,
     stillLive: () => true,
     stillPrivate: async () => true,
@@ -107,6 +125,13 @@ describe("main-agent private worker start", () => {
     expect(second.actId).toBe(first.actId);
     expect(h.created).toEqual([first.instanceId]);
     expect((await h.instances.listUnits(first.instanceId))[0]?.workBrief?.requestedChange).toBe(brief.requestedChange);
+  });
+
+  it("refuses a model-selected repository outside the trusted request target", async () => {
+    const h = harness();
+    const result = await h.start({ ...h.input, repo: "acme/web" });
+    expect(result.kind).toBe("refused");
+    expect(h.created).toEqual([]);
   });
 
   it("treats task prose that resembles a plan command as a person-merged fix", async () => {
@@ -192,5 +217,115 @@ describe("main-agent private worker start", () => {
     });
     expect((await h.start({ ...h.input, stillLive: () => live })).kind).toBe("refused");
     expect(h.created).toEqual([]);
+  });
+  it("refuses work if a direct conversation becomes shared during repository preflight", async () => {
+    let releasePreflight: (() => void) | undefined;
+    let enteredPreflight: (() => void) | undefined;
+    const entered = new Promise<void>((resolve) => (enteredPreflight = resolve));
+    const h = harness({
+      repoInfo: async () => {
+        enteredPreflight?.();
+        await new Promise<void>((resolve) => (releasePreflight = resolve));
+        return { defaultBranch: "main" };
+      },
+    });
+    let privateNow = true;
+    const pending = h.start({ ...h.input, stillPrivate: async () => privateNow });
+    await entered;
+    privateNow = false;
+    releasePreflight?.();
+    expect((await pending).kind).toBe("refused");
+    expect(h.created).toEqual([]);
+  });
+
+  it("rechecks privacy after a durable claim and before Workflow creation", async () => {
+    const h = harness();
+    let privateNow = true;
+    const originalClaim = h.instances.claimMainTask.bind(h.instances);
+    h.instances.claimMainTask = async (...args) => {
+      const result = await originalClaim(...args);
+      privateNow = false;
+      return result;
+    };
+    const result = await h.start({ ...h.input, stillPrivate: async () => privateNow });
+    expect(result.kind).toBe("refused");
+    expect(h.created).toEqual([]);
+  });
+
+  it("does not claim work when the main run stops during the privacy check", async () => {
+    const h = harness();
+    const originalClaim = h.instances.claimMainTask.bind(h.instances);
+    let claimed = false;
+    h.instances.claimMainTask = async (...args) => {
+      claimed = true;
+      return originalClaim(...args);
+    };
+    let entered!: () => void;
+    const atGate = new Promise<void>((resolve) => (entered = resolve));
+    let release!: (value: boolean) => void;
+    let checks = 0;
+    let live = true;
+    const pending = h.start({
+      ...h.input,
+      stillLive: () => live,
+      stillPrivate: () => {
+        if (++checks !== 2) return Promise.resolve(true);
+        entered();
+        return new Promise<boolean>((resolve) => (release = resolve));
+      },
+    });
+    await atGate;
+    live = false;
+    release(true);
+    expect((await pending).kind).toBe("refused");
+    expect(claimed).toBe(false);
+    expect(h.created).toEqual([]);
+  });
+
+  it("does not start a Workflow when the main run stops during the last privacy check", async () => {
+    const h = harness();
+    let entered!: () => void;
+    const atGate = new Promise<void>((resolve) => (entered = resolve));
+    let release!: (value: boolean) => void;
+    let checks = 0;
+    let live = true;
+    const pending = h.start({
+      ...h.input,
+      stillLive: () => live,
+      stillPrivate: () => {
+        if (++checks !== 3) return Promise.resolve(true);
+        entered();
+        return new Promise<boolean>((resolve) => (release = resolve));
+      },
+    });
+    await atGate;
+    live = false;
+    release(true);
+    expect((await pending).kind).toBe("refused");
+    expect(h.created).toEqual([]);
+  });
+
+  it("does not retry a linked Workflow when the main run stops during its privacy check", async () => {
+    const h = harness({ status: async () => ({ kind: "absent" }) });
+    expect((await h.start(h.input)).kind).toBe("accepted");
+    let entered!: () => void;
+    const atGate = new Promise<void>((resolve) => (entered = resolve));
+    let release!: (value: boolean) => void;
+    let checks = 0;
+    let live = true;
+    const pending = h.start({
+      ...h.input,
+      stillLive: () => live,
+      stillPrivate: () => {
+        if (++checks !== 2) return Promise.resolve(true);
+        entered();
+        return new Promise<boolean>((resolve) => (release = resolve));
+      },
+    });
+    await atGate;
+    live = false;
+    release(true);
+    expect((await pending).kind).toBe("refused");
+    expect(h.created).toHaveLength(1);
   });
 });

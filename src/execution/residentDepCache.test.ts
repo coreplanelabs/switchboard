@@ -177,8 +177,10 @@ describe("depCacheScript nested node_modules (a lockfile that installs into a wo
         mkdirSync(join(entry, "gone", "node_modules"), { recursive: true }); // tree has no `gone/`
         mkdirSync(join(wt, "deploy", "w"), { recursive: true });
         const me = execFileSync("id", ["-un"], { encoding: "utf8" }).trim();
+        const group = execFileSync("id", ["-gn"], { encoding: "utf8" }).trim();
         const script = depCacheScript(join(dir, "checkout"), wt, me, {
           nodeModulesSrc: join(entry, "node_modules"),
+          chownGroup: group,
         });
         const out = execFileSync("sh", ["-c", script], { encoding: "utf8" });
         const parsed = parseDepCacheScriptOutput(out);

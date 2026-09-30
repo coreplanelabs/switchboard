@@ -944,6 +944,21 @@ export async function dispatch(
       );
       return ended;
     }
+    // Record the authenticated turn before routing or model work. A later
+    // message advances this private revision even if it is only a cancellation
+    // or correction; an older unclaimed request then loses the claim CAS.
+    if (directDm && directAudienceVerified && msg.messageId && deps.coordinatorInstances) {
+      try {
+        await deps.coordinatorInstances.recordRequesterTurn({
+          threadKey: msg.threadKey,
+          requesterId: msg.userId,
+          messageId: msg.messageId,
+        });
+      } catch {
+        // The main agent may still answer; work_start fails closed when the
+        // private authority record cannot be read.
+      }
+    }
     // The operator (record 0057; routing-and-config item 29): under
     // `routing.operator: shadow` or `on`, ONE operator turn per admitted chat
     // event — here, ahead of stage A and outside the deterministic live-thread
@@ -3420,6 +3435,7 @@ export async function dispatch(
       verifyDirectAudience: (
         io as ChannelIO & { verifyDirectAudience?: (audience: DirectAudience) => Promise<boolean> }
       ).verifyDirectAudience?.bind(io),
+      privateWorkVerifierAvailable: io.verifyDirectAudience !== undefined,
       agent,
       profile,
       resolved,
@@ -3576,6 +3592,9 @@ export async function dispatch(
         : {}),
       resume,
       repoCtx,
+      ...(deps.config.scopes(msg.channelId, msg.userId).channel.repo !== undefined
+        ? { configuredRepo: deps.config.scopes(msg.channelId, msg.userId).channel.repo }
+        : {}),
       ...(githubDoor ? { githubDoor } : {}),
       isPrReview,
       isCodingPrRun,
