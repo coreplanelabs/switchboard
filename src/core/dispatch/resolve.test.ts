@@ -119,6 +119,22 @@ describe("resolveRun — the (agent, model, effort) triple", () => {
     expect(resolved.effort).toBe("low"); // no effort on this message: the thread's sticky effort still applies
   });
 
+  it("an operator bind ignores old directive-looking words in the thread", () => {
+    const history: HistoryItem[] = [
+      { role: "user", text: "Explain why the example says model:anthropic/review-model effort:high verbosity:debug." },
+    ];
+    const { sticky, resolved } = resolveRun(deps(), {
+      msg: msg("continue"),
+      directives: { text: "continue", interpreter: "operator" },
+      history,
+      operatorPreset: "general",
+    });
+    expect(sticky).toEqual({});
+    expect(resolved.modelRef).toBe("anthropic/general-model");
+    expect(resolved.effort).toBeUndefined();
+    expect(resolved.verbosity).toBe("quiet");
+  });
+
   it("a resumed segment keeps its preset but ignores sticky model and effort, resolving both from the configuration now in force", () => {
     const configured = configStore(
       YAML.replace(

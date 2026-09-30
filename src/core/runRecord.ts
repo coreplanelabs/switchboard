@@ -2,6 +2,9 @@ import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../config/profile.js";
 import type { RunEvent } from "./runEvents.js";
 import type { ProviderFailureCause } from "./provider.js";
+import type { Effort } from "../effort.js";
+import type { AddressSeverity } from "./reviewVerdict.js";
+import type { Verbosity } from "./verbosity.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isRunUsage, type RunUsage } from "./runUsage.js";
 import type { PushedBranch } from "../execution/residentRebind.js";
@@ -490,6 +493,11 @@ export interface RunOperatorDecision {
     line: string;
     reason: string;
     model?: string;
+    effort?: Effort;
+    budget?: number;
+    severity?: AddressSeverity;
+    renewals?: number;
+    verbosity?: Verbosity;
     repo?: string;
     repoSource?: "request" | "attachment" | "thread" | "channel";
     shipEntry?: "work" | "work_from_thread" | "review" | "plan";
@@ -501,6 +509,15 @@ export interface RunOperatorDecision {
   questionWriter?: string;
   /** A question's proposed line — what the next turn's "yes" binds. */
   proposal?: string;
+  /** Typed settings that a confirmed preset proposal must retain. */
+  proposalSettings?: {
+    model?: string;
+    effort?: Effort;
+    budget?: number;
+    severity?: AddressSeverity;
+    renewals?: number;
+    verbosity?: Verbosity;
+  };
   /** A question's original ask — what the person's next words join back onto
    *  (`joinedAnswerRequest`). */
   request?: string;
@@ -539,6 +556,11 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
             line: b.line,
             reason: b.reason,
             ...(b.model !== undefined ? { model: b.model } : {}),
+            ...(b.effort !== undefined ? { effort: b.effort } : {}),
+            ...(b.budget !== undefined ? { budget: b.budget } : {}),
+            ...(b.severity !== undefined ? { severity: b.severity } : {}),
+            ...(b.renewals !== undefined ? { renewals: b.renewals } : {}),
+            ...(b.verbosity !== undefined ? { verbosity: b.verbosity } : {}),
             ...(b.repo !== undefined ? { repo: b.repo } : {}),
             ...(b.repoSource !== undefined ? { repoSource: b.repoSource } : {}),
             ...(b.shipEntry !== undefined ? { shipEntry: b.shipEntry } : {}),
@@ -550,6 +572,7 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
     ...(e.questionKind !== undefined ? { questionKind: e.questionKind } : {}),
     ...(e.questionWriter !== undefined ? { questionWriter: e.questionWriter } : {}),
     ...(e.proposal !== undefined ? { proposal: e.proposal } : {}),
+    ...(e.proposalSettings !== undefined ? { proposalSettings: e.proposalSettings } : {}),
     ...(e.request !== undefined ? { request: e.request } : {}),
     ...(e.refusalCause !== undefined ? { refusalCause: e.refusalCause } : {}),
     ...(e.refusalText !== undefined ? { refusalText: e.refusalText } : {}),

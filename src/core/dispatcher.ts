@@ -72,6 +72,7 @@ import {
   operatorStage,
   pendingQuestionOf,
   type OperatorEventFields,
+  type OperatorBind,
   type OperatorThreadOwner,
 } from "./dispatch/operator.js";
 import type { ProviderModelsReader } from "./dispatch/providerModels.js";
@@ -1041,6 +1042,7 @@ export async function dispatch(
     // words (the plain-words model unit): applied at directive precedence
     // (`resolveRun`'s `operatorModel`), exactly as `model:<ref>` would.
     let operatorModel: string | undefined;
+    let operatorSettings: Pick<OperatorBind, "effort" | "budget" | "severity" | "renewals" | "verbosity"> = {};
     // The accepted bind is authority, not the thread/channel fallback facts.
     let operatorRepo: string | undefined;
     let operatorRepoSource: ShipContext["shipRepoSource"];
@@ -1294,6 +1296,13 @@ export async function dispatch(
           operatorPreset = execution.preset;
           operatorRequest = execution.request;
           operatorModel = execution.model;
+          operatorSettings = {
+            effort: execution.effort,
+            budget: execution.budget,
+            severity: execution.severity,
+            renewals: execution.renewals,
+            verbosity: execution.verbosity,
+          };
           operatorRepo = execution.repo;
           operatorRepoSource = execution.repoSource;
           operatorShipEntry = execution.shipEntry;
@@ -1362,7 +1371,16 @@ export async function dispatch(
     )
       return ended;
 
-    const { directives, history } = await readRequest({ msg, io, root });
+    // A bound chat request has already been interpreted. Keep the author's
+    // whole message and the operator's typed settings through resolution.
+    const { directives, history } = await readRequest({
+      msg,
+      io,
+      root,
+      ...(operatorPreset !== undefined
+        ? { request: { text: operatorRequest ?? msg.text, ...operatorSettings, interpreter: "operator" as const } }
+        : {}),
+    });
     // The operator's preset stands where a directive would in the RESOLUTION
     // (`resolveRun`'s own `operatorPreset` field, `agentSource: "operator"`
     // below) — never written into `directives.agent`, so admission's follow-up
@@ -2363,7 +2381,10 @@ export async function dispatch(
     // through the attach and the run, the way a resident note is
     // (dispatch/provision.ts). Before the ship fork: a ship pipeline's wall
     // clock is its clipped budget too, and its card says so.
-    const clip = budgetClipLabel(agent, profile, directives.budget, { coordinator: opts.coordinator !== undefined });
+    const clip = budgetClipLabel(agent, profile, directives.budget, {
+      coordinator: opts.coordinator !== undefined,
+      operator: directives.interpreter === "operator",
+    });
     if (clip) shell.note("debug", clip);
 
     // A coordinator child already carries the reservation on its contract. A

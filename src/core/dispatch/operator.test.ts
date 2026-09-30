@@ -311,6 +311,110 @@ channels:
     expect(turn.decision.binds).toEqual([{ line: "agent:general what changed this week?", reason: "read ask" }]);
   });
 
+  it("bind_preset carries typed request settings beside the unchanged authored text", () => {
+    const requestText = "Use high effort and a 25 minute budget; show debug detail.";
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "general",
+          effort: "high",
+          budget: 25,
+          verbosity: "debug",
+          settingsEvidence: { effort: "high effort", budget: "25 minute budget", verbosity: "debug detail" },
+          reason: "requested controls",
+        },
+      },
+      ctxOf({ requestText }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds).toEqual([
+      {
+        line: `agent:general ${requestText}`,
+        reason: "requested controls",
+        effort: "high",
+        budget: 25,
+        verbosity: "debug",
+      },
+    ]);
+  });
+
+  it("bind_preset carries Ship severity and renewals as typed settings", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "ship",
+          shipEntry: "work",
+          severity: "major",
+          renewals: 2,
+          settingsEvidence: { severity: "major findings", renewals: "two renewals" },
+          reason: "requested review bar",
+        },
+      },
+      ctxOf({ requestText: "Ship this with major findings addressed and two renewals.", presets: ["ship"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0]).toMatchObject({ severity: "major", renewals: 2 });
+  });
+
+  it("bind_preset accepts typed review severity without a Ship entry", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          severity: "major",
+          settingsEvidence: { severity: "major findings" },
+          reason: "requested review bar",
+        },
+      },
+      ctxOf({ requestText: "Review this PR and address major findings.", presets: ["review"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0]).toMatchObject({ severity: "major" });
+  });
+
+  it("a general bind ignores a stray Ship entry instead of exhausting the door", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", shipEntry: "work", reason: "answer the question" } },
+      ctxOf({ requestText: "What happened in this thread?", presets: ["general", "ship"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0]).toEqual({
+      line: "agent:general What happened in this thread?",
+      reason: "answer the question",
+    });
+  });
+
+  it("does not accept an unrequested review severity or Ship renewal", () => {
+    const review = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", severity: "nit", reason: "review" } },
+      ctxOf({ requestText: "Review this pull request.", presets: ["review"] }),
+    );
+    const ship = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "work", renewals: 4, reason: "work" } },
+      ctxOf({ requestText: "Fix the flaky test.", presets: ["ship"] }),
+    );
+    expect(review.kind).toBe("violation");
+    expect(ship.kind).toBe("violation");
+  });
+
+  it.each([
+    { effort: "ultra" },
+    { budget: 1 },
+    { budget: 2.5 },
+    { severity: "critical" },
+    { renewals: 13 },
+    { verbosity: "normal" },
+  ])("bind_preset re-asks an invalid typed request setting: %j", (setting) => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "work", reason: "r", ...setting } },
+      ctxOf({ presets: ["ship"] }),
+    );
+    expect(turn).toMatchObject({ kind: "violation" });
+  });
+
   it("bind_preset carries a typed repository slot without rewriting the person's request", () => {
     const turn = parseOperatorTurn(
       {
@@ -1746,8 +1850,54 @@ describe("the question and its answer-as-a-bind", () => {
   });
 
   it("a yes-bound proposal is marked confirmed: the line, not the answer's word, carries the task", () => {
-    const bind = bindFromAnswer("yes", { proposal: "agent:coding fix the flaky test" });
-    expect(bind).toMatchObject({ line: "agent:coding fix the flaky test", confirmed: true });
+    const bind = bindFromAnswer("yes", { proposal: "agent:general summarize the flaky test", proposalSettings: {} });
+    expect(bind).toMatchObject({ line: "agent:general summarize the flaky test", confirmed: true });
+    expect(bindFromAnswer("yes", { proposal: "agent:general summarize the flaky test" })).toBeUndefined();
+  });
+
+  it("a confirmed preset proposal keeps typed settings from the original request", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_ASK_TOOL,
+        input: {
+          text: "Summarize this run?",
+          proposal: "agent:general Summarize the run with effort:high",
+          proposalSettings: { effort: "high", settingsEvidence: { effort: "effort:high" } },
+          reason: "confirm summary",
+        },
+      },
+      ctxOf({ requestText: "Summarize the run with effort:high" }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
+    expect(turn.decision.proposalSettings).toEqual({ effort: "high" });
+    const bind = bindFromAnswer("yes", {
+      proposal: turn.decision.proposal!,
+      proposalSettings: turn.decision.proposalSettings,
+    });
+    expect(bind).toMatchObject({ effort: "high", confirmed: true });
+  });
+
+  it("a confirmed preset proposal keeps the requested model ref", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_ASK_TOOL,
+        input: {
+          text: "Summarize this run?",
+          proposal: "agent:general Summarize the run",
+          proposalSettings: { model: "openai/gpt-6-sol" },
+          reason: "confirm summary",
+        },
+      },
+      ctxOf({ requestText: "Summarize the run with openai/gpt-6-sol", providers: ["openai"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
+    expect(turn.decision.proposalSettings).toEqual({ model: "openai/gpt-6-sol" });
+    expect(
+      bindFromAnswer("yes", { proposal: turn.decision.proposal!, proposalSettings: turn.decision.proposalSettings }),
+    ).toMatchObject({
+      model: "openai/gpt-6-sol",
+      confirmed: true,
+    });
   });
 
   it("presetRequestOf: the tail after the head token is the request; a bare line without a tail carries none", () => {
@@ -2939,6 +3089,64 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
     expect(turn.decision.binds[0]).toMatchObject({ line: "agent:general with astra, list the runs", model: ASTRA });
+  });
+
+  it("an exact authored model ref binds without a separate model word", () => {
+    const requestText = `Use model:${ASTRA} for this review.`;
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", model: ASTRA, reason: "requested model" } },
+      ctxOf({ requestText, providers: ["anthropic", "openrouter"], presets: ["review"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0]).toMatchObject({ line: `agent:review ${requestText}`, model: ASTRA });
+  });
+
+  it("a prefix of a longer authored model ref cannot select another model", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", model: "openai/o3", reason: "requested model" } },
+      ctxOf({ requestText: "Use model:openai/o3-pro for this review.", providers: ["openai"], presets: ["review"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].model).toBeUndefined();
+  });
+
+  it("a colon-suffixed model ref cannot authorize its shorter prefix", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", model: "openrouter/llama", reason: "requested model" } },
+      ctxOf({
+        requestText: "Use model:openrouter/llama:free for this review.",
+        providers: ["openrouter"],
+        presets: ["review"],
+      }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].model).toBeUndefined();
+  });
+
+  it("an unrelated colon-prefixed token cannot authorize a model ref", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", model: "openrouter/llama", reason: "requested model" } },
+      ctxOf({
+        requestText: "Inspect cache:openrouter/llama for this review.",
+        providers: ["openrouter"],
+        presets: ["review"],
+      }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].model).toBeUndefined();
+  });
+
+  it("a sentence period after a requested full ref keeps the model override", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", model: "openrouter/llama", reason: "requested model" } },
+      ctxOf({
+        requestText: "Use model:openrouter/llama. Review this PR.",
+        providers: ["openrouter"],
+        presets: ["review"],
+      }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].model).toBe("openrouter/llama");
   });
 
   it("a model naming no declared provider is a violation the seam re-asks — never a guess and never a silent default", () => {

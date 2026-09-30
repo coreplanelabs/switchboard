@@ -4588,6 +4588,24 @@ describe("review post-step", () => {
       expect(spy.calls[0].body.startsWith("LGTM: minor only\n")).toBe(true);
     });
 
+    it("an operator-bound review applies typed major severity without stripping the request", async () => {
+      const yaml = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
+      const deps = makeDeps(yaml, verdictThenAnswer("approve", "minor only", "Fine.", undefined, [minor]));
+      const spy = review(deps);
+      deps.operatorModel = vi.fn<RouteModel>(async () => ({
+        tool: "bind_preset",
+        input: {
+          preset: "review",
+          severity: "major",
+          settingsEvidence: { severity: "major findings" },
+          reason: "requested review bar",
+        },
+      }));
+      const { io } = fakeIO();
+      await dispatch(deps, msg("Review https://github.com/acme/api/pull/42 and address major findings."), io);
+      expect(spy.calls[0]?.body.startsWith("LGTM: minor only\n")).toBe(true);
+    });
+
     it("a channel's `review.addressSeverity: nit` narrows the gate for every review there: an approve over a nit posts `Changes requested:`", async () => {
       const yaml = YAML_FIXTURE + 'channels:\n  "slack:CX":\n    review:\n      addressSeverity: nit\n';
       const deps = makeDeps(yaml, verdictThenAnswer("approve", "one nit", "Fine.", undefined, [nit]));
@@ -10795,6 +10813,25 @@ workspaceDir: __WORKDIR__
       outcome: "binds",
       binds: [{ line: "agent:ship fix the login redirect", reason: "the ask" }],
     });
+  });
+
+  it("an operator-bound Ship request carries typed severity and renewals to its instance", async () => {
+    const { deps, instances } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: {
+        preset: "ship",
+        shipEntry: "work",
+        severity: "major",
+        renewals: 2,
+        settingsEvidence: { severity: "major findings", renewals: "two renewals" },
+        reason: "requested review bar",
+      },
+    }));
+    deps.runRegistry = new RunRegistry({ genId: () => "run-ship-settings", genToken: () => "tok" });
+    await dispatch(deps, msg("Ship this with major findings addressed and two renewals.", "slack:UADMIN"), fakeIO().io);
+    const { instance } = await handed(instances, "run-ship-settings");
+    expect(instance).toMatchObject({ addressSeverity: "major", grant: { renewals: 2 } });
   });
 
   it("an operator-bound file request gives the door the plan and durably seeds the same file onto the generated unit", async () => {
@@ -22494,7 +22531,14 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       repo?: string;
       shipEntry?: "work" | "work_from_thread" | "review" | "plan";
     }[];
-    question?: { text: string; proposal?: string };
+    question?: {
+      text: string;
+      proposal?: string;
+      proposalSettings?: {
+        effort?: "low" | "medium" | "high" | "xhigh" | "max";
+        settingsEvidence?: { effort?: string };
+      };
+    };
   }) =>
     vi.fn<RouteModel>(async () => {
       if (input.question) return { tool: "ask", input: { ...input.question, reason: input.reason ?? "why" } };
@@ -22539,6 +22583,58 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     deps.admission = new ThreadAdmission();
     return { deps, provider, registry };
   }
+
+  it("on: typed effort, budget and verbosity reach the run without rewriting the request", async () => {
+    const { deps, provider, registry } = operatorDeps(ON_YAML);
+    const request = "Use high effort, a 25 minute budget, and debug detail to answer this.";
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: {
+        preset: "general",
+        effort: "high",
+        budget: 25,
+        verbosity: "debug",
+        settingsEvidence: { effort: "high effort", budget: "25 minute budget", verbosity: "debug detail" },
+        reason: "requested controls",
+      },
+    }));
+    await dispatch(deps, msg(request, "slack:UADMIN"), fakeIO().io);
+    expect(provider.requests[0]?.effort).toBe("high");
+    expect(JSON.stringify(provider.requests[0]?.messages.at(-1)?.content)).toContain(request);
+    expect(provider.requests[0]?.system).toContain("The operator bound this message's run settings");
+    expect(provider.requests[0]?.system).toContain("Budget: 25 min (clipped by the request budget");
+    expect(registry.snapshotById("r1")?.events.find((event) => event.type === "operator")).toMatchObject({
+      binds: [{ effort: "high", budget: 25, verbosity: "debug" }],
+    });
+  });
+
+  it("on: an exact requested model ref reaches the run with its text intact", async () => {
+    const { deps, provider } = operatorDeps(ON_YAML);
+    const request = "Use model:anthropic/coding-model to answer this.";
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "general", model: "anthropic/coding-model", reason: "requested model" },
+    }));
+    await dispatch(deps, msg(request, "slack:UADMIN"), fakeIO().io);
+    expect(provider.requests[0]?.model).toBe("coding-model");
+    expect(JSON.stringify(provider.requests[0]?.messages.at(-1)?.content)).toContain(request);
+  });
+
+  it("on: omitted operator settings do not inherit tokens read from the same message", async () => {
+    const { deps, provider } = operatorDeps(ON_YAML);
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+    const request = "Explain why the example says effort:high budget:20 verbosity:debug.";
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "general", reason: "answer the question" },
+    }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(request, "slack:UADMIN"), io);
+    expect(provider.requests[0]?.effort).toBeUndefined();
+    expect(JSON.stringify(provider.requests[0]?.messages.at(-1)?.content)).toContain(request);
+    expect(provider.requests[0]?.system).not.toContain("Budget: 20 min");
+    expect(replies.filter((reply) => reply.includes("bound:"))).toEqual([]);
+  });
 
   it("keeps the operator choice on the same door record when the repository gate refuses", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
@@ -23116,7 +23212,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const { deps, registry } = operatorDeps(ON_YAML);
     deps.operatorModel = decides({
       reason: "a fork the run cannot resolve",
-      question: { text: QUESTION_TEXT, proposal: "agent:explore acme/company" },
+      question: { text: QUESTION_TEXT, proposal: "agent:explore acme/company", proposalSettings: {} },
     });
     await dispatch(deps, msg(QUESTION_REQUEST, "slack:UADMIN"), fakeIO().io);
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
@@ -23901,6 +23997,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
           outcome: "question",
           reason: "ambiguous",
           proposal: "agent:general summarize acme/repo",
+          proposalSettings: {},
         },
       },
     ] as RunView[];
@@ -23926,6 +24023,63 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         },
       ],
     });
+  });
+
+  it("on: yes to a preset proposal keeps its accepted run settings", async () => {
+    const pendingThread = [
+      {
+        id: "prev",
+        startedAt: 0,
+        finished: true,
+        eventCount: 2,
+        operator: {
+          mode: "on",
+          outcome: "question",
+          reason: "confirm",
+          proposal: "agent:general Summarize the run",
+          proposalSettings: { effort: "high", budget: 25, verbosity: "debug" },
+          request: "Use high effort, a 25 minute budget, and debug detail to summarize the run",
+        },
+      },
+    ] as RunView[];
+    const { deps, provider, registry } = operatorDeps(ON_YAML);
+    deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+
+    await dispatch(deps, msg("yes", "slack:UADMIN"), fakeIO().io, { thread: pendingThread });
+
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(provider.requests[0]?.effort).toBe("high");
+    expect(provider.requests[0]?.system).toContain("Budget: 25 min");
+    expect(registry.snapshotById("r1")?.events.find((event) => event.type === "operator")).toMatchObject({
+      binds: [{ effort: "high", budget: 25, verbosity: "debug", confirmed: true }],
+    });
+  });
+
+  it("on: yes to an older preset proposal without saved settings asks again and starts no run", async () => {
+    const pendingThread = [
+      {
+        id: "prev",
+        startedAt: 0,
+        finished: true,
+        eventCount: 2,
+        operator: {
+          mode: "on",
+          outcome: "question",
+          reason: "confirm",
+          proposal: "agent:general Summarize the run",
+          request: "Summarize the run with high effort",
+        },
+      },
+    ] as RunView[];
+    const { deps, provider } = operatorDeps(ON_YAML);
+    deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+    const { io, replies } = fakeIO();
+
+    await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread: pendingThread });
+
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(provider.requests).toHaveLength(0);
+    expect(replies.join(" ")).toContain("run settings were not saved");
   });
 
   // A reply into a thread a live run or an idle unit owns is a steer by
@@ -24186,6 +24340,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
           outcome: "question",
           reason: "ambiguous",
           proposal: "agent:general summarize the incident",
+          proposalSettings: {},
         },
       },
       { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: INSTANCE },
