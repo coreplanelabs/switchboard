@@ -170,8 +170,10 @@ describe("submit_verdict tool", () => {
 // Feature: docs/reference/specs/agent-ship.md item 6 — fix rounds record one disposition
 // per review finding through this tool; the runner matches those IDs after the run.
 describe("submit_dispositions tool", () => {
-  const ctxWith = (onDispositions: ToolContext["onDispositions"]): ToolContext =>
-    ({ executor: {} as ToolContext["executor"], onDispositions }) as ToolContext;
+  const ctxWith = (
+    onDispositions: ToolContext["onDispositions"],
+    issuedFindingIds: readonly string[] = ["F1", "F2"],
+  ): ToolContext => ({ executor: {} as ToolContext["executor"], onDispositions, issuedFindingIds }) as ToolContext;
 
   const valid = () => ({
     dispositions: [
@@ -215,40 +217,58 @@ describe("submit_dispositions tool", () => {
     ]);
     expect(String(out)).toContain("2");
     expect(String(out)).toContain("dispositions recorded"); // every run has the sink: its record
-    expect(String(out)).toContain("IDs are checked against the findings by the plan runner");
+    expect(String(out)).toContain("a later valid call replaces this one");
     expect(String(out)).not.toMatch(/^error:/);
   });
 
-  it("records whatever ids the run names: the tool holds no list of the review's findings, so an id the review never issued is recorded like any other and the plan runner drops it when it matches the set to the round", async () => {
-    const got: unknown[] = [];
-    const out = await tool().run(
-      {
-        dispositions: [
-          { findingId: "F1", disposition: "fixed", note: "n" },
-          { findingId: "F9", disposition: "declined", note: "n" },
-        ],
-      },
-      ctxWith((d) => got.push(d)),
-    );
-    expect(got).toEqual([
-      [
-        { findingId: "F1", disposition: "fixed", note: "n" },
-        { findingId: "F9", disposition: "declined", note: "n" },
+  it("rejects unknown, near-match and duplicate IDs without replacing a prior valid set, then accepts an exact correction", async () => {
+    let latest: unknown;
+    const ctx = ctxWith((d) => (latest = d), ["F1", "check:ci / bot"]);
+    const exact = {
+      dispositions: [
+        { findingId: "F1", disposition: "fixed", note: "done" },
+        { findingId: "check:ci / bot", disposition: "fixed", note: "green" },
       ],
-    ]);
-    expect(String(out)).toBe(
-      "dispositions recorded: 2; IDs are checked against the findings by the plan runner; a later call replaces this one",
-    );
-    expect(tool().description).not.toContain("no-op");
-    expect(tool().description).not.toContain("fix round");
+    };
+    expect(String(await tool().run(exact, ctx))).toContain("dispositions recorded: 2");
+    for (const bad of ["check:ci / bot ci / bot", "check:ci / bot ", "F2", "F1"]) {
+      const attempted = {
+        dispositions: [exact.dispositions[0], { findingId: bad, disposition: "fixed", note: "wrong" }],
+      };
+      const out = String(await tool().run(attempted, ctx));
+      expect(out).toMatch(/^error:/);
+      expect(out).toContain("check:ci / bot");
+      expect(latest).toEqual(exact.dispositions);
+    }
+    expect(String(await tool().run({ dispositions: [exact.dispositions[0]] }, ctx))).toMatch(/^error:/);
+    expect(latest).toEqual(exact.dispositions);
+    const corrected = { dispositions: exact.dispositions.map((d) => ({ ...d, note: "corrected" })) };
+    expect(String(await tool().run(corrected, ctx))).toContain("dispositions recorded: 2");
+    expect(latest).toEqual(corrected.dispositions);
+  });
+
+  it("refuses unbound or ambiguous issued IDs without recording, including repeated check names", async () => {
+    const got: unknown[] = [];
+    const sink = (d: unknown) => got.push(d);
+    for (const issuedFindingIds of [undefined, "F1", ["check:ci / bot", "check:ci / bot"]]) {
+      const ctx = { ...ctxWith(sink), issuedFindingIds } as ToolContext;
+      expect(String(await tool().run(valid(), ctx))).toMatch(/^error:/);
+    }
+    expect(got).toEqual([]);
   });
 
   it("last valid call wins at the sink", async () => {
     let latest: unknown;
     const ctx = ctxWith((d) => (latest = d));
     await tool().run(valid(), ctx);
-    await tool().run({ dispositions: [{ findingId: "F1", disposition: "declined", note: "changed my mind" }] }, ctx);
-    expect(latest).toEqual([{ findingId: "F1", disposition: "declined", note: "changed my mind" }]);
+    const replacement = {
+      dispositions: [
+        { findingId: "F1", disposition: "declined", note: "changed my mind" },
+        { findingId: "F2", disposition: "fixed", note: "resolved" },
+      ],
+    };
+    await tool().run(replacement, ctx);
+    expect(latest).toEqual(replacement.dispositions);
   });
 
   it("a non-array input is a string error — context untouched", async () => {
@@ -261,7 +281,7 @@ describe("submit_dispositions tool", () => {
     expect(String(out)).toMatch(/^error:/);
   });
 
-  it("a malformed entry is dropped with the drop surfaced in the ack; the rest are recorded", async () => {
+  it("a malformed entry is refused with the invalid entry surfaced and the prior set preserved", async () => {
     const got: unknown[][] = [];
     const out = await tool().run(
       {
@@ -272,8 +292,8 @@ describe("submit_dispositions tool", () => {
       },
       ctxWith((d) => got.push(d as unknown[])),
     );
-    expect(got).toEqual([[{ findingId: "F1", disposition: "fixed", note: "done" }]]);
-    expect(String(out)).toMatch(/dropped/i);
+    expect(got).toEqual([]);
+    expect(String(out)).toMatch(/^error:/);
     expect(String(out)).toContain("F2");
   });
 

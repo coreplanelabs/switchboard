@@ -547,6 +547,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
       ...(coordinator.recovery !== undefined ? { recovery: coordinator.recovery } : {}),
       ...(coordinator.base !== undefined ? { base: coordinator.base } : {}),
       ...(coordinator.publication !== undefined ? { publication: coordinator.publication } : {}),
+      ...(coordinator.issuedFindingIds !== undefined ? { issuedFindingIds: coordinator.issuedFindingIds } : {}),
       at: clock(),
     });
   }

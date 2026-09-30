@@ -509,6 +509,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
       costCapUsd: 50,
       branch: "plan/p/u16",
       base: "feat/trunk",
+      issuedFindingIds: ["F1", "check:ci / bot"],
     };
     await claimRun(deps, { ...base, reserved, resume: undefined, ledgerRun: undefined, coordinator });
     expect(ledger.handle!.events.map((e) => e.event)).toEqual([
@@ -519,6 +520,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
         unit: "U16",
         branch: "plan/p/u16",
         base: "feat/trunk",
+        issuedFindingIds: ["F1", "check:ci / bot"],
         at: NOW,
         seq: 1,
       },

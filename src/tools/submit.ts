@@ -102,14 +102,9 @@ export const submitVerdictTool: RunnableTool = {
   },
 };
 
-// A coding run's answer to a review's findings (docs/reference/specs/agent-ship.md
-// item 6): one typed disposition per finding, recorded on the run's record as
-// submitted, so the plan runner can match them to its round's findings and
-// split a cap report into declined (disposition recorded) vs unaddressed
-// (none). Validation mirrors submit_verdict's fail-closed style — the parse
-// lives beside the findings in src/core/reviewVerdict.ts. The tool holds no
-// list of a review's ids: an id the review never issued is recorded like any
-// other and the runner drops it, with a note to the re-review.
+// A coding run's answer to the issued findings (agent-ship item 6): validate
+// against the exact IDs the coordinator bound to this child before replacing
+// its last valid set. The runner still matches at completion as a second guard.
 export const submitDispositionsTool: RunnableTool = {
   name: "submit_dispositions",
   failsInText: true,
@@ -117,8 +112,8 @@ export const submitDispositionsTool: RunnableTool = {
     "Record one disposition per review finding after addressing them: `fixed` (the finding is addressed in your " +
     "pushed code) or `declined` (deliberately not doing it — the note says why). `findingId` is the finding's " +
     "stable id printed in the findings. Copy it exactly, including check ids such as `check:CI / checks (test)`; " +
-    "do not replace a check id with `F1`. An id the review never issued answers nothing " +
-    "and is dropped when the plan runner reads your record. Every finding gets exactly one entry, every severity " +
+    "do not replace a check id with `F1`. Unknown, duplicate or missing IDs are refused with the issued IDs " +
+    "while this run can still correct them. Every finding gets exactly one entry, every severity " +
     "included (nits too). Call it once with the complete set after your last push; a later call replaces the " +
     "earlier one. The set rides this run's record, where the plan runner reads it for the re-review.",
   inputSchema: {
@@ -146,12 +141,35 @@ export const submitDispositionsTool: RunnableTool = {
   async run(input, ctx) {
     const parsed = parseDispositionsInput(input);
     if (!parsed) return "error: dispositions must be an array of { findingId, disposition: fixed|declined, note }";
-    // The run loop hands every run the sink; a context without one (a unit
-    // test's, a CLI's) records nothing and the ack says so, never "recorded".
     if (!ctx.onDispositions) return "no run is recording dispositions here";
+    const issued = ctx.issuedFindingIds;
+    if (
+      !Array.isArray(issued) ||
+      issued.some((id) => typeof id !== "string" || !id) ||
+      new Set(issued).size !== issued.length
+    )
+      return "error: the issued finding IDs are unavailable or ambiguous; no dispositions recorded";
+    const ids = parsed.dispositions.map((d) => d.findingId);
+    // The shared parser normalizes one-line text; an ID cannot acquire
+    // authority by trimming or rewriting the caller's bytes into a known ID.
+    const altered =
+      parsed.dropped.length === 0 &&
+      parsed.dispositions.some(
+        (d, index) => (input.dispositions as Record<string, unknown>[])[index]?.findingId !== d.findingId,
+      );
+    const allowed = new Set(issued);
+    const unknown = ids.filter((id) => !allowed.has(id));
+    const duplicate = ids.filter((id, index) => ids.indexOf(id) !== index);
+    const missing = issued.filter((id) => !ids.includes(id));
+    if (parsed.dropped.length || altered || unknown.length || duplicate.length || missing.length) {
+      return (
+        `error: dispositions not recorded; issued IDs: ${JSON.stringify(issued)}; ` +
+        `unknown: ${JSON.stringify(unknown)}; duplicate: ${JSON.stringify(duplicate)}; ` +
+        `missing: ${JSON.stringify(missing)}; invalid: ${[...parsed.dropped, ...(altered ? ["finding IDs must match exactly"] : [])].join("; ") || "none"}`
+      );
+    }
     ctx.onDispositions(parsed.dispositions);
-    const drops = parsed.dropped.length ? ` (dropped: ${parsed.dropped.join("; ")})` : "";
-    return `dispositions recorded: ${parsed.dispositions.length}${drops}; IDs are checked against the findings by the plan runner; a later call replaces this one`;
+    return `dispositions recorded: ${parsed.dispositions.length}; a later valid call replaces this one`;
   },
 };
 

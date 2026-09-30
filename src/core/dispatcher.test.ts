@@ -6346,11 +6346,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   });
 
   // docs/reference/specs/run-history.md item 2, agent-ship.md item 6 — every
-  // coding run records what it submits through `submit_dispositions` on its
-  // record, whatever ids it names: the plan runner matches the set to the
-  // round's findings when it reads the record. A run that submitted none
-  // carries no key.
-  it("a coding run records the dispositions it submits, the ids the review issued or not, and the last set wins; a coding run that submitted none carries no dispositions key", async () => {
+  // A findings child receives its exact issued IDs as durable coordinator
+  // authority. Bad calls cannot overwrite a prior set or reach its record.
+  it("a findings child refuses unknown IDs in the same run, records its corrected set, and a plain coding run carries no dispositions key", async () => {
     const dispositionsProvider = (set: unknown[]): Provider => {
       let n = 0;
       return {
@@ -6385,23 +6383,38 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     };
     const set = [{ findingId: "F1", disposition: "declined", note: "the loop is exclusive" }];
     const deps = codingDeps(dispositionsProvider(set));
+    const childLedger = new InMemoryRunLedger();
+    deps.runLedger = createLedgerWriteThrough({
+      ledger: childLedger,
+      gen: "gen-child",
+      fallback: new InMemoryRunStore(),
+      warn: () => {},
+    });
     codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
     deps.openPullRequest = openSpy().fn;
     deps.runRegistry = new RunRegistry({ genId: () => "r-findings", genToken: () => "t-findings" });
     const store = new InMemoryRunStore();
     deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
-    // No option names the review's ids: the run is a plain `agent:coding` dispatch, as the findings step's is.
-    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io, {
+      coordinator: {
+        parentInstanceId: "plan-fixture",
+        idempotencyKey: "plan-fixture:U10/1/findings",
+        branch: "feat/x",
+        base: "main",
+        issuedFindingIds: ["F1"],
+      },
+    });
     await deps.runHistoryWriter.settled();
-    const rec = (await store.get("r-findings"))!;
+    const rec = childLedger.finished.get("r-findings")!;
     expect(rec.dispositions).toEqual(set);
     const dispositionAcks = (events: RunEvent[]) =>
       events.flatMap((e) => (e.type === "tool_result" && e.tool === "submit_dispositions" ? [e.summary] : []));
     const acks = dispositionAcks(rec.events);
     expect(acks).toHaveLength(2);
-    expect(acks[0]).toMatch(/dispositions recorded: 1/); // F9, an id no review issued, is recorded as submitted
+    expect(acks[0]).toMatch(/error: dispositions not recorded/);
+    expect(acks[0]).toContain("F9");
+    expect(acks[0]).toContain("F1");
     expect(acks[1]).toMatch(/dispositions recorded: 1/);
-    expect(acks.some((a) => /not recorded|unknown finding id/.test(a ?? ""))).toBe(false);
 
     const plain = codingDeps(describeThenAnswer(DESCRIPTION));
     codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });

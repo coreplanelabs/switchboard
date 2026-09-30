@@ -60,6 +60,8 @@ export interface ComposedChild {
   /** The branch the coding child's thread binds to (`on branch <ref>`); a review child pins the pull request's head itself. */
   ref?: string;
   contract?: ChildContract;
+  /** Exact IDs of this findings round, independent of the model-facing prompt. */
+  issuedFindingIds?: string[];
 }
 
 const SPECS_DIR = "docs/reference/specs";
@@ -327,15 +329,16 @@ export async function composeChild(
             ? ((await readers.readRunFacts(brief.reviewRunId)) ?? {})
             : await facts(readers, brief.reviewRunId)
           : ({} as ChildRunFacts);
-      // The round's check findings (record 0055) join the reviewer's: they sit
-      // on no run's record, so the brief carries them by value and the coding
-      // session answers them with dispositions exactly as a reviewer's.
+      // Check findings sit on no review run's record. Bind both sources as
+      // typed IDs on the child, not just as text in its model-facing prompt.
+      const findings = [...(brief.findings ?? review.findings ?? []), ...(brief.checks ?? [])];
       return {
         preset: "coding",
+        issuedFindingIds: findings.map((finding) => finding.id),
         prompt:
           findingsRequest({
             where,
-            findings: [...(brief.findings ?? review.findings ?? []), ...(brief.checks ?? [])],
+            findings,
             review: review.finalReply ?? "",
             ...(brief.answers !== undefined ? { answers: brief.answers } : {}),
           }) +

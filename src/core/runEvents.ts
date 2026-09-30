@@ -983,6 +983,7 @@ export type RunEvent =
       recovery?: import("./coordinator/contract.js").CoordinatorTag["recovery"];
       base?: string;
       publication?: import("./coordinator/contract.js").ExistingPrPublicationBinding;
+      issuedFindingIds?: string[];
       seq?: number;
       at?: number;
     }

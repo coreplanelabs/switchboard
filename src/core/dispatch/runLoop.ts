@@ -899,11 +899,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     handoff = h;
     ledgerRun?.setState({ handoff: h });
   };
-  // The dispositions a coding run records through submit_dispositions (agent-ship
-  // item 6): whatever it submits, the last call wins, restored like the handoff
-  // and recorded on the finish record. The run holds no list of a review's
-  // finding ids; the plan runner matches the set to its round's findings when
-  // it reads the record.
+  // Dispositions are restored like the handoff; the submission tool validates
+  // against the issued IDs in this run's durable coordinator tag before this
+  // sink replaces the last valid set. The runner matches again on completion.
   const restoredDispositions = parseDispositionsInput({ dispositions: restored.dispositions })?.dispositions;
   let dispositions: FindingDisposition[] | undefined = restoredDispositions;
   const onDispositions = (d: FindingDisposition[]) => {
@@ -1502,6 +1500,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     onPrDescription,
     onHandoff,
     onDispositions,
+    ...(coordinator?.issuedFindingIds !== undefined ? { issuedFindingIds: coordinator.issuedFindingIds } : {}),
   };
   // A resume whose plan is `finish` (run-history item 37): the model had
   // already answered when the previous generation died, so no loop runs here

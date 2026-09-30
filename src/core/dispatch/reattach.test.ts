@@ -8,6 +8,8 @@ import { createCardShell } from "../statusCardFrame.js";
 import type { IncomingMessage, StatusUpdate } from "../types.js";
 import type { ResumeContext } from "./admission.js";
 import type { WorkflowSender } from "../coordinator/contract.js";
+import { submitDispositionsTool } from "../../tools/submit.js";
+import type { ToolContext } from "../../tools/runnableTool.js";
 import {
   abandonLostWorkspace,
   announceChildRoll,
@@ -183,6 +185,7 @@ describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
         transportWorkflowId: "recovery-review-1",
         recovery,
         base: "feat/trunk",
+        issuedFindingIds: ["F1", "check:ci / bot"],
         at: 2,
       },
     ]);
@@ -194,7 +197,36 @@ describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
       transportWorkflowId: "recovery-review-1",
       recovery,
       base: "feat/trunk",
+      issuedFindingIds: ["F1", "check:ci / bot"],
     });
+  });
+
+  it("restored finding IDs still reject a near-match and accept a correction in the same child", async () => {
+    const tag = carriedCoordinatorTag(tagged, [
+      { type: "coordinator_tag", parentInstanceId: "plan-p-2", issuedFindingIds: ["check:ci / bot"], at: 2 },
+    ]);
+    let latest: unknown;
+    const ctx = {
+      executor: {} as ToolContext["executor"],
+      issuedFindingIds: tag?.issuedFindingIds,
+      onDispositions: (d: unknown) => {
+        latest = d;
+      },
+    } as ToolContext;
+    expect(
+      String(
+        await submitDispositionsTool.run(
+          { dispositions: [{ findingId: "check:ci / bot ci / bot", disposition: "fixed", note: "wrong" }] },
+          ctx,
+        ),
+      ),
+    ).toContain('"check:ci / bot"');
+    expect(latest).toBeUndefined();
+    const corrected = [{ findingId: "check:ci / bot", disposition: "fixed", note: "green" }];
+    expect(String(await submitDispositionsTool.run({ dispositions: corrected }, ctx))).toContain(
+      "dispositions recorded: 1",
+    );
+    expect(latest).toEqual(corrected);
   });
 
   it("a row written before the event existed carries the two meta fields and no base — the store guard's case", () => {

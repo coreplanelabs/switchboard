@@ -511,6 +511,9 @@ export interface CoordinatorTag {
    * durable unit row and current Workflow round. Published on the run's event
    * stream so a rehost retains the same fence. */
   publication?: ExistingPrPublicationBinding;
+  /** Exact review and check IDs issued to this findings child at spawn, retained
+   * on the run event across reattach. Other children carry no such authority. */
+  issuedFindingIds?: string[];
 }
 
 /** The tag's identity and optional cap as flat record fields, or nothing — so
