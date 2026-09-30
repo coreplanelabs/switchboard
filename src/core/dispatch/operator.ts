@@ -47,7 +47,10 @@ import {
   type ToolDef,
 } from "../provider.js";
 import { parseDirectives } from "../../directives.js";
-import { shows } from "../verbosity.js";
+import { EFFORT_LEVELS, isEffort, type Effort } from "../../effort.js";
+import { MIN_BOUNDARY_MINUTES } from "../../config/validate.js";
+import { ADDRESS_SEVERITIES, isAddressSeverity, type AddressSeverity } from "../shipPipeline.js";
+import { VERBOSITY_LEVELS, isVerbosity, shows, type Verbosity } from "../verbosity.js";
 import { oneLine, redactAndCap, redactSecrets, stripAnsi } from "../redact.js";
 import type { IntakeVerdict } from "../intake.js";
 import type { ConfigStore } from "../../config.js";
@@ -67,7 +70,7 @@ import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
 import { effectiveConfirm } from "../../config/profile.js";
 import { boundBlastRadius, type CommandDef, type CommandInput } from "../commandRegistry.js";
 import { chatInvocation, cliWords, namedToInput } from "../commandSurface.js";
-import { MINUTE_MS, STRUCTURED_RETRIES_MAX } from "../budgets.js";
+import { GRANT_RENEWALS_MAX, MINUTE_MS, STRUCTURED_RETRIES_MAX } from "../budgets.js";
 import { chatCallerFor, parseChatCommand, type ChatCommands } from "../commandChat.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RunEnding } from "../runEnding.js";
@@ -165,8 +168,8 @@ export const OPERATOR_QUESTION_MARKER = "Did you mean:";
  *  answer binds — a cut here cuts the ask itself. */
 export const OPERATOR_REQUEST_CAP = 600;
 
-/** A model override needs a named model beside selection words in the
- * request, and that name must end the proposed model id, not its vendor.
+/** A plain-words model override needs a named model beside selection words in
+ * the request, and that name must end the proposed model id, not its vendor.
  * This keeps incidental text such as "open the PR" from matching OpenRouter.
  * Scanning words here is only an authorization hold on the model's claimed
  * quote; the operator still interprets the request and resolves its model. */
@@ -205,6 +208,23 @@ function requestedModelWord(request: string, modelWord: string, ref: string): bo
   return modelName === word || modelName?.endsWith(`-${word}`) === true;
 }
 
+/** Hold a claimed full model ref to a complete authored token. A prefix of a
+ * longer ref is not evidence for selecting a different model. */
+function exactModelRefInRequest(request: string, ref: string): boolean {
+  const modelLabel = (at: number): boolean =>
+    request.slice(at - 6, at).toLowerCase() === "model:" && (at === 6 || request[at - 7]?.trim() === "");
+  const beginsToken = (at: number): boolean => at === 0 || request[at - 1]?.trim() === "" || modelLabel(at);
+  const endsToken = (at: number): boolean => {
+    const char = request[at];
+    if (char === undefined || char.trim() === "") return true;
+    return ".,!?".includes(char) && (request[at + 1] === undefined || request[at + 1]?.trim() === "");
+  };
+  for (let at = request.indexOf(ref); at >= 0; at = request.indexOf(ref, at + 1)) {
+    if (beginsToken(at) && endsToken(at + ref.length)) return true;
+  }
+  return false;
+}
+
 /** What the operator's turn decided for one admitted chat event. One typed
  *  act per turn (record 0069, as amended): `binds` carries exactly one bind —
  *  a `bind_preset` call rendered as the preset on the person's own words, or
@@ -223,6 +243,7 @@ export type OperatorDecision =
       kind: "question";
       text: string;
       proposal?: string;
+      proposalSettings?: OperatorRequestSettings;
       questionKind?: "target_repository";
       questionWriter?: string;
       reason: string;
@@ -249,6 +270,12 @@ export interface OperatorBind {
    *  the executor applies it at directive precedence — exactly as a typed
    *  `model:<ref>` would. Absent when the request names no model. */
   model?: string;
+  /** Per-request settings the operator bound from the author's words. */
+  effort?: Effort;
+  budget?: number;
+  severity?: AddressSeverity;
+  renewals?: number;
+  verbosity?: Verbosity;
   /** The repository target the door filled from the request, the thread's
    *  newest finished run or the channel default. It rides target resolution
    *  as a typed slot; the person's request is never rewritten to carry it. */
@@ -267,6 +294,11 @@ export interface OperatorBind {
    *  never the answer's word. A fresh bind never carries this. */
   confirmed?: true;
 }
+
+type OperatorRequestSettings = Pick<
+  OperatorBind,
+  "model" | "effort" | "budget" | "severity" | "renewals" | "verbosity"
+>;
 
 /** The projection the operator decides over: the presets and commands the
  *  AUTHOR may run — the policy table's answer, filtered here so a capability
@@ -497,8 +529,8 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
     "For one Ship request, choose `shipEntry` in `bind_preset`: `review` when the person asks Ship to review an existing pull request, `work` for a self-contained change, `work_from_thread` when the requested change depends on earlier requester context in this thread (for example, 'fix it'), or `plan` for an explicit `agent:ship plan <path>.md` request. A review starts in the review round of that exact PR; never turn the word 'review' or its URL into a coding task. If work cites a PR as evidence for a separate change, give `workObjective` as an exact quote of the requester's distinct code-change ask, from this turn or an earlier requester turn. Omit it for review or continuation of the cited PR; without requester-backed words a work bind citing a PR stops before coding. A request naming `agent:ship` still passes through this door and keeps Ship as its preset. The runner verifies the PR, head, repository and permissions after the bind.",
     "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a proposal that would do the write built from them — the person's yes runs it, and their next words refine it.",
     "A question about whether the person has config overrides uses `config show`: it describes their own scope, this channel's scope and the effective settings. `config overrides` lists channels with scopes; use it only when they ask which channels have settings.",
-    "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run. Pass that ref as `bind_preset`'s `model` and one exact model-name word from the person's request as `modelWord` (such as 'astra', 'o3', or 'gpt-6'): the run then uses it, exactly as a typed `model:` directive would. The request still rides verbatim — never strip the model word from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model omits both `model` and `modelWord`.",
-    "`bind_preset` runs the preset on the request as the author asked it — the author's own words ride by reference, so the call names only the preset, optional model and modelWord, and the reason: never re-type the request, never a flag form and never a paraphrase.",
+    "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run. Pass that ref as `bind_preset`'s `model` and one exact model-name word from the person's request as `modelWord` (such as 'astra', 'o3', or 'gpt-6'). When the person wrote the full `<provider>/<model>` ref, pass it as `model` and omit `modelWord`; the exact authored ref is its evidence. The run uses either at request precedence. The request still rides verbatim — never strip the model choice from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model omits both fields.",
+    "`bind_preset` runs the preset on the request as the author asked it — the author's own words ride by reference, so never re-type the request, write a flag form or paraphrase it. Bind effort, budget in whole minutes, and verbosity only when the person requests them. For review or Ship, bind severity only when requested; renewals apply only to Ship. These are typed settings, whether the person used a directive spelling or ordinary words. For each setting you bind, give an exact short quote from this request in `settingsEvidence` under that setting's name; omit the setting and its quote when unrequested. The call also carries the preset, optional model and modelWord, and the reason. When `ask` proposes a preset line, include `proposalSettings` (an empty object when none were requested); put each requested setting and its exact quote from the original request there, including model and modelWord when requested, so a later yes carries the same settings.",
     "",
     // 2. Projection: the presets and commands THIS author may run.
     "Presets this author may run:",
@@ -639,7 +671,46 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
                 modelWord: {
                   type: "string",
                   description:
-                    "one exact model-name word in the person's request that `model` resolves, such as astra, o3, or gpt-6; omit with `model` when no model is named",
+                    "one exact model-name word in a plain-words request that `model` resolves, such as astra, o3, or gpt-6; omit when the full model ref appears in the request",
+                },
+                effort: {
+                  type: "string",
+                  enum: [...EFFORT_LEVELS],
+                  description: "effort the person requested for this run; omit when unrequested",
+                },
+                budget: {
+                  type: "integer",
+                  minimum: MIN_BOUNDARY_MINUTES,
+                  description: "whole-minute boundary the person requested for this run; omit when unrequested",
+                },
+                severity: {
+                  type: "string",
+                  enum: [...ADDRESS_SEVERITIES],
+                  description: "review severity the person asked to address, for review or Ship; omit when unrequested",
+                },
+                renewals: {
+                  type: "integer",
+                  minimum: 0,
+                  maximum: GRANT_RENEWALS_MAX,
+                  description: "Ship renewals the person requested; omit when unrequested",
+                },
+                verbosity: {
+                  type: "string",
+                  enum: [...VERBOSITY_LEVELS],
+                  description: "reply detail the person requested for this run; omit when unrequested",
+                },
+                settingsEvidence: {
+                  type: "object",
+                  additionalProperties: false,
+                  description:
+                    "one exact short quote from this request for each bound effort, budget, severity, renewals or verbosity; omit unbound settings",
+                  properties: {
+                    effort: { type: "string" },
+                    budget: { type: "string" },
+                    severity: { type: "string" },
+                    renewals: { type: "string" },
+                    verbosity: { type: "string" },
+                  },
                 },
                 repo: {
                   type: "string",
@@ -675,6 +746,35 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
       properties: {
         text: { type: "string", description: "the question the person reads" },
         proposal: { type: "string", description: "the best-guess line a yes would run" },
+        proposalSettings: {
+          type: "object",
+          additionalProperties: false,
+          description:
+            "Required for a preset proposal, even when empty: the run settings that a yes must preserve from the original request",
+          properties: {
+            model: { type: "string", description: "the requested provider/model ref from provider_models" },
+            modelWord: {
+              type: "string",
+              description: "one exact model-name word from the request for a plain-words model choice",
+            },
+            effort: { type: "string", enum: [...EFFORT_LEVELS] },
+            budget: { type: "integer", minimum: MIN_BOUNDARY_MINUTES },
+            severity: { type: "string", enum: [...ADDRESS_SEVERITIES] },
+            renewals: { type: "integer", minimum: 0, maximum: GRANT_RENEWALS_MAX },
+            verbosity: { type: "string", enum: [...VERBOSITY_LEVELS] },
+            settingsEvidence: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                effort: { type: "string" },
+                budget: { type: "string" },
+                severity: { type: "string" },
+                renewals: { type: "string" },
+                verbosity: { type: "string" },
+              },
+            },
+          },
+        },
         reason: { type: "string", description: "one line: why this fork needs the person" },
       },
     },
@@ -862,9 +962,14 @@ async function decisionModelRefViolation(
   decision: OperatorDecision,
   reader: ProviderModelsReader | undefined,
 ): Promise<string | undefined> {
-  return decision.kind === "binds" && reader !== undefined
-    ? await modelRefViolation(decision.binds, reader)
-    : undefined;
+  if (reader === undefined) return undefined;
+  if (decision.kind === "binds") return modelRefViolation(decision.binds, reader);
+  if (decision.kind === "question" && decision.proposalSettings?.model !== undefined)
+    return modelRefViolation(
+      [{ line: decision.proposal ?? "", reason: decision.reason, model: decision.proposalSettings.model }],
+      reader,
+    );
+  return undefined;
 }
 
 /** The `provider_models` read, answered through the wired reader (issue
@@ -1027,21 +1132,75 @@ function proposalOnDeclaredProvider(
   }
 }
 
-/**
- * One answer of the loop's model as a turn. Text — a turn that ended with no
- * tool call — is a `non_decision` for the loop's one named repair.
- * A read tool is answered and re-asked; an action tool's input is validated
- * against the same tables its schema was built from, a refused input being a
- * violation the loop re-asks. A `bind_preset` decision renders as the preset
- * on the PERSON's own words (`stripDirectiveHead` — a typo'd directive head
- * naming the same preset duplicates the bind's own head) — the call carries
- * no request argument at all (issue 2099): the executor holds the admitted
- * message, so a paraphrase is unrepresentable and the output cap never
- * depends on the ask's length; a
- * command tool's decision renders through the registry's own grammar
- * (`chatInvocation`), so a malformed, doubled or re-spelled line is
- * unrepresentable.
- */
+/** One check for typed settings on direct binds and confirmed proposals. */
+function requestSettingsOf(
+  input: Record<string, unknown>,
+  preset: string,
+  requestText: string,
+  providers?: readonly string[],
+): { settings: OperatorRequestSettings } | { violation: string } {
+  const { model, modelWord, effort, budget, severity, renewals, verbosity, settingsEvidence } = input;
+  let ref: string | undefined;
+  if (
+    typeof model === "string" &&
+    model.trim() !== "" &&
+    (exactModelRefInRequest(requestText, model.trim()) ||
+      (typeof modelWord === "string" && requestedModelWord(requestText, modelWord, model)))
+  ) {
+    const trimmed = model.trim();
+    const parsed = /^([A-Za-z0-9_.-]+)\/\S+$/.exec(trimmed);
+    if (parsed === null)
+      return {
+        violation: `bind_preset's model "${String(model)}" is not a \`<provider>/<model>\` ref; read provider_models and pass a listed ref, or ask naming the candidates`,
+      };
+    if (providers !== undefined && !providers.includes(parsed[1]))
+      return {
+        violation: `bind_preset's model \`${trimmed}\` names no model provider this deployment has; read provider_models and pass a listed ref, or ask naming the candidates`,
+      };
+    ref = trimmed;
+  }
+  if (effort !== undefined && !isEffort(effort))
+    return { violation: "bind_preset effort must be a supported effort level" };
+  if (budget !== undefined && (!Number.isInteger(budget) || (budget as number) < MIN_BOUNDARY_MINUTES))
+    return { violation: `bind_preset budget must be whole minutes >= ${MIN_BOUNDARY_MINUTES}` };
+  if (severity !== undefined && ((preset !== "ship" && preset !== "review") || !isAddressSeverity(severity)))
+    return { violation: "bind_preset severity is only a supported review severity" };
+  if (
+    renewals !== undefined &&
+    (preset !== "ship" ||
+      !Number.isInteger(renewals) ||
+      (renewals as number) < 0 ||
+      (renewals as number) > GRANT_RENEWALS_MAX)
+  )
+    return { violation: `bind_preset renewals must be a Ship count from 0 to ${GRANT_RENEWALS_MAX}` };
+  if (verbosity !== undefined && !isVerbosity(verbosity))
+    return { violation: "bind_preset verbosity must be quiet, verbose or debug" };
+  const evidence =
+    settingsEvidence !== null && typeof settingsEvidence === "object" && !Array.isArray(settingsEvidence)
+      ? (settingsEvidence as Record<string, unknown>)
+      : {};
+  for (const [setting, value] of Object.entries({ effort, budget, severity, renewals, verbosity })) {
+    if (value === undefined) continue;
+    const quote = evidence[setting];
+    if (typeof quote !== "string" || quote.trim() === "" || !requestText.includes(quote))
+      return {
+        violation: `bind_preset ${setting} needs an exact quote from this request in settingsEvidence.${setting}`,
+      };
+  }
+  return {
+    settings: {
+      ...(ref !== undefined ? { model: ref } : {}),
+      ...(effort !== undefined ? { effort: effort as Effort } : {}),
+      ...(budget !== undefined ? { budget: budget as number } : {}),
+      ...(severity !== undefined ? { severity: severity as AddressSeverity } : {}),
+      ...(renewals !== undefined ? { renewals: renewals as number } : {}),
+      ...(verbosity !== undefined ? { verbosity: verbosity as Verbosity } : {}),
+    },
+  };
+}
+
+/** Validate one model turn. Presets run on the author's own text; commands
+ * render through the registry grammar. A no-call turn is one repair. */
 export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorTurnContext): OperatorTurn {
   if (typeof answer === "string") {
     const text = tidy(answer.trim());
@@ -1061,7 +1220,7 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
       ...(typeof input.filter === "string" && input.filter.trim().length > 0 ? { filter: input.filter } : {}),
     };
   if (answer.tool === OPERATOR_BIND_TOOL) {
-    const { preset, reason, model, modelWord, repo, shipEntry, workObjective } = input;
+    const { preset, reason, repo, shipEntry, workObjective } = input;
     if (typeof preset !== "string" || !ctx.presets.includes(preset))
       return {
         kind: "violation",
@@ -1082,43 +1241,14 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         kind: "violation",
         violation: "bind_preset for ship needs shipEntry: work, work_from_thread, review or plan",
       };
-    if (selectedPreset !== "ship" && shipEntry !== undefined && batch === undefined)
-      return { kind: "violation", violation: "shipEntry is only for the ship preset" };
     if (
+      selectedPreset === "ship" &&
       workObjective !== undefined &&
       ((shipEntry !== "work" && shipEntry !== "work_from_thread") || typeof workObjective !== "string")
     )
       return { kind: "violation", violation: "workObjective is only for a Ship work bind" };
-    // The plain-words model (the plain-words model unit): an optional ref the
-    // run then uses at directive precedence. The parse holds its shape and its
-    // provider here; the loop holds it against the catalogue (`runOperator`),
-    // so a ref this deployment cannot run is a violation re-asked — the model
-    // gets its retries to read `provider_models` and pass a listed ref, or ask
-    // naming the candidates — never a guess and never a silent default.
-    let ref: string | undefined;
-    // The operator may send an empty optional field. It is absence, not a
-    // request to pick a model. An unsubstantiated model leaves the configured
-    // resolution ladder in charge without a repair that could invent a ref.
-    if (
-      typeof model === "string" &&
-      model.trim() !== "" &&
-      typeof modelWord === "string" &&
-      requestedModelWord(ctx.requestText, modelWord, model)
-    ) {
-      const trimmed = model.trim();
-      const parsed = /^([A-Za-z0-9_.-]+)\/\S+$/.exec(trimmed);
-      if (parsed === null)
-        return {
-          kind: "violation",
-          violation: `bind_preset's model "${String(model)}" is not a \`<provider>/<model>\` ref; read provider_models and pass a listed ref, or ask naming the candidates`,
-        };
-      if (ctx.providers !== undefined && !ctx.providers.includes(parsed[1]))
-        return {
-          kind: "violation",
-          violation: `bind_preset's model \`${trimmed}\` names no model provider this deployment has; read provider_models and pass a listed ref, or ask naming the candidates`,
-        };
-      ref = trimmed;
-    }
+    const requestSettings = requestSettingsOf(input, selectedPreset, ctx.requestText, ctx.providers);
+    if ("violation" in requestSettings) return { kind: "violation", violation: requestSettings.violation };
     let repository: string | undefined;
     let repoSource: OperatorBind["repoSource"];
     const requestRepo = batch === undefined ? explicitRepoOf(ctx.requestText) : undefined;
@@ -1207,7 +1337,7 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         };
       repository = trimmed;
     }
-    if (shipEntry === "work_from_thread" && repoSource !== "thread")
+    if (selectedPreset === "ship" && shipEntry === "work_from_thread" && repoSource !== "thread")
       return { kind: "violation", violation: "work_from_thread needs the requester's established thread repository" };
     const words = stripDirectiveHead(ctx.requestText, selectedPreset);
     const line = operatorLine(redactSecrets(`agent:${selectedPreset} ${words}`));
@@ -1219,11 +1349,11 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
           {
             line,
             reason: tidy(reason),
-            ...(ref !== undefined ? { model: ref } : {}),
+            ...requestSettings.settings,
             ...(repository !== undefined ? { repo: repository } : {}),
             ...(repoSource !== undefined ? { repoSource } : {}),
             ...(selectedPreset === "ship" ? { shipEntry: shipEntry as ShipEntryIntent } : {}),
-            ...(typeof workObjective === "string" && workObjective.trim()
+            ...(selectedPreset === "ship" && typeof workObjective === "string" && workObjective.trim()
               ? { workObjective: tidy(workObjective.trim()) }
               : {}),
           },
@@ -1262,7 +1392,7 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     };
   }
   if (answer.tool === OPERATOR_ASK_TOOL) {
-    const { text, proposal, reason } = input;
+    const { text, proposal, proposalSettings, reason } = input;
     if (typeof text !== "string" || text.trim().length === 0)
       return { kind: "violation", violation: "an ask with no text" };
     const issueNumber = ctx.requesterIssue?.split("#")[1];
@@ -1284,12 +1414,41 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         violation:
           "an ask whose proposal is not a runnable bind from this turn's commands, presets and repository facts",
       };
+    const proposedPreset = typeof proposal === "string" ? presetBindOf(proposal, ctx.presets) : undefined;
+    if (proposedPreset !== undefined && proposalSettings === undefined)
+      return {
+        kind: "violation",
+        violation: "a preset proposal needs typed proposalSettings, empty when none were requested",
+      };
+    if (proposalSettings !== undefined && proposedPreset === undefined)
+      return { kind: "violation", violation: "proposalSettings are only for a preset proposal" };
+    if (
+      proposalSettings !== undefined &&
+      (proposalSettings === null || typeof proposalSettings !== "object" || Array.isArray(proposalSettings))
+    )
+      return { kind: "violation", violation: "proposalSettings must be an object" };
+    const checkedProposalSettings =
+      proposedPreset !== undefined && proposalSettings !== undefined
+        ? requestSettingsOf(proposalSettings as Record<string, unknown>, proposedPreset, ctx.requestText, ctx.providers)
+        : undefined;
+    if (checkedProposalSettings !== undefined && "violation" in checkedProposalSettings)
+      return { kind: "violation", violation: checkedProposalSettings.violation };
+    if (
+      checkedProposalSettings !== undefined &&
+      "settings" in checkedProposalSettings &&
+      typeof (proposalSettings as Record<string, unknown>).model === "string" &&
+      checkedProposalSettings.settings.model === undefined
+    )
+      return { kind: "violation", violation: "a proposed model needs evidence in this request" };
     return {
       kind: "decision",
       decision: {
         kind: "question",
         text: redactAndCap(text, ROUTE_RECEIPT_CAP),
         ...(typeof proposal === "string" && proposal.trim().length > 0 ? { proposal: operatorLine(proposal) } : {}),
+        ...(checkedProposalSettings !== undefined && "settings" in checkedProposalSettings
+          ? { proposalSettings: checkedProposalSettings.settings }
+          : {}),
         reason: tidy(reason),
       },
     };
@@ -1429,6 +1588,7 @@ export function pendingQuestionOf(
           mode: string;
           outcome: string;
           proposal?: string;
+          proposalSettings?: OperatorRequestSettings;
           question?: string;
           questionKind?: "target_repository";
           questionWriter?: string;
@@ -1440,6 +1600,7 @@ export function pendingQuestionOf(
 ):
   | {
       proposal?: string;
+      proposalSettings?: OperatorRequestSettings;
       question?: string;
       questionKind?: "target_repository";
       questionWriter?: string;
@@ -1453,6 +1614,7 @@ export function pendingQuestionOf(
     return undefined;
   return {
     ...(operator.proposal !== undefined ? { proposal: operator.proposal } : {}),
+    ...(operator.proposalSettings !== undefined ? { proposalSettings: operator.proposalSettings } : {}),
     ...(operator.question !== undefined ? { question: operator.question } : {}),
     ...(operator.questionKind !== undefined ? { questionKind: operator.questionKind } : {}),
     ...(operator.questionWriter !== undefined ? { questionWriter: operator.questionWriter } : {}),
@@ -1517,12 +1679,25 @@ export function answeredRepositoryTarget(
  *  anything else ("no, the docs one") is undefined, and the event is the
  *  question's free-text answer, joined onto the original ask
  *  (`joinedAnswerRequest`) and decided fresh. */
-export function bindFromAnswer(text: string, pending: { proposal: string }): OperatorBind | undefined {
+export function bindFromAnswer(
+  text: string,
+  pending: { proposal: string; proposalSettings?: OperatorRequestSettings },
+): OperatorBind | undefined {
   if (!isYesAnswer(text)) return undefined;
+  const preset = presetBindOf(
+    pending.proposal,
+    operatorPresets().map((p) => p.name),
+  );
+  if (preset !== undefined && pending.proposalSettings === undefined) return undefined;
   // Marked confirmed: the proposal's line is the one place the task lives —
   // the answer itself says nothing — so a preset proposal routes the line's
   // tail as the request instead of the word "yes".
-  return { line: operatorLine(pending.proposal), reason: "yes to the pending question's proposal", confirmed: true };
+  return {
+    line: operatorLine(pending.proposal),
+    reason: "yes to the pending question's proposal",
+    ...pending.proposalSettings,
+    confirmed: true,
+  };
 }
 
 /** The question as the person reads it: the operator's text, then record
@@ -2100,6 +2275,11 @@ export function operatorEventOf(
     line: string;
     reason: string;
     model?: string;
+    effort?: Effort;
+    budget?: number;
+    severity?: AddressSeverity;
+    renewals?: number;
+    verbosity?: Verbosity;
     repo?: string;
     repoSource?: "request" | "attachment" | "thread" | "channel";
     shipEntry?: ShipEntryIntent;
@@ -2110,6 +2290,7 @@ export function operatorEventOf(
   questionKind?: "target_repository";
   questionWriter?: string;
   proposal?: string;
+  proposalSettings?: OperatorRequestSettings;
   refusalCause?: string;
   refusalText?: string;
   providerFailure?: ProviderFailureCause;
@@ -2129,6 +2310,11 @@ export function operatorEventOf(
             line: b.line,
             reason: b.reason,
             ...(b.model !== undefined ? { model: b.model } : {}),
+            ...(b.effort !== undefined ? { effort: b.effort } : {}),
+            ...(b.budget !== undefined ? { budget: b.budget } : {}),
+            ...(b.severity !== undefined ? { severity: b.severity } : {}),
+            ...(b.renewals !== undefined ? { renewals: b.renewals } : {}),
+            ...(b.verbosity !== undefined ? { verbosity: b.verbosity } : {}),
             ...(b.repo !== undefined ? { repo: b.repo } : {}),
             ...(b.repoSource !== undefined ? { repoSource: b.repoSource } : {}),
             ...(b.shipEntry !== undefined ? { shipEntry: b.shipEntry } : {}),
@@ -2141,6 +2327,7 @@ export function operatorEventOf(
     ...(d.kind === "question" && d.questionKind !== undefined ? { questionKind: d.questionKind } : {}),
     ...(d.kind === "question" && d.questionWriter !== undefined ? { questionWriter: d.questionWriter } : {}),
     ...(d.kind === "question" && d.proposal !== undefined ? { proposal: d.proposal } : {}),
+    ...(d.kind === "question" && d.proposalSettings !== undefined ? { proposalSettings: d.proposalSettings } : {}),
     ...(d.kind === "refusal" ? { refusalCause: d.cause, refusalText: d.text } : {}),
     ...(d.kind === "refusal" && d.cause === "provider" ? { providerFailure: d.providerFailure } : {}),
     ...(answer.attempts ? { attempts: answer.attempts } : {}),
@@ -2397,7 +2584,18 @@ export async function operatorStage(
   // answer — "yes" binds the proposal with no model turn (`bindFromAnswer`);
   // anything else binds fresh, the marker in the prompt so the model sees it.
   const pending = pendingQuestionOf(ctx.thread, msg.userId);
-  const yes = pending?.proposal !== undefined ? bindFromAnswer(msg.text, { proposal: pending.proposal }) : undefined;
+  const legacyPresetProposal =
+    pending?.proposal !== undefined &&
+    pending.proposalSettings === undefined &&
+    isYesAnswer(msg.text) &&
+    presetBindOf(
+      pending.proposal,
+      operatorPresets().map((p) => p.name),
+    ) !== undefined;
+  const yes =
+    pending?.proposal !== undefined
+      ? bindFromAnswer(msg.text, pending as { proposal: string; proposalSettings?: OperatorRequestSettings })
+      : undefined;
   const durableContext = requesterRepoContext(tail, msg.userId, requesterTarget);
   const provisionalTarget =
     !targetStoreUnavailable &&
@@ -2407,41 +2605,55 @@ export async function operatorStage(
     durableContext.requesterRepo === undefined
       ? ctx.answeredTarget.target
       : undefined;
-  let answer: OperatorAnswer = yes
-    ? { decision: { kind: "binds", binds: [yes], reason: yes.reason }, latencyMs: 0, outputTokens: 0 }
-    : await runOperator(
-        {
-          text: msg.text,
-          projection,
-          tail,
-          requesterId: msg.userId,
-          ...((provisionalTarget ?? requesterTarget) ? { requesterTarget: provisionalTarget ?? requesterTarget } : {}),
-          ...(targetStoreUnavailable ? { targetStoreUnavailable: true } : {}),
-          ...(typedTargetStoreUnavailable ? { typedTargetStoreUnavailable: true } : {}),
-          ...(attachments.length > 0 ? { attachments } : {}),
-          ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates: repoCandidates.slice(0, 50) } : {}),
-          organization: cfg.organization,
-          ...(residentRepos && residentRepos.length > 0 ? { residentRepos } : {}),
-          ...(candidateStatus === "truncated" && barePrCandidates ? { residentReposTruncated: true } : {}),
-          ...(newestFinishedRun !== undefined ? { newestFinishedRun } : {}),
-          ...(channelRepo !== undefined ? { channelRepo } : {}),
-          // The deployment's declared providers (issue 2088): what a write
-          // proposal may name, and what the parse holds a write's ref against.
-          // The catalogue-bearing blocks (a `baseUrl` of their own — the
-          // aggregators) lead the fallback proposal's choice.
-          providers: Object.keys(cfg.providers ?? {}),
-          catalogueProviders: Object.entries(cfg.providers ?? {})
-            .filter(([, block]) => typeof block.baseUrl === "string" && block.baseUrl.length > 0)
-            .map(([name]) => name),
-          ...(deps.providerModels !== undefined ? { providerModels: deps.providerModels } : {}),
-          ...(sources !== undefined ? { sources } : {}),
-          ...(sourceCatalogUnavailable !== undefined ? { sourceCatalogUnavailable } : {}),
-          ...(pending ? { pendingQuestion: pending.proposal !== undefined ? { proposal: pending.proposal } : {} } : {}),
-          ...(ctx.owner ? { owner: ctx.owner } : {}),
+  let answer: OperatorAnswer = legacyPresetProposal
+    ? {
+        decision: {
+          kind: "question",
+          text: "I cannot confirm that earlier proposal because its run settings were not saved. What would you like me to run?",
+          reason: "the pending preset proposal has no typed settings",
         },
-        model,
-        maxOutputTokens !== undefined ? { maxOutputTokens } : {},
-      );
+        latencyMs: 0,
+        outputTokens: 0,
+      }
+    : yes
+      ? { decision: { kind: "binds", binds: [yes], reason: yes.reason }, latencyMs: 0, outputTokens: 0 }
+      : await runOperator(
+          {
+            text: msg.text,
+            projection,
+            tail,
+            requesterId: msg.userId,
+            ...((provisionalTarget ?? requesterTarget)
+              ? { requesterTarget: provisionalTarget ?? requesterTarget }
+              : {}),
+            ...(targetStoreUnavailable ? { targetStoreUnavailable: true } : {}),
+            ...(typedTargetStoreUnavailable ? { typedTargetStoreUnavailable: true } : {}),
+            ...(attachments.length > 0 ? { attachments } : {}),
+            ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates: repoCandidates.slice(0, 50) } : {}),
+            organization: cfg.organization,
+            ...(residentRepos && residentRepos.length > 0 ? { residentRepos } : {}),
+            ...(candidateStatus === "truncated" && barePrCandidates ? { residentReposTruncated: true } : {}),
+            ...(newestFinishedRun !== undefined ? { newestFinishedRun } : {}),
+            ...(channelRepo !== undefined ? { channelRepo } : {}),
+            // The deployment's declared providers (issue 2088): what a write
+            // proposal may name, and what the parse holds a write's ref against.
+            // The catalogue-bearing blocks (a `baseUrl` of their own — the
+            // aggregators) lead the fallback proposal's choice.
+            providers: Object.keys(cfg.providers ?? {}),
+            catalogueProviders: Object.entries(cfg.providers ?? {})
+              .filter(([, block]) => typeof block.baseUrl === "string" && block.baseUrl.length > 0)
+              .map(([name]) => name),
+            ...(deps.providerModels !== undefined ? { providerModels: deps.providerModels } : {}),
+            ...(sources !== undefined ? { sources } : {}),
+            ...(sourceCatalogUnavailable !== undefined ? { sourceCatalogUnavailable } : {}),
+            ...(pending
+              ? { pendingQuestion: pending.proposal !== undefined ? { proposal: pending.proposal } : {} }
+              : {}),
+            ...(ctx.owner ? { owner: ctx.owner } : {}),
+          },
+          model,
+          maxOutputTokens !== undefined ? { maxOutputTokens } : {},
+        );
   const bind = answer.decision.kind === "binds" ? answer.decision.binds[0] : undefined;
   const preset = bind
     ? presetBindOf(
@@ -2509,7 +2721,7 @@ export async function operatorStage(
   // the request would have been. On a joined answer that draws a second
   // question, the stored ask is the joined line, so a later answer joins onto
   // the whole of it.
-  return event.outcome === "question"
+  return event.outcome === "question" && !legacyPresetProposal
     ? { ...event, request: redactAndCap(oneLine(msg.text), OPERATOR_REQUEST_CAP) }
     : event;
 }
@@ -2591,6 +2803,11 @@ export type OperatorExecution =
        *  precedence (`resolveRun`'s `operatorModel`) — exactly as a typed
        *  `model:<ref>` would resolve. Absent when the request named none. */
       model?: string;
+      effort?: Effort;
+      budget?: number;
+      severity?: AddressSeverity;
+      renewals?: number;
+      verbosity?: Verbosity;
       /** The typed repository slot from bind_preset, when the door filled it. */
       repo?: string;
       /** How the repository was evidenced, for a thread-dependent Ship brief. */
@@ -2657,7 +2874,18 @@ export async function executeOperatorDecision(
   // The receipt (`bound:`) is the system's word on what it did for the person
   // — `verbose` material (routing-and-config item 28), resolved like the
   // stages that speak before a request resolves.
-  const verbosity = deps.config.verbosityFor(msg.channelId, msg.userId, parseDirectives(msg.text).verbosity);
+  const receiptBind = event.binds?.[0];
+  const routedPreset =
+    receiptBind !== undefined &&
+    presetBindOf(
+      receiptBind.line,
+      operatorPresets().map((preset) => preset.name),
+    ) !== undefined;
+  const verbosity = deps.config.verbosityFor(
+    msg.channelId,
+    msg.userId,
+    routedPreset ? receiptBind?.verbosity : parseDirectives(msg.text).verbosity,
+  );
   const verbose = shows(verbosity, "verbose");
   const answered: OperatorExecution = { kind: "answered" };
   // Ownership already resolved this event to one ended pipeline. The operator
@@ -2753,6 +2981,11 @@ export async function executeOperatorDecision(
         preset,
         ...(request !== undefined ? { request } : {}),
         ...(bind.model !== undefined ? { model: bind.model } : {}),
+        ...(bind.effort !== undefined ? { effort: bind.effort } : {}),
+        ...(bind.budget !== undefined ? { budget: bind.budget } : {}),
+        ...(bind.severity !== undefined ? { severity: bind.severity } : {}),
+        ...(bind.renewals !== undefined ? { renewals: bind.renewals } : {}),
+        ...(bind.verbosity !== undefined ? { verbosity: bind.verbosity } : {}),
         ...(bind.repo !== undefined ? { repo: bind.repo } : {}),
         ...(bind.repoSource !== undefined ? { repoSource: bind.repoSource } : {}),
         ...(bind.shipEntry !== undefined ? { shipEntry: bind.shipEntry } : {}),

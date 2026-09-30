@@ -21,6 +21,8 @@ import { isVerbosity, type Verbosity } from "./core/verbosity.js";
 // carries it.
 
 export interface RequestDirectives {
+  /** Interim migration marker: the operator supplied typed request settings. */
+  interpreter?: "operator";
   agent?: string;
   model?: string;
   effort?: Effort;

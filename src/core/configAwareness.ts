@@ -28,6 +28,8 @@ export interface ConfigAwarenessInput {
   user: Scope;
   /** `agent:`/`model:`/`effort:`/`budget:` parsed from THIS message. */
   messageDirective: DirectiveSet;
+  /** The request settings came from the operator's typed bind, not a chat token. */
+  messageInterpreter?: "operator";
   /** `agent:`/`model:`/`effort:` carried from an earlier message in the thread
    *  (stickiness); a budget is never carried, so the set has none. */
   threadDirective: Omit<DirectiveSet, "budget">;
@@ -83,7 +85,11 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
   const { agent: threadAgent, ...threadRest } = i.threadDirective;
   const fromThread = fmtDirective(threadRest);
   if (fromMessage) {
-    lines.push(`This message's \`${fromMessage}\` directive set the agent/model/effort for this run.`);
+    lines.push(
+      i.messageInterpreter === "operator"
+        ? `The operator bound this message's run settings as \`${fromMessage}\`.`
+        : `This message's \`${fromMessage}\` directive set the agent/model/effort for this run.`,
+    );
   } else {
     if (threadAgent) {
       lines.push(
@@ -132,8 +138,12 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
     );
   }
   if (i.budget?.boundedBy !== undefined) {
+    const clippedBy =
+      i.budget.boundedBy === "directive" && i.messageInterpreter === "operator"
+        ? "request budget"
+        : clipSourceLabel(i.budget.boundedBy);
     lines.push(
-      `Budget: ${i.budget.minutes} min (clipped by the ${clipSourceLabel(i.budget.boundedBy)}; the preset asks ${i.budget.presetMinutes}).`,
+      `Budget: ${i.budget.minutes} min (clipped by the ${clippedBy}; the preset asks ${i.budget.presetMinutes}).`,
     );
   }
   // A `budget:` directive that did not win — at or above the preset's own
@@ -143,7 +153,11 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
   if (i.budget?.directive !== undefined && i.budget.boundedBy !== "directive") {
     const stands =
       i.budget.boundedBy === undefined ? `the preset's ${i.budget.presetMinutes} min` : `${i.budget.minutes} min`;
-    lines.push(`This message's \`budget:${i.budget.directive}\` narrowed nothing: the run's budget is ${stands}.`);
+    lines.push(
+      i.messageInterpreter === "operator"
+        ? `This message's requested ${i.budget.directive} min budget narrowed nothing: the run's budget is ${stands}.`
+        : `This message's \`budget:${i.budget.directive}\` narrowed nothing: the run's budget is ${stands}.`,
+    );
   }
 
   // The harness driving this run and whose word put it there (harness.md item

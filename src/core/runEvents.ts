@@ -6,6 +6,9 @@ import type { HarnessScope } from "./harness/scope.js";
 import type { ModelCard } from "./modelCard.js";
 import type { ProviderFailureCause } from "./provider.js";
 import type { RunStateEvent } from "./runLiveState.js";
+import type { Effort } from "../effort.js";
+import type { AddressSeverity } from "./reviewVerdict.js";
+import type { Verbosity } from "./verbosity.js";
 
 /** The `pr_description` review artifact minus the event envelope
  *  (docs/reference/specs/reading-diff.md item 7). */
@@ -1151,6 +1154,11 @@ export type RunEvent =
         line: string;
         reason: string;
         model?: string;
+        effort?: Effort;
+        budget?: number;
+        severity?: AddressSeverity;
+        renewals?: number;
+        verbosity?: Verbosity;
         repo?: string;
         /** The admissible fact behind the model's typed repo choice. */
         repoSource?: "request" | "attachment" | "thread" | "channel";
@@ -1167,6 +1175,15 @@ export type RunEvent =
       /** A question's proposed line, redacted and cut like the receipt — what
        *  the next turn's "yes" binds (`bindFromAnswer`). */
       proposal?: string;
+      /** Typed settings accepted with a preset proposal; a later yes reuses them. */
+      proposalSettings?: {
+        model?: string;
+        effort?: Effort;
+        budget?: number;
+        severity?: AddressSeverity;
+        renewals?: number;
+        verbosity?: Verbosity;
+      };
       /** A question's original ask, redacted and capped: the request the
        *  question interrupted, kept so the person's next words in the thread
        *  join back onto it (`joinedAnswerRequest` —
