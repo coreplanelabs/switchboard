@@ -3116,7 +3116,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       merge: "person",
       // No `plan.path` on the record: the mark of a generated plan, answered for the machine's report.
       generated: true,
-      caps: { maxRounds: 3, maxMinutes: 240 },
+      caps: { maxRounds: 48, maxMinutes: 1440 },
       units: [],
     });
     expect("planId" in body).toBe(false);
@@ -7436,7 +7436,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       humanGated: true as const,
     },
   ];
-  const salvageHarness = async () => {
+  const salvageHarness = async (maxMinutes = 120) => {
     const workflows = new Set<string>();
     const h = harness({
       prFacts: exactRecoveryFacts(SALVAGED),
@@ -7446,7 +7446,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         return { kind: duplicate ? "duplicate" : "created", id };
       },
     });
-    await h.instances.put(recoveryInstance());
+    await h.instances.put({ ...recoveryInstance(), caps: { maxRounds: 3, maxMinutes } });
     const row = requestChangesRow();
     row.rounds.push(
       { index: 1, agent: "coding", outcome: "started", at: NOW - minutesToMs(15) },
@@ -7959,7 +7959,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   it.each(["missing disposition", "missing description", "missing final head", "red CI", "human consent", "complete"])(
     "salvage recovery keeps %s behind the findings and exact-head review gates",
     async (scenario) => {
-      const h = await salvageHarness();
+      const h = await salvageHarness(124);
       expect((await callRecovery(h)).status).toBe(200);
       let head = SALVAGED;
       const fixed = "c".repeat(40);
@@ -8775,9 +8775,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       finishedAt: NOW - minutesToMs(45),
       ...over,
     });
-  const legacyHarness = async () => {
+  const legacyHarness = async (maxMinutes = 120) => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
-    await h.instances.put(recoveryInstance());
+    await h.instances.put({ ...recoveryInstance(), caps: { maxRounds: 3, maxMinutes } });
     await h.instances.putUnits([legacyRow()]);
     await h.store.put(originalCoding());
     await h.store.put(reviewRecord({ startedAt: NOW - minutesToMs(40), finishedAt: NOW - minutesToMs(30) }));
@@ -10273,7 +10273,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   });
 
   it("legacy binding repair drives the real recovery transport through authorized findings and exact-head re-review", async () => {
-    const h = await legacyHarness();
+    const h = await legacyHarness(124);
     const fixed = "b".repeat(40);
     let head = HEAD;
     const children: CoordinatorTag[] = [];

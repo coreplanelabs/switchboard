@@ -592,7 +592,7 @@ export const REFUSAL_SENTENCES = {
           .join(", ")}.`
       : "Reply in the unit's own thread instead."),
   ship_budget: (p: { maxMinutes: number; maxRounds: number; need: number; provision: number; coding: number }) =>
-    `🚫 Ship cannot start under a ${p.maxMinutes}-minute budget: the loop it allows (${p.maxRounds} review rounds) needs ${p.need} minutes — ` +
+    `🚫 Ship cannot start under a ${p.maxMinutes}-minute budget: the loop it allows (${p.maxRounds} review ${p.maxRounds === 1 ? "round" : "rounds"}) needs ${p.need} minutes — ` +
     `${p.provision} to provision, the coding child's ${p.coding}, and the reserve for the rounds after it at their floors. ` +
     `Switchboard left the budget and boundary unchanged and did not start either the review loop or a single coding pass.`,
 } as const;

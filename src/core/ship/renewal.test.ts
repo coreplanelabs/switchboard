@@ -241,7 +241,7 @@ describe("renewalDecision — renew only when progress, a renewal and the cap al
     ).toEqual({
       renew: false,
       why: "unfit",
-      detail: "a 40-minute budget cannot hold the ship loop (3 review rounds need 163 min)",
+      detail: "a 40-minute budget cannot hold the ship loop (3 review rounds need 169 min)",
       renewalsLeft: 6,
     });
   });
@@ -305,11 +305,11 @@ describe("renderRenewal — the card's words, as the record's trace has them", (
         {
           renew: false,
           why: "unfit",
-          detail: "a 40-minute budget cannot hold the ship loop (3 review rounds need 163 min)",
+          detail: "a 40-minute budget cannot hold the ship loop (3 review rounds need 169 min)",
           renewalsLeft: 6,
         },
         { renewals: 6 },
       ),
-    ).toBe("a 40-minute budget cannot hold the ship loop (3 review rounds need 163 min)");
+    ).toBe("a 40-minute budget cannot hold the ship loop (3 review rounds need 169 min)");
   });
 });

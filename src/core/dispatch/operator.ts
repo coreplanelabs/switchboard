@@ -56,6 +56,7 @@ import { sessionKey, threadSessionKey } from "../runLedger/sessionLog.js";
 import { chatActorOf } from "../authz/actor.js";
 import { renderRepoFacts } from "./repoFacts.js";
 import { barePrNumberOf, explicitRepoOf, type ResidentSlugs } from "../repoContext.js";
+import { prBatchOf } from "../prBatch.js";
 import { residentSlugsLister } from "../../execution/factory.js";
 import type { ProviderModelsReader } from "./providerModels.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
@@ -468,6 +469,7 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
         ]
       : []),
     "A write ask in a named or inherited repository binds the write preset even when a detail inside it is unresolved — the run it starts resolves the detail with the repository in front of it. For a terse fix, inherit only the same requester's actor-stamped explicit target in the thread; a prior general run's repository and other people's or assistant turns do not authorize a write. Conflicting requester targets require one question. Ask a question only for a fork the run itself could not resolve, and a question's proposal must be a line that would do the asked work: a write line for a write ask, never a read (an exploration, a listing, a summary) standing in for the work.",
+    "A request to review or ship several linked pull requests is one conductor bind, even when the links span repositories. Omit the repository slot: each child uses its own exact pull request URL. The conductor may start Ship children only for the pull requests explicitly listed in a 'ship these' request.",
     "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a proposal that would do the write built from them — the person's yes runs it, and their next words refine it.",
     "A question about whether the person has config overrides uses `config show`: it describes their own scope, this channel's scope and the effective settings. `config overrides` lists channels with scopes; use it only when they ask which channels have settings.",
     "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run. Pass that ref as `bind_preset`'s `model` and one exact model-name word from the person's request as `modelWord` (such as 'astra', 'o3', or 'gpt-6'): the run then uses it, exactly as a typed `model:` directive would. The request still rides verbatim — never strip the model word from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model omits both `model` and `modelWord`.",
@@ -976,6 +978,10 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         kind: "violation",
         violation: `bind_preset named "${String(preset)}", not a preset the projection offers`,
       };
+    const batch = prBatchOf(ctx.requestText);
+    if (batch !== undefined && !ctx.presets.includes("conductor"))
+      return { kind: "violation", violation: "a pull request batch needs the conductor preset" };
+    const selectedPreset = batch === undefined ? preset : "conductor";
     // The plain-words model (the plain-words model unit): an optional ref the
     // run then uses at directive precedence. The parse holds its shape and its
     // provider here; the loop holds it against the catalogue (`runOperator`),
@@ -1008,30 +1014,37 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     }
     let repository: string | undefined;
     let repoSource: OperatorBind["repoSource"];
-    const requestRepo = explicitRepoOf(ctx.requestText);
-    const needsRepo = AGENTS[preset] !== undefined && machineNeedsRepo(AGENTS[preset].machine);
-    const threadRepo = preset === "review" ? ctx.threadRepo : needsRepo ? ctx.requesterRepo : ctx.threadRepo;
-    if (needsRepo && preset !== "review" && ctx.requesterRepoConflict && requestRepo === undefined)
+    const requestRepo = batch === undefined ? explicitRepoOf(ctx.requestText) : undefined;
+    const needsRepo = AGENTS[selectedPreset] !== undefined && machineNeedsRepo(AGENTS[selectedPreset].machine);
+    const suppliedRepo = batch === undefined ? repo : undefined;
+    const threadRepo = selectedPreset === "review" ? ctx.threadRepo : needsRepo ? ctx.requesterRepo : ctx.threadRepo;
+    if (needsRepo && selectedPreset !== "review" && ctx.requesterRepoConflict && requestRepo === undefined)
       return {
         kind: "violation",
         violation: "the requester named conflicting thread targets; ask which repository to fix",
       };
-    if (ctx.attachmentRepos === null && requestRepo === undefined && (repo !== undefined || needsRepo))
+    if (ctx.attachmentRepos === null && requestRepo === undefined && (suppliedRepo !== undefined || needsRepo))
       return {
         kind: "violation",
         violation: "the attachment has conflicting repository evidence; ask which repository is the target",
       };
     const attachmentRepo = ctx.attachmentRepos?.length === 1 ? ctx.attachmentRepos[0] : undefined;
-    if (needsRepo && preset !== "review" && requestRepo === undefined && ctx.requesterRepo && repo === undefined)
+    if (
+      needsRepo &&
+      selectedPreset !== "review" &&
+      requestRepo === undefined &&
+      ctx.requesterRepo &&
+      suppliedRepo === undefined
+    )
       return {
         kind: "violation",
         violation: `bind the requester's thread repository \`${ctx.requesterRepo}\` explicitly before starting work`,
       };
     if (
-      preset === "review" &&
+      selectedPreset === "review" &&
       barePrNumberOf(ctx.requestText) !== undefined &&
       requestRepo === undefined &&
-      repo === undefined &&
+      suppliedRepo === undefined &&
       threadRepo === undefined &&
       ctx.channelRepo === undefined &&
       attachmentRepo === undefined
@@ -1044,14 +1057,14 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
       needsRepo &&
       requestRepo === undefined &&
       attachmentRepo !== undefined &&
-      (typeof repo !== "string" || repo.trim().toLowerCase() !== attachmentRepo.toLowerCase())
+      (typeof suppliedRepo !== "string" || suppliedRepo.trim().toLowerCase() !== attachmentRepo.toLowerCase())
     )
       return {
         kind: "violation",
         violation: `the attachment identifies \`${attachmentRepo}\` as the target; bind that repository rather than an inherited default`,
       };
-    if (repo !== undefined) {
-      const trimmed = typeof repo === "string" ? repo.trim().toLowerCase() : "";
+    if (suppliedRepo !== undefined) {
+      const trimmed = typeof suppliedRepo === "string" ? suppliedRepo.trim().toLowerCase() : "";
       if (!/^[\w.-]+\/[\w.-]+$/.test(trimmed))
         return { kind: "violation", violation: `bind_preset's repo must be an owner/name slug` };
       if (requestRepo !== undefined && requestRepo !== trimmed)
@@ -1080,8 +1093,8 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         };
       repository = trimmed;
     }
-    const words = stripDirectiveHead(ctx.requestText, preset);
-    const line = operatorLine(redactSecrets(`agent:${preset} ${words}`));
+    const words = stripDirectiveHead(ctx.requestText, selectedPreset);
+    const line = operatorLine(redactSecrets(`agent:${selectedPreset} ${words}`));
     return {
       kind: "decision",
       decision: {

@@ -5,15 +5,14 @@
 // orchestrator stays `dispatch()` (docs/decisions/0002-dispatcher-is-the-only-orchestrator.md):
 // a child is a `dispatch()` run as the requesting user — the parent's user, in
 // the parent's channel — in a thread the parent's channel opens for it, with
-// `DispatchOptions.parent` naming the parent, the child's depth and the wall
-// clock the parent had left, and `DispatchOptions.seed` the parent's
-// conversation as text turns — a child is a reader of its parent's
-// conversation, started from what was said so far plus its prompt. What this
+// `DispatchOptions.parent` naming the parent and depth. Read children inherit
+// the parent's remaining clock and conversation as text turns. An exact-PR
+// Ship child gets its own lease and no parent seed. What this
 // stage decides for itself it refuses by name before anything is opened: a
-// child cannot spawn (`spawn_depth`), a preset that writes is no child — the
-// registry's identity column is the line (`spawn_identity`) — a parent with
+// child cannot spawn (`spawn_depth`), a writer outside an explicit Ship batch
+// is refused (`spawn_identity`), a parent with
 // under two minutes left has no budget to hand on (`spawn_budget`), a parent
-// at `spawn.maxChildren` live children waits (`spawn_fanout`), a channel with
+// at `spawn.maxChildren` live read children waits (`spawn_fanout`), a channel with
 // no thread to open has no child (`spawn_unsupported`). Everything else — the
 // agent gate, the profile gate, admission, the repository gates — is the
 // pipeline's, asked of the child as of any request
@@ -28,7 +27,7 @@
 import { AGENTS, type ModelTier } from "../../agents/registry.js";
 import type { ConfigStore } from "../../config.js";
 import type { Effort } from "../../effort.js";
-import { carveChildOfParent, LOOP_PRESETS, type LoopPreset } from "../budgets.js";
+import { carveChildOfParent, fit, LOOP_PRESETS, PRESET_FLOORS, type LoopPreset } from "../budgets.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
 import { resolveChatActor } from "../authz/actor.js";
@@ -37,6 +36,7 @@ import type { RunRegistry } from "../runRegistry.js";
 import type { RunControl } from "../runRegistry/runControl.js";
 import type { RunStore } from "../runStore.js";
 import { createRunsService, type RunsService } from "../runsService.js";
+import { RUN_LIST_MAX_LIMIT } from "../runRecord.js";
 import type { FollowUpInbox, ThreadAdmission } from "../threadAdmission.js";
 import type { Clock } from "../trace/types.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
@@ -45,15 +45,16 @@ import { waitCapabilityFor, type WaitCapability } from "./awaitChildren.js";
 import { textTurnsOf, type TextTurn } from "./textTurns.js";
 import type { DispatchOutcome } from "./outcome.js";
 import type { OperationTarget } from "../repoContext.js";
+import { prBatchOf } from "../prBatch.js";
 
 /** The `spawn` block of `config.yaml` (docs/reference/specs/agent-conductor.md item 5). */
 export interface SpawnConfig {
-  /** The most children one run may have live at once (default 3, at least 1);
-   *  a spawn past it is refused until one finishes. */
+  /** The most read children one run may have live at once (default 8, at least 1);
+   *  an exact-PR Ship batch starts independent durable units. */
   maxChildren?: number;
 }
 
-export const DEFAULT_MAX_CHILDREN = 3;
+export const DEFAULT_MAX_CHILDREN = 8;
 
 /** The fan-out cap in force: the knob, or the default. */
 export function maxChildrenOf(cfg: SpawnConfig | undefined): number {
@@ -114,9 +115,9 @@ export function spawnTierRefusal(request: Pick<SpawnRequest, "preset" | "model">
 }
 
 /** What `dispatch()` is told about a child's parent (`DispatchOptions.parent`):
- *  the run that spawned it, the child's own depth, and the wall clock the
- *  parent had left at the spawn — the child's effective profile takes it as one
- *  more boundary (`boundedBy: "parent"`). A run that continues a spawned
+ *  the run that spawned it and the child's own depth. A read child also takes
+ *  the parent's remaining clock as a profile boundary (`boundedBy: "parent"`);
+ *  an exact-PR Ship child starts an independent durable unit. A run that continues a spawned
  *  thread (a person's reply there; dispatch/lineage.ts) names the same parent
  *  at the same depth and inherits no clock: the wait that bounded the spawned
  *  child is not what a later reply spends. */
@@ -154,7 +155,7 @@ export type SpawnOutcome =
 
 /** The registry as the stage reads it: a parent's live children, for the fan-out cap. */
 export interface SpawnRegistry {
-  listActive(): ReadonlyArray<{ id: string; finished: boolean; parentRunId?: string }>;
+  listActive(): ReadonlyArray<{ id: string; finished: boolean; parentRunId?: string; agent?: string }>;
 }
 
 /** The slice of the dispatcher's dependency bag the stage and the run tools'
@@ -293,21 +294,47 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   // coding, ship or review child never runs on the fast tier.
   const tierProblem = spawnTierRefusal(request, deps.core.config.config);
   if (tierProblem !== undefined) return refused("spawn_tier", tierProblem);
-  // A child is a reader (agent-conductor item 3): the registry's identity
-  // column is the line, never a list kept here, so a preset that writes is
-  // refused by name before a child is started.
-  if (AGENTS[request.preset]?.identity === "write") {
+  // An explicit Ship batch authorizes only its exact PR URLs. The child gets
+  // that PR's repository as an operation target; no model-chosen repository,
+  // branch or extra task text can turn one listed PR into another write.
+  const batch = parent.agentName === "conductor" ? prBatchOf(parent.msg.text) : undefined;
+  const shipTarget =
+    request.preset === "ship" && batch?.kind === "ship"
+      ? batch.targets.find((target) => target.url === request.prompt.trim())
+      : undefined;
+  if (
+    request.preset === "ship" &&
+    batch?.kind === "ship" &&
+    (shipTarget === undefined ||
+      request.ref !== undefined ||
+      (request.repo !== undefined && request.repo !== shipTarget.repo))
+  )
+    return refused("spawn_ship_target", "ship only an exact pull request URL listed in the parent's request");
+  // Other writers still cannot be spawned from a conductor. A Ship child
+  // passes this one exception only after its target was checked above.
+  if (AGENTS[request.preset]?.identity === "write" && shipTarget === undefined) {
     return refused(
       "spawn_identity",
-      `\`${request.preset}\` runs as a \`write\` identity — it pushes branches and opens pull requests — so this run was not started: spawned children read this conversation and report, but never write`,
+      `\`${request.preset}\` runs as a \`write\` identity, so this run was not started: only an exact PR in an explicit "ship these" request may spawn a write child`,
     );
   }
-  // The child's minutes are the parent's remainder, refused under the child
-  // preset's floor (decision 0046; `src/core/budgets.ts`): a child under its
-  // floor costs a thread and a model turn and finishes nothing.
+  const shipBudgetFit =
+    shipTarget !== undefined && request.budget !== undefined
+      ? fit({ maxMinutes: request.budget, maxRounds: 1 })
+      : undefined;
+  if (shipBudgetFit !== undefined && !shipBudgetFit.ok)
+    return refused("spawn_budget", `a ship child needs at least ${shipBudgetFit.need} minutes for one review round`);
+  // A durable Ship unit needs its own full lease and does not occupy the
+  // conductor's live-child slots. Its launch still needs the four-minute
+  // minimum; read children retain the parent-bound budget and fan-out cap.
   const childPreset: LoopPreset = (LOOP_PRESETS as readonly string[]).includes(request.preset)
     ? (request.preset as LoopPreset)
     : "general";
+  if (shipTarget === undefined && request.budget !== undefined && request.budget < PRESET_FLOORS[childPreset])
+    return refused(
+      "spawn_budget",
+      `a \`${request.preset}\` child needs at least ${PRESET_FLOORS[childPreset]} minutes for its loop and write-up`,
+    );
   const carved = carveChildOfParent(parent.remainingMs, childPreset);
   if (carved.kind === "refused") {
     return refused(
@@ -315,13 +342,17 @@ export async function spawnChild<D extends SpawnCoreDeps>(
       `this run has ${carved.minutes} minute${carved.minutes === 1 ? "" : "s"} left — under the ${carved.floor}-minute floor a \`${request.preset}\` child needs to do useful work; wrap up instead`,
     );
   }
-  const live = deps.registry.listActive().filter((s) => !s.finished && s.parentRunId === parent.runId).length;
-  const cap = maxChildrenOf(deps.core.config.config.spawn);
-  if (live >= cap) {
-    return refused(
-      "spawn_fanout",
-      `${live} child run${live === 1 ? " is" : "s are"} live already — the cap is ${cap} (\`spawn.maxChildren\`); wait for one to finish before spawning another`,
-    );
+  if (shipTarget === undefined) {
+    const live = deps.registry
+      .listActive()
+      .filter((s) => !s.finished && s.parentRunId === parent.runId && s.agent !== "ship").length;
+    const cap = maxChildrenOf(deps.core.config.config.spawn);
+    if (live >= cap) {
+      return refused(
+        "spawn_fanout",
+        `${live} child run${live === 1 ? " is" : "s are"} live already — the cap is ${cap} (\`spawn.maxChildren\`); wait for one to finish before spawning another`,
+      );
+    }
   }
   if (!parent.io.openThread) {
     return refused(
@@ -367,13 +398,20 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   });
   // The seed (routing-and-config item 20): what the parent's conversation
   // said up to this call, as text — no tool exchanges, no thinking.
-  const seed = parent.conversation ? textTurnsOf(parent.conversation) : undefined;
+  const seed =
+    request.preset === "ship" ? undefined : parent.conversation ? textTurnsOf(parent.conversation) : undefined;
   const settled = deps
     .dispatch(deps.core, child, io, {
-      ...(request.repo !== undefined
-        ? { operationTarget: { repo: request.repo, ...(request.ref !== undefined ? { ref: request.ref } : {}) } }
-        : {}),
-      parent: { runId: parent.runId, depth: parent.depth + 1, remainingMs: parent.remainingMs },
+      ...(shipTarget !== undefined
+        ? { operationTarget: { repo: shipTarget.repo } }
+        : request.repo !== undefined
+          ? { operationTarget: { repo: request.repo, ...(request.ref !== undefined ? { ref: request.ref } : {}) } }
+          : {}),
+      parent: {
+        runId: parent.runId,
+        depth: parent.depth + 1,
+        ...(shipTarget === undefined ? { remainingMs: parent.remainingMs } : {}),
+      },
       ...(seed ? { seed } : {}),
     })
     .then(
@@ -443,8 +481,14 @@ export type SpawningRun = Omit<SpawnParent, keyof SpawnMoment>;
  *  dispatch registers it, so two spawns issued at once would both count the
  *  same — the next spawn waits for the previous to register or refuse, and the
  *  cap holds however the caller batches its calls. */
-export function spawnCapabilityFor<D extends SpawnCoreDeps>(deps: SpawnDeps<D>, parent: SpawningRun): SpawnCapability {
+export function spawnCapabilityFor<D extends SpawnCoreDeps>(
+  deps: SpawnDeps<D>,
+  parent: SpawningRun,
+  history?: Pick<RunsService, "listRuns" | "getRun">,
+): SpawnCapability {
   const outcomes = new Map<string, DispatchOutcome>();
+  const spawnedShipTargets = new Set<string>();
+  const spawnedShipRuns = new Set<string>();
   const withHook: SpawnDeps<D> = {
     ...deps,
     onChildEnded: (child, outcome) => {
@@ -455,7 +499,65 @@ export function spawnCapabilityFor<D extends SpawnCoreDeps>(deps: SpawnDeps<D>, 
   let previous: Promise<unknown> = Promise.resolve();
   return {
     spawn: (request, at) => {
-      const turn = previous.then(() => spawnChild(withHook, { ...parent, ...at }, request));
+      const turn = previous.then(async () => {
+        const target = request.preset === "ship" ? request.prompt.trim() : undefined;
+        if (target !== undefined && spawnedShipTargets.has(target))
+          return {
+            kind: "refused" as const,
+            reason: "spawn_ship_duplicate",
+            message: "this run already started Ship for that pull request",
+          };
+        if (target !== undefined && history !== undefined) {
+          try {
+            let before: { finishedAt: number; id: string } | undefined;
+            do {
+              const page = await history.listRuns({
+                status: "all",
+                visibleTo: { kind: "all" },
+                parentRunId: parent.runId,
+                limit: RUN_LIST_MAX_LIMIT,
+                ...(before !== undefined ? { before: before.finishedAt, beforeId: before.id } : {}),
+              });
+              if (page.storeUnavailable || page.ledgerUnavailable)
+                return {
+                  kind: "refused" as const,
+                  reason: "spawn_ship_history_unavailable",
+                  message: "the previous Ship launches cannot be checked while run history is unavailable",
+                };
+              for (const child of page.runs) {
+                if (spawnedShipRuns.has(child.id) || (child.agent !== undefined && child.agent !== "ship")) continue;
+                const record = await history.getRun(child.id, { include: "messages" });
+                const input = record.ok ? record.value.events?.find((event) => event.type === "input") : undefined;
+                if (input === undefined)
+                  return {
+                    kind: "refused" as const,
+                    reason: "spawn_ship_history_unavailable",
+                    message: "a previous child launch has no readable request yet",
+                  };
+                if (input.text.trim().endsWith(target))
+                  return {
+                    kind: "refused" as const,
+                    reason: "spawn_ship_duplicate",
+                    message: "this run already started Ship for that pull request",
+                  };
+              }
+              before = page.nextBefore;
+            } while (before !== undefined);
+          } catch {
+            return {
+              kind: "refused" as const,
+              reason: "spawn_ship_history_unavailable",
+              message: "the previous Ship launches cannot be checked while run history is unavailable",
+            };
+          }
+        }
+        const outcome = await spawnChild(withHook, { ...parent, ...at }, request);
+        if (target !== undefined && outcome.kind === "spawned") {
+          spawnedShipTargets.add(target);
+          spawnedShipRuns.add(outcome.runId);
+        }
+        return outcome;
+      });
       previous = turn.catch(() => {}); // a failed turn never blocks the next
       return turn;
     },
@@ -486,10 +588,11 @@ export function runToolCapabilities<D extends SpawnCoreDeps>(
   },
 ): { spawn: SpawnCapability; runs: RunsReadCapability; steer: SteerCapability; wait: WaitCapability } {
   const { core } = deps;
+  const service = core.runs ?? createRunsService({ registry: deps.registry, store: core.runStore });
   return {
-    spawn: spawnCapabilityFor(deps, run),
+    spawn: spawnCapabilityFor(deps, run, service),
     runs: {
-      service: core.runs ?? createRunsService({ registry: deps.registry, store: core.runStore }),
+      service,
       actor: resolveChatActor(run.msg, (id) => core.config.grantsFor(id)),
       runId: run.runId,
     },

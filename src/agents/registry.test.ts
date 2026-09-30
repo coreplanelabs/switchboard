@@ -196,13 +196,13 @@ describe("the turn cap is a runaway guard derived from the wall clock (docs/refe
     expect(AGENTS.ship.maxTurns).toBe(1);
   });
 
-  it("the derived caps: coding 540 in 90, review 150 in 25, research 48 in 8, general 360 in 60, explore and conductor 720 in 120", () => {
+  it("the derived caps: short runs keep their asks while the conductor gets 8640 turns in 1440 minutes", () => {
     expect(AGENTS.coding.maxTurns).toBe(540);
     expect(AGENTS.review.maxTurns).toBe(150);
     expect(AGENTS.research.maxTurns).toBe(48);
     expect(AGENTS.general.maxTurns).toBe(360);
     expect(AGENTS.explore.maxTurns).toBe(720);
-    expect(AGENTS.conductor.maxTurns).toBe(720);
+    expect(AGENTS.conductor.maxTurns).toBe(8640);
   });
 });
 
@@ -856,7 +856,7 @@ describe("ship agent (docs/reference/specs/agent-ship.md)", () => {
     expect(AGENTS.ship.toolset).toBe("full");
     expect(AGENTS.ship.maxTurns).toBe(1);
     expect(AGENTS.ship.maxTokens).toBe(16000);
-    expect(AGENTS.ship.maxMinutes).toBe(240);
+    expect(AGENTS.ship.maxMinutes).toBe(1440);
   });
 
   it("ship's child presets run within ship's own profile — coding and review declare an identity at or under `write` and ship's own machine class — so the parent's profile gate covers every round", () => {
@@ -1159,11 +1159,11 @@ describe("review prompts: the unit contract check (agent-review item 17)", () =>
 // job depends on: a command is capped at twenty minutes, and a job past it is
 // detached with `setsid -f` (a `nohup` job dies with the command that started it).
 describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
-  it("conductor: machine none, identity none, the conductor toolset, 120 minutes so it can outlast its children, no built-in effort and no resident prompt", () => {
+  it("conductor: machine none, identity none, the conductor toolset, 1440 minutes for broad batches, no built-in effort and no resident prompt", () => {
     expect(AGENTS.conductor.machine).toBe("none");
     expect(AGENTS.conductor.identity).toBe("none");
     expect(AGENTS.conductor.toolset).toBe("conductor");
-    expect(AGENTS.conductor.maxMinutes).toBe(120);
+    expect(AGENTS.conductor.maxMinutes).toBe(1440);
     expect(AGENTS.conductor.maxTurns).toBeGreaterThanOrEqual(30);
     expect(AGENTS.conductor.effort).toBeUndefined();
     expect(AGENTS.conductor.residentSystem).toBeUndefined();
@@ -1218,7 +1218,7 @@ describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
   // docs/reference/specs/agent-conductor.md items 3 and 7: the child list is
   // rendered from the registry the way `help` renders its rows — a preset
   // added or moved across the identity line is offered or withheld the day
-  // its def changes — and a child is a reader of this conversation.
+  // its def changes — and a read child sees this conversation.
   it("conductor's prompt renders the presets a child can run from the registry — every sibling whose identity is not `write`, in registry order, each with its own description and a repository note where its machine carries a checkout — names the write presets as refused `spawn_identity`, and says a child starts from this conversation's text plus the prompt, never that it sees none of the thread", () => {
     const sys = AGENTS.conductor.system;
     const siblings = Object.values(AGENTS).filter((a) => a.name !== "conductor");

@@ -175,12 +175,13 @@ export const spawnRunTool: RunnableTool = {
   failsInText: true,
   description:
     "Start a child run as the person who asked you: an ordinary Switchboard run of the named preset, in a thread of its own in this " +
-    "channel, under their permissions — what they could start by hand with `agent:<preset>`. The child is a reader of this conversation: " +
+    "channel, under their permissions — what they could start by hand with `agent:<preset>`. A read child sees this conversation: " +
     "it starts from this conversation's text so far (every user and assistant turn, never your tool calls or their results) plus " +
-    `\`prompt\`, its one new turn — so say what it should do. Presets a child can run: ${CHILD_PRESETS().join(", ")}; a preset that ` +
-    `writes (${WRITE_PRESETS().join(", ")}) is refused \`spawn_identity\`. \`repo\` (owner/name) for a preset that works in a ` +
+    `\`prompt\`, its one new turn — so say what it should do. Presets a child can run: ${CHILD_PRESETS().join(", ")}. ` +
+    "For an explicit 'ship these' request listing at least two PR URLs, `ship` is also allowed only with one listed PR's bare URL as `prompt` and its exact repository as `repo`; each Ship unit gets its own full lease and does not consume the read-child cap. Other write spawns are refused `spawn_identity`. " +
+    `\`repo\` (owner/name) for a preset that works in a ` +
     `repository (${REPO_PRESETS().join(", ")}); ` +
-    "`budget` narrows the child's wall clock in whole minutes (at least 2; it is also capped by what is left of yours); " +
+    "`budget` narrows the child's wall clock in whole minutes (at least 2; read children are also capped by what is left of yours); " +
     "`model` (`<provider>/<model>`) and `effort` choose the child's tier, within the preset's allowed tiers — a model " +
     "outside them is refused `spawn_tier`, and an escalation is a new spawn on the stronger tier. Returns the " +
     "child's run id, its thread and a link, or a refusal by name: a preset or repository the requester may not use, a boundary the " +
@@ -190,7 +191,9 @@ export const spawnRunTool: RunnableTool = {
     properties: {
       preset: {
         type: "string",
-        description: `The preset the child runs: one of ${CHILD_PRESETS().join(", ")} (a preset that writes — ${WRITE_PRESETS().join(", ")} — is refused spawn_identity)`,
+        description: `The preset the child runs: one of ${CHILD_PRESETS().join(", ")}; ship only for an exact PR in an explicit 'ship these' batch; other writes (${WRITE_PRESETS()
+          .filter((name) => name !== "ship")
+          .join(", ")}) are refused spawn_identity`,
       },
       prompt: {
         type: "string",
@@ -314,9 +317,9 @@ export const sendToRunTool: RunnableTool = {
   },
 };
 
-/** The most runs one `await_runs` waits on: the fan-out cap is 3 by default and
- *  every child is polled per tick, so a list past this is a mistake, not a wait. */
-const AWAIT_IDS_MAX = 50;
+/** The most runs one `await_runs` waits on: every child is polled per tick,
+ *  including independent Ship units, so a list past this is a mistake. */
+const AWAIT_IDS_MAX = 1000;
 
 /** One read of a child through the one runs service: its end, or that it
  *  still runs (here, or under another generation), or nothing to wait for. A

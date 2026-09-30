@@ -207,7 +207,7 @@ describe("runOriginalUnitRecovery", () => {
         unit: "U10",
         step: "U10/recovery/1/findings",
         preset: "coding",
-        budget: 42,
+        budget: 40,
         brief: { kind: "findings", unit: "U10", pr: 7, headSha: HEAD, reviewRunId: "run-original-review" },
       },
       {
@@ -423,7 +423,7 @@ describe("runOriginalUnitRecovery", () => {
         unit: "U10",
         step: "U10/recovery/1/review",
         preset: "review",
-        budget: 24,
+        budget: 22,
         brief: { kind: "review", unit: "U10", pr: 7, headSha: HEAD, round: 1 },
       },
     ]);

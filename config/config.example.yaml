@@ -449,8 +449,8 @@ workspaceDir: ./workspaces
 # it adopts that pull request. Defaults shown; `maxRounds` must be an integer
 # >= 1; any other key under `ship` fails the load by name.
 # ship:
-#   maxRounds: 3      # review rounds per unit
-#   maxMinutes: 240   # the ship preset's wall-clock budget in minutes (the registry's default)
+#   maxRounds: 48       # review rounds per unit
+#   maxMinutes: 1440    # the ship preset's wall-clock budget in minutes (the registry's default)
 #   idleDays: 0       # days a ship unit idles instead of ending (record 0051): 0–365, 0 = today's
 #                     # endings; also per channel/user (`channels.<id>.ship.idleDays`), user > channel > org
 
@@ -503,11 +503,12 @@ workspaceDir: ./workspaces
 # The fan-out cap a spawning run meets (docs/reference/specs/agent-conductor.md).
 # `agent:conductor` starts child runs as the person who asked — each an
 # ordinary run in a thread of its own, under that person's permissions — and
-# at most `maxChildren` of one run's children are live at once: a spawn past
-# the cap is refused by name until a child finishes. A child cannot spawn.
+# at most `maxChildren` read children of one run are live at once: a spawn
+# past the cap waits for one to finish. Exact-PR Ship batches start independent
+# durable units outside this read-child cap. A child cannot spawn.
 # Default shown; an integer >= 1.
 # spawn:
-#   maxChildren: 3
+#   maxChildren: 8
 
 # The one door's mode (routing-and-config item 29): `on` (default) — the
 # operator's typed decision is what runs; `shadow` — one operator turn per

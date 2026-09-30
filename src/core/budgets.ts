@@ -186,17 +186,17 @@ export type Preset = LoopPreset | "ship";
  *  is sized by the ledger's ship children, not its standalone runs: a child
  *  that pushes at minute 29 and then runs the repo's whole gate (seven to ten
  *  minutes on a resident) was cut at 45 one run in twelve, so the ask is
- *  double the 90th percentile (31.5) with the gate inside it. Ship's holds
- *  its own loop at the default rounds with a findings round at that ask, not at
- *  its floor (`fit` proves the floor case; the ask leaves room above it). */
+ *  double the 90th percentile (31.5) with the gate inside it. Ship's one-day
+ *  ask holds the default round ceiling at each later round's floor; a shorter
+ *  effective lease lowers the round count to one it can hold. */
 export const ASKS: Readonly<Record<Preset, number>> = {
   general: 60,
   coding: 90,
   review: 25,
-  ship: 240,
+  ship: 1440,
   research: 8,
   explore: 120,
-  conductor: 120,
+  conductor: 1440,
   // The plane's chat preset (record 0070): reads the fleet's tables and
   // answers; a turn is a projection read plus a write-up, so its ask sits
   // between general's and research's kind of work, with room for a few reads.
@@ -210,20 +210,21 @@ export type RoundKind = "coding" | "review" | "findings" | "merge";
 /** The least lease in which a round does useful work, in minutes. A carve that
  *  falls under the floor is refused rather than dispatched: a two-minute
  *  review or findings round costs an attach and a model turn and finishes
- *  nothing. Review's is the ledger's 90th percentile of completed reviews (5.1
- *  min over 181); coding's is the least a findings round can run the repo's
+ *  nothing. Review's observed 90th percentile is 5.1 minutes over 181 runs,
+ *  but its three-minute write-up and three-minute post-step require at least
+ *  seven minutes for a model turn; coding's is the least a findings round can run the repo's
  *  gate in — the gate alone takes seven to ten minutes on a resident, and a
  *  round that cannot run it finishes nothing its contract asks; the merge
  *  wait's is a guess
  *  until the ledger says. */
 export const PRESET_FLOORS: Readonly<Record<LoopPreset, number>> = {
-  general: 2,
+  general: 4,
   coding: 15,
-  review: 5,
-  research: 3,
+  review: 7,
+  research: 4,
   explore: 15,
   conductor: 15,
-  orchestrator: 2,
+  orchestrator: 4,
 };
 export const FLOORS: Readonly<Record<RoundKind, number>> = {
   coding: PRESET_FLOORS.coding,
@@ -564,6 +565,18 @@ export function fit(pipeline: Pipeline): { ok: boolean; need: number; have: numb
   return { ok: pipeline.maxMinutes >= need, need, have: pipeline.maxMinutes };
 }
 
+/** Keep the configured ceiling, but reserve only rounds the effective lease can hold. */
+export function affordableShipRounds(maxMinutes: number, ceiling: number): number {
+  let low = 1;
+  let high = ceiling;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (fit({ maxMinutes, maxRounds: middle }).ok) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
+
 // ---- the grant (decision 0046, Renewal: the grant decides, the lease continues) ----
 
 /** What the request authorizes for the whole problem beyond one lease: a count
@@ -583,8 +596,8 @@ export type GrantSource = "org" | "channel" | "user" | "run";
 
 export const DEFAULT_GRANT: Grant = { renewals: 0 };
 
-/** The most renewals one request may carry: thirteen segments of the ship
- *  preset's ask are two days. The cap bounds a COUNT a person types
+/** The most renewals one request may carry: twelve renewals permit thirteen
+ *  one-day ship segments. The cap bounds a COUNT a person types
  *  (`renewals:`) or a scope holds; it did not halve when the ask doubled,
  *  since every grant already configured is a count of segments and a day's
  *  hand-over is now `renewals: 5` — the longest problem a person hands over

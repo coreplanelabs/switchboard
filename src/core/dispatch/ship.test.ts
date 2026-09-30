@@ -340,7 +340,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
       threadKey: THREAD,
       repo: "acme/api",
       base: "main",
-      caps: { maxRounds: 3, maxMinutes: 200 },
+      caps: { maxRounds: 4, maxMinutes: 200 },
       card: { channel: "CX", ts: "1.5" },
       runId: "run-s",
       label: "*ship* · acme/api",
@@ -448,27 +448,27 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
   // agent-ship.md item 8, decision 0046: the fit at the fork. A boundary or a
   // `budget:` directive that clipped the pipeline under the loop it allows is
   // refused with the sum on the card, and no instance opens.
-  it("a boundary that clips ship under its loop refuses at the fork with the sum: 40 minutes cannot hold three review rounds (163 needed), no instance is created, the card closes 🚫 and the reply names the numbers", async () => {
+  it("a boundary that clips ship under one review round refuses at the fork with the sum, no instance is created, the card closes 🚫 and the reply names the numbers", async () => {
     const s = setup("slack:UADMIN", { minutes: 40 });
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect(s.created).toEqual([]);
     expect(s.refusals).toEqual(["ship_budget"]);
     expect(JSON.stringify(s.closes[0])).toContain("🚫");
     expect(JSON.stringify(s.closes[0])).toContain(
-      "budget 40 min cannot hold the ship loop (3 review rounds need 163 min)",
+      "budget 40 min cannot hold the ship loop (1 review round needs 113 min)",
     );
     expect(s.replies[0]).toContain("Ship cannot start under a 40-minute budget");
-    expect(s.replies[0]).toContain("needs 163 minutes");
+    expect(s.replies[0]).toContain("needs 113 minutes");
     expect(s.replies[0]).toContain("the coding child's 90");
   });
 
-  it("a boundary at the fit's sum starts the runner: 163 minutes hold three review rounds", async () => {
-    const s = setup("slack:UADMIN", { minutes: 163 });
+  it("a boundary at the fit's sum starts the runner with three review rounds", async () => {
+    const s = setup("slack:UADMIN", { minutes: 169 });
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect(s.created).toEqual(["plan-fix-the-login-redirect-6435ec"]);
     expect((await s.instances.get("plan-fix-the-login-redirect-6435ec"))?.caps).toEqual({
       maxRounds: 3,
-      maxMinutes: 163,
+      maxMinutes: 169,
     });
   });
 
