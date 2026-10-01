@@ -202,6 +202,7 @@ function isRuntimeBusy(err: unknown): boolean {
 /** A finished command, as `/exec` answers it. `durationMs` is the command's
  *  wall time in the sandbox (docs/reference/specs/tracing.md item 19). */
 export interface ExecAnswer {
+  truncated: boolean;
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -384,6 +385,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       // here is a prefix, whatever the executor's caps say.
       if (out.truncated) notes.push("output truncated by the sandbox runtime — the streams above are a prefix");
       return {
+        truncated: out.truncated === true,
         stdout: out.stdout,
         stderr: [out.stderr, ...notes].filter(Boolean).join("\n"),
         exitCode: timedOut ? 124 : out.exitCode,
@@ -403,6 +405,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
             stdout: "",
             stderr: heldOutputNote(status.exit.code),
             exitCode: status.exit.code,
+            truncated: true,
             durationMs: systemClock() - startedAt,
           };
         }
@@ -411,6 +414,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
           stdout: "",
           stderr: `${timeoutNote(execTimeoutSecs)}\n(the process outlived the sandbox's own limit and was killed)`,
           exitCode: 124,
+          truncated: true,
           durationMs: systemClock() - startedAt,
         };
       }

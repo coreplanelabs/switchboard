@@ -3258,11 +3258,18 @@ describe("makeExecutor pilot ready environment", () => {
       headSha: undefined,
       reattach: {
         backend: "sandbox",
-        seeded: { slug: "jshttp/vary", ref: "master", workspace: "/workspace/checkout", sourceSha: "b".repeat(40) },
+        seeded: {
+          slug: "jshttp/vary",
+          ref: "master",
+          workspace: "/workspace/checkout",
+          sourceSha: "b".repeat(40),
+          depsBackupId: DEPS,
+        },
       },
     });
     expect(selection.backend).toBe("sandbox");
-    expect(selection.seeded).toMatchObject({ slug: "jshttp/vary", ref: "master", sha: SHA });
+    expect(selection.seeded).toMatchObject({ slug: "jshttp/vary", ref: "master", sha: SHA, depsBackupId: DEPS });
+    expect(workspaceBindingFor(selection)?.seeded).toMatchObject({ depsBackupId: DEPS });
     expect(check.mock.calls.at(-1)?.[0]).toContain("node_modules");
     expect(check.mock.calls.at(-1)?.[0]).toContain("git diff --quiet 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' HEAD");
     expect(calls).toEqual([]);
@@ -3388,7 +3395,8 @@ describe("makeExecutor pilot ready environment", () => {
     const check = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockResolvedValue("READY");
     const selection = await makeExecutor(opts(), context());
     expect(selection.backend).toBe("sandbox");
-    expect(selection.seeded).toMatchObject({ slug: "jshttp/vary", ref: "master", sha: SHA });
+    expect(selection.seeded).toMatchObject({ slug: "jshttp/vary", ref: "master", sha: SHA, depsBackupId: DEPS });
+    expect(workspaceBindingFor(selection)?.seeded).toMatchObject({ depsBackupId: DEPS });
     expect(check.mock.calls[0]?.[0]).toContain("/workspace/checkout");
     expect(calls).toEqual(["/status", "/seed"]);
   });

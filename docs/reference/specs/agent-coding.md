@@ -1,5 +1,7 @@
 # Agent: coding
 
+
+Opted-in coding runs also obey the [first coding baseline](first-coding-test.md) admission and durable receipt contract.
 Takes a task from Slack, scopes fast, implements the change in its sandbox, pushes the branch, and submits a typed PR description — Switchboard renders the body and opens the PR itself ([pr-description.md](pr-description.md) item 5). Its unit of delivery is a pushed branch plus a validated `PrDescription`, not prose; the PR URL comes from code.
 
 - **Code**: `src/agents/registry.ts` (`CODING_SYSTEM`; resident-path variant `CODING_SYSTEM_RESIDENT`; seeded-sandbox variant `CODING_SYSTEM_SEEDED`), `src/tools/attach.ts` (`attach_file`: a [run](../vocabulary.md#run)'s file into the conversation)

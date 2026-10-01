@@ -653,7 +653,7 @@ async function legacyReviewedHeadOf(
 /** A reclaimed pilot uses its saved admission check, not a later config edit. */
 function recordedReadyRequirement(value: unknown): ReadyEnvironmentRequirement | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  if (Object.keys(value).some((key) => !["testCommand", "dependencyDir", "requiredTools"].includes(key)))
+  if (Object.keys(value).some((key) => !["testCommand", "dependencyDir", "requiredTools", "firstAction"].includes(key)))
     return undefined;
   try {
     const requirement = value as ReadyEnvironmentRequirement;
@@ -662,6 +662,7 @@ function recordedReadyRequirement(value: unknown): ReadyEnvironmentRequirement |
       testCommand: requirement.testCommand,
       dependencyDir: requirement.dependencyDir,
       requiredTools: [...requirement.requiredTools],
+      ...(requirement.firstAction ? { firstAction: { ...requirement.firstAction } } : {}),
     };
   } catch {
     return undefined;
@@ -3880,6 +3881,7 @@ export async function dispatch(
       startedAt,
       loopStartedAt,
       assertAdmissionBudget,
+      admissionRemainingMs: () => Math.max(0, admissionBound - clock()),
       channelVisibility,
       slackContext,
       privateAudienceLatch,
@@ -3908,16 +3910,21 @@ export async function dispatch(
       await refuse(
         refusalOf(
           "setup_failed",
-          ran.handedOff
-            ? `${ran.message} This run is paused with its recorded workspace binding. After repairing the environment, restart the service to resume this run.`
-            : `${ran.message} The original run could not be marked for immediate recovery. No replacement started; an operator needs to check its saved workspace before a retry.`,
+          ran.reason === "first_test_required"
+            ? ran.message
+            : ran.handedOff
+              ? `${ran.message} This run is paused with its recorded workspace binding. After repairing the environment, restart the service to resume this run.`
+              : `${ran.message} The original run could not be marked for immediate recovery. No replacement started; an operator needs to check its saved workspace before a retry.`,
         ),
         () =>
           card.done(
             shell.close({
               kind: "refused",
               icon: "⏸️",
-              reason: "coding environment not ready, original binding retained",
+              reason:
+                ran.reason === "first_test_required"
+                  ? "required first test held, original binding retained"
+                  : "coding environment not ready, original binding retained",
               ...closeLines(clock(), false),
             }),
           ),

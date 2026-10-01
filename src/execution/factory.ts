@@ -195,7 +195,7 @@ export interface WorkspaceBinding {
    *  item 8), when the attach answered one: the resident's is its VM's boot id. */
   container?: string;
   /** A resident fallback's seed identity, retained so re-attach can verify the same checkout. */
-  seeded?: Pick<SeededSandbox, "slug" | "ref" | "workspace" | "sourceSha">;
+  seeded?: Pick<SeededSandbox, "slug" | "ref" | "workspace" | "sourceSha" | "depsBackupId">;
 }
 
 const BACKENDS: readonly Backend[] = ["local", "resident", "sandbox", "e2b"];
@@ -221,6 +221,9 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
           slug: seed.slug,
           ref: seed.ref,
           workspace: seed.workspace,
+          ...(typeof seed.depsBackupId === "string" && seed.depsBackupId.length > 0 && seed.depsBackupId.length <= 128
+            ? { depsBackupId: seed.depsBackupId }
+            : {}),
           ...(typeof seed.sourceSha === "string" && /^[0-9a-f]{40}$/.test(seed.sourceSha)
             ? { sourceSha: seed.sourceSha }
             : {}),
@@ -265,6 +268,7 @@ export function workspaceBindingFor(
             ref: selection.seeded.ref,
             workspace: selection.seeded.workspace,
             ...(selection.seeded.sourceSha ? { sourceSha: selection.seeded.sourceSha } : {}),
+            ...(selection.seeded.depsBackupId ? { depsBackupId: selection.seeded.depsBackupId } : {}),
           },
         }
       : {}),
@@ -976,6 +980,7 @@ async function seedSandbox(
           slug: answer.slug,
           ref: answer.ref,
           sha: answer.sha,
+          ...(answer.from?.depsBackupId ? { depsBackupId: answer.from.depsBackupId } : {}),
           workspace: SEED_CHECKOUT_DIR,
           cached: answer.cached,
           ms: answer.ms,

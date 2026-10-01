@@ -1,5 +1,7 @@
 # Main agent starts private work
 
+
+Opted-in coding runs also obey the [first coding baseline](first-coding-test.md) admission and durable receipt contract.
 A plain-language fix request in a direct requester Slack DM starts one existing Ship coordinator unit with the question and sourced findings in a durable brief. The dispatcher supplies the requester, conversation, message ID, permissions, and private worker availability. The unit keeps person review and merge gates.
 
 - **Code**: `src/core/coordinator/contract.ts`, `src/core/coordinator/mainStart.ts`, `src/core/coordinator/handOff.ts`, `src/core/coordinator/instanceStore.ts`, `src/core/coordinator/requesterAuthority.ts`, `src/core/coordinator/briefs.ts`, `src/tools/mainStart.ts`, `src/tools/toolsets.ts`, `src/tools/runnableTool.ts`, `src/core/dispatch/run.ts`, `src/core/dispatch/runLoop.ts`, `src/core/dispatch/mainSource.ts`, `src/core/dispatch/settle.ts`, `src/core/dispatcher.ts`, `src/core/harness/contract.ts`, `src/core/harness/pi/harness.ts`, `src/core/harness/opencode/harness.ts`, `src/core/threadAdmission.ts`, `src/core/types.ts`, `src/index.ts`, `src/agents/registry.ts`, `deploy/cloudflare-memory/worker.ts`

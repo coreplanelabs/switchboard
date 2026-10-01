@@ -24,6 +24,9 @@ export const SOURCE_REVALIDATE_MAX_MS = 30 * SECOND_MS;
 export const secondsToMs = (seconds: number): number => seconds * SECOND_MS;
 
 export const MINUTE_MS = 60_000;
+/** Operator-selected baseline tests cannot consume an unbounded setup lease. */
+export const FIRST_TEST_MAX_MS = 2 * MINUTE_MS;
+export const FIRST_TEST_PREFLIGHT_MS = 10 * SECOND_MS;
 /** Allow the run's ending to release its resident workspace after its budget ends. */
 export const RUN_REGISTRATION_GRACE_MS = MINUTE_MS;
 

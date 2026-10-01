@@ -330,9 +330,14 @@ execution:
   # the dependency view and command availability on that checkout.
   # readyPilotRepos:
   #   acme/api:
-  #     testCommand: npm test
+  #     testCommand: npm exec -- vitest run src/smoke.test.ts
   #     dependencyDir: node_modules
   #     requiredTools: [node, npm]
+  #     # Explicitly run this bounded command before coding; absent means readiness only.
+  #     firstAction:
+  #       kind: baseline_test
+  #       policyVersion: smoke-v1
+  #       timeoutMs: 30000
 
 # Where per-conversation agent workspaces are created (local execution only).
 # Under docker compose this directory is a named volume, so checkouts survive a restart.

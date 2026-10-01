@@ -396,7 +396,12 @@ function validateReadyPilotRepos(execution: AppConfig["execution"]): void {
       throw new Error(`${where}: repository names must be lower-case owner/name`);
     if (typeof requirement !== "object" || requirement === null || Array.isArray(requirement))
       throw new Error(`${where}: requirement must be a mapping`);
-    for (const key of unknownKeys(requirement, { testCommand: true, dependencyDir: true, requiredTools: true }))
+    for (const key of unknownKeys(requirement, {
+      testCommand: true,
+      dependencyDir: true,
+      requiredTools: true,
+      firstAction: true,
+    }))
       throw new Error(`${where}: unknown field ${key}`);
     try {
       readyEnvironmentCommand("/workspace", requirement as ReadyEnvironmentRequirement);

@@ -870,6 +870,23 @@ describe("restrict — closed unless granted (authorization.md item 11)", () => 
 describe("pilot ready environment config", () => {
   const ready = `\nexecution:\n  type: cloudflare\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]\n`;
 
+  it("requires explicit bounded first-action opt-in with a policy version", () => {
+    const declaration = `${ready}      firstAction:\n        kind: baseline_test\n        policyVersion: smoke-v1\n        timeoutMs: 30000\n`;
+    expect(store(YAML_FIXTURE + declaration).config.execution?.readyPilotRepos?.["acme/api"]?.firstAction).toEqual({
+      kind: "baseline_test",
+      policyVersion: "smoke-v1",
+      timeoutMs: 30000,
+    });
+    for (const invalid of [
+      declaration.replace("30000", "0"),
+      declaration.replace("30000", "999999"),
+      declaration.replace("baseline_test", "model_choice"),
+      declaration.replace("smoke-v1", "''"),
+    ])
+      expect(() => store(YAML_FIXTURE + invalid)).toThrow(/firstAction/);
+    expect(store(YAML_FIXTURE).config.execution?.readyPilotRepos).toBeUndefined();
+  });
+
   it("accepts a bounded operator declaration and refuses malformed requirements at load", () => {
     expect(store(YAML_FIXTURE + ready).config.execution?.readyPilotRepos?.["acme/api"]).toEqual({
       testCommand: "npm test",

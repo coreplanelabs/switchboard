@@ -9,6 +9,7 @@ import {
   infraReasonOfStatus,
   truncate,
   type ExecOptions,
+  type ExecResult,
   type Executor,
 } from "./executor.js";
 import type { ExecTraceOptions } from "./executor.js";
@@ -257,6 +258,7 @@ export class CloudflareSandboxExecutor implements Executor {
     budgetMs: number = BASH_TIMEOUT_MS,
     span?: Span,
     skipScrub = false,
+    singleSend = false,
   ): Promise<Record<string, unknown>> {
     if (signal?.aborted) throw sandboxStopped(route);
     if (this.opts.scrubLegacyCredentials && !skipScrub) {
@@ -294,8 +296,9 @@ export class CloudflareSandboxExecutor implements Executor {
     let attempt = 0;
     let lastReason: WaitReason | undefined;
     for (;;) {
-      const answer = await this.send(route, sent, headers, budgetMs, signal, span);
+      const answer = await this.send(route, sent, headers, budgetMs, signal, span, singleSend);
       if (answer.kind === "ok") return answer.data;
+      if (singleSend) throw new ExecCapacityError("The typed command was refused before execution.");
       const plan = waitPlan(answer.reason, budgetMs);
       if (waited >= plan.budget) {
         // The fleet's spent wait carries its facts — the Worker's refusal text
@@ -337,12 +340,13 @@ export class CloudflareSandboxExecutor implements Executor {
     budgetMs: number,
     signal?: AbortSignal,
     span?: Span,
+    singleSend = false,
   ): Promise<
     | { kind: "ok"; data: Record<string, unknown> }
     | { kind: "busy"; reason: WaitReason; refusal: string; containerId?: string }
   > {
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
-    const delays = [0, 3000, 6000, 12000];
+    const delays = singleSend ? [0] : [0, 3000, 6000, 12000];
     let lastErr = "";
     let lastStatus = 0;
     for (const delay of delays) {
@@ -441,6 +445,33 @@ export class CloudflareSandboxExecutor implements Executor {
     // Exhausted retries against an unreachable worker — infra, not a command
     // exit; a 5xx the Worker may yet clear, a 4xx a refusal.
     throw new ExecInfraError(lastErr, infraReasonOfStatus(lastStatus));
+  }
+
+  /** Facts for runner-owned effects. A possibly executed command is never replayed. */
+  async execResult(command: string, opts?: ExecOptions): Promise<ExecResult> {
+    const timeoutMs = clampBashTimeout(opts?.timeoutMs);
+    await this.refreshCredential({ signal: opts?.signal, span: opts?.span });
+    const r = await this.call(
+      "/exec",
+      {
+        command,
+        timeoutMs,
+        ...(opts?.env ? { env: opts.env } : {}),
+      },
+      opts?.signal,
+      timeoutMs,
+      opts?.span,
+      false,
+      true,
+    );
+    if (
+      typeof r.stdout !== "string" ||
+      typeof r.stderr !== "string" ||
+      !Number.isInteger(r.exitCode) ||
+      typeof r.truncated !== "boolean"
+    )
+      throw new ExecInfraError("sandbox /exec: invalid command result", "worker-unavailable");
+    return { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode as number, truncated: r.truncated };
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
