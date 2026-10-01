@@ -62,6 +62,23 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     if (!res.ok) expect(res.reply).toContain("Name the open pull request");
   });
 
+  it("a merged PR resume says it was merged and does not start a child", async () => {
+    const res = await shipPreflight(
+      input({
+        intent: "review",
+        requestText: PR_URL,
+        repoCtx: { repo: "acme/api", pr: 7 },
+        prFacts: async () => openPr({ state: "closed", mergedAt: "2026-09-29T01:02:03Z" }),
+      }),
+    );
+    expect(res).toMatchObject({ ok: false, refusal: { code: "ship_preflight_closed_resume" } });
+    if (!res.ok) {
+      expect(res.reply).toContain("merged");
+      expect(res.reply).toContain("2026-09-29T01:02:03Z");
+      expect(res.reply).not.toContain("is closed");
+    }
+  });
+
   it("an operator work entry treats a cited foreign PR as context and keeps the request intact", async () => {
     const res = await shipPreflight(
       input({

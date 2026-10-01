@@ -290,6 +290,19 @@ describe("github_* reads", () => {
     );
   });
 
+  it("github_pull_get distinguishes a merged PR from a closed unmerged PR", async () => {
+    const api = mem();
+    const merged = await api.getPullRequest("acme/api", 7);
+    merged.state = "closed";
+    merged.mergedAt = "2026-09-29T01:02:03Z";
+    const result = await text(githubPullGetTool, { repo: "acme/api", number: 7 }, ctxFor(api));
+    expect(result).toContain("acme/api#7 [merged] Fix login");
+    expect(result).toContain("merged 2026-09-29T01:02:03Z");
+    merged.mergedAt = undefined;
+    const closed = await text(githubPullGetTool, { repo: "acme/api", number: 7 }, ctxFor(api));
+    expect(closed).toContain("acme/api#7 [closed] Fix login");
+  });
+
   it("reads are side-effect-free; writes are not", () => {
     for (const t of GITHUB_READ_TOOLS) expect(t.sideEffectFree, t.name).toBe(true);
     for (const t of GITHUB_ISSUE_WRITE_TOOLS) expect(t.sideEffectFree, t.name).toBeUndefined();
