@@ -129,6 +129,8 @@ import {
   mainTaskBindingMatches,
   mainTaskClaimMatches,
   preserveWorkBrief,
+  prepareUnfencedUnitWrite,
+  CoordinatorUnitWriteConflict,
   isCoordinatorInstance,
   isCoordinatorUnit,
   isThreadEvent,
@@ -2988,7 +2990,11 @@ export class RunHistoryDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       if (
         this.sql.exec(`SELECT 1 FROM coordinator_main_task_links WHERE instance_id = ?`, instance.id).toArray().length >
-        0
+          0 ||
+        this.sql
+          .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ?`, instance.id)
+          .toArray()
+          .some((row) => (JSON.parse(row.json) as CoordinatorUnit).ending?.outcome !== undefined)
       ) {
         out = { ok: false, reason: "exists" };
         return;
@@ -3140,9 +3146,19 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   // ---- the units of the plan an instance runs (run-history item 50) -----------
 
+  private writeUnfencedUnit(write: () => void): { ok: true } | { ok: false; reason: "settled" } {
+    try {
+      this.ctx.storage.transactionSync(write);
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof CoordinatorUnitWriteConflict) return { ok: false, reason: "settled" };
+      throw error;
+    }
+  }
+
   /** Each row replaced whole under its (instance, unit); a replace keeps the row's place. */
-  async putUnits(units: CoordinatorUnit[], now: number): Promise<{ ok: true }> {
-    this.ctx.storage.transactionSync(() => {
+  async putUnits(units: CoordinatorUnit[], now: number): Promise<{ ok: true } | { ok: false; reason: "settled" }> {
+    return this.writeUnfencedUnit(() => {
       for (const u of units) {
         const row = this.sql
           .exec<{ json: string }>(
@@ -3151,7 +3167,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             u.unit,
           )
           .toArray()[0];
-        const updated = preserveWorkBrief(row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined, u);
+        const updated = prepareUnfencedUnitWrite(row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined, u);
         this.sql.exec(
           `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
            ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
@@ -3162,7 +3178,6 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       }
     });
-    return { ok: true };
   }
 
   /** One compare-and-replace transaction updates a unit for exactly one
@@ -3359,8 +3374,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     seqs: number[],
     by: string,
     now: number,
-  ): Promise<{ ok: true }> {
-    this.ctx.storage.transactionSync(() => {
+  ): Promise<{ ok: true } | { ok: false; reason: "settled" }> {
+    return this.writeUnfencedUnit(() => {
       const updated = { ...unit, wakes: { ...(unit.wakes ?? {}), [waitId]: answer } };
       const row = this.sql
         .exec<{ json: string }>(
@@ -3374,7 +3389,7 @@ export class RunHistoryDO extends DurableObject<Env> {
          ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
         unit.instanceId,
         unit.unit,
-        JSON.stringify(preserveWorkBrief(row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined, updated)),
+        JSON.stringify(prepareUnfencedUnitWrite(row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined, updated)),
         now,
       );
       for (const seq of seqs)
@@ -3386,7 +3401,6 @@ export class RunHistoryDO extends DurableObject<Env> {
           seq,
         );
     });
-    return { ok: true };
   }
 
   // ---- the live-run ledger (run-history items 28–34) --------------------------
@@ -6786,7 +6800,7 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     const units = b.units as CoordinatorUnit[];
     const r = await stub.putUnits(units, now);
     console.log(`[runs/coordinator/units/put] ${key.value} ${units[0]!.instanceId} ${units.length} row(s)`);
-    return json(r);
+    return json(r, r.ok ? 200 : 409);
   }
   if (pathname === "/runs/coordinator/units/claim-legacy-continuation") {
     if (!isCoordinatorUnit(b.expected) || !isCoordinatorUnit(b.recovered))
@@ -6817,7 +6831,7 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       return json({ error: "by must name the consumer" }, 400);
     const r = await stub.answerUnitWake(b.unit, b.waitId, b.answer, b.seqs as number[], b.by, now);
     console.log(`[runs/coordinator/wake] ${key.value} ${b.unit.instanceId}:${b.unit.unit} ${b.waitId}`);
-    return json(r);
+    return json(r, r.ok ? 200 : 409);
   }
   // The thread events of a unit-owned thread (record 0051's reply-as-event rule): append assigns
   // the sequence (or returns the row with the same stable id), list filters

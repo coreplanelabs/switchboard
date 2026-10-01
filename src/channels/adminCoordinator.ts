@@ -86,7 +86,9 @@ import {
   type ThreadEvent,
   type UnitIdle,
   type UnitWakeAnswer,
+  CoordinatorUnitWriteConflict,
 } from "../core/coordinator/contract.js";
+import { isShipOutcome, sameShipOutcome } from "../core/coordinator/shipOutcome.js";
 import { foldThreadAttachments } from "../core/dispatch/admission.js";
 import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
@@ -4683,6 +4685,7 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   } catch (err) {
     if (err instanceof PublicationBindingRefusal)
       return json(409, { ok: false, error: err.reason, message: "the open pull request was not durably bound", at });
+    if (err instanceof CoordinatorUnitWriteConflict) throw err;
     return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
   }
 }
@@ -5477,6 +5480,9 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     typeof ending.report !== "string"
   )
     return json(400, { ok: false, error: "ending must carry a kind and a report" });
+  const outcome = ending.outcome;
+  if (outcome !== undefined && (!isShipOutcome(outcome) || outcome.kind !== ending.kind))
+    return json(400, { ok: false, error: "ending outcome must match its kind" });
   const cause =
     typeof ending.cause === "string" && ending.cause.length > 0 && ending.cause.length <= 64 ? ending.cause : undefined;
   if (ending.cause !== undefined && cause === undefined)
@@ -5501,6 +5507,46 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  const pr = body.pr as { number?: unknown; url?: unknown } | undefined;
+  if (
+    outcome !== undefined &&
+    pr !== undefined &&
+    (pr === null ||
+      typeof pr !== "object" ||
+      !Number.isSafeInteger(pr.number) ||
+      (pr.number as number) <= 0 ||
+      typeof pr.url !== "string" ||
+      pr.url.length === 0)
+  )
+    return json(400, { ok: false, error: "ending pull request must carry a number and URL", at });
+  if (
+    outcome !== undefined &&
+    pr !== undefined &&
+    row.pr !== undefined &&
+    (pr.number !== row.pr.number || pr.url !== row.pr.url)
+  )
+    return json(400, { ok: false, error: "ending outcome must match the unit pull request", at });
+  if (outcome?.terminalPr !== undefined) {
+    const target = pr ?? row.pr;
+    if (
+      target?.number !== outcome.terminalPr.number ||
+      target.url !== outcome.terminalPr.url ||
+      (row.pr !== undefined && (row.pr.number !== outcome.terminalPr.number || row.pr.url !== outcome.terminalPr.url))
+    )
+      return json(400, { ok: false, error: "ending outcome must match the unit pull request", at });
+  }
+  // A producer retry may finish delivery, but cannot rewrite a recorded result.
+  // Recovery first claims and removes the old ending under its own fenced path.
+  if (
+    row.ending !== undefined &&
+    (outcome !== undefined || row.ending.outcome !== undefined) &&
+    (row.ending.kind !== ending.kind ||
+      row.ending.report !== ending.report ||
+      !sameShipOutcome(row.ending.outcome, outcome))
+  )
+    return json(409, { ok: false, error: "settlement_conflict", at });
+  if (row.workBrief !== undefined && row.ending?.outcome !== undefined && row.ending.deliveryId !== body.deliveryId)
+    return json(409, { ok: false, error: "settlement_conflict", at });
   if (row.workBrief !== undefined && deps.privateWorkerLog === undefined)
     return json(503, { ok: false, error: "private_worker_log_unavailable", at });
   if (row.workBrief !== undefined) {
@@ -5550,7 +5596,6 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     return json(409, { ok: false, error: "recovery_claim_mismatch", at });
   const host = row.recovery !== undefined ? ({ kind: "not_host" } as const) : await hostRunOf(deps, instance);
   if (host.kind === "not_host" && row.recovery === undefined) return json(409, { ok: false, error: "not_host", at });
-  const pr = body.pr as { number?: unknown; url?: unknown } | undefined;
   // The driver's `headSha` is the exact continuation boundary: the coding
   // child's last push for review_pending, or the final approved head for
   // merge_ready. Persist it as `lastPush` for the next attempt's pre-check.
@@ -5597,73 +5642,85 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // A real ending is the unit's end: an idle the row carried from an earlier
   // stop is dropped with it, so the row says one thing about how the unit stands.
   const { idle: _idle, recovery: _recovery, ...rowWithoutLifecycle } = row;
-  const updated: CoordinatorUnit = {
-    ...(idle !== undefined || segment !== undefined ? row : rowWithoutLifecycle),
-    ...(row.recovery !== undefined
-      ? {
-          recoveryReceipt: {
-            reviewRunId: row.recovery.reviewRunId,
-            ...(row.recovery.externalReview !== undefined ? { externalReview: row.recovery.externalReview } : {}),
-            ...(row.recovery.accounting !== undefined ? { accounting: row.recovery.accounting } : {}),
-            workflowId: row.recovery.workflowId,
-            at,
-          },
-        }
-      : {}),
-    ...(recoveryHold !== undefined ? { recoveryHold } : {}),
-    ...(pr && typeof pr.number === "number" && typeof pr.url === "string"
-      ? { pr: { number: pr.number, url: pr.url } }
-      : {}),
-    ...(lastPush !== undefined ? { lastPush } : {}),
-    ...(idle !== undefined
-      ? { idle }
-      : segment !== undefined
-        ? { segments: segments.some((s) => s.index === segment.index) ? segments : [...segments, { ...segment, at }] }
-        : {
-            ending: {
-              kind: ending.kind,
-              report: ending.report,
-              // Machine-readable failure context (issue 2100): readers do not
-              // need to parse the person's report to locate a thrown step.
-              ...(cause !== undefined ? { cause } : {}),
-              ...(failedStep !== undefined ? { step: failedStep } : {}),
-              ...(failedRound !== undefined ? { round: failedRound } : {}),
-              at,
-            },
-          }),
-  };
-  if (row.recovery !== undefined) {
-    let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
-    try {
-      replaced = await deps.instances.compareAndReplaceUnit(row, updated);
-    } catch {
-      const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
-      const current = reread?.filter((candidate) => candidate.unit === row.unit);
-      if (
-        current?.length === 1 &&
-        (JSON.stringify(current[0]) === JSON.stringify(updated) ||
-          (current[0]!.recovery === undefined &&
-            current[0]!.recoveryReceipt?.workflowId === row.recovery.workflowId &&
-            current[0]!.recoveryReceipt?.reviewRunId === row.recovery.reviewRunId))
-      )
-        replaced = { ok: true };
-      else if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(row))
-        return json(503, { ok: false, error: "recovery_store_unavailable", at });
-      else return json(409, { ok: false, error: "recovery_claim_stale", at });
-    }
-    if (replaced?.ok !== true)
-      return json(409, {
-        ok: false,
-        error: replaced?.reason === "stale" ? "recovery_claim_stale" : "recovery_store_unavailable",
-        at,
-      });
-  } else await deps.instances.putUnits([updated]);
+  const updated: CoordinatorUnit =
+    row.ending?.outcome !== undefined
+      ? row
+      : {
+          ...(idle !== undefined || segment !== undefined ? row : rowWithoutLifecycle),
+          ...(row.recovery !== undefined
+            ? {
+                recoveryReceipt: {
+                  reviewRunId: row.recovery.reviewRunId,
+                  ...(row.recovery.externalReview !== undefined ? { externalReview: row.recovery.externalReview } : {}),
+                  ...(row.recovery.accounting !== undefined ? { accounting: row.recovery.accounting } : {}),
+                  workflowId: row.recovery.workflowId,
+                  at,
+                },
+              }
+            : {}),
+          ...(recoveryHold !== undefined ? { recoveryHold } : {}),
+          ...(pr && typeof pr.number === "number" && typeof pr.url === "string"
+            ? { pr: { number: pr.number, url: pr.url } }
+            : {}),
+          ...(lastPush !== undefined ? { lastPush } : {}),
+          ...(idle !== undefined
+            ? { idle }
+            : segment !== undefined
+              ? {
+                  segments: segments.some((s) => s.index === segment.index)
+                    ? segments
+                    : [...segments, { ...segment, at }],
+                }
+              : {
+                  ending: {
+                    kind: ending.kind,
+                    report: ending.report,
+                    ...(outcome !== undefined ? { outcome } : {}),
+                    ...(outcome !== undefined && row.workBrief !== undefined
+                      ? { deliveryId: body.deliveryId as string }
+                      : {}),
+                    // Machine-readable failure context (issue 2100): readers do not
+                    // need to parse the person's report to locate a thrown step.
+                    ...(cause !== undefined ? { cause } : {}),
+                    ...(failedStep !== undefined ? { step: failedStep } : {}),
+                    ...(failedRound !== undefined ? { round: failedRound } : {}),
+                    at,
+                  },
+                }),
+        };
+  // Every caller participates, including an older driver's unprojected ending:
+  // a stale legacy or idle write must not erase a newer typed settlement.
+  const storeError = row.recovery !== undefined ? "recovery_store_unavailable" : "settlement_store_unavailable";
+  const staleError = row.recovery !== undefined ? "recovery_claim_stale" : "settlement_conflict";
+  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
+  try {
+    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
+  } catch {
+    const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
+    const current = reread?.filter((candidate) => candidate.unit === row.unit);
+    if (
+      current?.length === 1 &&
+      (JSON.stringify(current[0]) === JSON.stringify(updated) ||
+        (outcome === undefined &&
+          current[0]!.ending?.outcome === undefined &&
+          row.recovery !== undefined &&
+          current[0]!.recovery === undefined &&
+          current[0]!.recoveryReceipt?.workflowId === row.recovery.workflowId &&
+          current[0]!.recoveryReceipt?.reviewRunId === row.recovery.reviewRunId))
+    )
+      replaced = { ok: true };
+    else if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(row))
+      return json(503, { ok: false, error: storeError, at });
+    else return json(409, { ok: false, error: staleError, at });
+  }
+  if (replaced?.ok !== true)
+    return json(409, {
+      ok: false,
+      error: replaced?.reason === "stale" ? staleError : storeError,
+      at,
+    });
   if (segment === undefined && idle === undefined && updated.pr !== undefined)
-    deps.runnerOwnership?.release(
-      instance.repo,
-      updated.pr.number,
-      row.recovery !== undefined ? { instanceId: instance.id, unit: row.unit } : undefined,
-    );
+    deps.runnerOwnership?.release(instance.repo, updated.pr.number, { instanceId: instance.id, unit: row.unit });
   const thread = unitThread(instance, updated, units.length);
   if (host.kind === "host")
     await hostPublish(
@@ -6592,37 +6649,45 @@ export async function answerCoordinatorStep(
   if (door.step === "authorize") return json(200, { ok: true, subject: door.subject });
   const parsed = parseObject(body);
   if (!parsed.ok) return json(400, { ok: false, error: parsed.error });
-  switch (door.step) {
-    case "plan":
-      return plan(parsed.value, deps);
-    case "unit-start":
-      return unitStart(parsed.value, deps);
-    case "branch":
-      return branch(parsed.value, deps);
-    case "spawn":
-      return spawn(parsed.value, deps);
-    case "read-record":
-      return readRecord(parsed.value, deps);
-    case "steer":
-      return steerChild(parsed.value, deps);
-    case "pr-check":
-      return prCheck(parsed.value, deps);
-    case "recover-unit":
-      return recoverOriginalUnit(parsed.value, deps);
-    case "round":
-      return round(parsed.value, deps);
-    case "unit-end":
-      return unitEnd(parsed.value, deps);
-    case "unit-wake":
-      return unitWake(parsed.value, deps);
-    case "checks":
-      return checksStep(parsed.value, deps);
-    case "merge":
-      return merge(parsed.value, deps, door.subject);
-    case "rebase":
-      return rebaseStep(parsed.value, deps);
-    default:
-      return finish(parsed.value, deps);
+  const answer = async (): Promise<IngressResponse> => {
+    switch (door.step) {
+      case "plan":
+        return plan(parsed.value, deps);
+      case "unit-start":
+        return unitStart(parsed.value, deps);
+      case "branch":
+        return branch(parsed.value, deps);
+      case "spawn":
+        return spawn(parsed.value, deps);
+      case "read-record":
+        return readRecord(parsed.value, deps);
+      case "steer":
+        return steerChild(parsed.value, deps);
+      case "pr-check":
+        return prCheck(parsed.value, deps);
+      case "recover-unit":
+        return recoverOriginalUnit(parsed.value, deps);
+      case "round":
+        return round(parsed.value, deps);
+      case "unit-end":
+        return unitEnd(parsed.value, deps);
+      case "unit-wake":
+        return unitWake(parsed.value, deps);
+      case "checks":
+        return checksStep(parsed.value, deps);
+      case "merge":
+        return merge(parsed.value, deps, door.subject);
+      case "rebase":
+        return rebaseStep(parsed.value, deps);
+      default:
+        return finish(parsed.value, deps);
+    }
+  };
+  try {
+    return await answer();
+  } catch (error) {
+    if (error instanceof CoordinatorUnitWriteConflict) return json(409, { ok: false, error: "settlement_conflict" });
+    throw error;
   }
 }
 

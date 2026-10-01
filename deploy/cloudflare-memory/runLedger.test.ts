@@ -1352,6 +1352,132 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
     ...over,
   });
 
+  it("fences stale full-row and wake writes after typed settlement without committing part of a batch", async () => {
+    const key = storeKey();
+    const stale = unit("U12");
+    const settled: CoordinatorUnit = {
+      ...stale,
+      ending: {
+        kind: "aborted",
+        report: "Stopped",
+        at: 2_000,
+        outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 },
+      },
+    };
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [stale] })).status).toBe(200);
+    expect(
+      (
+        await post("/runs/coordinator/events/append", {
+          storeKey: key,
+          instanceId: INSTANCE_ID,
+          unit: "U12",
+          event: { sender: "slack:UALICE", text: "Proceed", mode: "steer", at: 1_000 },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await post("/runs/coordinator/units/claim-legacy-continuation", {
+          storeKey: key,
+          expected: stale,
+          recovered: settled,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      await post("/runs/coordinator/units/put", {
+        storeKey: key,
+        units: [unit("U13"), { ...stale, startedAt: 3_000 }],
+      }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "settled" } });
+    expect(
+      await post("/runs/coordinator/wake", {
+        storeKey: key,
+        unit: stale,
+        waitId: "U12/wait/1",
+        answer: { kind: "answered", reply: "Proceed" },
+        seqs: [1],
+        by: "wake",
+      }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "settled" } });
+    expect(
+      (
+        await post("/runs/coordinator/events/list", {
+          storeKey: key,
+          instanceId: INSTANCE_ID,
+          unit: "U12",
+          unconsumedOnly: true,
+        })
+      ).data,
+    ).toMatchObject({ events: [{ seq: 1, text: "Proceed" }] });
+    expect(
+      await post("/runs/coordinator/replace", {
+        storeKey: key,
+        instance: {
+          id: INSTANCE_ID,
+          kind: "ship",
+          userId: "slack:UALICE",
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
+          repo: "acme/api",
+          branch: "plan/orchestration",
+          base: "main",
+          plan: { id: "orchestration" },
+          merge: "person",
+          createdAt: 1_000,
+        },
+      }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "exists" } });
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: INSTANCE_ID })).data).toEqual({
+      units: [settled],
+    });
+    expect(
+      (
+        await post("/runs/coordinator/units/claim-legacy-continuation", {
+          storeKey: key,
+          expected: settled,
+          recovered: stale,
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  it("persists a typed outcome and rejects malformed or foreign pull request facts without changing the stored row", async () => {
+    const key = storeKey();
+    const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
+    const row = unit("U12", {
+      pr,
+      ending: {
+        kind: "aborted",
+        report: "Display only",
+        at: 2_000,
+        outcome: {
+          schemaVersion: 1,
+          kind: "aborted",
+          reviewRounds: 2,
+          terminalPr: { state: "merged", ...pr, mergeSha: "c".repeat(40), headSha: "b".repeat(40) },
+          findings: {
+            stop: "head_mismatch",
+            observedHead: "a".repeat(40),
+            remoteHead: "b".repeat(40),
+            missingOutputCount: 1,
+          },
+        },
+      },
+    });
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [row] })).status).toBe(200);
+    for (const bad of [
+      { ...row, ending: { ...row.ending, kind: "merged" } },
+      { ...row, pr: { ...pr, number: 8 } },
+      { ...row, ending: { ...row.ending, outcome: { ...row.ending!.outcome, schemaVersion: 2 } } },
+    ]) {
+      expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [bad] })).status).toBe(400);
+      expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: INSTANCE_ID })).data).toEqual({
+        units: [row],
+      });
+    }
+  });
+
   it("put writes the rows and list reads an instance's back in first-written order; a row is replaced whole and keeps its place; another instance's rows never appear; an unknown instance lists none", async () => {
     const key = storeKey();
     expect(

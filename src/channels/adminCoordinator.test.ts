@@ -3671,6 +3671,263 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(offline.threadsAsked).toEqual([]);
   });
 
+  it("persists typed settlement facts and refuses a mismatched ending before publication", async () => {
+    const h = await planHarness();
+    const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
+    await h.instances.putUnits([unitRow("U10", { pr })]);
+    await hostParent(h);
+    const outcome = {
+      schemaVersion: 1,
+      kind: "aborted",
+      reviewRounds: 1,
+      terminalPr: { state: "closed", ...pr },
+      findings: { stop: "missing_remote", observedHead: "a".repeat(40), missingOutputCount: 2 },
+    };
+    const body = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      ending: { kind: "aborted", report: "Display text cannot certify success", outcome },
+      pr,
+    };
+    expect(await call(h, "unit-end", { ...body, ending: { ...body.ending, kind: "merged" } })).toMatchObject({
+      status: 400,
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.ending).toBeUndefined();
+    expect(
+      await call(h, "unit-end", {
+        ...body,
+        ending: { ...body.ending, outcome: { ...outcome, terminalPr: { ...outcome.terminalPr, number: 8 } } },
+      }),
+    ).toMatchObject({ status: 400 });
+    expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.ending).toMatchObject({ outcome });
+    const settled = (await h.instances.listUnits(PLAN_INSTANCE.id))[0];
+    expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
+    const reordered = Object.fromEntries(Object.entries(outcome).reverse());
+    expect(await call(h, "unit-end", { ...body, ending: { ...body.ending, outcome: reordered } })).toMatchObject({
+      status: 200,
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(settled);
+    expect(
+      await call(h, "unit-end", {
+        ...body,
+        ending: { ...body.ending, outcome: { ...outcome, findings: { ...outcome.findings, missingOutputCount: 0 } } },
+      }),
+    ).toMatchObject({ status: 409 });
+    expect(
+      await call(h, "unit-end", {
+        ...body,
+        ending: { kind: "merged", report: "A stale driver cannot erase typed facts" },
+      }),
+    ).toMatchObject({ status: 409 });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(settled);
+  });
+
+  it("reconciles a typed settlement after a lost store acknowledgment without replacing its result", async () => {
+    const h = await planHarness();
+    await h.instances.putUnits([unitRow("U10")]);
+    await hostParent(h);
+    const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+    const cas = vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementationOnce(async (before, after) => {
+      await replace(before, after);
+      throw new Error("acknowledgment lost");
+    });
+    const outcome = { schemaVersion: 1, kind: "aborted", reviewRounds: 1 };
+    expect(
+      await call(h, "unit-end", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        ending: { kind: "aborted", report: "Stopped", outcome },
+      }),
+    ).toMatchObject({ status: 200 });
+    expect(cas).toHaveBeenCalledTimes(1);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.ending).toMatchObject({ outcome });
+  });
+
+  it("refuses typed settlement when another writer changes the row between read and commit", async () => {
+    const h = await planHarness();
+    const original = unitRow("U10");
+    const newer = { ...original, lastPush: "b".repeat(40) };
+    await h.instances.putUnits([original]);
+    await hostParent(h);
+    const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+    vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementationOnce(async (before, after) => {
+      await h.instances.putUnits([newer]);
+      return replace(before, after);
+    });
+    expect(
+      await call(h, "unit-end", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        ending: { kind: "aborted", report: "Stopped", outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 } },
+      }),
+    ).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(newer);
+  });
+
+  it("does not let a legacy settlement erase a typed outcome committed while its row read was pending", async () => {
+    const h = await planHarness();
+    await h.instances.putUnits([unitRow("U10")]);
+    await hostParent(h);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reached!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const list = h.instances.listUnits.bind(h.instances);
+    vi.spyOn(h.instances, "listUnits").mockImplementationOnce(async (id) => {
+      const rows = await list(id);
+      reached();
+      await held;
+      return rows;
+    });
+    const legacy = call(h, "unit-end", {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      ending: { kind: "merged", report: "stale" },
+    });
+    await readStarted;
+    const outcome = { schemaVersion: 1, kind: "aborted", reviewRounds: 1 };
+    expect(
+      await call(h, "unit-end", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        ending: { kind: "aborted", report: "Stopped", outcome },
+      }),
+    ).toMatchObject({ status: 200 });
+    release();
+    expect(await legacy).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+    expect((await list(PLAN_INSTANCE.id))[0]?.ending).toMatchObject({ kind: "aborted", outcome });
+  });
+
+  it("keeps a successor publication owner when a normal typed settlement is replayed", async () => {
+    const h = await planHarness();
+    const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
+    await h.instances.putUnits([unitRow("U10", { pr })]);
+    await hostParent(h);
+    const fence = h.deps.runnerOwnership!;
+    expect(fence.claim(PLAN_INSTANCE.repo, pr.number, { instanceId: PLAN_INSTANCE.id, unit: "U10" })).toBe(true);
+    const body = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      pr,
+      ending: { kind: "aborted", report: "Stopped", outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 } },
+    };
+    expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
+    const successor = { instanceId: "runner-successor", unit: "task" };
+    expect(fence.claim(PLAN_INSTANCE.repo, pr.number, successor)).toBe(true);
+    expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
+    expect(fence.owner(PLAN_INSTANCE.repo, pr.number)).toEqual(successor);
+  });
+
+  it("binds a typed private report to its original delivery id across retries", async () => {
+    for (const loseAcknowledgment of [false, true]) {
+      const backing = new InMemoryPrivateWorkerLog();
+      let fail = loseAcknowledgment;
+      const log: PrivateWorkerLog = {
+        list: (threadKey) => backing.list(threadKey),
+        listAfter: (threadKey, afterSeq, limit) => backing.listAfter(threadKey, afterSeq, limit),
+        append: async (threadKey, event) => {
+          const saved = await backing.append(threadKey, event);
+          if (event.kind === "reply" && fail) {
+            fail = false;
+            throw new Error("lost acknowledgment after append");
+          }
+          return saved;
+        },
+      };
+      const h = await planHarness({ privateWorkerLog: log });
+      await h.instances.putUnits([
+        unitRow("U10", {
+          workBrief: {
+            requesterId: PLAN_INSTANCE.userId,
+            mainThreadKey: PLAN_INSTANCE.threadKey,
+            actId: "act-1",
+            repo: PLAN_INSTANCE.repo,
+            base: "main",
+            question: "Why?",
+            findings: [],
+            requestedChange: "Fix it",
+          },
+        }),
+      ]);
+      await hostParent(h);
+      const body = {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        deliveryId: "U10/end",
+        ending: { kind: "aborted", report: "Stopped", outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 } },
+      };
+      expect(await call(h, "unit-end", body)).toMatchObject({ status: loseAcknowledgment ? 503 : 200 });
+      expect(await call(h, "unit-end", { ...body, deliveryId: "U10/changed" })).toMatchObject({
+        status: 409,
+        body: { error: "settlement_conflict" },
+      });
+      expect(
+        await call(h, "unit-end", {
+          ...body,
+          ending: { ...body.ending, report: "Different content" },
+        }),
+      ).toMatchObject({ status: 409 });
+      expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
+      expect(
+        (await log.list(`worker:${PLAN_INSTANCE.id}:U10`)).filter((event) => event.kind === "reply"),
+      ).toMatchObject([{ kind: "reply", id: "U10/end", text: "Stopped" }]);
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.ending).toMatchObject({ deliveryId: "U10/end" });
+    }
+  });
+
+  it.each(["round", "pr-check", "unit-start"] as const)(
+    "%s cannot erase a typed ending committed between its row read and ordinary write",
+    async (step) => {
+      const h = await planHarness({
+        mergedPr: {
+          number: 12,
+          htmlUrl: "https://github.com/acme/api/pull/12",
+          sha: "9".repeat(40),
+          mergedAt: "then",
+        },
+      });
+      await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+      await hostParent(h);
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reached!: () => void;
+      const writeStarted = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const put = h.instances.putUnits.bind(h.instances);
+      vi.spyOn(h.instances, "putUnits").mockImplementationOnce(async (rows) => {
+        reached();
+        await held;
+        return put(rows);
+      });
+      const pending = call(h, step, {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        ...(step === "round" ? { index: 1, agent: "review", outcome: "approve" } : {}),
+      });
+      await writeStarted;
+      const outcome = { schemaVersion: 1, kind: "aborted", reviewRounds: 1 };
+      expect(
+        await call(h, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "aborted", report: "Stopped", outcome },
+        }),
+      ).toMatchObject({ status: 200 });
+      const settled = (await h.instances.listUnits(PLAN_INSTANCE.id))[0];
+      release();
+      expect(await pending).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(settled);
+    },
+  );
+
   it("retries a long private unit report after a transient log failure without losing or duplicating it", async () => {
     const backing = new InMemoryPrivateWorkerLog();
     let fail = true;
@@ -13149,26 +13406,123 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   });
 
   it("replays a recovered private unit report after its settlement committed but the log failed", async () => {
-    const backing = new InMemoryPrivateWorkerLog();
-    let fail = true;
-    const log: PrivateWorkerLog = {
-      list: (threadKey) => backing.list(threadKey),
-      listAfter: (threadKey, afterSeq, limit) => backing.listAfter(threadKey, afterSeq, limit),
-      append: async (threadKey, event) => {
-        if (event.kind === "reply" && fail) {
-          fail = false;
-          throw new Error("temporary log failure");
-        }
-        return backing.append(threadKey, event);
-      },
-    };
+    for (const outcome of [undefined, { schemaVersion: 1, kind: "aborted", reviewRounds: 2 }]) {
+      const backing = new InMemoryPrivateWorkerLog();
+      let fail = true;
+      const log: PrivateWorkerLog = {
+        list: (threadKey) => backing.list(threadKey),
+        listAfter: (threadKey, afterSeq, limit) => backing.listAfter(threadKey, afterSeq, limit),
+        append: async (threadKey, event) => {
+          if (event.kind === "reply" && fail) {
+            fail = false;
+            if (outcome) await backing.append(threadKey, event);
+            throw new Error("temporary log failure");
+          }
+          return backing.append(threadKey, event);
+        },
+      };
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
+      await h.instances.put(recoveryInstance());
+      const key = `worker:${INSTANCE.id}:U12`;
+      await h.instances.putUnits([requestChangesRow()]);
+      await h.store.put(reviewRecord());
+      expect((await callRecovery(h)).status).toBe(200);
+      const [claimed] = await h.instances.listUnits(INSTANCE.id);
+      await h.instances.putUnits([
+        {
+          ...claimed!,
+          threadKey: key,
+          workBrief: {
+            requesterId: INSTANCE.userId,
+            mainThreadKey: INSTANCE.threadKey,
+            actId: "act-1",
+            repo: INSTANCE.repo,
+            base: "main",
+            question: "Why?",
+            findings: [],
+            requestedChange: "Fix it",
+          },
+        },
+      ]);
+      const body = {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryWorkflowId: "recovery-run-original-review",
+        deliveryId: "U12/recovery/end",
+        ending: {
+          kind: outcome?.kind ?? "merge_ready",
+          report: "ready at the recovered head",
+          ...(outcome ? { outcome } : {}),
+        },
+        pr: PR,
+        headSha: HEAD,
+      };
+      expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+        status: 503,
+        body: { error: "private_worker_log_unavailable" },
+      });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]?.recoveryReceipt).toMatchObject({
+        workflowId: "recovery-run-original-review",
+      });
+      if (outcome) {
+        expect(
+          await handleCoordinatorRequest(
+            post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+              ...body,
+              deliveryId: "U12/recovery/changed-id",
+            }),
+            h.deps,
+          ),
+        ).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+        expect(
+          await handleCoordinatorRequest(
+            post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+              ...body,
+              ending: { ...body.ending, report: "Changed report" },
+            }),
+            h.deps,
+          ),
+        ).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+        expect(
+          await handleCoordinatorRequest(
+            post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+              ...body,
+              deliveryId: "U12/recovery/conflicting",
+              ending: {
+                ...body.ending,
+                outcome: { ...outcome, reviewRounds: 3 },
+              },
+            }),
+            h.deps,
+          ),
+        ).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+        expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
+          { kind: "reply", id: "U12/recovery/end", text: "ready at the recovered head" },
+        ]);
+      }
+      expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+        status: 200,
+        body: { ok: true, alreadySettled: true, told: true },
+      });
+      expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+        status: 200,
+        body: { ok: true, alreadySettled: true, told: true },
+      });
+      expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
+        { kind: "reply", id: "U12/recovery/end", text: "ready at the recovered head" },
+      ]);
+    }
+  });
+
+  it("refuses a legacy recovery replay that races a typed settlement before a lost CAS response", async () => {
+    const log = new InMemoryPrivateWorkerLog();
     const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
     await h.instances.put(recoveryInstance());
-    const key = `worker:${INSTANCE.id}:U12`;
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    const key = `worker:${INSTANCE.id}:U12`;
     await h.instances.putUnits([
       {
         ...claimed!,
@@ -13189,29 +13543,40 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       parentInstanceId: INSTANCE.id,
       unit: "U12",
       recoveryWorkflowId: "recovery-run-original-review",
-      deliveryId: "U12/recovery/end",
-      ending: { kind: "merge_ready", report: "ready at the recovered head" },
+      deliveryId: "U12/recovery/legacy",
+      ending: { kind: "merge_ready", report: "Legacy report" },
       pr: PR,
       headSha: HEAD,
     };
+    vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementationOnce(async () => {
+      expect(
+        await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+            ...body,
+            deliveryId: "U12/recovery/typed",
+            ending: {
+              kind: "aborted",
+              report: "Typed report",
+              outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 2 },
+            },
+          }),
+          h.deps,
+        ),
+      ).toMatchObject({ status: 200 });
+      throw new Error("lost CAS response");
+    });
     expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
-      status: 503,
-      body: { error: "private_worker_log_unavailable" },
+      status: 409,
+      body: { error: "recovery_claim_stale" },
     });
-    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recoveryReceipt).toMatchObject({
-      workflowId: "recovery-run-original-review",
-    });
-    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
-      status: 200,
-      body: { ok: true, alreadySettled: true, told: true },
-    });
-    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
-      status: 200,
-      body: { ok: true, alreadySettled: true, told: true },
-    });
-    expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
-      { kind: "reply", id: "U12/recovery/end", text: "ready at the recovered head" },
+    expect((await log.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
+      { id: "U12/recovery/typed", text: "Typed report" },
     ]);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.ending).toMatchObject({
+      kind: "aborted",
+      deliveryId: "U12/recovery/typed",
+      report: "Typed report",
+    });
   });
 
   it("rejects a stale original Workflow settlement that omits the active recovery identity", async () => {

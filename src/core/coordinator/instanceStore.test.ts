@@ -7,9 +7,12 @@ import {
   isMainTaskKey,
   mainTaskClaimMatches,
   preserveWorkBrief,
+  prepareUnfencedUnitWrite,
+  CoordinatorUnitWriteConflict,
   type CoordinatorInstance,
   type CoordinatorUnit,
   type ThreadEvent,
+  type UnitWakeAnswer,
 } from "./contract.js";
 import {
   buildCoordinatorInstanceStore,
@@ -113,6 +116,13 @@ function workerDouble() {
       const inst = body.instance as CoordinatorInstance;
       if ([...mainTasks.values()].some((link) => link.instanceId === inst.id))
         return Response.json({ ok: false, reason: "exists" }, { status: 409 });
+      if (
+        [...units].some(
+          ([key, text]) =>
+            key.startsWith(`${inst.id}/`) && (JSON.parse(text) as CoordinatorUnit).ending?.outcome !== undefined,
+        )
+      )
+        return Response.json({ ok: false, reason: "exists" }, { status: 409 });
       rows.set(inst.id, JSON.stringify(inst));
       for (const key of [...units.keys()]) if (key.startsWith(`${inst.id}/`)) units.delete(key);
       return Response.json({ ok: true });
@@ -130,11 +140,19 @@ function workerDouble() {
       return Response.json({ ok: true });
     }
     if (path === "/runs/coordinator/units/put") {
-      for (const u of body.units as CoordinatorUnit[]) {
-        const key = `${u.instanceId}/${u.unit}`;
-        const prior = units.get(key);
-        units.set(key, JSON.stringify(preserveWorkBrief(prior ? JSON.parse(prior) : undefined, u)));
+      const pending = new Map<string, string>();
+      try {
+        for (const u of body.units as CoordinatorUnit[]) {
+          const key = `${u.instanceId}/${u.unit}`;
+          const prior = pending.get(key) ?? units.get(key);
+          pending.set(key, JSON.stringify(prepareUnfencedUnitWrite(prior ? JSON.parse(prior) : undefined, u)));
+        }
+      } catch (error) {
+        if (error instanceof CoordinatorUnitWriteConflict)
+          return Response.json({ ok: false, reason: "settled" }, { status: 409 });
+        throw error;
       }
+      for (const [key, text] of pending) units.set(key, text);
       return Response.json({ ok: true });
     }
     if (path === "/runs/coordinator/units/claim-legacy-continuation") {
@@ -148,6 +166,26 @@ function workerDouble() {
       )
         return Response.json({ ok: false, reason: "stale" }, { status: 409 });
       units.set(key, JSON.stringify(preserveWorkBrief(expected, replacement)));
+      return Response.json({ ok: true });
+    }
+    if (path === "/runs/coordinator/wake") {
+      const unit = body.unit as CoordinatorUnit;
+      const key = `${unit.instanceId}/${unit.unit}`;
+      const current = units.get(key);
+      try {
+        const updated = prepareUnfencedUnitWrite(current ? JSON.parse(current) : undefined, {
+          ...unit,
+          wakes: { ...(unit.wakes ?? {}), [body.waitId as string]: body.answer as UnitWakeAnswer },
+        });
+        units.set(key, JSON.stringify(updated));
+      } catch (error) {
+        if (error instanceof CoordinatorUnitWriteConflict)
+          return Response.json({ ok: false, reason: "settled" }, { status: 409 });
+        throw error;
+      }
+      for (const event of events.get(key) ?? [])
+        if ((body.seqs as number[]).includes(event.seq) && event.consumedBy === undefined)
+          event.consumedBy = body.by as string;
       return Response.json({ ok: true });
     }
     if (path === "/runs/coordinator/units/list") {
@@ -194,6 +232,42 @@ const unitRow = (unit: string, over: Partial<CoordinatorUnit> = {}): Coordinator
 
 const contract = (name: string, make: () => CoordinatorInstanceStore) => {
   describe(name, () => {
+    it("refuses unfenced writes over a typed ending atomically while allowing an exact checked replacement", async () => {
+      const store = make();
+      const stale = unitRow("U12");
+      const settled: CoordinatorUnit = {
+        ...stale,
+        ending: {
+          kind: "aborted",
+          report: "Stopped",
+          at: 2_000,
+          outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 },
+        },
+      };
+      await store.putUnits([stale]);
+      const key = { instanceId: instance.id, unit: "U12" };
+      await store.appendEvent(key, { sender: "slack:UALICE", text: "Proceed", mode: "steer", at: 1_000 });
+      expect(await store.compareAndReplaceUnit(stale, settled)).toEqual({ ok: true });
+      for (const late of [
+        { ...stale, startedAt: 3_000 },
+        { ...stale, pr: { number: 7, url: "https://github.com/acme/api/pull/7" } },
+        { ...stale, rounds: [{ index: 1, agent: "review", outcome: "approve", at: 3_000 }] },
+      ]) {
+        await expect(store.putUnits([unitRow("U13"), late])).rejects.toThrow(/settled/);
+        expect(await store.listUnits(instance.id)).toEqual([settled]);
+      }
+      expect(await store.putUnits([settled])).toEqual({ ok: true });
+      await expect(
+        store.answerWake(stale, "U12/wait/1", { kind: "answered", reply: "Proceed" }, [1], "wake"),
+      ).rejects.toThrow(/settled/);
+      expect(await store.listUnits(instance.id)).toEqual([settled]);
+      expect(await store.listEvents(key, true)).toMatchObject([{ seq: 1, text: "Proceed" }]);
+      expect(await store.replace(instance)).toEqual({ ok: false, reason: "exists" });
+      expect(await store.listUnits(instance.id)).toEqual([settled]);
+      expect(await store.compareAndReplaceUnit(settled, stale)).toEqual({ ok: true });
+      expect(await store.listUnits(instance.id)).toEqual([stale]);
+    });
+
     it("put stores the record and get reads it back; an identical put is idempotent; a different record under the same id is refused as exists; an unknown id is null", async () => {
       const store = make();
       expect(await store.put(instance)).toEqual({ ok: true });
@@ -206,7 +280,7 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
 
     // A re-issue over the leftover of an attempt whose create failed: the
     // record is written over whatever the id holds, once the shim said no
-    // instance exists — the one write that is never `exists`.
+    // instance exists and no private claim or typed settlement protects it.
     it("replace writes the record over whatever the id holds — a different record, or none — drops the id's unit rows and no other instance's, and get reads the new one back", async () => {
       const store = make();
       expect(await store.put(instance)).toEqual({ ok: true });

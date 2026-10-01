@@ -20,6 +20,8 @@ import {
   mainTaskBindingMatches,
   mainTaskClaimMatches,
   preserveWorkBrief,
+  prepareUnfencedUnitWrite,
+  CoordinatorUnitWriteConflict,
   isThreadEvent,
   type CoordinatorInstance,
   type CoordinatorUnit,
@@ -105,13 +107,15 @@ export interface CoordinatorInstanceStore {
   put(instance: CoordinatorInstance): Promise<PutInstanceResult>;
   /** The record written over whatever the id holds and the id's unit rows
    *  dropped — an attempt starting over: the leftover of one whose Workflow
-   *  instance was never created, once the shim has said so. Never `exists`;
-   *  the same `unavailable` as `put`. */
+   *  instance was never created, once the shim has said so. A private-task
+   *  claim or typed settlement refuses replacement as `exists`. */
   replace(instance: CoordinatorInstance): Promise<PutInstanceResult>;
   get(id: string): Promise<CoordinatorInstance | null>;
   /** The unit rows of an instance (run-history item 50), each replaced whole:
    *  written at the instance's creation and rewritten as the runner reaches the
-   *  unit — its thread, its pull request, its rounds, its ending. */
+   *  unit — its thread, its pull request, its rounds, its ending. A typed
+   *  settlement rejects changed rows atomically with CoordinatorUnitWriteConflict;
+   *  further changes require compareAndReplaceUnit. */
   putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult>;
   /** Replace one unit only while its complete durable row still equals the
    * caller's expected row. A missing or changed row is stale, so concurrent
@@ -247,6 +251,13 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   async replace(instance: CoordinatorInstance): Promise<PutInstanceResult> {
     if ([...this.mainTasks.values()].some((link) => link.instanceId === instance.id))
       return { ok: false, reason: "exists" };
+    if (
+      [...this.units].some(
+        ([key, text]) =>
+          key.startsWith(`${instance.id}\0`) && (JSON.parse(text) as CoordinatorUnit).ending?.outcome !== undefined,
+      )
+    )
+      return { ok: false, reason: "exists" };
     this.rows.set(instance.id, JSON.stringify(instance));
     for (const key of [...this.units.keys()]) if (key.startsWith(`${instance.id}\0`)) this.units.delete(key);
     return { ok: true };
@@ -256,10 +267,13 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     return text === undefined ? null : (JSON.parse(text) as CoordinatorInstance);
   }
   async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
+    const pending = new Map<string, string>();
     for (const u of units) {
-      const current = this.units.get(unitKey(u));
-      this.units.set(unitKey(u), JSON.stringify(preserveWorkBrief(current ? JSON.parse(current) : undefined, u)));
+      const key = unitKey(u);
+      const current = pending.get(key) ?? this.units.get(key);
+      pending.set(key, JSON.stringify(prepareUnfencedUnitWrite(current ? JSON.parse(current) : undefined, u)));
     }
+    for (const [key, text] of pending) this.units.set(key, text);
     return { ok: true };
   }
   async compareAndReplaceUnit(
@@ -380,7 +394,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     const current = this.units.get(unitKey(updated));
     this.units.set(
       unitKey(updated),
-      JSON.stringify(preserveWorkBrief(current ? JSON.parse(current) : undefined, updated)),
+      JSON.stringify(prepareUnfencedUnitWrite(current ? JSON.parse(current) : undefined, updated)),
     );
     const list = this.events.get(unitKey(unit)) ?? [];
     for (const e of list) if (seqs.includes(e.seq) && e.consumedBy === undefined) e.consumedBy = by;
@@ -588,7 +602,8 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
 
   async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
     const r = await this.post("/runs/coordinator/units/put", { units });
-    const d = r.data as { ok?: unknown };
+    const d = r.data as { ok?: unknown; reason?: unknown };
+    if (r.status === 409 && d.reason === "settled") throw new CoordinatorUnitWriteConflict();
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/units/put: unexpected answer (HTTP ${r.status})`);
   }
@@ -706,7 +721,8 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     by: string,
   ): Promise<AnswerWakeResult> {
     const r = await this.post("/runs/coordinator/wake", { unit, waitId, answer, seqs: [...seqs], by });
-    const d = r.data as { ok?: unknown };
+    const d = r.data as { ok?: unknown; reason?: unknown };
+    if (r.status === 409 && d.reason === "settled") throw new CoordinatorUnitWriteConflict();
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/wake: unexpected answer (HTTP ${r.status})`);
   }
