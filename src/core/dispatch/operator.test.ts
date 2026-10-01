@@ -16,6 +16,7 @@ import {
   OPERATOR_ASK_TOOL,
   OPERATOR_ASK_REPO_TOOL,
   OPERATOR_BIND_TOOL,
+  OPERATOR_BATCH_TOOL,
   OPERATOR_QUESTION_MARKER,
   OPERATOR_READ_TOOLS,
   operatorEventOf,
@@ -1084,6 +1085,72 @@ restrict:
 });
 
 describe("runOperator — the loop over a scripted model", () => {
+  it("a typed flattened review batch binds conductor with exact cross-repository targets", async () => {
+    const text = "review these: • https://github.com/acme/cli/pull/120 • https://github.com/acme/api/pull/3927";
+    const answer = await runOperator(
+      input({
+        text,
+        projection: operatorProjection({
+          presets: operatorPresets(),
+          commands: [],
+          allowedPresets: ["conductor", "review", "ship", "general"],
+        }),
+      }),
+      async (prompt) => {
+        expect(prompt.tools?.map((tool) => tool.name)).toContain(OPERATOR_BATCH_TOOL);
+        return {
+          tool: OPERATOR_BATCH_TOOL,
+          input: {
+            kind: "review",
+            targets: ["https://github.com/acme/cli/pull/120", "https://github.com/acme/api/pull/3927"],
+            reason: "coordinate both reviews",
+          },
+        };
+      },
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [
+        {
+          line: `agent:conductor ${text}`,
+          prBatch: {
+            kind: "review",
+            targets: [
+              { repo: "acme/cli", number: 120 },
+              { repo: "acme/api", number: 3927 },
+            ],
+          },
+        },
+      ],
+    });
+    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
+    expect(operatorEventOf("on", answer).binds?.[0]?.prBatch).toMatchObject({
+      kind: "review",
+      targets: [
+        { repo: "acme/cli", number: 120 },
+        { repo: "acme/api", number: 3927 },
+      ],
+    });
+  });
+
+  it("a typed Ship batch cannot select a PR URL absent from the request", () => {
+    const answer = parseOperatorTurn(
+      {
+        tool: OPERATOR_BATCH_TOOL,
+        input: {
+          kind: "ship",
+          targets: ["https://github.com/acme/api/pull/1", "https://github.com/acme/web/pull/9"],
+          reason: "ship both",
+        },
+      },
+      ctxOf({
+        requestText: "ship these: • https://github.com/acme/api/pull/10 • https://github.com/acme/web/pull/9",
+        presets: ["conductor", "ship"],
+      }),
+    );
+    expect(answer).toEqual({ kind: "violation", violation: "a PR batch target must be an exact link in this request" });
+  });
+
   it("a cross-repository PR review batch binds the conductor without choosing one PR's repository", async () => {
     const text =
       "review these:\n" +
@@ -1091,8 +1158,16 @@ describe("runOperator — the loop over a scripted model", () => {
       "- https://github.com/acme/web/pull/9\n" +
       "- https://github.com/acme/api/pull/11";
     const model = vi.fn(async () => ({
-      tool: OPERATOR_BIND_TOOL,
-      input: { preset: "conductor", repo: "acme/api", reason: "coordinate the three reviews" },
+      tool: OPERATOR_BATCH_TOOL,
+      input: {
+        kind: "review",
+        targets: [
+          "https://github.com/acme/api/pull/7",
+          "https://github.com/acme/web/pull/9",
+          "https://github.com/acme/api/pull/11",
+        ],
+        reason: "coordinate the three reviews",
+      },
     }));
     const answer = await runOperator(
       input({
@@ -1112,7 +1187,7 @@ describe("runOperator — the loop over a scripted model", () => {
     expect(model).toHaveBeenCalledTimes(1);
   });
 
-  it("a plain-words ship batch binds the conductor even when the model chose single-repository ship", async () => {
+  it("a plain-words ship batch binds the conductor with typed cross-repository targets", async () => {
     const text = "ship these:\n" + "- https://github.com/acme/api/pull/7\n" + "- https://github.com/acme/web/pull/9";
     const answer = await runOperator(
       input({
@@ -1124,8 +1199,12 @@ describe("runOperator — the loop over a scripted model", () => {
         }),
       }),
       async () => ({
-        tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", shipEntry: "work", repo: "acme/api", reason: "ship the linked PRs" },
+        tool: OPERATOR_BATCH_TOOL,
+        input: {
+          kind: "ship",
+          targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
+          reason: "ship the linked PRs",
+        },
       }),
     );
     expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ line: "agent:conductor ship these:" }] });
@@ -1134,11 +1213,145 @@ describe("runOperator — the loop over a scripted model", () => {
     expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
   });
 
-  it("a PR batch ignores conflicting inherited thread targets and binds no single repository", () => {
+  it("an explicit conductor directive still binds the requested PR batch", () => {
+    const requestText =
+      "agent:conductor ship these: https://github.com/acme/api/pull/7 https://github.com/acme/web/pull/9";
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BATCH_TOOL,
+          input: {
+            kind: "ship",
+            targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
+            reason: "ship both",
+          },
+        },
+        ctxOf({ requestText, presets: ["conductor", "ship"] }),
+      ),
+    ).toMatchObject({
+      kind: "decision",
+      decision: {
+        kind: "binds",
+        binds: [{ line: expect.stringContaining("agent:conductor ship these:"), prBatch: { kind: "ship" } }],
+      },
+    });
+  });
+
+  it("a conductor bind ignores irrelevant Ship-only fields on a single-PR request", async () => {
+    const text = "review https://github.com/acme/cli/pull/120 and summarize the test results";
+    const answer = await runOperator(
+      input({
+        text,
+        projection: operatorProjection({
+          presets: operatorPresets(),
+          commands: [],
+          allowedPresets: ["conductor", "ship", "review", "general"],
+        }),
+      }),
+      async () => ({
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "conductor",
+          shipEntry: "review",
+          workObjective: "review the listed PRs",
+          reason: "coordinate both reviews",
+        },
+      }),
+    );
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ line: `agent:conductor ${text}` }] });
+    if (answer.decision.kind !== "binds") return;
+    expect(answer.decision.binds[0]?.repo).toBeUndefined();
+    expect(answer.decision.binds[0]?.shipEntry).toBeUndefined();
+    expect(answer.decision.binds[0]?.workObjective).toBeUndefined();
+    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
+  });
+
+  it("a single review ignores irrelevant Ship-only fields without granting Ship work", () => {
     const answer = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", shipEntry: "work", repo: "acme/api", reason: "ship both PRs" },
+        input: {
+          preset: "review",
+          shipEntry: "work",
+          workObjective: "change the linked PR",
+          repo: "acme/api",
+          reason: "review the requested PR",
+        },
+      },
+      ctxOf({ requestText: "review https://github.com/acme/api/pull/7", presets: ["review"] }),
+    );
+    expect(answer).toMatchObject({ kind: "decision", decision: { kind: "binds", binds: [{ repo: "acme/api" }] } });
+    if (answer.kind !== "decision" || answer.decision.kind !== "binds") return;
+    expect(answer.decision.binds[0]?.shipEntry).toBeUndefined();
+    expect(answer.decision.binds[0]?.workObjective).toBeUndefined();
+  });
+
+  it("a multi-PR preset bind without typed targets is re-asked before starting work", () => {
+    const text = "review these: • https://github.com/acme/cli/pull/120 • https://github.com/acme/api/pull/3927";
+    for (const preset of ["conductor", "review", "ship", "general"]) {
+      expect(
+        parseOperatorTurn(
+          { tool: OPERATOR_BIND_TOOL, input: { preset, reason: "handle the reviews" } },
+          ctxOf({ requestText: text, presets: ["conductor", "review", "ship", "general"] }),
+        ),
+      ).toEqual({ kind: "violation", violation: "a multi-PR Review or Ship request needs bind_pr_batch" });
+    }
+  });
+
+  it("an unscoped third PR still rejects an untyped multi-PR preset bind", () => {
+    const requestText =
+      "ship these: https://github.com/acme/api/pull/7 https://github.com/acme/web/pull/9; https://github.com/acme/cli/pull/10";
+    expect(
+      parseOperatorTurn(
+        { tool: OPERATOR_BIND_TOOL, input: { preset: "conductor", reason: "ship the listed PRs" } },
+        ctxOf({ requestText, presets: ["conductor", "ship"] }),
+      ),
+    ).toEqual({ kind: "violation", violation: "a multi-PR Review or Ship request needs bind_pr_batch" });
+  });
+
+  it("re-asks an untyped conductor bind and accepts the corrected exact batch", async () => {
+    const text = "ship these: https://github.com/acme/api/pull/7 https://github.com/acme/web/pull/9";
+    const answers: RouteToolCall[] = [
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "conductor", reason: "coordinate Ship" } },
+      {
+        tool: OPERATOR_BATCH_TOOL,
+        input: {
+          kind: "ship",
+          targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
+          reason: "ship both requested PRs",
+        },
+      },
+    ];
+    const answer = await runOperator(
+      input({
+        text,
+        projection: operatorProjection({
+          presets: operatorPresets(),
+          commands: [],
+          allowedPresets: ["conductor", "ship", "general"],
+        }),
+      }),
+      async () => answers.shift()!,
+    );
+    expect(answer.attempts).toEqual([
+      { outcome: "violation", violation: "a multi-PR Review or Ship request needs bind_pr_batch" },
+      { outcome: "accepted" },
+    ]);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ prBatch: { kind: "ship", targets: [{ number: 7 }, { number: 9 }] } }],
+    });
+  });
+
+  it("a PR batch ignores conflicting inherited thread targets and binds no single repository", () => {
+    const answer = parseOperatorTurn(
+      {
+        tool: OPERATOR_BATCH_TOOL,
+        input: {
+          kind: "ship",
+          targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
+          reason: "ship both PRs",
+        },
       },
       ctxOf({
         requestText: "ship these:\n- https://github.com/acme/api/pull/7\n- https://github.com/acme/web/pull/9",

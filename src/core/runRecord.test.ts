@@ -104,6 +104,31 @@ it("a preset question keeps its typed settings through the event-to-record proje
   });
 });
 
+it("a typed PR batch survives the operator event and JSON storage for a resumed conductor", () => {
+  const event: RunEvent = {
+    type: "operator",
+    mode: "on",
+    outcome: "binds",
+    reason: "coordinate two reviews",
+    binds: [
+      {
+        line: "agent:conductor review these",
+        reason: "coordinate two reviews",
+        prBatch: {
+          kind: "review",
+          targets: [
+            { repo: "acme/api", number: 7, url: "https://github.com/acme/api/pull/7" },
+            { repo: "acme/web", number: 9, url: "https://github.com/acme/web/pull/9" },
+          ],
+        },
+      },
+    ],
+  };
+  const stored = JSON.parse(JSON.stringify(record({ events: [event], operator: operatorOfEvents([event]) })));
+  expect(isRunRecord(stored)).toBe(true);
+  expect(stored.operator.binds[0].prBatch).toEqual(event.binds?.[0]?.prBatch);
+});
+
 function item(id: string, finishedAt: number, bytes?: number): RunListItem {
   const { events: _events, ...rest } = record({ id, finishedAt });
   return bytes === undefined ? rest : { ...rest, bytes };

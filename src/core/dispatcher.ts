@@ -76,6 +76,7 @@ import {
   type OperatorThreadOwner,
 } from "./dispatch/operator.js";
 import type { ProviderModelsReader } from "./dispatch/providerModels.js";
+import type { PrBatchBinding } from "./prBatchBinding.js";
 import type { IntakeVerdict } from "./intake.js";
 import type { McpToolSource } from "../mcp/source.js";
 import {
@@ -1047,6 +1048,7 @@ export async function dispatch(
     let operatorRepo: string | undefined;
     let operatorRepoSource: ShipContext["shipRepoSource"];
     let operatorShipEntry: ShipContext["shipEntry"];
+    let operatorPrBatch: PrBatchBinding | undefined;
     // An ended generated pipeline's stable plan id and remaining caps: read
     // from its coordinator rows and handed to ship so neither a formatted
     // durable input nor today's config can mint a new identity or budget.
@@ -1303,6 +1305,7 @@ export async function dispatch(
           operatorRepo = execution.repo;
           operatorRepoSource = execution.repoSource;
           operatorShipEntry = execution.shipEntry;
+          operatorPrBatch = execution.prBatch;
         }
         // `kind: "fold"` (issue 2027; thread-admission item 9): the decision was
         // neither steers-and-reads nor a question in an owned thread, so the
@@ -3731,12 +3734,14 @@ export async function dispatch(
     // REQUESTER may, steer a child through the inbox a thread reply takes, and
     // wait on its children within its own clock. Only a toolset that holds the
     // run tools reaches any of them.
+    const prBatch = operatorPrBatch ?? resume?.events.find((event) => event.type === "operator")?.binds?.[0]?.prBatch;
     const { spawn, runs, steer, wait } = runToolCapabilities(
       { core: deps, dispatch, registry, clock },
       {
         runId: run.id,
         depth: parent?.depth ?? 0,
         agentName: agent.name,
+        ...(prBatch ? { prBatch } : {}),
         msg,
         io,
         control: run.control,

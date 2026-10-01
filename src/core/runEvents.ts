@@ -1165,6 +1165,10 @@ export type RunEvent =
         /** The operator-selected first stage of a Ship unit. */
         shipEntry?: "work" | "work_from_thread" | "review" | "plan";
         workObjective?: string;
+        prBatch?: {
+          kind: "review" | "ship";
+          targets: ReadonlyArray<{ repo: string; number: number; url: string }>;
+        };
         confirmed?: true;
       }>;
       question?: string;
