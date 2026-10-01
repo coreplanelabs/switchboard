@@ -3149,6 +3149,44 @@ describe("the pending question's free-text answer joins the original ask (issue 
     expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
   });
 
+  it("a repository answer with more instructions binds the same Ship request", async () => {
+    const request =
+      "agents:ship update the renovate config to automerge these kinds of PR https://github.com/acme/project/pull/7 https://github.com/acme/project/pull/8";
+    const pending = {
+      question: "Which repository should receive this change? Reply with owner/name.",
+      questionKind: "target_repository" as const,
+      questionWriter: "ship",
+      requesterId: "slack:UREQUESTER",
+      request,
+    };
+    const followUp =
+      "acme/project, and quadruple the rate limit for how many are created a day and can be live at a time";
+    const target = answeredRepositoryTarget("slack:UREQUESTER", pending, followUp);
+    expect(target?.target.repo).toBe("acme/project");
+    const joined = joinedAnswerRequest(pending, followUp)!;
+    const answer = await runOperator(
+      input({
+        text: joined,
+        projection: projectionOf(["general", "ship"]),
+        requesterId: "slack:UREQUESTER",
+        requesterTarget: target?.target,
+      }),
+      async () => ({
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "work", repo: "acme/project", reason: "the requested Renovate change" },
+      }),
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/project", repoSource: "thread" }],
+    });
+    expect(answer.decision.kind === "binds" && answer.decision.binds[0]?.line).toContain("quadruple the rate limit");
+    expect(answeredRepositoryTarget("slack:UREQUESTER", pending, "acme/project, or acme/other")).toBeUndefined();
+    expect(
+      answeredRepositoryTarget("slack:UREQUESTER", pending, "acme/project, and update in acme/other"),
+    ).toBeUndefined();
+  });
+
   it("question wording and another person's reply cannot authorize a write target", async () => {
     const pending = {
       question: "Which repository should I update?",

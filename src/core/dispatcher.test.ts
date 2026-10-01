@@ -24659,7 +24659,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   });
 
   it("on: a typed target answer is saved before the operator starts its selected writer", async () => {
-    const { deps } = operatorDeps(ON_YAML);
+    const { deps, registry } = operatorDeps(ON_YAML);
     const request = "Add hourly drift detection to the infrastructure repo";
     const question = "Which repository should receive this change? Reply with owner/name.";
     const pending = [
@@ -24688,16 +24688,23 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         target = next;
         return next;
       });
-    const joined = `${request} — ${question}: acme/infrastructure`;
+    const reply = "acme/infrastructure, and double the alert budget";
+    const joined = `${request} — ${question}: ${reply}`;
     deps.operatorModel = decides({
       binds: [{ line: `agent:ship ${joined}`, repo: "acme/infrastructure", shipEntry: "work" }],
     });
-    await dispatch(deps, msg("acme/infrastructure", "slack:UADMIN"), fakeIO().io, { thread: pending });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(reply, "slack:UADMIN"), io, { thread: pending });
     expect(checkpoint).toHaveBeenCalledWith(
       expect.any(String),
       "slack:UADMIN",
-      expect.objectContaining({ repo: "acme/infrastructure", provenance: expect.stringContaining(request) }),
+      expect.objectContaining({ repo: "acme/infrastructure", provenance: expect.stringContaining(reply) }),
     );
+    expect(replies).not.toContain("I couldn't bind this request to an action, so nothing started.");
+    expect(registry.snapshotById("r1")!.events.find((event) => event.type === "operator")).toMatchObject({
+      outcome: "binds",
+      binds: [{ repo: "acme/infrastructure", repoSource: "thread" }],
+    });
   });
 
   it("on: a pending question's no-call answer is re-asked once, then stops without a reader hand-off (issue 2046)", async () => {

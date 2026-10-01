@@ -1778,7 +1778,19 @@ export function answeredRepositoryTarget(
     !machineNeedsRepo(AGENTS[writer]!.machine)
   )
     return;
-  const repo = parseSlug(answer.trim());
+  const words = answer.trim();
+  const boundary = words.search(/[,;\n]/);
+  const repo = parseSlug(boundary < 0 ? words : words.slice(0, boundary).trim());
+  if (repo !== undefined && boundary >= 0) {
+    const rest = words.slice(boundary + 1);
+    const addressed = explicitRepoOf(rest);
+    const alternative = /\b(?:or|instead|rather than)\s+(?:in\s+)?([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)/i.exec(rest);
+    if (
+      (addressed !== undefined && addressed !== repo) ||
+      (alternative !== null && parseSlug(alternative[1]!) !== repo)
+    )
+      return undefined;
+  }
   return repo === undefined
     ? undefined
     : {
