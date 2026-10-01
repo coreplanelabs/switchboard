@@ -94,6 +94,8 @@ export interface PullSummary {
   title: string;
   body: string;
   state: string;
+  /** GitHub reports both merged and abandoned pull requests as `closed`. */
+  mergedAt?: string;
   draft: boolean;
   url: string;
   author: string;
@@ -447,6 +449,7 @@ export class RestGithubApi implements GithubApi {
       title: String(row.title ?? ""),
       body: String(row.body ?? ""),
       state: String(row.state ?? ""),
+      ...(typeof row.merged_at === "string" ? { mergedAt: row.merged_at } : {}),
       draft: row.draft === true,
       url: String(row.html_url ?? ""),
       author: String(user.login ?? ""),

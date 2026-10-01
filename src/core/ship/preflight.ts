@@ -460,11 +460,14 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       // A closed/merged PR is done: a bare reference to it has nothing to
       // resume; with task text the thread may start a fresh task below.
       if (!task) {
+        const merged = facts.mergedAt !== undefined;
         return refuse(
           "ship_preflight_closed_resume",
-          "closed resume target",
-          "not started (PR closed)",
-          `🚫 ${where} is closed — there is no review loop to resume. Give ship a task to start fresh work.`,
+          merged ? "merged resume target" : "closed resume target",
+          merged ? "not started (PR merged)" : "not started (PR closed without merge)",
+          merged
+            ? `🚫 ${where} was merged at ${facts.mergedAt} — there is no open review loop to resume. No Ship child was started.`
+            : `🚫 ${where} was closed without merging — there is no review loop to resume. Give ship a task to start fresh work.`,
         );
       }
     }

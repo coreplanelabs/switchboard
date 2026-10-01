@@ -327,6 +327,29 @@ describe("RestGithubApi — reads use the read token", () => {
 });
 
 describe("RestGithubApi — pull request reads", () => {
+  it("getPullRequest preserves merge time so a merged PR is not reported as merely closed", async () => {
+    const { api: gh } = api(() => ({
+      status: 200,
+      body: {
+        number: 7,
+        title: "Fix login",
+        body: "",
+        state: "closed",
+        merged_at: "2026-09-29T01:02:03Z",
+        draft: false,
+        html_url: "https://github.com/acme/api/pull/7",
+        user: { login: "ada" },
+        updated_at: "2026-09-29T01:02:03Z",
+        head: { ref: "fix/login", sha: "a".repeat(40), repo: { full_name: "acme/api" } },
+        base: { ref: "main", repo: { full_name: "acme/api" } },
+      },
+    }));
+    expect(await gh.getPullRequest("acme/api", 7)).toMatchObject({
+      state: "closed",
+      mergedAt: "2026-09-29T01:02:03Z",
+    });
+  });
+
   it("getPullRequest reads title, body and exact refs with the read token", async () => {
     scopes.length = 0;
     const { api: gh, calls } = api(({ url }) =>

@@ -361,9 +361,10 @@ export const githubPullGetTool: RunnableTool = {
     if (refused) return refused;
     try {
       const pull = await ctx.github.api.getPullRequest(repo, number);
-      return `${repo}#${pull.number} [${pull.state}${pull.draft ? " draft" : ""}] ${pull.title}
+      const state = pull.mergedAt ? "merged" : pull.state;
+      return `${repo}#${pull.number} [${state}${pull.draft ? " draft" : ""}] ${pull.title}
 ${pull.url}
-by ${pull.author}, updated ${pull.updatedAt}
+by ${pull.author}, updated ${pull.updatedAt}${pull.mergedAt ? `, merged ${pull.mergedAt}` : ""}
 head: ${pull.head.repo}:${pull.head.ref} @ ${pull.head.sha}
 base: ${pull.base.repo}:${pull.base.ref}
 
