@@ -68,6 +68,7 @@ function bindReviewStream(): string {
   const input = JSON.stringify({
     preset: "review",
     repo: "acme/api",
+    prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
     reason: "the request names a pull request",
   });
   const call = {
@@ -126,7 +127,7 @@ function fullCatalogue() {
   const commands = bindCommands(registry, {} as CoreCommandDeps);
   const presets = operatorPresets();
   const tools = operatorTools({
-    text: "review the pull request in acme/api",
+    text: "review https://github.com/acme/api/pull/7",
     tail: [],
     projection: operatorProjection({
       presets,
@@ -172,7 +173,7 @@ describe("the direct operator on the Responses wire", () => {
       channelId: "slack:CX",
       userId: "slack:UX",
       userName: "UX",
-      text: "review the pull request in acme/api",
+      text: "review https://github.com/acme/api/pull/7",
       threadKey: "slack:CX:1.0",
     };
 
@@ -182,7 +183,7 @@ describe("the direct operator on the Responses wire", () => {
       outcome: "binds",
       binds: [
         {
-          line: "agent:review review the pull request in acme/api",
+          line: "agent:review review https://github.com/acme/api/pull/7",
           repo: "acme/api",
         },
       ],

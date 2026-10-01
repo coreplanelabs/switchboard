@@ -51,10 +51,18 @@ async function gitBackend(root: string, url: string, init?: RequestInit): Promis
       REMOTE_USER: "bot",
     },
   });
+  const closed = once(child, "close");
+  // A rejected push can make Git close stdin before it consumes the body.
+  // The backend's response and exit code still decide the result.
+  let inputError: NodeJS.ErrnoException | undefined;
+  child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+    inputError = error;
+  });
   child.stdin.end(payload);
   const chunks: Buffer[] = [];
   for await (const chunk of child.stdout) chunks.push(Buffer.from(chunk));
-  const [code] = (await once(child, "close")) as [number];
+  const [code] = (await closed) as [number];
+  if (inputError && inputError.code !== "EPIPE") throw inputError;
   if (code !== 0) throw new Error(`git-http-backend exited ${code}`);
   const output = Buffer.concat(chunks);
   const split = output.indexOf("\r\n\r\n");

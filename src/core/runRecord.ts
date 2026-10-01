@@ -500,6 +500,7 @@ export interface RunOperatorDecision {
     verbosity?: Verbosity;
     repo?: string;
     repoSource?: "request" | "attachment" | "thread" | "channel";
+    prTarget?: { number: number; source: "request" | "thread"; quote: string };
     shipEntry?: "work" | "work_from_thread" | "review" | "plan" | "continue";
     workObjective?: string;
     prBatch?: {
@@ -568,6 +569,7 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
             ...(b.verbosity !== undefined ? { verbosity: b.verbosity } : {}),
             ...(b.repo !== undefined ? { repo: b.repo } : {}),
             ...(b.repoSource !== undefined ? { repoSource: b.repoSource } : {}),
+            ...(b.prTarget !== undefined ? { prTarget: b.prTarget } : {}),
             ...(b.shipEntry !== undefined ? { shipEntry: b.shipEntry } : {}),
             ...(b.prBatch !== undefined
               ? {

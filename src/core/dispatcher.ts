@@ -1035,6 +1035,7 @@ export async function dispatch(
     // The accepted bind is authority, not the thread/channel fallback facts.
     let operatorRepo: string | undefined;
     let operatorRepoSource: ShipContext["shipRepoSource"];
+    let operatorPrTarget: OperatorBind["prTarget"];
     let operatorShipEntry: ShipContext["shipEntry"];
     let operatorPrBatch: PrBatchBinding | undefined;
     // An ended generated pipeline's stable plan id and remaining caps: read
@@ -1308,6 +1309,7 @@ export async function dispatch(
           };
           operatorRepo = execution.repo;
           operatorRepoSource = execution.repoSource;
+          operatorPrTarget = execution.prTarget;
           operatorShipEntry = execution.shipEntry;
           operatorPrBatch = execution.prBatch;
         }
@@ -1503,7 +1505,9 @@ export async function dispatch(
         ? carriedOperationTarget(restart.row)
         : undefined;
     const operationTarget =
-      opts.operationTarget ?? carriedTarget ?? (operatorRepo !== undefined ? { repo: operatorRepo } : undefined);
+      operatorRepo !== undefined && operatorPrTarget !== undefined
+        ? { repo: operatorRepo, prTarget: operatorPrTarget }
+        : (opts.operationTarget ?? carriedTarget ?? (operatorRepo !== undefined ? { repo: operatorRepo } : undefined));
     const historicalRoutePreset = restart?.row.meta.route?.preset;
     const resolveCurrent = () =>
       resolveRun(deps, {
@@ -2095,6 +2099,7 @@ export async function dispatch(
               ? { operatorRepo: operatorRepo ?? inheritedRepo }
               : {}),
             reviewBarePr: true,
+            ...(operationTarget?.prTarget !== undefined ? { operationTarget } : {}),
           })
         : undefined;
     if (earlyRepoTarget !== undefined) {
@@ -2227,7 +2232,9 @@ export async function dispatch(
       root,
       ...(threadPr ? { records: { pr: threadPr } } : {}),
       ...(inheritedRepo !== undefined ? { operatorRepo: inheritedRepo } : {}),
-      ...(agent.name !== "review" && operationTarget !== undefined ? { operationTarget } : {}),
+      ...(operationTarget !== undefined && (agent.name !== "review" || operationTarget.prTarget !== undefined)
+        ? { operationTarget }
+        : {}),
       ...(earlyRepoTarget !== undefined ? { repoTarget: earlyRepoTarget } : {}),
     });
 
@@ -2807,7 +2814,9 @@ export async function dispatch(
         profile,
         resolved,
         repoCtx,
-        ...(agent.name !== "review" && operationTarget !== undefined ? { operationTarget } : {}),
+        ...(operationTarget !== undefined && (agent.name !== "review" || operationTarget.prTarget !== undefined)
+          ? { operationTarget }
+          : {}),
         channelVisibility,
         runId,
         startedAt,
@@ -3686,7 +3695,9 @@ export async function dispatch(
       profile,
       resolved,
       repoCtx,
-      ...(agent.name !== "review" && operationTarget !== undefined ? { operationTarget } : {}),
+      ...(operationTarget !== undefined && (agent.name !== "review" || operationTarget.prTarget !== undefined)
+        ? { operationTarget }
+        : {}),
       channelVisibility,
       slackContext,
       run,
