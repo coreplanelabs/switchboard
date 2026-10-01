@@ -43,6 +43,7 @@
 // The handler here is pure over a parsed request (`handleCoordinatorRequest`),
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
+import type { RunnerPullOwner } from "../core/runnerOwnership.js";
 import {
   DEFAULT_GRANT,
   GRANT_RENEWALS_MAX,
@@ -156,6 +157,12 @@ import {
 } from "../core/shipPipeline.js";
 import { createCardShell } from "../core/statusCardFrame.js";
 import { systemClock } from "../core/trace/clock.js";
+import {
+  isRecoveryRequest,
+  recoveryActionId,
+  type RecoveryRequest,
+  type RecoveryAction,
+} from "../core/coordinator/recoveryHistory.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
 import { authenticateIngressBearer } from "../deploy/restart.js";
 import type { GithubApi } from "../execution/githubApi.js";
@@ -251,18 +258,18 @@ export interface AdminCoordinatorDeps {
   /** Process-local ownership fence shared with the sweep. The durable runner
    *  remains authoritative; this fence only makes a simultaneous command defer. */
   runnerOwnership?: {
-    claim(repo: string, prNumber: number, owner?: { instanceId: string; unit: string }): boolean;
-    reserve?(repo: string, prNumber: number, owner: { instanceId: string; unit: string }): symbol | undefined;
+    claim(repo: string, prNumber: number, owner?: RunnerPullOwner): boolean;
+    reserve?(repo: string, prNumber: number, owner: RunnerPullOwner): symbol | undefined;
     transferReservation?(
       repo: string,
       prNumber: number,
       token: symbol,
-      currentOwner: { instanceId: string; unit: string },
-      nextOwner: { instanceId: string; unit: string },
+      currentOwner: RunnerPullOwner,
+      nextOwner: RunnerPullOwner,
     ): boolean;
     releaseReservation?(repo: string, prNumber: number, token: symbol): boolean;
-    release(repo: string, prNumber: number, owner?: { instanceId: string; unit: string }): boolean;
-    owner(repo: string, prNumber: number): { instanceId: string; unit: string } | undefined;
+    release(repo: string, prNumber: number, owner?: RunnerPullOwner): boolean;
+    owner(repo: string, prNumber: number): RunnerPullOwner | undefined;
   };
   /** The ship grant as the requester's channel and user scopes say now. Idle
    * waits can outlive a config change, so a wake never relies on the grant
@@ -3399,6 +3406,8 @@ function verifiedPatternContinuations(
 export interface OriginalUnitRecoveryCaller {
   userId: string;
   threadKey: string;
+  /** Original adapter event identity, never a model call or run-id fallback. */
+  messageId?: string;
 }
 
 export async function recoverOriginalUnit(
@@ -3425,6 +3434,51 @@ export async function recoverOriginalUnit(
   if (row.instanceId !== instance.id) return json(409, { ok: false, error: "recovery_identity_mismatch", at });
   if (caller !== undefined && caller.threadKey !== (row.threadKey ?? instance.threadKey))
     return json(403, { ok: false, error: "recovery_requester_mismatch", at });
+  const request: RecoveryRequest | undefined = caller !== undefined && isRecoveryRequest(caller) ? caller : undefined;
+  if (caller !== undefined && request === undefined)
+    return json(409, { ok: false, error: "recovery_request_identity_required", at });
+  let savedAction: RecoveryAction | null;
+  try {
+    savedAction = request === undefined ? null : await deps.instances.getRecoveryAction(row, request);
+  } catch {
+    return json(503, { ok: false, error: "recovery_history_unavailable", at });
+  }
+  if (savedAction !== null) {
+    if (
+      savedAction.repo !== instance.repo ||
+      savedAction.base !== instance.base ||
+      savedAction.branch !== row.branch ||
+      savedAction.mainThreadKey !== instance.threadKey ||
+      savedAction.workerThreadKey !== (row.threadKey ?? instance.threadKey) ||
+      savedAction.actId !== row.workBrief?.actId
+    )
+      return json(409, { ok: false, error: "recovery_identity_mismatch", at });
+    if (savedAction.state === "refused") {
+      // A refusal can commit while every response is lost. Only its action
+      // may release the old fence; the same unit can already have a successor.
+      if (row.pr !== undefined)
+        deps.runnerOwnership?.release(instance.repo, row.pr.number, {
+          instanceId: instance.id,
+          unit: row.unit,
+          recoveryActionId: savedAction.id,
+        });
+      return json(409, { ok: false, error: savedAction.error, workflowId: savedAction.workflowId, at });
+    }
+    if (savedAction.state === "settled")
+      return json(200, {
+        ok: true,
+        outcome: "already_completed",
+        workflowId: savedAction.workflowId,
+        parentInstanceId: instance.id,
+        unit: row.unit,
+        at,
+      });
+    if (row.recovery?.actionId !== savedAction.id)
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  } else if (request !== undefined && row.recovery?.actionId !== undefined)
+    return json(409, { ok: false, error: "recovery_already_claimed", workflowId: row.recovery.workflowId, at });
+  if (row.recovery === undefined && instance.admission === "unreconciled")
+    return json(409, { ok: false, error: "recovery_admission_unreconciled", at });
   if (row.idle !== undefined && row.ending !== undefined)
     return json(409, { ok: false, error: "unit_lifecycle_ambiguous", at });
 
@@ -3515,7 +3569,7 @@ export async function recoverOriginalUnit(
         : round > (instance.caps?.maxRounds ?? 0) + patternContinuations)
     )
       return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
-    if (externalReview !== undefined && requestedWorkflowId === undefined)
+    if (externalReview !== undefined && requestedWorkflowId === undefined && savedAction === null)
       return json(409, { ok: false, error: "recovery_already_claimed", workflowId, at });
     if (
       (instance.grant?.costCapUsd !== undefined && accounting === undefined) ||
@@ -4206,6 +4260,12 @@ export async function recoverOriginalUnit(
       return json(409, { ok: false, error: "recovery_claim_mismatch", at });
   }
 
+  const actionId =
+    existingClaim?.actionId ?? (request === undefined ? undefined : await recoveryActionId(row, request));
+  const fenceOwner: RunnerPullOwner = {
+    ...originalOwner,
+    ...(actionId !== undefined ? { recoveryActionId: actionId } : {}),
+  };
   const fence = deps.runnerOwnership;
   if (
     fence === undefined ||
@@ -4220,7 +4280,7 @@ export async function recoverOriginalUnit(
       // The claim is durable while the ownership fence is process-local. A
       // Workflow can outlive a bot process, so reconstruct this exact owner's
       // fence from the claim before revalidating it; a rival claim still wins.
-      if (!fence.claim(instance.repo, pr.number, originalOwner))
+      if (!fence.claim(instance.repo, pr.number, fenceOwner))
         return json(409, { ok: false, error: "publication_ownership_changed", at });
     } catch (err) {
       return json(503, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
@@ -4228,6 +4288,7 @@ export async function recoverOriginalUnit(
   }
 
   let claimedRow = row;
+  let claimReplayed = false;
   let token: symbol | undefined;
   let transferred = existingClaim !== undefined;
   const rollback = async (error: string, consumed = false): Promise<IngressResponse> => {
@@ -4244,7 +4305,12 @@ export async function recoverOriginalUnit(
             },
           }
         : originalRow;
-      const restored = await deps.instances.compareAndReplaceUnit(claimedRow, replacement).catch(() => undefined);
+      const refusal = { kind: "refuse" as const, expected: claimedRow, replacement, error, consumed };
+      const restored = await (
+        claimedRow.recovery?.actionId !== undefined
+          ? deps.instances.transitionRecovery(refusal).catch(() => deps.instances.transitionRecovery(refusal))
+          : deps.instances.compareAndReplaceUnit(claimedRow, replacement)
+      ).catch(() => undefined);
       if (restored?.ok !== true)
         return json(500, {
           ok: false,
@@ -4255,12 +4321,40 @@ export async function recoverOriginalUnit(
         });
     }
     const released = transferred
-      ? fence.release(instance.repo, pr.number, originalOwner)
+      ? fence.release(instance.repo, pr.number, fenceOwner)
       : token !== undefined
         ? releaseReservation(instance.repo, pr.number, token)
         : true;
     if (!released) return json(500, { ok: false, error: "recovery_cleanup_failed", cause: error, at });
     return json(409, { ok: false, error, at });
+  };
+
+  const reconcileWorkflow = async (): Promise<IngressResponse | undefined> => {
+    const status = await deps
+      .recoveryStatus?.(workflowId)
+      .catch(() => ({ kind: "unanswered" as const, reason: "unavailable" }));
+    if (status?.kind === "status") {
+      if (["complete", "errored", "terminated"].includes(status.status))
+        return rollback("recovery_workflow_terminal", true);
+      return json(200, {
+        ok: true,
+        outcome: "already_started",
+        workflowId,
+        parentInstanceId: instance.id,
+        unit: row.unit,
+        at,
+      });
+    }
+    if (status?.kind !== "absent")
+      return json(200, {
+        ok: true,
+        outcome: "indeterminate",
+        workflowId,
+        parentInstanceId: instance.id,
+        unit: row.unit,
+        at,
+      });
+    return undefined;
   };
 
   if (requestedWorkflowId === undefined && expiredExistingClaim) {
@@ -4279,6 +4373,13 @@ export async function recoverOriginalUnit(
     if (status.kind === "status" && !["complete", "errored", "terminated"].includes(status.status))
       return json(409, { ok: false, error: "recovery_wall_clock_exhausted", workflowId, at });
     return rollback("recovery_wall_clock_exhausted", status.kind !== "absent");
+  }
+
+  // A retry observes its saved Workflow before mutable admission evidence.
+  // A failed review read cannot revoke work that may already be running.
+  if (savedAction !== null && requestedWorkflowId === undefined) {
+    const replay = await reconcileWorkflow();
+    if (replay !== undefined) return replay;
   }
 
   if (facts === undefined)
@@ -4319,7 +4420,11 @@ export async function recoverOriginalUnit(
   }
 
   if (externalReview !== undefined && existingClaim !== undefined) {
-    if (at >= deadlineAt) return rollback("recovery_wall_clock_exhausted", true);
+    // An absent status is not an exclusive create claim: another retry can
+    // start this Workflow during the read. Only its callback may revoke it.
+    const refuseRevalidation = (error: string) =>
+      requestedWorkflowId === undefined ? json(409, { ok: false, error, workflowId, at }) : rollback(error, true);
+    if (at >= deadlineAt) return refuseRevalidation("recovery_wall_clock_exhausted");
     const current = await laterRecoveryReview(
       deps,
       instance,
@@ -4329,18 +4434,19 @@ export async function recoverOriginalUnit(
       at,
     );
     if (JSON.stringify(current) !== JSON.stringify(externalReview))
-      return rollback("recovery_later_review_invalid", true);
+      return refuseRevalidation("recovery_later_review_invalid");
     if (accounting === undefined || JSON.stringify(accounting.grant) !== JSON.stringify(instance.grant))
-      return rollback("recovery_budget_unknown", true);
+      return refuseRevalidation("recovery_budget_unknown");
   }
 
   if (existingClaim === undefined) {
+    if (instance.stop !== undefined) return json(409, { ok: false, error: "stopped", at });
     // Historical evidence and remote reads can outlive the remaining lease.
     // Refuse before reserving ownership; the original deadline never moves.
     if (deadlineAt - (deps.clock ?? systemClock)() < minutesToMs(leaseMinimum(kind === "findings" ? "fix" : "review")))
       return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
     try {
-      token = fence.reserve(instance.repo, pr.number, originalOwner);
+      token = fence.reserve(instance.repo, pr.number, fenceOwner);
     } catch (err) {
       return json(503, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
     }
@@ -4379,8 +4485,23 @@ export async function recoverOriginalUnit(
       },
     };
     let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
+    let historyError: string | undefined;
     try {
-      replaced = await deps.instances.compareAndReplaceUnit(row, claimedRow);
+      if (request === undefined) return rollback("recovery_request_identity_required");
+      const replacement = claimedRow;
+      claimedRow = {
+        ...replacement,
+        history: { version: 1, receiptId: row.history?.receiptId ?? "observed" },
+        recovery: { ...replacement.recovery!, actionId: actionId! },
+      };
+      const result = await deps.instances.transitionRecovery({ kind: "claim", expected: row, replacement, request });
+      replaced = result.ok ? { ok: true } : { ok: false, reason: result.reason === "stale" ? "stale" : "unavailable" };
+      if (!result.ok && (result.reason === "capacity" || result.reason === "conflict"))
+        historyError = `recovery_history_${result.reason}`;
+      if (result.ok) {
+        claimedRow = result.unit;
+        claimReplayed = result.replayed === true;
+      }
     } catch (err) {
       // A lost CAS response is not a definite failure. Re-read the exact row:
       // committed means continue under the still-held reservation; unchanged
@@ -4397,18 +4518,24 @@ export async function recoverOriginalUnit(
       } else return json(503, { ok: false, error: "recovery_claim_unanswered", message: describe(err), at });
     }
     if (replaced.ok !== true) {
-      const error = replaced.reason === "stale" ? "recovery_claim_stale" : "recovery_store_unavailable";
+      const error =
+        historyError ?? (replaced.reason === "stale" ? "recovery_claim_stale" : "recovery_store_unavailable");
       const released = releaseReservation(instance.repo, pr.number, token);
       if (!released) return json(500, { ok: false, error: "recovery_cleanup_failed", cause: error, at });
       return json(409, { ok: false, error, at });
     }
-    if (!fence.transferReservation(instance.repo, pr.number, token, originalOwner, originalOwner))
+    if (!fence.transferReservation(instance.repo, pr.number, token, fenceOwner, fenceOwner))
       return rollback("publication_ownership_changed");
     token = undefined;
     transferred = true;
   }
   if (requestedWorkflowId !== undefined)
     return json(200, { ok: true, parentInstanceId: instance.id, unit: row.unit, workflowId, at });
+
+  if (claimReplayed) {
+    const replay = await reconcileWorkflow();
+    if (replay !== undefined) return replay;
+  }
 
   const startRecovery = deps.startRecovery;
   if (startRecovery === undefined) return rollback("recovery_workflow_unavailable");
@@ -5558,13 +5685,18 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // Recovery first claims and removes the old ending under its own fenced path.
   if (
     row.ending !== undefined &&
-    (outcome !== undefined || row.ending.outcome !== undefined) &&
+    (outcome !== undefined || row.ending.outcome !== undefined || row.history !== undefined) &&
     (row.ending.kind !== ending.kind ||
       row.ending.report !== ending.report ||
       !sameShipOutcome(row.ending.outcome, outcome))
   )
     return json(409, { ok: false, error: "settlement_conflict", at });
-  if (row.workBrief !== undefined && row.ending?.outcome !== undefined && row.ending.deliveryId !== body.deliveryId)
+  if (
+    row.workBrief !== undefined &&
+    row.ending !== undefined &&
+    (row.ending.outcome !== undefined || row.history !== undefined) &&
+    row.ending.deliveryId !== body.deliveryId
+  )
     return json(409, { ok: false, error: "settlement_conflict", at });
   if (row.workBrief !== undefined && deps.privateWorkerLog === undefined)
     return json(503, { ok: false, error: "private_worker_log_unavailable", at });
@@ -5595,14 +5727,20 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       : undefined;
   if (body.recoveryWorkflowId !== undefined && recoveryWorkflowId === undefined)
     return json(400, { ok: false, error: "recoveryWorkflowId must be a Workflow instance id", at });
+  if (row.recovery !== undefined && recoveryWorkflowId !== row.recovery.workflowId)
+    return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  const settlementActionId =
+    row.recovery?.actionId ?? (row.history?.receiptId !== "observed" ? row.history?.receiptId : undefined);
+  const settlementOwner: RunnerPullOwner = {
+    instanceId: instance.id,
+    unit: row.unit,
+    ...(settlementActionId !== undefined ? { recoveryActionId: settlementActionId } : {}),
+  };
   if (recoveryWorkflowId !== undefined && row.recoveryReceipt?.workflowId === recoveryWorkflowId) {
     if (row.workBrief !== undefined && !(await deliverPrivateReport()))
       return json(503, { ok: false, error: "private_worker_log_unavailable", at });
     if (row.pr !== undefined) {
-      const owner = { instanceId: instance.id, unit: row.unit };
-      const current = deps.runnerOwnership?.owner(instance.repo, row.pr.number);
-      if (current?.instanceId === owner.instanceId && current.unit === owner.unit)
-        deps.runnerOwnership?.release(instance.repo, row.pr.number, owner);
+      deps.runnerOwnership?.release(instance.repo, row.pr.number, settlementOwner);
     }
     return json(200, {
       ok: true,
@@ -5611,8 +5749,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       at: row.recoveryReceipt.at,
     });
   }
-  if (row.recovery !== undefined && recoveryWorkflowId !== row.recovery.workflowId)
-    return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+
   const host = row.recovery !== undefined ? ({ kind: "not_host" } as const) : await hostRunOf(deps, instance);
   if (host.kind === "not_host" && row.recovery === undefined) return json(409, { ok: false, error: "not_host", at });
   // The driver's `headSha` is the exact continuation boundary: the coding
@@ -5650,9 +5787,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     return json(409, { ok: false, error: "recovery_continuation_unsupported", at });
   if (row.recovery !== undefined && row.pr !== undefined) {
     try {
-      if (
-        deps.runnerOwnership?.claim(instance.repo, row.pr.number, { instanceId: instance.id, unit: row.unit }) !== true
-      )
+      if (deps.runnerOwnership?.claim(instance.repo, row.pr.number, settlementOwner) !== true)
         return json(409, { ok: false, error: "publication_ownership_changed", at });
     } catch (err) {
       return json(409, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
@@ -5661,8 +5796,8 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // A real ending is the unit's end: an idle the row carried from an earlier
   // stop is dropped with it, so the row says one thing about how the unit stands.
   const { idle: _idle, recovery: _recovery, ...rowWithoutLifecycle } = row;
-  const updated: CoordinatorUnit =
-    row.ending?.outcome !== undefined
+  let updated: CoordinatorUnit =
+    row.ending !== undefined && (row.ending.outcome !== undefined || row.history !== undefined)
       ? row
       : {
           ...(idle !== undefined || segment !== undefined ? row : rowWithoutLifecycle),
@@ -5695,7 +5830,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
                     kind: ending.kind,
                     report: ending.report,
                     ...(outcome !== undefined ? { outcome } : {}),
-                    ...(outcome !== undefined && row.workBrief !== undefined
+                    ...((outcome !== undefined || row.history !== undefined) && row.workBrief !== undefined
                       ? { deliveryId: body.deliveryId as string }
                       : {}),
                     // Machine-readable failure context (issue 2100): readers do not
@@ -5713,7 +5848,13 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const staleError = row.recovery !== undefined ? "recovery_claim_stale" : "settlement_conflict";
   let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
   try {
-    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
+    if (row.recovery?.actionId !== undefined) {
+      const replacement = updated;
+      updated = { ...updated, history: { version: 1, receiptId: row.recovery.actionId } };
+      const result = await deps.instances.transitionRecovery({ kind: "settle", expected: row, replacement });
+      replaced = result.ok ? { ok: true } : { ok: false, reason: result.reason === "stale" ? "stale" : "unavailable" };
+      if (result.ok) updated = result.unit;
+    } else replaced = await deps.instances.compareAndReplaceUnit(row, updated);
   } catch {
     const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
     const current = reread?.filter((candidate) => candidate.unit === row.unit);
@@ -5721,6 +5862,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       current?.length === 1 &&
       (JSON.stringify(current[0]) === JSON.stringify(updated) ||
         (outcome === undefined &&
+          row.history === undefined &&
           current[0]!.ending?.outcome === undefined &&
           row.recovery !== undefined &&
           current[0]!.recovery === undefined &&
@@ -5739,7 +5881,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       at,
     });
   if (segment === undefined && idle === undefined && updated.pr !== undefined)
-    deps.runnerOwnership?.release(instance.repo, updated.pr.number, { instanceId: instance.id, unit: row.unit });
+    deps.runnerOwnership?.release(instance.repo, updated.pr.number, settlementOwner);
   const thread = unitThread(instance, updated, units.length);
   if (host.kind === "host")
     await hostPublish(

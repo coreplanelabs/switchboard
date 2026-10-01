@@ -1,0 +1,384 @@
+import { describe, expect, it } from "vitest";
+import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
+import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
+import { generatedTaskOf } from "./generatedTask.js";
+import { isRecoveryReceipt, RECOVERY_HISTORY_LIMITS } from "./recoveryHistory.js";
+
+const instance: CoordinatorInstance = {
+  id: "ship_acme_api_1",
+  kind: "ship",
+  userId: "slack:UALICE",
+  channelId: "slack:C1",
+  threadKey: "slack:C1:1.0",
+  repo: "acme/api",
+  branch: "plan/api/u1",
+  base: "main",
+  plan: { id: "api" },
+  merge: "person",
+  createdAt: 1,
+};
+const request = (messageId = "slack:C1:2.0") => ({ userId: instance.userId, threadKey: instance.threadKey, messageId });
+const ended = (): CoordinatorUnit => ({
+  instanceId: instance.id,
+  unit: "U12",
+  slug: "u1",
+  branch: instance.branch,
+  dependsOn: [],
+  rounds: [],
+  threadKey: instance.threadKey,
+  ending: {
+    kind: "aborted",
+    report: "first result",
+    at: 10,
+    outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 },
+  },
+});
+const recovering = (row: CoordinatorUnit, number = 1): CoordinatorUnit => {
+  const { ending, ...rest } = row;
+  return {
+    ...rest,
+    recovery: {
+      kind: "findings",
+      round: number,
+      expectedHeadSha: "a".repeat(40),
+      remainingMs: 1000,
+      claimedAt: 20 + number,
+      step: `U12/recovery/${number}/findings`,
+      reviewRunId: `review-${number}`,
+      reviewKey: `review-key-${number}`,
+      previousEnding: ending!,
+      workflowId: `recovery-review-${number}`,
+      deadlineAt: 1000,
+    },
+  };
+};
+const settled = (row: CoordinatorUnit, number = 1): CoordinatorUnit => {
+  const { recovery, ...rest } = row;
+  return {
+    ...rest,
+    ending: {
+      kind: "aborted",
+      report: `result ${number}`,
+      at: 30 + number,
+      outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: number + 1 },
+    },
+    recoveryReceipt: { reviewRunId: recovery!.reviewRunId, workflowId: recovery!.workflowId, at: 30 + number },
+  };
+};
+
+describe("recovery history store", () => {
+  it("requires reconciled admission and preserves history through confirmation replay", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    const pending: CoordinatorInstance = { ...instance, admission: "unreconciled" };
+    await store.put(pending);
+    const row = ended();
+    await store.putUnits([row]);
+    const input = { kind: "claim" as const, expected: row, replacement: recovering(row), request: request() };
+    expect(await store.transitionRecovery(input)).toMatchObject({ ok: false, reason: "conflict" });
+    expect((await store.listRecoveryHistory(row)).receipts).toEqual([]);
+    expect(await store.getRecoveryAction(row, request())).toBeNull();
+    expect(await store.confirmCreated({ ...pending, runId: "different-create" })).toEqual({
+      ok: false,
+      reason: "stale",
+    });
+    expect(await store.confirmCreated(pending)).toEqual({ ok: true });
+    const claimed = await store.transitionRecovery(input);
+    if (!claimed.ok) throw new Error(claimed.reason);
+    const action = await store.getRecoveryAction(row, request());
+    const history = await store.listRecoveryHistory(row);
+    expect(await store.confirmCreated(pending)).toEqual({ ok: true });
+    expect(await store.listUnits(instance.id)).toEqual([claimed.unit]);
+    expect(await store.getRecoveryAction(row, request())).toEqual(action);
+    expect(await store.listRecoveryHistory(row)).toEqual(history);
+    const completed = await store.transitionRecovery({
+      kind: "settle",
+      expected: claimed.unit,
+      replacement: settled(claimed.unit),
+    });
+    if (!completed.ok) throw new Error(completed.reason);
+    const finalHistory = await store.listRecoveryHistory(row);
+    expect(await store.confirmCreated(pending)).toEqual({ ok: true });
+    expect(await store.listUnits(instance.id)).toEqual([completed.unit]);
+    expect(await store.listRecoveryHistory(row)).toEqual(finalHistory);
+    expect(await store.get(instance.id)).toEqual({ ...pending, admission: "created" });
+  });
+
+  it("rejects identity and provenance changes in every recovery transition", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    await store.put(instance);
+    const row = ended();
+    await store.putUnits([row]);
+    const mutations: Partial<CoordinatorUnit>[] = [
+      { threadKey: "slack:COTHER:1.0" },
+      { sourceUrl: "https://example.com/other" },
+      { threadEvidence: "different evidence" },
+      {
+        generatedTask: await generatedTaskOf("different request", {
+          requesterId: instance.userId,
+          threadKey: instance.threadKey,
+          runId: "other-run",
+          repo: instance.repo,
+        }),
+      },
+    ];
+    for (const mutation of mutations)
+      expect(
+        await store.transitionRecovery({
+          kind: "claim",
+          expected: row,
+          replacement: { ...recovering(row), ...mutation },
+          request: request(),
+        }),
+      ).toMatchObject({ ok: false, reason: "conflict" });
+    expect(await store.listUnits(instance.id)).toEqual([row]);
+    expect((await store.listRecoveryHistory(row)).receipts).toEqual([]);
+    const claimed = await store.transitionRecovery({
+      kind: "claim",
+      expected: row,
+      replacement: recovering(row),
+      request: request(),
+    });
+    if (!claimed.ok) throw new Error(claimed.reason);
+    const before = await store.listRecoveryHistory(row);
+    for (const mutation of mutations) {
+      expect(
+        await store.transitionRecovery({
+          kind: "settle",
+          expected: claimed.unit,
+          replacement: { ...settled(claimed.unit), ...mutation },
+        }),
+      ).toMatchObject({ ok: false, reason: "conflict" });
+      expect(
+        await store.transitionRecovery({
+          kind: "refuse",
+          expected: claimed.unit,
+          replacement: { ...row, ...mutation },
+          error: "refused",
+        }),
+      ).toMatchObject({ ok: false, reason: "conflict" });
+    }
+    expect(await store.listUnits(instance.id)).toEqual([claimed.unit]);
+    expect(await store.listRecoveryHistory(row)).toEqual(before);
+    expect(await store.getRecoveryAction(row, request())).toMatchObject({ state: "pending" });
+  });
+
+  it("retains both predecessors across two recovery settlements", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    await store.put(instance);
+    let row = ended();
+    await store.putUnits([row]);
+    const original = structuredClone(row.ending);
+    for (const number of [1, 2]) {
+      const claimed = await store.transitionRecovery({
+        kind: "claim",
+        expected: row,
+        replacement: recovering(row, number),
+        request: request(`slack:C1:${number + 1}.0`),
+      });
+      expect(claimed.ok).toBe(true);
+      if (!claimed.ok) throw new Error(claimed.reason);
+      row = claimed.unit;
+      const completed = await store.transitionRecovery({
+        kind: "settle",
+        expected: row,
+        replacement: settled(row, number),
+      });
+      expect(completed.ok).toBe(true);
+      if (!completed.ok) throw new Error(completed.reason);
+      row = completed.unit;
+    }
+    const page = await store.listRecoveryHistory(row);
+    expect(page.receipts.map((receipt) => receipt.ending.report)).toEqual(["first result", "result 1", "result 2"]);
+    expect(page.receipts[0]!.ending).toEqual(original);
+    expect(page.receipts[0]!.provenance).toBe("observed_predecessor");
+    expect(page.receipts[1]!.predecessorId).toBe(page.receipts[0]!.id);
+    expect(page.receipts[2]!.predecessorId).toBe(page.receipts[1]!.id);
+    expect(
+      await store.transitionRecovery({
+        kind: "claim",
+        expected: row,
+        replacement: recovering(row, 1),
+        request: request("slack:C1:4.0"),
+      }),
+    ).toMatchObject({ ok: false, reason: "conflict" });
+  });
+
+  it("binds action replay to its request and preserves a definitive refusal", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    await store.put(instance);
+    const row = ended();
+    await store.putUnits([row]);
+    const claim = { kind: "claim" as const, expected: row, replacement: recovering(row), request: request() };
+    const first = await store.transitionRecovery(claim);
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error(first.reason);
+    expect(await store.transitionRecovery(claim)).toEqual({ ...first, replayed: true });
+    const laterClock = recovering(row);
+    laterClock.recovery!.claimedAt += 1;
+    laterClock.recovery!.remainingMs -= 1;
+    expect(await store.transitionRecovery({ ...claim, replacement: laterClock })).toEqual({ ...first, replayed: true });
+    expect(await store.transitionRecovery({ ...claim, replacement: recovering(row, 2) })).toMatchObject({
+      ok: false,
+      reason: "conflict",
+    });
+    const refused = await store.transitionRecovery({
+      kind: "refuse",
+      expected: first.unit,
+      replacement: row,
+      error: "recovery_workflow_failed",
+    });
+    expect(refused.ok).toBe(true);
+    const saved = await store.getRecoveryAction(row, request());
+    expect(saved).toMatchObject({ state: "refused", error: "recovery_workflow_failed" });
+    expect(await store.transitionRecovery(claim)).toMatchObject({ ok: false, reason: "conflict" });
+    if (!refused.ok) throw new Error(refused.reason);
+    const later = await store.transitionRecovery({
+      ...claim,
+      expected: refused.unit,
+      replacement: recovering(refused.unit, 2),
+      request: request("slack:C1:3.0"),
+    });
+    expect(later.ok).toBe(true);
+    expect((await store.getRecoveryAction(row, request("slack:C1:3.0")))?.id).not.toBe(saved?.id);
+  });
+
+  it("fences alternate writers without losing history or consuming wake events", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    await store.put(instance);
+    const row = ended();
+    await store.putUnits([row]);
+    const claimed = await store.transitionRecovery({
+      kind: "claim",
+      expected: row,
+      replacement: recovering(row),
+      request: request(),
+    });
+    expect(claimed.ok).toBe(true);
+    if (!claimed.ok) throw new Error(claimed.reason);
+    const before = await store.listRecoveryHistory(row);
+    expect(await store.compareAndReplaceUnit(claimed.unit, settled(claimed.unit))).toEqual({
+      ok: false,
+      reason: "stale",
+    });
+    await expect(store.putUnits([{ ...row, unit: "U13" }, row])).rejects.toThrow();
+    expect(await store.listUnits(instance.id)).toEqual([claimed.unit]);
+    expect(await store.replace(instance)).toEqual({ ok: false, reason: "exists" });
+    await store.appendEvent(row, { sender: instance.userId, text: "Continue", mode: "steer", at: 25 });
+    await expect(
+      store.answerWake(row, "U12/wait/1", { kind: "answered", reply: "Continue" }, [1], "wake"),
+    ).rejects.toThrow();
+    expect(await store.listEvents(row, true)).toHaveLength(1);
+    expect(await store.listRecoveryHistory(row)).toEqual(before);
+  });
+
+  it("refuses oversized transitions before changing the unit", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    await store.put(instance);
+    const row = {
+      ...ended(),
+      generatedTask: generatedTaskOf("界".repeat(90_000), {
+        requesterId: instance.userId,
+        threadKey: instance.threadKey,
+        runId: "source-run",
+        repo: instance.repo,
+      }),
+    };
+    await store.putUnits([row]);
+    expect(
+      await store.transitionRecovery({
+        kind: "claim",
+        expected: row,
+        replacement: recovering(row),
+        request: request(),
+      }),
+    ).toMatchObject({ ok: false, reason: "capacity" });
+    expect(await store.listUnits(instance.id)).toEqual([row]);
+    expect((await store.listRecoveryHistory(row)).receipts).toEqual([]);
+  });
+
+  it("reserves terminal row space before admitting a large but valid task", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    await store.put(instance);
+    const row = {
+      ...ended(),
+      generatedTask: generatedTaskOf("x".repeat(100_000), {
+        requesterId: instance.userId,
+        threadKey: instance.threadKey,
+        runId: "source-run",
+        repo: instance.repo,
+      }),
+    };
+    await store.putUnits([row]);
+    expect(
+      await store.transitionRecovery({
+        kind: "claim",
+        expected: row,
+        replacement: recovering(row),
+        request: request(),
+      }),
+    ).toMatchObject({ ok: false, reason: "capacity" });
+    expect(await store.listUnits(instance.id)).toEqual([row]);
+  });
+
+  it("reserves the final receipt slot and pages history without trimming predecessors", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    await store.put(instance);
+    let row = ended();
+    await store.putUnits([row]);
+    for (let number = 1; number <= RECOVERY_HISTORY_LIMITS.actions; number++) {
+      const claimed = await store.transitionRecovery({
+        kind: "claim",
+        expected: row,
+        replacement: recovering(row, number),
+        request: request(`request-${number}`),
+      });
+      if (!claimed.ok) throw new Error(claimed.reason);
+      const complete = await store.transitionRecovery({
+        kind: "settle",
+        expected: claimed.unit,
+        replacement: settled(claimed.unit, number),
+      });
+      if (!complete.ok) throw new Error(complete.reason);
+      row = complete.unit;
+    }
+    expect(
+      await store.transitionRecovery({
+        kind: "claim",
+        expected: row,
+        replacement: recovering(row, 33),
+        request: request("request-33"),
+      }),
+    ).toMatchObject({ ok: false, reason: "capacity" });
+    let cursor = 0;
+    const reports: string[] = [];
+    for (;;) {
+      const page = await store.listRecoveryHistory(row, cursor);
+      expect(page.receipts.length).toBeLessThanOrEqual(RECOVERY_HISTORY_LIMITS.pageCount);
+      reports.push(...page.receipts.map((receipt) => receipt.ending.report));
+      cursor = page.cursor;
+      if (!page.more) break;
+    }
+    expect(reports).toHaveLength(33);
+    expect(reports[0]).toBe("first result");
+    expect(reports.at(-1)).toBe("result 32");
+  });
+
+  it("rejects receipts without an ending or with contradictory nested outcomes", () => {
+    const receipt = {
+      version: 1,
+      id: "observed",
+      seq: 1,
+      instanceId: instance.id,
+      unit: "U12",
+      provenance: "observed_predecessor",
+    };
+    expect(isRecoveryReceipt(receipt)).toBe(false);
+    expect(
+      isRecoveryReceipt({
+        ...receipt,
+        ending: { ...ended().ending, outcome: { schemaVersion: 1, kind: "merged", reviewRounds: 1 } },
+      }),
+    ).toBe(false);
+    expect(isRecoveryReceipt({ ...receipt, ending: ended().ending })).toBe(true);
+  });
+});

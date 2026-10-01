@@ -111,7 +111,7 @@ export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegi
    * work, not a generated-plan hand-off or a model run. */
   recoverOriginalUnit?: (
     key: { instanceId: string; unit: string },
-    caller: { userId: string; threadKey: string },
+    caller: { userId: string; threadKey: string; messageId?: string },
   ) => Promise<{ status: number; body: Record<string, unknown> }>;
   /**
    * The bot's read of an earlier attempt's instance status on its own shim
@@ -262,7 +262,11 @@ export async function runShipBranch(
     const answer = await root.span("dispatch.ship_recover_original_unit", () =>
       deps.recoverOriginalUnit === undefined
         ? Promise.resolve({ status: 503, body: { error: "original-unit recovery is unavailable" } })
-        : deps.recoverOriginalUnit(recovery, { userId: msg.userId, threadKey: msg.threadKey }),
+        : deps.recoverOriginalUnit(recovery, {
+            userId: msg.userId,
+            threadKey: msg.threadKey,
+            messageId: msg.messageId,
+          }),
     );
     if (answer.status !== 200) {
       const error = typeof answer.body.error === "string" ? answer.body.error : "original-unit recovery was refused";
@@ -285,11 +289,13 @@ export async function runShipBranch(
     }
     const workflowId = typeof answer.body.workflowId === "string" ? answer.body.workflowId : "unknown";
     const outcome =
-      answer.body.outcome === "already_started"
-        ? "already running"
-        : answer.body.outcome === "indeterminate"
-          ? "has an indeterminate start; its claim remains held for same-checkpoint replay"
-          : "started";
+      answer.body.outcome === "already_completed"
+        ? "already completed"
+        : answer.body.outcome === "already_started"
+          ? "already running"
+          : answer.body.outcome === "indeterminate"
+            ? "has an indeterminate start; its claim remains held for same-checkpoint replay"
+            : "started";
     const text = `Original unit \`${recovery.instanceId}:${recovery.unit}\` recovery ${outcome} as durable checkpoint \`${workflowId}\`.`;
     await replyAck(io, ctx.verbosity, text);
     await card.done(

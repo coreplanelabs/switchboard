@@ -76,6 +76,75 @@ async function fixture() {
 }
 
 describe("main worker relay", () => {
+  it("reads bounded recovery history after restart only through the original act", async () => {
+    const { instances, log } = await fixture();
+    const ended: CoordinatorUnit = { ...unit, ending: { kind: "aborted", report: "original", at: 5 } };
+    await instances.putUnits([ended]);
+    const { ending, ...rest } = ended;
+    const claimed = await instances.transitionRecovery({
+      kind: "claim",
+      expected: ended,
+      request: { userId: instance.userId, threadKey: thread, messageId: "2" },
+      replacement: {
+        ...rest,
+        recovery: {
+          kind: "findings",
+          round: 1,
+          expectedHeadSha: "a".repeat(40),
+          remainingMs: 1000,
+          claimedAt: 6,
+          step: "task/recovery/1/findings",
+          reviewRunId: "review-1",
+          reviewKey: "review-key-1",
+          previousEnding: ending!,
+          workflowId: "recovery-1",
+          deadlineAt: 1000,
+        },
+      },
+    });
+    expect(claimed.ok).toBe(true);
+    if (!claimed.ok) throw new Error(claimed.reason);
+    const { recovery, ...active } = claimed.unit;
+    const saved = await instances.transitionRecovery({
+      kind: "settle",
+      expected: claimed.unit,
+      replacement: {
+        ...active,
+        ending: {
+          kind: "aborted",
+          report: "x".repeat(3000),
+          at: 7,
+          outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 2 },
+        },
+        recoveryReceipt: { reviewRunId: recovery!.reviewRunId, workflowId: recovery!.workflowId, at: 7 },
+      },
+    });
+    expect(saved.ok).toBe(true);
+    const restarted = createMainWorkerRelay({ instances, privateWorkerLog: log });
+    const result = await restarted.read(actor(), { actId, afterHistory: 1 });
+    expect(result).toMatchObject({
+      kind: "found",
+      history: {
+        cursor: 2,
+        more: false,
+        priorHistory: "not_recorded",
+        receipts: [
+          {
+            predecessorId: "observed",
+            report: "x".repeat(2000),
+            reportTruncated: true,
+            settlement: { state: "recorded" },
+          },
+        ],
+      },
+    });
+    expect(await restarted.read(actor({ id: "slack:UBOB" }), { actId })).toEqual({ kind: "not_found" });
+    expect(
+      await restarted.read(actor({ origin: { channelId: instance.channelId, threadKey: "slack:COTHER:1" } }), {
+        actId,
+      }),
+    ).toEqual({ kind: "not_found" });
+  });
   it("returns the stored typed outcome after restart without interpreting a contradictory report", async () => {
     const { instances, log } = await fixture();
     const outcome = {
@@ -199,6 +268,7 @@ describe("main worker relay", () => {
       instances: {
         getMainTask: instances.getMainTask.bind(instances),
         get: instances.get.bind(instances),
+        listRecoveryHistory: instances.listRecoveryHistory.bind(instances),
         listUnits: async (id) =>
           (await instances.listUnits(id)).map((stored) => ({
             ...stored,

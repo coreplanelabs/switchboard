@@ -873,6 +873,8 @@ export interface RecoveryAccounting {
  * the terminal interpretation before a child starts; its step remains under
  * the original instance/unit idempotency namespace. */
 export interface OriginalUnitRecovery {
+  /** The authenticated request's journal action; absent on older claims. */
+  actionId?: string;
   kind: "findings" | "review";
   externalReview?: RecoveryReviewEvidence;
   accounting?: RecoveryAccounting;
@@ -928,6 +930,8 @@ export interface OriginalUnitRecoveryReceipt {
  *  drew and how it ended. One row a person can read for "what happened to this
  *  unit". */
 export interface CoordinatorUnit {
+  /** Monotonic pointer into separately stored immutable recovery receipts. */
+  history?: { version: 1; receiptId: string };
   instanceId: string;
   /** `U<n>` as the plan spells it. */
   unit: string;
@@ -1066,9 +1070,58 @@ export function prepareUnfencedUnitWrite(
   replacement: CoordinatorUnit,
 ): CoordinatorUnit {
   const updated = preserveWorkBrief(current, replacement);
+  if (!permitsRecoveryMetadataWrite(current, updated)) throw new CoordinatorUnitWriteConflict();
   if (current?.ending?.outcome !== undefined && JSON.stringify(current) !== JSON.stringify(updated))
     throw new CoordinatorUnitWriteConflict();
   return updated;
+}
+
+/** History transitions require the journal transaction, including through bare CAS.
+ * A started round may discard rollback-only publication data, never restore it. */
+export const RECOVERY_ROW_MAX_BYTES = 224 * 1024;
+export const RECOVERY_SETTLEMENT_MAX_BYTES = 160 * 1024;
+export function hasRecoverySettlementCapacity(unit: CoordinatorUnit): boolean {
+  const { ending: _ending, recovery, ...rest } = unit;
+  const { previousEnding: _previousEnding, ...claim } = recovery ?? {};
+  const metadata = { ...rest, ...(recovery ? { recovery: claim } : {}) };
+  return (
+    new TextEncoder().encode(JSON.stringify(metadata)).byteLength + RECOVERY_SETTLEMENT_MAX_BYTES <=
+    RECOVERY_ROW_MAX_BYTES
+  );
+}
+
+export function permitsRecoveryMetadataWrite(
+  current: CoordinatorUnit | undefined,
+  replacement: CoordinatorUnit,
+  checked = false,
+): boolean {
+  if (current?.history === undefined)
+    return replacement.history === undefined && replacement.recovery?.actionId === undefined;
+  const before = current.recovery;
+  const after = replacement.recovery;
+  let recovery =
+    before?.previousBinding !== undefined && after?.previousBinding === undefined
+      ? { ...before, previousBinding: undefined }
+      : before;
+  if (
+    checked &&
+    recovery &&
+    after &&
+    after.expectedHeadSha === replacement.publication?.expectedHeadSha &&
+    after.expectedHeadSha === replacement.lastPush
+  )
+    recovery = { ...recovery, expectedHeadSha: after.expectedHeadSha };
+  return (
+    JSON.stringify(current.history) === JSON.stringify(replacement.history) &&
+    JSON.stringify(current.ending) === JSON.stringify(replacement.ending) &&
+    JSON.stringify(recovery) === JSON.stringify(after) &&
+    JSON.stringify(current.recoveryReceipt) === JSON.stringify(replacement.recoveryReceipt) &&
+    JSON.stringify(current.generatedTask) === JSON.stringify(replacement.generatedTask) &&
+    current.branch === replacement.branch &&
+    current.threadKey === replacement.threadKey &&
+    new TextEncoder().encode(JSON.stringify(replacement)).byteLength <= RECOVERY_ROW_MAX_BYTES &&
+    (replacement.recovery === undefined || hasRecoverySettlementCapacity(replacement))
+  );
 }
 
 const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -1281,6 +1334,14 @@ const isRecoveryAccounting = (v: unknown): v is RecoveryAccounting =>
 export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isObject(v)) return false;
   const r = v;
+  if (
+    r.history !== undefined &&
+    (!isObject(r.history) ||
+      r.history.version !== 1 ||
+      !isText(r.history.receiptId, 128) ||
+      Object.keys(r.history).length !== 2)
+  )
+    return false;
   if (typeof r.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(r.instanceId)) return false;
   if (!isText(r.unit, 32) || !isText(r.slug) || !isText(r.branch) || !isOptionalText(r.title)) return false;
   if (!Array.isArray(r.dependsOn) || !r.dependsOn.every((d) => isText(d, 32))) return false;
@@ -1324,6 +1385,10 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
     r.recovery !== undefined &&
     !(
       isObject(r.recovery) &&
+      (r.recovery.actionId === undefined ||
+        (r.history !== undefined &&
+          typeof r.recovery.actionId === "string" &&
+          /^r_[a-f0-9]{64}$/.test(r.recovery.actionId))) &&
       (r.recovery.kind === "findings" || r.recovery.kind === "review") &&
       typeof r.recovery.round === "number" &&
       Number.isInteger(r.recovery.round) &&

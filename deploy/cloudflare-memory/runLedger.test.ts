@@ -1374,6 +1374,170 @@ describe("run ledger — durable decision-record reservations (agent-ship item 1
 });
 
 describe("run ledger — the coordinator's unit rows (item 50)", () => {
+  it("commits recovery history and settlement atomically while fencing older writers", async () => {
+    const storeKeyValue = storeKey();
+    const call = (path: string, body: Record<string, unknown>) =>
+      post(`/runs/coordinator/${path}`, { storeKey: storeKeyValue, ...body });
+    const instance: CoordinatorInstance = {
+      id: "ship_history",
+      kind: "ship",
+      userId: "slack:UA",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+      repo: "acme/api",
+      branch: "plan/u1",
+      base: "main",
+      plan: { id: "history" },
+      merge: "person",
+      createdAt: 1,
+      admission: "unreconciled",
+    };
+    let row: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "U12",
+      slug: "u1",
+      branch: instance.branch,
+      threadKey: instance.threadKey,
+      dependsOn: [],
+      rounds: [],
+      ending: { kind: "aborted", report: "original", at: 10 },
+    };
+    expect((await call("put", { instance })).status).toBe(200);
+    expect((await call("units/put", { units: [row] })).status).toBe(200);
+    for (const number of [1, 2]) {
+      const { ending, ...active } = row;
+      const replacement: CoordinatorUnit = {
+        ...active,
+        recovery: {
+          kind: "findings",
+          round: number,
+          expectedHeadSha: "a".repeat(40),
+          remainingMs: 1000,
+          claimedAt: 20 + number,
+          step: `U12/recovery/${number}/findings`,
+          reviewRunId: `review-${number}`,
+          reviewKey: `review-key-${number}`,
+          previousEnding: ending!,
+          workflowId: `recovery-${number}`,
+          deadlineAt: 1000,
+        },
+      };
+      const input = {
+        kind: "claim" as const,
+        expected: row,
+        replacement,
+        request: { userId: instance.userId, threadKey: instance.threadKey, messageId: `slack:C1:${number + 1}.0` },
+      };
+      if (number === 1) {
+        expect(await call("recovery/transition", { input })).toMatchObject({
+          status: 409,
+          data: { ok: false, reason: "conflict" },
+        });
+        expect((await call("recovery/history", { key: row, after: 0 })).data.receipts).toEqual([]);
+        expect((await call("admission/confirm", { expected: { ...instance, runId: "different-create" } })).status).toBe(
+          409,
+        );
+        expect((await call("admission/confirm", { expected: instance })).status).toBe(200);
+        await runInDurableObject(
+          env.RUNS.get(env.RUNS.idFromName(storeKeyValue)),
+          async (store: RunHistoryDO, state) => {
+            state.storage.sql.exec(
+              `CREATE TRIGGER fail_recovery_action BEFORE INSERT ON coordinator_recovery_journal WHEN NEW.kind = 'action' BEGIN SELECT RAISE(ABORT, 'action write failed'); END`,
+            );
+            await expect(store.transitionRecovery(input, 20)).rejects.toThrow("action write failed");
+            expect(state.storage.sql.exec(`SELECT * FROM coordinator_recovery_journal`).toArray()).toEqual([]);
+            state.storage.sql.exec(`DROP TRIGGER fail_recovery_action`);
+          },
+        );
+        expect((await call("units/list", { instanceId: instance.id })).data.units).toEqual([row]);
+      }
+      const claim = await call("recovery/transition", { input });
+      expect(claim.status).toBe(200);
+      row = claim.data.unit as CoordinatorUnit;
+      expect(await call("recovery/transition", { input })).toMatchObject({
+        status: 200,
+        data: { ok: true, unit: row, replayed: true },
+      });
+      expect((await call("units/claim-legacy-continuation", { expected: row, recovered: active })).status).toBe(409);
+      expect((await call("units/put", { units: [{ ...active, unit: "U13" }, active] })).status).toBe(409);
+      expect((await call("replace", { instance })).status).toBe(409);
+      const { recovery, ...settling } = row;
+      const completed = await call("recovery/transition", {
+        input: {
+          kind: "settle",
+          expected: row,
+          replacement: {
+            ...settling,
+            ending: { kind: "aborted", report: `result ${number}`, at: 30 + number },
+            recoveryReceipt: { reviewRunId: recovery!.reviewRunId, workflowId: recovery!.workflowId, at: 30 + number },
+          },
+        },
+      });
+      expect(completed.status).toBe(200);
+      row = completed.data.unit as CoordinatorUnit;
+      const savedHistory = await call("recovery/history", { key: row, after: 0 });
+      expect((await call("admission/confirm", { expected: instance })).status).toBe(200);
+      expect((await call("units/list", { instanceId: instance.id })).data.units).toEqual([row]);
+      expect(await call("recovery/history", { key: row, after: 0 })).toEqual(savedHistory);
+      expect((await call("get", { id: instance.id })).data.instance).toEqual({ ...instance, admission: "created" });
+    }
+    const history = await call("recovery/history", { key: { instanceId: row.instanceId, unit: row.unit }, after: 0 });
+    expect(history).toMatchObject({
+      status: 200,
+      data: {
+        cursor: 3,
+        more: false,
+        receipts: [
+          { ending: { report: "original" } },
+          { ending: { report: "result 1" } },
+          { ending: { report: "result 2" } },
+        ],
+      },
+    });
+    expect((await call("units/list", { instanceId: instance.id })).data.units).toEqual([row]);
+    const { ending: lastEnding, ...last } = row;
+    const request = { userId: instance.userId, threadKey: instance.threadKey, messageId: "slack:C1:later" };
+    const third = await call("recovery/transition", {
+      input: {
+        kind: "claim",
+        expected: row,
+        request,
+        replacement: {
+          ...last,
+          recovery: {
+            kind: "findings",
+            round: 3,
+            expectedHeadSha: "a".repeat(40),
+            remainingMs: 1000,
+            claimedAt: 40,
+            step: "U12/recovery/3/findings",
+            reviewRunId: "review-3",
+            reviewKey: "review-key-3",
+            previousEnding: lastEnding,
+            workflowId: "recovery-3",
+            deadlineAt: 1000,
+          },
+        },
+      },
+    });
+    expect(third.status).toBe(200);
+    const refusal = { kind: "refuse", expected: third.data.unit, replacement: row, error: "recovery_workflow_failed" };
+    expect(await call("recovery/transition", { input: refusal })).toMatchObject({
+      status: 200,
+      data: { ok: true, unit: row },
+    });
+    expect(await call("recovery/transition", { input: refusal })).toMatchObject({
+      status: 200,
+      data: { ok: true, unit: row, replayed: true },
+    });
+    expect(await call("recovery/action", { key: { instanceId: instance.id, unit: row.unit }, request })).toMatchObject({
+      status: 200,
+      data: { action: { state: "refused", error: "recovery_workflow_failed", consumed: false } },
+    });
+    expect(await call("recovery/history", { key: { instanceId: instance.id, unit: row.unit }, after: 0 })).toEqual(
+      history,
+    );
+  });
   const INSTANCE_ID = "ship_acme_api_1";
   const unit = (name: string, over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
     instanceId: INSTANCE_ID,

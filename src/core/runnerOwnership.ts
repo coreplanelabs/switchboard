@@ -12,7 +12,15 @@ export const runnerOwnedPullKey = (repo: string, prNumber: number): string => `$
 export interface RunnerPullOwner {
   instanceId: string;
   unit: string;
+  /** The durable action distinguishes successive recoveries of the same unit. */
+  recoveryActionId?: string;
 }
+
+const ownerOf = (unit: { instanceId: string; unit: string; recovery?: { actionId?: string } }): RunnerPullOwner => ({
+  instanceId: unit.instanceId,
+  unit: unit.unit,
+  ...(unit.recovery?.actionId !== undefined ? { recoveryActionId: unit.recovery.actionId } : {}),
+});
 
 export async function recoverRunnerOwnedPullOwners(
   instanceIds: Iterable<string>,
@@ -24,14 +32,13 @@ export async function recoverRunnerOwnedPullOwners(
     if (instance === null) continue;
     for (const unit of await instances.listUnits(instanceId)) {
       if (unit.pr !== undefined && unit.ending === undefined)
-        owned.set(runnerOwnedPullKey(instance.repo, unit.pr.number), { instanceId, unit: unit.unit });
+        owned.set(runnerOwnedPullKey(instance.repo, unit.pr.number), ownerOf(unit));
     }
   }
   for (const unit of await instances.listActiveRecoveries()) {
     if (unit.pr === undefined) continue;
     const instance = await instances.get(unit.instanceId);
-    if (instance !== null)
-      owned.set(runnerOwnedPullKey(instance.repo, unit.pr.number), { instanceId: unit.instanceId, unit: unit.unit });
+    if (instance !== null) owned.set(runnerOwnedPullKey(instance.repo, unit.pr.number), ownerOf(unit));
   }
   return owned;
 }
@@ -81,11 +88,20 @@ export class RunnerOwnershipFence {
       (owner === undefined ||
         current === undefined ||
         current.instanceId !== owner.instanceId ||
-        current.unit !== owner.unit)
+        current.unit !== owner.unit ||
+        (owner.recoveryActionId !== undefined &&
+          current.recoveryActionId !== undefined &&
+          current.recoveryActionId !== owner.recoveryActionId))
     )
       return false;
     this.claimed.add(key);
-    if (owner !== undefined) this.claimedOwners.set(key, owner);
+    if (owner !== undefined)
+      this.claimedOwners.set(
+        key,
+        owner.recoveryActionId === undefined && current?.recoveryActionId !== undefined
+          ? { ...owner, recoveryActionId: current.recoveryActionId }
+          : owner,
+      );
     return true;
   }
 
@@ -120,11 +136,12 @@ export class RunnerOwnershipFence {
       this.reservations.get(key) !== token ||
       !this.claimed.has(key) ||
       current?.instanceId !== currentOwner.instanceId ||
-      current.unit !== currentOwner.unit
+      current.unit !== currentOwner.unit ||
+      current.recoveryActionId !== currentOwner.recoveryActionId
     )
       return false;
     this.reservations.delete(key);
-    this.claimedOwners.set(key, nextOwner);
+    this.claimedOwners.set(key, { ...nextOwner });
     return true;
   }
 
@@ -143,7 +160,12 @@ export class RunnerOwnershipFence {
     const key = runnerOwnedPullKey(repo, prNumber);
     if (owner !== undefined) {
       const current = this.claimedOwners.get(key) ?? this.recoveredOwners.get(key);
-      if (current?.instanceId !== owner.instanceId || current.unit !== owner.unit) return false;
+      if (
+        current?.instanceId !== owner.instanceId ||
+        current.unit !== owner.unit ||
+        current.recoveryActionId !== owner.recoveryActionId
+      )
+        return false;
     }
     this.reservations.delete(key);
     this.claimed.delete(key);
@@ -181,6 +203,7 @@ export class RunnerOwnershipFence {
     // across its awaits too; if the coordinator store fails, the next reclaim
     // pass must retry rather than serving the previous process view as current.
     this.recoveryComplete = false;
+    const localBeforeRead = new Map(this.claimedOwners);
     const activeRunnerInstances = new Set(this.localRecoveredInstances);
     for (const hosting of outcome.liveHosted) activeRunnerInstances.add(hosting.instanceId);
     for (const run of outcome.liveElsewhere) {
@@ -189,6 +212,23 @@ export class RunnerOwnershipFence {
     const recovered = await recoverRunnerOwnedPullOwners(activeRunnerInstances, instances);
     this.recovered.clear();
     this.recoveredOwners.clear();
+    for (const [key, local] of localBeforeRead) {
+      const owner = recovered.get(key);
+      // Missing recovery actions have ended, but an ordinary claim can precede
+      // its first durable PR binding. Reservations and transfers stay fenced.
+      if (
+        local === this.claimedOwners.get(key) &&
+        !this.reservations.has(key) &&
+        (owner === undefined
+          ? local.recoveryActionId !== undefined
+          : local.instanceId !== owner.instanceId ||
+            local.unit !== owner.unit ||
+            local.recoveryActionId !== owner.recoveryActionId)
+      ) {
+        this.claimed.delete(key);
+        this.claimedOwners.delete(key);
+      }
+    }
     for (const [key, owner] of recovered) {
       this.recovered.add(key);
       this.recoveredOwners.set(key, owner);

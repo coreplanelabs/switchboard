@@ -130,6 +130,7 @@ import {
   mainTaskClaimMatches,
   preserveWorkBrief,
   prepareUnfencedUnitWrite,
+  permitsRecoveryMetadataWrite,
   CoordinatorUnitWriteConflict,
   isCoordinatorInstance,
   isCoordinatorUnit,
@@ -188,6 +189,22 @@ import {
 import { isRunMetricsPoint, pointTurnsFinal, type RunMetricsPoint } from "../../src/core/runMetrics.ts";
 import { AnalyticsEngineSink, NullSink, type RunMetricsSink } from "./runMetricsSink.ts";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.ts";
+import {
+  prepareRecoveryTransition,
+  planRecoveryTransition,
+  recoveryActionId,
+  recoveryHistoryPage,
+  isRecoveryTransition,
+  isRecoveryRequest,
+  RECOVERY_HISTORY_LIMITS,
+  recoveryBytes,
+  type RecoveryTransition,
+  type RecoveryTransitionResult,
+  type RecoveryRequest,
+  type RecoveryAction,
+  type RecoveryReceipt,
+  type RecoveryHistoryPage,
+} from "../../src/core/coordinator/recoveryHistory.ts";
 import { systemClock } from "../../src/core/trace/clock.ts";
 import { assignRunLiveState } from "../../src/core/runLiveState.ts";
 import { createTracer } from "../../src/core/trace/tracer.ts";
@@ -1779,6 +1796,14 @@ export class RunHistoryDO extends DurableObject<Env> {
         unit TEXT NOT NULL,
         PRIMARY KEY (main_thread_key, act_id)
       );
+      CREATE TABLE IF NOT EXISTS coordinator_recovery_journal (
+        instance_id TEXT NOT NULL,
+        unit TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        id TEXT NOT NULL,
+        json TEXT NOT NULL,
+        PRIMARY KEY (instance_id, unit, kind, id)
+      );
       CREATE TABLE IF NOT EXISTS coordinator_requester_turns (
         thread_key TEXT NOT NULL,
         requester_id TEXT NOT NULL,
@@ -2994,7 +3019,13 @@ export class RunHistoryDO extends DurableObject<Env> {
         this.sql
           .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ?`, instance.id)
           .toArray()
-          .some((row) => (JSON.parse(row.json) as CoordinatorUnit).ending?.outcome !== undefined)
+          .some(
+            (row) =>
+              (JSON.parse(row.json) as CoordinatorUnit).ending?.outcome !== undefined ||
+              (JSON.parse(row.json) as CoordinatorUnit).history !== undefined,
+          ) ||
+        this.sql.exec(`SELECT 1 FROM coordinator_recovery_journal WHERE instance_id = ? LIMIT 1`, instance.id).toArray()
+          .length > 0
       ) {
         out = { ok: false, reason: "exists" };
         return;
@@ -3218,7 +3249,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           expected.unit,
         )
         .toArray()[0];
-      if (row?.json !== JSON.stringify(expected)) {
+      if (row?.json !== JSON.stringify(expected) || !permitsRecoveryMetadataWrite(expected, replacement, true)) {
         out = { ok: false, reason: "stale" };
         return;
       }
@@ -3231,6 +3262,112 @@ export class RunHistoryDO extends DurableObject<Env> {
       );
     });
     return out;
+  }
+
+  async transitionRecovery(input: RecoveryTransition, now: number): Promise<RecoveryTransitionResult> {
+    const prepared = await prepareRecoveryTransition(input);
+    let result: RecoveryTransitionResult = { ok: false, reason: "unavailable" };
+    this.ctx.storage.transactionSync(() => {
+      const { instanceId, unit } = input.expected;
+      const saved = this.sql
+        .exec<{ json: string }>(
+          `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+          instanceId,
+          unit,
+        )
+        .toArray()[0];
+      const instance = this.sql
+        .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, instanceId)
+        .toArray()[0];
+      const records = this.sql
+        .exec<{ kind: string; json: string }>(
+          `SELECT kind, json FROM coordinator_recovery_journal WHERE instance_id = ? AND unit = ?`,
+          instanceId,
+          unit,
+        )
+        .toArray();
+      const brief = input.expected.workBrief;
+      const mainTask = brief
+        ? this.sql
+            .exec<{ instanceId: string; unit: string }>(
+              `SELECT instance_id AS instanceId, unit FROM coordinator_main_task_links WHERE main_thread_key = ? AND act_id = ?`,
+              brief.mainThreadKey,
+              brief.actId,
+            )
+            .toArray()[0]
+        : undefined;
+      const planned = planRecoveryTransition(
+        prepared,
+        instance ? JSON.parse(instance.json) : null,
+        saved ? JSON.parse(saved.json) : undefined,
+        {
+          actions: records.filter((row) => row.kind === "action").map((row) => JSON.parse(row.json) as RecoveryAction),
+          receipts: records
+            .filter((row) => row.kind === "receipt")
+            .map((row) => JSON.parse(row.json) as RecoveryReceipt),
+          mainTask,
+        },
+      );
+      if (!planned.ok) {
+        result = planned;
+        return;
+      }
+      if (planned.receipt)
+        this.sql.exec(
+          `INSERT INTO coordinator_recovery_journal (instance_id, unit, kind, id, json) VALUES (?, ?, 'receipt', ?, ?)`,
+          instanceId,
+          unit,
+          planned.receipt.id,
+          JSON.stringify(planned.receipt),
+        );
+      if (planned.action)
+        this.sql.exec(
+          `INSERT INTO coordinator_recovery_journal (instance_id, unit, kind, id, json) VALUES (?, ?, 'action', ?, ?) ON CONFLICT(instance_id, unit, kind, id) DO UPDATE SET json = excluded.json`,
+          instanceId,
+          unit,
+          planned.action.id,
+          JSON.stringify(planned.action),
+        );
+      this.sql.exec(
+        `UPDATE coordinator_units SET json = ?, updated_at = ? WHERE instance_id = ? AND unit = ?`,
+        JSON.stringify(planned.unit),
+        now,
+        instanceId,
+        unit,
+      );
+      result = { ok: true, unit: planned.unit, ...(planned.replayed ? { replayed: true } : {}) };
+    });
+    return result;
+  }
+
+  async getRecoveryAction(
+    key: { instanceId: string; unit: string },
+    request: RecoveryRequest,
+  ): Promise<RecoveryAction | null> {
+    const id = await recoveryActionId(key, request);
+    const row = this.sql
+      .exec<{ json: string }>(
+        `SELECT json FROM coordinator_recovery_journal WHERE instance_id = ? AND unit = ? AND kind = 'action' AND id = ?`,
+        key.instanceId,
+        key.unit,
+        id,
+      )
+      .toArray()[0];
+    return row ? (JSON.parse(row.json) as RecoveryAction) : null;
+  }
+
+  async listRecoveryHistory(key: { instanceId: string; unit: string }, after = 0): Promise<RecoveryHistoryPage> {
+    const rows = this.sql
+      .exec<{ json: string }>(
+        `SELECT json FROM coordinator_recovery_journal WHERE instance_id = ? AND unit = ? AND kind = 'receipt'`,
+        key.instanceId,
+        key.unit,
+      )
+      .toArray();
+    return recoveryHistoryPage(
+      rows.map((row) => JSON.parse(row.json) as RecoveryReceipt),
+      after,
+    );
   }
 
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
@@ -5999,6 +6136,9 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/stop",
   "/runs/coordinator/units/put",
   "/runs/coordinator/units/claim-legacy-continuation",
+  "/runs/coordinator/recovery/transition",
+  "/runs/coordinator/recovery/action",
+  "/runs/coordinator/recovery/history",
   "/runs/coordinator/units/list-active-recoveries",
   "/runs/coordinator/units/list",
   "/runs/coordinator/events/append",
@@ -6821,6 +6961,31 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   }
   // The units of the plan an instance runs (run-history item 50): rows
   // validated by the shared contract, each replaced whole; a list by instance.
+  if (pathname === "/runs/coordinator/recovery/transition") {
+    if (recoveryBytes(b) > RECOVERY_HISTORY_LIMITS.requestBytes) return json({ ok: false, reason: "capacity" }, 409);
+    if (!isRecoveryTransition(b.input)) return json({ error: "invalid recovery transition" }, 400);
+    const result = await stub.transitionRecovery(b.input, now);
+    return json(result, result.ok ? 200 : 409);
+  }
+  if (pathname === "/runs/coordinator/recovery/action" || pathname === "/runs/coordinator/recovery/history") {
+    const address = b.key as { instanceId?: unknown; unit?: unknown } | undefined;
+    if (
+      !address ||
+      typeof address.instanceId !== "string" ||
+      !INSTANCE_ID_PATTERN.test(address.instanceId) ||
+      typeof address.unit !== "string" ||
+      !UNIT_PATTERN.test(address.unit)
+    )
+      return json({ error: "invalid recovery work key" }, 400);
+    const recoveryKey = { instanceId: address.instanceId, unit: address.unit };
+    if (pathname.endsWith("/action")) {
+      if (!isRecoveryRequest(b.request)) return json({ error: "invalid recovery request" }, 400);
+      return json({ action: await stub.getRecoveryAction(recoveryKey, b.request) });
+    }
+    if (!Number.isSafeInteger(b.after) || (b.after as number) < 0)
+      return json({ error: "invalid recovery cursor" }, 400);
+    return json(await stub.listRecoveryHistory(recoveryKey, b.after as number));
+  }
   if (pathname === "/runs/coordinator/units/put") {
     if (!Array.isArray(b.units) || b.units.length === 0 || b.units.length > MAX_UNITS_PER_PUT)
       return json({ error: `units must be a non-empty array of at most ${MAX_UNITS_PER_PUT} unit rows` }, 400);
