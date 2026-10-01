@@ -1,3 +1,4 @@
+import { sourceHash } from "../../core/references/receipts.js";
 import { humanizeMessageText } from "../../core/dispatch/reply.js";
 import type {
   ConversationClassification,
@@ -73,12 +74,12 @@ export interface ReferenceClient {
   };
 }
 
-/** Fetch the full bounded thread, or stop once an exact target message is found. */
+/** Fetch the full bounded thread, or stop once every exact target message is found. */
 export async function fetchSlackReplies(
   client: Pick<ReferenceClient, "conversations">,
   channel: string,
   ts: string,
-  targetTs?: string,
+  targetTs?: string | readonly string[],
 ): Promise<SlackThreadMessage[]> {
   const messages: SlackThreadMessage[] = [];
   let cursor: string | undefined;
@@ -92,7 +93,8 @@ export async function fetchSlackReplies(
     });
     if ((page.messages?.length ?? 0) > REPLIES_PAGE) throw new Error("Slack replies exceeded the page size");
     messages.push(...(page.messages ?? []));
-    if (targetTs && messages.some((message) => message.ts === targetTs)) return messages;
+    const targets = typeof targetTs === "string" ? [targetTs] : targetTs;
+    if (targets?.length && targets.every((id) => messages.some((message) => message.ts === id))) return messages;
     const next = page.response_metadata?.next_cursor?.trim();
     if (page.has_more && !next) throw new Error("Slack replies omitted the next cursor");
     if (!next) return messages;
@@ -233,6 +235,7 @@ export class SlackConversationReader implements ConversationReader {
     // a message the mapping dropped (a status card) quotes nothing, never the
     // thread the link did not name.
     if (ref.messageId !== undefined && ref.messageId !== threadTs) turns = turns.filter((t) => t.ts === ref.messageId);
+    const total = turns.length;
     // Newest kept: the parent stays, the newest replies fill the rest.
     if (turns.length > caps.maxMessages) turns = [turns[0], ...turns.slice(turns.length - (caps.maxMessages - 1))];
     const messages: ReferencedMessage[] = [];
@@ -243,6 +246,7 @@ export class SlackConversationReader implements ConversationReader {
       messages.push({
         ...(t.at !== undefined ? { at: t.at } : {}),
         ...(t.ts ? { ts: t.ts } : {}),
+        sourceHash: await slackMessageHash(messagesInThread.find((m) => m.ts === t.ts)!),
         author,
         text: humanizeMessageText(t.text),
       });
@@ -253,6 +257,7 @@ export class SlackConversationReader implements ConversationReader {
       channelName: cls.channelName ?? channel,
       permalink: ref.url,
       messages,
+      coverage: { kind: total > turns.length ? "bounded" : "complete", truncated: total > turns.length },
     };
   }
 
@@ -269,3 +274,15 @@ export class SlackConversationReader implements ConversationReader {
 }
 
 const NEVER: ConversationClassification = Object.freeze({ visibility: "never", botIsMember: false });
+
+/** Stable content identity excludes reply counts and transport URLs that change on append. */
+export function slackMessageHash(message: SlackThreadMessage): Promise<string> {
+  return sourceHash({
+    ts: message.ts,
+    user: message.user,
+    botId: message.bot_id,
+    text: message.text,
+    edited: message.edited,
+    files: message.files?.map((f) => ({ id: f.id, name: f.name, size: f.size, mimetype: f.mimetype })),
+  });
+}

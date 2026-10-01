@@ -66,7 +66,10 @@ describe("orchestrator conversational reads", () => {
         canWrite: () => false,
         readableRepos: async () => (userId === "user:reader" ? api.listRepos() : []),
       },
-      session: sessionCapabilityFor({ session: { key, seedFrom: 0, request: 0, range: { from: 1 } } }, ledger),
+      session: sessionCapabilityFor(
+        { runId: "turn-1", session: { key, seedFrom: 0, request: 0, range: { from: 1 } } },
+        ledger,
+      ),
       runs: {
         runId: "turn-1",
         actor: { kind: "user", id: userId, grants: { actions: new Set(), channels: new Set(), repos: new Set() } },
@@ -104,7 +107,7 @@ describe("orchestrator conversational reads", () => {
     expect(String(await tool("notes").run({}, later))).toContain("cursor");
     expect(String(await tool("recall").run({ turn: 0 }, later))).toContain("last completed hour UTC");
     expect(ledger.readSession).toHaveBeenCalledWith(key, 0, 0);
-    expect(ledger.writeNotepad).toHaveBeenCalledWith(key, evidence);
+    expect(ledger.writeNotepad).toHaveBeenCalledWith(key, evidence, "turn-1");
     expect(await tool("recall").run({ turn: 0 }, context("user:other"))).toBe('{"turn":0,"content":null}');
     expect(ledger.readSession).toHaveBeenCalledTimes(1);
     for (const absent of ["github_issue_create", "spawn_run", "submit_pr_description", "bash", "mcp__metrics__write"]) {

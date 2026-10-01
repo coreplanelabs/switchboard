@@ -1,3 +1,4 @@
+import type { SlackSourceRead, SlackSourceReceipt } from "../core/references/receipts.js";
 import type { ToolResultContent } from "../core/chatMessage.js";
 import type { RunnableTool } from "./runnableTool.js";
 
@@ -9,12 +10,14 @@ export type SlackContextRequest =
 
 /** Bound by the channel adapter to one requester's actor and origin thread. */
 export interface SlackContextCapability {
-  /** Revalidation repeats every authority check without spending a new user read. */
-  read(request: SlackContextRequest, purpose?: "revalidate"): Promise<ToolResultContent>;
+  /** Model-facing content, released only after its trusted receipt is persisted. */
+  read(request: SlackContextRequest): Promise<ToolResultContent>;
 }
 
 /** Slack adapter proof required before this read can enter a main-agent run. */
-export interface VerifiedSlackContextCapability extends SlackContextCapability {
+export interface VerifiedSlackContextCapability {
+  readSource(request: SlackContextRequest): Promise<SlackSourceRead>;
+  revalidateSource(receipt: SlackSourceReceipt): Promise<boolean>;
   verifyDirectOrigin(): Promise<boolean>;
 }
 

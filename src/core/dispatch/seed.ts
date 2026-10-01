@@ -1,3 +1,4 @@
+import type { SessionSources } from "../references/receipts.js";
 // The session seed (docs/reference/specs/session-log.md item 9; records 0034
 // and 0035): what a follow-up starts from when its thread and agent have a
 // session log. The log's newest turns within the seed budget,
@@ -40,6 +41,8 @@ export const REFUSED_REQUEST_STAND_IN = "(a request the model refused under its 
 /** What the ledger's tail read answers (`readSessionTail`): the log index the
  *  rows start at and the transcript assembled from them, counted from 0. */
 export interface SessionTail {
+  sources?: SessionSources;
+  requiresFreshSources?: true;
   from: number;
   transcript: AssembledTranscript;
 }
@@ -53,6 +56,9 @@ export interface PreviousRun {
 }
 
 export interface SessionSeed {
+  /** Trusted session metadata, independent of model turns and compaction. */
+  sources?: SessionSources;
+  requiresFreshSources?: true;
   /** The conversation the run starts from, in order: the tail's rows as they
    *  are, the settlement of its calls in flight, the gap marker, the lines
    *  since, the request. Not merged across the tail's end: every message
@@ -227,6 +233,8 @@ export function sessionSeed(input: {
 
   return {
     messages,
+    ...(tail.sources ? { sources: tail.sources } : {}),
+    ...(tail.requiresFreshSources ? { requiresFreshSources: true as const } : {}),
     log: { from: logFrom, turns: kept.length },
     ...(summary !== undefined ? { summary } : {}),
     ...(actors !== undefined ? { actors } : {}),

@@ -18,6 +18,9 @@
 
 export const SECOND_MS = 1_000;
 
+/** One source revalidation pass, inside the existing three-minute write-up allowance. */
+export const SOURCE_REVALIDATE_MAX_MS = 30 * SECOND_MS;
+
 export const secondsToMs = (seconds: number): number => seconds * SECOND_MS;
 
 export const MINUTE_MS = 60_000;

@@ -1,3 +1,5 @@
+import { requiresFreshSourceTool } from "./runLedger/sessionLog.js";
+import { addSourceReceipt, referenceReceipt, sourceBinding, type SessionSources } from "./references/receipts.js";
 import { getAgent } from "../agents/registry.js";
 import { MINUTE_MS, minutesToMs } from "./budgets.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
@@ -2668,17 +2670,12 @@ export async function dispatch(
     const staleMainRead =
       agent.name === "orchestrator" &&
       fromSession?.seed !== undefined &&
-      fromSession.seed.messages.some((message) =>
-        message.content.some(
-          (part) =>
-            part.type === "tool_use" &&
-            (part.name.startsWith("github_") ||
-              part.name === "plane_show" ||
-              part.name === "thread_work" ||
-              part.name === "work_progress" ||
-              part.name.startsWith("mcp__")),
-        ),
-      );
+      (fromSession.seed.requiresFreshSources ||
+        fromSession.seed.messages.some((message) =>
+          message.content.some((part) => part.type === "tool_use" && requiresFreshSourceTool(part.name)),
+        ));
+    // Prompt replay and trusted dependencies have separate lifetimes.
+    const sourceSession = fromSession?.seed;
     const session = staleMainRead || sourceContinuation !== undefined ? undefined : fromSession?.seed;
     // If a prior main run exists but its log cannot be read, an old bot answer
     // may quote a private source. A specialist-only history has no main answer
@@ -2712,7 +2709,7 @@ export async function dispatch(
     const needsSavedSlackRecheck =
       agent.name === "orchestrator" &&
       /^slack:D[A-Z0-9_]+$/.test(msg.channelId) &&
-      savedSlackContextNeedsRecheck(session, unprovedMainLog ? history : mainHistory);
+      savedSlackContextNeedsRecheck(sourceSession, unprovedMainLog ? history : mainHistory);
     const savedSlackVisibility = needsSavedSlackRecheck
       ? await root.span("dispatch.channel_visibility", () => channelVisibilityOf(deps, msg.channelId))
       : undefined;
@@ -2728,14 +2725,7 @@ export async function dispatch(
         })
       : undefined;
     const revalidateSavedSources = (binding: SlackContextBinding) =>
-      revalidateSavedSlackContext(session, binding.capability, async (url) => {
-        const fresh = await readReferences(deps, {
-          msg: { ...msg, text: url },
-          actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)),
-          purpose: "revalidate",
-        });
-        return fresh.refused.length === 0 && fresh.blocks.length === 1 ? fresh.blocks[0] : undefined;
-      });
+      revalidateSavedSlackContext(sourceSession, binding.revalidate);
     if (needsSavedSlackRecheck && (!savedSlackBinding || !(await revalidateSavedSources(savedSlackBinding)))) {
       await refuse(
         refusalOf(
@@ -3683,8 +3673,7 @@ export async function dispatch(
         create: deps.slackContextForRun,
       }));
     const privateAudienceLatch = recoveredPrivateAudienceLatch(msg, recovered);
-    if (needsSavedSlackRecheck && slackContext)
-      privateAudienceLatch.revalidateSources = () => revalidateSavedSources(slackContext);
+    if (slackContext) privateAudienceLatch.revalidateSources = () => slackContext.sourcesStillValid();
     ledgerRun = await claimRun(deps, {
       msg,
       verifyDirectAudience: (
@@ -3727,6 +3716,25 @@ export async function dispatch(
       markUntracked: () => shell.note("debug", "untracked by the ledger"),
       ...(seedActors !== undefined ? { seedActors } : {}),
     });
+    if (slackContext) {
+      let sources: SessionSources = sourceSession?.sources ?? {
+        version: 1,
+        status: "known",
+        binding: sourceBinding(msg),
+        receipts: [],
+      };
+      for (const [i, conversation] of references.conversations.entries()) {
+        const receipt = referenceReceipt(conversation, references.visibilities[i], sourceBinding(msg));
+        sources = receipt ? addSourceReceipt(sources, receipt) : { version: 1, status: "unknown" };
+      }
+      if (
+        !(await slackContext.initialize(sources, (next) => ledgerRun?.writeSources(next) ?? Promise.resolve(false)))
+      ) {
+        privateAudienceLatch.revoked = true;
+        privateAudienceLatch.reason = "source-unavailable";
+        throw new Error("The Slack source receipts could not be saved.");
+      }
+    }
     if (preserveOnReattachRefusal && !ledgerRun?.tracked())
       throw new Error("The coding run lost its durable owner during setup. Retry after the run ledger recovers.");
     if (agent.name === "coding" && ledgerRun?.tracked()) {

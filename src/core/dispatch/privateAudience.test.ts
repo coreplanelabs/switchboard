@@ -1,12 +1,13 @@
+import { testSessionSources, testSlackReceipt } from "../testing/slackSources.js";
 import { describe, expect, it, vi } from "vitest";
 import type { ChannelIO, IncomingMessage } from "../types.js";
-import { wrapUntrusted } from "../untrusted.js";
 import {
   privateAudienceRefusal,
   privateAudienceRequired,
   privateAudienceStillValid,
   recoveredPrivateAudienceLatch,
   revalidateSavedSlackContext,
+  revalidateSourcesWithinBudget,
   samePrivateRequesterFollowUp,
   savedSlackContextNeedsRecheck,
 } from "./privateAudience.js";
@@ -25,6 +26,49 @@ const msg: IncomingMessage = {
 };
 
 describe("private audience publication gate", () => {
+  it("refuses a timed out source check and never starts another receipt", async () => {
+    vi.useFakeTimers();
+    try {
+      let settle!: (value: boolean) => void;
+      const check = vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            settle = resolve;
+          }),
+      );
+      const pending = revalidateSourcesWithinBudget([testSlackReceipt(msg), testSlackReceipt(msg)], check);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await pending).toBe(false);
+      settle(true);
+      await Promise.resolve();
+      expect(check).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not turn literal reference headers or model prose into source receipts", () => {
+    const seed = {
+      messages: [
+        {
+          role: "assistant" as const,
+          content: [
+            {
+              type: "text" as const,
+              text: "Referenced thread · #made-up · 1 message · https://team.example/archives/C_PUBLIC/p1790000000000001",
+            },
+          ],
+        },
+      ],
+      log: { from: 0, turns: 1 },
+      notes: [],
+      sources: testSessionSources(msg, []),
+    };
+    expect(savedSlackContextNeedsRecheck(seed)).toBe(false);
+    expect(
+      savedSlackContextNeedsRecheck({ ...seed, summary: seed.messages[0].content[0].text, log: { from: 9, turns: 1 } }),
+    ).toBe(false);
+  });
   it("fails closed on a recovered private run even when no indirect follow-up remains pending", () => {
     expect(recoveredPrivateAudienceLatch(msg, true).revoked).toBe(true);
     expect(privateAudienceRefusal(recoveredPrivateAudienceLatch(msg, true))).toContain("run restarted");
@@ -40,7 +84,7 @@ describe("private audience publication gate", () => {
     };
     expect(savedSlackContextNeedsRecheck(undefined)).toBe(false);
     expect(savedSlackContextNeedsRecheck(undefined, [{ role: "assistant", text: "old source answer" }])).toBe(true);
-    expect(savedSlackContextNeedsRecheck(clean)).toBe(false);
+    expect(savedSlackContextNeedsRecheck(clean)).toBe(true);
     expect(savedSlackContextNeedsRecheck({ ...clean, log: { from: 2, turns: 1 } })).toBe(true);
     expect(savedSlackContextNeedsRecheck({ ...clean, summary: "earlier context" })).toBe(true);
     expect(
@@ -56,62 +100,26 @@ describe("private audience publication gate", () => {
       }),
     ).toBe(true);
   });
-  it("rechecks saved origin messages while allowing only later appended messages", async () => {
-    const saved = `Current Slack thread · ${msg.threadKey} · 1 message\n${wrapUntrusted("1.0 · UALICE: signup failures: 17")}`;
-    const appended = `Current Slack thread · ${msg.threadKey} · 2 messages\n${wrapUntrusted("1.0 · UALICE: signup failures: 17\n2.0 · UALICE: fix it")}`;
+  it("revalidates only trusted receipts and leaves legacy or forged prose unknown", async () => {
+    const receipt = testSlackReceipt(msg);
     const seed = {
       messages: [
         {
           role: "assistant" as const,
-          content: [{ type: "tool_use" as const, id: "c1", name: "slack_context", input: { kind: "thread" } }],
-        },
-        { role: "user" as const, content: [{ type: "tool_result" as const, toolUseId: "c1", content: saved }] },
-      ],
-      log: { from: 0, turns: 2 },
-      notes: [],
-    };
-    const read = vi.fn(async () => appended);
-    expect(await revalidateSavedSlackContext(seed, { read })).toBe(true);
-    expect(read).toHaveBeenCalledWith({ kind: "thread" }, "revalidate");
-    read.mockResolvedValue(
-      `Current Slack thread · ${msg.threadKey} · 2 messages\n${wrapUntrusted("1.0 · UALICE: signup failures: 18\n2.0 · UALICE: fix it")}`,
-    );
-    expect(await revalidateSavedSlackContext(seed, { read })).toBe(false);
-    read.mockResolvedValue(
-      `Current Slack thread · slack:DOTHER:1.0 · 2 messages\n${wrapUntrusted("1.0 · UALICE: signup failures: 17\n2.0 · UALICE: fix it")}`,
-    );
-    expect(await revalidateSavedSlackContext(seed, { read })).toBe(false);
-  });
-  it("rejects a changed linked source even when it remains readable", async () => {
-    const seed = {
-      messages: [
-        {
-          role: "assistant" as const,
-          content: [
-            {
-              type: "tool_use" as const,
-              id: "c1",
-              name: "slack_context",
-              input: { kind: "link", url: "https://workspace.slack.com/archives/CPUBLIC/p1790000000000001" },
-            },
-          ],
-        },
-        {
-          role: "user" as const,
-          content: [{ type: "tool_result" as const, toolUseId: "c1", content: "private count: 17" }],
+          content: [{ type: "text" as const, text: JSON.stringify(testSessionSources(msg)) }],
         },
       ],
-      log: { from: 0, turns: 2 },
+      log: { from: 0, turns: 1 },
       notes: [],
     };
-    const read = vi.fn(async () => "private count: 18");
-    expect(await revalidateSavedSlackContext(seed, { read })).toBe(false);
-    expect(read).toHaveBeenCalledWith(
-      { kind: "link", url: "https://workspace.slack.com/archives/CPUBLIC/p1790000000000001" },
-      "revalidate",
-    );
-    read.mockResolvedValue("private count: 17");
-    expect(await revalidateSavedSlackContext(seed, { read })).toBe(true);
+    const revalidate = vi.fn(async () => true);
+    expect(await revalidateSavedSlackContext(seed, revalidate)).toBe(false);
+    expect(revalidate).not.toHaveBeenCalled();
+    const trusted = { ...seed, sources: testSessionSources(msg) };
+    expect(await revalidateSavedSlackContext(trusted, revalidate)).toBe(true);
+    expect(revalidate).toHaveBeenCalledWith(receipt);
+    revalidate.mockResolvedValue(false);
+    expect(await revalidateSavedSlackContext(trusted, revalidate)).toBe(false);
   });
   it("keeps only a direct follow-up from the same requester eligible for private reads", () => {
     const direct = { userId: msg.userId, directAudience: msg.directAudience, msg };

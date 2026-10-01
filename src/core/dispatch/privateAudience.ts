@@ -1,9 +1,9 @@
+import { SOURCE_REVALIDATE_MAX_MS } from "../budgets.js";
 import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
 import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
 import type { FollowUpInput } from "../threadAdmission.js";
 import type { SessionSeed } from "./seed.js";
-import type { SlackContextCapability, SlackContextRequest } from "../../tools/slackContext.js";
-import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN, UNTRUSTED_PREAMBLE, unwrapUntrusted } from "../untrusted.js";
+import type { SlackSourceReceipt } from "../references/receipts.js";
 
 /** A live run's private-source revocation follows it through answer delivery. */
 export interface PrivateAudienceLatch {
@@ -32,166 +32,51 @@ export function privateAudienceRefusal(latch: PrivateAudienceLatch | undefined):
   return "I can no longer verify this private conversation, so I can't share that answer here.";
 }
 
-/** Saved Slack reads have no durable source-membership proof for a later turn. */
+/** Only trusted session metadata describes prior reads; prose never grants or revokes access. */
 export function savedSlackContextNeedsRecheck(
   seed: SessionSeed | undefined,
   history: readonly HistoryItem[] = [],
 ): boolean {
-  // A failed log read leaves only channel history, whose bot answers have no
-  // durable labels for the Slack sources they quoted.
   if (!seed) return history.some((item) => item.role === "assistant");
-  // A cut or compaction can hide a former Slack read in its omitted rows.
-  if (seed.log.from !== 0 || seed.summary !== undefined) return true;
-  if (
-    seed.messages
-      .slice(0, seed.log.turns)
-      .some((message) =>
-        message.content.some((part) => part.type === "text" && part.text.includes(SAVED_REFERENCE_HEADER)),
-      )
-  )
-    return true;
-  const calls = new Set<string>();
-  for (const message of seed.messages) {
-    for (const part of message.content) {
-      if (part.type === "tool_use") {
-        if (part.name === "slack_context") return true;
-        calls.add(part.id);
-      }
-      if (part.type === "tool_result" && !calls.has(part.toolUseId)) return true;
-    }
-  }
-  return false;
+  return !seed.sources || seed.sources.status !== "known" || seed.sources.receipts.length > 0;
 }
 
-const SAVED_SLACK_RECHECK_MAX = 4;
-const SAVED_REFERENCE_HEADER = "Referenced thread · #";
-
-/** A persisted prompt may have joined the request and quoted blocks into one text part. */
-function savedReferences(seed: SessionSeed): Array<{ url: string; block: string }> | undefined {
-  const references: Array<{ url: string; block: string }> = [];
-  for (const message of seed.messages.slice(0, seed.log.turns)) {
-    for (const part of message.content) {
-      if (part.type !== "text") continue;
-      let offset = 0;
-      while (true) {
-        const start = part.text.indexOf(SAVED_REFERENCE_HEADER, offset);
-        if (start < 0) break;
-        if (start > 0 && part.text[start - 1] !== "\n") return undefined;
-        const lineEnd = part.text.indexOf("\n", start);
-        if (lineEnd < 0) return undefined;
-        const match = /^Referenced thread · #[^\n]+ · \d+ messages? · (https:\/\/\S+)$/.exec(
-          part.text.slice(start, lineEnd),
-        );
-        const bodyStart = `${UNTRUSTED_PREAMBLE}\n${UNTRUSTED_OPEN}\n`;
-        if (!match || !part.text.startsWith(bodyStart, lineEnd + 1)) return undefined;
-        const close = part.text.indexOf(`\n${UNTRUSTED_CLOSE}`, lineEnd + 1 + bodyStart.length);
-        if (close < 0) return undefined;
-        const end = close + 1 + UNTRUSTED_CLOSE.length;
-        references.push({ url: match[1], block: part.text.slice(start, end) });
-        offset = end;
-      }
-    }
-  }
-  return references;
-}
-
-function savedRequest(input: unknown): SlackContextRequest | undefined {
-  if (!input || typeof input !== "object") return undefined;
-  const value = input as Record<string, unknown>;
-  if (value.kind === "thread" || value.kind === "nearby") return { kind: value.kind };
-  if (value.kind === "link" && typeof value.url === "string" && value.url.startsWith("https://"))
-    return { kind: "link", url: value.url };
-  if (value.kind !== "file" || typeof value.fileId !== "string" || !/^F[A-Z0-9]+$/.test(value.fileId)) return undefined;
-  if (typeof value.url === "string" && value.url.startsWith("https://"))
-    return { kind: "file", fileId: value.fileId, url: value.url };
-  if (typeof value.messageTs === "string" && /^\d+\.\d+$/.test(value.messageTs))
-    return { kind: "file", fileId: value.fileId, messageTs: value.messageTs };
-  return undefined;
-}
-
-/** An origin read may gain later messages; every earlier byte must remain. */
-function sameOrAppendedOriginRead(saved: unknown, fresh: unknown): boolean {
-  if (typeof saved !== "string" || typeof fresh !== "string") return false;
-  const parse = (text: string): { source: string; body: string } | undefined => {
-    const split = text.indexOf("\n");
-    if (split < 0) return undefined;
-    const header = text.slice(0, split);
-    const match = /^(Current Slack thread|Nearby Slack channel) · (.+) · \d+ messages?$/.exec(header);
-    const fenced = text.slice(split + 1);
-    if (
-      !match ||
-      !fenced.startsWith(`${UNTRUSTED_PREAMBLE}\n${UNTRUSTED_OPEN}\n`) ||
-      !fenced.endsWith(`\n${UNTRUSTED_CLOSE}`)
-    )
-      return undefined;
-    return { source: `${match[1]} · ${match[2]}`, body: unwrapUntrusted(fenced) };
-  };
-  const before = parse(saved);
-  const after = parse(fresh);
-  return (
-    before !== undefined &&
-    after !== undefined &&
-    before.source === after.source &&
-    (after.body === before.body || after.body.startsWith(`${before.body}\n`))
-  );
-}
-
-/** Re-read a bounded saved source set; unchanged text alone is not authority. */
 export async function revalidateSavedSlackContext(
   seed: SessionSeed | undefined,
-  capability: SlackContextCapability,
-  revalidateReference?: (url: string) => Promise<string | undefined>,
+  revalidate: (receipt: SlackSourceReceipt) => Promise<boolean>,
 ): Promise<boolean> {
-  if (!seed || seed.log.from !== 0 || seed.summary !== undefined) return false;
-  const references = savedReferences(seed);
-  if (!references || references.length > SAVED_SLACK_RECHECK_MAX) return false;
-  const calls = new Map<string, { name: string; input: unknown }>();
-  const results: Array<{ input: unknown; content: unknown; isError?: boolean }> = [];
-  const pendingSlackCalls = new Set<string>();
-  for (const message of seed.messages) {
-    for (const part of message.content) {
-      if (part.type === "tool_use") {
-        calls.set(part.id, { name: part.name, input: part.input });
-        if (part.name === "slack_context") pendingSlackCalls.add(part.id);
-      }
-      if (part.type === "tool_result") {
-        const call = calls.get(part.toolUseId);
-        if (!call) return false;
-        if (call.name === "slack_context") {
-          pendingSlackCalls.delete(part.toolUseId);
-          results.push({ input: call.input, content: part.content, isError: part.isError });
-        }
-      }
-    }
-  }
-  if (
-    pendingSlackCalls.size > 0 ||
-    results.length + references.length === 0 ||
-    results.length + references.length > SAVED_SLACK_RECHECK_MAX
-  )
-    return false;
-  for (const result of results) {
-    const request = savedRequest(result.input);
-    if (!request || result.isError) return false;
+  if (!seed?.sources || seed.sources.status !== "known") return false;
+  return revalidateSourcesWithinBudget(seed.sources.receipts, revalidate);
+}
+
+/** A stalled API check refuses publication; it cannot begin another receipt after the deadline. */
+export async function revalidateSourcesWithinBudget(
+  receipts: readonly SlackSourceReceipt[],
+  revalidate: (receipt: SlackSourceReceipt) => Promise<boolean>,
+): Promise<boolean> {
+  let expired = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => {
+      expired = true;
+      resolve(false);
+    }, SOURCE_REVALIDATE_MAX_MS);
+  });
+  const check = async () => {
     try {
-      const fresh = await capability.read(request, "revalidate");
-      if (typeof fresh === "string" && fresh.startsWith("slack_context:")) return false;
-      if (request.kind === "thread" || request.kind === "nearby") {
-        if (!sameOrAppendedOriginRead(result.content, fresh)) return false;
-      } else if (JSON.stringify(fresh) !== JSON.stringify(result.content)) return false;
+      for (const receipt of receipts) {
+        if (expired || !(await revalidate(receipt)) || expired) return false;
+      }
+      return !expired;
     } catch {
       return false;
     }
+  };
+  try {
+    return await Promise.race([check(), deadline]);
+  } finally {
+    clearTimeout(timer);
   }
-  for (const reference of references) {
-    if (!revalidateReference) return false;
-    try {
-      if ((await revalidateReference(reference.url)) !== reference.block) return false;
-    } catch {
-      return false;
-    }
-  }
-  return true;
 }
 
 /** A later source change seals both the event and the channel reply. */

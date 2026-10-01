@@ -1,3 +1,4 @@
+import { testSessionSources } from "./testing/slackSources.js";
 import { describe, expect, it } from "vitest";
 import { secretsFrom } from "../secrets.js";
 import type { ChatMessage } from "./chatMessage.js";
@@ -70,6 +71,24 @@ const claimReq: ClaimRequest = {
 };
 
 describe("WorkerRunLedger", () => {
+  it("requires explicit source metadata acknowledgment from the memory worker", async () => {
+    const sources = testSessionSources({ channelId: "slack:D1", threadKey: "slack:D1:1.0", userId: "slack:UALICE" });
+    const old = stubWorker();
+    expect(await old.ledger.writeSessionSources("slack:D1:1.0:orchestrator", "r1", "g1", sources)).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    const current = stubWorker(() => ({ status: 200, data: { ok: true, sourcesSaved: true } }));
+    expect(await current.ledger.writeSessionSources("slack:D1:1.0:orchestrator", "r1", "g1", sources)).toEqual({
+      ok: true,
+    });
+    expect(current.calls[0].body).toMatchObject({
+      key: "slack:D1:1.0:orchestrator",
+      sourceRunId: "r1",
+      gen: "g1",
+      sources,
+    });
+  });
   it("requests a resident fence for the ledger owner and reports stale claims", async () => {
     const w = stubWorker((path) =>
       path === "/runs/resident-claim"

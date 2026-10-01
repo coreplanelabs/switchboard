@@ -877,6 +877,9 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       agent: getAgent("orchestrator"),
       answer: "private fact",
       slackContext: {
+        initialize: async () => true,
+        revalidate: async () => true,
+        sourcesStillValid: async () => true,
         capability: { read: async () => "private fact" },
         destinationStillPrivate: async () => false,
         revoke: () => {},
@@ -894,6 +897,9 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       agent: getAgent("orchestrator"),
       answer: "private fact",
       slackContext: {
+        initialize: async () => true,
+        revalidate: async () => true,
+        sourcesStillValid: async () => true,
         capability: { read: async () => "private fact" },
         destinationStillPrivate: async () => ++checks === 1,
         revoke: () => {},

@@ -379,7 +379,7 @@ describe("sessionCapabilityFor — the capability the dispatcher builds for a ru
       writeNotepad: vi.fn(async () => ({ ok: true as const })),
     };
     const session = { key: "slack:C1:1.0:coding", seedFrom: 2, request: 4, range: { from: 5 } };
-    const cap = sessionCapabilityFor({ session }, wt)!;
+    const cap = sessionCapabilityFor({ session, runId: "run-0" }, wt)!;
     expect(cap.session).toEqual(session);
     expect(await cap.readTurn(4)).toEqual(say("turn 4"));
     // The run's conversation (agent-conductor item 3): every row from where its seed began to the log's tail.
@@ -389,14 +389,14 @@ describe("sessionCapabilityFor — the capability the dispatcher builds for a ru
     await cap.search("x", 3);
     expect(wt.searchSession).toHaveBeenCalledWith("slack:C1:1.0:coding", "x", 3);
     await cap.writeNotepad("n");
-    expect(wt.writeNotepad).toHaveBeenCalledWith("slack:C1:1.0:coding", "n");
-    expect(sessionCapabilityFor({ session: undefined }, wt)).toBeUndefined();
+    expect(wt.writeNotepad).toHaveBeenCalledWith("slack:C1:1.0:coding", "n", "run-0");
+    expect(sessionCapabilityFor({ session: undefined, runId: "run-0" }, wt)).toBeUndefined();
     expect(sessionCapabilityFor(undefined, wt)).toBeUndefined();
     // Without a store the capability has no files; with one it carries the catalogue read and this run's paths.
     expect(cap.assets).toBeUndefined();
     expect(cap.workspacePathOf).toBeUndefined();
     const read = vi.fn(async () => [clip]);
-    const withFiles = sessionCapabilityFor({ session }, wt, {
+    const withFiles = sessionCapabilityFor({ session, runId: "run-0" }, wt, {
       read,
       pathOf: (key) => (key === CLIP ? "attachments/1-clip.mp4" : undefined),
     })!;

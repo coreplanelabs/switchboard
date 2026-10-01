@@ -1,3 +1,4 @@
+import type { SessionSources } from "../references/receipts.js";
 // The ledger seam (docs/reference/specs/run-history.md item 28): what the bot calls, with
 // two implementations — `WorkerRunLedger` (HTTPS to the state Worker; the
 // production choice) and `InMemoryRunLedger` (tests, and the shape every
@@ -129,6 +130,8 @@ export interface RunLedger {
    *  re-runs the owner write, so the caller's convention is: retry the whole
    *  `claim` on failure, never proceed past a claim that did not resolve `ok`. */
   claim(req: ClaimRequest): Promise<ClaimResult>;
+  /** Persist cumulative trusted source metadata under the exact session owner. */
+  writeSessionSources(key: string, runId: string, gen: string, sources: SessionSources): Promise<FenceResult>;
   /** The seed prefix, written once at start (chunked by the implementation).
    *  With `session`, the rows go to that session log at their log indices
    *  (docs/reference/specs/session-log.md item 2); without, to the run's own
@@ -149,7 +152,7 @@ export interface RunLedger {
     rowId: string,
     rows: readonly { part: number; json: string }[],
   ): Promise<{ ok: boolean; appended: boolean }>;
-  /** Own the session log for the run: its writes land, every other generation's are fenced.
+  /** Own the session log for the run: its writes land, other source-tracked writers are fenced.
    *  Taken after the history claim, so a refused claim never steals a live run's log.
    *  `maxBytes` is the log's byte budget (session-log item 5); absent, the implementation's
    *  configured budget, else the policy default — the object enforces it on every write. */
@@ -159,7 +162,10 @@ export interface RunLedger {
   /** The rows `[from, to]` (the tail when `to` is absent) as a conversation counted from `from`. */
   readSession(key: string, from: number, to?: number): Promise<AssembledTranscript>;
   /** The newest whole turns within `maxBytes` and the index they start at (item 4). */
-  readSessionTail(key: string, maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }>;
+  readSessionTail(
+    key: string,
+    maxBytes: number,
+  ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }>;
   /** The rows whose text matches `query`, in relevance order, at most `limit`,
    *  and the gap markers that lie between the oldest and the newest hit — what
    *  `recall` answers (item 10). */
@@ -172,7 +178,7 @@ export interface RunLedger {
   readNotepad(key: string): Promise<Notepad | null>;
   /** Replace the notepad whole under the owner's fence (item 10); `text` is at
    *  most `NOTEPAD_MAX_BYTES` — the caller refuses more before asking. */
-  writeNotepad(key: string, gen: string, text: string): Promise<FenceResult>;
+  writeNotepad(key: string, gen: string, text: string, runId?: string): Promise<FenceResult>;
   /** `facts` is the heartbeat body (record 0064, "The backpressure contract"):
    *  the round, the in-flight call, the last event and the newest pushed head
    *  — what the plane judges the checkpoint steer on. Optional: an owner

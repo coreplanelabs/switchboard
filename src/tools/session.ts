@@ -61,7 +61,7 @@ export interface SessionAssets {
  *  for a run without one. The thread's files join it when the deployment has
  *  an artifact store. */
 export function sessionCapabilityFor(
-  run: Pick<LedgerRun, "session"> | undefined,
+  run: Pick<LedgerRun, "session" | "runId"> | undefined,
   ledger: Pick<LedgerWriteThrough, "readSession" | "searchSession" | "readNotepad" | "writeNotepad">,
   assets?: SessionAssets,
 ): SessionCapability | undefined {
@@ -73,7 +73,7 @@ export function sessionCapabilityFor(
     readTurn: async (idx) => (await ledger.readSession(session.key, idx, idx)).messages[0],
     readConversation: async () => (await ledger.readSession(session.key, session.seedFrom)).messages,
     readNotepad: () => ledger.readNotepad(session.key),
-    writeNotepad: (text) => ledger.writeNotepad(session.key, text),
+    writeNotepad: (text) => ledger.writeNotepad(session.key, text, run.runId),
     ...(assets ? { assets: assets.read, workspacePathOf: assets.pathOf } : {}),
   };
 }

@@ -1,3 +1,5 @@
+import { testSlackCapability, testSessionSources } from "./testing/slackSources.js";
+import type { SessionSources } from "./references/receipts.js";
 import { ASKS, bearerExpiresAt, HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "./budgets.js";
 import { contractFromPlan, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./ship/contract.js";
 import { NO_VERDICT_LINE } from "./reviewVerdict.js";
@@ -681,13 +683,17 @@ describe("dispatch", () => {
     };
     const deps = makeDeps(mainDmYaml, provider);
     const reads: unknown[] = [];
-    deps.slackContextForRun = () => ({
-      verifyDirectOrigin: async () => true,
-      read: async (request) => {
+    deps.runLedger = createLedgerWriteThrough({
+      ledger: new InMemoryRunLedger(),
+      gen: "gen-source",
+      fallback: new NullRunStore(),
+      warn: () => {},
+    });
+    deps.slackContextForRun = (_actor, origin) =>
+      testSlackCapability(origin, async (request) => {
         reads.push(request);
         return request.kind === "link" ? "linked source data: 17" : "attached file data: 17";
-      },
-    });
+      });
     const { io, replies } = mainDmIO();
     await dispatch(deps, mainDm(`read this permalink and its file: ${permalink}`), io);
     expect(reads).toEqual([
@@ -750,6 +756,7 @@ describe("dispatch", () => {
     });
     deps.runLedger.readSessionTail = async () => ({
       from: 0,
+      sources: testSessionSources(mainDm("fix it"), []),
       transcript: {
         complete: true,
         turns: 2,
@@ -801,6 +808,7 @@ describe("dispatch", () => {
       });
       deps.runLedger.readSessionTail = async () => ({
         from: 0,
+        sources: testSessionSources(mainDm("fix it"), []),
         transcript: {
           complete: true,
           turns: 4,
@@ -18720,6 +18728,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       threadKey?: string;
       agent?: string;
       tail?: ChatMessage[];
+      sources?: SessionSources;
     } = {},
   ) {
     const channelId = options.channelId ?? "slack:CX";
@@ -18759,6 +18768,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     deps.runBearers = new RunBearerStore({ clock: () => NOW });
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
     await ledger.claimSession(key, "run-prev", "gen-R");
+    if (options.sources) await ledger.writeSessionSources(key, "run-prev", "gen-R", options.sources);
     await ledger.seed(
       "run-prev",
       "gen-R",
@@ -19042,9 +19052,10 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
         verifyDirectAudience: async () => true,
       } as unknown as ChannelIO,
       visibility: "dm",
-      create: () => ({ read: async () => "private sign-up count: 17", verifyDirectOrigin: async () => true }),
+      create: () => testSlackCapability(directAudience, async () => "private sign-up count: 17"),
     });
     expect(prior).toBeDefined();
+    await prior!.initialize(testSessionSources(directAudience, []), async () => true);
     const privateResult = await prior!.capability.read({ kind: "thread" });
     expect(privateResult).toBe("private sign-up count: 17");
     const privateText = typeof privateResult === "string" ? privateResult : JSON.stringify(privateResult);
@@ -19159,7 +19170,12 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       ],
     });
     const freshRead = vi.fn(async () => "slack_context: I can't read that Slack source.");
-    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
+    t.deps.slackContextForRun = (_actor, origin) =>
+      testSlackCapability(
+        origin,
+        async () => "",
+        async () => (await freshRead()) !== "slack_context: I can't read that Slack source.",
+      );
     const { io, replies, statuses } = fakeIO([
       { role: "user", user: directAudience.userId, text: "Read this linked thread", at: NOW - 20_000 },
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
@@ -19175,7 +19191,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       async () => dispatch(t.deps, { ...directAudience, text: "What changed?", directAudience }, io),
     );
     expect(seeded).toBeUndefined();
-    expect(freshRead).toHaveBeenCalledOnce();
+    expect(freshRead).not.toHaveBeenCalled();
     expect(replies.join(" ")).toContain("check the Slack source again");
     expect(JSON.stringify({ replies, statuses })).not.toContain(privateText);
   });
@@ -19208,7 +19224,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
         assistant("I found the count."),
       ],
     });
-    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: async () => "" });
+    t.deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "");
     const classify = vi.fn(async () => ({ visibility: "never" as const, botIsMember: false }));
     const read = vi.fn();
     t.deps.conversationReaders = [
@@ -19238,7 +19254,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       async () => dispatch(t.deps, { ...directAudience, text: "Fix it", directAudience }, io),
     );
     expect(seeded).toBeUndefined();
-    expect(classify).toHaveBeenCalledOnce();
+    expect(classify).not.toHaveBeenCalled();
     expect(read).not.toHaveBeenCalled();
     expect(replies.join(" ")).toContain("check the Slack source again");
     expect(JSON.stringify({ replies, statuses })).not.toContain(privateText);
@@ -19268,12 +19284,15 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       userId: directAudience.userId,
       threadKey,
       agent: "orchestrator",
+      sources: testSessionSources(directAudience),
       tail: [
         { role: "user", content: [{ type: "text", text: `What happened? ${permalink}\n\n${block}` }] },
         assistant("I found the count."),
       ],
     });
-    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: async () => "" });
+    t.deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "");
+    const revalidate = vi.fn(async () => true);
+    t.deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "", revalidate);
     const read = vi.fn(async () => conversation);
     t.deps.conversationReaders = [
       {
@@ -19299,7 +19318,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       async () => dispatch(t.deps, { ...directAudience, text: "Fix it", directAudience }, io),
     );
     expect(seeded?.[0]?.content.find((part) => part.type === "text")?.text).toContain(block);
-    expect(read.mock.calls.length).toBeGreaterThan(1);
+    expect(revalidate.mock.calls.length).toBeGreaterThan(1);
     expect(replies.at(-1)).toContain("I will fix it.");
   });
 
@@ -19372,6 +19391,83 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     expect(replies.join(" ")).toContain("run restarted");
   });
 
+  it.each([false, true])(
+    "retains Slack receipts when a dynamic source discards replayable prompt turns (compacted=%s)",
+    async (compacted) => {
+      const directAudience = {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:DMAIN",
+        threadKey: "slack:DMAIN:1.0",
+        userId: "slack:UADMIN",
+      };
+      const sources = testSessionSources(directAudience);
+      const yaml =
+        PI_YAML.replace(
+          "    coding: anthropic/coding-model",
+          "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+        ) + "  orchestrator: pi\n";
+      const t = await threadWithSession(yaml, {
+        ...directAudience,
+        agent: "orchestrator",
+        sources,
+        tail: [
+          user("Read both sources"),
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "slack", name: "slack_context", input: { kind: "thread" } }],
+          },
+          { role: "user", content: [{ type: "tool_result", toolUseId: "slack", content: "old Slack data" }] },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "external", name: "mcp__service__query", input: {} }],
+          },
+          { role: "user", content: [{ type: "tool_result", toolUseId: "external", content: "old external data" }] },
+          assistant("old combined answer"),
+        ],
+      });
+      if (compacted) {
+        const key = `${directAudience.threadKey}:orchestrator`;
+        await t.ledger.claimSession(key, "run-prev", "gen-R");
+        await t.ledger.seed(
+          "run-prev",
+          "gen-R",
+          [
+            { idx: 6, compaction: { summary: "old external data in summary" } },
+            { idx: 7, message: user("later turn") },
+          ],
+          key,
+        );
+        await t.ledger.releaseSession(key, "run-prev", "gen-R");
+      }
+      const revalidate = vi.fn(async () => true);
+      t.deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "", revalidate);
+      const { io, replies } = fakeIO([
+        { role: "user", user: directAudience.userId, text: "Read both sources", at: NOW - 20_000 },
+      ]);
+      io.directAudience = () => directAudience;
+      io.verifyDirectAudience = async () => true;
+      let seeded: ChatMessage[] | undefined;
+      let prompt: string | undefined;
+      await vi.mocked(runPiHarnessOpen).withImplementation(
+        async (_deps, run) => {
+          seeded = run.messages;
+          prompt = run.system;
+          return piAnswered("Fresh answer");
+        },
+        async () => dispatch(t.deps, { ...directAudience, directAudience, text: "continue" }, io),
+      );
+      expect(seeded).toBeDefined();
+      expect(JSON.stringify(seeded)).not.toContain("old Slack data");
+      expect(JSON.stringify(seeded)).not.toContain("old external data");
+      expect(prompt).not.toContain("old external data in summary");
+      expect(replies.at(-1)).toContain("Fresh answer");
+      expect(revalidate).toHaveBeenCalled();
+      expect((await t.ledger.readSessionTail(`${directAudience.threadKey}:orchestrator`, 1000)).sources).toEqual(
+        sources,
+      );
+    },
+  );
+
   it("continues a same-thread fix after a bounded fresh read matches the saved Slack source", async () => {
     const channelId = "slack:DMAIN";
     const threadKey = `${channelId}:1.0`;
@@ -19387,6 +19483,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       userId: directAudience.userId,
       threadKey,
       agent: "orchestrator",
+      sources: testSessionSources(directAudience),
       tail: [
         user("Read this linked thread"),
         {
@@ -19405,7 +19502,12 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       ],
     });
     const freshRead = vi.fn(async () => privateText);
-    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
+    t.deps.slackContextForRun = (_actor, origin) =>
+      testSlackCapability(
+        origin,
+        async () => "",
+        async () => (await freshRead()) !== "slack_context: I can't read that Slack source.",
+      );
     const { io, replies } = fakeIO([
       { role: "user", user: directAudience.userId, text: "Read this linked thread", at: NOW - 20_000 },
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
@@ -19442,6 +19544,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       userId: directAudience.userId,
       threadKey,
       agent: "orchestrator",
+      sources: testSessionSources(directAudience),
       tail: [
         user("How many users failed to sign up?"),
         {
@@ -19453,7 +19556,12 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       ],
     });
     const freshRead = vi.fn(async () => appended);
-    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
+    t.deps.slackContextForRun = (_actor, origin) =>
+      testSlackCapability(
+        origin,
+        async () => "",
+        async () => (await freshRead()) !== "slack_context: I can't read that Slack source.",
+      );
     const { io, replies } = fakeIO([
       { role: "user", user: directAudience.userId, text: "How many users failed to sign up?", at: NOW - 20_000 },
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
@@ -19488,6 +19596,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       userId: directAudience.userId,
       threadKey,
       agent: "orchestrator",
+      sources: testSessionSources(directAudience),
       tail: [
         user("Read this linked thread"),
         {
@@ -19509,7 +19618,12 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       .fn()
       .mockResolvedValueOnce(privateText)
       .mockResolvedValue("slack_context: I can't read that Slack source.");
-    t.deps.slackContextForRun = () => ({ verifyDirectOrigin: async () => true, read: freshRead });
+    t.deps.slackContextForRun = (_actor, origin) =>
+      testSlackCapability(
+        origin,
+        async () => "",
+        async () => (await freshRead()) !== "slack_context: I can't read that Slack source.",
+      );
     const { io, replies, statuses } = fakeIO([
       { role: "user", user: directAudience.userId, text: "Read this linked thread", at: NOW - 20_000 },
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },

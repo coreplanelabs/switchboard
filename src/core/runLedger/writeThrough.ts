@@ -1,3 +1,4 @@
+import type { SessionSources } from "../references/receipts.js";
 // The bot's write-through onto the run ledger (docs/reference/specs/run-history.md item
 // 35): one `LedgerRun` per dispatched run that mirrors what the process holds
 // in closures — the claim with the composed system prompt and tool
@@ -256,6 +257,8 @@ export interface LedgerRun {
   setState(patch: RunState): void;
   /** Commit a security binding before the side effect it authorizes. */
   setStateAndFlush(patch: RunState): Promise<boolean>;
+  /** Persist trusted dependencies before source content reaches a model. */
+  writeSources(sources: SessionSources): Promise<boolean>;
   /** `live → finishing`, before the reply — the double-answer gate (D9). */
   finishing(): Promise<FinishingGate>;
   /** A reserved run that never started (item 42): the row goes with no record,
@@ -356,7 +359,10 @@ export interface LedgerWriteThrough {
    *  oldest first, with the log index they start at — what a follow-up's seed
    *  is cut from (item 9). A log with no rows answers `from` 0 and no turns.
    *  Throws as the ledger does; the caller decides what a failed read means. */
-  readSessionTail(key: string, maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }>;
+  readSessionTail(
+    key: string,
+    maxBytes: number,
+  ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }>;
   /** The rows `[from, to]` of a session log as a conversation counted from `from` (item 3) — one turn when `to` is `from`. */
   readSession(key: string, from: number, to?: number): Promise<AssembledTranscript>;
   /** The idempotent keyed append (session-log item 13): the parts of one turn
@@ -375,7 +381,7 @@ export interface LedgerWriteThrough {
   /** The session's notepad, or null when nothing wrote it (item 10). */
   readNotepad(key: string): Promise<Notepad | null>;
   /** Replace the notepad whole under this generation's fence (item 10). */
-  writeNotepad(key: string, text: string): Promise<FenceResult>;
+  writeNotepad(key: string, text: string, runId?: string): Promise<FenceResult>;
   /** SIGTERM (plan D8): mark every resumable live run `handoff` on the ledger so
    *  the next generation takes it at once, whatever its lease. The runs keep
    *  running here until the process exits; their writes are fenced the moment
@@ -444,7 +450,10 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   async readInbox(_runId: string, _afterSeq: number): Promise<InboxItem[]> {
     return [];
   }
-  async readSessionTail(_key: string, _maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }> {
+  async readSessionTail(
+    _key: string,
+    _maxBytes: number,
+  ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }> {
     return { from: 0, transcript: { complete: true, turns: 0, messages: [], compactions: [] } };
   }
   async readSession(_key: string, _from: number, _to?: number): Promise<AssembledTranscript> {
@@ -525,6 +534,9 @@ export class NullLedgerRun implements LedgerRun {
   }
   setState(_patch: RunState): void {
     // no ledger to mirror onto
+  }
+  async writeSources(_sources: SessionSources): Promise<boolean> {
+    return false;
   }
   async setStateAndFlush(_patch: RunState): Promise<boolean> {
     return false;
@@ -1011,6 +1023,15 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
     }
 
+    async writeSources(sources: SessionSources): Promise<boolean> {
+      if (this.detached || !this.sessionRow) return false;
+      try {
+        return (await ledger.writeSessionSources(this.sessionRow.key, this.runId, gen, sources)).ok;
+      } catch {
+        return false;
+      }
+    }
+
     /** The seed, then the seed record: step 0 with no calls in flight and
      *  `turnIndex` = the seed's length, so a reclaim always has a step record
      *  to judge the transcript against (`transcriptCompleteness`) — a row with
@@ -1467,7 +1488,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     readRequesterTarget: (key, actor) => ledger.readRequesterTarget(key, actor),
     checkpointRequesterTarget: (key, actor, target) => ledger.checkpointRequesterTarget(key, actor, target),
     readNotepad: (key) => ledger.readNotepad(key),
-    writeNotepad: (key, text) => ledger.writeNotepad(key, gen, text),
+    writeNotepad: (key, text, runId) => ledger.writeNotepad(key, gen, text, runId),
 
     async handoff() {
       const candidates = [...live].filter((r) => r.resumable && r.tracked() && !r.handedOff);

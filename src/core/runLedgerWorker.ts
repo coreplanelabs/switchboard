@@ -1,3 +1,4 @@
+import { type SessionSources, isSessionSources } from "./references/receipts.js";
 // The production ledger: HTTPS to the state Worker's `/runs/*` ledger routes
 // (docs/reference/specs/run-history.md items 28–34), beside `WorkerRunStore`. Same bearer,
 // same error classes, same body convention (a STRING JSON body so the runtime
@@ -230,7 +231,7 @@ export class WorkerRunLedger implements RunLedger {
   private target(runId: string, gen: string, session: string | undefined) {
     if (session === undefined) return { path: "/runs/transcript/write", body: { runId, gen } };
     this.checkSessionKey(session);
-    return { path: "/runs/session/write", body: { key: session, gen } };
+    return { path: "/runs/session/write", body: { key: session, runId, gen } };
   }
 
   private async writeTurns(
@@ -267,6 +268,21 @@ export class WorkerRunLedger implements RunLedger {
       if (!f.ok) return f;
     }
     return { ok: true };
+  }
+
+  async writeSessionSources(key: string, runId: string, gen: string, sources: SessionSources): Promise<FenceResult> {
+    this.checkSessionKey(key);
+    this.checkIds(runId, gen);
+    const result = await this.post("/runs/session/write", {
+      key,
+      gen,
+      sourceRunId: runId,
+      sources,
+      rows: [],
+      attachments: [],
+    });
+    const fence = this.fenceResult(result);
+    return fence.ok && result.data.sourcesSaved !== true ? { ok: false, reason: "fenced" } : fence;
   }
 
   async seed(runId: string, gen: string, turns: TranscriptTurn[], session?: string): Promise<FenceResult> {
@@ -337,12 +353,17 @@ export class WorkerRunLedger implements RunLedger {
     );
   }
 
-  async readSessionTail(key: string, maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }> {
+  async readSessionTail(
+    key: string,
+    maxBytes: number,
+  ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }> {
     this.checkSessionKey(key);
     const r = await this.post("/runs/session/read-tail", { key, maxBytes });
     const from = typeof r.data.from === "number" ? r.data.from : 0;
     return {
       from,
+      ...(isSessionSources(r.data.sources) ? { sources: r.data.sources } : {}),
+      ...(r.data.requiresFreshSources === true ? { requiresFreshSources: true as const } : {}),
       transcript: assembleTranscript(
         Array.isArray(r.data.rows) ? (r.data.rows as TranscriptRow[]) : [],
         Array.isArray(r.data.attachments) ? (r.data.attachments as TranscriptAttachment[]) : [],
@@ -382,10 +403,10 @@ export class WorkerRunLedger implements RunLedger {
       : null;
   }
 
-  async writeNotepad(key: string, gen: string, text: string): Promise<FenceResult> {
+  async writeNotepad(key: string, gen: string, text: string, runId?: string): Promise<FenceResult> {
     this.checkSessionKey(key);
     if (!GEN_PATTERN.test(gen)) throw new PermanentStoreError(`run ledger: malformed generation`);
-    return this.fenceResult(await this.post("/runs/session/notepad/write", { key, gen, text }));
+    return this.fenceResult(await this.post("/runs/session/notepad/write", { key, gen, text, runId }));
   }
 
   async heartbeat(runId: string, gen: string, leaseMs: number, facts?: HeartbeatFacts): Promise<HeartbeatResult> {

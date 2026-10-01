@@ -1,3 +1,9 @@
+import {
+  type SessionSources,
+  mergeSessionSources,
+  isSessionSources,
+  sourcesBelongToSession,
+} from "../references/receipts.js";
 // The in-memory ledger: the reference implementation the bot's tests run
 // against, applying the same pure decisions the Durable Object applies. It
 // also documents the storage shape in the plainest form.
@@ -41,6 +47,7 @@ import {
   droppedToolResultRow,
   GAP_MARKER,
   planSessionTrim,
+  storedRowRequiresFreshSources,
   roleOfStoredRow,
   rowKind,
   tailCut,
@@ -81,6 +88,11 @@ interface Transcript {
  *  of a thread-and-agent session, the run whose writes land right now, and the
  *  byte budget the log is held to. */
 export interface SessionLog {
+  sources?: SessionSources;
+  requiresFreshSources?: true;
+  sourceStart?: number;
+  sourceOwner?: string;
+  pendingSourceOwner?: string;
   owner?: { runId: string; gen: string };
   rows: TranscriptRow[];
   attachments: TranscriptAttachment[];
@@ -227,8 +239,11 @@ export class InMemoryRunLedger implements RunLedger {
     if (session !== undefined) {
       const log = this.sessions.get(session);
       if (!log?.owner) return { ok: false, reason: "unknown-run" };
-      if (log.owner.gen !== gen) return { ok: false, reason: "fenced" };
+      if (log.owner.gen !== gen || log.owner.runId !== runId) return { ok: false, reason: "fenced" };
+      if (log.sources && turns.length && log.sourceOwner !== `${log.owner.runId}:${gen}`)
+        log.pendingSourceOwner = `${log.owner.runId}:${gen}`;
       InMemoryRunLedger.append(log, turns);
+      if (log.rows.some((r) => storedRowRequiresFreshSources(r.json))) log.requiresFreshSources = true;
       this.enforceBytePolicy(session);
       return { ok: true };
     }
@@ -236,6 +251,20 @@ export class InMemoryRunLedger implements RunLedger {
     if (!t) return { ok: false, reason: "unknown-run" };
     if (t.ownerGen !== gen) return { ok: false, reason: "fenced" };
     InMemoryRunLedger.append(t, turns);
+    return { ok: true };
+  }
+
+  async writeSessionSources(key: string, runId: string, gen: string, sources: SessionSources): Promise<FenceResult> {
+    const log = this.sessions.get(key);
+    if (!log?.owner) return { ok: false, reason: "unknown-run" };
+    if (log.owner.gen !== gen || log.owner.runId !== runId) return { ok: false, reason: "fenced" };
+    if (!isSessionSources(sources) || !sourcesBelongToSession(key, sources)) return { ok: false, reason: "fenced" };
+    if (log.pendingSourceOwner && log.pendingSourceOwner !== `${runId}:${gen}`)
+      log.sources = { version: 1, status: "unknown" };
+    log.sources = structuredClone(mergeSessionSources(log.sources, sources, log.sourceStart === 0));
+    if (JSON.stringify(log.sources) !== JSON.stringify(sources)) return { ok: false, reason: "fenced" };
+    log.sourceOwner = `${runId}:${gen}`;
+    delete log.pendingSourceOwner;
     return { ok: true };
   }
 
@@ -524,6 +553,9 @@ export class InMemoryRunLedger implements RunLedger {
 
   async claimSession(key: string, runId: string, gen: string, maxBytes?: number): Promise<void> {
     const log = this.session(key);
+    if (log.pendingSourceOwner && log.pendingSourceOwner !== `${runId}:${gen}`)
+      log.sources = { version: 1, status: "unknown" };
+    log.sourceStart = await this.sessionTail(key);
     log.owner = { runId, gen };
     log.maxBytes = maxBytes ?? DEFAULT_SESSION_LOG_MAX_BYTES;
   }
@@ -591,7 +623,12 @@ export class InMemoryRunLedger implements RunLedger {
     return assembleTranscript(rows, log?.attachments ?? [], from);
   }
 
-  async readSessionTail(key: string, maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }> {
+  async readSessionTail(
+    key: string,
+    maxBytes: number,
+  ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }> {
+    const log = this.sessions.get(key);
+    const sources = log?.pendingSourceOwner ? { version: 1 as const, status: "unknown" as const } : log?.sources;
     const rows = [...(this.sessions.get(key)?.rows ?? [])].sort((a, b) => b.idx - a.idx || b.part - a.part);
     const from = tailCut(
       rows.map((r) => ({ idx: r.idx, bytes: utf8ByteLength(r.json) })),
@@ -599,9 +636,19 @@ export class InMemoryRunLedger implements RunLedger {
     );
     if (from === undefined) {
       const next = await this.sessionTail(key);
-      return { from: next, transcript: assembleTranscript([], [], next) };
+      return {
+        from: next,
+        transcript: assembleTranscript([], [], next),
+        ...(sources ? { sources: structuredClone(sources) } : {}),
+        ...(log?.requiresFreshSources ? { requiresFreshSources: true as const } : {}),
+      };
     }
-    return { from, transcript: await this.readSession(key, from) };
+    return {
+      from,
+      transcript: await this.readSession(key, from),
+      ...(sources ? { sources: structuredClone(sources) } : {}),
+      ...(log?.requiresFreshSources ? { requiresFreshSources: true as const } : {}),
+    };
   }
 
   /** The search as the object answers it (session-log item 10), by the memory
@@ -653,10 +700,11 @@ export class InMemoryRunLedger implements RunLedger {
     return this.sessions.get(key)?.notepad ?? null;
   }
 
-  async writeNotepad(key: string, gen: string, text: string): Promise<FenceResult> {
+  async writeNotepad(key: string, gen: string, text: string, runId?: string): Promise<FenceResult> {
     const log = this.sessions.get(key);
     if (!log?.owner) return { ok: false, reason: "unknown-run" };
-    if (log.owner.gen !== gen) return { ok: false, reason: "fenced" };
+    if (log.owner.gen !== gen || ((log.sources || runId !== undefined) && log.owner.runId !== runId))
+      return { ok: false, reason: "fenced" };
     log.notepad = { text, updatedAt: this.now() };
     return { ok: true };
   }
