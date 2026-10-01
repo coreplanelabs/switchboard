@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.271.0](https://github.com/coreplanelabs/switchboard/compare/v1.270.2...v1.271.0) (2026-10-01)
+
+
+### Features
+
+* **dispatcher:** bind authored PR targets for chat runs ([#2535](https://github.com/coreplanelabs/switchboard/issues/2535)) ([a9a448c](https://github.com/coreplanelabs/switchboard/commit/a9a448c5101af901ec6e23cd3ecc50a632e09c05))
+
+
+### Bug fixes
+
+* **dispatcher:** bind cross-repo PR batches as typed targets ([#2527](https://github.com/coreplanelabs/switchboard/issues/2527)) ([9327603](https://github.com/coreplanelabs/switchboard/commit/9327603041d0140298b21421f2553fc274c8c9bb))
+* **dispatcher:** bind run settings without stripping chat text ([#2524](https://github.com/coreplanelabs/switchboard/issues/2524)) ([0cc7f33](https://github.com/coreplanelabs/switchboard/commit/0cc7f330a399c21b245df3ed04ac3576a80b565d))
+* **dispatcher:** end failed operator turns at the door ([#2525](https://github.com/coreplanelabs/switchboard/issues/2525)) ([f6dd1a5](https://github.com/coreplanelabs/switchboard/commit/f6dd1a573e7d255497663ce368cdd11b5353ba94))
+* **dispatcher:** route typed chat through the operator ([#2533](https://github.com/coreplanelabs/switchboard/issues/2533)) ([5bd8dd7](https://github.com/coreplanelabs/switchboard/commit/5bd8dd762343b03a6d479f4e419268fab800dfbb))
+* **main:** verify private audience for Ship children ([#2529](https://github.com/coreplanelabs/switchboard/issues/2529)) ([b8e44c4](https://github.com/coreplanelabs/switchboard/commit/b8e44c4d511f9ef54a2b2a3d79496ac89de87fac))
+* **resident:** wait through checked VM recycle before exec ([#2532](https://github.com/coreplanelabs/switchboard/issues/2532)) ([0b1d2ac](https://github.com/coreplanelabs/switchboard/commit/0b1d2acb065cdd856ec4dd947f7c2885bb605bd6))
+* **ship:** reject unissued finding IDs during submission ([#2530](https://github.com/coreplanelabs/switchboard/issues/2530)) ([652761d](https://github.com/coreplanelabs/switchboard/commit/652761db176283f14b6867703dbaca9c2eb3d94b))
+
 ## [1.270.2](https://github.com/coreplanelabs/switchboard/compare/v1.270.1...v1.270.2) (2026-09-30)
 
 
