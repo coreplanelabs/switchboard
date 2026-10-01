@@ -31,6 +31,7 @@ function fakeTransfer(
       lists.push({ account, authorization: credential.authorization });
       return listing;
     },
+    inspect: async () => ({ value: undefined }),
     transfer: async (copy, account, credential) => {
       copies.push({ source: copy.source, account, authorization: credential.authorization });
       return { ok: true, report: { digest: `sha256:${copy.name}`, blobs: 3, uploaded: 2, bytes: 10 } };
@@ -44,6 +45,17 @@ const host = (transfer: Transfer, env: Record<string, string | undefined> = ENV,
 const MINUTE = 60_000;
 
 describe("imagesHostIO", () => {
+  it("probes known tags by manifest HEAD even when the catalog omits them", async () => {
+    const t = fakeTransfer(undefined, { value: [] });
+    t.transfer.inspect = async (_account, name, version) =>
+      name === COPY.name && version === COPY.version ? { value: `sha256:${"a".repeat(64)}` } : { value: undefined };
+    const io = host(t.transfer);
+    expect(await io.registry(ACCOUNT, [COPY, SECOND])).toEqual({
+      value: [{ name: COPY.name, tags: [COPY.version], digest: `sha256:${"a".repeat(64)}` }],
+    });
+    expect(t.lists).toEqual([]);
+  });
+
   it("mints the credential from CLOUDFLARE_API_TOKEN once per account and spends it on the registry read, the pre-check and every copy", async () => {
     const t = fakeTransfer();
     const io = host(t.transfer);

@@ -20,10 +20,9 @@
 // registry is asked for its digest afterwards: a push that returned 201 is not
 // the proof, the digest is.
 //
-// The account registry is also READ here (`listAccountRegistry`: `GET /v2/_catalog?tags=true`
-// under the same credential — what `wrangler containers images list` does), so
-// a plan probes presence with no process spawned and no Worker directory
-// installed, and a token the registry refuses is one named failure.
+// Known release images are read by exact manifest HEAD under the same credential.
+// Catalog enumeration remains available, but a catalog page cannot prove absence.
+// A plan probes presence with no process spawned and no Worker directory installed.
 //
 // Every endpoint is injectable so the tests run against an in-process registry.
 
@@ -35,6 +34,7 @@ import {
   basicAuthorization,
   blobsOf,
   catalogProblem,
+  containersEditProblem,
   catalogUrl,
   challengeTokenUrl,
   contentRange,
@@ -104,6 +104,7 @@ export type TransferOutcome =
 
 /** The account registry's listing, or why it could not be read (`unauthorized`: the credential was refused). */
 export type RegistryListing = { value: RegistryImage[] } | { error: string; unauthorized?: true };
+export type ManifestReadback = { value: string | undefined } | { error: string; unauthorized?: true };
 
 /** A small request's budget, and a part's or a blob stream's. */
 const SHORT_MS = 60_000;
@@ -197,6 +198,40 @@ export async function listAccountRegistry(
   }
   const listing = parseCatalog(await res.json().catch(() => null), account);
   return listing === undefined ? { error: `${url}: no repository catalog in the response` } : { value: listing };
+}
+
+/** Read one account image by exact repository and tag. A 404 means the tag is absent;
+ *  a successful response must carry a full manifest digest. */
+export async function readAccountManifest(
+  account: string,
+  name: string,
+  version: string,
+  credential: RegistryCredential,
+  io: TransferIO = {},
+): Promise<ManifestReadback> {
+  const doFetch = io.fetch ?? fetch;
+  const endpoint = io.endpoints ?? REGISTRY_ENDPOINTS;
+  const url = `${endpoint.target}/v2/${targetRepository(account, name)}/manifests/${version}`;
+  let res: Response;
+  try {
+    res = await doFetch(url, {
+      method: "HEAD",
+      headers: { authorization: credential.authorization, accept: MANIFEST_ACCEPT },
+      signal: AbortSignal.timeout(SHORT_MS),
+    });
+  } catch (err) {
+    return { error: `reading ${url} failed — ${reason(err)}` };
+  }
+  if (res.status === 404) return { value: undefined };
+  if (!res.ok) {
+    const error =
+      res.status === 403 ? containersEditProblem(`HEAD ${url}`) : `reading ${url} failed — ${await said(res)}`;
+    return res.status === 401 ? { error, unauthorized: true } : { error };
+  }
+  const digest = res.headers.get("docker-content-digest");
+  if (!digest || !/^sha256:[0-9a-f]{64}$/.test(digest))
+    return { error: `reading ${url} failed — no valid manifest digest in the response` };
+  return { value: digest };
 }
 
 /** Copy one published image into the account registry as `<account>/<name>:<version>`. */

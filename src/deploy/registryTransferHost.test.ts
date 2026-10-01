@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { basicAuthorization, containersEditProblem, MEDIA_TYPES, MIN_PART_BYTES } from "./registryTransfer.js";
 import {
   listAccountRegistry,
+  readAccountManifest,
   mintRegistryCredential,
   REGISTRY_ENDPOINTS,
   transferImage,
@@ -145,6 +146,7 @@ class FakeRegistries {
   /** Every `Range` header a source blob read carried, in order. */
   sourceRanges: string[] = [];
   lieAboutManifestDigest = false;
+  omitManifestDigest = false;
   private patches = 0;
   private uploadIds = 0;
 
@@ -168,6 +170,7 @@ class FakeRegistries {
     this.ignoreRange = false;
     this.sourceRanges = [];
     this.lieAboutManifestDigest = false;
+    this.omitManifestDigest = false;
     this.patches = 0;
   }
 
@@ -348,7 +351,11 @@ class FakeRegistries {
       if (!stored) return json(res, 404, { errors: [{ code: "MANIFEST_UNKNOWN" }] });
       res.writeHead(200, {
         "content-type": stored.type,
-        "docker-content-digest": this.lieAboutManifestDigest ? `sha256:${"0".repeat(64)}` : sha256(stored.bytes),
+        ...(this.omitManifestDigest
+          ? {}
+          : {
+              "docker-content-digest": this.lieAboutManifestDigest ? `sha256:${"0".repeat(64)}` : sha256(stored.bytes),
+            }),
       });
       return res.end();
     }
@@ -440,6 +447,34 @@ describe("listAccountRegistry", () => {
     fake.catalogBody = { nope: true };
     expect(await listAccountRegistry(ACCOUNT, CREDENTIAL, io())).toEqual({
       error: `${url}: no repository catalog in the response`,
+    });
+  });
+});
+
+describe("readAccountManifest", () => {
+  it("finds an exact tag and digest even when the catalog omits it, and treats a missing tag as absent", async () => {
+    fake.source = sourceImage([randomBytes(10)]);
+    expect(await readAccountManifest(ACCOUNT, COPY.name, COPY.version, CREDENTIAL, io())).toEqual({ value: undefined });
+    const copied = await transferImage(COPY, ACCOUNT, CREDENTIAL, io());
+    expect(copied.ok).toBe(true);
+    fake.catalogBody = { repositories: {} };
+    expect(await listAccountRegistry(ACCOUNT, CREDENTIAL, io())).toEqual({ value: [] });
+    expect(await readAccountManifest(ACCOUNT, COPY.name, COPY.version, CREDENTIAL, io())).toEqual({
+      value: fake.source.manifestDigest,
+    });
+  });
+
+  it("refuses an unreadable manifest or one without a valid digest", async () => {
+    fake.source = sourceImage([randomBytes(10)]);
+    await transferImage(COPY, ACCOUNT, CREDENTIAL, io());
+    fake.omitManifestDigest = true;
+    expect(await readAccountManifest(ACCOUNT, COPY.name, COPY.version, CREDENTIAL, io())).toEqual({
+      error: expect.stringContaining("no valid manifest digest"),
+    });
+    fake.targetUnauthorized = true;
+    expect(await readAccountManifest(ACCOUNT, COPY.name, COPY.version, CREDENTIAL, io())).toMatchObject({
+      unauthorized: true,
+      error: expect.stringContaining("HTTP 401"),
     });
   });
 });

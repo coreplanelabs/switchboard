@@ -5,7 +5,7 @@
 // reach these three operations through `deps.deploy.images`, so their tests run
 // over fakes and this file is the one that touches the network.
 //
-// Nothing here spawns a process. Both the registry read and the copy are the
+// Nothing here spawns a process. Both the exact manifest reads and the copy are the
 // HTTPS calls of src/deploy/registryTransferHost.ts under one credential per
 // account, minted from CLOUDFLARE_API_TOKEN — the one thing `registry` mode
 // needs that the rest of the deploy does not, refused by name when the variable
@@ -19,6 +19,7 @@ import type { ImageCopy, RegistryImage } from "./images.js";
 import { CREDENTIAL_MINUTES } from "./registryTransfer.js";
 import {
   listAccountRegistry,
+  readAccountManifest,
   mintRegistryCredential,
   transferImage,
   type RegistryCredential,
@@ -34,10 +35,18 @@ export const API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN";
  *  minutes, and one that starts on a credential about to expire would fail mid-stream. */
 export const RENEW_BEFORE_MS = 5 * 60_000;
 
+/** A known tag's exact readback; catalog enumeration has no digest. */
+export interface ProbedRegistryImage extends RegistryImage {
+  digest?: string;
+}
+
 /** What the commands need from the host. */
 export interface ImagesHostIO {
-  /** What the account's registry holds (`GET /v2/_catalog?tags=true` under the minted credential), or why it could not be read. */
-  registry(account: string): Promise<Read<RegistryImage[]>>;
+  /** Without refs, enumerate the catalog. With refs, read each exact tag and manifest digest. */
+  registry(
+    account: string,
+    refs?: readonly Pick<ImageCopy, "name" | "version">[],
+  ): Promise<Read<ProbedRegistryImage[]>>;
   /** Can this host reach the account's registry? Mints (and keeps, for the reads and copies) a push+pull credential
    *  from CLOUDFLARE_API_TOKEN; the problem names the missing variable, or the endpoint and the token permission. */
   credential(account: string): Promise<{ ok: true } | { ok: false; problem: string }>;
@@ -49,6 +58,7 @@ export interface ImagesHostIO {
 export interface Transfer {
   mint: typeof mintRegistryCredential;
   list: typeof listAccountRegistry;
+  inspect: typeof readAccountManifest;
   transfer: typeof transferImage;
 }
 
@@ -71,6 +81,7 @@ export function imagesHostIO(options: ImagesHostOptions = {}): ImagesHostIO {
   const transfer = options.transfer ?? {
     mint: mintRegistryCredential,
     list: listAccountRegistry,
+    inspect: readAccountManifest,
     transfer: transferImage,
   };
   const env = options.env ?? process.env;
@@ -113,12 +124,25 @@ export function imagesHostIO(options: ImagesHostOptions = {}): ImagesHostIO {
     return op(again.credential);
   };
   return {
-    registry: (account) =>
-      under(
-        account,
-        (c) => transfer.list(account, c, transferIO),
-        (problem) => ({ error: problem }),
-      ),
+    registry: async (account, refs) => {
+      if (!refs)
+        return under(
+          account,
+          (c) => transfer.list(account, c, transferIO),
+          (problem) => ({ error: problem }),
+        );
+      const found: ProbedRegistryImage[] = [];
+      for (const ref of refs) {
+        const read = await under(
+          account,
+          (c) => transfer.inspect(account, ref.name, ref.version, c, transferIO),
+          (problem) => ({ error: problem }),
+        );
+        if ("error" in read) return read;
+        if (read.value) found.push({ name: ref.name, tags: [ref.version], digest: read.value });
+      }
+      return { value: found };
+    },
     credential: async (account) => {
       const r = await credential(account);
       return r.ok ? { ok: true } : r;
