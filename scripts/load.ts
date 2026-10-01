@@ -136,6 +136,7 @@ import { ROUTE_MISS_FIXTURES } from "../src/load/routeMissFixtures.js";
 import { ROUTE_DIRECTIVE_FIXTURES } from "../src/load/routeDirectiveFixtures.js";
 import { ROUTE_PLANTED_FIXTURES } from "../src/load/routePlantedFixtures.js";
 import { COMPOUND_PRESET } from "../src/agents/registry.js";
+import { parseAppConfigText } from "../src/config.js";
 import { CommandRegistry } from "../src/core/commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../src/core/commands/all.js";
 import { ALL_CAPABILITIES } from "../src/core/capabilities.js";
@@ -145,9 +146,16 @@ import {
   ROUTE_TIMEOUT_MS,
   type RouteDecision,
 } from "../src/core/dispatch/route.js";
-import { operatorPresets, presetBindOf, runOperator } from "../src/core/dispatch/operator.js";
+import {
+  OPERATOR_TIMEOUT_MS,
+  operatorPresets,
+  presetBindOf,
+  runOperator,
+  type OperatorBind,
+} from "../src/core/dispatch/operator.js";
 import { parseChatCommand } from "../src/core/commandChat.js";
 import { doorReport, renderDoor } from "../src/load/doorReport.js";
+import { loadProfileOnHost, readConfigForPush } from "../src/deploy/run.js";
 import {
   intakeScore,
   liveFalseSilence,
@@ -208,7 +216,10 @@ commands
              the checked-in compound, imperative and defect fixture sets all driven through runOperator; no readers'
              classifier or second model is called
              --provider NAME  --model ID  [--key-env VAR  --base-url URL  --since DATE  --limit N  --default-agent NAME
-             --concurrency N]
+             --concurrency N  --smoke  --profile-model]
+             --smoke: before deployment, use the candidate source and a real model on an ordinary read, an
+             existing-PR Ship review and an explicit-settings request; starts no agent or writer
+             --profile-model: with --smoke, read the deployment profile's config and test its default general model
              [--verify: one more call on every bind of a write- or destructive-class command in the checked-in command set,
              shown the sentence and the bound line and asked whether the line does what was asked; printed beside the command
              rows as write misbinds removed and correct binds rejected — a measurement for the production decision, never a
@@ -285,6 +296,8 @@ function flags(argv: string[]): Flags {
       "default-agent": { type: "string" },
       concurrency: { type: "string" },
       verify: { type: "boolean" },
+      smoke: { type: "boolean" },
+      "profile-model": { type: "boolean" },
       help: { type: "boolean" },
     },
   });
@@ -1186,32 +1199,136 @@ async function piReviewSuite(f: Flags): Promise<boolean> {
 async function routeReplay(f: Flags): Promise<boolean> {
   const id = runId();
   const startedAt = new Date(systemClock()).toISOString();
-  const providerName = str(f, "provider", "anthropic");
-  const keyEnv = str(f, "key-env", piKeyEnvFor(providerName));
+  if (f["profile-model"] === true && f.smoke !== true) throw new Error("load route: --profile-model requires --smoke");
+  const profileConfig =
+    f["profile-model"] === true
+      ? await (async () => {
+          const loaded = await loadProfileOnHost();
+          const read = await readConfigForPush(loaded.profile.configSource);
+          if (!read.ok) throw new Error(`load route: ${read.problem}`);
+          return parseAppConfigText(read.text);
+        })()
+      : undefined;
+  const configuredRef = profileConfig?.defaults.models.general;
+  const separator = configuredRef?.indexOf("/") ?? -1;
+  if (profileConfig !== undefined && separator < 1)
+    throw new Error("load route: the deployment config needs defaults.models.general as provider/model");
+  const providerName = configuredRef ? configuredRef.slice(0, separator) : str(f, "provider", "anthropic");
+  const modelId = configuredRef ? configuredRef.slice(separator + 1) : str(f, "model");
+  const configuredProvider = profileConfig?.providers[providerName];
+  if (profileConfig !== undefined && configuredProvider === undefined)
+    throw new Error(`load route: the deployment config has no provider ${providerName}`);
+  const keyEnv = configuredProvider?.apiKeyEnv ?? str(f, "key-env", piKeyEnvFor(providerName));
   if (!processSecrets.named(keyEnv)) {
     process.stderr.write(
       `load route: the model key must be in the environment variable ${keyEnv} (name another with --key-env); refusing to start\n`,
     );
     return false;
   }
-  const modelId = str(f, "model");
   const baseUrl = typeof f["base-url"] === "string" ? f["base-url"] : undefined;
+  let modelFetch: typeof globalThis.fetch | undefined;
+  if (profileConfig !== undefined) {
+    const trustedValue = process.env.DOOR_SMOKE_TRUSTED_ORIGIN;
+    if (!trustedValue) throw new Error("load route: DOOR_SMOKE_TRUSTED_ORIGIN is required with --profile-model");
+    const trusted = new URL(trustedValue);
+    if (
+      trusted.protocol !== "https:" ||
+      trusted.username ||
+      trusted.password ||
+      trusted.pathname !== "/" ||
+      trusted.search ||
+      trusted.hash
+    )
+      throw new Error("load route: DOOR_SMOKE_TRUSTED_ORIGIN must be a bare HTTPS origin");
+    if (!configuredProvider?.baseUrl || new URL(configuredProvider.baseUrl).origin !== trusted.origin)
+      throw new Error("load route: the configured model origin differs from DOOR_SMOKE_TRUSTED_ORIGIN");
+    modelFetch = (input, init) => {
+      const requestUrl = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (requestUrl.origin !== trusted.origin)
+        throw new Error("load route: the model request left DOOR_SMOKE_TRUSTED_ORIGIN");
+      return globalThis.fetch(input, { ...init, redirect: "error" });
+    };
+  }
   // The router's model exactly as production builds it: the one-block table on
   // pi's model library (harness-pi.md item 13), so the replay scores the call
   // path the deployment runs, not a stand-in.
-  const providers = new PiAiProviders({
-    [providerName]: {
-      type: providerName === "anthropic" ? "anthropic" : "openai-compatible",
-      apiKeyEnv: keyEnv,
-      ...(baseUrl ? { baseUrl } : {}),
+  const providers = new PiAiProviders(
+    {
+      [providerName]: configuredProvider ?? {
+        type: providerName === "anthropic" ? "anthropic" : "openai-compatible",
+        ...(providerName === "openai" ? { wire: "openai-responses" as const } : {}),
+        apiKeyEnv: keyEnv,
+        ...(baseUrl ? { baseUrl } : {}),
+      },
     },
-  });
+    { ...(modelFetch ? { fetch: modelFetch } : {}) },
+  );
   // Every router call rides the tallying decorator: the receipt's counters
   // line sums the usage fields (cost and prompt caching) and counts the
   // answers refused for carrying two tool calls (load-harness item 17).
   const counters = emptyCounters();
   const model = providerStructuredModel(tallyingProvider(providers.get(providerName), counters), modelId);
   const modelRef = `${providerName}/${modelId}`;
+  if (f.smoke === true) {
+    const commandRegistry = new CommandRegistry<CoreCommandDeps>({ audit: () => {}, capabilities: ALL_CAPABILITIES });
+    registerCoreCommands(commandRegistry);
+    const projection = { presets: operatorPresets(), commands: routableCommands(commandRegistry) };
+    const probes = [
+      {
+        name: "ordinary read",
+        text: "What is 2 + 2? Answer in one sentence.",
+        expected: (bind: OperatorBind) =>
+          presetBindOf(
+            bind.line,
+            projection.presets.map((preset) => preset.name),
+          ) === "general" &&
+          bind.effort === undefined &&
+          bind.budget === undefined &&
+          bind.verbosity === undefined,
+      },
+      {
+        name: "existing PR review",
+        text: "agents:ship please review https://github.com/acme/api/pull/7",
+        expected: (bind: OperatorBind) =>
+          bind.shipEntry === "review" &&
+          bind.repo === "acme/api" &&
+          bind.prTarget?.number === 7 &&
+          bind.prTarget.quote === "https://github.com/acme/api/pull/7" &&
+          bind.workObjective === undefined,
+      },
+      {
+        name: "requested run settings",
+        text: "Use high effort and a 25 minute budget; show debug detail. What is 2 + 2? Answer in one sentence.",
+        expected: (bind: OperatorBind) =>
+          presetBindOf(
+            bind.line,
+            projection.presets.map((preset) => preset.name),
+          ) === "general" &&
+          bind.effort === "high" &&
+          bind.budget === 25 &&
+          bind.verbosity === "debug",
+      },
+    ];
+    let passed = true;
+    for (const probe of probes) {
+      const result = await runOperator({ text: probe.text, projection, tail: [], providers: [providerName] }, model, {
+        timeoutMs: OPERATOR_TIMEOUT_MS,
+      });
+      const bind =
+        result.decision.kind === "binds" && result.decision.binds.length === 1 ? result.decision.binds[0] : undefined;
+      const ok = bind !== undefined && probe.expected(bind);
+      process.stdout.write(
+        `door smoke: ${probe.name} ${ok ? "PASS" : "FAIL"}; model ${modelRef}; attempts ${result.attempts?.length ?? 0}\n`,
+      );
+      if (!ok) {
+        process.stdout.write(
+          `door smoke detail: ${JSON.stringify({ decision: result.decision, attempts: result.attempts })}\n`,
+        );
+        passed = false;
+      }
+    }
+    return passed;
+  }
   const base = str(f, "state-url", process.env.SWITCHBOARD_STATE_WORKER_URL).replace(/\/$/, "");
   const store = new WorkerRunStore({
     baseUrl: base,
@@ -1323,7 +1440,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
           providers: [providerName],
         },
         model,
-        { timeoutMs: ROUTE_TIMEOUT_MS },
+        { timeoutMs: OPERATOR_TIMEOUT_MS },
       );
       if (answer.decision.kind !== "binds")
         return {
