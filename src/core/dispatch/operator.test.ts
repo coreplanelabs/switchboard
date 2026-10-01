@@ -407,6 +407,67 @@ channels:
     expect(ship.kind).toBe("violation");
   });
 
+  it("drops unsupported preset settings without requester evidence before routing", () => {
+    for (const severity of ["major", null]) {
+      const read = parseOperatorTurn(
+        { tool: OPERATOR_BIND_TOOL, input: { preset: "general", severity, reason: "answer from facts" } },
+        ctxOf({
+          requestText: "What happened with the export issue and its pull request?",
+          presets: ["general", "review"],
+        }),
+      );
+      if (read.kind !== "decision" || read.decision.kind !== "binds") throw new Error("read did not bind");
+      expect(read.decision.binds[0]).not.toHaveProperty("severity");
+    }
+
+    for (const renewals of [0, null]) {
+      const review = parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "review",
+            repo: "acme/api",
+            prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+            renewals,
+            reason: "review the PR",
+          },
+        },
+        ctxOf({ requestText: "Review https://github.com/acme/api/pull/7", presets: ["review", "ship"] }),
+      );
+      if (review.kind !== "decision" || review.decision.kind !== "binds") throw new Error("review did not bind");
+      expect(review.decision.binds[0]).not.toHaveProperty("renewals");
+    }
+  });
+
+  it("re-asks unsupported preset settings when the requester explicitly named them", () => {
+    const read = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "general",
+          severity: "major",
+          settingsEvidence: { severity: "major findings" },
+          reason: "answer",
+        },
+      },
+      ctxOf({ requestText: "What happened with the major findings?", presets: ["general", "review"] }),
+    );
+    const review = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          renewals: 2,
+          settingsEvidence: { renewals: "two renewals" },
+          reason: "review",
+        },
+      },
+      ctxOf({ requestText: "Review this with two renewals.", presets: ["review", "ship"] }),
+    );
+    expect(read.kind).toBe("violation");
+    expect(review.kind).toBe("violation");
+  });
+
   it.each([
     { effort: "ultra" },
     { budget: 1 },

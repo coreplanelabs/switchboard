@@ -1186,7 +1186,30 @@ function requestSettingsOf(
   requestText: string,
   providers?: readonly string[],
 ): { settings: OperatorRequestSettings } | { violation: string } {
-  const { model, modelWord, effort, budget, severity, renewals, verbosity, settingsEvidence } = input;
+  const {
+    model,
+    modelWord,
+    effort,
+    budget,
+    severity: suppliedSeverity,
+    renewals: suppliedRenewals,
+    verbosity,
+    settingsEvidence,
+  } = input;
+  const evidence =
+    settingsEvidence !== null && typeof settingsEvidence === "object" && !Array.isArray(settingsEvidence)
+      ? (settingsEvidence as Record<string, unknown>)
+      : {};
+  const quotesRequest = (setting: "severity" | "renewals"): boolean => {
+    const quote = evidence[setting];
+    return typeof quote === "string" && quote.trim() !== "" && requestText.includes(quote);
+  };
+  // A preset cannot apply another preset's setting. Drop stray tool fields
+  // unless the requester actually named them, in which case the model
+  // must choose the right preset rather than silently losing the request.
+  const severity =
+    preset !== "ship" && preset !== "review" && !quotesRequest("severity") ? undefined : suppliedSeverity;
+  const renewals = preset !== "ship" && !quotesRequest("renewals") ? undefined : suppliedRenewals;
   let ref: string | undefined;
   if (
     typeof model === "string" &&
@@ -1222,10 +1245,6 @@ function requestSettingsOf(
     return { violation: `bind_preset renewals must be a Ship count from 0 to ${GRANT_RENEWALS_MAX}` };
   if (verbosity !== undefined && !isVerbosity(verbosity))
     return { violation: "bind_preset verbosity must be quiet, verbose or debug" };
-  const evidence =
-    settingsEvidence !== null && typeof settingsEvidence === "object" && !Array.isArray(settingsEvidence)
-      ? (settingsEvidence as Record<string, unknown>)
-      : {};
   for (const [setting, value] of Object.entries({ effort, budget, severity, renewals, verbosity })) {
     if (value === undefined) continue;
     const quote = evidence[setting];
