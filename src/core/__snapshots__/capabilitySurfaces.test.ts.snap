@@ -108,7 +108,7 @@ commands:
   config clear         — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
-  runs get             — One run's record, its cost in dollars per model (or unpriced) included; \`--include messages\` adds its events with free text wrapped as untrusted content.
+  runs get             — One run's record and cost in dollars per model (or unpriced); \`--include messages\` adds events with free text wrapped as untrusted content; \`--include audience\` adds a structural refusal diagnostic when recorded.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
   runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
@@ -400,7 +400,7 @@ commands:
   config clear         — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
-  runs get             — One run's record, its cost in dollars per model (or unpriced) included; \`--include messages\` adds its events with free text wrapped as untrusted content.
+  runs get             — One run's record and cost in dollars per model (or unpriced); \`--include messages\` adds events with free text wrapped as untrusted content; \`--include audience\` adds a structural refusal diagnostic when recorded.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
   runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
@@ -648,7 +648,7 @@ commands:
   config clear         — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
-  runs get             — One run's record, its cost in dollars per model (or unpriced) included; \`--include messages\` adds its events with free text wrapped as untrusted content.
+  runs get             — One run's record and cost in dollars per model (or unpriced); \`--include messages\` adds events with free text wrapped as untrusted content; \`--include audience\` adds a structural refusal diagnostic when recorded.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
   runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.

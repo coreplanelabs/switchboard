@@ -1,3 +1,4 @@
+import type { AudienceCheck } from "../audienceDecision.js";
 import type { ConfigStore } from "../../config.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import { chatActorOf } from "../authz/actor.js";
@@ -19,12 +20,12 @@ type DirectAudience = {
 
 // The Slack adapter supplies this attestation at intake and checks it again at
 // use time. Keep the bridge structural while its channel seam lands separately.
-type DirectAudienceIO = ChannelIO | { verifyDirectAudience?: (audience: DirectAudience) => Promise<boolean> };
+type DirectAudienceIO = ChannelIO | { verifyDirectAudience?: (audience: DirectAudience) => Promise<AudienceCheck> };
 
 async function verifiedDirectAudience(io: DirectAudienceIO | undefined, audience: DirectAudience): Promise<boolean> {
   if (!io || !("verifyDirectAudience" in io) || !io.verifyDirectAudience) return false;
   try {
-    return (await io.verifyDirectAudience(audience)) === true;
+    return (await io.verifyDirectAudience(audience)).ok;
   } catch {
     return false;
   }

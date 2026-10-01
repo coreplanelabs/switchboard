@@ -1,3 +1,4 @@
+import type { AudienceCheck } from "../audienceDecision.js";
 import type { McpServerOutcome } from "../../mcp/source.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { HistoryItem } from "../types.js";
@@ -14,7 +15,7 @@ export interface MainAudience {
   sources: readonly string[];
 }
 
-export type AudienceDecision = { ok: true; audience: MainAudience } | { ok: false; reason: string };
+export type AudienceDecision = { ok: true; audience: MainAudience } | Extract<AudienceCheck, { ok: false }>;
 
 /** The repository names an answered run exposed through GitHub tools, plus
  * the requester's current readable list checked before Slack publication. */
@@ -76,9 +77,6 @@ export interface ResumedAudienceEvidence {
   requester: string;
   channelId: string;
 }
-
-const RECHECK = "I can't safely use earlier source data in this conversation. Please ask me to check the source again.";
-const PRIVATE_SOURCE = "I can read this private source only in your one-person Slack DM. Please ask me there.";
 
 function sourceOf(toolName: string): string | undefined {
   const match = /^mcp__([a-z0-9-]+)__/.exec(toolName);
@@ -149,24 +147,25 @@ export function mainAudienceAtPrompt(input: {
   parentSeed?: boolean;
 }): AudienceDecision {
   const directSlack = /^slack:D[A-Z0-9_]+$/.test(input.channelId);
-  if (directSlack && !input.verifiedDirectAudience) return { ok: false, reason: PRIVATE_SOURCE };
+  if (directSlack && !input.verifiedDirectAudience) return { ok: false, code: "direct-audience-unavailable" };
   if (input.resumed && !provenPublicResume(input.resumed, input.requester, input.channelId))
-    return { ok: false, reason: RECHECK };
-  if (input.parentSeed) return { ok: false, reason: RECHECK };
+    return { ok: false, code: "recovered-provenance-unproved" };
+  if (input.parentSeed) return { ok: false, code: "parent-context-unproved" };
   // Another agent's finished artifact has no durable source labels. Even in
   // the same DM, its sources cannot be rechecked before this model sees it.
-  if (input.threadArtifacts) return { ok: false, reason: RECHECK };
+  if (input.threadArtifacts) return { ok: false, code: "artifact-context-unproved" };
   const sources = servedSources(input.servers, input.requester);
-  if (!sources) return { ok: false, reason: PRIVATE_SOURCE };
+  if (!sources) return { ok: false, code: "mcp-audience-unproved" };
   if (sources.length > 0 && (!directSlack || !input.verifiedDirectAudience))
-    return { ok: false, reason: PRIVATE_SOURCE };
+    return { ok: false, code: "mcp-audience-unproved" };
 
   const seed = input.session;
   // A failed ledger read falls back to channel history. Earlier bot words
   // have no source labels there, so they cannot safely seed this agent.
-  if (!seed && input.history.some((item) => item.role === "assistant")) return { ok: false, reason: RECHECK };
+  if (!seed && input.history.some((item) => item.role === "assistant"))
+    return { ok: false, code: "saved-context-unproved" };
   if (seed) {
-    if (seed.log.from !== 0 || seed.summary !== undefined) return { ok: false, reason: RECHECK };
+    if (seed.log.from !== 0 || seed.summary !== undefined) return { ok: false, code: "saved-context-unproved" };
     const calls = new Set<string>();
     for (const message of seed.messages) {
       for (const part of message.content) {
@@ -175,14 +174,15 @@ export function mainAudienceAtPrompt(input: {
           // current name alone cannot prove that the requester still holds
           // the repo grant used by an earlier turn.
           if (part.name.startsWith("github_") || part.name === "plane_show" || part.name === "thread_work")
-            return { ok: false, reason: RECHECK };
+            return { ok: false, code: "saved-context-unproved" };
           const source = sourceOf(part.name);
           // A removed source can be replaced under the same name. The old
           // tool result has no source revision, so it must be read afresh.
-          if (source) return { ok: false, reason: RECHECK };
+          if (source) return { ok: false, code: "saved-context-unproved" };
           calls.add(part.id);
         }
-        if (part.type === "tool_result" && !calls.has(part.toolUseId)) return { ok: false, reason: RECHECK };
+        if (part.type === "tool_result" && !calls.has(part.toolUseId))
+          return { ok: false, code: "saved-context-unproved" };
       }
     }
   }
@@ -191,10 +191,11 @@ export function mainAudienceAtPrompt(input: {
   // Their one-person audience is proven by the owning runs and each visible
   // human turn. Missing authors are unknown, so do not seed them.
   if (sources.length > 0 || seed?.notepad) {
-    if (!input.channelId.startsWith("slack:D")) return { ok: false, reason: PRIVATE_SOURCE };
+    if (!input.channelId.startsWith("slack:D")) return { ok: false, code: "mcp-audience-unproved" };
     if (input.history.some((item) => item.role === "user" && item.user !== input.requester))
-      return { ok: false, reason: RECHECK };
-    if (input.thread?.some((run) => run.userId !== input.requester)) return { ok: false, reason: RECHECK };
+      return { ok: false, code: "history-author-unproved" };
+    if (input.thread?.some((run) => run.userId !== input.requester))
+      return { ok: false, code: "history-author-unproved" };
   }
 
   return { ok: true, audience: { requester: input.requester, channelId: input.channelId, sources } };
@@ -214,20 +215,22 @@ export function mainAudienceAtReply(
   threadWork?: MainThreadWorkEvidence,
 ): AudienceDecision {
   if ((/^slack:D[A-Z0-9_]+$/.test(channelId) || audience.sources.length > 0) && !verifiedDirectAudience)
-    return { ok: false, reason: PRIVATE_SOURCE };
-  if (channelId !== audience.channelId || requester !== audience.requester) return { ok: false, reason: RECHECK };
+    return { ok: false, code: "direct-audience-unavailable" };
+  if (channelId !== audience.channelId || requester !== audience.requester)
+    return { ok: false, code: "requester-or-channel-mismatch" };
   const current = servedSources(servers, requester);
-  if (!current || audience.sources.some((key) => !current.includes(key))) return { ok: false, reason: RECHECK };
-  if (
-    github.unknown ||
-    github.repos.some((repo) => !repo || !github.current.some((name) => name.toLowerCase() === repo.toLowerCase()))
-  )
-    return { ok: false, reason: RECHECK };
+  if (!current) return { ok: false, code: "mcp-audience-unproved" };
+  if (audience.sources.some((key) => !current.includes(key))) return { ok: false, code: "mcp-source-changed" };
+  if (github.unknown) return { ok: false, code: "github-identity-unproved" };
+  if (github.repos.some((repo) => !repo || !github.current.some((name) => name.toLowerCase() === repo.toLowerCase())))
+    return { ok: false, code: "github-access-lost" };
   if (plane?.read) {
-    if (plane.unknown || !plane.current) return { ok: false, reason: RECHECK };
+    if (plane.unknown) return { ok: false, code: "plane-identity-unproved" };
+    if (!plane.current) return { ok: false, code: "plane-check-unavailable" };
     const visible = new Set(plane.current);
-    if (plane.exposed.some((id) => !visible.has(id))) return { ok: false, reason: RECHECK };
+    if (plane.exposed.some((id) => !visible.has(id))) return { ok: false, code: "plane-row-no-longer-visible" };
   }
-  if (threadWork?.exposed.some((result) => result !== threadWork.current)) return { ok: false, reason: RECHECK };
+  if (threadWork?.exposed.some((result) => result !== threadWork.current))
+    return { ok: false, code: "thread-work-snapshot-changed" };
   return { ok: true, audience };
 }

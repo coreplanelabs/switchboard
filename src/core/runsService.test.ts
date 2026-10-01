@@ -91,6 +91,56 @@ function expectNoToken(value: unknown): void {
 }
 
 describe("RunsService.getRun", () => {
+  it.each(["local", "foreign", "finished-local", "stored"] as const)(
+    "exposes only committed audience diagnostics from %s with explicit include",
+    async (source) => {
+      const { reg, store } = setup();
+      const ledger = new InMemoryRunLedger(() => NOW);
+      const service = createRunsService({ registry: reg, store, ledger });
+      const meta = { agent: "coding", channelId: "slack:D1", userId: "slack:UALICE", threadKey: "slack:D1:t" };
+      const local = source === "local" || source === "finished-local";
+      const id = local ? reg.create("private", meta).id : "private-run";
+      const receipt = {
+        version: 1 as const,
+        causeAt: "reply" as const,
+        withheldAt: "reply" as const,
+        code: "github-access-lost" as const,
+      };
+      if (source === "local" || source === "foreign") {
+        await ledger.claim({
+          runId: id,
+          threadKey: meta.threadKey,
+          gen: "owner",
+          leaseMs: 30000,
+          startedAt: NOW,
+          meta,
+          card: null,
+          system: "private system",
+          tools: [],
+        });
+        await ledger.setState(id, "owner", { audienceRefusal: receipt });
+        expect(
+          await ledger.setState(id, "stale", { audienceRefusal: { ...receipt, code: "mcp-source-changed" } }),
+        ).toEqual({ ok: false, reason: "fenced" });
+      } else {
+        if (local) reg.finish(id, "completed");
+        await store!.put(record(id, NOW, { ...meta, channelVisibility: "dm", audienceRefusal: receipt }));
+      }
+      const read = await service.getRun(id, { include: "audience" });
+      expect(read.ok && read.value.audience).toEqual({ status: "recorded", refusal: receipt });
+      expect(JSON.stringify(await service.getRun(id))).not.toContain("audience");
+      expect(JSON.stringify(await service.listRuns({ status: "all", visibleTo: ALL }))).not.toContain("audience");
+      expect(JSON.stringify(read)).not.toContain("private system");
+    },
+  );
+
+  it("reports absent legacy audience evidence as unavailable", async () => {
+    const { svc, store } = setup();
+    await store!.put(record("legacy", NOW));
+    const read = await svc.getRun("legacy", { include: "audience" });
+    expect(read.ok && read.value.audience).toEqual({ status: "unavailable" });
+  });
+
   it("hides a private worker's live and persisted prompt from ordinary run reads", async () => {
     const { reg, svc, store } = setup();
     const privateThread = "worker:instance-private:unitA";
@@ -107,6 +157,8 @@ describe("RunsService.getRun", () => {
     expect(listed.runs).toEqual([]);
     expect(await svc.getRun(live.id, { include: "messages" })).toEqual({ ok: false, error: "not_found" });
     expect(await svc.getRun("private-finished", { include: "messages" })).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRun(live.id, { include: "audience" })).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRun("private-finished", { include: "audience" })).toEqual({ ok: false, error: "not_found" });
     expect(await svc.getRunEvents(live.id, {})).toEqual({ ok: false, error: "not_found" });
     expect(await svc.getRunEvents("private-finished", {})).toEqual({ ok: false, error: "not_found" });
     expect(await svc.getRunFriction(live.id)).toEqual({ ok: false, error: "not_found" });

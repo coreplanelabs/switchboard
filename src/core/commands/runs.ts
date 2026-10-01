@@ -117,7 +117,7 @@ async function getVisibleRun(
   action: Action,
   deps: RunsCommandDeps,
   commandId: string,
-  opts: { include?: "messages" } = {},
+  opts: { include?: "messages" | "audience" } = {},
 ): Promise<RunRecordView> {
   const view = unwrap(await runs.getRun(id, opts));
   const actor: Actor = caller.actor;
@@ -269,13 +269,16 @@ export const runsGet = defineCommand({
   id: "runs.get",
   args: [idArg],
   options: z.object({
-    include: z.enum(["messages"]).optional().describe("add the run's events, free text wrapped as untrusted content"),
+    include: z
+      .enum(["messages", "audience"])
+      .optional()
+      .describe("add events or the structural audience-refusal diagnostic"),
   }),
   action: "runs:read",
   effect: "read",
   surfaces: { chat: false },
   describe:
-    "One run's record, its cost in dollars per model (or unpriced) included; `--include messages` adds its events with free text wrapped as untrusted content.",
+    "One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic when recorded.",
   handler: async ({ args, options, caller, deps }) => {
     const view = await getVisibleRun(
       await deps.runs(),

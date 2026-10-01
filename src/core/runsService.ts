@@ -1,3 +1,4 @@
+import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecision.js";
 import { matchesPredicate } from "./authz/predicate.js";
 import type { ChannelVisibility, Predicate, Resource } from "./authz/types.js";
 import { sanitizeActor, type RunActor, type RunEvent, type StopMode } from "./runEvents.js";
@@ -243,8 +244,9 @@ export interface UnitLineage {
   unit?: { key: string; id: string; title?: string; thread: "coding" | "review" };
 }
 
-/** `getRun`'s shape: the view plus, only with `include: "messages"`, the events. */
+/** `getRun` adds events or structural audience evidence only on an explicit include. */
 export interface RunRecordView extends RunView {
+  audience?: { status: "recorded"; refusal: AudienceRefusalReceipt } | { status: "unavailable" };
   events?: RunEvent[];
 }
 
@@ -425,7 +427,7 @@ export interface RunsService {
   getRun(
     id: string,
     opts?: {
-      include?: "messages";
+      include?: "messages" | "audience";
       requireFinalRecord?: boolean;
       privateWorkerAccess?: typeof PRIVATE_WORKER_INTERNAL_READ;
     },
@@ -624,8 +626,9 @@ function liveView(s: RunSummary): RunView {
 
 /** A stored row as a view: finished, persisted, and priced when it carries usage. */
 function persistedView(item: RunListItem, prices: ModelPriceTable): RunView {
+  const { audienceRefusal: _audienceRefusal, ...visible } = item;
   return {
-    ...item,
+    ...visible,
     finished: true,
     persisted: true,
     // Propagate the provisional flag from the record so a caller can render
@@ -1216,6 +1219,20 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     },
 
     async getRun(id, opts = {}) {
+      const diagnostic = async (view: RunRecordView): Promise<RunRecordView> => {
+        if (opts.include !== "audience") return view;
+        let receipt: AudienceRefusalReceipt | undefined;
+        try {
+          receipt = audienceRefusalOf(
+            view.finished
+              ? (await storeSummary(id))?.audienceRefusal
+              : (await ledgerRow(id))?.row.state.audienceRefusal,
+          );
+        } catch {
+          // Missing storage is unknown, never evidence that publication was allowed.
+        }
+        return { ...view, audience: receipt ? { status: "recorded", refusal: receipt } : { status: "unavailable" } };
+      };
       // The coordinator must not settle a child from a registry finish alone:
       // its final record is written only after the reply is sealed. A pending
       // Git write may be absent from that temporary registry projection.
@@ -1225,7 +1242,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         const { events, ...rest } = record;
         const view: RunRecordView = persistedView(rest, prices);
         if (opts.include === "messages") view.events = events;
-        return { ok: true, value: view };
+        return { ok: true, value: await diagnostic(view) };
       }
       const summary = registry.getById(id);
       const snap = summary ? registry.snapshotById(id) : null;
@@ -1237,7 +1254,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         // finish fields and events are the registry's; the record's typed
         // artifacts are the store's to supply (item 21). A live row never asks.
         if (summary.finished) Object.assign(view, await storedArtifacts(id));
-        return { ok: true, value: view };
+        return { ok: true, value: await diagnostic(view) };
       }
       // Live on the ledger, not here (item 41): the row and the events it holds.
       const far = await ledgerRow(id);
@@ -1245,7 +1262,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         const view: RunRecordView = ledgerView(far.row, far.events);
         if (!ordinaryRun(view, opts.privateWorkerAccess)) return notFound;
         if (opts.include === "messages") view.events = far.events;
-        return { ok: true, value: view };
+        return { ok: true, value: await diagnostic(view) };
       }
       // Only a `messages` read loads the events; every other caller gets the
       // summary row (the record minus events), so a 5000-event run is never
@@ -1254,23 +1271,27 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         const summary = await storeSummary(id);
         if (summary)
           return ordinaryRun(summary, opts.privateWorkerAccess)
-            ? { ok: true, value: persistedView(summary, prices) }
+            ? { ok: true, value: await diagnostic(persistedView(summary, prices)) }
             : notFound;
         // Not live, not stored: a queued ask's id still has a page (record
         // 0064, "The queue") — the stored request the plane holds under it.
         const queued = await queuedRun(id);
-        return queued && ordinaryRun(queued, opts.privateWorkerAccess) ? { ok: true, value: queued } : notFound;
+        return queued && ordinaryRun(queued, opts.privateWorkerAccess)
+          ? { ok: true, value: await diagnostic(queued) }
+          : notFound;
       }
       const record = await storeGet(id);
       if (!record) {
         const queued = await queuedRun(id);
-        return queued && ordinaryRun(queued, opts.privateWorkerAccess) ? { ok: true, value: queued } : notFound;
+        return queued && ordinaryRun(queued, opts.privateWorkerAccess)
+          ? { ok: true, value: await diagnostic(queued) }
+          : notFound;
       }
       if (!ordinaryRun(record, opts.privateWorkerAccess)) return notFound;
       const { events, ...rest } = record;
       const view: RunRecordView = persistedView(rest, prices);
       view.events = events;
-      return { ok: true, value: view };
+      return { ok: true, value: await diagnostic(view) };
     },
 
     async getRunEvents(id, opts) {

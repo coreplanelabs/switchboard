@@ -114,9 +114,9 @@ describe("SlackIO direct audience", () => {
       trigger: "dm",
     });
     const audience = { kind: "slack-unshared-im" as const, ...io.directAudience()! };
-    expect(await io.verifyDirectAudience(audience)).toBe(true);
+    expect(await io.verifyDirectAudience(audience)).toMatchObject({ ok: true });
     channel.is_ext_shared = true;
-    expect(await io.verifyDirectAudience(audience)).toBe(false);
+    expect(await io.verifyDirectAudience(audience)).toMatchObject({ ok: false });
   });
 });
 

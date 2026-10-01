@@ -1,3 +1,4 @@
+import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { describe, expect, it } from "vitest";
 import { privateWorkerThreadKey } from "../../channels/privateWorker.js";
 import { ALL_GRANTS } from "../authz/grants.js";
@@ -147,7 +148,7 @@ describe("main worker capability", () => {
         threadKey,
       },
     };
-    const io = { verifyDirectAudience: async () => true };
+    const io = { verifyDirectAudience: booleanAudienceVerifier(async () => true) };
     const first = await mainWorkerCapabilityFor(deps, "orchestrator", message, io);
     expect(first).toBeDefined();
     expect(await first!.read({ actId: "fix-signups" })).toMatchObject({
@@ -208,10 +209,12 @@ describe("main worker capability", () => {
       threadKey,
     };
     expect(
-      await mainWorkerCapabilityFor(deps, "orchestrator", msg, { verifyDirectAudience: async () => true }),
+      await mainWorkerCapabilityFor(deps, "orchestrator", msg, {
+        verifyDirectAudience: booleanAudienceVerifier(async () => true),
+      }),
     ).toBeUndefined();
     for (const state of ["shared", "external", "pending", "metadata unavailable"]) {
-      const io = { verifyDirectAudience: async () => state === "unshared" };
+      const io = { verifyDirectAudience: booleanAudienceVerifier(async () => state === "unshared") };
       expect(await mainWorkerCapabilityFor(deps, "orchestrator", { ...msg, directAudience }, io)).toBeUndefined();
     }
     expect(await mainWorkerCapabilityFor(deps, "orchestrator", { ...msg, directAudience })).toBeUndefined();
@@ -221,9 +224,9 @@ describe("main worker capability", () => {
         "orchestrator",
         { ...msg, directAudience },
         {
-          verifyDirectAudience: async () => {
+          verifyDirectAudience: booleanAudienceVerifier(async () => {
             throw new Error("Slack lookup unavailable");
-          },
+          }),
         },
       ),
     ).toBeUndefined();
@@ -235,7 +238,7 @@ describe("main worker capability", () => {
           ...msg,
           directAudience: { ...directAudience, userId: "slack:UBOB" },
         },
-        { verifyDirectAudience: async () => true },
+        { verifyDirectAudience: booleanAudienceVerifier(async () => true) },
       ),
     ).toBeUndefined();
     expect(
@@ -243,7 +246,7 @@ describe("main worker capability", () => {
         deps,
         "orchestrator",
         { ...msg, directAudience, relayedBy: "external bot" },
-        { verifyDirectAudience: async () => true },
+        { verifyDirectAudience: booleanAudienceVerifier(async () => true) },
       ),
     ).toBeUndefined();
   });
@@ -274,10 +277,10 @@ describe("main worker capability", () => {
     let verified = true;
     let calls = 0;
     const io = {
-      verifyDirectAudience: async () => {
+      verifyDirectAudience: booleanAudienceVerifier(async () => {
         calls++;
         return verified;
-      },
+      }),
     };
     const cap = await mainWorkerCapabilityFor(deps, "orchestrator", msg, io);
     expect(cap).toBeDefined();
@@ -314,7 +317,7 @@ describe("main worker capability", () => {
       },
     };
     let calls = 0;
-    const io = { verifyDirectAudience: async () => ++calls < 3 };
+    const io = { verifyDirectAudience: booleanAudienceVerifier(async () => ++calls < 3) };
     const cap = await mainWorkerCapabilityFor(deps, "orchestrator", msg, io);
     expect(cap).toBeDefined();
     expect(await cap!.read({ actId: "fix-signups" })).toEqual({ kind: "unavailable" });
@@ -341,7 +344,9 @@ describe("main worker capability", () => {
       text: "status?",
       directAudience: { kind: "slack-unshared-im" as const, channelId: instance.channelId, userId, threadKey },
     };
-    const cap = await mainWorkerCapabilityFor(deps, "orchestrator", msg, { verifyDirectAudience: async () => true });
+    const cap = await mainWorkerCapabilityFor(deps, "orchestrator", msg, {
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
+    });
     expect(cap).toBeDefined();
     expect(await cap!.read({ actId: "fix-signups" })).toMatchObject({ kind: "found" });
   });
@@ -374,7 +379,7 @@ describe("main worker capability", () => {
       deps,
       "orchestrator",
       msg,
-      { verifyDirectAudience: async () => true },
+      { verifyDirectAudience: booleanAudienceVerifier(async () => true) },
       privateProgressSourceTrusted(msg.userId, inbox),
     );
     expect(await cap!.read({ actId: "fix-signups" })).toMatchObject({ kind: "found" });

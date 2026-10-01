@@ -26,6 +26,31 @@ const verifiedReply = (...args: Parameters<typeof mainAudienceAtReply>) =>
   mainAudienceAtReply(args[0], args[1], args[2], args[3], args[4], args[5], true);
 
 describe("main conversation source audience", () => {
+  it("distinguishes missing identities, lost access and changed snapshots without source text", () => {
+    const current = mainAudienceAtPrompt({ ...base, servers: [] });
+    if (!current.ok) throw new Error("fixture must be admitted");
+    const check = (
+      github: { repos: string[]; current: string[]; unknown: boolean },
+      plane?: Parameters<typeof mainAudienceAtReply>[5],
+      work?: Parameters<typeof mainAudienceAtReply>[7],
+    ) => mainAudienceAtReply(current.audience, [], base.channelId, base.requester, github, plane, true, work);
+    const github = { repos: [], current: [], unknown: false };
+    expect(check({ ...github, unknown: true })).toEqual({ ok: false, code: "github-identity-unproved" });
+    expect(check({ ...github, repos: ["private/repo"] })).toEqual({ ok: false, code: "github-access-lost" });
+    expect(check(github, { read: true, unknown: true, exposed: [] })).toEqual({
+      ok: false,
+      code: "plane-identity-unproved",
+    });
+    expect(check(github, { read: true, unknown: false, exposed: ["run:hidden"], current: [] })).toEqual({
+      ok: false,
+      code: "plane-row-no-longer-visible",
+    });
+    expect(check(github, undefined, { exposed: ["private snapshot"], current: "changed" })).toEqual({
+      ok: false,
+      code: "thread-work-snapshot-changed",
+    });
+  });
+
   it("keeps a web-plane conversation usable when it has no private DM source", () => {
     const input = { ...base, channelId: "web:plane", verifiedDirectAudience: false, servers: [] };
     const current = mainAudienceAtPrompt(input);

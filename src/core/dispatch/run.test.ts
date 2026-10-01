@@ -1,3 +1,4 @@
+import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -301,7 +302,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
         agent,
         profile: declaredProfile(agent),
         channelVisibility,
-        verifyDirectAudience: async () => true,
+        verifyDirectAudience: booleanAudienceVerifier(async () => true),
         reserved,
         resume: undefined,
         ledgerRun: undefined,
@@ -343,7 +344,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
       agent,
       profile: declaredProfile(agent),
       channelVisibility: "dm",
-      verifyDirectAudience: verified,
+      verifyDirectAudience: booleanAudienceVerifier(verified),
       reserved,
       resume: undefined,
       ledgerRun: undefined,
@@ -479,7 +480,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
         ...base,
         msg: dmMsg,
         privateWorkVerifierAvailable: verifier,
-        ...(verifier ? { verifyDirectAudience: async () => true } : {}),
+        ...(verifier ? { verifyDirectAudience: booleanAudienceVerifier(async () => true) } : {}),
         agent,
         profile: declaredProfile(agent),
         resolved: { ...base.resolved, agentName: agent.name },

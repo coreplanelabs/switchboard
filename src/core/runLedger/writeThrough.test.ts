@@ -1468,6 +1468,47 @@ describe("events, state, heartbeat", () => {
 });
 
 describe("finishing and finish", () => {
+  it("does not turn a storage error mentioning a fence into ownership loss", async () => {
+    const { wt } = harness({
+      ledger: overriding(new InMemoryRunLedger(() => 10_000), {
+        step: async () => {
+          throw new PermanentStoreError("storage said (fenced), without an ownership result");
+        },
+      }),
+    });
+    const run = (await openRun(wt, openReq()))!;
+    await run.step(step());
+    expect(await run.commitState({ audienceRefusal: {} })).toBe("unavailable");
+    expect(await run.finishing()).toBe("unavailable");
+  });
+
+  it("commits a refusal after finishing and distinguishes ownership loss from unavailable storage", async () => {
+    const receipt = { version: 1, causeAt: "reply", withheldAt: "reply", code: "github-access-lost" };
+    const { ledger, wt } = harness();
+    const run = (await openRun(wt, openReq()))!;
+    expect(await run.finishing()).toBe("ok");
+    expect(await run.commitState({ audienceRefusal: receipt })).toBe("ok");
+    expect(ledger.live.get("r1")!.state.audienceRefusal).toEqual(receipt);
+    ledger.live.get("r1")!.ownerGen = "gen-B";
+    expect(await run.commitState({ audienceRefusal: { ...receipt, code: "mcp-source-changed" } })).toBe("fenced");
+    expect(await run.commitState({ audienceRefusal: receipt })).toBe("fenced");
+    expect(ledger.live.get("r1")!.state.audienceRefusal).toEqual(receipt);
+
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const down = harness({
+      ledger: overriding(inner, {
+        setState: async () => {
+          throw new TransientStoreError("unavailable");
+        },
+      }),
+    });
+    const other = (await openRun(down.wt, openReq()))!;
+    expect(await other.finishing()).toBe("ok");
+    expect(await other.commitState({ audienceRefusal: receipt })).toBe("unavailable");
+    expect(other.tracked()).toBe(true);
+    expect(inner.live.get("r1")!.state.audienceRefusal).toBeUndefined();
+  });
+
   it("finishing moves the row to `finishing`; the sink's finish replaces the live rows with the record and never touches the fallback", async () => {
     const { ledger, wt, fallbackPuts, t } = harness();
     const run = (await openRun(wt, openReq()))!;

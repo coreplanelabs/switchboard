@@ -1,3 +1,4 @@
+import { audienceRefusalText, noteAudienceRefusal, type AudienceRefusalCode } from "../audienceDecision.js";
 // The run stage's loop (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the model turn and everything that rides on it. The card frame the loop
 // paints (checklist, activity line, the shutdown notice); the run on the pi
@@ -30,10 +31,8 @@ import { createMainWorkEffectGate, mainWorkForRun, type DirectAudience } from ".
 import { type SlackContextBinding } from "./slackContextBinding.js";
 import {
   privateAudienceRequired,
-  privateAudienceRefusal,
-  privateAudienceStillValid,
-  savedSlackSourcesStillValid,
-  samePrivateRequesterFollowUp,
+  privateRunAudienceDecision,
+  privateFollowUpFailure,
   type PrivateAudienceLatch,
 } from "./privateAudience.js";
 import { mainStartForRun } from "../../tools/mainStart.js";
@@ -379,13 +378,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // answer. Keep every card frame free of model text for the whole DM run.
   const privateRun = privateAudienceRequired(msg) || slackContext !== undefined;
   const privateAudienceLatch = sharedPrivateAudienceLatch ?? { revoked: false };
-  const privateRunStillValid = async () => {
-    if (privateAudienceLatch.revoked) return false;
-    if (privateAudienceRequired(msg) && !(await privateAudienceStillValid(msg, io))) return false;
-    if (slackContext && !(await slackContext.destinationStillPrivate())) return false;
-    if (!(await savedSlackSourcesStillValid(privateAudienceLatch))) return false;
-    return !privateAudienceLatch.revoked;
-  };
   const events = ctx.events ?? new RunEventLane((event) => registry.publish(run.id, event));
   // The def the runner and the post-run turns read: the preset with the
   // EFFECTIVE budget (its deadline, wrap-up warning and budget label read
@@ -1334,12 +1326,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     await mainWorkEffectGate.revoke();
   };
   const directAudience = (msg as IncomingMessage & { directAudience?: DirectAudience }).directAudience;
-  const verifyDirectAudience = (
-    io as ChannelIO & { verifyDirectAudience?: (audience: DirectAudience) => Promise<boolean> }
-  ).verifyDirectAudience?.bind(io);
+  const verifyDirectAudience = io.verifyDirectAudience?.bind(io);
   const verifiedAtOpen =
     agent.name === "orchestrator" && directAudience && verifyDirectAudience
-      ? await verifyDirectAudience(directAudience).catch(() => false)
+      ? await verifyDirectAudience(directAudience).then(
+          (checked) => checked.ok,
+          () => false,
+        )
       : false;
   // A private work source comes only from a delivered requester message, never
   // the operator's combined prompt. Follow-ups bind after confirmed delivery.
@@ -1370,7 +1363,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       )
         await withdrawMainWork();
       if (mainWorkTrusted && directAudience && verifyDirectAudience) {
-        const stillDirect = await verifyDirectAudience(directAudience).catch(() => false);
+        const stillDirect = await verifyDirectAudience(directAudience).then(
+          (checked) => checked.ok,
+          () => false,
+        );
         if (!stillDirect) await withdrawMainWork();
       }
       // A steer can be replayed from the durable inbox without this process's
@@ -1451,7 +1447,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     effectGate: mainWorkEffectGate,
     trusted: () => mainWorkTrusted && !privateAudienceLatch.revoked,
     verifiedAtOpen,
-    ...(verifyDirectAudience ? { verify: verifyDirectAudience } : {}),
+    ...(verifyDirectAudience
+      ? { verify: async (audience: DirectAudience) => (await verifyDirectAudience(audience)).ok }
+      : {}),
   });
   const githubReadRepos = new Set<string>();
   let githubReadUnknown = false;
@@ -1604,15 +1602,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   if (privateRun) {
     // Keep the latch through answer delivery; the admission slot is released
     // only after the reply, so a late follow-up can still revoke publication.
-    const revoke = () => {
+    const revoke = (code: AudienceRefusalCode = "followup-unverified") => {
       privateAudienceLatch.revoked = true;
+      const receipt = noteAudienceRefusal(privateAudienceLatch, code, "followup");
+      ledgerRun?.setState({ audienceRefusal: receipt });
       slackContext?.revoke();
       mainWorkTrusted = false;
       void mainWorkEffectGate.revoke();
     };
-    admitted.inbox.onUntrustedFollowUp(revoke);
+    admitted.inbox.onUntrustedFollowUp(() => revoke());
     admitted.inbox.onAccepted((followUp) => {
-      if (!samePrivateRequesterFollowUp(msg, followUp)) revoke();
+      const code = privateFollowUpFailure(msg, followUp);
+      if (code) revoke(code);
     });
   }
   try {
@@ -2780,7 +2781,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // canonicalized ONCE here, so the event text, the channel reply, the
     // GitHub post, and memory all read one Markdown dialect; the model's raw
     // text rides on the event only when normalization changed it.
-    if (privateRun && !(await privateRunStillValid())) answer = privateAudienceRefusal(privateAudienceLatch);
+    if (privateRun) {
+      const checked = await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext);
+      if (!checked.ok) {
+        const receipt = noteAudienceRefusal(privateAudienceLatch, checked.code, "answer-event", "answer-event");
+        ledgerRun?.setState({ audienceRefusal: receipt });
+        answer = audienceRefusalText(receipt.code);
+      }
+    }
     const acceptedAnswer = markdownOutput.parse(answer);
     const rawAnswer = acceptedAnswer.ok && acceptedAnswer.changed ? answer : undefined;
     if (acceptedAnswer.ok) answer = acceptedAnswer.value;
@@ -3017,6 +3025,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ending.finished(run.id);
       shell.freeze(finishedAt);
       registerFinishRecord(deps, {
+        audience: privateAudienceLatch,
         ending,
         run,
         snap,

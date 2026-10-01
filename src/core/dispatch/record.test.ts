@@ -1,3 +1,4 @@
+import type { AudienceTrace } from "../audienceDecision.js";
 import { describe, expect, it } from "vitest";
 import { RunRegistry } from "../runRegistry.js";
 import { isRunRecord, type RunRecord } from "../runRecord.js";
@@ -578,7 +579,11 @@ describe("assembleRunRecord — the handoff on the record", () => {
       tools: [],
       state: {},
     };
+    row.phase = "finishing";
+    row.state.audienceRefusal = { version: 1, causeAt: "followup", withheldAt: "reply", code: "followup-indirect" };
     const reclaimed = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 5_000 });
+    expect(reclaimed.audienceRefusal).toEqual(row.state.audienceRefusal);
+    expect(reclaimed.replyOk).toBeUndefined();
     expect(reclaimed).toMatchObject({ id: "run-child", seed: "parent" });
     expect(isRunRecord(reclaimed)).toBe(true);
   });
@@ -734,6 +739,7 @@ describe("registerFinishRecord — the finish record, written by the drain after
     runAgent = agent,
     runMsg: IncomingMessage = msg,
     route?: { preset: string; reason: string; model: string },
+    audience?: AudienceTrace,
   ) {
     const registry = new RunRegistry({ genId: () => "run-f", genToken: () => "tok" });
     const run = registry.create(runAgent.name, {
@@ -755,6 +761,7 @@ describe("registerFinishRecord — the finish record, written by the drain after
     };
     const trace = startRequestRoot({ clock: () => 5 }, { channel: channelOf("slack:CX"), receivedAt: 1 });
     registerFinishRecord(deps, {
+      audience,
       ending,
       run,
       snap,
@@ -775,6 +782,21 @@ describe("registerFinishRecord — the finish record, written by the drain after
     });
     return { ending, writes };
   }
+
+  it("reads a late audience refusal at seal without replacing completed work facts", () => {
+    const audience: AudienceTrace = {};
+    const { ending, writes } = finished(agent, msg, undefined, audience);
+    audience.refusal = { version: 1, causeAt: "reply", withheldAt: "reply", code: "github-access-lost" };
+    ending.drain(true);
+    expect(writes[0].record).toMatchObject({
+      status: "completed",
+      replyOk: true,
+      headSha: "a".repeat(40),
+      audienceRefusal: audience.refusal,
+    });
+    expect(writes[0].record.handoff?.followUps).toHaveLength(1);
+    expect(isRunRecord(writes[0].record)).toBe(true);
+  });
 
   it("the handoff the run loop captured rides the finish record", () => {
     const { ending, writes } = finished();

@@ -1,3 +1,9 @@
+import {
+  audienceRefusalText,
+  noteAudienceRefusal,
+  type AudienceCheck,
+  type AudienceTrace,
+} from "../audienceDecision.js";
 // The reply stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // how a run is shown. The label a run carries on the runs index, the humanized
 // form of a channel-authored turn for the record, the card's activity line and
@@ -39,9 +45,8 @@ import type { ProvisionDeps } from "./provision.js";
 import type { ProviderTable } from "../harness/piAi.js";
 import {
   privateAudienceRefusal,
+  privateRunAudienceDecision,
   privateAudienceRequired,
-  privateAudienceStillValid,
-  savedSlackSourcesStillValid,
   type PrivateAudienceLatch,
 } from "./privateAudience.js";
 
@@ -705,7 +710,8 @@ export interface DeliveryContext {
   releaseWorkspace: (span?: Span) => Promise<void>;
   root: Span;
   /** A source-bearing answer is rechecked before any channel publication. */
-  publicationRefusal?: () => Promise<string | undefined>;
+  publicationCheck?: () => Promise<AudienceCheck>;
+  audience?: AudienceTrace;
 }
 
 /**
@@ -738,12 +744,22 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
   } = ctx;
   const privateRun = privateAudienceRequired(msg) || ctx.slackContext !== undefined;
   const privateCard = privateRun;
-  const privateRunStillValid = async () => {
-    if (ctx.privateAudienceLatch?.revoked) return false;
-    if (privateAudienceRequired(msg) && !(await privateAudienceStillValid(msg, io))) return false;
-    if (ctx.slackContext && !(await ctx.slackContext.destinationStillPrivate())) return false;
-    if (ctx.privateAudienceLatch && !(await savedSlackSourcesStillValid(ctx.privateAudienceLatch))) return false;
-    return !ctx.privateAudienceLatch?.revoked;
+  const latch = ctx.privateAudienceLatch ?? { revoked: false };
+  const audience = ctx.audience ?? latch;
+  const privateCheck = async (): Promise<AudienceCheck> =>
+    privateRun ? privateRunAudienceDecision(msg, io, latch, ctx.slackContext) : { ok: true };
+  const fenced = new Error("reply ownership changed");
+  const commitRefusal = async (check: Extract<AudienceCheck, { ok: false }>) => {
+    const receipt = noteAudienceRefusal(audience, check.code, "reply", "reply");
+    if (ledgerRun && (await ledgerRun.commitState({ audienceRefusal: receipt })) === "fenced") {
+      ending.drop(run.id);
+      throw fenced;
+    }
+    return receipt;
+  };
+  const refusal = async (check: Extract<AudienceCheck, { ok: false }>): Promise<void> => {
+    const receipt = await commitRefusal(check);
+    await io.reply(audienceRefusalText(receipt.code));
   };
   // The coding PR post-step ran INSIDE the try above (before the stream
   // finished — its outcome is the `pr_opened` event); `prNote` carries what
@@ -776,7 +792,17 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     // write-up rides along only when no GitHub post carries it. Projection
     // only — the `answer` event published above stays the model's own words
     // and link-free.
-    const privateAddressValid = !privateRun || (await privateRunStillValid());
+    const addressCheck = await privateCheck();
+    if (!addressCheck.ok) {
+      // The card close may fail or outlive the audience check. Keep its first
+      // refusal for the final record before yielding to either outcome.
+      await commitRefusal(addressCheck);
+    } else if (audience.refusal?.withheldAt) {
+      // An answer-event refusal may still have only a queued write even when
+      // this check recovers. Confirm its receipt and ownership before the card.
+      await commitRefusal({ ok: false, code: audience.refusal.code });
+    }
+    const privateAddressValid = addressCheck.ok;
     const privateAnswer = privateAddressValid ? answer : privateAudienceRefusal(ctx.privateAudienceLatch);
     const channelAnswer =
       !privateAddressValid || ctx.reviewStoppedBeforeStart
@@ -817,16 +843,21 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
         ),
       () =>
         root.span("post.reply", async () => {
-          if (!privateAddressValid) return io.reply(privateAudienceRefusal(ctx.privateAudienceLatch));
-          const publicationRefusal = await ctx.publicationRefusal?.();
-          if (privateRun && !(await privateRunStillValid()))
-            return io.reply(privateAudienceRefusal(ctx.privateAudienceLatch));
-          return io.reply(publicationRefusal ?? (prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer));
+          if (!addressCheck.ok) return refusal(addressCheck);
+          const publication = await ctx.publicationCheck?.();
+          const privateDecision = await privateCheck();
+          if (!privateDecision.ok) return refusal(privateDecision);
+          if (publication && !publication.ok) return refusal(publication);
+          if (audience.refusal?.withheldAt) return refusal({ ok: false, code: audience.refusal.code });
+          return io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer);
         }),
       // A null channel's reply resolves but reaches nobody: the seal says
       // `replyOk: false` with the reason (run-history.md item 38).
       io.undeliverable !== undefined ? { undelivered: io.undeliverable } : undefined,
     );
+  } catch (err) {
+    if (err === fenced) return { kind: "fenced" };
+    throw err;
   } finally {
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
   }

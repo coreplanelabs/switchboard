@@ -1,3 +1,4 @@
+import type { AudienceCheck } from "../audienceDecision.js";
 import {
   addSourceReceipt,
   isSessionSources,
@@ -15,11 +16,7 @@ import {
 } from "../../tools/slackContext.js";
 import type { RunnableTool } from "../../tools/runnableTool.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
-import {
-  privateAudienceRequired,
-  privateAudienceStillValid,
-  revalidateSourcesWithinBudget,
-} from "./privateAudience.js";
+import { privateAudienceRequired, privateAudienceStillValid, revalidateSourcesDecision } from "./privateAudience.js";
 
 /** Declaring the source tool selects its receipt path even when binding fails.
  * Never fall back to eager content reads when the requester has no capability. */
@@ -31,7 +28,7 @@ export interface SlackContextBinding {
   capability: SlackContextCapability;
   initialize(sources: SessionSources, persist: (sources: SessionSources) => Promise<boolean>): Promise<boolean>;
   revalidate(receipt: SlackSourceReceipt): Promise<boolean>;
-  sourcesStillValid(): Promise<boolean>;
+  sourcesStillValid(): Promise<AudienceCheck>;
   /** Re-read the adapter's reply address before recording or sending model output. */
   destinationStillPrivate(): Promise<boolean>;
   /** An indirect follow-up permanently ends this run's private read authority. */
@@ -97,13 +94,15 @@ export async function bindSlackContext(input: {
       },
       revalidate,
       async sourcesStillValid() {
-        if (sources.status !== "known" || revoked || !(await writes)) return false;
-        if (!(await revalidateSourcesWithinBudget(sources.receipts, revalidate))) {
+        if (sources.status !== "known" || revoked || !(await writes))
+          return { ok: false, code: "slack-source-unverified" };
+        const checked = await revalidateSourcesDecision(sources.receipts, revalidate);
+        if (!checked.ok) {
           revoked = true;
           await save({ version: 1, status: "revoked" });
-          return false;
+          return checked;
         }
-        return destinationStillPrivate();
+        return (await destinationStillPrivate()) ? { ok: true } : { ok: false, code: "direct-audience-unavailable" };
       },
       capability: {
         read: async (request) => {

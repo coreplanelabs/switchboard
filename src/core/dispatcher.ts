@@ -1,3 +1,11 @@
+import {
+  audienceRefusalOf,
+  audienceRefusalText,
+  noteAudienceRefusal,
+  type AudienceCheck,
+  type AudienceRefusalCode,
+  type AudienceTrace,
+} from "./audienceDecision.js";
 import { requiresFreshSourceTool } from "./runLedger/sessionLog.js";
 import { sourceBinding, type SessionSources } from "./references/receipts.js";
 import { getAgent } from "../agents/registry.js";
@@ -119,16 +127,16 @@ import { claimRun, githubCapabilityFor, type RunDeps } from "./dispatch/run.js";
 import { bindSlackContext, sourceIntakeFor, type SlackContextBinding } from "./dispatch/slackContextBinding.js";
 import {
   privateAudienceRequired,
-  privateAudienceStillValid,
+  privateAudienceDecision,
   recoveredPrivateAudienceLatch,
-  revalidateSavedSlackContext,
+  revalidateSavedSlackContextDecision,
   savedSlackContextNeedsRecheck,
 } from "./dispatch/privateAudience.js";
 import { directAudienceStampOf } from "./runLedger/inboxMessage.js";
 import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { mainAudienceAtPrompt, mainAudienceAtReply, planeRowIdentities } from "./dispatch/mainAudience.js";
-import { readThreadWork } from "../tools/threadWork.js";
+import { readThreadWorkEvidence } from "../tools/threadWork.js";
 import { predicateFor } from "./authz/predicate.js";
 import { channelVisibilityOf, finishChildSetup, writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipContext, type ShipDeps } from "./dispatch/ship.js";
@@ -158,7 +166,6 @@ import { fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
-import type { DirectAudience } from "../tools/mainWork.js";
 import {
   endedPipelineForPrOf,
   establishedMainDmOf,
@@ -734,6 +741,7 @@ export async function dispatch(
   let childSetupFinalizer: (() => void) | undefined;
   let childSetupRefusal: Refusal | undefined;
   let childSetupFinished = false;
+  const audienceTrace: AudienceTrace = { refusal: audienceRefusalOf(resume?.row.state.audienceRefusal) };
   const recordRefusalOnce = async (refusal: Refusal) => {
     if (refusalRecorded) return;
     refusalRecorded = true;
@@ -741,7 +749,7 @@ export async function dispatch(
       childSetupRefusal ??= refusal;
       return;
     }
-    await recordRefusal(deps, msg, io, refusal, ending, trace, operatorEvent);
+    await recordRefusal(deps, msg, io, refusal, ending, trace, operatorEvent, audienceTrace.refusal);
     operatorEvent = undefined;
   };
   // A gate refusal is the site's `Refusal` — its own sentence, the cause from
@@ -749,6 +757,13 @@ export async function dispatch(
   // inside the span, the sentence rendered by the ONE renderer, and the
   // decision recorded as a `door` run.
   const refuse = async (refusal: Refusal, side?: () => Promise<void>) => {
+    if (audienceTrace.refusal) {
+      const writer = ledgerRun ?? reserved;
+      if (writer && (await writer.commitState({ audienceRefusal: audienceTrace.refusal })) === "fenced") {
+        fencedWhileAttaching = true;
+        return;
+      }
+    }
     const cause = stampRefusal(refusal.code);
     await root.span(
       "dispatch.refuse",
@@ -942,7 +957,11 @@ export async function dispatch(
       if (live?.agent === "orchestrator") live.inbox.markUntrustedFollowUp();
     };
     if (directDm && directAudienceStampOf(msg) === undefined) revokePrivateLive();
-    if (directDm) directAudienceVerified = await privateAudienceStillValid(msg, io);
+    if (directDm) {
+      const checked = await privateAudienceDecision(msg, io);
+      directAudienceVerified = checked.ok;
+      if (!checked.ok) noteAudienceRefusal(audienceTrace, checked.code, "prompt", "prompt");
+    }
     if (directDm && !directAudienceVerified) {
       revokePrivateLive();
       await refuse(
@@ -2708,6 +2727,7 @@ export async function dispatch(
     // Recovery cannot prove whether an indirect source was consumed before the
     // crash. Refuse before a saved plan or session can reach the model.
     if (recovered && privateAudienceRequired(msg)) {
+      noteAudienceRefusal(audienceTrace, "recovered-provenance-unproved", "recovery", "prompt");
       await refuse(refusalOf("setup_failed", "This run restarted, so please ask again in a private DM."));
       return ended;
     }
@@ -2729,9 +2749,13 @@ export async function dispatch(
           create: deps.slackContextForRun,
         })
       : undefined;
-    const revalidateSavedSources = (binding: SlackContextBinding) =>
-      revalidateSavedSlackContext(sourceSession, binding.revalidate);
-    if (needsSavedSlackRecheck && (!savedSlackBinding || !(await revalidateSavedSources(savedSlackBinding)))) {
+    const savedSlackCheck: AudienceCheck = needsSavedSlackRecheck
+      ? savedSlackBinding
+        ? await revalidateSavedSlackContextDecision(sourceSession, savedSlackBinding.revalidate)
+        : { ok: false, code: "slack-source-unverified" }
+      : { ok: true };
+    if (!savedSlackCheck.ok) {
+      noteAudienceRefusal(audienceTrace, savedSlackCheck.code, "prompt", "prompt");
       await refuse(
         refusalOf(
           "setup_failed",
@@ -2882,6 +2906,7 @@ export async function dispatch(
                       ? "stopped_soft"
                       : "failed";
                 finishChildSetup(deps, {
+                  audience: audienceTrace,
                   runId,
                   registry,
                   ledgerRun: childReservation,
@@ -3620,7 +3645,8 @@ export async function dispatch(
           })
         : undefined;
     if (mainAudience && !mainAudience.ok) {
-      const reason = mainAudience.reason;
+      noteAudienceRefusal(audienceTrace, mainAudience.code, "prompt", "prompt");
+      const reason = audienceRefusalText(mainAudience.code);
       await refuse(refusalOf("setup_failed", reason), () =>
         card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
       );
@@ -3676,13 +3702,13 @@ export async function dispatch(
         recovered,
         create: deps.slackContextForRun,
       }));
-    const privateAudienceLatch = recoveredPrivateAudienceLatch(msg, recovered);
+    const privateAudienceLatch = Object.assign(audienceTrace, recoveredPrivateAudienceLatch(msg, recovered));
+    if (privateAudienceLatch.code === "recovered-provenance-unproved")
+      noteAudienceRefusal(privateAudienceLatch, "recovered-provenance-unproved", "recovery");
     if (slackContext) privateAudienceLatch.revalidateSources = () => slackContext.sourcesStillValid();
     ledgerRun = await claimRun(deps, {
       msg,
-      verifyDirectAudience: (
-        io as ChannelIO & { verifyDirectAudience?: (audience: DirectAudience) => Promise<boolean> }
-      ).verifyDirectAudience?.bind(io),
+      verifyDirectAudience: io.verifyDirectAudience?.bind(io),
       privateWorkVerifierAvailable: io.verifyDirectAudience !== undefined,
       io,
       admitted: admitted!,
@@ -3731,7 +3757,7 @@ export async function dispatch(
         !(await slackContext.initialize(sources, (next) => ledgerRun?.writeSources(next) ?? Promise.resolve(false)))
       ) {
         privateAudienceLatch.revoked = true;
-        privateAudienceLatch.reason = "source-unavailable";
+        privateAudienceLatch.code = "slack-source-unverified";
         throw new Error("The Slack source receipts could not be saved.");
       }
     }
@@ -4005,28 +4031,30 @@ export async function dispatch(
       root,
       ...(mainAudience?.ok
         ? {
-            publicationRefusal: async () => {
+            publicationCheck: async (): Promise<AudienceCheck> => {
+              let checking: AudienceRefusalCode = "direct-audience-unavailable";
               try {
                 const directSlack = /^slack:D[A-Z0-9_]+$/.test(msg.channelId);
-                const directAudienceStillValid =
+                const directCheck: AudienceCheck =
                   directSlack || mainAudience.audience.sources.length > 0
-                    ? await privateAudienceStillValid(msg, io)
-                    : false;
-                if ((directSlack || mainAudience.audience.sources.length > 0) && !directAudienceStillValid)
-                  return "I can't verify that this Slack DM is private. Please ask me again in your private DM.";
+                    ? await privateAudienceDecision(msg, io)
+                    : { ok: true };
+                if (!directCheck.ok) return directCheck;
+                const directAudienceStillValid = directSlack || mainAudience.audience.sources.length > 0;
+                checking = "mcp-check-unavailable";
                 const fresh = await deps.mcp.toolsFor("orchestrator", {
                   userId: msg.userId,
                   channelId: msg.channelId,
                   ...(msg.directAudience ? { directAudience: msg.directAudience } : {}),
                 });
+                checking = "github-check-unavailable";
                 const readable =
                   ran.githubReadRepos.length > 0 || ran.githubReadUnknown
                     ? await githubCapabilityFor(deps, chatActorOf(deps.config, msg)).readableRepos?.()
                     : [];
-                if (!readable)
-                  return "I can't verify this source's sharing permissions right now. Please ask me to check it again.";
-                if (ran.planeRead && !deps.plane)
-                  return "I can't verify this source's sharing permissions right now. Please ask me to check it again.";
+                if (!readable) return { ok: false, code: checking };
+                checking = "plane-check-unavailable";
+                if (ran.planeRead && !deps.plane) return { ok: false, code: checking };
                 const currentPlaneRows = ran.planeRead
                   ? planeRowIdentities(
                       await (
@@ -4034,10 +4062,13 @@ export async function dispatch(
                       ).table(predicateFor(chatActorOf(deps.config, msg), "runs:read", "run")),
                     )
                   : undefined;
+                checking = "thread-work-check-unavailable";
                 const currentThreadWork =
                   threadWorkSnapshots.length > 0
-                    ? await readThreadWork({ ...fencedRuns, actor: chatActorOf(deps.config, msg) }, agent.name)
+                    ? await readThreadWorkEvidence({ ...fencedRuns, actor: chatActorOf(deps.config, msg) }, agent.name)
                     : undefined;
+                if (currentThreadWork && !currentThreadWork.ok)
+                  return { ok: false, code: "thread-work-check-unavailable" };
                 const checked = mainAudienceAtReply(
                   mainAudience.audience,
                   fresh.servers,
@@ -4055,11 +4086,14 @@ export async function dispatch(
                     unknown: ran.planeReadUnknown || currentPlaneRows?.unknown === true,
                   },
                   directAudienceStillValid,
-                  { exposed: threadWorkSnapshots, current: currentThreadWork },
+                  {
+                    exposed: threadWorkSnapshots,
+                    current: currentThreadWork?.ok ? currentThreadWork.snapshot : undefined,
+                  },
                 );
-                return checked.ok ? undefined : checked.reason;
+                return checked;
               } catch {
-                return "I can't verify this source's sharing permissions right now. Please ask me to check it again.";
+                return { ok: false, code: checking };
               }
             },
           }

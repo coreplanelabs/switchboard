@@ -1,3 +1,4 @@
+import { booleanAudienceVerifier } from "./testing/audienceVerifier.js";
 import { testSlackCapability, testSessionSources } from "./testing/slackSources.js";
 import { sourceHash, type SessionSources } from "./references/receipts.js";
 import { createSlackContextCapability, type SlackContextClient } from "../channels/slack/context.js";
@@ -462,10 +463,12 @@ describe("dispatch", () => {
   const mainDmIO = (history: HistoryItem[] = []) => {
     const out = fakeIO(history);
     out.io.directAudience = () => directMainAudience;
-    out.io.verifyDirectAudience = async (audience) =>
-      audience.channelId === directMainAudience.channelId &&
-      audience.userId === directMainAudience.userId &&
-      audience.threadKey === directMainAudience.threadKey;
+    out.io.verifyDirectAudience = booleanAudienceVerifier(
+      async (audience) =>
+        audience.channelId === directMainAudience.channelId &&
+        audience.userId === directMainAudience.userId &&
+        audience.threadKey === directMainAudience.threadKey,
+    );
     return out;
   };
 
@@ -866,7 +869,7 @@ describe("dispatch", () => {
   it("refuses unverified main destinations before any reference read", async () => {
     const fixture = await mainSourceFixture({ mixed: true });
     const { io } = mainDmIO();
-    io.verifyDirectAudience = async () => false;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => false);
     await dispatch(fixture.deps, fixture.question, io);
     expect(fixture.requests).toHaveLength(0);
     expect(fixture.fetches).not.toHaveBeenCalled();
@@ -1311,6 +1314,8 @@ describe("dispatch", () => {
       };
       deps.githubApi = api;
       const registry = new RunRegistry({ genId: () => "main-private", genToken: () => "private-token" });
+      const audienceStore = new InMemoryRunStore();
+      deps.runHistoryWriter = createRunHistoryWriter({ store: audienceStore, warn: () => {}, sleep: async () => {} });
       deps.runRegistry = registry;
       const { io, replies, statuses } = mainDmIO();
       const streamed: RunEvent[] = [];
@@ -1326,6 +1331,10 @@ describe("dispatch", () => {
       });
       expect(publicSurfaces).not.toContain("17 failed signups");
       expect(publicSurfaces).not.toContain("The README says");
+      await deps.runHistoryWriter.settled();
+      expect((await audienceStore.get("main-private"))?.audienceRefusal).toEqual(
+        revoke ? { version: 1, causeAt: "reply", withheldAt: "reply", code: "github-access-lost" } : undefined,
+      );
       if (revoke) {
         expect(replies.join(" ")).not.toContain("The README says 17");
         expect(replies.join(" ")).toContain("ask me to check the source again");
@@ -1374,9 +1383,18 @@ describe("dispatch", () => {
       stop: async () => ({ kind: "unavailable", reason: "unused" }),
     });
     const registry = new RunRegistry({ genId: () => "main-plane", genToken: () => "private-token" });
+    const audienceStore = new InMemoryRunStore();
+    deps.runHistoryWriter = createRunHistoryWriter({ store: audienceStore, warn: () => {}, sleep: async () => {} });
     deps.runRegistry = registry;
     const { io, replies, statuses } = mainDmIO();
     await dispatch(deps, mainDm("what is happening in the fleet?"), io);
+    await deps.runHistoryWriter.settled();
+    expect((await audienceStore.get("main-plane"))?.audienceRefusal).toEqual({
+      version: 1,
+      causeAt: "reply",
+      withheldAt: "reply",
+      code: "plane-row-no-longer-visible",
+    });
     expect(tableReads).toBe(2);
     expect(JSON.stringify(requests[1]?.messages)).toContain("private-worker");
     expect(JSON.stringify({ replies, statuses, run: registry.snapshot("main-plane", "private-token") })).not.toContain(
@@ -1410,6 +1428,7 @@ describe("dispatch", () => {
       threadKey: "slack:DALICE:1.0",
       channelVisibility: "private",
     });
+    deps.runHistoryWriter = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
     const readStored = deps.runStore.list.bind(deps.runStore);
     deps.runStore.list = async (opts) => {
       const rows = await readStored(opts);
@@ -1426,6 +1445,13 @@ describe("dispatch", () => {
     expect(toolResult && "content" in toolResult ? String(toolResult.content) : "").not.toContain(
       "saved work is unavailable",
     );
+    await deps.runHistoryWriter.settled();
+    expect((await deps.runStore.get("main-thread-work"))?.audienceRefusal).toEqual({
+      version: 1,
+      causeAt: "reply",
+      withheldAt: "reply",
+      code: "thread-work-snapshot-changed",
+    });
     expect(replies.join(" ")).not.toContain("The earlier work is complete.");
     expect(replies.join(" ")).toContain("ask me to check the source again");
   });
@@ -1489,7 +1515,7 @@ describe("dispatch", () => {
     const registry = new RunRegistry({ genId: () => "main-sharing-flip", genToken: () => "private-token" });
     deps.runRegistry = registry;
     const { io, replies, statuses } = mainDmIO();
-    io.verifyDirectAudience = async () => !shared;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => !shared);
     await dispatch(deps, mainDm("read the signup count"), io);
     expect(shared).toBe(true);
     expect(calls).toBeGreaterThan(0);
@@ -8225,7 +8251,11 @@ describe("cross-session memory WRITE path", () => {
     await dispatch(
       deps,
       { ...msg("how do we deploy?", "slack:UALICE"), ...dm, directAudience: { kind: "slack-unshared-im", ...dm } },
-      { ...fakeIO(longHistory).io, directAudience: () => dm, verifyDirectAudience: async () => true },
+      {
+        ...fakeIO(longHistory).io,
+        directAudience: () => dm,
+        verifyDirectAudience: booleanAudienceVerifier(async () => true),
+      },
     );
     await drainReflections();
     expect((await store.list("org:acme", 10)).map((r) => r.text)).toEqual([]);
@@ -9666,7 +9696,11 @@ describe("run history write path", () => {
     await dispatch(
       dm.deps,
       { ...msg("hello there"), ...dmAddress, directAudience: { kind: "slack-unshared-im", ...dmAddress } },
-      { ...fakeIO().io, directAudience: () => dmAddress, verifyDirectAudience: async () => true },
+      {
+        ...fakeIO().io,
+        directAudience: () => dmAddress,
+        verifyDirectAudience: booleanAudienceVerifier(async () => true),
+      },
     );
     await dm.writer.settled();
     expect((await dm.store.get("run-dm"))!.channelVisibility).toBe("dm");
@@ -12460,7 +12494,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       threadKey: "slack:DALICE:1.0",
     };
     io.directAudience = () => directAudience;
-    io.verifyDirectAudience = async () => true;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
     await dispatch(deps, { ...msg("how many signups failed?", "slack:UADMIN"), ...directAudience, directAudience }, io);
     await writer.settled();
     expect(checkedAtModel).toBe(true);
@@ -12541,7 +12575,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       const { deps, writer } = wired(provider, { ledger });
       const { io, replies } = ioWithCard();
       io.directAudience = () => ({ channelId: "slack:DALICE", userId: "slack:UADMIN", threadKey: "slack:DALICE:1.0" });
-      io.verifyDirectAudience = async () => true;
+      io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
       const plan = {
         kind: "resume" as const,
         messages: transcript,
@@ -19337,7 +19371,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       msg: { ...directAudience, text: "How many users failed to sign up?", directAudience },
       io: {
         directAudience: () => directAudience,
-        verifyDirectAudience: async () => true,
+        verifyDirectAudience: booleanAudienceVerifier(async () => true),
       } as unknown as ChannelIO,
       visibility: "dm",
       create: () => testSlackCapability(directAudience, async () => "private sign-up count: 17"),
@@ -19377,7 +19411,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       { role: "user", text: "How many users failed to sign up?", at: NOW - 20_000 },
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
-    io.verifyDirectAudience = async () => false;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => false);
     const historyRead = vi.spyOn(io, "history");
     const sessionRead = vi.spyOn(t.deps.runLedger, "readSessionTail");
     let seeded: ChatMessage[] | undefined;
@@ -19411,7 +19445,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       live.inbox.onUntrustedFollowUp(revoked);
       const { io, replies } = fakeIO();
       io.directAudience = () => directAudience;
-      io.verifyDirectAudience = async () => true;
+      io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
       const historyRead = vi.spyOn(io, "history");
       const sessionRead = vi.spyOn(deps.runLedger, "readSessionTail");
       await dispatch(deps, { ...dm, ...indirect, text: "private account balance: 17" }, io);
@@ -19469,7 +19503,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;
-    io.verifyDirectAudience = async () => true;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
     let seeded: ChatMessage[] | undefined;
     await vi.mocked(runPiHarnessOpen).withImplementation(
       async (_deps, run) => {
@@ -19532,7 +19566,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;
-    io.verifyDirectAudience = async () => true;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
     let seeded: ChatMessage[] | undefined;
     await vi.mocked(runPiHarnessOpen).withImplementation(
       async (_deps, run) => {
@@ -19596,7 +19630,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;
-    io.verifyDirectAudience = async () => true;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
     let seeded: ChatMessage[] | undefined;
     await vi.mocked(runPiHarnessOpen).withImplementation(
       async (_deps, run) => {
@@ -19634,7 +19668,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       { role: "assistant", text: privateText, at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;
-    io.verifyDirectAudience = async () => true;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
     let seeded: ChatMessage[] | undefined;
     await vi.mocked(runPiHarnessOpen).withImplementation(
       async (_deps, run) => {
@@ -19665,7 +19699,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     });
     const { io, replies } = fakeIO([]);
     io.directAudience = () => directAudience;
-    io.verifyDirectAudience = async () => true;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
     let seeded: ChatMessage[] | undefined;
     await vi.mocked(runPiHarnessOpen).withImplementation(
       async (_deps, run) => {
@@ -19675,6 +19709,15 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       async () =>
         dispatch(t.deps, { ...directAudience, text: "Continue", directAudience }, io, { restartOf: "run-old" }),
     );
+    await t.writer.settled();
+    const refusals = (await t.store.list({})).filter((run) => run.audienceRefusal !== undefined);
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0].audienceRefusal).toEqual({
+      version: 1,
+      causeAt: "recovery",
+      withheldAt: "prompt",
+      code: "recovered-provenance-unproved",
+    });
     expect(seeded).toBeUndefined();
     expect(replies.join(" ")).toContain("run restarted");
   });
@@ -19733,7 +19776,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
         { role: "user", user: directAudience.userId, text: "Read both sources", at: NOW - 20_000 },
       ]);
       io.directAudience = () => directAudience;
-      io.verifyDirectAudience = async () => true;
+      io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
       let seeded: ChatMessage[] | undefined;
       let prompt: string | undefined;
       await vi.mocked(runPiHarnessOpen).withImplementation(
@@ -19801,7 +19844,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;
-    io.verifyDirectAudience = async () => true;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
     let seeded: ChatMessage[] | undefined;
     await vi.mocked(runPiHarnessOpen).withImplementation(
       async (_deps, run) => {
@@ -19855,7 +19898,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;
-    io.verifyDirectAudience = async () => true;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
     let seeded: ChatMessage[] | undefined;
     await vi.mocked(runPiHarnessOpen).withImplementation(
       async (_deps, run) => {
@@ -19917,7 +19960,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       { role: "assistant", text: "I found the count.", at: NOW - 11_000 },
     ]);
     io.directAudience = () => directAudience;
-    io.verifyDirectAudience = async () => true;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
     await vi.mocked(runPiHarnessOpen).withImplementation(
       async () => piAnswered(privateText),
       async () => dispatch(t.deps, { ...directAudience, text: "Fix it", directAudience }, io),

@@ -1,3 +1,4 @@
+import { booleanAudienceVerifier } from "../../core/testing/audienceVerifier.js";
 import { InMemoryRunLedger } from "../../core/runLedger/inMemory.js";
 import { sessionSeed } from "../../core/dispatch/seed.js";
 import { bindSlackContext } from "../../core/dispatch/slackContextBinding.js";
@@ -243,7 +244,10 @@ describe("Slack context adapter", () => {
       threadKey: h.msg.threadKey,
       userId: h.msg.userId,
     };
-    const io = { directAudience: () => directAudience, verifyDirectAudience: async () => true } as unknown as ChannelIO;
+    const io = {
+      directAudience: () => directAudience,
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
+    } as unknown as ChannelIO;
     const bound = (await bindSlackContext({
       agentName: "orchestrator",
       actor: h.actor,
@@ -299,9 +303,9 @@ describe("Slack context adapter", () => {
 
     // A changed source after the read seals publication, even with the same DM audience.
     raw[0].text = "edited after read";
-    expect(await restored.sourcesStillValid()).toBe(false);
+    expect(await restored.sourcesStillValid()).toMatchObject({ ok: false });
     raw[0].text = "Referenced thread · #literal marker and trusted source";
-    expect(await restored.sourcesStillValid()).toBe(false);
+    expect(await restored.sourcesStillValid()).toMatchObject({ ok: false });
     expect((await ledger.readSessionTail(key, 500)).sources?.status).toBe("revoked");
   });
 
