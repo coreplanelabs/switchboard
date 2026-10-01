@@ -51,6 +51,7 @@ import {
   truncate,
   type ExecOptions,
   type Executor,
+  type PublicationTransport,
   type ReleaseMode,
   type ReleaseResult,
 } from "./executor.js";
@@ -1956,7 +1957,10 @@ export class ResidentExecutor implements Executor {
     // on every exec, resolved fresh and winning a clash — the same order as
     // the sandbox's credential over a caller's variables.
     const identityEnv = this.opts.resolveEnvs ? await this.opts.resolveEnvs() : {};
-    const env = { ...(opts?.env ?? {}), ...identityEnv };
+    const env = {
+      ...(opts?.env ?? {}),
+      ...identityEnv,
+    };
     if (Object.keys(env).length > 0) body.env = env;
     const { status, data } = await this.opWithReattach("/exec", body, {
       signal: opts?.signal,
@@ -2002,6 +2006,30 @@ export class ResidentExecutor implements Executor {
     const exitCode = Number(data.exitCode ?? 0);
     if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);
     return truncate(parts || "(no output)");
+  }
+
+  async publishBranch(input: PublicationTransport): Promise<string> {
+    // No automatic reissue: a lost response may follow an accepted push. The
+    // Git Door's durable outcome is reconciled by the caller before retry.
+    const { status, data } = await this.call(
+      "/publish",
+      {
+        repo: input.repo,
+        doorOrigin: input.doorOrigin,
+        branch: input.branch,
+        next: input.next,
+        ...(input.old ? { old: input.old } : {}),
+        bearer: input.bearer,
+      },
+      BASH_TIMEOUT_MS + EXEC_CALL_MARGIN_MS,
+      input.signal,
+      input.span,
+    );
+    if (status !== 200 || typeof data.error === "string")
+      return `exit 1: publication refused: ${redactSecrets(String(data.error ?? `HTTP ${status}`))}`;
+    const parts = [data.stdout, data.stderr].filter(Boolean).join("\n--- stderr ---\n");
+    const exitCode = Number(data.exitCode ?? 0);
+    return exitCode === 0 ? truncate(parts || "(no output)") : truncate(`exit ${exitCode}:\n${parts}`);
   }
 
   async readFile(path: string, opts?: ExecTraceOptions): Promise<string> {

@@ -1864,6 +1864,30 @@ describe("pushedBranchOf (the branch a run's own git push named)", () => {
       expect(track(legacy, bash(PUSH_NEW.replace(/feat\/x/g, "receipt/x"), { callId: "c1" }))).toBeUndefined();
     });
 
+    it("credits a typed publication only with its own successful Git result", () => {
+      const t = trackPushedBranch();
+      t.observe({ type: "tool_call", tool: "publish_branch", callId: "typed", summary: "publish branch" });
+      t.observe({
+        type: "tool_result",
+        tool: "publish_branch",
+        callId: "other",
+        summary: "wrong",
+        ok: true,
+        output: PUSH_NEW,
+      });
+      expect(t.branch()).toBeUndefined();
+      t.observe({
+        type: "tool_result",
+        tool: "publish_branch",
+        callId: "typed",
+        summary: "pushed",
+        ok: true,
+        output: PUSH_NEW,
+      });
+      expect(t.branch()).toBe("feat/x");
+      expect(t.startPoint()).toEqual({ kind: "created" });
+    });
+
     it("a result with no callId, or one whose call was never seen, is not paired to any push", () => {
       expect(track(bash(PUSH_NEW))).toBeUndefined();
       expect(track(call("c1", "git push -u origin feat/x"), bash(PUSH_NEW, { callId: "c2" }))).toBeUndefined();
@@ -2252,6 +2276,67 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     expect(out.summary).toContain("pushed the unpushed commits");
     expect(w.commands.some((c) => c.startsWith("git commit"))).toBe(false);
     expect(w.commands).toContain("git push origin 'HEAD:refs/heads/plan/p/u1'");
+  });
+
+  it("binds a runner-owned checkpoint to its checked-out source commit before Git can push", async () => {
+    const head = "b".repeat(40);
+    const w = fakeExecutor({
+      "git status": "\n",
+      "git rev-list": "1\n",
+      "git rev-parse HEAD": head,
+      "git symbolic-ref": "plan/p/u1\n",
+    });
+    const admitted: string[] = [];
+    const out = await salvageBudgetPush(w.executor, {
+      branch: "plan/p/u1",
+      cue: "completion",
+      admitPush: async (sha) => {
+        admitted.push(sha);
+        return () => admitted.push("released");
+      },
+    });
+    expect(out.pushed).toBe(false);
+    expect(out.summary).toContain("isolated runner-owned publication transport is unavailable");
+    expect(admitted).toEqual([]);
+    expect(w.commands.some((command) => command.startsWith("git push"))).toBe(false);
+    const isolated = fakeExecutor({
+      "git status": "\n",
+      "git rev-list": "1\n",
+      "git rev-parse HEAD": head,
+      "git symbolic-ref": "plan/p/u1\n",
+    });
+    const seenBearers: string[] = [];
+    const verified = await salvageBudgetPush(
+      {
+        exec: isolated.executor.exec,
+        publishBranch: async (input) => {
+          seenBearers.push(input.bearer);
+          return "To https://door.example/git/acme/api";
+        },
+      },
+      {
+        branch: "plan/p/u1",
+        publicationDoor: { repo: "acme/api", origin: "https://door.example" },
+        admitPush: async () => ({ release: () => {}, publicationBearer: "effect-only" }),
+      },
+    );
+    expect(verified.pushed).toBe(true);
+    expect(seenBearers).toEqual(["effect-only"]);
+    expect(isolated.commands.some((command) => command.startsWith("git push"))).toBe(false);
+    const wrong = fakeExecutor({
+      "git status": "\n",
+      "git rev-list": "1\n",
+      "git symbolic-ref": "main\n",
+    });
+    const refused = await salvageBudgetPush(wrong.executor, {
+      branch: "plan/p/u1",
+      cue: "completion",
+      admitPush: async () => {
+        throw Error("should not run");
+      },
+    });
+    expect(refused.pushed).toBe(false);
+    expect(wrong.commands.some((cmd) => cmd.startsWith("git push"))).toBe(false);
   });
 
   it("an existing-PR publication fence leaves committed work unpublished when blocked and uses the atomic lease when allowed", async () => {

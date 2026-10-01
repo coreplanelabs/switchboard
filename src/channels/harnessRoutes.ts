@@ -212,7 +212,7 @@ export async function handleHarnessRequest(deps: HarnessRouteDeps, req: HarnessR
   const ask = askOf(req.body);
   if (!ask) return { status: 400, body: { error: "invalid_body" } };
   if (req.path === HARNESS_AUTHORIZE_PATH) {
-    const answer = authorizeToolCall(harness, ask);
+    const answer = await authorizeToolCall(harness, ask);
     deps.log?.(`[harness] run=${door.runId} authorize ${ask.tool} → ${answer.allow ? "allow" : "refuse"}`);
     return { status: 200, body: { ...answer } };
   }

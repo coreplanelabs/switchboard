@@ -120,6 +120,19 @@ describe("LocalExecutor exec env", () => {
       delete process.env.ANTHROPIC_API_KEY;
     }
   });
+  it("gives the runner-owned effect credential precedence over the run bearer without changing ordinary env precedence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-local-effect-"));
+    const ex = new LocalExecutor(dir, async () => ({ GH_ENTERPRISE_TOKEN: "model-bearer" }));
+    expect(
+      (
+        await ex.exec('printf %s "$GH_ENTERPRISE_TOKEN"', {
+          env: { GH_ENTERPRISE_TOKEN: "forged" },
+        })
+      ).trim(),
+    ).toBe("model-bearer");
+    expect("publishBranch" in ex).toBe(false);
+  });
+
   it("without an env the command inherits the process environment exactly as before", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sb-local-env-"));
     process.env.SWB_TEST_INHERIT_PROBE = "inherited";

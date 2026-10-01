@@ -2427,7 +2427,7 @@ class ScriptedServe {
     // The plugin asks `/harness/authorize` before `/harness/tool`: during the
     // run's write-up the LiveHarness's `toolsBlocked` refuses the call (the same
     // refusal pi's relay makes), and the tool never runs in the bot.
-    const authorized = authorizeToolCall(live, { toolCallId: callId, tool, input });
+    const authorized = await authorizeToolCall(live, { toolCallId: callId, tool, input });
     if (!authorized.allow) return [{ type: "text", text: authorized.reason }];
     const answer = await runRelayedTool(live, { toolCallId: callId, tool, input });
     const text = answer.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n");

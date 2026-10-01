@@ -11,6 +11,7 @@
 // counts turns for the guard and says `💭 thought for …` where the loop would.
 // Pure over the event records: the harness feeds it and acts on what it says.
 
+import { isDeepStrictEqual } from "node:util";
 import { formatDuration } from "../../time/formatDuration.js";
 import {
   COMMAND_CAP,
@@ -207,7 +208,10 @@ export class PiBridge {
   private modelCallOpen = false;
   /** The calls under way: their span, their tool, and whether their end is
    *  judged against the gate (harness-pi item 7). */
-  private readonly openTools = new Map<string, { span: Span | undefined; tool: string; judged: boolean }>();
+  private readonly openTools = new Map<
+    string,
+    { span: Span | undefined; tool: string; judged: boolean; command?: string; input?: unknown }
+  >();
   /** The open calls an abort was sent for (`markOpenCallsCut`): their failed
    *  end, when pi answers it, is the abort's cut and not a settle — the result
    *  is marked `cut`, and the workspace's release reads the command as one that
@@ -434,9 +438,15 @@ export class PiBridge {
     const tool = str(event.toolName);
     const callId = str(event.toolCallId);
     const span = this.agentSpan?.start(`tool.${tool}`);
-    this.openTools.set(callId, { span, tool, judged: this.judgeGate });
-    this.toolCalls++;
     const input = isRecord(event.args) ? event.args : undefined;
+    this.openTools.set(callId, {
+      span,
+      tool,
+      judged: this.judgeGate,
+      ...(input ? { input } : {}),
+      ...(tool === "bash" && typeof input?.command === "string" ? { command: input.command } : {}),
+    });
+    this.toolCalls++;
     const command =
       tool === "bash" && typeof input?.command === "string"
         ? { command: redactAndCap(input.command, COMMAND_CAP) }
@@ -573,6 +583,24 @@ export class PiBridge {
    *  end: what a relayed request that arrived ahead of the poll waits for. */
   callOpen(callId: string): boolean {
     return this.openTools.has(callId);
+  }
+
+  /** A model bearer alone cannot invent a publication ask: the bridge must
+   * have observed this exact bash input from pi before the gate can admit it. */
+  effectCallMatches(callId: string, tool: string, input: unknown): boolean {
+    const open = this.openTools.get(callId);
+    return (
+      open?.tool === tool &&
+      isDeepStrictEqual(open.input, input) &&
+      [...this.openTools.keys()].every((id) => id === callId)
+    );
+  }
+
+  pushCallMatches(callId: string, command: string): boolean {
+    // No other tool may still be running when a shell gains a Door slot.
+    // A run-scoped bearer cannot distinguish the receive-pack of two live
+    // processes; an already-open call must settle before publication starts.
+    return this.openTools.get(callId)?.command === command && [...this.openTools.keys()].every((id) => id === callId);
   }
 
   /** What the run is at right now, for the budget note: the open tool calls by

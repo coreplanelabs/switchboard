@@ -271,13 +271,21 @@ describe("resident prompt variants", () => {
     expect(sys).not.toMatch(/1\. Create a branch with a descriptive name off the bound branch/);
   });
 
-  it("resident coding uses the exact leased push for an existing PR", () => {
+  it("resident coding publishes through a runner-owned effect rather than the model shell", () => {
     const sys = AGENTS.coding.residentSystem!;
-    expect(sys).toContain("git push -u origin <branch>");
-    expect(sys).toContain("--force-with-lease=refs/heads/<branch>:<authorized-old-head-sha>");
-    expect(sys).toContain("<branch>:refs/heads/<branch>");
-    expect(sys).toMatch(/standalone git push command/);
-    expect(sys).toMatch(/without trusted publication authority, keep the commit local/);
+    expect(sys).toContain("publish_branch");
+    expect(sys).toContain("one-use Git Door credential");
+    expect(sys).toContain("model shell cannot publish");
+    expect(sys).not.toContain("one standalone git push command");
+    expect(sys).toContain("Without the tool or trusted publication authority, keep the commit local");
+  });
+
+  it("every coding workspace refuses shell publication without a runner-owned effect", () => {
+    for (const prompt of [AGENTS.coding.system, AGENTS.coding.residentSystem!, AGENTS.coding.seededSystem!]) {
+      expect(prompt).toContain("publish_branch");
+      expect(prompt).toContain("Without the tool or trusted publication authority, keep the commit local");
+      expect(prompt).not.toContain("git push -u origin <branch>");
+    }
   });
 
   it("fallback prompt still clones; review still reads the diff with gh", () => {
@@ -495,7 +503,8 @@ describe("coding prompts: push then submit_pr_description (opening the PR is the
 
   it("both coding prompts instruct pushing the branch, then submitting the typed description", () => {
     for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
-      expect(sys).toMatch(/push the branch/i);
+      expect(sys).toContain("publish_branch");
+      expect(sys).toContain("Without the tool or trusted publication authority, keep the commit local");
       expect(sys).toContain("submit_pr_description");
       expect(sys).toMatch(/Switchboard renders the .*body/i);
       expect(sys).toMatch(/opens \(or updates\) the pull request/i);
@@ -566,7 +575,7 @@ describe("coding prompts: checks by cost — push before the expensive ones (age
   it("every coding prompt's workflow proves the change with the cheapest checks, pushes, and hands the full suite to CI — the push step comes before the CI step, and no step tells the run to run the expensive checks itself", () => {
     for (const sys of codingPrompts()) {
       const cheap = sys.search(/Prove the change with the cheapest checks that can/);
-      const push = sys.search(/push the branch[^\n]*— before any full suite, build or full verification/);
+      const push = sys.search(/Use the runner-owned `publish_branch` tool/);
       const expensive = sys.search(
         /CI runs the full suite, the typecheck and the full verification on that push — you never run them yourself/,
       );
@@ -1539,7 +1548,7 @@ describe("seeded prompt variants", () => {
   });
 
   it("the coding variant pushes and submits the description; the review variant reads the diff from the checkout and keeps gh for the PR's metadata", () => {
-    expect(AGENTS.coding.seededSystem!).toContain("git push -u origin");
+    expect(AGENTS.coding.seededSystem!).toContain("publish_branch");
     expect(AGENTS.coding.seededSystem!).toContain("submit_pr_description");
     expect(AGENTS.review.seededSystem!).toContain("gh pr view");
     expect(AGENTS.review.seededSystem!).toContain("git diff origin/<base>...HEAD");

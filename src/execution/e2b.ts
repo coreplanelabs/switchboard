@@ -221,7 +221,7 @@ export class E2BExecutor implements Executor {
 
   private async run(command: string, opts?: ExecOptions): Promise<string> {
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
-    const envs = await this.resolveEnvs();
+    const envs = (await this.resolveEnvs()) ?? {};
     const result = await this.sbx.commands.run(command, { cwd: WORKDIR, timeoutMs, envs }).catch((err: unknown) => {
       const e = err as { name?: string; exitCode?: number; stdout?: string; stderr?: string; message?: string };
       // The SDK's deadline kill throws TimeoutError with no exit code —

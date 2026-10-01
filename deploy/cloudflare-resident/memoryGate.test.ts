@@ -43,9 +43,9 @@ describe("the reader is the exec choke point, one exec per sample, never on a sl
 
   it("no polling loop was added: the sample sites are the two route gates and the measure step, and none arms a timer", () => {
     const sites = residentDO.match(/this\.(?:sampleMemory|memoryGate)\(/g) ?? [];
-    // memoryGate's own sampleMemory call + the exec gate + the attach gate +
-    // the measure step's sample: four call sites, nothing else.
-    expect(sites.length).toBe(4);
+    // memoryGate's own sampleMemory call + the exec, publish and attach gates +
+    // the measure step's sample: five call sites, nothing else.
+    expect(sites.length).toBe(5);
     const guard = method("memoryGate") + method("sampleMemory") + method("readCgroup");
     expect(guard).not.toMatch(/setInterval|setTimeout|schedule\(/);
   });

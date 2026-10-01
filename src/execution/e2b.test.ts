@@ -121,6 +121,7 @@ describe("E2B reused sandbox credential boundary", () => {
       });
       await ex.exec("git status");
       expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ envs: { GH_ENTERPRISE_TOKEN: "run-bearer" } });
+      expect("publishBranch" in ex).toBe(false);
     } finally {
       kill.mockRestore();
       create.mockRestore();
@@ -231,6 +232,14 @@ describe("E2BExecutor credential file refresh", () => {
     expect(out).toContain("Invalid username or token");
     expect(credential).toHaveBeenLastCalledWith({ fresh: true });
     expect(run.mock.calls.filter(([c]) => String(c).includes("credential.helper")).length).toBe(2);
+  });
+
+  it("does not expose a runner-owned publication transport in the model sandbox", async () => {
+    const { ex } = e2bWith(
+      async () => OK,
+      async () => ({}),
+    );
+    expect("publishBranch" in ex).toBe(false);
   });
 
   it("a run-bearer push refusal is returned once without an App credential source", async () => {

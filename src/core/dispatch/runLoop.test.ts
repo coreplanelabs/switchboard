@@ -123,6 +123,14 @@ import { publicationReceiptsFromState, restoredPublicationHead } from "../public
 const NOW = 10_000;
 const THREAD = "slack:CX:1.0";
 
+/** Scripted calls known to be refused or allowed without a source read.
+ * Fail the fixture if it starts exercising the asynchronous Door gate. */
+function immediateToolVerdict(harness: LiveHarness, ask: ToolCallAsk) {
+  const answer = authorizeToolCall(harness, ask);
+  if (answer instanceof Promise) throw new Error("this scripted tool call needs an awaited publication gate");
+  return answer;
+}
+
 const YAML = `
 organization: acme
 providers:
@@ -3010,6 +3018,81 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(rec.events.some((e) => e.type === "pushed_head" || e.type === "pr_opened")).toBe(false);
   });
 
+  it("serves the runner-owned publication effect only to a write run with a bound door and bearer store", async () => {
+    const bindings = new GitBindings();
+    bindings.register("run-l", { repo: "o/r", ref: "refs/heads/fix/owned" }, undefined, async () => true);
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    const s = endingIn(
+      async (_deps, run) => {
+        expect(run.tools.find((tool) => tool.name === "publish_branch")).toBeDefined();
+        expect(run.rules.noShellPush).toBe(true);
+        return sessionAnswering("done");
+      },
+      { repoCtx: { repo: "o/r", baseRef: "main" }, executor: { publishBranch: async () => "" } },
+    );
+    s.deps.githubBindings = bindings;
+    s.deps.runBearers = bearers;
+    const bearer = mintFor(bearers, s);
+    answered(await runLoop(s.deps, { ...s.ctx, bearer }));
+    s.ending.drain(undefined);
+    await s.writer.settled();
+  });
+
+  it("refuses model-shell publication without opening a Door slot, including a literal owned push", async () => {
+    const bindings = new GitBindings();
+    const ref = "fix/owned";
+    bindings.register("run-l", { repo: "o/r" }, undefined, async () => true);
+    const s = endingIn(
+      async (_deps, run) => {
+        expect(bindings.toolPushIsRequired("run-l")).toBe(true);
+        const harness: LiveHarness = {
+          runId: run.runId,
+          rules: { ...run.rules, identity: "write" },
+          tools: [],
+          toolContext: run.toolContext,
+          admitPush: run.admitPush,
+          emit: (e) => run.onEvent?.(e),
+          gateSaw: () => {},
+          toolSpan: () => undefined,
+          toolsBlocked: () => undefined,
+        };
+        const spawn = `node -e 'require("child_process").execFileSync("git",process.argv.slice(1))' push origin ${ref}:${ref} & npm version patch`;
+        expect(
+          await authorizeToolCall(harness, { toolCallId: "spawn", tool: "bash", input: { command: spawn } }),
+        ).toMatchObject({ allow: false });
+        expect(bindings.hasToolPush("run-l")).toBe(false);
+        // Inline interpreters are not a bound publication call, even when
+        // neither executable nor subcommand appears in the shell source.
+        const opaque = `node -e 'require("child_process").execFileSync(String.fromCharCode(103,105,116),["pu"+"sh","origin","${ref}:${ref}"])'`;
+        expect(
+          await authorizeToolCall(harness, { toolCallId: "opaque", tool: "bash", input: { command: opaque } }),
+        ).toMatchObject({ allow: false });
+        expect(bindings.hasToolPush("run-l")).toBe(false);
+        for (const command of [`git push origin HEAD:${ref}`, `git push upstream ${ref}:main`])
+          expect(
+            await authorizeToolCall(harness, { toolCallId: "bad", tool: "bash", input: { command } }),
+          ).toMatchObject({ allow: false });
+        expect(
+          await authorizeToolCall(harness, {
+            toolCallId: "owned",
+            tool: "bash",
+            input: { command: `git push origin ${ref}:${ref}` },
+          }),
+        ).toMatchObject({ allow: false });
+        expect(bindings.hasToolPush("run-l")).toBe(false);
+        return sessionAnswering("done");
+      },
+      {
+        repoCtx: { repo: "o/r", baseRef: "main" },
+        executor: { exec: async () => "" },
+      },
+    );
+    s.deps.githubBindings = bindings;
+    answered(await runLoop(s.deps, s.ctx));
+    s.ending.drain(undefined);
+    await s.writer.settled();
+  });
+
   it("commits a Git-door existing-PR intent before forwarding and its accepted head before reporting success", async () => {
     const old = "a".repeat(40);
     const head = "b".repeat(40);
@@ -3459,7 +3542,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
             // The gate's allowance starts the fence, not the delayed log of
             // the tool result. Even a parallel next ask cannot mutate the ref.
             expect(
-              authorizeToolCall(harness, {
+              immediateToolVerdict(harness, {
                 toolCallId: "parallel",
                 tool: "bash",
                 input: { command: `git update-ref -d refs/heads/${ref}` },
@@ -3480,7 +3563,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
           if (mode === "delayed-tip") {
             await tipStarted;
             const command = `git update-ref -d refs/heads/${ref}`;
-            const pi = authorizeToolCall(harness, { toolCallId: "delete", tool: "bash", input: { command } });
+            const pi = immediateToolVerdict(harness, { toolCallId: "delete", tool: "bash", input: { command } });
             const oc = judgeOpenCodeAsk("shell", [command], harness.rules, new Set());
             if (pi.allow || oc.reply === "once") localHead = "";
             releaseTip();
@@ -4282,7 +4365,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     const registry = new HarnessRegistry();
     const container = new FakeHarnessContainer();
     const commands: string[] = [];
-    let laterPush: ReturnType<typeof authorizeToolCall> | undefined;
+    let laterPush: Awaited<ReturnType<typeof authorizeToolCall>> | undefined;
     container.onStdin = (line, c) => {
       const cmd = JSON.parse(line) as Record<string, unknown>;
       if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
@@ -4318,7 +4401,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
           { type: "message_end", message: call },
           { type: "tool_execution_start", toolCallId: "p1", toolName: "bash", args: input },
         );
-        laterPush = authorizeToolCall(live, { toolCallId: "p1", tool: "bash", input });
+        laterPush = immediateToolVerdict(live, { toolCallId: "p1", tool: "bash", input });
         c.emit(
           {
             type: "tool_execution_end",
@@ -5809,7 +5892,7 @@ describe("the pi harness — the review preset", () => {
         { type: "message_end", message: t2 },
         { type: "tool_execution_start", toolCallId: "c2", toolName: "edit", args: edit },
       );
-      const gate = authorizeToolCall(live, { toolCallId: "c2", tool: "edit", input: edit });
+      const gate = immediateToolVerdict(live, { toolCallId: "c2", tool: "edit", input: edit });
       c.emit(
         {
           type: "tool_execution_end",
@@ -6091,7 +6174,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
         { type: "message_end", message: t1 },
         { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: shell },
       );
-      const gate = authorizeToolCall(live, { toolCallId: "c1", tool: "bash", input: shell });
+      const gate = immediateToolVerdict(live, { toolCallId: "c1", tool: "bash", input: shell });
       refusals.push(gate);
       c.emit(
         {
@@ -6315,7 +6398,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
           { type: "message_end", message: t1 },
           { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: shell },
         );
-        const gate = authorizeToolCall(live, { toolCallId: "c1", tool: "bash", input: shell });
+        const gate = immediateToolVerdict(live, { toolCallId: "c1", tool: "bash", input: shell });
         refusals.push(gate);
         c.emit(
           {

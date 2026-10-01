@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
-import { RunBearerStore } from "../core/modelProxy/runBearers.js";
+import { bearerHashOf, RunBearerStore } from "../core/modelProxy/runBearers.js";
 import { GIT_RECEIVE_PACK_FORWARD_TIMEOUT_MS } from "../core/budgets.js";
 import { GitBindings } from "../core/modelProxy/gitBindings.js";
 import { createGithubDoorHandler, type GithubDoorDeps } from "./githubDoor.js";
@@ -330,6 +330,113 @@ describe("GitHub run-bearer door", () => {
       expect(begin).toHaveBeenCalledWith({ old, next, ref: "refs/heads/fix" });
       expect(finish).toHaveBeenCalledWith({ old, next, ref: "refs/heads/fix" }, "accepted");
       expect(bindings.publicationOf(grant.runId)).toEqual({ ref: "fix", expectedHeadSha: next });
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("requires a source-bound harness authorization before forwarding even an owned receive-pack", async () => {
+    const bindings = new GitBindings();
+    const old = "1".repeat(40);
+    const next = "2".repeat(40);
+    bindings.register(grant.runId, { repo: "o/r", ref: "fix" }, undefined, undefined, true);
+    bindings.setPublication(grant.runId, { ref: "fix", expectedHeadSha: old });
+    bindings.setPublicationRecorder(grant.runId, { begin: async () => true, finish: async () => true });
+    bindings.requireToolPush(grant.runId);
+    const f = await fixture(bindings);
+    const line = Buffer.from(`${old} ${next} refs/heads/fix\0report-status`);
+    const body = Buffer.concat([
+      Buffer.from((line.length + 4).toString(16).padStart(4, "0")),
+      line,
+      Buffer.from("0000PACK"),
+    ]);
+    const auth = `Basic ${Buffer.from(`x-access-token:${f.bearer}`).toString("base64")}`;
+    const send = () =>
+      fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/x-git-receive-pack-request" },
+        body,
+      });
+    try {
+      expect((await send()).status).toBe(403);
+      expect(
+        (
+          await fetch(`${f.url}/git/o/r.git/info/refs?service=git-receive-pack`, {
+            headers: { authorization: auth },
+          })
+        ).status,
+      ).toBe(403);
+      expect(f.upstream).not.toHaveBeenCalled();
+      bindings.allowToolPush(grant.runId, "literal", { ref: "refs/heads/fix", old, next }, bearerHashOf(f.bearer));
+      const pkt = (line: string) =>
+        Buffer.concat([Buffer.from((Buffer.byteLength(line) + 4).toString(16).padStart(4, "0")), Buffer.from(line)]);
+      f.upstream.mockImplementation(async (url: string) =>
+        url.includes("/repos/o/r")
+          ? new Response(JSON.stringify({ default_branch: "main" }))
+          : new Response(Buffer.concat([pkt("unpack ok\n"), pkt("ok refs/heads/fix\n"), Buffer.from("0000")]), {
+              headers: { "content-type": "application/x-git-receive-pack-result" },
+            }),
+      );
+      expect((await send()).status).toBe(200);
+      const replay = await send();
+      expect(replay.status).toBe(403);
+      expect(await replay.text()).toContain("bound harness push is required");
+      expect(f.upstream.mock.calls.filter(([url]) => url.endsWith("git-receive-pack"))).toHaveLength(1);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("refuses a concurrent model bearer even when a typed effect owns the same one-use ref/source slot", async () => {
+    const bindings = new GitBindings();
+    const old = "1".repeat(40);
+    const next = "2".repeat(40);
+    bindings.register(grant.runId, { repo: "o/r", ref: "fix" }, undefined, undefined, true);
+    bindings.setPublication(grant.runId, { ref: "fix", expectedHeadSha: old });
+    bindings.setPublicationRecorder(grant.runId, { begin: async () => true, finish: async () => true });
+    bindings.requireToolPush(grant.runId);
+    const f = await fixture(bindings);
+    const effect = f.bearers.issue(grant.runId)!.token;
+    const line = Buffer.from(`${old} ${next} refs/heads/fix\0report-status`);
+    const body = Buffer.concat([
+      Buffer.from((line.length + 4).toString(16).padStart(4, "0")),
+      line,
+      Buffer.from("0000PACK"),
+    ]);
+    const send = (bearer: string) =>
+      fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+        method: "POST",
+        headers: {
+          authorization: `Basic ${Buffer.from(`x-access-token:${bearer}`).toString("base64")}`,
+          "content-type": "application/x-git-receive-pack-request",
+        },
+        body,
+      });
+    try {
+      expect(
+        bindings.allowToolPush(grant.runId, "effect", { ref: "refs/heads/fix", old, next }, bearerHashOf(effect)),
+      ).toBe(true);
+      expect((await send(f.bearer)).status).toBe(403);
+      expect(
+        (
+          await fetch(`${f.url}/git/o/r.git/info/refs?service=git-receive-pack`, {
+            headers: { authorization: `Bearer ${f.bearer}` },
+          })
+        ).status,
+      ).toBe(403);
+      expect(bindings.hasToolPush(grant.runId, bearerHashOf(effect))).toBe(true);
+      const pkt = (value: string) =>
+        Buffer.concat([Buffer.from((Buffer.byteLength(value) + 4).toString(16).padStart(4, "0")), Buffer.from(value)]);
+      f.upstream.mockImplementation(async (url: string) =>
+        url.includes("/repos/o/r")
+          ? new Response(JSON.stringify({ default_branch: "main" }))
+          : new Response(Buffer.concat([pkt("unpack ok\n"), pkt("ok refs/heads/fix\n"), Buffer.from("0000")]), {
+              headers: { "content-type": "application/x-git-receive-pack-result" },
+            }),
+      );
+      expect((await send(effect)).status).toBe(200);
+      expect((await send(f.bearer)).status).toBe(403);
+      expect(f.upstream.mock.calls.filter(([url]) => url.endsWith("git-receive-pack"))).toHaveLength(1);
     } finally {
       await f.close();
     }

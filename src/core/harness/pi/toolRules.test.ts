@@ -5,6 +5,7 @@ import {
   PI_TOOL_BUNDLES,
   READ_REACH,
   judgeToolCall,
+  literalPushSource,
   reachFor,
   type ToolRuleContext,
 } from "./toolRules.js";
@@ -198,53 +199,18 @@ describe("judgeToolCall — bash", () => {
       reason: "repo:use — a bound run may push exactly one branch",
     });
   });
-  it("reads a shell redirection as the shell's, never as the push's remote or refspec", () => {
-    expect(bash("git push --force-with-lease 2>&1 | tail -1")).toEqual({
-      verdict: "refused",
-      reason:
-        "repo:use — name the run's branch load-pi/test-gap-1 as the push source and destination; the checkout may have moved",
-    });
-    expect(bash("git push origin HEAD 2>/dev/null")).toEqual({
-      verdict: "refused",
-      reason: "repo:use — push to `HEAD`, not the run's branch load-pi/test-gap-1",
-    });
-    expect(bash("git push origin load-pi/test-gap-1:load-pi/test-gap-1 > push.log 2>&1")).toEqual({
-      verdict: "allowed",
-    });
-    // a bare operator's target is the next word, not a refspec
-    expect(bash("git push origin 2> push.log")).toEqual({
-      verdict: "refused",
-      reason:
-        "repo:use — name the run's branch load-pi/test-gap-1 as the push source and destination; the checkout may have moved",
-    });
-    // a redirection never hides the push's own arguments from the rule
-    expect(bash("git push evil main | tail -1")).toEqual({
-      verdict: "refused",
-      reason: "repo:use — push to remote `evil`, not the run's repository (origin)",
-    });
-    expect(bash("git push 2>/dev/null evil main")).toEqual({
-      verdict: "refused",
-      reason: "repo:use — push to remote `evil`, not the run's repository (origin)",
-    });
+  it("allows only a terminal stderr redirect, never a redirect that hides later arguments", () => {
+    expect(bash("git push origin load-pi/test-gap-1:load-pi/test-gap-1 2>&1")).toEqual({ verdict: "allowed" });
+    for (const command of [
+      "git push origin load-pi/test-gap-1 > push.log 2>&1",
+      "git push origin load-pi/test-gap-1 2>&1 evil main",
+      "git push 2>/dev/null evil main",
+      "git push origin load-pi/test-gap-1 2>&1 && git push evil main",
+    ])
+      expect(bash(command), command).toMatchObject({ verdict: "refused" });
     expect(bash("git push origin main 2>&1")).toEqual({
       verdict: "refused",
       reason: "repo:use — push to `main`, not the run's branch load-pi/test-gap-1",
-    });
-    // a redirection's `&` never cuts the tail — the arguments after it are judged
-    for (const redirection of ["2>&1", ">&2", "1>&2", "&>push.log", "&>>push.log"]) {
-      expect(bash(`git push ${redirection} evil main`)).toEqual({
-        verdict: "refused",
-        reason: "repo:use — push to remote `evil`, not the run's repository (origin)",
-      });
-      expect(bash(`git push ${redirection} origin main`)).toEqual({
-        verdict: "refused",
-        reason: "repo:use — push to `main`, not the run's branch load-pi/test-gap-1",
-      });
-    }
-    // a control `&&` still ends the tail, and the push after it is judged too
-    expect(bash("git push origin load-pi/test-gap-1:load-pi/test-gap-1 2>&1 && git push evil main")).toEqual({
-      verdict: "refused",
-      reason: "repo:use — push to remote `evil`, not the run's repository (origin)",
     });
   });
   it("refuses a push to another remote or another branch — repo:use outside the run's grant", () => {
@@ -252,19 +218,13 @@ describe("judgeToolCall — bash", () => {
       verdict: "refused",
       reason: "repo:use — push to remote `upstream`, not the run's repository (origin)",
     });
-    expect(bash("git -C /work/repo push origin main")).toEqual({
-      verdict: "refused",
-      reason: "repo:use — push to `main`, not the run's branch load-pi/test-gap-1",
-    });
-    expect(bash("git -c user.name=x push -u origin load-pi/test-gap-1")).toEqual({ verdict: "allowed" });
+    expect(bash("git -C /work/repo push origin main")).toMatchObject({ verdict: "refused" });
+    expect(bash("git -c user.name=x push -u origin load-pi/test-gap-1")).toMatchObject({ verdict: "refused" });
     expect(bash("git push origin main")).toEqual({
       verdict: "refused",
       reason: "repo:use — push to `main`, not the run's branch load-pi/test-gap-1",
     });
-    expect(bash("git checkout -b fix && git push origin fix")).toEqual({
-      verdict: "refused",
-      reason: "repo:use — push to `fix`, not the run's branch load-pi/test-gap-1",
-    });
+    expect(bash("git checkout -b fix && git push origin fix")).toMatchObject({ verdict: "refused" });
   });
   it("refuses merging or approving a pull request, by CLI or by API — never the agent's to do", () => {
     expect(bash("gh pr merge 12 --squash")).toEqual({
@@ -327,7 +287,6 @@ describe("judgeToolCall — bash", () => {
       "set -e",
       "set -o pipefail",
       "printenv HOME",
-      "node -e 'console.log(process.env.HOME)'",
       "grep -rn ANTHROPIC_API_KEY src/",
       "export FOO=bar",
     ]) {
@@ -339,7 +298,7 @@ describe("judgeToolCall — bash", () => {
     expect(bash('curl -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user')).toEqual(expand);
     expect(bash("echo ${ANTHROPIC_API_KEY}")).toEqual(expand);
     expect(bash("printenv OPENAI_API_KEY")).toEqual(expand);
-    expect(bash("echo $HOME $PATH")).toEqual({ verdict: "allowed" });
+    expect(bash("echo $HOME $PATH")).toMatchObject({ verdict: "refused" });
   });
   it("a non-string command is refused as malformed rather than allowed by accident", () => {
     expect(judgeToolCall("bash", { command: 42 }, ctx)).toEqual({
@@ -408,39 +367,149 @@ describe("judgeToolCall — multiline pushes", () => {
   const status = 'result=$?\ncat push.log\ngit rev-parse HEAD\nexit "$result"';
   const judge = (command: string, rules: ToolRuleContext = own) => judgeToolCall("bash", { command }, rules);
 
-  it("allows one owned push followed by status and logging commands without inventing refspecs", () => {
+  it("refuses a push in a shell call that also runs other commands", () => {
     for (const separator of ["\n", "; ", " && ", " || ", " | ", " & "]) {
-      expect(judge(`git status --short\n${push} > push.log 2>&1${separator}${status}`), separator).toEqual({
-        verdict: "allowed",
+      expect(judge(`${push}${separator}npm version patch`), separator).toEqual({
+        verdict: "refused",
+        reason: "repo:use — publish with one standalone push command; shell composition cannot bind its source",
       });
+    }
+    for (const command of [
+      `git status --short && ${push}`,
+      `(${push})`,
+      `${push}; ${push}`,
+      `bash -c '${push}'`,
+      `bash -c 'git "push" ${lease} origin ${branch}'`,
+      `env ${push}`,
+      `command ${push}`,
+      `exec ${push}`,
+      `exec git 'push' ${lease} origin ${branch}`,
+      `echo done; git 'push' ${lease} origin ${branch}`,
+    ]) {
+      expect(judge(command), command).toMatchObject({ verdict: "refused" });
     }
   });
 
-  it("refuses HEAD with the source-specific reason even when status commands follow", () => {
-    expect(judge(`git push ${lease} origin HEAD:refs/heads/${branch}\n${status}`)).toEqual({
+  it("distinguishes quoted metacharacters from operative ones in a single owned push", () => {
+    expect(judge(`${push} --push-option='note&read|only;yes'`)).toMatchObject({ verdict: "refused" });
+    expect(judge(`${push} --push-option='note&read|only;yes'`, { ...ctx, branch })).toEqual({ verdict: "allowed" });
+    expect(judge(`${push} --push-option=note&npm version patch`)).toMatchObject({ verdict: "refused" });
+    expect(judge(`${push} 2>&1`)).toEqual({ verdict: "allowed" });
+    expect(judge(`${push} > push.log`)).toMatchObject({ verdict: "refused" });
+    expect(judge(`${push} 2>&1 other:other`)).toMatchObject({ verdict: "refused" });
+    expect(judge(`echo '${push} & npm version patch'`)).toEqual({ verdict: "allowed" });
+  });
+
+  it("refuses dynamically assembled publication words and nested shell execution before any push", () => {
+    for (const command of [
+      `g\${0:+}it push origin ${branch}:${branch} & npm version patch`,
+      `git p\${0:+}ush origin HEAD:${branch}`,
+      `g\${0:+}it push upstream ${branch}:main`,
+      `g{it,arbage} push origin ${branch}:${branch} & npm version patch`,
+      `g?t push origin ${branch}:${branch} & npm version patch`,
+      `bash -c 'g\${0:+}it push origin ${branch}:${branch} & npm version patch'`,
+      `echo done; bash -c 'g\${0:+}it push origin ${branch}:${branch} & npm version patch'`,
+      `env sh -c 'g\${0:+}it push origin ${branch}:${branch} & npm version patch'`,
+      `~/git push origin ${branch}:${branch} & npm version patch`,
+      `eval 'git push origin ${branch}:${branch}'`,
+      ...[`${branch}:${branch}`, `HEAD:${branch}`, `${branch}:main`].flatMap((refspec, i) => [
+        `node -e 'require("child_process").execFileSync("git",process.argv.slice(1))' push ${i === 2 ? "upstream" : "origin"} ${refspec}`,
+        `node -e 'require("child_process").execFileSync("git",process.argv.slice(1))' push ${i === 2 ? "upstream" : "origin"} ${refspec} & npm version patch`,
+      ]),
+    ]) {
+      expect(judge(command), command).toMatchObject({ verdict: "refused" });
+    }
+    const fresh = { ...ctx, branch };
+    expect(judge(`git push origin ${branch}:${branch}`, fresh)).toEqual({ verdict: "allowed" });
+    expect(judge(`git push origin ${branch}:${branch} & npm version patch`, fresh)).toMatchObject({
+      verdict: "refused",
+    });
+    expect(judge(push)).toEqual({ verdict: "allowed" });
+    expect(literalPushSource(push)).toBe(branch);
+    expect(literalPushSource(`git -c http.postBuffer=512 push ${lease} origin ${branch}:${branch}`)).toBe(branch);
+    expect(literalPushSource(`node -e 'git' push origin ${branch}:${branch}`)).toBeUndefined();
+    expect(literalPushSource(`${push} & npm version patch`)).toBeUndefined();
+  });
+
+  it("refuses opaque programs that can spawn a push without adjacent publication words", () => {
+    for (const command of [
+      `node -e 'require("child_process").execFileSync(String.fromCharCode(103,105,116),["pu"+"sh","origin","${branch}:${branch}"])'`,
+      `node -e 'require("child_process").execFileSync(String.fromCharCode(103,105,116),["pu"+"sh","origin","HEAD:${branch}"])'`,
+      `node -e 'require("child_process").execFileSync(String.fromCharCode(103,105,116),["pu"+"sh","upstream","${branch}:main"])'`,
+    ]) {
+      expect(judge(command), command).toMatchObject({ verdict: "refused" });
+    }
+    expect(judge(`echo 'node -e opaque text'`)).toEqual({ verdict: "allowed" });
+    expect(judge("node -e 'console.log(process.env.HOME)'")).toMatchObject({ verdict: "refused" });
+    expect(judge("python3 -c 'print(1)'")).toMatchObject({ verdict: "refused" });
+  });
+
+  it("refuses a helper program passing Git's push verb as a separate argument before shell execution", () => {
+    const command = `node -e 'require("child_process").execFileSync("git",process.argv.slice(1))' push origin ${branch}:${branch} & npm version patch`;
+    expect(judge(command)).toEqual({
+      verdict: "refused",
+      reason: "repo:use — publish with one standalone push command; shell composition cannot bind its source",
+    });
+  });
+
+  it("only executes existing-PR pushes the receipt parser can attribute", () => {
+    for (const command of [
+      `git \\\n push ${lease} origin ${branch}:${branch}`,
+      `git push ${lease} origin '${branch}:${branch}'`,
+      `git push ${lease} origin ${branch}:${branch} --push-option='note&read'`,
+      `git -c http.postBuffer=512 -c http.postBuffer=1024 push ${lease} origin ${branch}:${branch}`,
+      `${push} & npm version patch`,
+    ]) {
+      expect(judge(command), command).toMatchObject({ verdict: "refused" });
+    }
+    expect(judge(push)).toEqual({ verdict: "allowed" });
+  });
+
+  it("refuses configured or implicit refspecs, unsafe Git configuration and substitutions", () => {
+    for (const command of [
+      `git -c remote.origin.push=main push ${lease} origin`,
+      `git -c remote.origin.url=https://other.example push ${lease} origin ${branch}`,
+      `git -C /other push ${lease} origin ${branch}`,
+      `${push}$(npm version patch)`,
+      `${push} \`npm version patch\``,
+      `${push} --receive-pack=custom`,
+      `${push} --mirror`,
+      `git push --force-with-lease=refs/heads/${branch}:${expected} origin`,
+    ])
+      expect(judge(command), command).toMatchObject({ verdict: "refused" });
+    expect(judge(`git -c http.postBuffer=52428800 push ${lease} origin ${branch}:refs/heads/${branch}`)).toEqual({
+      verdict: "allowed",
+    });
+  });
+
+  it("refuses HEAD with the source-specific reason in a standalone push", () => {
+    expect(judge(`git push ${lease} origin HEAD:refs/heads/${branch}`)).toEqual({
       verdict: "refused",
       reason: `repo:use — push from the owned publication ref ${branch}; the checkout may have moved`,
     });
   });
 
   it("keeps the bound branch source check without an existing-PR fence", () => {
-    expect(judge(`${push}\n${status}`, { ...ctx, branch })).toEqual({ verdict: "allowed" });
-    expect(judge(`git push origin HEAD:${branch}\n${status}`, { ...ctx, branch })).toEqual({
+    expect(judge(push, { ...ctx, branch })).toEqual({ verdict: "allowed" });
+    expect(judge(`git push origin HEAD:${branch}`, { ...ctx, branch })).toEqual({
       verdict: "refused",
       reason: `repo:use — push from the run's branch ${branch}; the checkout may have moved`,
     });
   });
 
-  it("folds escaped-newline continuations without splitting a command or a word", () => {
+  it("refuses escaped-newline publication before execution even when it would form one command", () => {
     const command = `git \\\n  push \\\n  ${lease} \\\n  origin fix/ex\\\nisting:refs/heads/${branch} \\\n  2>&1\n${status}`;
-    expect(judge(command)).toEqual({ verdict: "allowed" });
+    expect(judge(command)).toMatchObject({ verdict: "refused" });
+    expect(
+      judge(`git \\\n  push \\\n  ${lease} \\\n  origin fix/ex\\\nisting:refs/heads/${branch} \\\n  2>&1`),
+    ).toMatchObject({ verdict: "refused" });
     expect(judge(command, { ...own, identity: "read" })).toEqual({
       verdict: "refused",
       reason: "read-only — a read-identity run never pushes",
     });
   });
 
-  it("preserves the remote, owned ref, source, single destination and explicit lease fences on continued pushes", () => {
+  it("preserves the remote, owned ref, source, single destination and explicit lease fences on literal pushes", () => {
     for (const [args, reason] of [
       [`${lease} upstream ${branch}`, "repo:use — push to remote `upstream`, not the run's repository (origin)"],
       [`${lease} origin ${branch}:main`, `repo:use — push to \`main\`, not the owned publication ref ${branch}`],
@@ -449,7 +518,7 @@ describe("judgeToolCall — multiline pushes", () => {
         `repo:use — push from the owned publication ref ${branch}; the checkout may have moved`,
       ],
       [
-        `${lease} origin ${branch} \\\n other:other`,
+        `${lease} origin ${branch} other:other`,
         "repo:use — existing-PR publication allows exactly one owned destination",
       ],
       ...["", "--force-with-lease", lease.replace(expected, "b".repeat(40))].map((flag) => [
@@ -457,23 +526,21 @@ describe("judgeToolCall — multiline pushes", () => {
         `repo:use — existing-PR publication requires \`${lease}\` so concurrent movement fails atomically`,
       ]),
     ]) {
-      expect(judge(`git push \\\n ${args}\n${status}`), args).toEqual({ verdict: "refused", reason });
+      expect(judge(`git push ${args}`), args).toEqual({ verdict: "refused", reason });
     }
   });
 
   it("never borrows the explicit lease from a later command", () => {
-    expect(judge(`git push origin ${branch}\nprintf '%s' ${lease}\n${status}`)).toEqual({
+    expect(judge(`git push origin ${branch}\nprintf '%s' ${lease}\n${status}`)).toMatchObject({ verdict: "refused" });
+    expect(judge(`git push origin ${branch}`)).toEqual({
       verdict: "refused",
       reason: `repo:use — existing-PR publication requires \`${lease}\` so concurrent movement fails atomically`,
     });
   });
 
   it("judges later pushes independently rather than swallowing them as the first push's arguments", () => {
-    expect(judge(`${push}\n${push}\n${status}`)).toEqual({ verdict: "allowed" });
-    expect(judge(`${push}\ngit push ${lease} origin HEAD:${branch}\n${status}`)).toEqual({
-      verdict: "refused",
-      reason: `repo:use — push from the owned publication ref ${branch}; the checkout may have moved`,
-    });
+    expect(judge(`${push}\n${push}\n${status}`)).toMatchObject({ verdict: "refused" });
+    expect(judge(`${push}\ngit push ${lease} origin HEAD:${branch}\n${status}`)).toMatchObject({ verdict: "refused" });
   });
 
   it("does not let a quoted newline hide a second destination", () => {
@@ -485,7 +552,18 @@ describe("judgeToolCall — multiline pushes", () => {
   });
 
   it("does not mistake an escaped backslash before a newline for a continuation", () => {
-    expect(judge(`${push} --push-option=literal\\\\\n${status}`)).toEqual({ verdict: "allowed" });
+    expect(judge(`${push} --push-option=literal\\\\\n${status}`)).toMatchObject({ verdict: "refused" });
+  });
+});
+
+describe("judgeToolCall — load preview of its checked-out task branch", () => {
+  const task = { identity: "write" as const, checkout: "/work/repo", branch: "load-pi/task" };
+  it("refuses HEAD and foreign branches, but admits one explicit own-branch refspec", () => {
+    for (const command of ["git push origin HEAD", "git push origin main", "git push origin other:other"])
+      expect(judgeToolCall("bash", { command }, task), command).toMatchObject({ verdict: "refused" });
+    expect(judgeToolCall("bash", { command: "git push origin load-pi/task:load-pi/task" }, task)).toEqual({
+      verdict: "allowed",
+    });
   });
 });
 
@@ -493,8 +571,18 @@ describe("judgeToolCall — a run that names its own branch", () => {
   const own = { identity: "write" as const, checkout: "/work/repo", protectedBranches: ["main", "release/1.2"] };
   it("may push any branch to origin but the protected ones — the base its pull request targets", () => {
     expect(judgeToolCall("bash", { command: "git push -u origin feat/login" }, own)).toEqual({ verdict: "allowed" });
-    expect(judgeToolCall("bash", { command: "git push origin HEAD" }, own)).toEqual({ verdict: "allowed" });
-    expect(judgeToolCall("bash", { command: "git push" }, own)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("bash", { command: "git push origin HEAD" }, own)).toMatchObject({ verdict: "refused" });
+    expect(judgeToolCall("bash", { command: "git push" }, own)).toMatchObject({ verdict: "refused" });
+    expect(judgeToolCall("bash", { command: "git -c remote.origin.push=main push origin" }, own)).toMatchObject({
+      verdict: "refused",
+    });
+    for (const command of [
+      "git push origin feat/x other:other",
+      "git push origin :feat/x",
+      "git push origin feat/x:",
+    ]) {
+      expect(judgeToolCall("bash", { command }, own), command).toMatchObject({ verdict: "refused" });
+    }
     expect(judgeToolCall("bash", { command: "git push origin main" }, own)).toEqual({
       verdict: "refused",
       reason: "repo:use — push to `main`, the branch this run's pull request targets; push your own branch",

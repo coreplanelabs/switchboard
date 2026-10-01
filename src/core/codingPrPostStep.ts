@@ -92,7 +92,7 @@ import { parseExitPrefix, type RunEvent } from "./runEvents.js";
 import type { SavedFindingsPatch } from "./coordinator/contract.js";
 import { systemClock } from "./trace/clock.js";
 import type { Span } from "./trace/types.js";
-import type { ExecTraceOptions } from "../execution/executor.js";
+import type { ExecTraceOptions, Executor } from "../execution/executor.js";
 import { leftBehindSentence, type LeftBehind } from "../execution/residentCleanliness.js";
 
 /** What the PR post-step observed in the run's workspace, all read BEFORE the
@@ -308,7 +308,7 @@ export function salvageWorkOf(
  *  refused for good may end the run at the context's overflow before any
  *  wind-down, so the tree is pushed the moment the failure is known. */
 export async function salvageBudgetPush(
-  executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
+  executor: Pick<Executor, "exec" | "publishBranch">,
   opts: {
     branch: string;
     checkout?: string;
@@ -318,6 +318,12 @@ export async function salvageBudgetPush(
     requireBranchProof?: boolean;
     cue?: "budget" | "compaction" | "ending" | "completion";
     publication?: { ref: string; expectedHeadSha: string } | { blocked: string };
+    /** Runner-owned source binding for a checkpoint on a fenced harness.
+     * A refusal keeps the commit local; no shell push is attempted. */
+    admitPush?: (
+      head: string,
+    ) => Promise<{ release: () => void; publicationBearer: string } | (() => void) | undefined>;
+    publicationDoor?: { repo: string; origin: string };
     unfinished?: { runId: string; baseHeadSha: string; store: ArtifactStore };
   },
   span?: Span,
@@ -475,12 +481,47 @@ export async function salvageBudgetPush(
         ...(kept.patch !== undefined ? { patch: kept.patch } : {}),
       };
     }
-    const lease =
-      opts.publication !== undefined
-        ? ` --force-with-lease=${shellQuote(`refs/heads/${opts.publication.ref}:${opts.publication.expectedHeadSha}`)}`
-        : "";
     try {
-      await run(`${git} push${lease} origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
+      let release: (() => void) | undefined;
+      let pushBearer: string | undefined;
+      let source: string | undefined;
+      if (opts.admitPush) {
+        if (!executor.publishBranch || !opts.publicationDoor)
+          throw new Error("an isolated runner-owned publication transport is unavailable");
+        if ((await run(`${git} symbolic-ref --quiet --short HEAD`)).trim() !== opts.branch)
+          throw new Error("the checkpoint checkout is not on the owned branch");
+        source = parseRevParseOutput(await run(`${git} rev-parse HEAD`));
+        if (!source) throw new Error("the checkpoint source commit could not be read");
+        const admitted = await opts.admitPush(source);
+        if (!admitted) throw new Error("the Git door did not admit the checkpoint source commit");
+        release = typeof admitted === "function" ? admitted : admitted.release;
+        pushBearer = typeof admitted === "function" ? undefined : admitted.publicationBearer;
+      }
+      try {
+        if (pushBearer && source && opts.publicationDoor && executor.publishBranch) {
+          const output = await executor.publishBranch({
+            repo: opts.publicationDoor.repo,
+            doorOrigin: opts.publicationDoor.origin,
+            branch: opts.branch,
+            next: source,
+            ...(opts.publication && "expectedHeadSha" in opts.publication
+              ? { old: opts.publication.expectedHeadSha }
+              : {}),
+            bearer: pushBearer,
+          });
+          if (parseExitPrefix(output).failed) throw new Error(output.trim());
+        } else if (opts.admitPush) {
+          throw new Error("the admitted checkpoint has no isolated publication transport");
+        } else {
+          const lease =
+            opts.publication !== undefined
+              ? ` --force-with-lease=${shellQuote(`refs/heads/${opts.publication.ref}:${opts.publication.expectedHeadSha}`)}`
+              : "";
+          await run(`${git} push${lease} origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
+        }
+      } finally {
+        release?.();
+      }
     } catch (err) {
       if (opts.publication !== undefined) {
         const detail = err instanceof Error ? err.message : String(err);
@@ -608,7 +649,13 @@ export type PushedStartPoint = { kind: "created" } | { kind: "before"; sha: stri
  *  landed on, with the summary that said so. The parse `pushedBranchOf`
  *  documents, kept in one place for it and `trackPushedBranch`. */
 function pushedRefUpdatesOf(event: RunEvent): Array<{ branch: string; summary: string }> {
-  if (event.type !== "tool_result" || event.tool !== "bash" || event.output === undefined) return [];
+  if (
+    event.type !== "tool_result" ||
+    (event.tool !== "bash" && event.tool !== "publish_branch") ||
+    event.output === undefined
+  )
+    return [];
+  if (event.tool === "publish_branch" && !event.ok) return [];
   const updates: Array<{ branch: string; summary: string }> = [];
   let inBlock = false;
   for (const raw of event.output.split(/\r?\n/)) {
@@ -685,11 +732,20 @@ export function trackPushedBranch(initial?: string): {
         // The full command when the event carries it (runner ≥ this fix); the
         // 200-char summary otherwise (older records) — where a chained command's
         // push past the cap is a known false negative (falls back to the checkout).
-        if (event.tool === "bash" && event.callId !== undefined && PUSH_COMMAND_RE.test(event.command ?? event.summary))
+        if (
+          event.callId !== undefined &&
+          (event.tool === "publish_branch" ||
+            (event.tool === "bash" && PUSH_COMMAND_RE.test(event.command ?? event.summary)))
+        )
           pushCalls.add(event.callId);
         return;
       }
-      if (event.type !== "tool_result" || event.tool !== "bash" || event.callId === undefined) return;
+      if (
+        event.type !== "tool_result" ||
+        (event.tool !== "bash" && event.tool !== "publish_branch") ||
+        event.callId === undefined
+      )
+        return;
       const fromPush = pushCalls.delete(event.callId);
       if (!fromPush) return;
       const updates = pushedRefUpdatesOf(event);
