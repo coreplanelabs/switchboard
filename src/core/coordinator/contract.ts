@@ -699,6 +699,10 @@ export interface OriginalUnitRecovery {
   externalReview?: RecoveryReviewEvidence;
   accounting?: RecoveryAccounting;
   round: number;
+  /** Credits earned in the original segment, checked against posted review pairs at claim time. */
+  patternContinuations?: number;
+  /** The immediately preceding posted review's findings, verified before a direct review recovery. */
+  priorFindings?: import("../reviewVerdict.js").Finding[];
   expectedHeadSha: string;
   remainingMs: number;
   claimedAt: number;
@@ -824,7 +828,14 @@ export interface CoordinatorUnit {
    *  carrying a finding at or above the level in force ([agent-ship](../../../docs/reference/specs/agent-ship.md)
    *  item 9) — a mismatch to be seen, since the child's parser holds an approve
    *  to the same level. */
-  rounds: Array<{ index: number; agent: string; outcome: string; at: number; gate?: RoundGate }>;
+  rounds: Array<{
+    index: number;
+    agent: string;
+    outcome: string;
+    at: number;
+    gate?: RoundGate;
+    patternContinuation?: true;
+  }>;
   /** An explicit recovery claim for this same durable unit. It is mutually
    * exclusive with both `idle` and `ending`; legacy readers otherwise keep
    * their existing decoding rules. */
@@ -977,6 +988,12 @@ export const isHumanGatePending = (v: unknown): v is HumanGatePending =>
   v.findings.every((finding: unknown) => isFindingShape(finding)) &&
   (v.verdict === "approve" || v.verdict === "request_changes") &&
   (v.reviewRunId === undefined || isText(v.reviewRunId)) &&
+  (v.reviewPosted === undefined || v.reviewPosted === true) &&
+  (v.patternContinuations === undefined ||
+    (Number.isSafeInteger(v.patternContinuations) &&
+      (v.patternContinuations as number) >= 0 &&
+      (v.patternContinuations as number) <= 2 &&
+      (v.patternContinuations as number) < v.round)) &&
   (v.headSha === undefined || isText(v.headSha)) &&
   (v.askedAt === undefined || isFinite(v.askedAt));
 
@@ -1089,7 +1106,8 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
         isText(x.agent) &&
         isText(x.outcome) &&
         isFinite(x.at) &&
-        (x.gate === undefined || isRoundGate(x.gate)),
+        (x.gate === undefined || isRoundGate(x.gate)) &&
+        (x.patternContinuation === undefined || x.patternContinuation === true),
     )
   )
     return false;
@@ -1101,6 +1119,11 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
       typeof r.recovery.round === "number" &&
       Number.isInteger(r.recovery.round) &&
       r.recovery.round >= 1 &&
+      (r.recovery.patternContinuations === undefined ||
+        (Number.isSafeInteger(r.recovery.patternContinuations) &&
+          (r.recovery.patternContinuations as number) >= 0 &&
+          (r.recovery.patternContinuations as number) <= 2 &&
+          (r.recovery.patternContinuations as number) < r.recovery.round)) &&
       typeof r.recovery.expectedHeadSha === "string" &&
       /^[0-9a-f]{40}$/i.test(r.recovery.expectedHeadSha) &&
       isFinite(r.recovery.remainingMs) &&
@@ -1124,6 +1147,11 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
           r.recovery.findingsKey !== undefined)) &&
       (r.recovery.findings === undefined ||
         (Array.isArray(r.recovery.findings) && r.recovery.findings.every(isFindingShape))) &&
+      (r.recovery.priorFindings === undefined ||
+        (r.recovery.kind === "review" &&
+          r.recovery.round >= 2 &&
+          Array.isArray(r.recovery.priorFindings) &&
+          r.recovery.priorFindings.every(isFindingShape))) &&
       (r.recovery.patch === undefined || (r.recovery.kind === "findings" && isSavedFindingsPatch(r.recovery.patch))) &&
       (r.recovery.previousBinding === undefined ||
         (isObject(r.recovery.previousBinding) &&

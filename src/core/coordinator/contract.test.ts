@@ -319,6 +319,19 @@ describe("isCoordinatorUnit — one unit's row", () => {
     expect(isCoordinatorUnit({ ...unit, idle: { ...idle, wakes: 0.5 } })).toBe(false);
     expect(isCoordinatorUnit({ ...unit, idle: { ...idle, spendUsd: "12" } })).toBe(false);
     expect(isCoordinatorUnit({ ...unit, idle: { ...idle, handoff: { deviations: "none" } } })).toBe(false);
+    const gate = {
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      round: 2,
+      verdict: "request_changes",
+      findings: [{ id: "F1", severity: "minor", file: "src/a.ts", title: "push safety" }],
+      patternContinuations: 1,
+    };
+    expect(isCoordinatorUnit({ ...unit, idle: { ...idle, humanGate: gate } })).toBe(true);
+    for (const invalid of [-1, 2, 3, 0.5, "1"]) {
+      expect(
+        isCoordinatorUnit({ ...unit, idle: { ...idle, humanGate: { ...gate, patternContinuations: invalid } } }),
+      ).toBe(false);
+    }
     expect(isCoordinatorUnit({ ...unit, idle: "wall_clock_cap" })).toBe(false);
   });
 
@@ -390,6 +403,43 @@ describe("isCoordinatorUnit — one unit's row", () => {
     const claimed = { ...unit, ending: undefined, recovery };
     expect(isCoordinatorUnit(claimed)).toBe(true);
     expect(isCoordinatorUnit(JSON.parse(JSON.stringify(claimed)))).toBe(true);
+    const continued = {
+      ...claimed,
+      rounds: [{ index: 2, agent: "review", outcome: "request_changes", at: 2_000, patternContinuation: true }],
+      recovery: { ...recovery, round: 2, patternContinuations: 1 },
+    };
+    expect(isCoordinatorUnit(JSON.parse(JSON.stringify(continued)))).toBe(true);
+    const previous = {
+      id: "F1",
+      severity: "minor" as const,
+      file: "src/a.ts",
+      title: "push safety",
+      invariant: "only checked trees",
+      cases: [{ scenario: "source", expected: "checked" }],
+    };
+    const directReview = {
+      ...continued,
+      recovery: { ...continued.recovery, kind: "review", round: 3, priorFindings: [previous] },
+    };
+    expect(isCoordinatorUnit(JSON.parse(JSON.stringify(directReview)))).toBe(true);
+    expect(isCoordinatorUnit({ ...claimed, recovery: { ...recovery, priorFindings: [previous] } })).toBe(false);
+    expect(
+      isCoordinatorUnit({
+        ...directReview,
+        recovery: {
+          ...directReview.recovery,
+          priorFindings: [{ ...previous, cases: [{ scenario: "", expected: "checked" }] }],
+        },
+      }),
+    ).toBe(false);
+    for (const invalid of [-1, 3, 1.5, 2]) {
+      expect(
+        isCoordinatorUnit({ ...continued, recovery: { ...continued.recovery, patternContinuations: invalid } }),
+      ).toBe(false);
+    }
+    expect(isCoordinatorUnit({ ...continued, rounds: [{ ...continued.rounds[0], patternContinuation: false }] })).toBe(
+      false,
+    );
     const accounting = {
       spendUsd: 15,
       children: [{ runId: "run-c0", key: "plan-old:U12/0/coding", usd: 15 }],

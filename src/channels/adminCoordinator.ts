@@ -135,6 +135,8 @@ import {
   type InterruptionCause,
   type RoundChecks,
   stepPrefixOf,
+  strictPatternWidening,
+  MAX_PATTERN_CONTINUATIONS,
 } from "../core/ship/coordinator.js";
 import { renderRenewal, renewalDecision } from "../core/ship/renewal.js";
 import { BOT_SCOPES, checkPrTitle, TITLE_MAX_LENGTH } from "../core/prTitle.mjs";
@@ -994,7 +996,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
           run.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
           run.threadKey !== (row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey) ||
           priorRound < row.recovery.round ||
-          round > (instance.caps?.maxRounds ?? 0) ||
+          round > (instance.caps?.maxRounds ?? 0) + (row.recovery.patternContinuations ?? 0) ||
           !isStepAttempt(run.idempotencyKey, `${instance.id}:${row.unit}/recovery/${priorRound}/review`) ||
           run.verdict === undefined ||
           run.reviewPost?.posted !== true ||
@@ -1502,8 +1504,11 @@ async function postedHumanGateAnswer(
     .sort((a, b) => Date.parse(a.submittedAt!) - Date.parse(b.submittedAt!))
     .at(-1);
   if (own === undefined) return undefined;
-  const marker = /<!-- switchboard:verdict (\{[^\n]*\}) -->/.exec(own.body);
-  if (marker === null) return undefined;
+  // Cases and review prose can contain marker-shaped text. The renderer puts
+  // its own marker after both (before an optional carried-head footer), so
+  // only the last complete marker line may authorize a resumed human gate.
+  const marker = [...own.body.matchAll(/^<!-- switchboard:verdict (\{[^\r\n]*\}) -->\r?$/gm)].at(-1);
+  if (marker === undefined) return undefined;
   let payload: unknown;
   try {
     payload = JSON.parse(marker[1]!);
@@ -3286,6 +3291,87 @@ async function claimedRecoveryReviewValid(
   );
 }
 
+/** A uniquely owned, completed and posted review is the only prior table a
+ * recovered review may compare with its next verdict. */
+function postedPatternReviewAt(
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  runs: readonly RunView[],
+  segmentPrefix: string,
+  leaseStartedAt: number,
+  index: number,
+): RunView | undefined {
+  const threadKey = row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey;
+  const key = `${instance.id}:${segmentPrefix}/${index}/review`;
+  const candidates = runs.filter(
+    (run) =>
+      run.finished &&
+      run.status === "completed" &&
+      run.agent === "review" &&
+      run.parentInstanceId === instance.id &&
+      isStepAttempt(run.idempotencyKey, key) &&
+      run.userId === instance.userId &&
+      run.repo?.toLowerCase() === instance.repo.toLowerCase() &&
+      run.threadKey === threadKey &&
+      run.startedAt >= leaseStartedAt &&
+      run.verdict !== undefined &&
+      fullHead(run.reviewHead) !== undefined &&
+      run.reviewPost?.posted === true &&
+      run.reviewPost.head === run.reviewHead &&
+      run.reviewPost.verdict === run.verdict.verdict &&
+      run.reviewPost.target.repo.toLowerCase() === instance.repo.toLowerCase() &&
+      run.reviewPost.target.number === row.pr?.number,
+  );
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+/** A continuation note buys recovery time only if the original, posted reviews
+ * prove the same strict widening the live pipeline credited. Missing or
+ * ambiguous evidence never creates a new slot on replay. */
+function verifiedPatternContinuations(
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  runs: readonly RunView[],
+  segmentPrefix: string,
+  leaseStartedAt: number,
+  throughRound: number,
+): number | undefined {
+  const credits = row.rounds.filter((note) => note.at >= leaseStartedAt && note.patternContinuation === true);
+  if (credits.length > MAX_PATTERN_CONTINUATIONS || credits.some((note) => note.index < 2 || note.index > throughRound))
+    return undefined;
+  for (const note of credits) {
+    const before = postedPatternReviewAt(instance, row, runs, segmentPrefix, leaseStartedAt, note.index - 1);
+    const after = postedPatternReviewAt(instance, row, runs, segmentPrefix, leaseStartedAt, note.index);
+    const boundaries = row.rounds.filter(
+      (entry) =>
+        entry.at >= leaseStartedAt &&
+        entry.index === note.index &&
+        entry.agent === "review" &&
+        entry.outcome === note.outcome,
+    );
+    if (
+      before === undefined ||
+      after === undefined ||
+      boundaries.length !== 1 ||
+      note.outcome !== after.verdict!.verdict ||
+      before.finishedAt === undefined ||
+      before.finishedAt > after.startedAt ||
+      after.finishedAt === undefined ||
+      after.finishedAt > note.at ||
+      !strictPatternWidening(
+        before.verdict!.verdict === "request_changes"
+          ? (before.verdict!.findings ?? [])
+          : findingsAtOrAbove(before.verdict!.findings ?? [], instance.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY),
+        after.verdict!.verdict === "request_changes"
+          ? (after.verdict!.findings ?? [])
+          : findingsAtOrAbove(after.verdict!.findings ?? [], instance.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY),
+      )
+    )
+      return undefined;
+  }
+  return credits.length;
+}
+
 /** Recover one ended original unit without passing through generated-plan
  * hand-off. Every authoritative fact comes from the original durable rows,
  * their owned review record and one fresh GitHub read. */
@@ -3363,6 +3449,7 @@ export async function recoverOriginalUnit(
   const existingClaim = row.recovery;
   let kind: "findings" | "review";
   let round: number;
+  let patternContinuations: number;
   let remainingMs: number;
   let reviewRunId: string;
   let stepName: string;
@@ -3370,6 +3457,7 @@ export async function recoverOriginalUnit(
   let reviewKey: string;
   let deadlineAt: number;
   let findings: Finding[] | undefined;
+  let priorFindings: Finding[] | undefined;
   let findingsRunId: string | undefined;
   let findingsKey: string | undefined;
   let savedPatch: SavedFindingsPatch | undefined;
@@ -3389,12 +3477,23 @@ export async function recoverOriginalUnit(
       reviewKey,
       deadlineAt,
       findings,
+      priorFindings,
       findingsRunId,
       findingsKey,
       patch: savedPatch,
       externalReview,
       accounting,
     } = existingClaim);
+    patternContinuations = existingClaim.patternContinuations ?? 0;
+    if (
+      !Number.isSafeInteger(patternContinuations) ||
+      patternContinuations < 0 ||
+      patternContinuations > MAX_PATTERN_CONTINUATIONS ||
+      (kind === "findings"
+        ? round >= (instance.caps?.maxRounds ?? 0) + patternContinuations
+        : round > (instance.caps?.maxRounds ?? 0) + patternContinuations)
+    )
+      return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
     if (externalReview !== undefined && requestedWorkflowId === undefined)
       return json(409, { ok: false, error: "recovery_already_claimed", workflowId, at });
     if (
@@ -3474,7 +3573,6 @@ export async function recoverOriginalUnit(
       (grant.costCapUsd !== undefined && (!Number.isFinite(grant.costCapUsd) || grant.costCapUsd <= 0))
     )
       return unknownBudget("grant_invalid");
-    if (round >= caps.maxRounds) return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
     // Recovery resumes the active segment's original wall-clock lease. A
     // renewal starts a full lease at its durable segment time; a stopped
     // segment can carry the smaller unspent lease on its durable wake answer.
@@ -3577,6 +3675,20 @@ export async function recoverOriginalUnit(
         return unknownBudget("child_history_ambiguous");
       histories.set(run.id, run);
     }
+    const credited = verifiedPatternContinuations(
+      instance,
+      row,
+      [...histories.values()],
+      segmentPrefix,
+      leaseStartedAt,
+      round,
+    );
+    if (credited === undefined) return json(409, { ok: false, error: "recovery_continuation_evidence_ambiguous", at });
+    patternContinuations = credited;
+    // The boundary itself must still leave a review slot; only a completed
+    // findings child below may advance directly to that last review index.
+    if (round >= caps.maxRounds + patternContinuations)
+      return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
     // Do not renew a terminal unit over an earlier uncertain Git-door write.
     // This is a durable run-record fact, independent of the current PR head.
     if (
@@ -3738,7 +3850,8 @@ export async function recoverOriginalUnit(
       if (externalReview === undefined) return json(409, { ok: false, error: "recovery_later_review_invalid", at });
       round = boundary.index + 1;
       // Leave room for the typed findings fix and its independent re-review.
-      if (round >= caps.maxRounds) return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
+      if (round >= caps.maxRounds + patternContinuations)
+        return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
     }
     try {
       facts = await deps.fetchPrFacts({ repo: instance.repo, number: pr.number });
@@ -3846,6 +3959,8 @@ export async function recoverOriginalUnit(
       expectedHead = facts.headSha;
       kind = "review";
       round = boundary.index + 1;
+      if (round > caps.maxRounds + patternContinuations)
+        return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
       claimRow = {
         ...claimRow,
         lastPush: expectedHead,
@@ -4024,6 +4139,8 @@ export async function recoverOriginalUnit(
       if (headMoved) return json(409, { ok: false, error: "recovery_head_moved", at });
       expectedHead = reviewedHead;
     }
+    if (kind === "review" && round > caps.maxRounds + patternContinuations)
+      return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
     const floor = minutesToMs(leaseMinimum(kind === "findings" ? "fix" : "review"));
     if (!Number.isFinite(remainingMs) || remainingMs < floor)
       return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
@@ -4034,6 +4151,26 @@ export async function recoverOriginalUnit(
         : `recovery-${findingsRunId ?? reviewRunId}`;
     deadlineAt = at + remainingMs;
     findings = kind === "findings" ? candidates[0]!.verdict?.findings : undefined;
+    if (kind === "review" && round >= 2) {
+      const preceding = postedPatternReviewAt(
+        instance,
+        row,
+        [...histories.values()],
+        segmentPrefix,
+        leaseStartedAt,
+        round - 1,
+      );
+      const notes = row.rounds.filter(
+        (note) =>
+          note.index === round - 1 &&
+          note.agent === "review" &&
+          note.outcome === preceding?.verdict?.verdict &&
+          note.at >= leaseStartedAt &&
+          preceding.finishedAt !== undefined &&
+          preceding.finishedAt <= note.at,
+      );
+      if (notes.length === 1) priorFindings = preceding?.verdict?.findings;
+    }
     if (
       row.recoveryReceipt?.reviewRunId === reviewRunId ||
       (externalReview !== undefined && row.recoveryReceipt?.externalReview?.id === externalReview.id)
@@ -4193,6 +4330,7 @@ export async function recoverOriginalUnit(
       recovery: {
         kind,
         round,
+        ...(patternContinuations > 0 ? { patternContinuations } : {}),
         expectedHeadSha: expectedHead,
         remainingMs,
         claimedAt: at,
@@ -4203,6 +4341,7 @@ export async function recoverOriginalUnit(
         ...(findingsRunId !== undefined ? { findingsRunId } : {}),
         ...(findingsKey !== undefined ? { findingsKey } : {}),
         ...(findings !== undefined ? { findings } : {}),
+        ...(priorFindings !== undefined ? { priorFindings } : {}),
         ...(savedPatch !== undefined ? { patch: savedPatch } : {}),
         previousEnding: row.ending!,
         ...(claimRow !== row
@@ -4971,6 +5110,13 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       ok: false,
       error: "gate must be { level: blocking|major|minor|nit, findings: string[] }",
     });
+  if (
+    body.patternContinuation !== undefined &&
+    (body.patternContinuation !== true ||
+      body.agent !== "review" ||
+      (body.outcome !== "request_changes" && body.outcome !== "approve"))
+  )
+    return json(400, { ok: false, error: "patternContinuation must mark a settled review" });
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
@@ -4996,6 +5142,7 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     outcome: body.outcome as string,
     at,
     ...(gate ? { gate } : {}),
+    ...(body.patternContinuation === true ? { patternContinuation: true as const } : {}),
   };
   const previous = row.rounds.at(-1);
   if (
@@ -5003,7 +5150,8 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     previous?.index === note.index &&
     previous.agent === note.agent &&
     previous.outcome === note.outcome &&
-    JSON.stringify(previous.gate) === JSON.stringify(note.gate)
+    JSON.stringify(previous.gate) === JSON.stringify(note.gate) &&
+    previous.patternContinuation === note.patternContinuation
   )
     return json(200, { ok: true, at: previous.at });
   const updated: CoordinatorUnit = {

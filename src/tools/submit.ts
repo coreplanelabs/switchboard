@@ -38,7 +38,11 @@ export const submitVerdictTool: RunnableTool = {
     "Enumerate EVERY issue you report in `findings` with STABLE ids assigned in order (F1, F2, …) — a fix round " +
     "references findings by these ids, so never renumber them. Severity is exactly one of blocking|major|minor|nit; " +
     "the entry carries the file (plus line when it points at one) and a one-line title, while the full explanation " +
-    "stays in your review text keyed by the same ids. An `approve` carrying a finding at or above the severity to address " +
+    "stays in your review text keyed by the same ids. Every new finding declares kind: single or pattern. " +
+    "For a pattern, declare kind: pattern, name its invariant and enumerate " +
+    "independently checkable {scenario, expected} cases, including all selection and execution paths in the diff; " +
+    "for a push, check source, destination, endpoint and command composition, not just the first counterexample. " +
+    "A missing or malformed matrix is refused before recording the verdict; you must judge whether its cases cover the invariant. An `approve` carrying a finding at or above the severity to address " +
     "is downgraded to `request_changes` and the ack names the finding and the level — approve only when every finding sits below it. " +
     "Set `humanGated: true` on a finding ONLY when its remedy is a receipt no run can produce — a replay needing a credential " +
     "no sandbox holds, a procedure a person runs live — so the ship loop can hold the unit for a person instead of opening a fix round that can change nothing.",
@@ -72,13 +76,32 @@ export const submitVerdictTool: RunnableTool = {
               type: "string",
               description: "One line naming the issue (the full explanation goes in your review text)",
             },
+            kind: {
+              type: "string",
+              enum: ["single", "pattern"],
+              description: "single issue or pattern spanning multiple cases; pattern requires invariant and cases",
+            },
+            invariant: { type: "string", description: "The shared safety/correctness rule this pattern must hold" },
+            cases: {
+              type: "array",
+              description:
+                "All independently checkable cases of the invariant found in this diff, including selection and execution paths",
+              items: {
+                type: "object",
+                properties: {
+                  scenario: { type: "string", description: "Concrete input or path through the invariant" },
+                  expected: { type: "string", description: "Required behavior on that path" },
+                },
+                required: ["scenario", "expected"],
+              },
+            },
             humanGated: {
               type: "boolean",
               description:
                 "true ONLY when the remedy is a receipt only a person can produce (a credential-gated replay, a live procedure) — never for work a fix round could do",
             },
           },
-          required: ["id", "severity", "file", "title"],
+          required: ["id", "severity", "file", "title", "kind"],
         },
       },
     },
@@ -91,6 +114,23 @@ export const submitVerdictTool: RunnableTool = {
       ...(ctx.addressSeverity !== undefined ? { addressSeverity: ctx.addressSeverity } : {}),
     });
     if (!verdict) return "error: verdict must be exactly `approve` or `request_changes`";
+    const rawFindings = input.findings;
+    if (Array.isArray(rawFindings)) {
+      const untyped = rawFindings.flatMap((raw, index) =>
+        typeof raw === "object" &&
+        raw !== null &&
+        !Array.isArray(raw) &&
+        ((raw as Record<string, unknown>).kind === "single" || (raw as Record<string, unknown>).kind === "pattern")
+          ? []
+          : [`findings[${index}]: declare kind single or pattern`],
+      );
+      if (untyped.length) return `error: ${untyped.join("; ")}; no verdict recorded`;
+    }
+    const invalidCases = verdict.droppedFindings?.filter((reason) =>
+      /dropped — (invariant and a non-empty cases array|each case needs|a single finding cannot carry)/.test(reason),
+    );
+    if (invalidCases?.length)
+      return `error: invalid invariant case table; ${invalidCases.join("; ")}; no verdict recorded`;
     ctx.onVerdict?.(verdict);
     const notes: string[] = [];
     if (verdict.downgraded) notes.push(`downgraded from approve: ${downgradeNote(verdict.downgraded)}`);

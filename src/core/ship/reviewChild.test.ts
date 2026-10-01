@@ -55,6 +55,31 @@ describe("buildShipReviewTurn — the review round's one user turn (item 5)", ()
     expect(turn).toContain("Fix round's dispositions:\nF1: fixed — cookie set on the redirect\nF2: declined");
   });
 
+  it("a re-review carries the previous invariant and every case into the next review turn", () => {
+    const turn = buildShipReviewTurn({
+      where: "acme/api#7",
+      round: 2,
+      prior: {
+        findings: [
+          {
+            ...F1,
+            invariant: "only checked trees publish",
+            cases: [
+              { scenario: "explicit source", expected: "validate its tree" },
+              { scenario: "backgrounded push", expected: "reject compound execution" },
+            ],
+          },
+        ],
+        dispositions: [D1],
+      },
+    });
+    expect(turn).toContain("check EACH scenario against its expected result");
+    expect(turn).toContain("use a new id for a different invariant");
+    expect(turn).toContain("Invariant: only checked trees publish");
+    expect(turn).toContain("explicit source → validate its tree");
+    expect(turn).toContain("backgrounded push → reject compound execution");
+  });
+
   it("a re-review whose prior round recorded nothing says so for both lists", () => {
     const turn = buildShipReviewTurn({ where: "acme/api#7", round: 3, prior: { findings: [], dispositions: [] } });
     expect(turn).toContain("Previous round's findings:\n(none recorded)");

@@ -653,6 +653,30 @@ describe("composeChild — the child a brief names", () => {
       r,
     );
     expect(withChecks.issuedFindingIds).toEqual(["F1", "check:ci / bot", "check:ci / workers"]);
+    const withCases = await composeChild(
+      {
+        kind: "findings",
+        unit: "U10",
+        pr: 7,
+        reviewRunId: "run-gone-after-the-idle-window",
+        findings: [
+          {
+            ...FINDING,
+            invariant: "only checked trees publish",
+            cases: [
+              { scenario: "explicit refspec", expected: "check source tree" },
+              { scenario: "backgrounded push", expected: "refuse compound command" },
+            ],
+          },
+        ],
+      },
+      instance,
+      unit,
+      r,
+    );
+    expect(withCases.prompt).toContain("check every applicable invariant case (scenario → expected result)");
+    expect(withCases.prompt).toContain("Invariant: only checked trees publish");
+    expect(withCases.prompt).toContain("backgrounded push → refuse compound command");
     // A review that listed no structured findings is addressed by its prose, said so.
     const prose = readers({ runs: { "run-r1": { findings: [], finalReply: "Please tighten the tests." } } });
     const byProse = await composeChild(

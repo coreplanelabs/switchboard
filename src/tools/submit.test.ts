@@ -62,7 +62,14 @@ describe("submit_verdict tool", () => {
   // at the tool: the dispatcher's level rides the context, the parser holds the
   // approve to it, and the ack tells the model its verdict changed and why.
   describe("the severity gate (agent-review item 5a)", () => {
-    const major = { id: "F3", severity: "major", file: "a.vue", line: 149, title: "drops the first key's ref" };
+    const major = {
+      id: "F3",
+      severity: "major",
+      file: "a.vue",
+      line: 149,
+      title: "drops the first key's ref",
+      kind: "single",
+    };
     const ctxAt = (level: ToolContext["addressSeverity"], sink: (v: unknown) => void): ToolContext =>
       ({ executor: {} as ToolContext["executor"], onVerdict: sink, addressSeverity: level }) as ToolContext;
 
@@ -123,6 +130,103 @@ describe("submit_verdict tool", () => {
       expect(submitVerdictTool.inputSchema.required).not.toContain("findings");
     });
 
+    it("exposes a typed invariant and case matrix for pattern findings, with concrete push axes in the tool contract", async () => {
+      const item = (submitVerdictTool.inputSchema.properties as Record<string, any>).findings.items;
+      expect(item.properties.kind.enum).toEqual(["single", "pattern"]);
+      expect(item.required).toContain("kind");
+      expect(item.properties.invariant.type).toBe("string");
+      expect(item.properties.cases.items.required).toEqual(["scenario", "expected"]);
+      for (const axis of ["source", "destination", "endpoint", "command composition"]) {
+        expect(submitVerdictTool.description).toContain(axis);
+      }
+      const got: unknown[] = [];
+      const result = await submitVerdictTool.run(
+        {
+          verdict: "request_changes",
+          findings: [
+            {
+              id: "F1",
+              severity: "major",
+              file: "src/a.ts",
+              title: "Unsafe push",
+              kind: "pattern",
+              invariant: "Only checked trees publish",
+              cases: [{ scenario: "explicit refspec", expected: "checked source" }],
+            },
+          ],
+        },
+        ctxWith((v) => got.push(v)),
+      );
+      expect(result).toBe("verdict recorded: request_changes (1 finding)");
+      expect(got).toMatchObject([
+        {
+          findings: [
+            {
+              invariant: "Only checked trees publish",
+              cases: [{ scenario: "explicit refspec", expected: "checked source" }],
+            },
+          ],
+        },
+      ]);
+    });
+
+    it("requires a new finding to declare single or pattern, and rejects pattern findings without a well-formed case table before recording", async () => {
+      const got: unknown[] = [];
+      const ctx = ctxWith((v) => got.push(v));
+      const base = { id: "F1", severity: "major", file: "src/push.ts", title: "Unsafe push" };
+      for (const finding of [
+        base,
+        { ...base, kind: "pattern" },
+        { ...base, kind: "pattern", invariant: "only checked trees" },
+        { ...base, kind: "single", invariant: "only checked trees", cases: [{ scenario: "push", expected: "refuse" }] },
+        { ...base, kind: "typo" },
+      ]) {
+        const result = await submitVerdictTool.run({ verdict: "request_changes", findings: [finding] }, ctx);
+        expect(String(result)).toMatch(/^error:/);
+      }
+      expect(got).toEqual([]);
+      const accepted = await submitVerdictTool.run(
+        {
+          verdict: "request_changes",
+          findings: [
+            {
+              ...base,
+              kind: "pattern",
+              invariant: "only checked trees",
+              cases: [{ scenario: "push", expected: "refuse" }],
+            },
+          ],
+        },
+        ctx,
+      );
+      expect(accepted).toContain("verdict recorded");
+      expect(got).toMatchObject([{ findings: [{ kind: "pattern", invariant: "only checked trees" }] }]);
+    });
+
+    it("refuses a missing invariant matrix before replacing a valid verdict", async () => {
+      const got: unknown[] = [];
+      const ctx = ctxWith((v) => got.push(v));
+      await submitVerdictTool.run({ verdict: "approve", findings: [] }, ctx);
+      const out = await submitVerdictTool.run(
+        {
+          verdict: "request_changes",
+          findings: [
+            {
+              id: "F1",
+              severity: "major",
+              file: "src/a.ts",
+              title: "Unsafe push",
+              kind: "pattern",
+              invariant: "only checked trees",
+            },
+          ],
+        },
+        ctx,
+      );
+      expect(String(out)).toContain("error: invalid invariant case table");
+      expect(got).toEqual([{ verdict: "approve", summary: "", findings: [] }]);
+    });
+
     it("the description instructs stable ids (F1, F2, …) and names the severity vocabulary once", () => {
       expect(submitVerdictTool.description).toMatch(/stable/i);
       expect(submitVerdictTool.description).toContain("F1");
@@ -135,7 +239,7 @@ describe("submit_verdict tool", () => {
         {
           verdict: "request_changes",
           summary: "one bug",
-          findings: [{ id: "F1", severity: "major", file: "src/a.ts", line: 3, title: "off by one" }],
+          findings: [{ id: "F1", severity: "major", file: "src/a.ts", line: 3, title: "off by one", kind: "single" }],
         },
         ctxWith((v) => got.push(v)),
       );
@@ -143,7 +247,7 @@ describe("submit_verdict tool", () => {
         {
           verdict: "request_changes",
           summary: "one bug",
-          findings: [{ id: "F1", severity: "major", file: "src/a.ts", line: 3, title: "off by one" }],
+          findings: [{ id: "F1", severity: "major", file: "src/a.ts", line: 3, title: "off by one", kind: "single" }],
         },
       ]);
       expect(String(out)).toContain("1 finding");
@@ -155,8 +259,8 @@ describe("submit_verdict tool", () => {
           verdict: "request_changes",
           summary: "s",
           findings: [
-            { id: "F1", severity: "major", file: "a.ts", title: "ok" },
-            { id: "F2", severity: "meh", file: "b.ts", title: "bad" },
+            { id: "F1", severity: "major", file: "a.ts", title: "ok", kind: "single" },
+            { id: "F2", severity: "meh", file: "b.ts", title: "bad", kind: "single" },
           ],
         },
         ctxWith(() => {}),

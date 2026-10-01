@@ -32,7 +32,7 @@ export function buildShipReviewTurn(input: {
   return (
     `Re-review pull request ${input.where}${at} — review round ${input.round} of this ship pipeline. ` +
     `Load the \`re-review-delta\` skill: narrow your READING to the delta since the previously reviewed head and verify each prior finding's disposition, ` +
-    `but your verdict still covers the full diff against base. Carry every unresolved prior finding forward under its existing id.\n\n` +
+    `but your verdict still covers the full diff against base. For every prior invariant, check EACH scenario against its expected result; add missing cases under the same id, but use a new id for a different invariant. Carry every unresolved prior finding forward under its existing id.\n\n` +
     `Previous round's findings:\n${findings}\n\nFix round's dispositions:\n${dispositions}${dropped}`
   );
 }

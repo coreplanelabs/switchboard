@@ -724,6 +724,17 @@ describe("review prompts: structured findings through submit_verdict (agent-ship
     }
   });
 
+  it("both review prompts require invariant case coverage across push selection and command composition, and preserve widened IDs", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
+      expect(sys).toContain("kind: single or pattern");
+      expect(sys).toContain("declare kind: pattern");
+      expect(sys).toContain("shared invariant");
+      expect(sys).toContain("{scenario, expected}");
+      for (const axis of ["source", "destination", "endpoint", "command composition"]) expect(sys).toContain(axis);
+      expect(sys).toContain("SAME id");
+    }
+  });
+
   it("both review prompts state the severity gate (agent-review item 5a): approve means no finding at or above the severity to address, minor by default, nits alone never block, and an approve over one is downgraded", () => {
     for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
       expect(sys).toMatch(/downgraded to `request_changes`/i);

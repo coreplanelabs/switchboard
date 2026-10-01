@@ -390,7 +390,7 @@ describe("runRelayedTool — the verdict path", () => {
     verdict: "approve",
     summary: "looks correct",
     head: HEAD,
-    findings: [{ id: "F1", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
+    findings: [{ id: "F1", kind: "single", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
   };
   it("a relayed submit_verdict is the native tool's own call: the run's onVerdict receives the verdict the native loop's call yields, the model reads the same acknowledgement, and the post-step's body is the same — `LGTM:` first, the findings under it", async () => {
     const submitVerdict = TOOLSETS.readonly.find((t) => t.name === "submit_verdict")!;

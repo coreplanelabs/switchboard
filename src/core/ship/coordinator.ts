@@ -535,6 +535,10 @@ export interface HumanGatePending {
   round: number;
   findings: Finding[];
   verdict: "approve" | "request_changes";
+  /** Earned in the live review before this gate parked the unit. */
+  patternContinuations?: number;
+  /** Only a confirmed GitHub review may be a predecessor for a later widening. */
+  reviewPosted?: true;
   reviewRunId?: string;
   headSha?: string;
   /** When the verdict asked the question, for fencing older unit events. */
@@ -1080,6 +1084,8 @@ export type CoordinatorNote =
        *  record, a harness around `submit_verdict`) and the row, the card and
        *  the log say so instead of routing silently into the findings step. */
       gate?: { level: AddressSeverity; findings: string[] };
+      /** Durable credit, verified against posted review records before recovery. */
+      patternContinuation?: true;
     }
   | { type: "ended"; ending: UnitEnding };
 type RoundNote = Extract<CoordinatorNote, { type: "round" }>;
@@ -1322,6 +1328,9 @@ export interface UnitPipelineState {
   /** Approved-head rebases attempted in this run. Each fresh conflict may buy
    *  one fix round; the run's remaining lease, not pull-request lifetime, is the bound. */
   readonly rebaseAttempts: number;
+  /** Extra reviews granted only for strict same-invariant case-table widenings.
+   * Physical round indexes remain unique; this counter is bounded separately. */
+  readonly patternContinuations: number;
   /** Review dispatches superseded by an external head move. The count gives
    * each restarted round a fresh durable `/a<n>` step identity. */
   readonly reviewRestarts: number;
@@ -1333,6 +1342,10 @@ export interface UnitPipelineState {
    *  ids are unique within one round only. A disposition naming an id the review
    *  never issued is dropped at the match (`matchDispositions`). */
   readonly findingsByRound: Readonly<Record<number, Finding[]>>;
+  /** A case table alone is not evidence that its review was published. */
+  readonly postedReviewByRound: Readonly<Record<number, boolean>>;
+  /** A directly recovered review carries this audited prior round's findings by value. */
+  readonly recoveredPriorRound?: number;
   /** Human answers folded into a recovered/parked findings brief. */
   readonly humanAnswersByRound: Readonly<Record<number, string[]>>;
   readonly dispositionsByRound: Readonly<Record<number, FindingDisposition[]>>;
@@ -1390,10 +1403,12 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
     phase: { at: "pre-check" },
     reviewRounds: pending?.round ?? 0,
     rebaseAttempts: 0,
+    patternContinuations: pending?.patternContinuations ?? 0,
     reviewRestarts: 0,
     spentMs: { coding: 0, review: 0, waiting: 0 },
     spendUsd: input.session?.spendUsd ?? 0,
     findingsByRound: pending ? { [pending.round]: pending.findings } : {},
+    postedReviewByRound: pending?.reviewPosted === true ? { [pending.round]: true } : {},
     humanAnswersByRound: pending && input.session?.texts !== undefined ? { [pending.round]: input.session.texts } : {},
     dispositionsByRound: {},
     reviewRunByRound: pending?.reviewRunId !== undefined ? { [pending.round]: pending.reviewRunId } : {},
@@ -1431,6 +1446,9 @@ export function openRecoveredUnitPipeline(
     spendUsd?: number;
     findingsRunId?: string;
     findings?: Finding[];
+    /** Posted findings of the review immediately before a recovered review. */
+    priorFindings?: Finding[];
+    patternContinuations?: number;
   },
 ): UnitPipelineState {
   const base: UnitPipelineState = {
@@ -1439,11 +1457,12 @@ export function openRecoveredUnitPipeline(
     clock: at,
     phase: { at: "ended" },
     reviewRounds: recovery.round,
-    // These counters name actions inside this new recovery Workflow's distinct
-    // `/recovery/` step namespace; they are not lifetime-unit counters or
-    // budget inputs. The lifetime review-round count is the durable `round`
-    // above, while wall-clock and dollar enforcement come from the claim.
+    // Rebase attempts and dispatch restarts belong to this recovery Workflow's
+    // distinct `/recovery/` steps. The review round and earned pattern slots
+    // are original-segment counters carried by the verified claim; wall-clock
+    // and dollar enforcement also come from that claim.
     rebaseAttempts: 0,
+    patternContinuations: recovery.patternContinuations ?? 0,
     reviewRestarts: 0,
     pr: recovery.pr,
     lastReviewHead: recovery.expectedHeadSha,
@@ -1451,7 +1470,21 @@ export function openRecoveredUnitPipeline(
     // come only from the admission claim's complete persisted child evidence.
     spentMs: { coding: 0, review: 0, waiting: 0 },
     spendUsd: recovery.spendUsd ?? (input.grant?.costCapUsd === undefined ? 0 : null),
-    findingsByRound: recovery.kind === "findings" ? { [recovery.round]: recovery.findings ?? [] } : {},
+    findingsByRound:
+      recovery.kind === "findings"
+        ? { [recovery.round]: recovery.findings ?? [] }
+        : recovery.priorFindings !== undefined
+          ? { [recovery.round - 1]: recovery.priorFindings }
+          : {},
+    postedReviewByRound:
+      recovery.kind === "review" && recovery.priorFindings !== undefined
+        ? { [recovery.round - 1]: true }
+        : recovery.kind === "findings"
+          ? { [recovery.round]: true }
+          : {},
+    ...(recovery.kind === "review" && recovery.priorFindings !== undefined
+      ? { recoveredPriorRound: recovery.round - 1 }
+      : {}),
     humanAnswersByRound: {},
     dispositionsByRound: {},
     reviewRunByRound:
@@ -1477,7 +1510,47 @@ function waitSliceMs(clock: number, until: number): number {
 }
 
 /** The pipeline's loop as the config allows it. */
-const loopOf = (s: UnitPipelineState): Loop => ({ maxRounds: s.input.caps.maxRounds });
+export const MAX_PATTERN_CONTINUATIONS = 2;
+const loopOf = (s: UnitPipelineState): Loop => ({ maxRounds: s.input.caps.maxRounds + s.patternContinuations });
+const ordinaryRoundsSpent = (s: UnitPipelineState): boolean =>
+  s.reviewRounds - s.patternContinuations >= s.input.caps.maxRounds;
+
+/** Only one finding continuing one prior pattern can buy an extra round. A
+ * same file or id without an unchanged invariant and a strict case superset
+ * never buys time; neither do check findings or a new issue alongside it. */
+export function strictPatternWidening(prior: readonly Finding[], findings: readonly Finding[]): boolean {
+  if (prior.length !== 1 || findings.length !== 1) return false;
+  const [before] = prior;
+  const [after] = findings;
+  if (
+    before.check ||
+    after.check ||
+    !before.invariant ||
+    before.invariant !== after.invariant ||
+    !before.cases?.length ||
+    !after.cases?.length ||
+    before.id !== after.id
+  )
+    return false;
+  const key = (c: { scenario: string; expected: string }) => JSON.stringify([c.scenario, c.expected]);
+  const oldCases = new Set(before.cases.map(key));
+  const newCases = new Set(after.cases.map(key));
+  return (
+    oldCases.size === before.cases.length &&
+    newCases.size === after.cases.length &&
+    newCases.size > oldCases.size &&
+    [...oldCases].every((c) => newCases.has(c))
+  );
+}
+
+function widenedOnly(s: UnitPipelineState, round: RoundRef, findings: readonly Finding[]): boolean {
+  return (
+    round.index >= 2 &&
+    s.patternContinuations < MAX_PATTERN_CONTINUATIONS &&
+    s.postedReviewByRound[round.index - 1] === true &&
+    strictPatternWidening(s.findingsByRound[round.index - 1] ?? [], findings)
+  );
+}
 
 /** A round's carve (agent-ship item 8): the remainder minus the reserve for
  *  the rounds after it, capped at its preset's ask, refused under its floor.
@@ -1551,11 +1624,13 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
     pr,
     ...(s.lastReviewHead !== undefined ? { headSha: s.lastReviewHead } : {}),
     round: round.index,
-    ...(priorReview !== undefined || (priorCoding !== undefined && priorFindings.length > 0)
+    ...(priorReview !== undefined || (priorCoding !== undefined && priorFindings.length > 0) || priorFindings.length > 0
       ? {
           prior: {
             ...(priorReview !== undefined ? { reviewRunId: priorReview } : {}),
-            ...(priorReview === undefined || s.humanAnswersByRound[round.index - 1] !== undefined
+            ...(priorReview === undefined ||
+            s.recoveredPriorRound === round.index - 1 ||
+            s.humanAnswersByRound[round.index - 1] !== undefined
               ? { findings: priorFindings }
               : {}),
             ...(priorCoding !== undefined ? { codingRunId: priorCoding } : {}),
@@ -1845,6 +1920,8 @@ function parkHumanGate(
     round: round.index,
     findings,
     verdict,
+    ...(s.patternContinuations > 0 ? { patternContinuations: s.patternContinuations } : {}),
+    ...(s.postedReviewByRound[round.index] === true ? { reviewPosted: true } : {}),
     ...(s.reviewRunByRound[round.index] !== undefined ? { reviewRunId: s.reviewRunByRound[round.index] } : {}),
     ...(s.lastReviewHead !== undefined ? { headSha: s.lastReviewHead } : {}),
     askedAt,
@@ -1923,7 +2000,7 @@ function recoveryCostEnding(s: UnitPipelineState): UnitEnding | undefined {
  *  remainder cannot carve above its floor is not dispatched, and the unit ends
  *  at the cap naming the round, what it would have got and the floor. */
 function enterRound(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNote[] = []): Transition {
-  if (s.input.recovery !== undefined && round.index > s.input.caps.maxRounds)
+  if (s.input.recovery !== undefined && round.index > loopOf(s).maxRounds)
     return end(s, { kind: "round_cap", maxRounds: s.input.caps.maxRounds, reviewRounds: s.reviewRounds }, notes);
   const costEnding = recoveryCostEnding(s);
   if (costEnding !== undefined) return end(s, costEnding, notes);
@@ -1946,7 +2023,7 @@ function mandatoryReview(s: UnitPipelineState, notes: CoordinatorNote[] = []): T
 
 /** The next review round, or the round cap. */
 function nextReview(s: UnitPipelineState, notes: CoordinatorNote[] = []): Transition {
-  if (s.reviewRounds >= s.input.caps.maxRounds)
+  if (ordinaryRoundsSpent(s))
     return end(s, { kind: "round_cap", maxRounds: s.input.caps.maxRounds, reviewRounds: s.reviewRounds }, notes);
   return enterRound(s, { index: s.reviewRounds + 1, kind: "review" }, notes);
 }
@@ -2214,13 +2291,22 @@ function settleReview(
     );
   }
   const verdict = facts.verdict;
+  const actionable =
+    verdict.verdict === "request_changes"
+      ? (verdict.findings ?? [])
+      : findingsAtOrAbove(verdict.findings ?? [], s.input.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY);
+  const continued = facts.reviewPosted === true && widenedOnly(s, round, actionable);
   const next: UnitPipelineState = {
     ...charged,
+    patternContinuations: s.patternContinuations + (continued ? 1 : 0),
     findingsByRound: { ...s.findingsByRound, [round.index]: verdict.findings },
+    postedReviewByRound: { ...s.postedReviewByRound, [round.index]: facts.reviewPosted === true },
     ...(facts.reviewHead !== undefined ? { lastReviewHead: facts.reviewHead } : {}),
     ...(verdict.summary !== undefined ? { lastVerdictSummary: verdict.summary } : {}),
   };
-  const notes = [roundNote(round, verdict.verdict)];
+  const notes: RoundNote[] = [
+    { ...roundNote(round, verdict.verdict), ...(continued ? { patternContinuation: true as const } : {}) },
+  ];
   const costEnding = recoveryCostEnding(next);
   if (costEnding !== undefined) return end(next, costEnding, notes);
   if (verdict.verdict === "approve") {
@@ -2249,7 +2335,7 @@ function settleReview(
       // The gate fired — which the child's parser should have made impossible
       // (agent-review item 5a): the round note carries what it caught, so the
       // mismatch is seen and not just routed around.
-      notes[0] = { ...roundNote(round, verdict.verdict), gate: { level, findings: gated.map(gateLabel) } };
+      notes[0] = { ...notes[0]!, gate: { level, findings: gated.map(gateLabel) } };
       if (mode !== undefined)
         return end(
           next,
@@ -2267,7 +2353,7 @@ function settleReview(
       // unit; an answer later opens the fix round with the question attached.
       if (allHumanGated(gated))
         return parkHumanGate(next, round, gated, "approve", facts.reviewAskedAt ?? facts.finishedAt ?? s.clock, notes);
-      if (next.reviewRounds >= next.input.caps.maxRounds)
+      if (ordinaryRoundsSpent(next))
         return end(
           next,
           { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
@@ -2307,7 +2393,7 @@ function settleReview(
       facts.reviewAskedAt ?? facts.finishedAt ?? s.clock,
       notes,
     );
-  if (next.reviewRounds >= next.input.caps.maxRounds)
+  if (ordinaryRoundsSpent(next))
     return end(
       next,
       { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
@@ -2509,7 +2595,7 @@ function settleChecks(
       // the parser-mismatch gate — and the findings step runs as for any
       // changes-requested round: dispositions, a fix round, a re-review.
       const notes: CoordinatorNote[] = [roundNote(round, "checks_failed")];
-      if (next.reviewRounds >= next.input.caps.maxRounds)
+      if (ordinaryRoundsSpent(next))
         return end(
           next,
           { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
@@ -3300,6 +3386,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
               ...adopted,
               reviewRounds: round,
               findingsByRound: { ...adopted.findingsByRound, [round]: answered.findings },
+              postedReviewByRound: { ...adopted.postedReviewByRound, [round]: true },
               humanAnswersByRound: {
                 ...adopted.humanAnswersByRound,
                 [round]: [`${answered.author}: ${answered.answer}`],
@@ -3745,7 +3832,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           findingsByRound: { ...s.findingsByRound, [round.index]: findings },
         };
         const notes: CoordinatorNote[] = [roundNote(round, "dequeued")];
-        if (next.reviewRounds >= next.input.caps.maxRounds)
+        if (ordinaryRoundsSpent(next))
           return end(
             next,
             { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
@@ -3863,7 +3950,12 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
 
 // ---- the report --------------------------------------------------------------------------------------
 
-const sameFinding = (a: Finding, b: Finding) => a.severity === b.severity && a.file === b.file && a.title === b.title;
+const sameFinding = (a: Finding, b: Finding) =>
+  a.severity === b.severity &&
+  a.file === b.file &&
+  a.title === b.title &&
+  a.invariant === b.invariant &&
+  JSON.stringify(a.cases) === JSON.stringify(b.cases);
 
 /** The disposition that answers `finding` as review round `round` listed it:
  *  the one that round's findings step recorded, else one carried forward
@@ -4193,7 +4285,14 @@ function renderUnitReportWithWake(
         failedChecks.length > 0
           ? `🧢 Ship stopped at a cap: the ${e.maxRounds}-round cap — the review of round ${e.reviewRounds} approved, but ${failedChecks.map((f) => `\`${f.id}\``).join(", ")} failed at the approved head and no fix round remains.${prLine}`
           : `🧢 Ship stopped at a cap: the ${e.maxRounds}-round cap — no approval after ${rounds}.${prLine}`;
-      return join([headline, splitReport(s), nextAction()]);
+      return join([
+        headline,
+        ...(s.patternContinuations > 0
+          ? [`Same-invariant continuations: ${s.patternContinuations} of ${MAX_PATTERN_CONTINUATIONS} used.`]
+          : []),
+        splitReport(s),
+        nextAction(),
+      ]);
     }
     case "wall_clock_cap":
       if (!shows(verbosity, "verbose")) return `🧢 Out of budget — no approval after ${rounds}.${prLine}`;
