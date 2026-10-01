@@ -97,6 +97,13 @@ export function downgradeNote(d: { findings: readonly string[]; level: AddressSe
   return `finding${d.findings.length === 1 ? "" : "s"} ${d.findings.join(", ")} at or above ${d.level}, the severity to address`;
 }
 
+export interface FindingCase {
+  /** An independently reproducible input or path through the invariant. */
+  scenario: string;
+  /** The result the implementation must produce for this case. */
+  expected: string;
+}
+
 export interface Finding {
   /** Stable id the reviewer assigned in order ("F1", "F2", …) — dispositions
    *  reference findings by this id. */
@@ -109,6 +116,13 @@ export interface Finding {
   line?: number;
   /** One line naming the issue; the full explanation lives in the prose. */
   title: string;
+  /** Required on new submissions; absent on stored findings predating this boundary. */
+  kind?: "single" | "pattern";
+  /** The shared rule behind a pattern, not just the first counterexample. */
+  invariant?: string;
+  /** Concrete cases to verify in the fix and the re-review; legacy findings
+   * without a matrix remain readable, but a partial matrix is invalid. */
+  cases?: FindingCase[];
   /** The finding's remedy is a receipt only a person can produce — a replay
    *  that needs a provider credential no sandbox holds, a procedure a person
    *  runs live — so no fix round can address it. Set by the reviewer beside the
@@ -230,7 +244,29 @@ function parseFinding(
   if (!file) return { id, reason: "missing or empty file" };
   const title = typeof r.title === "string" ? oneLine(r.title) : "";
   if (!title) return { id, reason: "missing or empty title" };
+  if (r.kind !== undefined && r.kind !== "single" && r.kind !== "pattern")
+    return { id, reason: "kind must be single or pattern" };
+  if (r.kind === "single" && (r.invariant !== undefined || r.cases !== undefined))
+    return { id, reason: "a single finding cannot carry an invariant case table; declare kind pattern" };
   const finding: Finding = { id, severity: severity as FindingSeverity, file, title };
+  if (r.kind !== undefined) finding.kind = r.kind;
+  if (r.kind === "pattern" || r.invariant !== undefined || r.cases !== undefined) {
+    const invariant = typeof r.invariant === "string" ? oneLine(r.invariant) : "";
+    if (!invariant || !Array.isArray(r.cases) || r.cases.length === 0)
+      return { id, reason: "invariant and a non-empty cases array must be supplied together" };
+    const cases: FindingCase[] = [];
+    for (const value of r.cases) {
+      if (typeof value !== "object" || value === null || Array.isArray(value))
+        return { id, reason: "each case needs a scenario and expected result" };
+      const row = value as Record<string, unknown>;
+      const scenario = typeof row.scenario === "string" ? oneLine(row.scenario) : "";
+      const expected = typeof row.expected === "string" ? oneLine(row.expected) : "";
+      if (!scenario || !expected) return { id, reason: "each case needs a scenario and expected result" };
+      cases.push({ scenario, expected });
+    }
+    finding.invariant = invariant;
+    finding.cases = cases;
+  }
   // Like `head`: an unusable optional locator is dropped, the finding stands —
   // dropping the whole finding over a bad line would also drop the severity
   // that the approve→request_changes downgrade keys on.
@@ -288,7 +324,10 @@ export function severityCounts(findings: readonly Finding[]): string {
  *  the posted body's list (bulleted below) and ship's synthesized child turns. */
 export function formatFinding(f: Finding): string {
   const location = f.line !== undefined ? `${f.file}:${f.line}` : f.file;
-  return `[${f.severity}] ${f.id} ${location} — ${f.title}${f.humanGated ? " (human-gated)" : ""}`;
+  const headline = `[${f.severity}] ${f.id} ${location} — ${f.title}${f.humanGated ? " (human-gated)" : ""}`;
+  return f.invariant && f.cases
+    ? `${headline}\n  Invariant: ${f.invariant}\n  Cases:\n${f.cases.map((row) => `  - ${row.scenario} → ${row.expected}`).join("\n")}`
+    : headline;
 }
 
 /** One compact disposition line — `id: fixed|declined[ — note]` — the coding
@@ -371,6 +410,9 @@ function verdictMarker(verdict: ReviewVerdict | undefined, target: ReviewBodyTar
             severity: f.severity,
             file: f.file,
             title: f.title,
+            ...(f.kind !== undefined ? { kind: f.kind } : {}),
+            ...(f.invariant !== undefined ? { invariant: f.invariant } : {}),
+            ...(f.cases !== undefined ? { cases: f.cases } : {}),
             ...(f.line !== undefined ? { line: f.line } : {}),
             ...(f.humanGated ? { humanGated: true } : {}),
           })),
@@ -416,6 +458,15 @@ export function buildReviewPostBody(
         ),
       ].join("\n"),
     );
+  }
+
+  for (const f of findings) {
+    if (f.invariant && f.cases) {
+      fixedParts.push(
+        `**${escapeMarkdownTableCell(f.id)} invariant:** ${f.invariant}\n\n` +
+          f.cases.map((row) => `- ${row.scenario} → ${row.expected}`).join("\n"),
+      );
+    }
   }
 
   const marker = verdictMarker(verdict, target);
@@ -562,6 +613,23 @@ export function isFindingShape(v: unknown): v is Finding {
     typeof v.file === "string" &&
     typeof v.title === "string" &&
     (v.line === undefined || typeof v.line === "number") &&
+    (v.kind === undefined || v.kind === "single" || v.kind === "pattern") &&
+    (v.kind !== "pattern" || (v.invariant !== undefined && v.cases !== undefined)) &&
+    (v.kind !== "single" || (v.invariant === undefined && v.cases === undefined)) &&
+    (v.invariant === undefined && v.cases === undefined
+      ? true
+      : typeof v.invariant === "string" &&
+        v.invariant.length > 0 &&
+        Array.isArray(v.cases) &&
+        v.cases.length > 0 &&
+        v.cases.every(
+          (row: unknown) =>
+            isRecordLike(row) &&
+            typeof row.scenario === "string" &&
+            row.scenario.length > 0 &&
+            typeof row.expected === "string" &&
+            row.expected.length > 0,
+        )) &&
     (v.humanGated === undefined || v.humanGated === true)
   );
 }
@@ -642,7 +710,17 @@ export function redactVerdict(v: ReviewVerdict, redact: (s: string) => string = 
     summary: redact(v.summary),
     ...(v.head !== undefined ? { head: v.head } : {}),
     ...(v.findings !== undefined
-      ? { findings: v.findings.map((f) => ({ ...f, file: redact(f.file), title: redact(f.title) })) }
+      ? {
+          findings: v.findings.map((f) => ({
+            ...f,
+            file: redact(f.file),
+            title: redact(f.title),
+            ...(f.invariant !== undefined ? { invariant: redact(f.invariant) } : {}),
+            ...(f.cases !== undefined
+              ? { cases: f.cases.map((row) => ({ scenario: redact(row.scenario), expected: redact(row.expected) })) }
+              : {}),
+          })),
+        }
       : {}),
   };
 }

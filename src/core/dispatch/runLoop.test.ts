@@ -5761,7 +5761,7 @@ describe("the pi harness — the review preset", () => {
     verdict: "approve",
     summary: "looks correct",
     head: HEAD,
-    findings: [{ id: "F1", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
+    findings: [{ id: "F1", kind: "single", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
   };
   const prThread = {
     repoCtx: { repo: "o/r", pr: 42, ref: "fix/the-pr-head", refFromPr: true, baseRef: "main" } as RepoContext,
@@ -6541,7 +6541,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     verdict: "approve",
     summary: "looks correct",
     head: HEAD,
-    findings: [{ id: "F1", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
+    findings: [{ id: "F1", kind: "single", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
   };
   const prThread = {
     repoCtx: { repo: "o/r", pr: 42, ref: "fix/the-pr-head", refFromPr: true, baseRef: "main" } as RepoContext,

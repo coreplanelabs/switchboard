@@ -1109,6 +1109,10 @@ async function runUnit(
           ...(row.recovery.accounting !== undefined ? { spendUsd: row.recovery.accounting.spendUsd } : {}),
           ...(row.recovery.findingsRunId !== undefined ? { findingsRunId: row.recovery.findingsRunId } : {}),
           ...(row.recovery.findings !== undefined ? { findings: row.recovery.findings } : {}),
+          ...(row.recovery.priorFindings !== undefined ? { priorFindings: row.recovery.priorFindings } : {}),
+          ...(row.recovery.patternContinuations !== undefined
+            ? { patternContinuations: row.recovery.patternContinuations }
+            : {}),
         })
       : openUnitPipeline(input, start.at);
   let notes = 0;
@@ -1164,6 +1168,7 @@ async function runUnit(
             agent: note.agent,
             outcome: note.outcome,
             ...(note.gate !== undefined ? { gate: note.gate } : {}),
+            ...(note.patternContinuation ? { patternContinuation: true } : {}),
           };
           const noteStep = `${prefix}/note/${++notes}`;
           last = { step: noteStep, round: { index: note.index, kind: note.agent } };

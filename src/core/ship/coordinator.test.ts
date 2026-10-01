@@ -115,6 +115,84 @@ const FIXED: FindingDisposition = { findingId: "F1", disposition: "fixed", note:
 const DECLINED: FindingDisposition = { findingId: "F1", disposition: "declined", note: "the loop is exclusive" };
 
 describe("original-unit recovery accounting", () => {
+  it("compares the next widening with the posted prior table after recovery starts directly at review", () => {
+    const prior: Finding = {
+      ...FINDING,
+      invariant: "only checked trees",
+      cases: [
+        { scenario: "source", expected: "checked" },
+        { scenario: "endpoint", expected: "checked" },
+      ],
+    };
+    const state = openRecoveredUnitPipeline(
+      input({
+        caps: { maxRounds: 2, maxMinutes: 180 },
+        merge: "person",
+        recovery: { remainingMs: 100 * MIN, unitKey: "plan-old:U10" },
+      }),
+      T0,
+      {
+        kind: "review",
+        round: 3,
+        pr: { number: 7, url: PR_URL },
+        expectedHeadSha: HEAD_B,
+        reviewRunId: "run-review-2",
+        priorFindings: [prior],
+        patternContinuations: 1,
+      },
+    );
+    const d = new Driver(state);
+    expect(d.state.findingsByRound[2]).toEqual([prior]);
+    runChild(
+      d,
+      "run-review-3",
+      finished({
+        status: "completed",
+        verdict: {
+          verdict: "request_changes",
+          summary: "composition path missing",
+          findings: [{ ...prior, cases: [...prior.cases!, { scenario: "composition", expected: "rejected" }] }],
+        },
+        reviewPosted: true,
+        reviewHead: HEAD_B,
+      }),
+      T0 + 10 * MIN,
+    );
+    expect(d.state.patternContinuations).toBe(2);
+    expect(d.action).toMatchObject({ type: "spawn", round: { index: 3, kind: "findings" } });
+  });
+
+  it("spends a verified continuation in recovered findings and allows one re-review past the ordinary cap", () => {
+    const state = openRecoveredUnitPipeline(
+      input({
+        caps: { maxRounds: 2, maxMinutes: 120 },
+        merge: "person",
+        recovery: { remainingMs: 90 * MIN, unitKey: "plan-old:U10" },
+      }),
+      T0,
+      {
+        kind: "findings",
+        round: 2,
+        pr: { number: 7, url: PR_URL },
+        expectedHeadSha: HEAD_A,
+        reviewRunId: "run-review-2",
+        findings: [FINDING],
+        patternContinuations: 1,
+      },
+    );
+    const d = new Driver(state);
+    expect(d.action).toMatchObject({ type: "spawn", round: { index: 2, kind: "findings" } });
+    expect(d.state.patternContinuations).toBe(1);
+    runChild(d, "run-f2", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_B }), T0 + MIN);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 2 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "spawn", round: { index: 3, kind: "review" } });
+    expect(d.state.reviewRounds - d.state.patternContinuations).toBe(2);
+  });
+
   it("names spent original renewals in a recovered merge-ready report", () => {
     const pr = { number: 7, url: PR_URL };
     const state = openRecoveredUnitPipeline(
@@ -1691,6 +1769,310 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     );
     expect(report).toContain("Claimed fixed but still flagged:\n  - [nit] F2 src/b.ts — rename — counted from zero");
     expect(report).not.toContain("F9");
+  });
+
+  it("a widened invariant under the same finding ID does not inherit an earlier fixed disposition", () => {
+    const d = fresh(input({ caps: { maxRounds: 2, maxMinutes: 120 }, merge: "person" }));
+    const original: Finding = {
+      ...FINDING,
+      invariant: "push only checked trees",
+      cases: [{ scenario: "explicit source", expected: "checked" }],
+    };
+    const widened: Finding = {
+      ...original,
+      cases: [...original.cases!, { scenario: "compound push", expected: "rejected" }],
+    };
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: {
+          verdict: "request_changes",
+          summary: "push",
+          findings: [original],
+        },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    runChild(d, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_B }), T0 + 40 * MIN);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 40 * MIN,
+    });
+    runChild(
+      d,
+      "run-r2",
+      finished({
+        status: "completed",
+        verdict: {
+          verdict: "request_changes",
+          summary: "compound path missing",
+          findings: [widened],
+        },
+        reviewPosted: true,
+        reviewHead: HEAD_B,
+      }),
+      T0 + 50 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "spawn", round: { index: 2, kind: "findings" } });
+    expect(d.state.patternContinuations).toBe(1);
+    expect(d.notes).toContainEqual(expect.objectContaining({ type: "round", index: 2, patternContinuation: true }));
+    runChild(d, "run-f2", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_C }), T0 + 65 * MIN);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_C, headBranchExists: true },
+      at: T0 + 65 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "spawn", round: { index: 3, kind: "review" } });
+    expect(d.state.reviewRounds - d.state.patternContinuations).toBe(2);
+    expect(renderUnitReport(d.state)).not.toContain("Claimed fixed but still flagged:");
+  });
+
+  it("bounds widened-only continuation separately and never grants it to a different or unchanged invariant", () => {
+    const original: Finding = {
+      ...FINDING,
+      invariant: "only checked trees",
+      cases: [{ scenario: "source", expected: "checked" }],
+    };
+    const expanded = (f: Finding, scenario: string): Finding => ({
+      ...f,
+      cases: [...f.cases!, { scenario, expected: "refused" }],
+    });
+    const d = fresh(input({ caps: { maxRounds: 2, maxMinutes: 240 }, merge: "person" }));
+    throughRoundZero(d);
+    const review = (n: number, findings: Finding[], head: string, at: number) =>
+      runChild(
+        d,
+        `run-r${n}`,
+        finished({
+          status: "completed",
+          verdict: { verdict: "request_changes", summary: "unsafe", findings },
+          reviewPosted: true,
+          reviewHead: head,
+        }),
+        at,
+      );
+    const fix = (n: number, head: string, at: number) => {
+      runChild(d, `run-f${n}`, findingsCompleted({ dispositions: [FIXED], headSha: head }), at);
+      d.answer({
+        type: "pr-check",
+        pr: { state: "open", prNumber: 7, url: PR_URL, headSha: head, headBranchExists: true },
+        at,
+      });
+    };
+    review(1, [original], HEAD_A, T0 + 20 * MIN);
+    fix(1, HEAD_B, T0 + 40 * MIN);
+    const second = expanded(original, "endpoint");
+    review(2, [second], HEAD_B, T0 + 50 * MIN);
+    expect(d.state.patternContinuations).toBe(1);
+    fix(2, HEAD_C, T0 + 70 * MIN);
+    const third = expanded(second, "composition");
+    review(3, [third], HEAD_C, T0 + 80 * MIN);
+    expect(d.state.patternContinuations).toBe(2);
+    fix(3, "d".repeat(40), T0 + 100 * MIN);
+    review(4, [expanded(third, "fallback")], "d".repeat(40), T0 + 110 * MIN);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "round_cap", maxRounds: 2 } });
+    expect(d.state.patternContinuations).toBe(2);
+    expect(renderUnitReport(d.state)).toContain("Same-invariant continuations: 2 of 2 used.");
+    const unrelated = fresh(input({ caps: { maxRounds: 2, maxMinutes: 180 }, merge: "person" }));
+    throughRoundZero(unrelated);
+    runChild(
+      unrelated,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "unsafe", findings: [original] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    runChild(unrelated, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_B }), T0 + 40 * MIN);
+    unrelated.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 40 * MIN,
+    });
+    runChild(
+      unrelated,
+      "run-r2",
+      finished({
+        status: "completed",
+        verdict: {
+          verdict: "request_changes",
+          summary: "different",
+          findings: [{ ...second, invariant: "a different invariant" }],
+        },
+        reviewPosted: true,
+        reviewHead: HEAD_B,
+      }),
+      T0 + 50 * MIN,
+    );
+    expect(unrelated.action).toMatchObject({ type: "end", ending: { kind: "round_cap" } });
+    expect(unrelated.state.patternContinuations).toBe(0);
+  });
+
+  it.each([
+    ["unchanged table", (f: Finding) => [f]],
+    [
+      "changed expectation",
+      (f: Finding) => [
+        {
+          ...f,
+          cases: [
+            { scenario: "source", expected: "a new expectation" },
+            { scenario: "endpoint", expected: "refuse" },
+          ],
+        },
+      ],
+    ],
+    ["removed prior case", (f: Finding) => [{ ...f, cases: [{ scenario: "endpoint", expected: "refuse" }] }]],
+    [
+      "duplicate case",
+      (f: Finding) => [{ ...f, cases: [...f.cases!, ...f.cases!, { scenario: "endpoint", expected: "refuse" }] }],
+    ],
+    [
+      "new id",
+      (f: Finding) => [{ ...f, id: "F2", cases: [...f.cases!, { scenario: "endpoint", expected: "refuse" }] }],
+    ],
+    [
+      "additional defect",
+      (f: Finding) => [
+        { ...f, cases: [...f.cases!, { scenario: "endpoint", expected: "refuse" }] },
+        { ...FINDING, id: "F2" },
+      ],
+    ],
+  ] as const)("does not spend a pattern continuation for %s", (_label, nextFindings) => {
+    const d = fresh(input({ caps: { maxRounds: 2, maxMinutes: 160 }, merge: "person" }));
+    const original: Finding = {
+      ...FINDING,
+      invariant: "only checked trees",
+      cases: [{ scenario: "source", expected: "checked" }],
+    };
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "unsafe", findings: [original] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    runChild(d, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_B }), T0 + 40 * MIN);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 40 * MIN,
+    });
+    runChild(
+      d,
+      "run-r2",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "still", findings: nextFindings(original) },
+        reviewPosted: true,
+        reviewHead: HEAD_B,
+      }),
+      T0 + 50 * MIN,
+    );
+    expect(d.state.patternContinuations).toBe(0);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "round_cap" } });
+  });
+
+  it("does not grant a continuation for an unposted widening even if its case table grew", () => {
+    const d = fresh(input({ caps: { maxRounds: 2, maxMinutes: 160 }, merge: "person" }));
+    const original: Finding = {
+      ...FINDING,
+      invariant: "only checked trees",
+      cases: [{ scenario: "source", expected: "checked" }],
+    };
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "unsafe", findings: [original] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    runChild(d, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_B }), T0 + 40 * MIN);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 40 * MIN,
+    });
+    runChild(
+      d,
+      "run-r2",
+      finished({
+        status: "completed",
+        verdict: {
+          verdict: "request_changes",
+          summary: "unposted",
+          findings: [{ ...original, cases: [...original.cases!, { scenario: "endpoint", expected: "refuse" }] }],
+        },
+        reviewPosted: false,
+        reviewHead: HEAD_B,
+      }),
+      T0 + 50 * MIN,
+    );
+    expect(d.state.patternContinuations).toBe(0);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "round_cap" } });
+  });
+
+  it("does not grant a continuation from an unposted predecessor even when the next review posts a strict widening", () => {
+    const d = fresh(input({ caps: { maxRounds: 2, maxMinutes: 160 }, merge: "person" }));
+    const original: Finding = {
+      ...FINDING,
+      invariant: "only checked trees",
+      cases: [{ scenario: "source", expected: "checked" }],
+    };
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "unsafe", findings: [original] },
+        reviewPosted: false,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    runChild(d, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_B }), T0 + 40 * MIN);
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 40 * MIN,
+    });
+    runChild(
+      d,
+      "run-r2",
+      finished({
+        status: "completed",
+        verdict: {
+          verdict: "request_changes",
+          summary: "compound path missing",
+          findings: [{ ...original, cases: [...original.cases!, { scenario: "composition", expected: "rejected" }] }],
+        },
+        reviewPosted: true,
+        reviewHead: HEAD_B,
+      }),
+      T0 + 50 * MIN,
+    );
+    expect(d.state.patternContinuations).toBe(0);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "round_cap" } });
   });
 
   it("the round cap: request_changes at the last allowed round ends the unit with the declined/unaddressed split over the last review's findings", () => {
@@ -4657,6 +5039,101 @@ describe("the held ending — every finding the round would act on is human-gate
       at: T0 + 5 * MIN,
     });
     expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 2, kind: "review" } });
+  });
+
+  it("preserves earned continuations and the parked pattern table through an answered human gate", () => {
+    const first: Finding = {
+      ...FINDING,
+      invariant: "only checked trees",
+      cases: [{ scenario: "source", expected: "checked" }],
+    };
+    const widened: Finding = {
+      ...first,
+      humanGated: true,
+      cases: [...first.cases!, { scenario: "endpoint", expected: "checked" }],
+    };
+    const live = fresh(input({ caps: { maxRounds: 2, maxMinutes: 180 }, merge: "person" }));
+    throughRoundZero(live);
+    runChild(
+      live,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "source", findings: [first] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    runChild(live, "run-f1", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_B }), T0 + 30 * MIN);
+    live.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      at: T0 + 30 * MIN,
+    });
+    runChild(
+      live,
+      "run-r2",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "endpoint", findings: [widened] },
+        reviewPosted: true,
+        reviewHead: HEAD_B,
+      }),
+      T0 + 40 * MIN,
+    );
+    expect(live.state.patternContinuations).toBe(1);
+    const gate = (live.action as Extract<CoordinatorAction, { type: "end" }>).ending;
+    expect(gate).toMatchObject({ kind: "idle", humanGate: { round: 2, findings: [widened], patternContinuations: 1 } });
+    if (gate.kind !== "idle" || !gate.humanGate) throw new Error("expected parked gate");
+    const resumed = new Driver(
+      openUnitPipeline(
+        input({
+          caps: { maxRounds: 2, maxMinutes: 180 },
+          merge: "person",
+          session: {
+            segment: 1,
+            renewalsSpent: 0,
+            spendUsd: 1,
+            texts: ["alice: receipt"],
+            humanGate: gate.humanGate,
+            resume: { leaseMs: 180 * MIN, attempt: 1 },
+          },
+        }),
+        T0,
+      ),
+    );
+    expect(resumed.state.patternContinuations).toBe(1);
+    expect(resumed.state.findingsByRound[2]).toEqual([widened]);
+    confirmCurrentPr(resumed, HEAD_B);
+    runChild(resumed, "run-f2", findingsCompleted({ dispositions: [FIXED], headSha: HEAD_C }), T0 + 5 * MIN);
+    resumed.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_C, headBranchExists: true },
+      at: T0 + 5 * MIN,
+    });
+    runChild(
+      resumed,
+      "run-r3",
+      finished({
+        status: "completed",
+        verdict: {
+          verdict: "request_changes",
+          summary: "composition",
+          findings: [
+            {
+              ...first,
+              cases: [...widened.cases!, { scenario: "composition", expected: "rejected" }],
+            },
+          ],
+        },
+        reviewPosted: true,
+        reviewHead: HEAD_C,
+      }),
+      T0 + 10 * MIN,
+    );
+    expect(resumed.state.patternContinuations).toBe(2);
+    expect(resumed.action).toMatchObject({ type: "spawn", round: { index: 3, kind: "findings" } });
   });
 
   it("a parked unit's next human input resumes directly into the fix round with the finding and attributed answer", () => {

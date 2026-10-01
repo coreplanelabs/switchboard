@@ -399,6 +399,52 @@ describe("runOriginalUnitRecovery", () => {
     },
   );
 
+  it("briefs a directly recovered review with its verified prior pattern table", async () => {
+    const prior = {
+      id: "F1",
+      kind: "pattern" as const,
+      severity: "minor" as const,
+      file: "src/a.ts",
+      title: "push the checked tree",
+      invariant: "only checked trees",
+      cases: [
+        { scenario: "source", expected: "checked" },
+        { scenario: "endpoint", expected: "checked" },
+      ],
+    };
+    const s = steps({ "U10/recovery/3/review/wait/1": "event" });
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [
+        planAnswer(
+          [
+            recoveryRow("review", {
+              round: 3,
+              step: "U10/recovery/3/review",
+              patternContinuations: 1,
+              priorFindings: [prior],
+            }),
+          ],
+          T0,
+          "person",
+        ),
+      ],
+      spawn: [spawned("run-r3")],
+      "read-record": [record({ id: "run-r3", finished: true, status: "completed" }, T0 + 10 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked(T0 + 10 * MIN)],
+    });
+    await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+    expect(b.of("spawn")[0]).toMatchObject({
+      step: "U10/recovery/3/review",
+      brief: { kind: "review", prior: { findings: [prior] } },
+    });
+  });
+
   it("continues no_verdict with one read-only review in the original namespace", async () => {
     const s = steps({ "U10/recovery/1/review/wait/1": "event" });
     const b = bot({

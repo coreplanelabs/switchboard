@@ -3719,6 +3719,7 @@ describe("review post-step", () => {
                   findings: [
                     {
                       id: "F1",
+                      kind: "single",
                       severity: "major",
                       file: "src/a.ts",
                       line: 12,
@@ -3896,7 +3897,9 @@ describe("review post-step", () => {
                     verdict: "request_changes",
                     summary: "one nit",
                     head: PR_HEAD,
-                    findings: [{ id: "F1", severity: "nit", file: "src/a.ts", line: 3, title: "off by one" }],
+                    findings: [
+                      { id: "F1", kind: "single", severity: "nit", file: "src/a.ts", line: 3, title: "off by one" },
+                    ],
                   },
                 },
               ],
@@ -3920,7 +3923,7 @@ describe("review post-step", () => {
         verdict: "request_changes",
         summary: "one nit",
         head: PR_HEAD,
-        findings: [{ id: "F1", severity: "nit", file: "src/a.ts", line: 3, title: "off by one" }],
+        findings: [{ id: "F1", kind: "single", severity: "nit", file: "src/a.ts", line: 3, title: "off by one" }],
       });
       expect(rec.reviewHead).toBe(PR_HEAD);
       expect("dispositions" in rec).toBe(false);
@@ -4506,9 +4509,16 @@ describe("review post-step", () => {
   // so the body posted to GitHub starts with `Changes requested:` over a
   // finding at or above it, whatever the model submitted.
   describe("the severity gate (agent-review item 5a)", () => {
-    const major = { id: "F3", severity: "major", file: "a.vue", line: 149, title: "drops the first key's ref" };
-    const minor = { id: "F1", severity: "minor", file: "a.ts", title: "a minor" };
-    const nit = { id: "F2", severity: "nit", file: "b.ts", title: "a nit" };
+    const major = {
+      id: "F3",
+      kind: "single",
+      severity: "major",
+      file: "a.vue",
+      line: 149,
+      title: "drops the first key's ref",
+    };
+    const minor = { id: "F1", kind: "single", severity: "minor", file: "a.ts", title: "a minor" };
+    const nit = { id: "F2", kind: "single", severity: "nit", file: "b.ts", title: "a nit" };
     const review = (deps: TestDeps) => {
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor(PR_HEAD);
@@ -20173,7 +20183,15 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
               verdict: "request_changes",
               summary: "Reviewed the new head",
               head,
-              findings: [{ id: "F1", severity: "minor", file: "src/login.ts", title: "new finding at this head" }],
+              findings: [
+                {
+                  id: "F1",
+                  kind: "single",
+                  severity: "minor",
+                  file: "src/login.ts",
+                  title: "new finding at this head",
+                },
+              ],
             },
             run.toolContext,
           );

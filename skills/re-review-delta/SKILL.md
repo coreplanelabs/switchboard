@@ -17,9 +17,9 @@ You already reviewed this PR at an earlier head and returned findings; the branc
 
 The coding run that addressed your findings recorded a disposition per finding (`fixed` / `declined` + note): a ship round hands them to you in its turn, a thread re-review in the artifacts block of your prompt. For each:
 
-- **`fixed`** — verify the fix actually landed and actually resolves the finding at the new head. A fix that moved the problem or half-landed gets the finding re-raised (same id, so the trail stays legible).
+- **`fixed`** — verify the fix actually landed and actually resolves the finding at the new head. For an invariant finding, check EACH prior case's scenario and expected behavior against the new head; enumerate any missing selection or execution paths and widen under the SAME id. A fix that moved the problem or half-landed gets the finding re-raised (same id, so the trail stays legible).
 - **`declined`** — read the argument. Concede when it holds (do not re-raise a finding you now agree was wrong — say so). Re-raise with a counter-argument when it does not: escalate the reasoning, not the volume.
 
 ## Output
 
-Same contract as any review round: structured findings with stable ids (new findings get NEW ids — never reuse a prior id for a different issue), severity per the standard vocabulary, prose carrying the full reasoning, and exactly one `submit_verdict` call — `approve` only when nothing blocking or worth another round remains across the WHOLE PR.
+Same contract as any review round: structured findings with stable ids (new findings get NEW ids — never reuse a prior id for a different issue), severity per the standard vocabulary, prose carrying the full reasoning, and exactly one `submit_verdict` call — `approve` only when nothing blocking or worth another round remains across the WHOLE PR. Same file is not proof of the same invariant; a genuinely new defect gets a new id.

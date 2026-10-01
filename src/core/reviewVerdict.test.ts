@@ -85,6 +85,63 @@ describe("the stored shapes — isReviewVerdictShape, isFindingDispositionsShape
   });
 });
 
+describe("invariant case tables in review findings", () => {
+  const matrix = {
+    invariant: "A push publishes only checked trees to the owned ref in the bound repository",
+    cases: [
+      { scenario: "explicit refspec source and destination", expected: "validate both source tree and destination" },
+      { scenario: "configured push URL", expected: "refuse an endpoint outside the bound repository" },
+      { scenario: "backgrounded push followed by mutation", expected: "refuse the whole compound command" },
+    ],
+  };
+
+  it("retains the independently checkable cases across parse, stored shape, redaction, post and fix brief", () => {
+    const token = `ghp_${"a".repeat(24)}`;
+    const verdict = parseVerdictInput({
+      verdict: "request_changes",
+      findings: [
+        { id: "F1", kind: "pattern", severity: "major", file: "src/push.ts", title: "Unsafe push", ...matrix },
+      ],
+    })!;
+    expect(verdict.findings?.[0]).toMatchObject(matrix);
+    expect(isReviewVerdictShape(JSON.parse(JSON.stringify(verdict)))).toBe(true);
+    expect(formatFinding(verdict.findings![0])).toContain("backgrounded push followed by mutation");
+    const body = buildReviewPostBody("F1: unsafe", verdict);
+    expect(body).toContain("configured push URL");
+    const marker = /^<!-- switchboard:verdict (.*) -->$/.exec(body.split("\n").at(-1)!);
+    expect(JSON.parse(marker![1]).findings[0]).toMatchObject({ kind: "pattern", ...matrix });
+    const leaky = {
+      ...verdict,
+      findings: [{ ...verdict.findings![0], cases: [{ scenario: token, expected: token }] }],
+    };
+    expect(JSON.stringify(redactVerdict(leaky))).not.toContain(token);
+  });
+
+  it("reads old stored untyped findings but validates explicitly typed new pattern and single shapes", () => {
+    const legacy = { id: "F1", severity: "minor", file: "src/a.ts", title: "old" };
+    expect(isReviewVerdictShape({ verdict: "request_changes", summary: "old", findings: [legacy] })).toBe(true);
+    const pattern = parseVerdictInput({
+      verdict: "request_changes",
+      findings: [{ ...legacy, kind: "pattern", ...matrix }],
+    })!;
+    expect(pattern.findings?.[0]).toMatchObject({ kind: "pattern", ...matrix });
+    expect(isReviewVerdictShape(pattern)).toBe(true);
+    expect(isReviewVerdictShape({ ...pattern, findings: [{ ...legacy, kind: "pattern" }] })).toBe(false);
+    expect(isReviewVerdictShape({ ...pattern, findings: [{ ...legacy, kind: "single", ...matrix }] })).toBe(false);
+  });
+
+  it("refuses a partial or empty matrix rather than recording an apparently complete one", () => {
+    for (const fields of [{ invariant: matrix.invariant }, { cases: matrix.cases }, { ...matrix, cases: [] }]) {
+      const verdict = parseVerdictInput({
+        verdict: "approve",
+        findings: [{ id: "F1", severity: "major", file: "src/push.ts", title: "Unsafe push", ...fields }],
+      })!;
+      expect(verdict.verdict).toBe("request_changes");
+      expect(verdict.droppedFindings).toHaveLength(1);
+    }
+  });
+});
+
 // Feature: docs/reference/specs/agent-review.md — deterministic verdict token. The
 // auto-approve workflow keys on `startsWith(body, "LGTM:")`, so the first line
 // is produced by code from the structured verdict, never by the model's prose.
