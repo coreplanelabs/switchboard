@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.271.9](https://github.com/coreplanelabs/switchboard/compare/v1.271.8...v1.271.9) (2026-10-01)
+
+
+### Bug fixes
+
+* **coding:** run required baseline before the first model turn ([#2580](https://github.com/coreplanelabs/switchboard/issues/2580)) ([9dc94d7](https://github.com/coreplanelabs/switchboard/commit/9dc94d7edd0b27ded12361f1ac8be31aa77a1219))
+* **config:** stop mentioning every admin in permission guidance ([#2581](https://github.com/coreplanelabs/switchboard/issues/2581)) ([05db5cb](https://github.com/coreplanelabs/switchboard/commit/05db5cbb2bf1d8ddc095f4c48ef9c48f54fd1019))
+* **harness:** publish branches through a typed Git Door effect ([#2575](https://github.com/coreplanelabs/switchboard/issues/2575)) ([531cb03](https://github.com/coreplanelabs/switchboard/commit/531cb03bfa3d03d150c2632131fa2aa846db55ee))
+* **harness:** publish clean branches from typed command results ([#2578](https://github.com/coreplanelabs/switchboard/issues/2578)) ([537e4dc](https://github.com/coreplanelabs/switchboard/commit/537e4dcc8dd295f9c6be528e1c939becc20ffa06))
+* **ship:** stop findings advice at terminal pull requests ([#2579](https://github.com/coreplanelabs/switchboard/issues/2579)) ([e5a1bcc](https://github.com/coreplanelabs/switchboard/commit/e5a1bcc73ef6d4c296fbf9bf742e1935095a518e))
+* **ship:** validate and preserve typed private work briefs ([#2582](https://github.com/coreplanelabs/switchboard/issues/2582)) ([f298b88](https://github.com/coreplanelabs/switchboard/commit/f298b8893d4d59f038799884a00a7af7209ce3e5))
+* **slack:** retain trusted source receipts across follow-ups ([#2583](https://github.com/coreplanelabs/switchboard/issues/2583)) ([027a93c](https://github.com/coreplanelabs/switchboard/commit/027a93c7bca16fb83cf6246987d1c648d0d0983d))
+
 ## [1.271.8](https://github.com/coreplanelabs/switchboard/compare/v1.271.7...v1.271.8) (2026-10-01)
 
 
