@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.271.1](https://github.com/coreplanelabs/switchboard/compare/v1.271.0...v1.271.1) (2026-10-01)
+
+
+### Bug fixes
+
+* **dispatcher:** ignore unsupported unrequested run settings ([#2536](https://github.com/coreplanelabs/switchboard/issues/2536)) ([fc2628f](https://github.com/coreplanelabs/switchboard/commit/fc2628fe743dee0faa510f7e26f9b94e56afd9e1))
+
 ## [1.271.0](https://github.com/coreplanelabs/switchboard/compare/v1.270.2...v1.271.0) (2026-10-01)
 
 
