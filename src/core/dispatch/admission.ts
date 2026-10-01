@@ -702,6 +702,8 @@ export interface SteerSender {
   channelId: string;
   channelName?: string;
   sourceUrl?: string;
+  /** Only the adapter-stamped direct requester's own DM may retain this provenance. */
+  directAudience?: import("../types.js").SlackDirectAudience;
   /** The run that authored the steer. Absent for a person's typed steer
    *  (`steer.run`'s wired sender), whose owner rule the sender itself asked. */
   from?: {
@@ -778,6 +780,7 @@ export async function steerRun(
     ...(sender.postedBy !== undefined ? { postedBy: sender.postedBy } : {}),
     ...(sender.channelName !== undefined ? { channelName: sender.channelName } : {}),
     threadKey: target.threadKey,
+    ...(sender.directAudience !== undefined ? { directAudience: sender.directAudience } : {}),
     text,
     ...(sender.sourceUrl !== undefined ? { sourceUrl: sender.sourceUrl } : {}),
     receivedAt: at,
@@ -808,7 +811,7 @@ export interface SteerSendCaller {
   id: string;
   actor: Actor;
   name?: string;
-  origin?: { channelId: string; threadKey: string };
+  origin?: { channelId: string; threadKey: string; directAudience?: import("../types.js").SlackDirectAudience };
 }
 
 /** The credential behind a steer's caller, read back off the resolved actor
@@ -876,6 +879,7 @@ export function createSteerSender(deps: {
           ...(caller.name !== undefined ? { userName: caller.name } : {}),
           ...credential,
           channelId: caller.origin?.channelId ?? run.channelId ?? "",
+          ...(caller.origin?.directAudience ? { directAudience: caller.origin.directAudience } : {}),
         },
         {
           runId,

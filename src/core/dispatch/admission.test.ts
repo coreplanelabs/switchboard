@@ -5,6 +5,10 @@ import { describe, expect, it } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { parseDirectives } from "../../directives.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
+import { chatCallerFor, invokeChatCommand, parseChatCommand } from "../commandChat.js";
+import { CommandRegistry, bindCommands } from "../commandRegistry.js";
+import { registerSteerCommands, type SteerCommandDeps } from "../commands/steer.js";
+import { samePrivateRequesterFollowUp } from "./privateAudience.js";
 import { ThreadAdmission, type LiveThread } from "../threadAdmission.js";
 import { ThreadsElsewhere } from "../runLedger/threadsElsewhere.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
@@ -1245,6 +1249,22 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
       channelId: "slack:CX",
       userId: "slack:UREQ",
     },
+    "run-private": {
+      id: "run-private",
+      finished: false,
+      agent: "general",
+      threadKey: "slack:DM1:1.0",
+      channelId: "slack:DM1",
+      userId: "slack:UREQ",
+    },
+    "run-private-other": {
+      id: "run-private-other",
+      finished: false,
+      agent: "general",
+      threadKey: "slack:DM1:2.0",
+      channelId: "slack:DM1",
+      userId: "slack:UREQ",
+    },
   };
   const runs = { getById: (id: string) => rows[id] ?? null };
   const requester = {
@@ -1270,6 +1290,58 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
     });
     return { admission, ledger, sender, redispatched };
   }
+
+  it("an operator-bound same-requester DM steer keeps direct provenance through the command and durable inbox", async () => {
+    const { admission, ledger, sender } = senderDeps();
+    const original: IncomingMessage = {
+      channelId: "slack:DM1",
+      userId: "slack:UREQ",
+      threadKey: "slack:DM1:1.0",
+      text: "Fix it",
+      receivedAt: NOW,
+      directAudience: {
+        kind: "slack-unshared-im",
+        channelId: "slack:DM1",
+        userId: "slack:UREQ",
+        threadKey: "slack:DM1:1.0",
+      },
+    };
+    const claim = admission.claim(original.threadKey, { agent: "general" });
+    claim.live.runId = "run-private";
+    const registry = new CommandRegistry<SteerCommandDeps>({ audit: () => {} });
+    registerSteerCommands(registry);
+    const commands = bindCommands(registry, { steer: sender });
+    const config = configStore();
+    const invoke = async (message: IncomingMessage) => {
+      const parsed = parseChatCommand(message.text, commands);
+      expect(parsed).toBeDefined();
+      return invokeChatCommand({ commands, parsed: parsed!, msg: message, config });
+    };
+    expect((await invoke({ ...original, text: "steer run run-private also fix CI" })).ok).toBe(true);
+    const [folded] = claim.live.inbox.drain();
+    expect(samePrivateRequesterFollowUp(original, folded)).toBe(true);
+    expect(ledger.pushes[0].message).toMatchObject({ directAudience: original.directAudience });
+    const restored = followUpFromInbox({ seq: 31, message: ledger.pushes[0].message }, {} as ChannelIO, NOW)!;
+    expect(samePrivateRequesterFollowUp(original, restored)).toBe(true);
+
+    const other = admission.claim("slack:DM1:2.0", { agent: "general" });
+    other.live.runId = "run-private-other";
+    expect((await invoke({ ...original, text: "steer run run-private-other unrelated thread" })).ok).toBe(true);
+    const [crossThread] = other.live.inbox.drain();
+    expect(crossThread.directAudience).toBeUndefined();
+    expect(ledger.pushes[1].message).not.toHaveProperty("directAudience");
+    expect(
+      followUpFromInbox({ seq: 31, message: ledger.pushes[1].message }, {} as ChannelIO, NOW)?.directAudience,
+    ).toBeUndefined();
+
+    expect(chatCallerFor({ ...original, postedBy: "slack:bot:BOTHER" }, config).origin?.directAudience).toBeUndefined();
+    expect(
+      chatCallerFor(
+        { ...original, directAudience: { ...original.directAudience!, threadKey: "slack:DM1:2.0" } },
+        config,
+      ).origin?.directAudience,
+    ).toBeUndefined();
+  });
 
   it("two units live in two unit threads: a steer typed in the plan thread names the second and folds into ITS thread's run, whichever thread holds it", async () => {
     const { admission, ledger, sender } = senderDeps();

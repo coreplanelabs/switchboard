@@ -21,6 +21,7 @@ import {
 } from "./commandSurface.js";
 import { commandRefusalCode, refusalLine, refusalOf, type CommandGuessHint } from "./refusal.js";
 import type { IncomingMessage } from "./types.js";
+import { directAudienceStampOf } from "./runLedger/inboxMessage.js";
 import type { Span } from "./trace/types.js";
 
 // The chat adapter for the command registry
@@ -170,10 +171,22 @@ export interface HandleChatCommandArgs {
  *  name — not the channel it speaks in (authorization.md item 7), so one token
  *  gets one answer on every surface. */
 export function chatCallerFor(
-  msg: Pick<IncomingMessage, "userId" | "channelId" | "threadKey" | "channelName" | "userName">,
+  msg: Pick<
+    IncomingMessage,
+    | "userId"
+    | "channelId"
+    | "threadKey"
+    | "channelName"
+    | "userName"
+    | "directAudience"
+    | "postedBy"
+    | "authenticatedAs"
+    | "relayedBy"
+  >,
   config: Pick<ConfigStore, "grantsFor">,
   resolveRepo?: () => Promise<string | undefined>,
 ): Caller {
+  const directAudience = directAudienceStampOf(msg);
   return {
     kind: "chat",
     id: msg.userId,
@@ -181,6 +194,7 @@ export function chatCallerFor(
     origin: {
       channelId: msg.channelId,
       threadKey: msg.threadKey,
+      ...(directAudience !== undefined ? { directAudience } : {}),
       ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
       ...(resolveRepo ? { repo: resolveRepo } : {}),
     },
