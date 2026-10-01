@@ -36,6 +36,10 @@ interface Entry {
   branchRecorder?: GitPublicationRecorder;
   pending?: GitPublicationUpdate;
   pendingSettled?: Promise<void>;
+  /** Harness writes need one exact source/ref grant bound to the transport
+   * credential of the originating runner-owned effect. */
+  toolPushRequired?: boolean;
+  toolPush?: { callId: string; ref: string; next: string; old?: string; credentialHash: string };
   persist?: (binding: GitBinding) => Promise<boolean>;
   queue: Promise<unknown>;
 }
@@ -86,6 +90,89 @@ export class GitBindings {
     return publication ? { ...publication } : undefined;
   }
 
+  /** The harness opts in before the first model call. Old command-run and
+   * runner-owned salvage paths retain their independent write boundary. */
+  requireToolPush(runId: string): boolean {
+    const entry = this.entries.get(runId);
+    if (!entry) return false;
+    entry.toolPushRequired = true;
+    entry.toolPush = undefined;
+    return true;
+  }
+
+  toolPushIsRequired(runId: string): boolean {
+    return this.entries.get(runId)?.toolPushRequired === true;
+  }
+
+  hasToolPush(runId: string, credentialHash?: string): boolean {
+    const entry = this.entries.get(runId);
+    if (!entry?.toolPush) return false;
+    return credentialHash !== undefined && entry.toolPush.credentialHash === credentialHash;
+  }
+
+  /** Called by the trusted harness gate, never the model's Git request.
+   * Another call cannot replace one awaiting attribution. */
+  allowToolPush(
+    runId: string,
+    callId: string,
+    update: { ref: string; next: string; old?: string },
+    credentialHash?: string,
+  ): boolean {
+    const entry = this.entries.get(runId);
+    if (
+      !entry?.toolPushRequired ||
+      !credentialHash ||
+      entry.pending ||
+      !callId ||
+      update.next.length !== 40 ||
+      ![...update.next].every((c) => (c >= "0" && c <= "9") || (c >= "a" && c <= "f")) ||
+      !update.ref.startsWith("refs/heads/")
+    )
+      return false;
+    if (entry.binding.ref && entry.binding.ref !== update.ref) return false;
+    const authority = entry.publication;
+    if (
+      authority &&
+      ("blocked" in authority || branch(authority.ref) !== update.ref || authority.expectedHeadSha !== update.old)
+    )
+      return false;
+    if (entry.toolPush)
+      return (
+        entry.toolPush.callId === callId &&
+        entry.toolPush.ref === update.ref &&
+        entry.toolPush.next === update.next &&
+        entry.toolPush.old === update.old &&
+        entry.toolPush.credentialHash === credentialHash
+      );
+    entry.toolPush = { callId, ...update, credentialHash };
+    return true;
+  }
+
+  /** One receive-pack consumes the exact authorized source/old/ref tuple,
+   * before any upstream write. A wrong attempt does not consume a good one. */
+  takeToolPush(runId: string, update: GitPublicationUpdate, credentialHash?: string): boolean {
+    const entry = this.entries.get(runId);
+    if (!entry) return false;
+    if (!entry.toolPushRequired) return true;
+    const granted = entry.toolPush;
+    if (
+      !granted ||
+      !credentialHash ||
+      granted.credentialHash !== credentialHash ||
+      granted.ref !== update.ref ||
+      (granted.old !== undefined && granted.old !== update.old) ||
+      granted.next !== update.next
+    )
+      return false;
+    entry.toolPush = undefined;
+    return true;
+  }
+
+  clearToolPush(runId: string, callId: string): void {
+    const entry = this.entries.get(runId);
+    if (entry?.toolPush?.callId === callId) entry.toolPush = undefined;
+  }
+
   /** A trusted coordinator may replace the existing-PR door fence; a model cannot. */
   setPublication(runId: string, authority: GitPublicationAuthority): boolean {
     const entry = this.entries.get(runId);
@@ -102,6 +189,7 @@ export class GitBindings {
     }
     if (entry.pending && "expectedHeadSha" in authority) return false;
     entry.publication = { ...authority };
+    entry.toolPush = undefined;
     entry.generation = Symbol();
     return true;
   }
@@ -128,6 +216,7 @@ export class GitBindings {
     const entry = this.entries.get(runId);
     if (!entry || entry.publication) return false;
     entry.publication = { blocked: reason };
+    entry.toolPush = undefined;
     entry.generation = Symbol();
     return true;
   }

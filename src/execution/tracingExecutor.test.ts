@@ -15,6 +15,38 @@ function traced() {
 }
 
 describe("TracingExecutor", () => {
+  it("forwards isolated publication only when the inner executor supports it, without tracing the bearer", async () => {
+    const seen: Array<{ bearer: string; spanName?: string }> = [];
+    const base: Executor = {
+      exec: async () => "",
+      readFile: async () => "",
+      writeFile: async () => "",
+      publishBranch: async (input) => {
+        seen.push({ bearer: input.bearer, spanName: input.span?.name });
+        return "published";
+      },
+    };
+    const { log, call } = traced();
+    const ex = new TracingExecutor(base, call, "resident");
+    expect(
+      await ex.publishBranch?.({
+        repo: "acme/api",
+        doorOrigin: "https://door.example",
+        branch: "fix/owned",
+        next: "a".repeat(40),
+        bearer: "effect-only",
+      }),
+    ).toBe("published");
+    expect(seen).toEqual([{ bearer: "effect-only", spanName: "exec.publish_branch" }]);
+    expect(log.ended("exec.publish_branch")?.attrs).toEqual({ backend: "resident" });
+    expect(JSON.stringify(log.ended("exec.publish_branch"))).not.toContain("effect-only");
+    const unsupported = new TracingExecutor(
+      { exec: base.exec, readFile: base.readFile, writeFile: base.writeFile },
+      call,
+    );
+    expect(unsupported.publishBranch).toBeUndefined();
+  });
+
   it("times exec / readFile / writeFile as exec.* spans under the tool's span, carrying the backend and the per-call budget, never the command, path or output", async () => {
     const seen: string[] = [];
     const spansSeen: Array<string | undefined> = [];

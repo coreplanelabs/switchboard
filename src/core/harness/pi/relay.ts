@@ -29,7 +29,7 @@ import type { Backend } from "../../trace/attrs.js";
 import { redactAndCap, type RunEvent } from "../../runEvents.js";
 import type { Span } from "../../trace/types.js";
 import { pointerSummary, type CompactionAnswer, type CompactionAsk } from "./compactionFallback.js";
-import { judgeToolCall, publicationAttributionRefusal, type ToolRuleContext } from "./toolRules.js";
+import { judgeToolCall, literalPushSource, publicationAttributionRefusal, type ToolRuleContext } from "./toolRules.js";
 import { leasedPushCommand } from "../../publicationPush.js";
 
 /** One run driving a pi, as the routes see it. */
@@ -41,6 +41,15 @@ export interface LiveHarness {
   backend?: Backend;
   /** The checkout, the run's branch and the loop's clock the tool rules judge pi's own tools against. */
   rules: ToolRuleContext;
+  /** Legacy literal-source admission seam for harness tests. Live write
+   * runs use the credential-scoped publish_branch effect instead. */
+  admitPush?: (callId: string, source: string) => Promise<boolean>;
+  /** The pi bridge's observed bash input, not another request made with the
+   * same run bearer. A missing or mismatched call may not mint a Door slot. */
+  pushCallMatches?: (callId: string, command: string) => boolean;
+  /** A bearer cannot invent a runner-owned publication call over /harness/tool. */
+  effectCallMatches?: (callId: string, tool: string, input: unknown) => boolean;
+  admittedPushCalls?: Set<string>;
   emit: (event: RunEvent) => void;
   /** The span the bridge opened for a call still running, so a relayed tool's work hangs under it. */
   toolSpan: (callId: string) => Span | undefined;
@@ -320,7 +329,7 @@ export function relayedToolDefinitions(harness: LiveHarness): ToolDef[] {
  *  for the run's identity from the call alone. A refusal is a `tool_refused` note and
  *  the reason the model reads. Whatever the answer, the harness is told the
  *  gate saw the call first. */
-export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): AuthorizeAnswer {
+export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): AuthorizeAnswer | Promise<AuthorizeAnswer> {
   harness.gateSaw(ask.toolCallId);
   const blocked = harness.toolsBlocked();
   const refuse = (reason: string): AuthorizeAnswer => {
@@ -334,22 +343,63 @@ export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): Autho
   if (blocked !== undefined) return refuse(blocked);
   const pending = publicationAttributionRefusal(harness.rules, ask.toolCallId);
   if (pending !== undefined) return refuse(pending);
-  if (harness.tools.some((t) => t.name === ask.tool)) return { allow: true };
+  if (harness.tools.some((t) => t.name === ask.tool)) {
+    if (ask.tool !== "publish_branch") return { allow: true };
+    // Establish exclusivity before waiting for pi's log. An opaque shell
+    // starting alongside this effect cannot reach the executor while the
+    // Door's per-effect credential is in flight.
+    harness.rules.pushCallId = ask.toolCallId;
+    return (async (): Promise<AuthorizeAnswer> => {
+      try {
+        await harness.callSeen?.(ask.toolCallId);
+        if (harness.effectCallMatches?.(ask.toolCallId, ask.tool, ask.input)) return { allow: true };
+      } catch {
+        // A lost bridge observation cannot grant publication authority.
+      }
+      if (harness.rules.pushCallId === ask.toolCallId) delete harness.rules.pushCallId;
+      return refuse("publication call does not match pi's sole active tool execution");
+    })();
+  }
   const verdict = judgeToolCall(ask.tool, ask.input, harness.rules);
   if (verdict.verdict === "allowed") {
     const authority = harness.rules.publication?.authority;
     const input = ask.input as { command?: unknown } | undefined;
-    const push =
-      ask.tool === "bash" && typeof input?.command === "string" ? leasedPushCommand(input.command) : undefined;
-    if (
-      push !== undefined &&
-      authority !== undefined &&
-      !("blocked" in authority) &&
-      push.ref === authority.ref &&
-      push.expectedHeadSha === authority.expectedHeadSha
-    )
-      harness.emit({ type: "publication_push_authorized", callId: ask.toolCallId, ...push });
-    return { allow: true };
+    const command = ask.tool === "bash" && typeof input?.command === "string" ? input.command : undefined;
+    const push = command === undefined ? undefined : leasedPushCommand(command);
+    const source = command === undefined ? undefined : literalPushSource(command);
+    const accepted = (): AuthorizeAnswer => {
+      if (
+        push !== undefined &&
+        authority !== undefined &&
+        !("blocked" in authority) &&
+        push.ref === authority.ref &&
+        push.expectedHeadSha === authority.expectedHeadSha &&
+        !harness.admittedPushCalls?.has(ask.toolCallId)
+      ) {
+        harness.emit({ type: "publication_push_authorized", callId: ask.toolCallId, ...push });
+        harness.admittedPushCalls?.add(ask.toolCallId);
+      }
+      return { allow: true };
+    };
+    if (!harness.admitPush || source === undefined) return accepted();
+    // Fence all later calls while the Door slot is pending, including on a
+    // first-branch push (which has no existing-PR attribution fence). Set it
+    // before awaiting the bridge or source read: concurrent asks must not race.
+    harness.rules.pushCallId = ask.toolCallId;
+    return (async (): Promise<AuthorizeAnswer> => {
+      let admitted = false;
+      try {
+        await harness.callSeen?.(ask.toolCallId);
+        if (harness.pushCallMatches && !harness.pushCallMatches(ask.toolCallId, command!))
+          return refuse("repo:use — the push command does not match pi's sole active tool call");
+        admitted = await harness.admitPush!(ask.toolCallId, source);
+        return admitted ? accepted() : refuse("repo:use — the owned push source could not be bound at the Git door");
+      } catch {
+        return refuse("repo:use — the owned push source could not be bound at the Git door");
+      } finally {
+        if (!admitted && harness.rules.pushCallId === ask.toolCallId) delete harness.rules.pushCallId;
+      }
+    })();
   }
   return refuse(verdict.reason);
 }
@@ -378,6 +428,21 @@ export async function runRelayedTool(
 ): Promise<RelayedToolAnswer> {
   const tool = harness.tools.find((t) => t.name === ask.tool);
   if (!tool) return { content: [{ type: "text", text: `Unknown tool: ${ask.tool}` }], isError: true };
+  if (ask.tool === "publish_branch") {
+    try {
+      await harness.callSeen?.(ask.toolCallId);
+    } catch {
+      return { content: [{ type: "text", text: "publication call cannot be observed by pi" }], isError: true };
+    }
+    if (
+      harness.rules.pushCallId !== ask.toolCallId ||
+      !harness.effectCallMatches?.(ask.toolCallId, ask.tool, ask.input)
+    )
+      return {
+        content: [{ type: "text", text: "publication call does not match pi's active tool execution" }],
+        isError: true,
+      };
+  }
   const span = harness.toolSpan(ask.toolCallId);
   const base = harness.toolContext;
   const readConversation = base.conversation;

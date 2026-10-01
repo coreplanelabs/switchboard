@@ -46,8 +46,8 @@ describe("the resident's not-serviceable answers name what the client cannot wai
   it("every named refusal carries the seam's cause beside its words (record 0054): the onboard 403 is `policy` — the admin's to fix — the thread's ref failures are `request`, and the machinery's own answers are `system`, so a caller reads a field and never the sentence", () => {
     // The onboard 403: the repository is not in the App installation.
     expect(source).toMatch(/not-in-installation[\s\S]{0,900}?cause: "policy"/);
-    // Ref failures and Git door boundary refusals are caller-owned requests.
-    expect(source.match(/cause: "request"/g) ?? []).toHaveLength(7);
+    // Ref failures, Git Door and typed publication refusals are caller-owned requests.
+    expect(source.match(/cause: "request"/g) ?? []).toHaveLength(11);
     expect(source.match(/cause: "policy"/g) ?? []).toHaveLength(1);
     for (const literal of answers503().filter((l) => /reason: ("mirror-busy"|"unregistered")/.test(l)))
       expect(literal, literal).toMatch(/cause: "system"/);

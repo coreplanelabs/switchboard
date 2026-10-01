@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Executor } from "../../../execution/executor.js";
+import type { Executor, PublicationTransport } from "../../../execution/executor.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import { awaitRunsTool, sendToRunTool, spawnRunTool } from "../../../tools/runs.js";
 import { TOOLSETS } from "../../../tools/toolsets.js";
@@ -19,6 +19,7 @@ import { createTracer } from "../../trace/tracer.js";
 import { commandPastLoopEndRefusal } from "../windDown.js";
 import type { ChannelIO, IncomingMessage } from "../../types.js";
 import { POINTER_SUMMARY_PREFIX, pointerSummary } from "./compactionFallback.js";
+import { settlePushCall } from "./toolRules.js";
 import {
   HarnessRegistry,
   RELAY_POLL_WINDOW_MS,
@@ -109,6 +110,37 @@ function live(
 }
 
 describe("HarnessRegistry", () => {
+  it("does not run a forged publication effect from a bearer without an observed matching Pi tool call", async () => {
+    const { harness } = live();
+    const run = vi.fn(async () => "published");
+    harness.tools.push({ name: "publish_branch", description: "typed push", inputSchema: { type: "object" }, run });
+    harness.effectCallMatches = (id, tool, input) =>
+      id === "real" && tool === "publish_branch" && JSON.stringify(input) === JSON.stringify({ branch: "feat/x" });
+    expect(
+      (await runRelayedTool(harness, { toolCallId: "forged", tool: "publish_branch", input: { branch: "feat/x" } }))
+        .isError,
+    ).toBe(true);
+    expect(
+      (await runRelayedTool(harness, { toolCallId: "real", tool: "publish_branch", input: { branch: "main" } }))
+        .isError,
+    ).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+    expect(
+      await authorizeToolCall(harness, { toolCallId: "real", tool: "publish_branch", input: { branch: "feat/x" } }),
+    ).toEqual({ allow: true });
+    expect(
+      authorizeToolCall(harness, { toolCallId: "other", tool: "bash", input: { command: "npm test" } }),
+    ).toMatchObject({ allow: false });
+    expect(
+      (await runRelayedTool(harness, { toolCallId: "real", tool: "publish_branch", input: { branch: "feat/x" } }))
+        .isError,
+    ).toBe(false);
+    expect(run).toHaveBeenCalledOnce();
+    settlePushCall(harness.rules, "real");
+    expect(authorizeToolCall(harness, { toolCallId: "after", tool: "bash", input: { command: "npm test" } })).toEqual({
+      allow: true,
+    });
+  });
   it("knows a run while it is registered and forgets exactly that registration", () => {
     const r = new HarnessRegistry();
     const { harness } = live();
@@ -208,6 +240,140 @@ describe("authorizeToolCall — the gate", () => {
     ).toMatchObject({ allow: false });
     expect(events.some((e) => e.type === "publication_push_authorized")).toBe(false);
   });
+  it("waits for source-bound Door admission before emitting a receipt-eligible push and recovers from refusal", async () => {
+    const { harness, events } = live();
+    const old = "a".repeat(40);
+    harness.rules.publication = { authority: { ref: "feat/x", expectedHeadSha: old } };
+    harness.admittedPushCalls = new Set();
+    let permitted = false;
+    const sources: string[] = [];
+    harness.admitPush = async (_callId, source) => {
+      sources.push(source);
+      return permitted;
+    };
+    const command = `git push --force-with-lease=refs/heads/feat/x:${old} origin feat/x:feat/x`;
+    harness.pushCallMatches = () => false;
+    expect(await authorizeToolCall(harness, { toolCallId: "forged", tool: "bash", input: { command } })).toMatchObject({
+      allow: false,
+      reason: expect.stringContaining("active tool call"),
+    });
+    expect(sources).toEqual([]);
+    harness.pushCallMatches = (_id, input) => input === command;
+    expect(await authorizeToolCall(harness, { toolCallId: "first", tool: "bash", input: { command } })).toMatchObject({
+      allow: false,
+    });
+    expect(events.some((e) => e.type === "publication_push_authorized")).toBe(false);
+    permitted = true;
+    expect(await authorizeToolCall(harness, { toolCallId: "second", tool: "bash", input: { command } })).toEqual({
+      allow: true,
+    });
+    expect(await authorizeToolCall(harness, { toolCallId: "second", tool: "bash", input: { command } })).toEqual({
+      allow: true,
+    });
+    expect(sources).toEqual(["feat/x", "feat/x", "feat/x"]);
+    expect(events.filter((e) => e.type === "publication_push_authorized")).toEqual([
+      { type: "publication_push_authorized", callId: "second", ref: "feat/x", expectedHeadSha: old },
+    ]);
+    expect(harness.rules.pushCallId).toBe("second");
+    expect(
+      authorizeToolCall(harness, { toolCallId: "during", tool: "bash", input: { command: "npm test" } }),
+    ).toMatchObject({ allow: false });
+    settlePushCall(harness.rules, "unrelated");
+    expect(harness.rules.pushCallId).toBe("second");
+    settlePushCall(harness.rules, "second");
+    expect(authorizeToolCall(harness, { toolCallId: "after", tool: "bash", input: { command: "npm test" } })).toEqual({
+      allow: true,
+    });
+  });
+
+  it("refuses a compound leased push before execution or publication attribution", () => {
+    const { harness, events } = live();
+    const head = "a".repeat(40);
+    harness.rules.publication = { authority: { ref: "feat/x", expectedHeadSha: head } };
+    const command = `git push --force-with-lease=refs/heads/feat/x:${head} origin feat/x:feat/x & npm version patch`;
+    expect(authorizeToolCall(harness, { toolCallId: "compound", tool: "bash", input: { command } })).toMatchObject({
+      allow: false,
+      reason: expect.stringContaining("one standalone push command"),
+    });
+    expect(events).toEqual([
+      { type: "run_note", kind: "tool_refused", summary: expect.stringContaining("one standalone push command") },
+    ]);
+  });
+
+  it("holds every other tool while a first-branch push is admitted, and releases on refusal", async () => {
+    const { harness } = live();
+    const pending: { resolve?: (allow: boolean) => void } = {};
+    harness.admitPush = () => new Promise<boolean>((resolve) => (pending.resolve = resolve));
+    harness.pushCallMatches = () => true;
+    const push = authorizeToolCall(harness, {
+      toolCallId: "literal",
+      tool: "bash",
+      input: { command: "git push origin feat/x:feat/x" },
+    });
+    expect(harness.rules.pushCallId).toBe("literal");
+    for (const [tool, input] of [
+      ["bash", { command: "npm test" }],
+      ["bash", { command: `node -e 'require("child_process")'` }],
+      ["update_status", { checklist: "next" }],
+    ] as const) {
+      expect(authorizeToolCall(harness, { toolCallId: "opaque", tool, input })).toMatchObject({ allow: false });
+    }
+    await Promise.resolve();
+    expect(pending.resolve).toBeDefined();
+    pending.resolve!(false);
+    expect(await push).toMatchObject({ allow: false });
+    expect(harness.rules.pushCallId).toBeUndefined();
+    expect(authorizeToolCall(harness, { toolCallId: "retry", tool: "bash", input: { command: "npm test" } })).toEqual({
+      allow: true,
+    });
+  });
+
+  it("refuses an opaque Git-spawning call even while another literal push has a pending grant", () => {
+    const { harness, events } = live();
+    const head = "a".repeat(40);
+    harness.rules.publication = { authority: { ref: "feat/x", expectedHeadSha: head } };
+    const command = `node -e 'require("child_process").execFileSync(String.fromCharCode(103,105,116),["pu"+"sh","origin","feat/x:feat/x"])'`;
+    expect(authorizeToolCall(harness, { toolCallId: "opaque", tool: "bash", input: { command } })).toMatchObject({
+      allow: false,
+    });
+    expect(events.some((event) => event.type === "publication_push_authorized")).toBe(false);
+    harness.rules.publication.attributingCallId = "literal";
+    expect(authorizeToolCall(harness, { toolCallId: "opaque-2", tool: "bash", input: { command } })).toMatchObject({
+      allow: false,
+    });
+    delete harness.rules.publication.attributingCallId;
+    expect(authorizeToolCall(harness, { toolCallId: "recover", tool: "bash", input: { command: "npm test" } })).toEqual(
+      {
+        allow: true,
+      },
+    );
+  });
+
+  it("never emits a publication authorization for assembled or unattestable shell pushes", () => {
+    const { harness, events } = live();
+    const head = "a".repeat(40);
+    harness.rules.publication = { authority: { ref: "feat/x", expectedHeadSha: head } };
+    const lease = `--force-with-lease=refs/heads/feat/x:${head}`;
+    for (const command of [
+      `g\${0:+}it push ${lease} origin feat/x:feat/x & npm version patch`,
+      `bash -c 'g\${0:+}it push ${lease} origin feat/x:feat/x'`,
+      `git \\\n push ${lease} origin feat/x:feat/x`,
+      `git push ${lease} origin 'feat/x:feat/x'`,
+      `git -c http.postBuffer=512 -c http.postBuffer=1024 push ${lease} origin feat/x:feat/x`,
+    ]) {
+      expect(
+        authorizeToolCall(harness, { toolCallId: "unattestable", tool: "bash", input: { command } }),
+      ).toMatchObject({
+        allow: false,
+      });
+      expect(
+        events.some((event) => event.type === "publication_push_authorized"),
+        command,
+      ).toBe(false);
+      events.length = 0;
+    }
+  });
+
   it("refuses subsequent tools until push attribution settles, then allows a retry", () => {
     const { harness } = live();
     harness.rules.publication = {
@@ -294,7 +460,9 @@ describe("authorizeToolCall — the gate", () => {
       allow: false,
       reason: "the run is past its budget — write up, no more tool calls",
     });
-    expect(authorizeToolCall(harness, { toolCallId: "b", tool: "read", input: { path: "x" } }).allow).toBe(false);
+    expect(authorizeToolCall(harness, { toolCallId: "b", tool: "read", input: { path: "x" } })).toMatchObject({
+      allow: false,
+    });
     expect(events).toHaveLength(2);
   });
 
@@ -431,6 +599,44 @@ describe("runRelayedTool — the verdict path", () => {
     spanned.harness.tools = [probe];
     await runRelayedTool(spanned.harness, { toolCallId: "c10", tool: "probe", input: {} });
     expect(seen).toEqual(["c9", "c10"]);
+  });
+
+  it("a relayed typed publication keeps the resident transport with and without a call span", async () => {
+    const input = {
+      repo: "acme/api",
+      doorOrigin: "https://door.example",
+      branch: "feat/x",
+      next: "a".repeat(40),
+      bearer: "effect-only",
+    };
+    for (const withSpan of [false, true]) {
+      const { harness, sink } = live({ withSpan });
+      const published = vi.fn(async (_input: PublicationTransport) => "published");
+      harness.toolContext = { executor: { ...executor, publishBranch: published } };
+      harness.tools = [
+        {
+          name: "publish_branch",
+          description: "typed publication",
+          inputSchema: { type: "object" },
+          run: async (_value, ctx) => ctx.executor.publishBranch?.(input) ?? "unavailable",
+        },
+      ];
+      harness.callSeen = async () => {};
+      harness.effectCallMatches = () => true;
+      harness.rules.pushCallId = "c1";
+      const answer = await runRelayedTool(harness, {
+        toolCallId: "c1",
+        tool: "publish_branch",
+        input: { branch: "feat/x" },
+      });
+      expect(answer).toEqual({ content: [{ type: "text", text: "published" }], isError: false });
+      expect(published).toHaveBeenCalledOnce();
+      expect(published.mock.calls[0]?.[0]).toMatchObject(input);
+      if (withSpan) {
+        expect(published.mock.calls[0]?.[0].span?.name).toBe("exec.publish_branch");
+        expect(JSON.stringify(sink.ended("exec.publish_branch"))).not.toContain("effect-only");
+      } else expect(published.mock.calls[0]?.[0].span).toBeUndefined();
+    }
   });
 
   it("a relayed verdict the parser rejects is the same error the native call answers, and no verdict reaches the run", async () => {

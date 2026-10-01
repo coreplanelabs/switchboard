@@ -15,7 +15,7 @@
 //   admin scope     POST /onboard /offboard /reconfigure /rebuild /debug (all ops)
 //   drain scope     POST /drain /undrain (admin implied) — the deploy's bearer, nothing else
 //   read scope      GET /residents   POST /debug ops info|schedules|threads only (admin implied)
-//   operator scope  POST /attach /detach /exec /read /write /op            GET /status (state, reason, inFlight)
+//   operator scope  POST /attach /detach /exec /publish /read /write /op   GET /status (state, reason, inFlight)
 //   unauthenticated GET /healthz (deploy wake ping; touches no DO)
 //
 // Lifecycle engine: schedule-driven provisioning (clone → install/build →
@@ -89,6 +89,7 @@ import {
 } from "./legacyCredentials.js";
 import { hasUnexpectedOwnedThreadDir } from "./orphanThreadUsers.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
+import { residentPublicationCommand, type ResidentPublicationInput } from "../../src/execution/residentPublication.js";
 import {
   nextDeployImageReconcile,
   replacementContainerStarted,
@@ -101,7 +102,7 @@ import {
   registeredRunOwnsRelease,
 } from "./runRegistration.js";
 import { DAY_MS, RUN_REGISTRATION_GRACE_MS } from "../../src/core/budgets.js";
-import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
+import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { RESIDENT_MIRROR_PERMISSIONS, verifyGithubMintScope } from "../../src/execution/githubMintScope.js";
 import { selectBindingsToPurge } from "../../src/execution/bindingPurge.js";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
@@ -445,7 +446,7 @@ const BUILD_ID = buildId(BUILD);
 // route is a `resident.fetch` root at the edge. Each joins the bot's trace when
 // the request carried one. The tracer and its log sink are shared.ts's: the
 // refresh instance's root (refresh.ts) starts from the same pair.
-const STREAMED_ROUTES: ReadonlySet<string> = new Set(["/attach", "/exec", "/op", "/await-restore"]);
+const STREAMED_ROUTES: ReadonlySet<string> = new Set(["/attach", "/exec", "/publish", "/op", "/await-restore"]);
 
 /** One request as the resident's own root: started at its t0, joining the
  *  bot's trace when `traceparent` parses, the collector's steps grafted as
@@ -7645,6 +7646,43 @@ export class ResidentDO extends Sandbox<Env> {
     return res;
   }
 
+  /** A typed Git transport never enters the thread user's shell. The root-owned
+   * mirror supplies trusted config; the thread clone supplies object bytes only.
+   * The Git Door's one-use tuple remains the write authorization. */
+  async publishThread(
+    threadKey: string,
+    input: Omit<ResidentPublicationInput, "worktreePath">,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
+    return this.withThreadBusy(threadKey, async () => {
+      const memory = await this.memoryGate("exec");
+      if (memory) return memory;
+      const pre = await this.threadPreflight(threadKey);
+      if ("error" in pre) return pre;
+      const { binding } = pre;
+      if (binding.readonly || !binding.githubDoorHost)
+        return { error: "publication requires a writable Git Door binding", status: 403, cause: "request" };
+      let command: ReturnType<typeof residentPublicationCommand>;
+      try {
+        command = residentPublicationCommand({ ...input, worktreePath: binding.worktreePath });
+      } catch {
+        return { error: "invalid typed publication request", status: 400, cause: "request" };
+      }
+      if (new URL(input.doorOrigin).host !== binding.githubDoorHost)
+        return { error: "publication Door host does not match the thread binding", status: 403, cause: "request" };
+      const objects = await this.run(["test", "-d", command.env.GIT_ALTERNATE_OBJECT_DIRECTORIES]);
+      if (objects.exitCode !== 0)
+        return { error: "publication source objects are unavailable", status: 409, cause: "request" };
+      const result = await this.run(command.argv, { timeoutMs: BASH_TIMEOUT_MS, env: command.env });
+      return {
+        stdout: result.stdout.slice(0, EXEC_OUTPUT_CAP),
+        stderr: result.stderr.slice(0, EXEC_OUTPUT_CAP),
+        exitCode: result.timedOut ? 124 : result.exitCode,
+        truncated:
+          result.truncated === true || result.stdout.length > EXEC_OUTPUT_CAP || result.stderr.length > EXEC_OUTPUT_CAP,
+      };
+    });
+  }
+
   /** The exec route's one gate for a runtime replacement (item 43): every
    *  `RuntimeReplacedError` the route meets — the preflight's own probe of the
    *  worktree, the command itself — is judged by `replacedExecAnswer`, so the
@@ -9540,6 +9578,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/run-deadline": { scope: "operator", method: "POST" },
   "/detach": { scope: "operator", method: "POST" },
   "/exec": { scope: "operator", method: "POST" },
+  "/publish": { scope: "operator", method: "POST" },
   "/read": { scope: "operator", method: "POST" },
   "/write": { scope: "operator", method: "POST" },
   "/op": { scope: "operator", method: "POST" },
@@ -9661,6 +9700,8 @@ export default {
             return await handleDetach(env, body);
           case "/exec":
             return await handleExec(env, body, traceparent);
+          case "/publish":
+            return await handlePublish(env, body);
           case "/read":
             return await handleRead(env, body);
           case "/write":
@@ -10467,6 +10508,34 @@ async function handleExec(env: Env, body: Record<string, unknown>, traceparent?:
   const execEnv = envFromRequest({ body });
   return streamThreadExec(
     withLevels(ctx.stub, ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs, traceparent, execEnv)),
+  );
+}
+
+async function handlePublish(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const ctx = await resolveThreadRoute(env, body);
+  if (ctx instanceof Response) return ctx;
+  if (
+    typeof body.repo !== "string" ||
+    `repo:${body.repo}` !== ctx.resource ||
+    typeof body.doorOrigin !== "string" ||
+    typeof body.branch !== "string" ||
+    typeof body.next !== "string" ||
+    (body.old !== undefined && typeof body.old !== "string") ||
+    typeof body.bearer !== "string"
+  )
+    return json({ error: "invalid typed publication request" }, 400);
+  return streamThreadExec(
+    withLevels(
+      ctx.stub,
+      ctx.stub.publishThread(ctx.threadKey, {
+        repo: body.repo,
+        doorOrigin: body.doorOrigin,
+        branch: body.branch,
+        next: body.next,
+        ...(body.old === undefined ? {} : { old: body.old }),
+        bearer: body.bearer,
+      }),
+    ),
   );
 }
 

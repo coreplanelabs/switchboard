@@ -314,6 +314,22 @@ describe("the gate's honest cannot, the compaction row, the budget stop, the unk
     );
     expect(events.some((e) => e.type === "publication_push_authorized")).toBe(false);
   });
+  it("fails closed on OpenCode shell publication without pi's source-bound admission while leaving reads runnable", () => {
+    const rules: ToolRuleContext = {
+      identity: "write",
+      checkout: "/workspace",
+      branch: "feat/x",
+      noShellPush: true,
+    };
+    expect(judgeOpenCodeAsk("shell", ["git push origin feat/x:feat/x"], rules, new Set())).toMatchObject({
+      reply: "reject",
+      message: expect.stringContaining("cannot bind shell publication"),
+    });
+    expect(judgeOpenCodeAsk("shell", ["git status --short"], rules, new Set()).reply).toBe("once");
+    // An opaque program cannot prove it will not spawn a Git write.
+    expect(judgeOpenCodeAsk("shell", ["node -e '0'"], rules, new Set()).reply).toBe("reject");
+  });
+
   it("refuses subsequent tools during push attribution without denying the push's secondary permission", () => {
     const rules: ToolRuleContext = {
       identity: "write",

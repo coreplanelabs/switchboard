@@ -5458,6 +5458,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const deps = codingDeps(
       bashThenDescribe(["git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION),
     );
+    // Exercise legacy push attribution without a Git Door. Door-bound runs
+    // refuse shell pushes and use the typed publication effect instead.
+    deps.githubDoor = undefined;
     // The checkout ended on chore/other at a different commit; feat/login-fix was pushed at HEAD.
     codingExecutor({
       head: OTHER,
@@ -5590,6 +5593,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const deps = codingDeps(
       bashThenDescribe(["git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION),
     );
+    deps.githubDoor = undefined;
     // Neither branch is on the remote any more: the checkout never was, the pushed one was deleted after the push.
     codingExecutor({
       head: HEAD,

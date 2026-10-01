@@ -36,6 +36,37 @@ const pair = (): RunEvent[] => [
 ];
 
 describe("leased publication push evidence", () => {
+  it("pairs a runner-owned effect only with its trusted admission, result and Git Door output", () => {
+    const events: RunEvent[] = [
+      { type: "tool_call", tool: "publish_branch", callId: "effect", summary: "publish branch" },
+      { type: "publication_push_authorized", callId: "effect", ref, expectedHeadSha: old },
+      {
+        type: "tool_result",
+        tool: "publish_branch",
+        callId: "effect",
+        ok: true,
+        summary: "published",
+        output: `To https://door.example/git/acme/api.git\n + aaaaaaaa...bbbbbbbb ${ref} -> ${ref} (forced update)`,
+      },
+    ];
+    expect(pairedPublicationPush(events, binding, head, "effect", "https://door.example")).toMatchObject({
+      sha: head,
+      receipt: { callId: "effect", previousHeadSha: old },
+    });
+    expect(
+      pairedPublicationPush([events[0]!, events[2]!], binding, head, "effect", "https://door.example"),
+    ).toBeUndefined();
+    const result = events[2] as Extract<RunEvent, { type: "tool_result" }>;
+    expect(
+      pairedPublicationPush(
+        [events[0]!, events[1]!, { ...result, ok: false }],
+        binding,
+        head,
+        "effect",
+        "https://door.example",
+      ),
+    ).toBeUndefined();
+  });
   it("pairs a complete exact leased push result with a full new head, never prose", () => {
     expect(leasedPushCommand(command)).toEqual({ ref, expectedHeadSha: old });
     expect(pairedPublicationPush(pair(), binding, head)).toMatchObject({

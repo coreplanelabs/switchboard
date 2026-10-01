@@ -81,6 +81,8 @@ import type { McpToolsForRun } from "../../mcp/source.js";
 import { currentPrHeadSha, prCommitsSince, recordPrOf, type RepoContext } from "../repoContext.js";
 import { verifyExistingPrPublication } from "../existingPrPublication.js";
 import { pairedPublicationPush, restoredPublicationHead, publicationReceiptsFromState } from "../publicationPush.js";
+import { publicationEffectTool } from "../publicationEffect.js";
+import { bearerHashOf } from "../modelProxy/runBearers.js";
 import type { GitPublicationUpdate } from "../modelProxy/gitBindings.js";
 import { PrDescriptionSchema, redactPrDescription, type PrDescription } from "../prDescription.js";
 import { parseHandoff, type Handoff } from "../ship/handoff.js";
@@ -630,9 +632,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     const authority = existingPrPublicationFence?.authority;
     if (
       e.type !== "tool_result" ||
-      e.tool !== "bash" ||
+      (e.tool !== "bash" && e.tool !== "publish_branch") ||
       !e.ok ||
-      e.exitCode !== 0 ||
+      (e.tool === "bash" && e.exitCode !== 0) ||
       e.cut ||
       binding === undefined ||
       authority === undefined ||
@@ -770,6 +772,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           if (ctx.githubDoor) deps.githubBindings?.setPublication(run.id, existingPrPublication);
         } else blockExistingPrPublication("the successful push receipt could not be committed durably");
       }
+      if (e.type === "tool_result" && (e.tool === "bash" || e.tool === "publish_branch") && e.callId !== undefined)
+        deps.githubBindings?.clearToolPush(run.id, e.callId);
       if (
         e.type === "tool_result" &&
         existingPrPublicationFence !== undefined &&
@@ -1080,6 +1084,39 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  released. Abnormal endings always leave a mechanical marker; an ordinary
    *  completion checkpoints only work the child left dirty or unpushed, so a
    *  clean completed run can still use the description and PR post-steps. */
+  const checkpointAdmission = (
+    branch: string,
+    publication: { ref: string; expectedHeadSha: string } | { blocked: string } | undefined,
+  ) => {
+    const bindings = deps.githubBindings;
+    if (!ctx.githubDoor || !bindings?.toolPushIsRequired(run.id)) return {};
+    return {
+      ...(repoCtx.repo
+        ? { publicationDoor: { repo: repoCtx.repo, origin: new URL(ctx.githubDoor.baseUrl).origin } }
+        : {}),
+      admitPush: async (next: string): Promise<{ release: () => void; publicationBearer: string } | undefined> => {
+        const callId = `runner-checkpoint:${branch}:${next}`;
+        const issued = deps.runBearers?.issue(run.id);
+        const hash = issued && bearerHashOf(issued.token);
+        if (
+          !issued ||
+          !hash ||
+          !bindings.allowToolPush(
+            run.id,
+            callId,
+            {
+              ref: `refs/heads/${branch}`,
+              next,
+              ...(publication && "expectedHeadSha" in publication ? { old: publication.expectedHeadSha } : {}),
+            },
+            hash,
+          )
+        )
+          return;
+        return { release: () => bindings.clearToolPush(run.id, callId), publicationBearer: issued.token };
+      },
+    };
+  };
   const preserveCodingChildWork = async (cue: "budget" | "ending" | "completion"): Promise<void> => {
     if (workSalvageAttempted || !isCodingPrRun || coordinator === undefined) return;
     await events.drain();
@@ -1110,6 +1147,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
                 ...(currentCheckout !== undefined ? { checkout: currentCheckout } : {}),
                 ...(existingPrPublication !== undefined ? { publication: existingPrPublication } : {}),
+                ...checkpointAdmission(target.branch, existingPrPublication),
                 ...(deps.artifacts !== undefined && coordinator?.publication !== undefined
                   ? {
                       unfinished: {
@@ -1926,6 +1964,31 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(facts ? { facts } : {}),
           }
         : undefined;
+      // A model shell's bearer is not publication authority: an ordinary
+      // program can spawn Git without spelling its command in the tool input.
+      // Require a separate effect credential at the Door before any model call.
+      const toolPushGate = agent.identity === "write" && !!ctx.githubDoor && !!deps.githubBindings;
+      if (toolPushGate && !deps.githubBindings!.requireToolPush(run.id))
+        throw new Error("the Git door could not bind this harness's publication gate");
+      // A model shell never receives a Door slot. Only this typed effect
+      // receives a one-use credential tied to its tool execution.
+      const publicationTool =
+        toolPushGate &&
+        harness.name === "pi" &&
+        executor.publishBranch &&
+        deps.runBearers &&
+        repoCtx.repo &&
+        ctx.githubDoor
+          ? publicationEffectTool({
+              runId: run.id,
+              repo: repoCtx.repo,
+              doorUrl: ctx.githubDoor.baseUrl,
+              ...(ownBranch ? { branch: ownBranch } : {}),
+              protectedBranches,
+              bindings: deps.githubBindings!,
+              bearers: deps.runBearers,
+            })
+          : undefined;
       const openRun = () =>
         openThroughSeam(
           harness,
@@ -1949,17 +2012,20 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(ctx.modelCard ? { card: ctx.modelCard } : {}),
             system: publicationSystem,
             messages,
-            tools: filterUnavailableTools(
-              mergeTools(
-                toolsForRun(
-                  agent.toolset,
-                  mainWork !== undefined,
-                  mainStart !== undefined && verifiedAtOpen && mainWorkTrusted && !privateAudienceLatch.revoked,
-                ).filter((tool) => slackContext !== undefined || tool.name !== "slack_context"),
-                mcpForRun?.tools,
+            tools: [
+              ...filterUnavailableTools(
+                mergeTools(
+                  toolsForRun(
+                    agent.toolset,
+                    mainWork !== undefined,
+                    mainStart !== undefined && verifiedAtOpen && mainWorkTrusted && !privateAudienceLatch.revoked,
+                  ).filter((tool) => slackContext !== undefined || tool.name !== "slack_context"),
+                  mcpForRun?.tools,
+                ),
+                mainWorker ? [] : ["work_progress"],
               ),
-              mainWorker ? [] : ["work_progress"],
-            ),
+              ...(publicationTool ? [publicationTool] : []),
+            ],
             toolContext,
             ...(ctx.decisionRecord !== undefined ? { environment: { [DECISION_RECORD_ENV]: ctx.decisionRecord } } : {}),
             ...(session
@@ -1986,6 +2052,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                           ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
                           ...(currentCheckout !== undefined ? { checkout: currentCheckout } : {}),
                           ...(existingPrPublication !== undefined ? { publication: existingPrPublication } : {}),
+                          ...checkpointAdmission(branch, existingPrPublication),
                         },
                         span,
                       ),
@@ -2008,6 +2075,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               ...(ownBranch !== undefined ? { branch: ownBranch } : {}),
               protectedBranches,
               ...(existingPrPublicationFence !== undefined ? { publication: existingPrPublicationFence } : {}),
+              ...(toolPushGate ? { noShellPush: true } : {}),
             },
             ...(round.selection.backend ? { backend: round.selection.backend } : {}),
             span: root,

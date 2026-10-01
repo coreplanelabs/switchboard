@@ -276,7 +276,10 @@ export class CloudflareSandboxExecutor implements Executor {
     // sensitive is logged in clear — while bodies are not recorded. So no
     // credential ever rides in a header.
     const callerEnv = isPlainEnv(body.env) ? body.env : {};
-    const sent: Record<string, unknown> = { ...body, env: { ...callerEnv, ...envs } };
+    const sent: Record<string, unknown> = {
+      ...body,
+      env: { ...callerEnv, ...envs },
+    };
 
     // One wait ledger for both tokens: the plan (budget, backoff, the
     // exhausted message) is the LAST token's, so a start that turns into a
@@ -458,7 +461,7 @@ export class CloudflareSandboxExecutor implements Executor {
     // The fleet wait may spend up to the command's own budget (item 14) — a
     // command the run gave 60 s should not wait five minutes for a slot.
     const run = async () => {
-      const r = await this.call("/exec", body, opts?.signal, clampBashTimeout(opts?.timeoutMs), opts?.span);
+      const r = await this.call("/exec", body, opts?.signal, clampBashTimeout(opts?.timeoutMs), opts?.span, false);
       const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
       const exitCode = Number(r.exitCode ?? 0);
       return exitCode !== 0 ? `exit ${exitCode}:\n${parts}` : parts || "(no output)";

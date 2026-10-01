@@ -131,6 +131,19 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
     expect(sentEnv(calls[0])).toEqual({ GH_TOKEN: "ghs_real", SWITCHBOARD_RUN_BEARER: "sbr_x.y" });
   });
 
+  it("reserves a per-effect door credential override while an ordinary env cannot replace it", async () => {
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const ex = new CloudflareSandboxExecutor({
+      ...OPTS,
+      resolveEnvs: async () => ({ GH_ENTERPRISE_TOKEN: "model-bearer" }),
+    });
+    await ex.exec("git status", {
+      env: { GH_ENTERPRISE_TOKEN: "forged" },
+    });
+    expect(sentEnv(calls[0]).GH_ENTERPRISE_TOKEN).toBe("model-bearer");
+    expect("publishBranch" in ex).toBe(false);
+  });
+
   // Feature: docs/reference/specs/execution.md item 5 — the commit identity
   // (record 0062) rides the same shared resolver: the four variables reach
   // the body's env beside the credential on every command.
@@ -252,6 +265,11 @@ describe("CloudflareSandboxExecutor credential file refresh", () => {
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as ExecInfraError).reason).toBe("refused");
     expect((err as ExecInfraError).message).toContain("credential refresh failed");
+  });
+
+  it("does not expose a runner-owned publication transport in the model sandbox", () => {
+    const ex = new CloudflareSandboxExecutor(OPTS);
+    expect("publishBranch" in ex).toBe(false);
   });
 
   it("a run-bearer push refusal is returned once without an App credential source", async () => {

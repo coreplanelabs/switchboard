@@ -1,6 +1,13 @@
 import type { Backend } from "../core/trace/attrs.js";
 import type { Span } from "../core/trace/types.js";
-import type { ExecOptions, Executor, MoveOptions, ReleaseMode, ReleaseResult } from "./executor.js";
+import type {
+  ExecOptions,
+  Executor,
+  MoveOptions,
+  PublicationTransport,
+  ReleaseMode,
+  ReleaseResult,
+} from "./executor.js";
 
 // The executor as the run's spans see it (docs/reference/specs/tracing.md): every
 // operation a tool asks of the workspace runs inside a log-only `exec.*` span
@@ -14,6 +21,7 @@ export class TracingExecutor implements Executor {
   release?: (mode: ReleaseMode) => Promise<ReleaseResult>;
   moveTo?: (sha: string, opts?: MoveOptions) => Promise<{ sha: string }>;
   readBytes?: (path: string) => Promise<Uint8Array>;
+  publishBranch?: (input: PublicationTransport) => Promise<string>;
 
   constructor(
     private readonly inner: Executor,
@@ -29,6 +37,10 @@ export class TracingExecutor implements Executor {
     const innerReadBytes = inner.readBytes?.bind(inner);
     if (innerReadBytes)
       this.readBytes = (path) => this.timed("exec.read_bytes", (s) => innerReadBytes(path, { span: s }));
+    const innerPublishBranch = inner.publishBranch?.bind(inner);
+    if (innerPublishBranch)
+      this.publishBranch = (input) =>
+        this.timed("exec.publish_branch", (s) => innerPublishBranch({ ...input, span: s }));
   }
 
   /** Each op under its own `exec.*` span, handed to the inner executor as

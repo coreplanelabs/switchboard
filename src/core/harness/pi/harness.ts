@@ -118,7 +118,7 @@ import {
 import { piApiFor } from "../piAi.js";
 import { parsePiLine } from "./protocol.js";
 import { RELAY_POLL_WINDOW_MS, stillRunningNote, type LiveHarness, type RelayedToolAnswer } from "./relay.js";
-import type { ToolRuleContext } from "./toolRules.js";
+import { settlePushCall, type ToolRuleContext } from "./toolRules.js";
 import { PiRpcTransport } from "./transport.js";
 
 /** What pi's loop needs beyond what every harness is handed (`HarnessDeps`,
@@ -498,7 +498,15 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
    *  event precedes it. Nothing is stamped for a run without a session or a
    *  row the mirror cannot place. */
   let placed = (event: RunEvent): RunEvent => event;
+  let pushRules: ToolRuleContext | undefined;
   const emit = (event: RunEvent) => {
+    if (
+      event.type === "tool_result" &&
+      (event.tool === "bash" || event.tool === "publish_branch") &&
+      event.callId &&
+      pushRules
+    )
+      settlePushCall(pushRules, event.callId);
     const stamped = placed(event);
     run.onEvent?.(stamped.at === undefined ? { ...stamped, at: now() } : stamped);
   };
@@ -657,6 +665,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   // reaches past `loopEnd` — the moment the cut below fires — is refused at
   // the gate before it runs (harness-pi item 7), not cut at the end.
   const rules: ToolRuleContext = { ...run.rules, identity: run.agent.identity, loopEndsIn: () => loopEnd - now() };
+  pushRules = rules;
   // The waits on the bridge pace with the log poll: a test that polls every millisecond is not made to wait fifty.
   const seenTick = Math.min(CALL_SEEN_TICK_MS, deps.pollMs ?? CALL_SEEN_TICK_MS);
   const live: LiveHarness = {
@@ -665,7 +674,15 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     toolContext: run.toolContext,
     ...(run.backend ? { backend: run.backend } : {}),
     rules,
+    ...(run.admitPush
+      ? {
+          admitPush: run.admitPush,
+          pushCallMatches: (id: string, command: string) => bridge.pushCallMatches(id, command),
+          admittedPushCalls: new Set<string>(),
+        }
+      : {}),
     emit,
+    effectCallMatches: (id, tool, input) => bridge.effectCallMatches(id, tool, input),
     toolSpan: (callId) => bridge.openSpan(callId),
     gateSaw: (callId) => bridge.gateSaw(callId),
     toolsBlocked,

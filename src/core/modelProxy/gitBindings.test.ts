@@ -2,6 +2,57 @@ import { describe, expect, it, vi } from "vitest";
 import { GitBindings } from "./gitBindings.js";
 
 describe("GitBindings", () => {
+  it("does not let a model shell bearer consume the runner's execution-bound slot", () => {
+    const bindings = new GitBindings();
+    const update = { ref: "refs/heads/owned", old: "a".repeat(40), next: "b".repeat(40) };
+    bindings.register("run", { repo: "o/r", ref: "owned" }, undefined, undefined, true);
+    bindings.setPublication("run", { ref: "owned", expectedHeadSha: update.old });
+    expect(bindings.requireToolPush("run")).toBe(true);
+    expect(bindings.allowToolPush("run", "typed-call", update, "effect-secret-hash")).toBe(true);
+    expect(bindings.hasToolPush("run", "model-secret-hash")).toBe(false);
+    expect(bindings.hasToolPush("run", "effect-secret-hash")).toBe(true);
+    expect(bindings.takeToolPush("run", update, "model-secret-hash")).toBe(false);
+    expect(bindings.takeToolPush("run", update)).toBe(false);
+    expect(bindings.takeToolPush("run", update, "effect-secret-hash")).toBe(true);
+    expect(bindings.takeToolPush("run", update, "effect-secret-hash")).toBe(false);
+  });
+  it("consumes one typed harness push authorization bound to source, destination and old head", () => {
+    const bindings = new GitBindings();
+    const old = "a".repeat(40);
+    const next = "b".repeat(40);
+    bindings.register("run", { repo: "o/r", ref: "fix" }, undefined, undefined, true);
+    bindings.setPublication("run", { ref: "fix", expectedHeadSha: old });
+    expect(bindings.requireToolPush("run")).toBe(true);
+    const update = { ref: "refs/heads/fix", old, next };
+    const proof = "effect-secret-hash";
+    expect(bindings.takeToolPush("run", update, proof)).toBe(false);
+    expect(bindings.allowToolPush("run", "call-1", { ref: update.ref, next, old }, proof)).toBe(true);
+    expect(bindings.takeToolPush("run", { ...update, next: "c".repeat(40) }, proof)).toBe(false);
+    expect(bindings.takeToolPush("run", { ...update, old: "c".repeat(40) }, proof)).toBe(false);
+    expect(bindings.takeToolPush("run", update, proof)).toBe(true);
+    expect(bindings.takeToolPush("run", update, proof)).toBe(false);
+    expect(bindings.allowToolPush("run", "call-2", { ref: update.ref, next, old }, proof)).toBe(true);
+    bindings.clearToolPush("run", "call-2");
+    expect(bindings.takeToolPush("run", update, proof)).toBe(false);
+    expect(bindings.allowToolPush("run", "call-3", { ref: update.ref, next, old }, proof)).toBe(true);
+    bindings.setPublication("run", { blocked: "head moved" });
+    expect(bindings.takeToolPush("run", update, proof)).toBe(false);
+  });
+
+  it("preserves the first-branch ref binding while refusing foreign receive-pack destinations", () => {
+    const bindings = new GitBindings();
+    bindings.register("new", { repo: "o/r" }, undefined);
+    bindings.requireToolPush("new");
+    const next = "b".repeat(40);
+    const proof = "effect-secret-hash";
+    expect(bindings.allowToolPush("new", "owned", { ref: "refs/heads/fix", next }, proof)).toBe(true);
+    expect(bindings.takeToolPush("new", { ref: "refs/heads/main", old: "0".repeat(40), next }, proof)).toBe(false);
+    expect(bindings.takeToolPush("new", { ref: "refs/heads/fix", old: "0".repeat(40), next }, proof)).toBe(true);
+    expect(bindings.takeToolPush("new", { ref: "refs/heads/fix", old: "0".repeat(40), next }, proof)).toBe(false);
+    bindings.unregister("new");
+    expect(bindings.toolPushIsRequired("new")).toBe(false);
+  });
+
   it("gives a replacement registration a new request generation", () => {
     const bindings = new GitBindings();
     expect(bindings.register("run", { repo: "o/r", ref: "feature" }, undefined)).toBe(true);

@@ -53,19 +53,26 @@ export function pairedPublicationPush(
   const calls = events.filter(
     (e): e is Extract<RunEvent, { type: "tool_call" }> =>
       e.type === "tool_call" &&
-      e.tool === "bash" &&
-      (callId === undefined ? mentionsGitPush(e.command ?? e.summary) : e.callId === callId),
+      (e.tool === "bash" || e.tool === "publish_branch") &&
+      (callId === undefined ? e.tool === "bash" && mentionsGitPush(e.command ?? e.summary) : e.callId === callId),
   );
   if (calls.length !== 1) return;
   const call = calls[0]!;
-  if (
-    !call.callId ||
-    !call.command ||
-    events.filter((e) => e.type === "tool_call" && e.callId === call.callId).length !== 1
-  )
-    return;
-  const command = leasedPushCommand(call.command);
-  if (command?.ref !== binding.publicationRef || command.expectedHeadSha !== binding.expectedHeadSha) return;
+  if (!call.callId || events.filter((e) => e.type === "tool_call" && e.callId === call.callId).length !== 1) return;
+  if (call.tool === "publish_branch") {
+    const admissions = events.filter((e) => e.type === "publication_push_authorized" && e.callId === call.callId);
+    if (
+      admissions.length !== 1 ||
+      admissions[0]?.type !== "publication_push_authorized" ||
+      admissions[0].ref !== binding.publicationRef ||
+      admissions[0].expectedHeadSha !== binding.expectedHeadSha
+    )
+      return;
+  } else {
+    if (!call.command) return;
+    const command = leasedPushCommand(call.command);
+    if (command?.ref !== binding.publicationRef || command.expectedHeadSha !== binding.expectedHeadSha) return;
+  }
   const results = events.filter(
     (e): e is Extract<RunEvent, { type: "tool_result" }> => e.type === "tool_result" && e.callId === call.callId,
   );
@@ -73,9 +80,9 @@ export function pairedPublicationPush(
   const result = results[0]!;
   if (
     events.indexOf(result) <= events.indexOf(call) ||
-    result.tool !== "bash" ||
+    result.tool !== call.tool ||
     !result.ok ||
-    result.exitCode !== 0 ||
+    (call.tool === "bash" && result.exitCode !== 0) ||
     result.cut ||
     !result.output ||
     result.output.length >= TOOL_OUTPUT_CAP
@@ -87,7 +94,8 @@ export function pairedPublicationPush(
     `Branch '${binding.publicationRef}' set up to track remote branch '${binding.publicationRef}' from 'origin'.`,
   ];
   if (
-    /(?:^|\s)(?:-u|--set-upstream)(?:\s|$)/.test(call.command) &&
+    call.tool === "bash" &&
+    /(?:^|\s)(?:-u|--set-upstream)(?:\s|$)/.test(call.command ?? "") &&
     lines.filter((line) => tracking.includes(line)).length === 1
   )
     lines = lines.filter((line) => !tracking.includes(line));

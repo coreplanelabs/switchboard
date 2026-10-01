@@ -328,6 +328,36 @@ describe("the gate's coverage — every call that ran was vetted", () => {
     ]);
   });
 
+  it("binds a typed publication effect to its observed tool name and exact input", () => {
+    const { bridge } = harness();
+    expect(bridge.effectCallMatches("typed", "publish_branch", { branch: "owned" })).toBe(false);
+    bridge.observe(start("typed", "publish_branch", { branch: "owned" }));
+    expect(bridge.effectCallMatches("typed", "publish_branch", { branch: "owned" })).toBe(true);
+    expect(bridge.effectCallMatches("typed", "publish_branch", { branch: "main" })).toBe(false);
+    expect(bridge.effectCallMatches("typed", "bash", { branch: "owned" })).toBe(false);
+    bridge.observe(start("concurrent", "bash", { command: "npm test" }));
+    expect(bridge.effectCallMatches("typed", "publish_branch", { branch: "owned" })).toBe(false);
+    bridge.observe(end("concurrent", "bash", "done"));
+    expect(bridge.effectCallMatches("typed", "publish_branch", { branch: "owned" })).toBe(true);
+    bridge.observe(end("typed", "publish_branch", "ok"));
+    expect(bridge.effectCallMatches("typed", "publish_branch", { branch: "owned" })).toBe(false);
+  });
+
+  it("binds a publication ask to the actual bash call and exact command pi announced", () => {
+    const { bridge } = harness();
+    expect(bridge.pushCallMatches("c1", "git push origin fix:fix")).toBe(false);
+    bridge.observe(start("c1", "bash", { command: "git push origin fix:fix" }));
+    expect(bridge.pushCallMatches("c1", "git push origin fix:fix")).toBe(true);
+    expect(bridge.pushCallMatches("c1", "git push origin other:other")).toBe(false);
+    bridge.observe(start("c2", "read", { path: "x" }));
+    expect(bridge.pushCallMatches("c1", "git push origin fix:fix")).toBe(false);
+    expect(bridge.pushCallMatches("c2", "git push origin fix:fix")).toBe(false);
+    bridge.observe(end("c2", "read", "done"));
+    expect(bridge.pushCallMatches("c1", "git push origin fix:fix")).toBe(true);
+    bridge.observe(end("c1", "bash", "done"));
+    expect(bridge.pushCallMatches("c1", "git push origin fix:fix")).toBe(false);
+  });
+
   it("a call the gate saw ends quietly; pi's own pre-gate answer is a harness_error note naming the reason; an unvetted call that ran is reported as a gate bypass", () => {
     const { bridge, events } = harness();
     bridge.gateSaw("c1");

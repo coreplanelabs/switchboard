@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { once } from "node:events";
-import type { RunBearerStore } from "../core/modelProxy/runBearers.js";
+import { bearerHashOf, type RunBearerStore } from "../core/modelProxy/runBearers.js";
 import { GIT_RECEIVE_PACK_FORWARD_TIMEOUT_MS } from "../core/budgets.js";
 import type { GitBinding, GitBindings, GitPublicationClaim } from "../core/modelProxy/gitBindings.js";
 import { authorizePushRefs, inspectReceivePackPrefix, type PushPrefix } from "./gitPushPolicy.js";
@@ -335,6 +335,15 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
         return answer(res, 403, "GitHub write identity is absent for this run");
       if (receive && publication && "blocked" in publication)
         return answer(res, 403, "existing PR publication is blocked");
+      // The model's bearer is not a blanket receive-pack grant in a harness
+      // run. An unadmitted request never even asks for repository metadata or
+      // a GitHub token; the exact source/ref/old-head check follows the body.
+      if (
+        receive &&
+        deps.bindings?.toolPushIsRequired(verdict.grant.runId) &&
+        !deps.bindings.hasToolPush(verdict.grant.runId, bearerHashOf(presented ?? ""))
+      )
+        return answer(res, 403, "a bound harness push is required");
       if (boundRepo && boundRepo.toLowerCase() !== repo.toLowerCase())
         return answer(res, 403, "repository is outside this run's binding");
       let parsed: PushPrefix | undefined;
@@ -372,6 +381,12 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
           ...(publication && "expectedHeadSha" in publication ? { expectedHeadSha: publication.expectedHeadSha } : {}),
         });
         if (!decision.ok) return refusePush(res, parsed, decision.reason);
+        if (
+          parsed.kind === "commands" &&
+          deps.bindings?.toolPushIsRequired(verdict.grant.runId) &&
+          !deps.bindings.takeToolPush(verdict.grant.runId, parsed.commands[0]!, bearerHashOf(presented ?? ""))
+        )
+          return answer(res, 403, "receive-pack does not match an authorized harness push");
         if (firstBranch && parsed.kind === "commands") pendingBranchRef = parsed.commands[0]!.ref;
         if (!boundRef && parsed.kind === "commands") {
           const first = parsed.commands[0]!.ref;

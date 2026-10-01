@@ -460,6 +460,9 @@ export interface HarnessRun {
    *  preset's (`agent.identity`) and is folded in by the harness, so the
    *  allowlist it starts with and the reach the gate judges by read one word. */
   rules: Omit<ToolRuleContext, "identity">;
+  /** Runner-owned permission for one literal push: reads its source commit
+   * and binds that head to the Door's next receive-pack before bash runs. */
+  admitPush?: (callId: string, source: string) => Promise<boolean>;
   /** The session's notepad as the `notes` tool last wrote it (session-log item
    *  10), read when the process compacts so the steer that follows carries it;
    *  absent for a run without a session, and the steer says the notes are empty. */

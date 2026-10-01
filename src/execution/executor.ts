@@ -50,6 +50,10 @@ export interface Executor {
    *  cancel the underlying command does so and returns/throws promptly; one that
    *  cannot simply ignores it — the runner stops waiting on it either way. */
   exec(command: string, opts?: ExecOptions): Promise<string>;
+  /** Optional trusted Git transport. Implementations must keep `bearer` out
+   * of the model shell's UID, process environment and writable repository
+   * config. Absence means publication is unavailable, never a shell fallback. */
+  publishBranch?(input: PublicationTransport): Promise<string>;
   /** Read a file, path relative to the execution workspace. */
   readFile(path: string, opts?: ExecTraceOptions): Promise<string>;
   /** Write a file (creating parent dirs), path relative to the workspace. */
@@ -77,6 +81,16 @@ export interface Executor {
    *  Absent on executors whose workspace the model manages itself (a sandbox
    *  clone): the dispatcher then tells the model to check the commit out. */
   moveTo?(sha: string, opts?: MoveOptions): Promise<{ sha: string }>;
+}
+
+export interface PublicationTransport extends ExecTraceOptions {
+  repo: string;
+  doorOrigin: string;
+  branch: string;
+  next: string;
+  old?: string;
+  bearer: string;
+  signal?: AbortSignal;
 }
 
 export interface ExecOptions extends ExecTraceOptions {
@@ -349,7 +363,13 @@ export class LocalExecutor implements Executor {
     // The profile's identity wins a clash, as on E2B, Cloudflare and the
     // resident. Passing an explicit map also prevents a factory-created local
     // run from inheriting arbitrary host credentials.
-    const env = identityEnv === undefined ? opts?.env : { ...(opts?.env ?? {}), ...identityEnv };
+    const env =
+      identityEnv === undefined && opts?.env === undefined
+        ? undefined
+        : {
+            ...(opts?.env ?? {}),
+            ...identityEnv,
+          };
     const r = await runBash(command, this.workspaceDir, opts?.signal, timeoutMs, env);
     const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
     if (r.timedOut) {

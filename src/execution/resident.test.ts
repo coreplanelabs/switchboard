@@ -268,6 +268,26 @@ describe("ResidentExecutor.exec", () => {
     expect("env" in sentBody(calls[1])).toBe(false);
   });
 
+  it("keeps model env from replacing the door bearer and sends publication only through the typed route", async () => {
+    const { calls } = stubFetch(
+      { body: { stdout: "ok", stderr: "", exitCode: 0, truncated: false } },
+      { body: { stdout: "ok", stderr: "", exitCode: 0, truncated: false } },
+    );
+    const ex = new ResidentExecutor({ ...OPTS, resolveEnvs: async () => ({ GH_ENTERPRISE_TOKEN: "model-bearer" }) });
+    await ex.exec("git status", { env: { GH_ENTERPRISE_TOKEN: "forged" } });
+    expect(sentBody(calls[0]).env).toMatchObject({ GH_ENTERPRISE_TOKEN: "model-bearer" });
+    await ex.publishBranch({
+      repo: "jshttp/vary",
+      doorOrigin: "https://door.example",
+      branch: "fix/owned",
+      next: "a".repeat(40),
+      bearer: "effect-bearer",
+    });
+    expect(route(calls[1])).toBe("/publish");
+    expect(sentBody(calls[1])).toMatchObject({ repo: "jshttp/vary", branch: "fix/owned", bearer: "effect-bearer" });
+    expect(sentBody(calls[1]).command).toBeUndefined();
+  });
+
   it('needs:"attach" for an evicted worktree re-attaches once and retries the command', async () => {
     const { fn, calls } = stubFetch(
       {
