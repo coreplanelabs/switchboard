@@ -280,6 +280,10 @@ export interface ChannelIO {
   directAudience?(): { channelId: string; userId: string; threadKey: string } | undefined;
   /** Fresh Slack confirmation that the reply address is still an unshared requester DM. */
   verifyDirectAudience?(audience: SlackDirectAudience): Promise<AudienceCheck>;
+  /** A private coordinator worker checks its stored requester, act and
+   * internal spawn identity against the original DM before reading its log.
+   * Slack adapters never provide this internal capability. */
+  verifyPrivateWorkerAudience?(request: IncomingMessage): Promise<AudienceCheck>;
   /**
    * Present when this channel has nowhere to deliver a reply (the resumed-run
    * null channel, docs/reference/specs/run-history.md item 38): the reason, e.g.

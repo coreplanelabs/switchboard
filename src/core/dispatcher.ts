@@ -134,6 +134,7 @@ import {
   savedSlackContextNeedsRecheck,
 } from "./dispatch/privateAudience.js";
 import { directAudienceStampOf } from "./runLedger/inboxMessage.js";
+import { parsePrivateWorkerThreadKey } from "./privateWorkerLog.js";
 import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { mainAudienceAtPrompt, mainAudienceAtReply, planeRowIdentities } from "./dispatch/mainAudience.js";
@@ -692,7 +693,13 @@ export async function dispatch(
   // Recovery authority is a durable fact of the coordinator child, not a
   // process-local spawn option. A resume/restart rebuilds the full boundary
   // from the run's coordinator event before any profile or target decision.
-  const coordinator = opts.coordinator ?? (resume ? carriedCoordinatorTag(resume.row, resume.events) : undefined);
+  const coordinator =
+    opts.coordinator ??
+    (resume
+      ? carriedCoordinatorTag(resume.row, resume.events)
+      : restart
+        ? carriedCoordinatorTag(restart.row, [])
+        : undefined);
   const recovery = opts.recovery ?? coordinator?.recovery;
   const clock = deps.clock ?? systemClock;
   // The request's root (docs/reference/specs/tracing.md): the adapter's, started when our
@@ -951,6 +958,13 @@ export async function dispatch(
     // Stop before the operator, history or seed can read that log unless Slack
     // still proves this is the same requester's private conversation.
     const directDm = /^slack:D[A-Z0-9_]+$/.test(msg.channelId);
+    const workerIdentity = parsePrivateWorkerThreadKey(msg.threadKey);
+    const boundPrivateWorker =
+      workerIdentity !== undefined &&
+      coordinator?.parentInstanceId === workerIdentity.instanceId &&
+      coordinator.idempotencyKey === msg.messageId &&
+      coordinator.idempotencyKey.startsWith(`${workerIdentity.instanceId}:${workerIdentity.unit}/`) &&
+      msg.directAudience === undefined;
     // An indirect reply to a live private run must revoke that run before this
     // turn is refused. It cannot enter the model inbox or read the saved session.
     const revokePrivateLive = () => {
@@ -958,12 +972,19 @@ export async function dispatch(
       if (live?.agent === "orchestrator") live.inbox.markUntrustedFollowUp();
     };
     if (directDm && directAudienceStampOf(msg) === undefined) revokePrivateLive();
-    if (directDm) {
-      const checked = await privateAudienceDecision(msg, io);
+    if (directDm || workerIdentity) {
+      const checked =
+        workerIdentity !== undefined
+          ? boundPrivateWorker && io.verifyPrivateWorkerAudience
+            ? await io
+                .verifyPrivateWorkerAudience(msg)
+                .catch(() => ({ ok: false, code: "direct-audience-unavailable" as const }))
+            : { ok: false, code: "direct-address-unproved" as const }
+          : await privateAudienceDecision(msg, io);
       directAudienceVerified = checked.ok;
       if (!checked.ok) noteAudienceRefusal(audienceTrace, checked.code, "prompt", "prompt");
     }
-    if (directDm && !directAudienceVerified) {
+    if ((directDm || workerIdentity) && !directAudienceVerified) {
       revokePrivateLive();
       await refuse(
         refusalOf(
@@ -976,7 +997,7 @@ export async function dispatch(
     // Record the authenticated turn before routing or model work. A later
     // message advances this private revision even if it is only a cancellation
     // or correction; an older unclaimed request then loses the claim CAS.
-    if (directDm && directAudienceVerified && msg.messageId && deps.coordinatorInstances) {
+    if (directDm && !workerIdentity && directAudienceVerified && msg.messageId && deps.coordinatorInstances) {
       try {
         await deps.coordinatorInstances.recordRequesterTurn({
           threadKey: msg.threadKey,

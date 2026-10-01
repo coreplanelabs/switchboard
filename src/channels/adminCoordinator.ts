@@ -99,6 +99,7 @@ import { PRIVATE_WORKER_INTERNAL_READ } from "../core/runsService.js";
 import {
   appendPrivateWorkerInput,
   appendPrivateWorkerReply,
+  privateWorkerAudienceFor,
   privateWorkerIO,
   privateWorkerThreadKey,
 } from "./privateWorker.js";
@@ -708,17 +709,30 @@ function unitIO(
   row: CoordinatorUnit,
   currentInputId?: string,
 ): ChannelIO | undefined {
-  if (row.workBrief !== undefined)
-    return deps.privateWorkerLog === undefined
-      ? undefined
-      : privateWorkerIO(
-          deps.privateWorkerLog,
-          { instanceId: instance.id, unit: row.unit },
-          {
-            clock: deps.clock ?? systemClock,
-            ...(currentInputId !== undefined ? { currentInputId } : {}),
-          },
-        );
+  if (row.workBrief !== undefined) {
+    if (!deps.privateWorkerLog) return undefined;
+    // A final report and a wake append to the durable internal log without a
+    // model read. Only a new coding/review spawn needs the requester gate.
+    if (!currentInputId)
+      return privateWorkerIO(
+        deps.privateWorkerLog,
+        { instanceId: instance.id, unit: row.unit },
+        {
+          clock: deps.clock ?? systemClock,
+        },
+      );
+    const audience = privateWorkerAudienceFor(instance, row, currentInputId, deps.ioFor, deps.instances);
+    if (!audience) return undefined;
+    return privateWorkerIO(
+      deps.privateWorkerLog,
+      { instanceId: instance.id, unit: row.unit },
+      {
+        clock: deps.clock ?? systemClock,
+        currentInputId,
+        audience,
+      },
+    );
+  }
   const thread = unitThread(instance, row, 1);
   return thread.threadKey === undefined
     ? undefined
@@ -869,6 +883,8 @@ function watched(io: ChannelIO, on: { started: (id: string) => void; replied: (t
   if (io.openThread) out.openThread = (lead) => io.openThread!(lead);
   if (io.directAudience) out.directAudience = () => io.directAudience!();
   if (io.verifyDirectAudience) out.verifyDirectAudience = (audience) => io.verifyDirectAudience!(audience);
+  if (io.verifyPrivateWorkerAudience)
+    out.verifyPrivateWorkerAudience = (request) => io.verifyPrivateWorkerAudience!(request);
   return out;
 }
 
@@ -1188,6 +1204,8 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     receivedAt: at,
   };
   if (row?.workBrief !== undefined) {
+    if (!(await io.verifyPrivateWorkerAudience?.(msg))?.ok)
+      return json(409, { ok: false, error: "private_worker_audience_unverified", at });
     try {
       await appendPrivateWorkerInput(
         deps.privateWorkerLog!,
