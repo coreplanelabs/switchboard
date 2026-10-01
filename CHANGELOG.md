@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.273.0](https://github.com/coreplanelabs/switchboard/compare/v1.272.0...v1.273.0) (2026-10-01)
+
+
+### Features
+
+* **coding:** choose task baselines without fixed repo commands ([#2589](https://github.com/coreplanelabs/switchboard/issues/2589)) ([b7eefaa](https://github.com/coreplanelabs/switchboard/commit/b7eefaa661aa9be8b0a3431e0411eb9120df9402))
+* **runs:** explain withheld private replies ([#2588](https://github.com/coreplanelabs/switchboard/issues/2588)) ([7b23729](https://github.com/coreplanelabs/switchboard/commit/7b237294947b4f648d45540578d5257ba5edf19a))
+
+
+### Bug fixes
+
+* **slack:** give supported recovery for denied sources ([#2592](https://github.com/coreplanelabs/switchboard/issues/2592)) ([a7170a1](https://github.com/coreplanelabs/switchboard/commit/a7170a15b35dc522a9f6d70b7c0dcc1ff605894f))
+
 ## [1.272.0](https://github.com/coreplanelabs/switchboard/compare/v1.271.9...v1.272.0) (2026-10-01)
 
 
