@@ -1,3 +1,4 @@
+import { booleanAudienceVerifier } from "../core/testing/audienceVerifier.js";
 import { describe, expect, it, vi } from "vitest";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { InMemoryArtifactStore } from "../artifacts/store.js";
@@ -573,7 +574,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
           status: async () => ({ update: () => {}, done: async () => {} }),
           history: async () => [],
           directAudience: () => testCase.address,
-          verifyDirectAudience: verify,
+          verifyDirectAudience: booleanAudienceVerifier(verify),
         }),
         script: async (_msg, io) => {
           childIO = io;
@@ -586,7 +587,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       expect(response.status).toBe(200);
       expect(h.dispatched[0].msg.directAudience).toEqual(testCase.stamped ? audience : undefined);
       expect(childIO?.directAudience?.()).toEqual(testCase.address);
-      expect(await childIO?.verifyDirectAudience?.(audience)).toBe(testCase.verified);
+      expect(await childIO?.verifyDirectAudience?.(audience)).toMatchObject({ ok: testCase.verified });
       expect(verify).toHaveBeenCalled();
     }
   });

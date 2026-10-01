@@ -1,3 +1,4 @@
+import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { SOURCE_RECEIPT_MAX, SOURCE_METADATA_MAX_BYTES, isSessionSources } from "../references/receipts.js";
 import { testSlackCapability, testSlackReceipt, testSessionSources } from "../testing/slackSources.js";
 import { describe, expect, it, vi } from "vitest";
@@ -31,7 +32,10 @@ describe("Slack context run binding", () => {
       userId: msg.userId,
       threadKey: msg.threadKey,
     };
-    const io = { directAudience: () => audience, verifyDirectAudience: async () => true } as unknown as ChannelIO;
+    const io = {
+      directAudience: () => audience,
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
+    } as unknown as ChannelIO;
     const bound = await bindSlackContext({ agentName: "orchestrator", actor, msg, io, visibility: "dm", create });
     expect(bound).toBeDefined();
     expect(create).toHaveBeenCalledWith(actor, msg);
@@ -56,7 +60,10 @@ describe("Slack context run binding", () => {
 
   it("rechecks the same one-person destination before the model answer can publish", async () => {
     let current = { channelId: msg.channelId, userId: msg.userId, threadKey: msg.threadKey };
-    const io = { directAudience: () => current, verifyDirectAudience: async () => true } as unknown as ChannelIO;
+    const io = {
+      directAudience: () => current,
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
+    } as unknown as ChannelIO;
     const read = vi.fn(async () => "private source");
     const bound = await bindSlackContext({
       agentName: "orchestrator",
@@ -77,7 +84,7 @@ describe("Slack context run binding", () => {
     let available = true;
     const io = {
       directAudience: () => msg.directAudience,
-      verifyDirectAudience: async () => available,
+      verifyDirectAudience: booleanAudienceVerifier(async () => available),
     } as unknown as ChannelIO;
     const read = vi.fn(async () => "private source");
     const bound = await bindSlackContext({
@@ -97,7 +104,7 @@ describe("Slack context run binding", () => {
   it("keeps a source revocation sealed even when Slack still reports the DM private", async () => {
     const io = {
       directAudience: () => msg.directAudience,
-      verifyDirectAudience: async () => true,
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
     } as unknown as ChannelIO;
     const bound = await bindSlackContext({
       agentName: "orchestrator",
@@ -129,7 +136,9 @@ describe("Slack context run binding", () => {
     let checks = 0;
     const io = {
       directAudience: () => msg.directAudience,
-      verifyDirectAudience: () => (++checks === 1 ? Promise.resolve(true) : (verifierStarted(), verifying)),
+      verifyDirectAudience: booleanAudienceVerifier(() =>
+        ++checks === 1 ? Promise.resolve(true) : (verifierStarted(), verifying),
+      ),
     } as unknown as ChannelIO;
     const bound = await bindSlackContext({
       agentName: "orchestrator",
@@ -149,7 +158,7 @@ describe("Slack context run binding", () => {
   it("refuses an externally shared or unverifiable D conversation before tool registration", async () => {
     const io = {
       directAudience: () => ({ channelId: msg.channelId, userId: msg.userId, threadKey: msg.threadKey }),
-      verifyDirectAudience: async () => true,
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
     } as unknown as ChannelIO;
     for (const verified of [false, undefined]) {
       const bound = await bindSlackContext({
@@ -171,7 +180,7 @@ describe("Slack context run binding", () => {
 describe("trusted source receipt persistence", () => {
   const io = {
     directAudience: () => msg.directAudience,
-    verifyDirectAudience: async () => true,
+    verifyDirectAudience: booleanAudienceVerifier(async () => true),
   } as unknown as ChannelIO;
   it("waits for the receipt write before delivering content and refuses a failed write", async () => {
     let finish!: (ok: boolean) => void;
@@ -221,7 +230,7 @@ describe("trusted source receipt persistence", () => {
     const persist = vi.fn(async () => true);
     expect(await bound.initialize(sources, persist)).toBe(true);
     expect(await bound.capability.read({ kind: "thread" })).not.toContain("source bytes");
-    expect(await bound.sourcesStillValid()).toBe(false);
+    expect(await bound.sourcesStillValid()).toMatchObject({ ok: false });
     expect(persist).toHaveBeenLastCalledWith({ version: 1, status: "revoked" });
   });
 });

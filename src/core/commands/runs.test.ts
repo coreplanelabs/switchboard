@@ -364,6 +364,35 @@ describe("runs.list", () => {
 });
 
 describe("channel visibility (authorization.md items 5–7)", () => {
+  it("authorizes audience diagnostics through the same run read and hides denied run existence", async () => {
+    const { registry, deps, store } = await setup();
+    const receipt = {
+      version: 1 as const,
+      causeAt: "reply" as const,
+      withheldAt: "reply" as const,
+      code: "github-access-lost" as const,
+    };
+    await store.put(
+      record("private-audience", NOW, {
+        channelId: "slack:D1",
+        userId: "slack:UALICE",
+        channelVisibility: "dm",
+        audienceRefusal: receipt,
+      }),
+    );
+    const request = { args: ["private-audience"], options: { include: "audience" } };
+    const allowed = await registry.invoke("runs.get", request, reader, deps);
+    expect(allowed.ok).toBe(true);
+    expect(JSON.stringify(allowed)).toContain('"code":"github-access-lost"');
+    const denied = await registry.invoke("runs.get", request, pinnedX, deps);
+    const missing = await registry.invoke("runs.get", { ...request, args: ["unknown"] }, pinnedX, deps);
+    expect(denied).toEqual(missing);
+    expect(denied).toMatchObject({ ok: false, error: "not_found" });
+    expect(JSON.stringify(await registry.invoke("runs.get", { args: request.args }, reader, deps))).not.toContain(
+      "audienceRefusal",
+    );
+  });
+
   it("a pinned token sees its channel and the public runs — never another machine channel or a private run — on list (even when asking for another channel) and on get/events/friction/stop", async () => {
     const { reg, registry, deps } = await setup();
     expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, pinnedX, deps))).toEqual([

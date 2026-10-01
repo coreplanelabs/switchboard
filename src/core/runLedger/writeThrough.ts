@@ -257,6 +257,8 @@ export interface LedgerRun {
   setState(patch: RunState): void;
   /** Commit a security binding before the side effect it authorizes. */
   setStateAndFlush(patch: RunState): Promise<boolean>;
+  /** The same state write, retaining ownership loss separately from unavailable storage. */
+  commitState(patch: RunState): Promise<FinishingGate>;
   /** Persist trusted dependencies before source content reaches a model. */
   writeSources(sources: SessionSources): Promise<boolean>;
   /** `live → finishing`, before the reply — the double-answer gate (D9). */
@@ -540,6 +542,9 @@ export class NullLedgerRun implements LedgerRun {
   }
   async setStateAndFlush(_patch: RunState): Promise<boolean> {
     return false;
+  }
+  async commitState(_patch: RunState): Promise<FinishingGate> {
+    return "unavailable";
   }
   async finishing(): Promise<FinishingGate> {
     return "unavailable";
@@ -859,7 +864,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       send: async (batch) => {
         if (this.detached) return;
         const result = await ledger.append(this.runId, gen, batch);
-        if (!result.ok && !this.finished) this.detach(`append refused (${result.reason})`);
+        if (!result.ok && !this.finished) this.detach(`append refused (${result.reason})`, result.reason === "fenced");
       },
       onError: (err, batch) => {
         if (!this.finished) warn(`[ledger] ${this.threadKey} ${batch.length} event(s) not appended: ${err.message}`);
@@ -1004,7 +1009,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
 
     /** One warning, then silence: the run continues untracked. */
-    detach(reason: string): void {
+    detach(reason: string, ownershipLost = false): void {
       if (this.detached) return;
       this.detached = true;
       this.broken = true; // the log ends short of what the model saw from here on
@@ -1014,7 +1019,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       // A fence means another generation owns the run now (it reclaimed the
       // row): this process must stop driving it, and must not reply (D9) —
       // `finishing()` answers `fenced` from here on, not `unavailable`.
-      if (reason.includes("(fenced)")) {
+      if (ownershipLost) {
         this.fencedOut = true;
         if (this.onFenced && !this.fencedTold) {
           this.fencedTold = true;
@@ -1053,7 +1058,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       try {
         const seeded = await ledger.seed(this.runId, gen, turns, this.sessionRow?.key);
         if (!seeded.ok) {
-          this.detach(`seed refused (${seeded.reason})`);
+          this.detach(`seed refused (${seeded.reason})`, seeded.reason === "fenced");
           return;
         }
         this.turnsWritten = messages.length;
@@ -1075,7 +1080,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           [],
           this.sessionRow?.key,
         );
-        if (!recorded.ok) this.detach(`seed record refused (${recorded.reason})`);
+        if (!recorded.ok) this.detach(`seed record refused (${recorded.reason})`, recorded.reason === "fenced");
         else this.seeded = true;
       } catch (err) {
         this.detach(`seed failed: ${describe(err)}`);
@@ -1125,7 +1130,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       for (let attempt = 1; ; attempt++) {
         try {
           const result = await ledger.step(this.runId, gen, record, turns, this.sessionRow?.key);
-          if (!result.ok) this.detach(`step ${record.step} refused (${result.reason})`);
+          if (!result.ok) this.detach(`step ${record.step} refused (${result.reason})`, result.reason === "fenced");
           else this.turnsWritten = record.turnIndex;
           return;
         } catch (err) {
@@ -1174,7 +1179,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         const result = await ledger.assignLiveState(this.runId, gen, assignment);
         if (!result.ok) {
           if (result.reason === "fenced" || result.reason === "unknown-run")
-            this.detach(`live state refused (${result.reason})`);
+            this.detach(`live state refused (${result.reason})`, result.reason === "fenced");
           return result;
         }
         this.state = {
@@ -1199,10 +1204,16 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
 
     async setStateAndFlush(patch: RunState): Promise<boolean> {
-      if (!this.tracked() || this.finished) return false;
+      return (await this.commitState(patch)) === "ok";
+    }
+
+    async commitState(patch: RunState): Promise<FinishingGate> {
+      if (this.fencedOut || this.finished) return "fenced";
+      if (this.detached) return "unavailable";
       this.setState(patch);
       await this.stateSending;
-      return this.tracked() && !this.finished && !this.stateDirty;
+      if (this.fencedOut || this.finished) return "fenced";
+      return this.detached || this.stateDirty ? "unavailable" : "ok";
     }
 
     /** The merged snapshot, sent once per burst of patches; a transient failure
@@ -1215,7 +1226,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       for (let attempt = 1; ; attempt++) {
         try {
           const result = await ledger.setState(this.runId, gen, this.state);
-          if (!result.ok) this.detach(`state refused (${result.reason})`);
+          if (!result.ok) this.detach(`state refused (${result.reason})`, true);
           return;
         } catch (err) {
           if (err instanceof RouteMissingError || err instanceof PermanentStoreError || attempt >= 2) {
@@ -1242,7 +1253,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         warn(
           `[ledger] ${this.threadKey} finishing refused (${result.reason}) — another generation owns this run; no reply from here`,
         );
-        this.detach(`finishing refused (fenced)`);
+        this.detach(`finishing refused (fenced)`, true);
         return "fenced";
       } catch (err) {
         warn(`[ledger] ${this.threadKey} finishing failed: ${describe(err)}`);
@@ -1297,7 +1308,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
             : undefined;
         const result = await ledger.heartbeat(this.runId, gen, leaseMs, facts);
         if (!result.ok) {
-          this.detach(`heartbeat refused (${result.reason})`);
+          this.detach(`heartbeat refused (${result.reason})`, result.reason === "fenced");
           return;
         }
         if (result.stop && this.stopRelayed !== result.stop && this.onStop) {
@@ -1402,7 +1413,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
         if (claimed.outcome === "fenced") {
           unpromoted.delete(reserved.runId); // the row is another generation's: nothing of ours to abandon
-          reserved.detach("promotion refused (fenced)");
+          reserved.detach("promotion refused (fenced)", true);
           return { kind: "fenced" };
         }
         if (claimed.outcome !== "ok") {

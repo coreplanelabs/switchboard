@@ -1,3 +1,5 @@
+import type { AudienceCheck } from "../audienceDecision.js";
+import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { testSlackCapability } from "../testing/slackSources.js";
 import type { RunLoopContext } from "./runLoop.js";
 import { depotCiAuthorizations } from "../../execution/depotCiAuthorization.js";
@@ -59,7 +61,7 @@ import { bindSlackContext } from "./slackContextBinding.js";
 import { deliverAnswer } from "./reply.js";
 import { resumeMessage } from "../resumeLaunch.js";
 import { windDownAnswer } from "../harness/windDown.js";
-import { recoveredPrivateAudienceLatch } from "./privateAudience.js";
+import { recoveredPrivateAudienceLatch, type PrivateAudienceLatch } from "./privateAudience.js";
 
 /** The loop's answered outcome; an interruption fails the test naming its note. */
 function answered(out: RunLoopOutcome): RunOutcome {
@@ -231,7 +233,7 @@ function setup(
         channelId: string;
         userId: string;
         threadKey: string;
-      }) => Promise<boolean>;
+      }) => Promise<AudienceCheck>;
     };
     directAudience?: { kind: "slack-unshared-im"; channelId: string; userId: string; threadKey: string };
     executor?: Partial<Executor>;
@@ -562,7 +564,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const sourceRead = vi.fn(async () => "private source");
     const io: ChannelIO = {
       directAudience: () => directAudience,
-      verifyDirectAudience: async () => true,
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
     } as unknown as ChannelIO;
     const binding = await bindSlackContext({
       agentName: "orchestrator",
@@ -620,7 +622,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const msg: IncomingMessage = { ...directAudience, text: "What happened?", directAudience };
     const io = {
       directAudience: () => directAudience,
-      verifyDirectAudience: async () => true,
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
     } as unknown as ChannelIO;
     const binding = await bindSlackContext({
       agentName: "orchestrator",
@@ -680,7 +682,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         slackContext: {
           initialize: async () => true,
           revalidate: async () => true,
-          sourcesStillValid: async () => true,
+          sourcesStillValid: async () => ({ ok: true }),
           capability: { read },
           destinationStillPrivate: async () => privateDestination,
           revoke: () => {},
@@ -746,7 +748,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const io: ChannelIO = {
       ...s.ctx.io,
       directAudience: () => audience,
-      verifyDirectAudience: async () => false,
+      verifyDirectAudience: booleanAudienceVerifier(async () => false),
     };
     const out = answered(
       await runLoop(s.deps, {
@@ -842,7 +844,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const io: ChannelIO = {
       ...s.ctx.io,
       directAudience: () => audience,
-      verifyDirectAudience: async () => true,
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
     };
     const privateAudienceLatch = { revoked: false };
     const out = answered(
@@ -936,10 +938,10 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const io: ChannelIO = {
       ...s.ctx.io,
       directAudience: () => audience,
-      verifyDirectAudience: () => {
+      verifyDirectAudience: booleanAudienceVerifier(() => {
         verifierStarted();
         return verifying;
-      },
+      }),
     };
     const privateAudienceLatch = { revoked: false };
     const running = runLoop(s.deps, {
@@ -1007,7 +1009,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const io: ChannelIO = {
       ...s.ctx.io,
       directAudience: () => audience,
-      verifyDirectAudience: async () => true,
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
     };
     const privateAudienceLatch = recoveredPrivateAudienceLatch(resumed, true);
     const out = answered(
@@ -1113,7 +1115,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const io: ChannelIO = {
       ...s.ctx.io,
       directAudience: () => audience,
-      verifyDirectAudience: async () => true,
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
     };
     const sourceEvents: RunEvent[] = [];
     const ledgerRun = new NullLedgerRun("run-l", { put: (record) => s.store.put(record), abandoned: () => {} });
@@ -1170,7 +1172,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const watchedPi = watched(piHarness);
     const s = setup("Done.", {
       agent: "orchestrator",
-      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) } as Partial<ChannelIO>,
       harness: {
         harnesses: roster({
           ...watchedPi.harness,
@@ -1226,7 +1228,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const s = setup("Done.", {
       agent: "orchestrator",
       userId: "slack:UADMIN",
-      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) } as Partial<ChannelIO>,
       harness: {
         harnesses: roster({
           ...watchedPi.harness,
@@ -1290,7 +1292,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       const s = setup("Done.", {
         agent: "orchestrator",
         userId: audience.userId,
-        io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+        io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) } as Partial<ChannelIO>,
         harness: {
           harnesses: roster({
             ...watchedPi.harness,
@@ -1363,7 +1365,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const s = setup("Done.", {
       agent: "orchestrator",
       userId: audience.userId,
-      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) } as Partial<ChannelIO>,
       harness: {
         harnesses: roster({
           ...watchedPi.harness,
@@ -1432,7 +1434,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const s = setup("Done.", {
       agent: "orchestrator",
       userId: "slack:UADMIN",
-      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) } as Partial<ChannelIO>,
       harness: {
         harnesses: roster({
           ...watchedPi.harness,
@@ -1479,7 +1481,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const watchedPi = watched(piHarness);
     const s = setup("Done.", {
       agent: "orchestrator",
-      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) } as Partial<ChannelIO>,
       harness: {
         harnesses: roster({
           ...watchedPi.harness,
@@ -1576,7 +1578,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const watchedPi = watched(piHarness);
     const s = setup("Done.", {
       agent: "orchestrator",
-      io: { verifyDirectAudience: async () => true } as Partial<ChannelIO>,
+      io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) } as Partial<ChannelIO>,
       harness: {
         harnesses: roster({
           ...watchedPi.harness,
@@ -1622,7 +1624,9 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const watchedPi = watched(piHarness);
     const s = setup("Done.", {
       agent: "orchestrator",
-      io: { verifyDirectAudience: async () => (++checks === 1 ? true : (checking(), verified)) } as Partial<ChannelIO>,
+      io: {
+        verifyDirectAudience: booleanAudienceVerifier(async () => (++checks === 1 ? true : (checking(), verified))),
+      } as Partial<ChannelIO>,
       harness: {
         harnesses: roster({
           ...watchedPi.harness,
@@ -1684,10 +1688,10 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       const s = setup("Done.", {
         agent: "orchestrator",
         io: {
-          verifyDirectAudience: async () => {
+          verifyDirectAudience: booleanAudienceVerifier(async () => {
             if (verify === "error") throw new Error("Slack lookup unavailable");
             return verify === "ok";
-          },
+          }),
         } as Partial<ChannelIO>,
         harness: {
           harnesses: roster({
@@ -1765,7 +1769,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
           state === "unverified"
             ? undefined
             : { kind: "slack-unshared-im", channelId: "slack:DMAIN", userId: "slack:UX", threadKey: "slack:DMAIN:1.0" },
-        io: { verifyDirectAudience: async () => false },
+        io: { verifyDirectAudience: booleanAudienceVerifier(async () => false) },
         provider: {
           name: "fake",
           async complete(req) {
@@ -1860,7 +1864,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         userId: instance.userId,
         threadKey: dmThread,
       },
-      io: { verifyDirectAudience: async () => true },
+      io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) },
     });
     s.deps.coordinatorInstances = instances;
     s.deps.privateWorkerLog = log;
@@ -1971,7 +1975,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       channelId: instance.channelId,
       threadKey,
       directAudience: { kind: "slack-unshared-im", channelId: instance.channelId, userId: instance.userId, threadKey },
-      io: { verifyDirectAudience: async () => true },
+      io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) },
     });
     s.deps.coordinatorInstances = instances;
     s.deps.privateWorkerLog = log;
@@ -7193,87 +7197,131 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
   // reads `instance.base` from the coordinator store by parentInstanceId before
   // building its PR target, rather than letting the binding ref (the unit
   // branch itself) stand in.
-  it("a coordinator child resumed with a description in hand and a tag without a base reads the plan's base from the coordinator store: the PR opens against instance.base, never against the unit branch", async () => {
-    const BRANCH = "plan/p/u1";
-    const description: PrDescription = {
-      title: "Fix the login redirect",
-      tldr: "Restores the session cookie on login. Users can sign in again.",
-      why: "The handler dropped the cookie; this restores it.",
-      pointers: [{ label: "The fix", text: "The cookie is set again.", anchor: { path: "src/a", from: 1, to: 2 } }],
-      feedbackWanted: "Nothing in particular.",
-      verified: "See validation.",
-      decisions: [{ title: "Keep it small", rationale: "One-line fix." }],
-      risk: "none",
-      validation: { criteria: [{ criterion: "tests", proof: "green" }] },
-    };
-    const executor = {
-      exec: async (cmd: string) => {
-        if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
-        if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
-        if (/rev-parse 'refs\/heads\//.test(cmd)) return `${HEAD}\n`;
-        if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
-        return "";
-      },
-    };
-    const s = setup("", {
-      agent: "coding",
-      provider: neverCalled(),
-      repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
-      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
-      executor,
-      coding: true,
-      coordinator: { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding" },
-    });
-    const instances = new InMemoryCoordinatorInstanceStore();
-    await instances.put({
-      id: "plan-p-2",
-      kind: "ship",
-      userId: "slack:UX",
-      channelId: "slack:CX",
-      threadKey: THREAD,
-      repo: "o/r",
-      branch: BRANCH,
-      base: "feat/trunk",
-      createdAt: NOW,
-    });
-    s.deps.coordinatorInstances = instances;
-    const bindings = new GitBindings();
-    expect(
-      bindings.register(
-        "run-l",
-        { repo: "o/r", ref: BRANCH },
-        { repo: "o/r", ref: `refs/heads/${BRANCH}`, refConfirmed: true },
-        async () => true,
-      ),
-    ).toBe(true);
-    expect(bindings.setBranchRecorder("run-l", { begin: async () => true, finish: async () => true })).toBe(true);
-    s.deps.githubBindings = bindings;
-    const opened: Array<Record<string, unknown>> = [];
-    let lateAdmission = false;
-    s.deps.openPullRequest = async (target) => {
-      const claim = await bindings.beginBranch("run-l", {
-        ref: `refs/heads/${BRANCH}`,
-        old: HEAD,
-        next: "c".repeat(40),
+  it.each([false, true])(
+    "keeps one successful unit PR and its base when private chat refusal is %s",
+    async (refuseReply) => {
+      const BRANCH = "plan/p/u1";
+      const description: PrDescription = {
+        title: "Fix the login redirect",
+        tldr: "Restores the session cookie on login. Users can sign in again.",
+        why: "The handler dropped the cookie; this restores it.",
+        pointers: [{ label: "The fix", text: "The cookie is set again.", anchor: { path: "src/a", from: 1, to: 2 } }],
+        feedbackWanted: "Nothing in particular.",
+        verified: "See validation.",
+        decisions: [{ title: "Keep it small", rationale: "One-line fix." }],
+        risk: "none",
+        validation: { criteria: [{ criterion: "tests", proof: "green" }] },
+      };
+      const executor = {
+        exec: async (cmd: string) => {
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+          if (/rev-parse 'refs\/heads\//.test(cmd)) return `${HEAD}\n`;
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+          return "";
+        },
+      };
+      const privateAudienceLatch: PrivateAudienceLatch = { revoked: false };
+      const directAudience = {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:DPRIVATE",
+        userId: "slack:UX",
+        threadKey: "slack:DPRIVATE:1.0",
+      };
+      const s = setup("", {
+        channelId: directAudience.channelId,
+        threadKey: directAudience.threadKey,
+        directAudience,
+        io: { verifyDirectAudience: async () => ({ ok: true }) },
+        agent: "coding",
+        provider: neverCalled(),
+        repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+        binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+        executor,
+        coding: true,
+        coordinator: { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding" },
       });
-      lateAdmission = claim !== undefined;
-      if (claim) await claim.finish("not_forwarded");
-      opened.push({ ...target });
-      return { number: 9, htmlUrl: "https://github.com/o/r/pull/9", created: true };
-    };
-    s.deps.fetchRepoShipInfo = async () => {
-      throw new Error("the default branch is not the plan's base and must not be asked for");
-    };
-    const resume = finishing("Done: pushed the fix.", {
-      agent: "coding",
-      state: { prDescription: description, pushedBranch: BRANCH },
-    });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
-    expect(opened).toHaveLength(1);
-    expect(lateAdmission).toBe(false);
-    expect(opened[0]).toMatchObject({ repo: "o/r", headBranch: BRANCH, base: "feat/trunk" });
-    expect(out.prNote).toContain("PR opened");
-  });
+      const instances = new InMemoryCoordinatorInstanceStore();
+      await instances.put({
+        id: "plan-p-2",
+        kind: "ship",
+        userId: "slack:UX",
+        channelId: "slack:CX",
+        threadKey: THREAD,
+        repo: "o/r",
+        branch: BRANCH,
+        base: "feat/trunk",
+        createdAt: NOW,
+      });
+      s.deps.coordinatorInstances = instances;
+      const bindings = new GitBindings();
+      expect(
+        bindings.register(
+          "run-l",
+          { repo: "o/r", ref: BRANCH },
+          { repo: "o/r", ref: `refs/heads/${BRANCH}`, refConfirmed: true },
+          async () => true,
+        ),
+      ).toBe(true);
+      expect(bindings.setBranchRecorder("run-l", { begin: async () => true, finish: async () => true })).toBe(true);
+      s.deps.githubBindings = bindings;
+      const opened: Array<Record<string, unknown>> = [];
+      let lateAdmission = false;
+      s.deps.openPullRequest = async (target) => {
+        const claim = await bindings.beginBranch("run-l", {
+          ref: `refs/heads/${BRANCH}`,
+          old: HEAD,
+          next: "c".repeat(40),
+        });
+        lateAdmission = claim !== undefined;
+        if (claim) await claim.finish("not_forwarded");
+        opened.push({ ...target });
+        if (refuseReply) {
+          privateAudienceLatch.revoked = true;
+          privateAudienceLatch.code = "followup-indirect";
+        }
+        return { number: 9, htmlUrl: "https://github.com/o/r/pull/9", created: true };
+      };
+      s.deps.fetchRepoShipInfo = async () => {
+        throw new Error("the default branch is not the plan's base and must not be asked for");
+      };
+      const resume = finishing("Done: pushed the fix.", {
+        agent: "coding",
+        state: { prDescription: description, pushedBranch: BRANCH },
+      });
+      const out = answered(
+        await runLoop(s.deps, { ...s.ctx, privateAudienceLatch, resume, messages: resume.plan.messages }),
+      );
+      expect(opened).toHaveLength(1);
+      expect(lateAdmission).toBe(false);
+      expect(opened[0]).toMatchObject({ repo: "o/r", headBranch: BRANCH, base: "feat/trunk" });
+      expect(out.prNote).toContain("PR opened");
+      await deliverAnswer({
+        ...s.ctx,
+        ...out,
+        privateAudienceLatch,
+        liveUrl: undefined,
+        stopped: undefined,
+        releaseWorkspace: out.releaseWorkspace,
+      });
+      await s.writer.settled();
+      const record = await s.store.get(s.run.id);
+      expect(record).toMatchObject({ status: "completed", replyOk: true, pr: { number: 9 } });
+      expect(opened).toHaveLength(1);
+      if (refuseReply) {
+        expect(s.replies.join(" ")).not.toContain("PR opened");
+        expect(record?.audienceRefusal).toEqual({
+          version: 1,
+          causeAt: "answer-event",
+          withheldAt: "answer-event",
+          code: "followup-indirect",
+        });
+      } else {
+        expect(s.replies.join(" ")).toContain("PR opened");
+        expect(record?.audienceRefusal).toBeUndefined();
+      }
+    },
+  );
 
   it("opens the unit PR after an auxiliary branch push and a dirty auxiliary checkout", async () => {
     const BRANCH = "plan/p/u1";

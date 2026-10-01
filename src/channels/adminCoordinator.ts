@@ -1157,7 +1157,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   let verifiedAudience: typeof candidate;
   if (candidate && io.verifyDirectAudience) {
     try {
-      if (await io.verifyDirectAudience(candidate)) verifiedAudience = candidate;
+      if ((await io.verifyDirectAudience(candidate)).ok) verifiedAudience = candidate;
     } catch {
       // A failed Slack read cannot mint authority for a synthetic child.
     }

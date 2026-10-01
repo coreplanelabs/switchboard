@@ -1,3 +1,4 @@
+import type { AudienceRefusalReceipt } from "../audienceDecision.js";
 // A registry command run from the dispatcher, as a run (docs/decisions/0008-one-command-definition-every-surface.md;
 // docs/reference/specs/command-registry.md item 18): the machinery the two fast
 // paths and the operator's command branch share. A chat command — typed
@@ -185,6 +186,7 @@ async function recordDoorDecision(
   decision: DoorDecision,
   ending: RunEnding,
   trace: RequestTrace,
+  audienceRefusal?: AudienceRefusalReceipt,
 ): Promise<void> {
   const registry = deps.runRegistry ?? defaultRunRegistry;
   const root = trace.root;
@@ -247,6 +249,7 @@ async function recordDoorDecision(
     write: (seal) =>
       deps.runHistoryWriter.write(
         assembleRunRecord({
+          audienceRefusal,
           run,
           snap,
           agent: DOOR_RUN_AGENT,
@@ -271,8 +274,16 @@ export async function recordRefusal(
   ending: RunEnding,
   trace: RequestTrace,
   operator?: OperatorEventFields,
+  audienceRefusal?: AudienceRefusalReceipt,
 ): Promise<void> {
-  await recordDoorDecision(deps, msg, { kind: "refusal", refusal, ...(operator ? { operator } : {}) }, ending, trace);
+  await recordDoorDecision(
+    deps,
+    msg,
+    { kind: "refusal", refusal, ...(operator ? { operator } : {}) },
+    ending,
+    trace,
+    audienceRefusal,
+  );
 }
 
 /** Record an operator decision that answered without starting a run. */

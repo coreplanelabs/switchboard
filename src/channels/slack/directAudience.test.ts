@@ -26,18 +26,44 @@ const clientFor = (channel: object, peerTeam = "TLOCAL") => ({
 });
 
 describe("Slack direct audience verification", () => {
+  it("distinguishes a changed audience from unavailable verification without returning private facts", async () => {
+    expect(await verifySlackDirectAudience(clientFor({ ...safe, is_shared: true }), audience)).toEqual({
+      ok: false,
+      code: "direct-audience-denied",
+    });
+    expect(
+      await verifySlackDirectAudience(
+        {
+          ...clientFor(safe),
+          auth: {
+            test: async () => {
+              throw new Error("private provider detail");
+            },
+          },
+        },
+        audience,
+      ),
+    ).toEqual({ ok: false, code: "direct-audience-unavailable" });
+    expect(await verifySlackDirectAudience(clientFor({ ...safe, is_org_shared: undefined }), audience)).toEqual({
+      ok: false,
+      code: "direct-audience-unavailable",
+    });
+  });
+
   it("accepts only a fresh unshared DM with this requester", async () => {
     const client = clientFor(safe);
-    expect(await verifySlackDirectAudience(client, audience)).toBe(true);
+    expect(await verifySlackDirectAudience(client, audience)).toMatchObject({ ok: true });
     // Slack's documented conversations.info IM example omits most channel flags.
     expect(
       await verifySlackDirectAudience(clientFor({ is_im: true, user: "UALICE", is_org_shared: false }), audience),
-    ).toBe(true);
-    expect(await verifySlackDirectAudience(clientFor(safe, "TEXTERNAL"), audience)).toBe(false);
-    expect(await verifySlackDirectAudience(clientFor(safe), { ...audience, userId: "slack:WALICE" })).toBe(false);
+    ).toMatchObject({ ok: true });
+    expect(await verifySlackDirectAudience(clientFor(safe, "TEXTERNAL"), audience)).toMatchObject({ ok: false });
+    expect(await verifySlackDirectAudience(clientFor(safe), { ...audience, userId: "slack:WALICE" })).toMatchObject({
+      ok: false,
+    });
     expect(
       await verifySlackDirectAudience(clientFor({ ...safe, user: "WALICE" }), { ...audience, userId: "slack:WALICE" }),
-    ).toBe(true);
+    ).toMatchObject({ ok: true });
     for (const changed of [
       { user: "UBOB" },
       { is_im: false },
@@ -49,11 +75,13 @@ describe("Slack direct audience verification", () => {
       { is_org_shared: true },
       { is_pending_ext_shared: true },
     ]) {
-      expect(await verifySlackDirectAudience(clientFor({ ...safe, ...changed }), audience)).toBe(false);
+      expect(await verifySlackDirectAudience(clientFor({ ...safe, ...changed }), audience)).toMatchObject({
+        ok: false,
+      });
     }
     expect(
       await verifySlackDirectAudience({ ...clientFor(safe), users: { info: async () => ({ user: {} }) } }, audience),
-    ).toBe(false);
+    ).toMatchObject({ ok: false });
     expect(
       await verifySlackDirectAudience(
         {
@@ -66,6 +94,6 @@ describe("Slack direct audience verification", () => {
         },
         audience,
       ),
-    ).toBe(false);
+    ).toMatchObject({ ok: false });
   });
 });

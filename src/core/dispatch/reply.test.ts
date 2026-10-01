@@ -1,3 +1,5 @@
+import type { AudienceTrace } from "../audienceDecision.js";
+import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { describe, expect, it, vi } from "vitest";
 import type { ParsedChatCommand } from "../commandChat.js";
 import {
@@ -879,7 +881,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       slackContext: {
         initialize: async () => true,
         revalidate: async () => true,
-        sourcesStillValid: async () => true,
+        sourcesStillValid: async () => ({ ok: true }),
         capability: { read: async () => "private fact" },
         destinationStillPrivate: async () => false,
         revoke: () => {},
@@ -899,7 +901,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       slackContext: {
         initialize: async () => true,
         revalidate: async () => true,
-        sourcesStillValid: async () => true,
+        sourcesStillValid: async () => ({ ok: true }),
         capability: { read: async () => "private fact" },
         destinationStillPrivate: async () => ++checks === 1,
         revoke: () => {},
@@ -908,6 +910,321 @@ describe("deliverAnswer — the answer reaches the thread", () => {
     expect(checks).toBe(2);
     expect(s.replies).toHaveLength(1);
     expect(s.replies[0]).not.toContain("private fact");
+  });
+
+  it.each([
+    ["coding", true],
+    ["coding", false],
+    ["orchestrator", true],
+    ["orchestrator", false],
+  ] as const)(
+    "latches the first private check before card close for %s (membership recovers=%s)",
+    async (agentName, recovers) => {
+      const s = finishedRun(async () => "ok");
+      const audience: AudienceTrace = {};
+      const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+      let privateNow = false;
+      let atCardClose: unknown;
+      let statesAtCardClose: unknown[] = [];
+      const receipt = { version: 1, causeAt: "reply", withheldAt: "reply", code: "direct-audience-denied" };
+      await deliverAnswer({
+        ...s.ctx,
+        agent: getAgent(agentName),
+        audience,
+        msg: { ...s.ctx.msg, ...dm, directAudience: { kind: "slack-unshared-im", ...dm } },
+        io: {
+          ...s.ctx.io,
+          directAudience: () => dm,
+          verifyDirectAudience: async () => (privateNow ? { ok: true } : { ok: false, code: "direct-audience-denied" }),
+        },
+        ledgerRun: {
+          ...s.ctx.ledgerRun!,
+          commitState: async (patch) => {
+            s.states.push(patch);
+            return "ok";
+          },
+        } as LedgerRun,
+        card: {
+          ...s.ctx.card,
+          done: async (frame) => {
+            atCardClose = audience.refusal;
+            statesAtCardClose = [...s.states];
+            privateNow = recovers;
+            s.closes.push(frame);
+          },
+        },
+        publicationCheck: async () => ({ ok: true }),
+        answer: "private source fact",
+        prNote: "private PR details",
+      });
+      expect(s.replies).toHaveLength(1);
+      expect(s.replies[0]).toContain("can't share that answer");
+      expect(s.replies.join("\n")).not.toContain("private source fact");
+      expect(s.replies.join("\n")).not.toContain("private PR details");
+      expect(audience.refusal).toEqual(receipt);
+      expect(atCardClose).toEqual(receipt);
+      expect(statesAtCardClose).toContainEqual({ audienceRefusal: receipt });
+      expect(s.sealed).toEqual(["replyOk=true"]);
+    },
+  );
+
+  it.each(["fenced", "unavailable"] as const)(
+    "checks ownership before closing a withheld card when the receipt write is %s",
+    async (result) => {
+      const s = finishedRun(async () => "ok");
+      const audience: AudienceTrace = {};
+      const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+      const delivery = await deliverAnswer({
+        ...s.ctx,
+        audience,
+        msg: { ...s.ctx.msg, ...dm, directAudience: { kind: "slack-unshared-im", ...dm } },
+        io: {
+          ...s.ctx.io,
+          directAudience: () => dm,
+          verifyDirectAudience: async () => ({ ok: false, code: "direct-audience-denied" }),
+        },
+        ledgerRun: { ...s.ctx.ledgerRun!, commitState: async () => result } as LedgerRun,
+        answer: "private answer",
+        prNote: "private PR details",
+      });
+      expect(s.replies.join("\n")).not.toContain("private answer");
+      expect(s.replies.join("\n")).not.toContain("private PR details");
+      if (result === "fenced") {
+        expect(delivery).toEqual({ kind: "fenced" });
+        expect(s.closes).toEqual([]);
+        expect(s.replies).toEqual([]);
+        expect(s.sealed).toEqual([]);
+      } else {
+        expect(delivery).toEqual({ kind: "delivered" });
+        expect(s.closes).toHaveLength(1);
+        expect(s.replies[0]).toContain("can't share that answer");
+        expect(s.sealed).toEqual(["replyOk=true"]);
+      }
+      expect(audience.refusal?.code).toBe("direct-audience-denied");
+      expect(s.releases).toEqual([1]);
+    },
+  );
+
+  it("retains the first private refusal when card close throws before the reply", async () => {
+    const s = finishedRun();
+    const audience: AudienceTrace = {};
+    const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+    await expect(
+      deliverAnswer({
+        ...s.ctx,
+        audience,
+        agent: getAgent("coding"),
+        msg: { ...s.ctx.msg, ...dm, directAudience: { kind: "slack-unshared-im", ...dm } },
+        io: {
+          ...s.ctx.io,
+          directAudience: () => dm,
+          verifyDirectAudience: async () => ({ ok: false, code: "direct-audience-unavailable" }),
+        },
+        card: {
+          ...s.ctx.card,
+          done: async () => {
+            throw new Error("card unavailable");
+          },
+        },
+        answer: "private answer",
+        prNote: "private PR details",
+      }),
+    ).rejects.toThrow("card unavailable");
+    expect(s.replies).toEqual([]);
+    expect(audience.refusal).toEqual({
+      version: 1,
+      causeAt: "reply",
+      withheldAt: "reply",
+      code: "direct-audience-unavailable",
+    });
+    expect(s.sealed).toEqual(["replyOk=undefined"]);
+  });
+
+  it("records the typed source refusal after the card closes without publishing model content", async () => {
+    const s = finishedRun(async () => "ok");
+    const audience = {};
+    const writes: unknown[] = [];
+    const ledgerRun = {
+      ...s.ctx.ledgerRun!,
+      commitState: async (patch: unknown) => {
+        writes.push(patch);
+        return "ok" as const;
+      },
+    } as LedgerRun;
+    await deliverAnswer({
+      ...s.ctx,
+      agent: getAgent("orchestrator"),
+      answer: "private source fact",
+      ledgerRun,
+      audience,
+      publicationCheck: async () => ({ ok: false, code: "github-access-lost" }),
+    });
+    expect(s.replies.join("\n")).not.toContain("private source fact");
+    expect(writes).toContainEqual({
+      audienceRefusal: {
+        version: 1,
+        causeAt: "reply",
+        withheldAt: "reply",
+        code: "github-access-lost",
+      },
+    });
+    expect(s.sealed).toEqual(["replyOk=true"]);
+  });
+
+  it.each(["fenced", "unavailable"] as const)(
+    "keeps diagnostic storage %s distinct from audience permission",
+    async (result) => {
+      const s = finishedRun(async () => "ok");
+      const ledgerRun = { ...s.ctx.ledgerRun!, commitState: async () => result } as LedgerRun;
+      const delivery = await deliverAnswer({
+        ...s.ctx,
+        ledgerRun,
+        publicationCheck: async () => ({ ok: false, code: "github-access-lost" }),
+        answer: "private source fact",
+      });
+      expect(s.replies.join("\n")).not.toContain("private source fact");
+      if (result === "fenced") {
+        expect(delivery).toEqual({ kind: "fenced" });
+        expect(s.replies).toEqual([]);
+        expect(s.sealed).toEqual([]);
+      } else {
+        expect(delivery).toEqual({ kind: "delivered" });
+        expect(s.replies[0]).toContain("check the source again");
+        expect(s.sealed).toEqual(["replyOk=true"]);
+      }
+    },
+  );
+
+  it.each([
+    ["direct", true, "ok", false],
+    ["direct", true, "ok", true],
+    ["slack-context", true, "ok", false],
+    ["direct", true, "fenced", false],
+    ["direct", true, "unavailable", false],
+    ["direct", false, "fenced", false],
+    ["direct", false, "unavailable", false],
+  ] as const)(
+    "awaits the answer-event refusal before card close (%s, recovers=%s, write=%s, card throws=%s)",
+    async (source, recovers, writeResult, cardThrows) => {
+      const s = finishedRun(async () => "ok");
+      const receipt = {
+        version: 1 as const,
+        causeAt: "answer-event" as const,
+        withheldAt: "answer-event" as const,
+        code: "direct-audience-unavailable" as const,
+      };
+      const audience: AudienceTrace = { refusal: receipt };
+      const dm = { channelId: "slack:DMAIN", userId: "slack:WALICE", threadKey: "slack:DMAIN:1.0" };
+      const events: string[] = [];
+      const committed: unknown[] = [];
+      let releaseWrite!: () => void;
+      const writeReady = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      let reachedBoundary!: () => void;
+      const boundary = new Promise<void>((resolve) => {
+        reachedBoundary = resolve;
+      });
+      const delivery = deliverAnswer({
+        ...s.ctx,
+        agent: getAgent("orchestrator"),
+        audience,
+        msg: { ...s.ctx.msg, ...dm, directAudience: { kind: "slack-unshared-im", ...dm } },
+        io: {
+          ...s.ctx.io,
+          directAudience: () => dm,
+          verifyDirectAudience: async () => (recovers ? { ok: true } : { ok: false, code: "direct-audience-denied" }),
+        },
+        ...(source === "slack-context"
+          ? {
+              slackContext: {
+                initialize: async () => true,
+                revalidate: async () => true,
+                sourcesStillValid: async () => ({ ok: true as const }),
+                capability: { read: async () => "private source fact" },
+                destinationStillPrivate: async () => recovers,
+                revoke: () => {},
+              },
+            }
+          : {}),
+        ledgerRun: {
+          ...s.ctx.ledgerRun!,
+          commitState: async (patch) => {
+            events.push("write started");
+            reachedBoundary();
+            await writeReady;
+            committed.push(patch);
+            events.push(`write ${writeResult}`);
+            return writeResult;
+          },
+        } as LedgerRun,
+        card: {
+          ...s.ctx.card,
+          done: async (frame) => {
+            events.push("card close");
+            reachedBoundary();
+            s.closes.push(frame);
+            if (cardThrows) throw new Error("card unavailable");
+          },
+        },
+        publicationCheck: async () => ({ ok: true }),
+        answer: "private source fact",
+        prNote: "private PR details",
+      }).then(
+        (value) => ({ value, error: undefined }),
+        (error: unknown) => ({ value: undefined, error }),
+      );
+      await boundary;
+      const beforeWriteSettles = [...events];
+      releaseWrite();
+      const result = await delivery;
+      expect(beforeWriteSettles).toEqual(["write started"]);
+      expect(committed[0]).toEqual({ audienceRefusal: receipt });
+      expect(audience.refusal).toEqual(receipt);
+      expect(s.replies.join("\n")).not.toContain("private source fact");
+      expect(s.replies.join("\n")).not.toContain("private PR details");
+      if (writeResult === "fenced") {
+        expect(result.value).toEqual({ kind: "fenced" });
+        expect(s.closes).toEqual([]);
+        expect(s.replies).toEqual([]);
+        expect(s.sealed).toEqual([]);
+      } else {
+        expect(events.indexOf(`write ${writeResult}`)).toBeLessThan(events.indexOf("card close"));
+        if (cardThrows) {
+          expect(result.error).toEqual(new Error("card unavailable"));
+          expect(s.replies).toEqual([]);
+          expect(s.sealed).toEqual(["replyOk=undefined"]);
+        } else {
+          expect(result.value).toEqual({ kind: "delivered" });
+          expect(s.replies[0]).toContain("can't share that answer");
+          expect(s.sealed).toEqual(["replyOk=true"]);
+        }
+      }
+      expect(s.releases).toEqual([1]);
+    },
+  );
+
+  it("retains earlier answer withholding when the last check passes and omits the PR note", async () => {
+    const s = finishedRun();
+    const audience = {
+      refusal: {
+        version: 1 as const,
+        causeAt: "answer-event" as const,
+        withheldAt: "answer-event" as const,
+        code: "direct-audience-unavailable" as const,
+      },
+    };
+    await deliverAnswer({
+      ...s.ctx,
+      audience,
+      answer: "private fact",
+      prNote: "private PR details",
+      publicationCheck: async () => ({ ok: true }),
+    });
+    expect(s.replies[0]).toContain("can't share that answer");
+    expect(s.replies.join("\n")).not.toContain("private fact");
+    expect(s.replies.join("\n")).not.toContain("private PR details");
+    expect(audience.refusal.withheldAt).toBe("answer-event");
   });
 
   it("rechecks source access after the card closes and before the channel reply", async () => {
@@ -925,13 +1242,13 @@ describe("deliverAnswer — the answer reaches the thread", () => {
           s.closes.push(frame);
         },
       },
-      publicationRefusal: async () => {
+      publicationCheck: async () => {
         checks++;
-        return sourceReadable ? undefined : "Please ask me to check the source again.";
+        return sourceReadable ? { ok: true } : { ok: false, code: "github-access-lost" };
       },
     });
     expect(checks).toBe(1);
-    expect(s.replies).toEqual(["Please ask me to check the source again."]);
+    expect(s.replies[0]).toContain("Please ask me to check the source again.");
     expect(JSON.stringify(s.closes)).not.toContain("private source fact");
   });
 
@@ -946,7 +1263,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       io: {
         ...s.ctx.io,
         directAudience: () => dm,
-        verifyDirectAudience: async () => ++checks === 1,
+        verifyDirectAudience: booleanAudienceVerifier(async () => ++checks === 1),
       },
       answer: "private worker fact",
       prNote: "private worker detail",
@@ -979,10 +1296,10 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       io: {
         ...s.ctx.io,
         directAudience: () => dm,
-        verifyDirectAudience: () => {
+        verifyDirectAudience: booleanAudienceVerifier(() => {
           verifierStarted();
           return verifying;
-        },
+        }),
       },
       privateAudienceLatch,
       answer: "private worker fact",
@@ -1015,7 +1332,9 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       io: {
         ...s.ctx.io,
         directAudience: () => dm,
-        verifyDirectAudience: () => (++checks === 1 ? Promise.resolve(true) : (verifierStarted(), verifying)),
+        verifyDirectAudience: booleanAudienceVerifier(() =>
+          ++checks === 1 ? Promise.resolve(true) : (verifierStarted(), verifying),
+        ),
       },
       privateAudienceLatch,
       answer: "private worker fact",
@@ -1036,7 +1355,11 @@ describe("deliverAnswer — the answer reaches the thread", () => {
     await deliverAnswer({
       ...s.ctx,
       msg: { ...s.ctx.msg, ...dm, directAudience: { kind: "slack-unshared-im", ...dm } },
-      io: { ...s.ctx.io, directAudience: () => dm, verifyDirectAudience: async () => ++checks > 1 },
+      io: {
+        ...s.ctx.io,
+        directAudience: () => dm,
+        verifyDirectAudience: booleanAudienceVerifier(async () => ++checks > 1),
+      },
       answer: "private finding",
       prNote: "private PR note",
       verdict: { verdict: "request_changes", summary: "private review summary" },

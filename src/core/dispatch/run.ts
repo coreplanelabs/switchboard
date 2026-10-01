@@ -1,3 +1,4 @@
+import type { AudienceCheck } from "../audienceDecision.js";
 // The run stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // what the model turn needs around it. The ledger claim once the prompt exists;
 // the tools' process-wide capabilities (the web fetcher, the GitHub API with
@@ -282,7 +283,7 @@ export interface ClaimContext {
   channelVisibility: ChannelVisibility;
   slackContext?: SlackContextBinding;
   /** A fresh channel-side check before private tool definitions enter the durable run row. */
-  verifyDirectAudience?: (audience: DirectAudience) => Promise<boolean>;
+  verifyDirectAudience?: (audience: DirectAudience) => Promise<AudienceCheck>;
   run: RunHandle;
   registry: RunRegistry;
   selection: ExecutorSelection;
@@ -396,7 +397,10 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
       });
     const verifiedDirectAudience =
       directAudience !== undefined && ctx.verifyDirectAudience !== undefined
-        ? await ctx.verifyDirectAudience(directAudience).catch(() => false)
+        ? await ctx.verifyDirectAudience(directAudience).then(
+            (checked) => checked.ok,
+            () => false,
+          )
         : false;
     const verifiedWorkAudience = workAudienceCandidate && verifiedDirectAudience;
     const mainWorker = await mainWorkerCapabilityFor(

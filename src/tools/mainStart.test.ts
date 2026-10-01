@@ -1,3 +1,4 @@
+import { booleanAudienceVerifier } from "../core/testing/audienceVerifier.js";
 import { describe, expect, it, vi } from "vitest";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import type { Actor } from "../core/authz/types.js";
@@ -59,7 +60,7 @@ describe("work_start — plain-language private worker handoff", () => {
       source: (quote, repo) => source.getWorkRequest(quote, repo, "acme/api"),
       live: () => true,
       runId: "main-run",
-      verifyDirectAudience,
+      verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
       start,
     });
     expect(await workStartTool.run({ ...input, repo: "vendor/lib" }, context(capability))).toContain("error:");
@@ -99,7 +100,7 @@ describe("work_start — plain-language private worker handoff", () => {
       source: () => ({ actor, msg, authorizedRepo: input.repo }),
       live: () => true,
       runId: "main-run",
-      verifyDirectAudience,
+      verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
       start,
     });
     expect(capability).toBeDefined();
@@ -140,7 +141,7 @@ describe("work_start — plain-language private worker handoff", () => {
       source: () => ({ actor, msg, authorizedRepo: input.repo }),
       live: () => true,
       runId: "main-run",
-      verifyDirectAudience,
+      verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
       start,
     });
     expect(await workStartTool.run(input, context())).toContain("unavailable");
@@ -157,7 +158,7 @@ describe("work_start — plain-language private worker handoff", () => {
         source: () => ({ actor, msg, authorizedRepo: input.repo }),
         live: () => true,
         runId: "child",
-        verifyDirectAudience,
+        verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
         start,
       }),
     ).toBeUndefined();
@@ -174,7 +175,7 @@ describe("work_start — plain-language private worker handoff", () => {
           source: () => ({ actor, msg, authorizedRepo: input.repo }),
           live: () => true,
           runId: "r",
-          verifyDirectAudience,
+          verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
           start,
         }),
       ).toBeUndefined();
@@ -225,7 +226,7 @@ describe("work_start — plain-language private worker handoff", () => {
       source: () => source,
       live: () => true,
       runId: "main-run",
-      verifyDirectAudience,
+      verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
       start,
     });
     source = { ...source, msg: { ...msg, messageId: "1700000001.000003", text: "fix it now" } };
@@ -252,7 +253,7 @@ describe("work_start — plain-language private worker handoff", () => {
       source: (sourceMessage, repo) => sources.getWorkRequest(sourceMessage, repo, "acme/api"),
       live: () => true,
       runId: "main-run",
-      verifyDirectAudience,
+      verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
       start,
     });
     expect(await workStartTool.run({ ...input, sourceMessage: "" }, context(capability))).toContain("quote");
@@ -274,7 +275,7 @@ describe("work_start — plain-language private worker handoff", () => {
       source: () => ({ actor, msg, authorizedRepo: input.repo }),
       live: () => false,
       runId: "main-run",
-      verifyDirectAudience,
+      verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
       start,
     });
     expect(await workStartTool.run(input, context(capability))).toContain("stopped");
@@ -291,7 +292,7 @@ describe("work_start — plain-language private worker handoff", () => {
       source: () => ({ actor, msg, authorizedRepo: input.repo }),
       live: () => true,
       runId: "main-run",
-      verifyDirectAudience: verify,
+      verifyDirectAudience: booleanAudienceVerifier(verify),
       start,
     });
     expect(await workStartTool.run(input, context(capability))).toContain("private conversation");

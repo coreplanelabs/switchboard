@@ -1,3 +1,4 @@
+import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecision.js";
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../config/profile.js";
 import type { RunEvent } from "./runEvents.js";
@@ -72,6 +73,8 @@ export interface RunReference {
 }
 
 export interface RunRecord {
+  /** Structural audience refusal; exposed only by authorized diagnostic reads. */
+  audienceRefusal?: AudienceRefusalReceipt;
   /** The run registry id (unguessable; safe to print — it is not the view token). */
   id: string;
   /** The human run label from the runs index. */
@@ -1279,6 +1282,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
     if (r[key] !== undefined && !isFiniteNumber(r[key])) return false;
   }
   if (r.replyOk !== undefined && typeof r.replyOk !== "boolean") return false;
+  if (r.audienceRefusal !== undefined && !audienceRefusalOf(r.audienceRefusal)) return false;
   if (r.replyNote !== undefined && typeof r.replyNote !== "string") return false;
   for (const key of ["stepCount", "schema"] as const) {
     if (r[key] !== undefined && (!isFiniteNumber(r[key]) || !Number.isInteger(r[key]) || (r[key] as number) < 0))

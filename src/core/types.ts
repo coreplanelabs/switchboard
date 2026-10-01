@@ -1,3 +1,4 @@
+import type { AudienceCheck } from "./audienceDecision.js";
 import type { Verbosity } from "./verbosity.js";
 
 // Channel abstraction. A channel (Slack, CLI, Discord, HTTP, ...) is only a
@@ -278,7 +279,7 @@ export interface ChannelIO {
    * A channel, group conversation, relay, or undeliverable handle omits it. */
   directAudience?(): { channelId: string; userId: string; threadKey: string } | undefined;
   /** Fresh Slack confirmation that the reply address is still an unshared requester DM. */
-  verifyDirectAudience?(audience: SlackDirectAudience): Promise<boolean>;
+  verifyDirectAudience?(audience: SlackDirectAudience): Promise<AudienceCheck>;
   /**
    * Present when this channel has nowhere to deliver a reply (the resumed-run
    * null channel, docs/reference/specs/run-history.md item 38): the reason, e.g.

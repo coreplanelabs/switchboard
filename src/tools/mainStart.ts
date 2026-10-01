@@ -1,3 +1,4 @@
+import type { AudienceCheck } from "../core/audienceDecision.js";
 import type { Actor, ChannelVisibility } from "../core/authz/types.js";
 import { validateWorkBriefDraft } from "../core/coordinator/contract.js";
 import type { MainStartInput, MainStartResult } from "../core/coordinator/mainStart.js";
@@ -54,7 +55,7 @@ export function mainStartForRun(deps: {
     | undefined;
   live: () => boolean;
   runId: string;
-  verifyDirectAudience?: (audience: SlackDirectAudience) => Promise<boolean>;
+  verifyDirectAudience?: (audience: SlackDirectAudience) => Promise<AudienceCheck>;
   start?: (input: MainStartInput) => Promise<MainStartResult>;
 }): MainStartCapability | undefined {
   // The model's tool call and evidence are logged in the conversation. Only a
@@ -79,7 +80,7 @@ export function mainStartForRun(deps: {
         };
       let privateNow = false;
       try {
-        privateNow = await verifyDirectAudience(source.msg.directAudience!);
+        privateNow = (await verifyDirectAudience(source.msg.directAudience!)).ok;
       } catch {
         // A failed Slack read is no proof that the destination stayed private.
       }
@@ -96,7 +97,7 @@ export function mainStartForRun(deps: {
         stillLive: deps.live,
         stillPrivate: async () => {
           try {
-            return await verifyDirectAudience(source.msg.directAudience!);
+            return (await verifyDirectAudience(source.msg.directAudience!)).ok;
           } catch {
             return false;
           }

@@ -1,3 +1,4 @@
+import { audienceRefusalOf, type AudienceRefusalReceipt, type AudienceTrace } from "../audienceDecision.js";
 // The record stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // what a run leaves behind. The channel-visibility stamp every run is created
 // with, and the ONE `RunRecord` assembly every run goes through before
@@ -213,6 +214,7 @@ export function reclaimedRunRecord(input: {
     truncated: false,
   };
   return assembleRunRecord({
+    audienceRefusal: audienceRefusalOf(row.state.audienceRefusal),
     run: { id: row.runId },
     snap,
     agent: row.meta.agent,
@@ -309,6 +311,7 @@ export function writeAbandonedRunRecords(
  * `truncated` before the byte budget is even considered.
  */
 export function assembleRunRecord(input: {
+  audienceRefusal?: AudienceRefusalReceipt;
   run: Pick<RunHandle, "id" | "label">;
   snap: RunSnapshot | null;
   agent?: string;
@@ -412,6 +415,7 @@ export function assembleRunRecord(input: {
   const pipeline = input.pipeline ?? pipelineOfEvents(events);
   const fitted = fitRecordToBudget({
     id: run.id,
+    ...(input.audienceRefusal ? { audienceRefusal: input.audienceRefusal } : {}),
     ...(run.label !== undefined ? { label: run.label } : {}),
     ...(input.agent !== undefined ? { agent: input.agent } : {}),
     ...(input.model !== undefined ? { model: input.model } : {}),
@@ -590,6 +594,7 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
 export function finishChildSetup(
   deps: RecordDeps,
   ctx: Omit<TombstoneContext, "run" | "resume"> & {
+    audience?: AudienceTrace;
     runId: string;
     ledgerRun: LedgerRun;
     ending: RunEnding;
@@ -619,6 +624,7 @@ export function finishChildSetup(
     write: (seal) =>
       deps.runHistoryWriter.write(
         assembleRunRecord({
+          audienceRefusal: ctx.audience?.refusal,
           run: { id: runId, ...(label !== undefined ? { label } : {}) },
           snap,
           agent: ctx.agent.name,
@@ -642,6 +648,7 @@ export function finishChildSetup(
 
 /** What `registerFinishRecord` reads off the dispatch. */
 export interface FinishRecordContext {
+  audience?: AudienceTrace;
   ending: RunEnding;
   run: RunHandle;
   snap: RunSnapshot | null;
@@ -727,6 +734,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     write: (seal, failedAfterFinish) =>
       deps.runHistoryWriter.write(
         assembleRunRecord({
+          audienceRefusal: ctx.audience?.refusal,
           run,
           snap,
           agent: agent.name,

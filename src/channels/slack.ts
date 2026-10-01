@@ -1,3 +1,4 @@
+import type { AudienceCheck } from "../core/audienceDecision.js";
 import { randomUUID } from "node:crypto";
 import {
   App,
@@ -1038,7 +1039,7 @@ export async function receiveSlackMessage(
         }
       : undefined;
   const verifiedAudience =
-    directAudience && (await verifySlackDirectAudience(client, directAudience)) ? directAudience : undefined;
+    directAudience && (await verifySlackDirectAudience(client, directAudience)).ok ? directAudience : undefined;
   return {
     message: {
       channelId: `${PLATFORM}:${ev.channel}`,
@@ -1452,14 +1453,15 @@ export class SlackIO implements ChannelIO {
     };
   }
 
-  async verifyDirectAudience(audience: SlackDirectAudience): Promise<boolean> {
+  async verifyDirectAudience(audience: SlackDirectAudience): Promise<AudienceCheck> {
     const address = this.directAudience();
-    return (
-      address?.channelId === audience.channelId &&
-      address.userId === audience.userId &&
-      address.threadKey === audience.threadKey &&
-      (await verifySlackDirectAudience(this.client, audience))
-    );
+    if (
+      address?.channelId !== audience.channelId ||
+      address.userId !== audience.userId ||
+      address.threadKey !== audience.threadKey
+    )
+      return { ok: false, code: "direct-address-mismatch" };
+    return verifySlackDirectAudience(this.client, audience);
   }
 
   async reply(text: string): Promise<void> {

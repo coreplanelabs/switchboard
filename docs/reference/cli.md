@@ -61,7 +61,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 | Command | What it does | Surfaces |
 |---|---|---|
 | `runs list [--status <active\|finished\|all>] [--agent <string>] [--channel <string>] [--thread <string>] [--parent <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>] [--mine]` | List runs (live and persisted, newest first) — metadata only, never message text. | every surface |
-| `runs get <id> [--include <messages>]` | One run's record, its cost in dollars per model (or unpriced) included; `--include messages` adds its events with free text wrapped as untrusted content. | CLI · HTTP · MCP |
+| `runs get <id> [--include <messages\|audience>]` | One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic when recorded. | CLI · HTTP · MCP |
 | `runs events <id> [--after-seq <integer>] [--limit <integer>]` | A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content. | CLI · HTTP · MCP |
 | `runs friction <id>` | One run's friction diagnosis (live: computed now; persisted: as stored). | CLI · HTTP · MCP |
 | `runs stop <id> --mode <soft\|hard>` | Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). A pipeline refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the requester. | every surface |

@@ -145,12 +145,14 @@ export function createSlackContextCapability(input: {
 
   const verifyDirectOrigin = async (): Promise<boolean> => {
     if (!origin.startsWith("D")) return false;
-    return verifySlackDirectAudience(client, {
-      kind: "slack-unshared-im",
-      channelId: msg.channelId,
-      userId: actor.id,
-      threadKey: msg.threadKey,
-    });
+    return (
+      await verifySlackDirectAudience(client, {
+        kind: "slack-unshared-im",
+        channelId: msg.channelId,
+        userId: actor.id,
+        threadKey: msg.threadKey,
+      })
+    ).ok;
   };
 
   const originAllowed = async (): Promise<boolean> => {

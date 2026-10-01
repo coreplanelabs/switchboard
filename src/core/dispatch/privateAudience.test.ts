@@ -1,3 +1,4 @@
+import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { testSessionSources, testSlackReceipt } from "../testing/slackSources.js";
 import { describe, expect, it, vi } from "vitest";
 import type { ChannelIO, IncomingMessage } from "../types.js";
@@ -7,7 +8,8 @@ import {
   privateAudienceStillValid,
   recoveredPrivateAudienceLatch,
   revalidateSavedSlackContext,
-  revalidateSourcesWithinBudget,
+  revalidateSourcesDecision,
+  privateFollowUpFailure,
   samePrivateRequesterFollowUp,
   savedSlackContextNeedsRecheck,
 } from "./privateAudience.js";
@@ -36,9 +38,9 @@ describe("private audience publication gate", () => {
             settle = resolve;
           }),
       );
-      const pending = revalidateSourcesWithinBudget([testSlackReceipt(msg), testSlackReceipt(msg)], check);
+      const pending = revalidateSourcesDecision([testSlackReceipt(msg), testSlackReceipt(msg)], check);
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(await pending).toBe(false);
+      expect(await pending).toEqual({ ok: false, code: "source-check-timeout" });
       settle(true);
       await Promise.resolve();
       expect(check).toHaveBeenCalledTimes(1);
@@ -124,6 +126,16 @@ describe("private audience publication gate", () => {
   it("keeps only a direct follow-up from the same requester eligible for private reads", () => {
     const direct = { userId: msg.userId, directAudience: msg.directAudience, msg };
     expect(samePrivateRequesterFollowUp(msg, direct)).toBe(true);
+    expect(privateFollowUpFailure(msg, direct)).toBeUndefined();
+    expect(privateFollowUpFailure(msg, { ...direct, from: { runId: "child" } })).toBe("followup-indirect");
+    expect(privateFollowUpFailure(msg, { ...direct, userId: "slack:UBOB" })).toBe("followup-requester-mismatch");
+    expect(privateFollowUpFailure(msg, { ...direct, directAudience: undefined })).toBe("followup-address-unproved");
+    expect(
+      privateFollowUpFailure(msg, {
+        ...direct,
+        directAudience: { ...msg.directAudience!, threadKey: "slack:DMAIN:other" },
+      }),
+    ).toBe("followup-address-mismatch");
     expect(samePrivateRequesterFollowUp(msg, { ...direct, msg: { ...msg, relayedBy: "slack:bot:BOTHER" } })).toBe(
       false,
     );
@@ -138,12 +150,17 @@ describe("private audience publication gate", () => {
 
   it("requires a matching claim and fresh adapter proof", async () => {
     const verifyDirectAudience = vi.fn(async () => true);
-    const io = { directAudience: () => msg.directAudience, verifyDirectAudience } as unknown as ChannelIO;
+    const io = {
+      directAudience: () => msg.directAudience,
+      verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
+    } as unknown as ChannelIO;
     expect(privateAudienceRequired(msg)).toBe(true);
     expect(await privateAudienceStillValid(msg, io)).toBe(true);
     expect(verifyDirectAudience).toHaveBeenCalledWith(msg.directAudience);
     expect(await privateAudienceStillValid({ ...msg, userId: "slack:UBOB" }, io)).toBe(false);
-    expect(await privateAudienceStillValid(msg, { ...io, verifyDirectAudience: async () => false })).toBe(false);
+    expect(
+      await privateAudienceStillValid(msg, { ...io, verifyDirectAudience: booleanAudienceVerifier(async () => false) }),
+    ).toBe(false);
     expect(await privateAudienceStillValid(msg, {} as ChannelIO)).toBe(false);
     expect(privateAudienceRequired({ ...msg, directAudience: undefined })).toBe(false);
   });

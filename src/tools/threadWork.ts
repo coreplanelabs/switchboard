@@ -11,14 +11,14 @@ import type { RunnableTool } from "./runnableTool.js";
 const UNAVAILABLE = "error: This thread's saved work is unavailable. Do not infer that no work was started.";
 
 /** The same requester-bound read serves the tool and the publication fence. */
-export async function readThreadWork(
+export async function readThreadWorkEvidence(
   cap: RunsReadCapability | undefined,
   agentName: string | undefined,
-): Promise<string> {
-  if (agentName !== "orchestrator" || !cap?.runId || cap.actor.kind !== "user") return UNAVAILABLE;
+): Promise<{ ok: true; snapshot: string } | { ok: false }> {
+  if (agentName !== "orchestrator" || !cap?.runId || cap.actor.kind !== "user") return { ok: false };
   try {
     const self = await cap.service.getRun(cap.runId);
-    if (!self.ok) return UNAVAILABLE;
+    if (!self.ok) return { ok: false };
     const current = self.value;
     if (
       current.agent !== "orchestrator" ||
@@ -26,7 +26,7 @@ export async function readThreadWork(
       !current.threadKey ||
       !authorize(cap.actor, "runs:read", runResource(current)).allow
     )
-      return UNAVAILABLE;
+      return { ok: false };
     const visibleTo = predicateFor(cap.actor, "runs:read", "run");
     const page = await cap.service.listRuns({
       status: "all",
@@ -36,7 +36,8 @@ export async function readThreadWork(
       includeDurableHistory: true,
     });
     // A live-only fallback or a cursor is not the thread's full history.
-    if (!page.durableHistory || page.storeUnavailable || page.ledgerUnavailable || page.nextBefore) return UNAVAILABLE;
+    if (!page.durableHistory || page.storeUnavailable || page.ledgerUnavailable || page.nextBefore)
+      return { ok: false };
     // The speaking run changes from live to finished before the publication
     // fence. It is not earlier work and must not make an unchanged read stale.
     const owned = page.runs.filter(
@@ -46,7 +47,7 @@ export async function readThreadWork(
     const units = [];
     for (const instanceId of instanceIds) {
       const found = await cap.service.listInstanceUnits(instanceId, visibleTo);
-      if (found.length === 0) return UNAVAILABLE;
+      if (found.length === 0) return { ok: false };
       units.push(
         ...found.map((unit) => ({
           unit: unit.unit,
@@ -57,22 +58,25 @@ export async function readThreadWork(
         })),
       );
     }
-    return JSON.stringify({
-      thread: current.threadKey,
-      requester: cap.actor.id,
-      runs: owned.map((row) => ({
-        id: row.id,
-        agent: row.agent,
-        status: row.finished ? (row.status ?? "finished") : "running",
-        ...(row.repo ? { repo: row.repo } : {}),
-        ...(row.instanceId ? { instanceId: row.instanceId } : {}),
-        ...(row.pr ? { pr: row.pr } : {}),
-        ...(row.sourceUrl ? { sourceUrl: row.sourceUrl } : {}),
-      })),
-      units,
-    });
+    return {
+      ok: true,
+      snapshot: JSON.stringify({
+        thread: current.threadKey,
+        requester: cap.actor.id,
+        runs: owned.map((row) => ({
+          id: row.id,
+          agent: row.agent,
+          status: row.finished ? (row.status ?? "finished") : "running",
+          ...(row.repo ? { repo: row.repo } : {}),
+          ...(row.instanceId ? { instanceId: row.instanceId } : {}),
+          ...(row.pr ? { pr: row.pr } : {}),
+          ...(row.sourceUrl ? { sourceUrl: row.sourceUrl } : {}),
+        })),
+        units,
+      }),
+    };
   } catch {
-    return UNAVAILABLE;
+    return { ok: false };
   }
 }
 
@@ -87,8 +91,8 @@ export const threadWorkTool: RunnableTool = {
   sideEffectFree: true,
   failsInText: true,
   async run(_input, ctx) {
-    const result = await readThreadWork(ctx.runs, ctx.agentName);
-    if (result !== UNAVAILABLE) ctx.runs?.recordThreadWorkRead?.(result);
-    return result;
+    const result = await readThreadWorkEvidence(ctx.runs, ctx.agentName);
+    if (result.ok) ctx.runs?.recordThreadWorkRead?.(result.snapshot);
+    return result.ok ? result.snapshot : UNAVAILABLE;
   },
 };

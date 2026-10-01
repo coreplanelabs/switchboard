@@ -1,3 +1,4 @@
+import type { AudienceCheck } from "../../core/audienceDecision.js";
 import type { SlackDirectAudience } from "../../core/types.js";
 
 export interface SlackDirectAudienceClient {
@@ -27,14 +28,14 @@ export interface SlackDirectAudienceClient {
 export async function verifySlackDirectAudience(
   client: SlackDirectAudienceClient,
   audience: SlackDirectAudience,
-): Promise<boolean> {
+): Promise<AudienceCheck> {
   if (
     audience.kind !== "slack-unshared-im" ||
     !/^slack:D[A-Z0-9_]+$/.test(audience.channelId) ||
     !/^slack:[UW][A-Z0-9_]+$/.test(audience.userId) ||
     !audience.threadKey.startsWith(`${audience.channelId}:`)
   )
-    return false;
+    return { ok: false, code: "direct-address-unproved" };
   try {
     const channel = audience.channelId.slice("slack:".length);
     const peer = audience.userId.slice("slack:".length);
@@ -44,7 +45,7 @@ export async function verifySlackDirectAudience(
       client.users.info({ user: peer }).then((result) => result.user),
     ]);
     const team = installation.team_id;
-    return (
+    const allowed =
       typeof team === "string" &&
       team.length > 0 &&
       person?.team_id === team &&
@@ -59,9 +60,12 @@ export async function verifySlackDirectAudience(
       c.is_pending_ext_shared !== true &&
       (c.num_members === undefined || c.num_members === 2) &&
       (c.shared_team_ids === undefined || (c.shared_team_ids.length === 1 && c.shared_team_ids[0] === team)) &&
-      (c.pending_connected_team_ids === undefined || c.pending_connected_team_ids.length === 0)
-    );
+      (c.pending_connected_team_ids === undefined || c.pending_connected_team_ids.length === 0);
+    if (allowed) return { ok: true };
+    const missing =
+      !team || !person?.team_id || !c?.user || typeof c.is_im !== "boolean" || typeof c.is_org_shared !== "boolean";
+    return { ok: false, code: missing ? "direct-audience-unavailable" : "direct-audience-denied" };
   } catch {
-    return false;
+    return { ok: false, code: "direct-audience-unavailable" };
   }
 }
