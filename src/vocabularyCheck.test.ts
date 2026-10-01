@@ -46,6 +46,39 @@ it("the registry surface reads only the describe summaries the CLI and tool list
   expect(snippets.map((s) => s.text)).toEqual(["shows the session"]);
 });
 
+it("ignores erased types while retaining runtime messages", () => {
+  const snippets = extractTypeScriptStrings(
+    "src/core/dispatch/x.ts",
+    [
+      'type Saved = Pick<RunRecord, "session" | "handoff">;',
+      'interface RecordShape { "lease": string; mode: "attempt"; }',
+      'type Key = `instance:${"segment"}`;',
+      'const prompt = "session prompt" as "handoff";',
+      'throw new Error("lease error");',
+      'class Runtime extends factory("tier label") {}',
+    ].join("\n"),
+    "all",
+  );
+  expect(snippets.map((s) => s.text)).toEqual(["session prompt", "lease error", "tier label"]);
+});
+
+it("ignores strict comparison operands without hiding output expressions", () => {
+  const snippets = extractTypeScriptStrings(
+    "src/core/dispatch/x.ts",
+    [
+      'const a = key === "handoff";',
+      'const b = ("session" as const) !== key;',
+      "const c = key === `lease`;",
+      'const d = key === "attempt" ? "attempt shown" : "ready";',
+      'const e = key === format("segment message");',
+      'const f = key === (label = "tier output");',
+      'const g = key == "intake";',
+    ].join("\n"),
+    "all",
+  );
+  expect(snippets.map((s) => s.text)).toEqual(["attempt shown", "ready", "segment message", "tier output", "intake"]);
+});
+
 it("a web template text node hits; an attribute binding does not", () => {
   const sfc = [
     "<template>",

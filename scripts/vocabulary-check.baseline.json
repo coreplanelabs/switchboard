@@ -67,9 +67,6 @@
     "admission": 5,
     "coordinator": 2
   },
-  "src/core/dispatch/relaunch.ts": {
-    "session": 1
-  },
   "src/core/dispatch/reply.ts": {
     "lease": 2,
     "coordinator": 1,
@@ -80,14 +77,10 @@
   },
   "src/core/dispatch/runLoop.ts": {
     "coordinator": 1,
-    "lease": 1,
     "session": 1
   },
   "src/core/dispatch/seed.ts": {
     "session": 9
-  },
-  "src/core/dispatch/settle.ts": {
-    "admission": 1
   },
   "src/core/dispatch/ship.ts": {
     "instance": 1
@@ -96,10 +89,10 @@
     "tier": 3
   },
   "src/core/dispatch/thread.ts": {
-    "session": 2
+    "session": 1
   },
   "src/core/dispatch/threadArtifacts.ts": {
-    "handoff": 5
+    "handoff": 3
   },
   "src/core/ship/contract.ts": {
     "handoff": 1,
@@ -109,7 +102,7 @@
     "handoff": 3
   },
   "src/core/ship/renewal.ts": {
-    "handoff": 2
+    "handoff": 1
   },
   "web/src/components/settings/McpServersPanel.vue": {
     "tier": 3
