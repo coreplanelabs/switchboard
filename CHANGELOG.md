@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.271.8](https://github.com/coreplanelabs/switchboard/compare/v1.271.7...v1.271.8) (2026-10-01)
+
+
+### Bug fixes
+
+* **dispatcher:** bind explicit PR requests through typed tokens ([#2573](https://github.com/coreplanelabs/switchboard/issues/2573)) ([c0b20b5](https://github.com/coreplanelabs/switchboard/commit/c0b20b5e3311e4512a9fa2a7ba62ff078c568310))
+
 ## [1.271.7](https://github.com/coreplanelabs/switchboard/compare/v1.271.6...v1.271.7) (2026-10-01)
 
 
