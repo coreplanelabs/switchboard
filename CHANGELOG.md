@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.275.2](https://github.com/coreplanelabs/switchboard/compare/v1.275.1...v1.275.2) (2026-10-01)
+
+
+### Bug fixes
+
+* **ship:** refuse cut spec and rules reads in unit contracts ([#2615](https://github.com/coreplanelabs/switchboard/issues/2615)) ([d337a90](https://github.com/coreplanelabs/switchboard/commit/d337a904751d414489187e7dae20bbe9597aa063))
+
 ## [1.275.1](https://github.com/coreplanelabs/switchboard/compare/v1.275.0...v1.275.1) (2026-10-01)
 
 
