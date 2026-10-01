@@ -394,17 +394,78 @@ channels:
     });
   });
 
-  it("does not accept an unrequested review severity or Ship renewal", () => {
+  it("drops unrequested review severity and Ship renewals", () => {
     const review = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", severity: "nit", reason: "review" } },
-      ctxOf({ requestText: "Review this pull request.", presets: ["review"] }),
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          severity: "nit",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+          reason: "review",
+        },
+      },
+      ctxOf({ requestText: "Review https://github.com/acme/api/pull/7", presets: ["review"] }),
     );
     const ship = parseOperatorTurn(
       { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "work", renewals: 4, reason: "work" } },
       ctxOf({ requestText: "Fix the flaky test.", presets: ["ship"] }),
     );
-    expect(review.kind).toBe("violation");
-    expect(ship.kind).toBe("violation");
+    expect(review).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
+    expect(ship).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
+    if (review.kind !== "decision" || review.decision.kind !== "binds") throw new Error("review did not bind");
+    if (ship.kind !== "decision" || ship.decision.kind !== "binds") throw new Error("Ship did not bind");
+    expect(review.decision.binds[0]).not.toHaveProperty("severity");
+    expect(ship.decision.binds[0]).not.toHaveProperty("renewals");
+  });
+
+  it("drops unevidenced optional settings on an ordinary read", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "general",
+          effort: "medium",
+          budget: 25,
+          verbosity: "verbose",
+          settingsEvidence: { effort: "not in the request" },
+          reason: "answer the question",
+        },
+      },
+      ctxOf({ requestText: "What happened with the export?", presets: ["general", "review"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("read did not bind");
+    expect(turn.decision.binds[0]).toEqual({
+      line: "agent:general What happened with the export?",
+      reason: "answer the question",
+    });
+  });
+
+  it("an ordinary read ignores ungrounded optional repository and PR slots", () => {
+    for (const channelRepo of [undefined, "acme/api"]) {
+      const turn = parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "general",
+            repo: "x/y",
+            prTarget: { number: 7, source: "request", quote: "https://github.com/x/y/pull/7" },
+            reason: "answer the question",
+          },
+        },
+        ctxOf({
+          requestText: "What is 2 + 2? Answer in one sentence.",
+          presets: ["general", "review", "ship"],
+          channelRepo,
+        }),
+      );
+      if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("read did not bind");
+      expect(turn.decision.binds[0]).toEqual({
+        line: "agent:general What is 2 + 2? Answer in one sentence.",
+        reason: "answer the question",
+      });
+    }
   });
 
   it("drops unsupported preset settings without requester evidence before routing", () => {
@@ -439,7 +500,7 @@ channels:
     }
   });
 
-  it("re-asks unsupported preset settings when the requester explicitly named them", () => {
+  it("drops settings that the selected preset cannot use, even with a model quote", () => {
     const read = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
@@ -458,14 +519,39 @@ channels:
         input: {
           preset: "review",
           renewals: 2,
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
           settingsEvidence: { renewals: "two renewals" },
           reason: "review",
         },
       },
-      ctxOf({ requestText: "Review this with two renewals.", presets: ["review", "ship"] }),
+      ctxOf({
+        requestText: "Review https://github.com/acme/api/pull/7 with two renewals.",
+        presets: ["review", "ship"],
+      }),
     );
-    expect(read.kind).toBe("violation");
-    expect(review.kind).toBe("violation");
+    expect(read).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
+    expect(review).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
+    if (read.kind !== "decision" || read.decision.kind !== "binds") throw new Error("read did not bind");
+    if (review.kind !== "decision" || review.decision.kind !== "binds") throw new Error("review did not bind");
+    expect(read.decision.binds[0]).not.toHaveProperty("severity");
+    expect(review.decision.binds[0]).not.toHaveProperty("renewals");
+
+    const coincidental = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "general",
+          severity: "major",
+          settingsEvidence: { severity: "Answer" },
+          reason: "answer the question",
+        },
+      },
+      ctxOf({ requestText: "What is 2 + 2? Answer in one sentence.", presets: ["general", "review"] }),
+    );
+    if (coincidental.kind !== "decision" || coincidental.decision.kind !== "binds")
+      throw new Error("read did not bind");
+    expect(coincidental.decision.binds[0]).not.toHaveProperty("severity");
   });
 
   it.each([
@@ -476,9 +562,20 @@ channels:
     { renewals: 13 },
     { verbosity: "normal" },
   ])("bind_preset re-asks an invalid typed request setting: %j", (setting) => {
+    const [name, value] = Object.entries(setting)[0]!;
+    const requestText = `Set ${name} to ${String(value)}`;
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "work", reason: "r", ...setting } },
-      ctxOf({ presets: ["ship"] }),
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "ship",
+          shipEntry: "work",
+          reason: "r",
+          ...setting,
+          settingsEvidence: { [name]: requestText },
+        },
+      },
+      ctxOf({ requestText, presets: ["ship"] }),
     );
     expect(turn).toMatchObject({ kind: "violation" });
   });
@@ -498,7 +595,7 @@ channels:
     expect(
       parseOperatorTurn(
         { tool: OPERATOR_BIND_TOOL, input: { preset: "research", repo: "not-a-slug", reason: "guess" } },
-        ctxOf(),
+        ctxOf({ requestText: "Investigate https://github.com/acme/api" }),
       ),
     ).toMatchObject({ kind: "violation", violation: expect.stringContaining("owner/name") as unknown as string });
   });
@@ -1618,6 +1715,28 @@ describe("runOperator — the loop over a scripted model", () => {
     if (answer.kind !== "decision" || answer.decision.kind !== "binds") return;
     expect(answer.decision.binds[0]?.shipEntry).toBeUndefined();
     expect(answer.decision.binds[0]?.workObjective).toBeUndefined();
+  });
+
+  it("a Ship review ignores a stray work objective and retains the exact PR target", () => {
+    const requestText = "agents:ship please review https://github.com/acme/api/pull/7";
+    const answer = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "ship",
+          shipEntry: "review",
+          workObjective: "please review",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+          reason: "review the requested PR",
+        },
+      },
+      ctxOf({ requestText, presets: ["ship"] }),
+    );
+    expect(answer).toMatchObject({ kind: "decision", decision: { kind: "binds", binds: [{ shipEntry: "review" }] } });
+    if (answer.kind !== "decision" || answer.decision.kind !== "binds") return;
+    expect(answer.decision.binds[0]?.workObjective).toBeUndefined();
+    expect(answer.decision.binds[0]?.line).toContain("https://github.com/acme/api/pull/7");
   });
 
   it("an untyped conductor bind carries no PR child authority", () => {

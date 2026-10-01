@@ -742,6 +742,7 @@ describe("the production deploy is one reusable workflow", () => {
       "CLOUDFLARE_DEPLOY_TOKEN",
       "CONFIG_REPO_APP_CLIENT_ID",
       "CONFIG_REPO_APP_PRIVATE_KEY",
+      "DOOR_SMOKE_OPENAI_API_KEY",
       "MEMORY_TOKEN",
       "RESIDENT_DRAIN_TOKEN",
       "RESIDENT_READ_TOKEN",
@@ -884,6 +885,7 @@ describe("the production deploy is one reusable workflow", () => {
     );
     expect(rendered.filter((l) => /^(npm|git)\b|npm run --silent cli/.test(l))).toEqual([
       "npm ci",
+      "npm run load -- route --smoke --profile-model",
       "npm run --silent cli -- deploy images",
       'npm run --silent cli -- deploy plan $ARGS --allow-branch --json > "$RUNNER_TEMP/plan.json"',
       'npm run --silent cli -- deploy plan $ARGS --allow-branch | tee "$RUNNER_TEMP/plan.txt"',
@@ -899,6 +901,7 @@ describe("the production deploy is one reusable workflow", () => {
       "the configuration repository needs the App",
       "the credentials this run has",
       "the selection",
+      "candidate Door through configured model",
       "copy the release's images into the account registry",
       "plan",
       "the tree is the commit",
@@ -954,6 +957,20 @@ describe("the production deploy is one reusable workflow", () => {
     expect(job.env?.SMOKE_INGRESS_TOKEN).toBe("${{ secrets.SMOKE_INGRESS_TOKEN }}");
     expect(job.env?.SMOKE_INGRESS_ORIGIN).toBe("${{ vars.SMOKE_INGRESS_ORIGIN }}");
     expect(steps.indexOf(smoke)).toBeGreaterThan(steps.findIndex((s) => s.name === "what is live"));
+  });
+
+  it("tests the candidate Door with the configured model before touching production", () => {
+    const smoke = steps.find((s) => s.name === "candidate Door through configured model")!;
+    expect(smoke.if).toBe("inputs.cli != 'package'");
+    expect(smoke.run).toBe("npm run load -- route --smoke --profile-model");
+    expect(smoke.env?.CONFIG_REPO_TOKEN).toBe("${{ steps.infra-token.outputs.token }}");
+    expect(smoke.env?.OPENAI_API_KEY).toBe("${{ secrets.DOOR_SMOKE_OPENAI_API_KEY }}");
+    expect(smoke.env?.DOOR_SMOKE_TRUSTED_ORIGIN).toBe("${{ vars.DOOR_SMOKE_TRUSTED_ORIGIN }}");
+    expect(job.env).not.toHaveProperty("OPENAI_API_KEY");
+    expect(steps.indexOf(smoke)).toBeLessThan(
+      steps.findIndex((s) => s.name === "copy the release's images into the account registry"),
+    );
+    expect(steps.indexOf(smoke)).toBeLessThan(steps.findIndex((s) => s.name === "deploy"));
   });
 });
 
