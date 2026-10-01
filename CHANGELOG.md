@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.271.5](https://github.com/coreplanelabs/switchboard/compare/v1.271.4...v1.271.5) (2026-10-01)
+
+
+### Bug fixes
+
+* **dispatcher:** retain private audience on steers ([#2567](https://github.com/coreplanelabs/switchboard/issues/2567)) ([1d91097](https://github.com/coreplanelabs/switchboard/commit/1d91097e64f3fef7cceb9c99903a7a85fd7a2adf))
+
 ## [1.271.4](https://github.com/coreplanelabs/switchboard/compare/v1.271.3...v1.271.4) (2026-10-01)
 
 
