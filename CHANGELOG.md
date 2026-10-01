@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.271.7](https://github.com/coreplanelabs/switchboard/compare/v1.271.6...v1.271.7) (2026-10-01)
+
+
+### Bug fixes
+
+* **main:** link thread work across agent runs ([#2571](https://github.com/coreplanelabs/switchboard/issues/2571)) ([a37e694](https://github.com/coreplanelabs/switchboard/commit/a37e6941bd24cdf19f6576a7889f197f847e57d7))
+
 ## [1.271.6](https://github.com/coreplanelabs/switchboard/compare/v1.271.5...v1.271.6) (2026-10-01)
 
 
