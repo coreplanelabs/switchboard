@@ -168,6 +168,52 @@ describe("main conversation source audience", () => {
     expect(mainAudienceAtPrompt({ ...base, servers: [], session: seed("plane_show") }).ok).toBe(false);
   });
 
+  it("refuses a saved thread work result on a later turn or resumed run", () => {
+    expect(mainAudienceAtPrompt({ ...base, servers: [], session: seed("thread_work") }).ok).toBe(false);
+    const resumed = {
+      kind: "resume" as const,
+      messages: seed("thread_work").messages,
+      originalToolNames: ["thread_work"],
+      originalAudienceChecked: true,
+      compacted: false,
+      requester: base.requester,
+      channelId: base.channelId,
+    };
+    expect(mainAudienceAtPrompt({ ...base, servers: [], resumed }).ok).toBe(false);
+  });
+
+  it("withholds a current thread work answer when the fresh durable view loses a linked unit", () => {
+    const first = mainAudienceAtPrompt({ ...base, servers: [] });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const github = { repos: [], current: [], unknown: false };
+    const prior = '{"units":[{"unit":"one","pr":"acme/api#7"}]}';
+    const gone = '{"units":[]}';
+    expect(
+      mainAudienceAtReply(first.audience, [], base.channelId, base.requester, github, undefined, true, {
+        exposed: [prior],
+        current: prior,
+      }).ok,
+    ).toBe(true);
+    expect(
+      mainAudienceAtReply(first.audience, [], base.channelId, base.requester, github, undefined, true, {
+        exposed: [prior],
+        current: gone,
+      }).ok,
+    ).toBe(false);
+    expect(
+      mainAudienceAtReply(first.audience, [], base.channelId, base.requester, github, undefined, true, {
+        exposed: [prior, gone],
+        current: gone,
+      }).ok,
+    ).toBe(false);
+    expect(
+      mainAudienceAtReply(first.audience, [], base.channelId, base.requester, github, undefined, true, {
+        exposed: [prior],
+      }).ok,
+    ).toBe(false);
+  });
+
   it("withholds a current plane answer when any exposed run, unit or PR disappears", () => {
     const first = mainAudienceAtPrompt({ ...base, servers: [] });
     expect(first.ok).toBe(true);

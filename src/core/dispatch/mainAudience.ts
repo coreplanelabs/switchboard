@@ -32,6 +32,12 @@ export interface MainPlaneReadEvidence {
   unknown: boolean;
 }
 
+/** A thread work result must be re-read under the same requester before reply. */
+export interface MainThreadWorkEvidence {
+  exposed: readonly string[];
+  current?: string;
+}
+
 /** Keep full identities even though the chat table abbreviates run ids. */
 export function planeRowIdentities(table: PlaneTable): { rows: string[]; unknown: boolean } {
   const rows: string[] = [];
@@ -115,6 +121,7 @@ function provenPublicResume(resumed: ResumedAudienceEvidence, requester: string,
           part.name.startsWith("mcp__") ||
           part.name.startsWith("github_") ||
           part.name === "plane_show" ||
+          part.name === "thread_work" ||
           part.name === "slack_context"
         )
           return false;
@@ -173,7 +180,8 @@ export function mainAudienceAtPrompt(input: {
           // GitHub results lack a durable repository audience. A source's
           // current name alone cannot prove that the requester still holds
           // the repo grant used by an earlier turn.
-          if (part.name.startsWith("github_") || part.name === "plane_show") return { ok: false, reason: RECHECK };
+          if (part.name.startsWith("github_") || part.name === "plane_show" || part.name === "thread_work")
+            return { ok: false, reason: RECHECK };
           const source = sourceOf(part.name);
           // A removed source can be replaced under the same name. The old
           // tool result has no source revision, so it must be read afresh.
@@ -209,6 +217,7 @@ export function mainAudienceAtReply(
   github: MainGithubReadEvidence,
   plane?: MainPlaneReadEvidence,
   verifiedDirectAudience = false,
+  threadWork?: MainThreadWorkEvidence,
 ): AudienceDecision {
   if ((/^slack:D[A-Z0-9_]+$/.test(channelId) || audience.sources.length > 0) && !verifiedDirectAudience)
     return { ok: false, reason: PRIVATE_SOURCE };
@@ -225,5 +234,6 @@ export function mainAudienceAtReply(
     const visible = new Set(plane.current);
     if (plane.exposed.some((id) => !visible.has(id))) return { ok: false, reason: RECHECK };
   }
+  if (threadWork?.exposed.some((result) => result !== threadWork.current)) return { ok: false, reason: RECHECK };
   return { ok: true, audience };
 }

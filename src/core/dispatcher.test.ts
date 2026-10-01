@@ -774,7 +774,7 @@ describe("dispatch", () => {
     expect(replies).toContain("I will check the review before starting work.");
   });
 
-  it.each(["github_file", "plane_show", "mcp__metrics__query", "work_progress"] as const)(
+  it.each(["github_file", "plane_show", "thread_work", "mcp__metrics__query", "work_progress"] as const)(
     "continues a main DM after a saved %s read without replaying its answer",
     async (sourceTool) => {
       const requests: CompletionRequest[] = [];
@@ -1088,6 +1088,74 @@ describe("dispatch", () => {
       "private-worker",
     );
     expect(replies.join(" ")).toContain("ask me to check the source again");
+  });
+
+  it("withholds a thread work answer when a linked run disappears after its tool read", async () => {
+    let calls = 0;
+    let visible = true;
+    let secondTurn: CompletionRequest | undefined;
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        calls++;
+        if (calls === 1)
+          return {
+            content: [{ type: "tool_use", id: "work", name: "thread_work", input: {} }],
+            stopReason: "tool_use",
+          };
+        secondTurn = req;
+        visible = false;
+        return { content: [{ type: "text", text: "The earlier work is complete." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    deps.runRegistry = new RunRegistry({ genId: () => "main-thread-work", genToken: () => "private-token" });
+    await threadWithFinishedRun(deps, "ship", {
+      channelId: "slack:DALICE",
+      threadKey: "slack:DALICE:1.0",
+      channelVisibility: "private",
+    });
+    const readStored = deps.runStore.list.bind(deps.runStore);
+    deps.runStore.list = async (opts) => {
+      const rows = await readStored(opts);
+      return visible ? rows : rows.filter((row) => row.id !== "run-prev");
+    };
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm("What work did this thread start?"), io);
+    expect(calls).toBe(2);
+    const toolResult = secondTurn?.messages
+      .flatMap((message) => message.content)
+      .find((part) => part.type === "tool_result");
+    expect(toolResult && "content" in toolResult ? String(toolResult.content) : "").toContain('"thread"');
+    expect(toolResult && "content" in toolResult ? String(toolResult.content) : "").toContain("run-prev");
+    expect(toolResult && "content" in toolResult ? String(toolResult.content) : "").not.toContain(
+      "saved work is unavailable",
+    );
+    expect(replies.join(" ")).not.toContain("The earlier work is complete.");
+    expect(replies.join(" ")).toContain("ask me to check the source again");
+  });
+
+  it("publishes a thread work answer when the earlier durable run remains visible", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        return ++calls === 1
+          ? { content: [{ type: "tool_use", id: "work", name: "thread_work", input: {} }], stopReason: "tool_use" }
+          : { content: [{ type: "text", text: "The linked run is run-prev." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    deps.runRegistry = new RunRegistry({ genId: () => "main-thread-work-positive", genToken: () => "private-token" });
+    await threadWithFinishedRun(deps, "ship", {
+      channelId: "slack:DALICE",
+      threadKey: "slack:DALICE:1.0",
+      channelVisibility: "private",
+    });
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm("What work did this thread start?"), io);
+    expect(calls).toBe(2);
+    expect(replies).toContain("The linked run is run-prev.");
   });
 
   it("withholds a GitHub answer when its verified DM becomes shared after the source read", async () => {

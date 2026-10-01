@@ -16,6 +16,7 @@
 import { DEPOT_CI_TOOLS } from "./depotCi.js";
 import { attachFileTool } from "./attach.js";
 import { planeShowTool } from "./plane.js";
+import { threadWorkTool } from "./threadWork.js";
 import { workProgressTool } from "./mainWorker.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS } from "./github.js";
@@ -109,6 +110,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
    *  start require a verified requester DM. No public status, shell or generic run tool. */
   orchestrator: [
     planeShowTool,
+    threadWorkTool,
     slackContextTool,
     ...MAIN_WORK_TOOLS,
     workStartTool,
