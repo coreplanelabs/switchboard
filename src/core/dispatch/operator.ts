@@ -531,11 +531,11 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
       : []),
     "A write ask in a named or inherited repository binds the write preset even when a detail inside it is unresolved — the run it starts resolves the detail with the repository in front of it. For a terse fix, inherit only the same requester's actor-stamped explicit target in the thread; a prior general run's repository and other people's or assistant turns do not authorize a write. Conflicting requester targets require one question. Ask a question only for a fork the run itself could not resolve, and a question's proposal must be a line that would do the asked work: a write line for a write ask, never a read (an exploration, a listing, a summary) standing in for the work.",
     "An explicit positive request to review or ship several linked pull requests uses `bind_pr_batch`, even when links span repositories or Slack flattens their bullets. Choose the action and every PR link destination in order; omit context, negated and quoted links. Supply `actionQuote` as an exact authored action span and one exact destination URL in `targetQuotes` for each chosen URL. If the action or list is ambiguous, ask. That typed choice starts the conductor with no single repository target. Each child is held to one selected URL at its spawn boundary.",
-    "For one Ship request, choose `shipEntry` in `bind_preset`: `continue` only to resume this thread's unfinished Ship unit on its owned pull request; `review` when the person asks Ship to review an existing pull request without resuming its writer; `work` for a self-contained new change; `work_from_thread` when new work depends on earlier requester context; or `plan` for an explicit seeded plan. Every review bind, including Ship review, needs `prTarget` with its number and complete verbatim target span from this request or an actor-stamped turn by this requester; ask when no such span exists. Omit `prTarget` for every non-review bind: a PR cited as context cannot select the write branch. Never invent or shorten a PR URL. A review starts in the review round of that exact PR; never turn the word 'review' or its URL into a coding task. If work cites a PR as evidence for a separate change, give `workObjective` as an exact quote of the requester's distinct code-change ask, from this turn or an earlier requester turn. Omit it for review or continuation. A request naming `agent:ship` still passes through this door. The runner verifies the PR, head, repository, owner and permissions after the bind.",
+    "For one Ship request, choose `shipEntry` in `bind_preset`: `continue` only to resume this thread's unfinished Ship unit on its owned pull request; `review` when the person asks Ship to review an existing pull request without resuming its writer; `work` for a self-contained new change; `work_from_thread` when new work depends on earlier requester context; or `plan` for an explicit seeded plan. Every review bind, including Ship review, needs `prTarget` with its number and the exact authored PR identifier from this request or an actor-stamped turn by this requester. Quote only the identifier, excluding adjacent constraints or task text; preserve a PR URL unchanged. Ask when no such identifier exists. Omit `prTarget` for every non-review bind: a PR cited as context cannot select the write branch. Never invent or shorten a PR URL. A review starts in the review round of that exact PR; never turn the word 'review' or its URL into a coding task. If work cites a PR as evidence for a separate change, give `workObjective` as an exact quote of the requester's distinct code-change ask, from this turn or an earlier requester turn. Omit it for review or continuation. A request naming `agent:ship` still passes through this door. The runner verifies the PR, head, repository, owner and permissions after the bind.",
     "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a proposal that would do the write built from them — the person's yes runs it, and their next words refine it.",
     "A question about whether the person has config overrides uses `config show`: it describes their own scope, this channel's scope and the effective settings. `config overrides` lists channels with scopes; use it only when they ask which channels have settings.",
     "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run. Pass that ref as `bind_preset`'s `model` and one exact model-name word from the person's request as `modelWord` (such as 'astra', 'o3', or 'gpt-6'). When the person wrote the full `<provider>/<model>` ref, pass it as `model` and omit `modelWord`; the exact authored ref is its evidence. The run uses either at request precedence. The request still rides verbatim — never strip the model choice from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model omits both fields.",
-    "`bind_preset` runs the preset on the request as the author asked it — the author's own words ride by reference, so never re-type the request, write a flag form or paraphrase it. Bind effort, budget in whole minutes, and verbosity only when the person requests them. For review or Ship, bind severity only when requested; renewals apply only to Ship. These are typed settings, whether the person used a directive spelling or ordinary words. For each setting you bind, give an exact short quote from this request in `settingsEvidence` under that setting's name; omit the setting and its quote when unrequested. The call also carries the preset, optional model and modelWord, and the reason. When `ask` proposes a preset line, include `proposalSettings` (an empty object when none were requested); put each requested setting and its exact quote from the original request there, including model and modelWord when requested, so a later yes carries the same settings.",
+    "`bind_preset` runs the preset on the request as the author asked it — the author's own words ride by reference, so never re-type the request, write a flag form or paraphrase it. Bind effort, budget in whole minutes, and verbosity only when the person requests them. For review or Ship, bind severity only when requested; renewals apply only to Ship. These are typed settings, whether the person used a directive spelling or ordinary words. For each setting you bind, give an exact phrase that expresses the requested run setting in `settingsEvidence` under that setting's name; a word from task content is not a setting request. Omit the setting and its quote when unrequested. If the person requested a setting the selected preset cannot apply, choose a compatible preset that still does the requested action or ask; never silently drop the setting. The call also carries the preset, optional model and modelWord, and the reason. When `ask` proposes a preset line, include `proposalSettings` (an empty object when none were requested); put each requested setting and its exact quote from the original request there, including model and modelWord when requested, so a later yes carries the same settings.",
     "",
     // 2. Projection: the presets and commands THIS author may run.
     "Presets this author may run:",
@@ -708,7 +708,7 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
                   type: "object",
                   additionalProperties: false,
                   description:
-                    "one exact short quote from this request for each bound effort, budget, severity, renewals or verbosity; omit unbound settings",
+                    "one exact phrase expressing each requested run setting; do not quote an incidental word from task content; omit unbound settings",
                   properties: {
                     effort: { type: "string" },
                     budget: { type: "string" },
@@ -728,7 +728,7 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
                   additionalProperties: false,
                   required: ["number", "source", "quote"],
                   description:
-                    "only for review and Ship review: the PR number and its complete verbatim target span from this request or this requester's actor-stamped thread turn; ask if none exists",
+                    "only for review and Ship review: the PR number and exact authored identifier, such as the URL alone; exclude adjacent constraints and task text, and preserve the URL unchanged; ask if none exists",
                   properties: {
                     number: { type: "integer", minimum: 1 },
                     source: { type: "string", enum: ["request", "thread"] },
@@ -1210,6 +1210,12 @@ function requestSettingsOf(
     quotesRequest(setting) ? value : undefined;
   const effort = requestedSetting("effort", suppliedEffort);
   const budget = requestedSetting("budget", suppliedBudget);
+  if (suppliedSeverity !== undefined && preset !== "ship" && preset !== "review" && quotesRequest("severity"))
+    return {
+      violation: "bind_preset cannot apply a requested review severity to this preset; choose review or Ship, or ask",
+    };
+  if (suppliedRenewals !== undefined && preset !== "ship" && quotesRequest("renewals"))
+    return { violation: "bind_preset cannot apply requested Ship renewals to this preset; choose Ship or ask" };
   const severity =
     preset === "ship" || preset === "review" ? requestedSetting("severity", suppliedSeverity) : undefined;
   const renewals = preset === "ship" ? requestedSetting("renewals", suppliedRenewals) : undefined;
@@ -1434,7 +1440,8 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     if (suppliedPrTarget !== undefined && verifiedPrTarget === undefined)
       return {
         kind: "violation",
-        violation: "the PR target needs a complete requester-authored span matching its number and repository",
+        violation:
+          "the PR target quote must be the exact authored PR identifier alone, without adjacent constraints or task text, matching its number and repository",
       };
     if (verifiedPrTarget !== undefined && repository === undefined)
       return { kind: "violation", violation: "bind the PR target's repository as a typed repo" };

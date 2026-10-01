@@ -500,7 +500,7 @@ channels:
     }
   });
 
-  it("drops settings that the selected preset cannot use, even with a model quote", () => {
+  it("re-asks quoted settings that the selected preset cannot apply", () => {
     const read = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
@@ -530,12 +530,8 @@ channels:
         presets: ["review", "ship"],
       }),
     );
-    expect(read).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
-    expect(review).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
-    if (read.kind !== "decision" || read.decision.kind !== "binds") throw new Error("read did not bind");
-    if (review.kind !== "decision" || review.decision.kind !== "binds") throw new Error("review did not bind");
-    expect(read.decision.binds[0]).not.toHaveProperty("severity");
-    expect(review.decision.binds[0]).not.toHaveProperty("renewals");
+    expect(read).toMatchObject({ kind: "violation", violation: expect.stringContaining("review severity") });
+    expect(review).toMatchObject({ kind: "violation", violation: expect.stringContaining("Ship renewals") });
 
     const coincidental = parseOperatorTurn(
       {
@@ -549,9 +545,109 @@ channels:
       },
       ctxOf({ requestText: "What is 2 + 2? Answer in one sentence.", presets: ["general", "review"] }),
     );
-    if (coincidental.kind !== "decision" || coincidental.decision.kind !== "binds")
-      throw new Error("read did not bind");
-    expect(coincidental.decision.binds[0]).not.toHaveProperty("severity");
+    expect(coincidental).toMatchObject({ kind: "violation", violation: expect.stringContaining("review severity") });
+  });
+
+  it("repairs an incidental setting quote without stranding an ordinary read", async () => {
+    const answers: RouteToolCall[] = [
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "general",
+          severity: "major",
+          settingsEvidence: { severity: "Answer" },
+          reason: "answer the question",
+        },
+      },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "answer the question" } },
+    ];
+    const answer = await runOperator(
+      input({ text: "What is 2 + 2? Answer in one sentence.", projection: projectionOf(["general", "review"]) }),
+      async () => answers.shift()!,
+    );
+    expect(answer.attempts).toMatchObject([{ outcome: "violation" }, { outcome: "accepted" }]);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ line: "agent:general What is 2 + 2? Answer in one sentence." }],
+    });
+  });
+
+  it("repairs an explicit incompatible renewal by choosing Ship review", async () => {
+    const prTarget = { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" };
+    const answers: RouteToolCall[] = [
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/api",
+          prTarget,
+          renewals: 2,
+          settingsEvidence: { renewals: "two renewals" },
+          reason: "review the PR",
+        },
+      },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "ship",
+          shipEntry: "review",
+          repo: "acme/api",
+          prTarget,
+          renewals: 2,
+          settingsEvidence: { renewals: "two renewals" },
+          reason: "review the PR with renewals",
+        },
+      },
+    ];
+    const answer = await runOperator(
+      input({
+        text: "Review https://github.com/acme/api/pull/7 with two renewals.",
+        projection: projectionOf(["review", "ship"]),
+      }),
+      async () => answers.shift()!,
+    );
+    expect(answer.attempts).toMatchObject([{ outcome: "violation" }, { outcome: "accepted" }]);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ shipEntry: "review", renewals: 2, prTarget }],
+    });
+  });
+
+  it("repairs a PR quote that includes adjacent head context", async () => {
+    const requestText =
+      "agent:review review https://github.com/acme/api/pull/7 at head 1111111111111111111111111111111111111111. Focus on the Door boundary.";
+    const answers: RouteToolCall[] = [
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/api",
+          prTarget: {
+            number: 7,
+            source: "request",
+            quote: "https://github.com/acme/api/pull/7 at head 1111111111111111111111111111111111111111",
+          },
+          reason: "review the PR",
+        },
+      },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+          reason: "review the PR",
+        },
+      },
+    ];
+    const answer = await runOperator(input({ text: requestText, projection: projectionOf(["review"]) }), async () =>
+      answers.shift()!,
+    );
+    expect(answer.attempts).toMatchObject([{ outcome: "violation" }, { outcome: "accepted" }]);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ prTarget: { number: 7, quote: "https://github.com/acme/api/pull/7" } }],
+    });
   });
 
   it.each([
