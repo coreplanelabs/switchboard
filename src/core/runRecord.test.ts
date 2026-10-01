@@ -84,6 +84,26 @@ it("a typed repository question survives the event-to-record projection and JSON
   });
 });
 
+it("a preset question keeps its typed settings through the event-to-record projection and JSON storage", () => {
+  const event: RunEvent = {
+    type: "operator",
+    mode: "on",
+    outcome: "question",
+    reason: "confirm",
+    question: "Summarize this run?",
+    proposal: "agent:general Summarize this run",
+    proposalSettings: { model: "openai/gpt-6-sol", effort: "high", budget: 25, verbosity: "debug" },
+  };
+  const stored = JSON.parse(JSON.stringify(record({ events: [event], operator: operatorOfEvents([event]) })));
+  expect(isRunRecord(stored)).toBe(true);
+  expect(stored.operator?.proposalSettings).toEqual({
+    model: "openai/gpt-6-sol",
+    effort: "high",
+    budget: 25,
+    verbosity: "debug",
+  });
+});
+
 function item(id: string, finishedAt: number, bytes?: number): RunListItem {
   const { events: _events, ...rest } = record({ id, finishedAt });
   return bytes === undefined ? rest : { ...rest, bytes };

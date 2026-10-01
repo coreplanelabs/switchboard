@@ -68,17 +68,20 @@ export interface ReadRequestContext {
   msg: IncomingMessage;
   io: ChannelIO;
   root: Span;
+  /** A typed chat bind already interpreted this request; keep its authored text. */
+  request?: RequestDirectives;
 }
 
-/** The request as the model will see it: its directives parsed and stripped
- *  from the text, and the thread's history — fetched under its own span, after
+/** The request as the model will see it: a typed bind keeps the author's text;
+ *  an unbound request uses the legacy directive reader. Fetch the thread's
+ *  history under its own span, after
  *  the chat fast path (a command never pays for it) and before the op fast
  *  path (which reads it). */
 export async function readRequest(
   ctx: ReadRequestContext,
 ): Promise<{ directives: RequestDirectives; history: HistoryItem[] }> {
   const { msg, io, root } = ctx;
-  const directives = parseDirectives(msg.text);
+  const directives = ctx.request ?? parseDirectives(msg.text);
   const history = await root.span("dispatch.history", () => io.history());
   return { directives, history };
 }
@@ -134,7 +137,9 @@ export function resolveRun(
   // the last directive in the thread's user turns. Derived on every message,
   // never stored: restart-safe, and consistent with how the Slack adapter
   // re-derives thread participation.
-  const fromTurns = lastThreadDirectives(history);
+  // Operator-bound chat has one interpreter: earlier prose does not supply
+  // sticky model, effort or verbosity through the legacy directive reader.
+  const fromTurns = directives.interpreter === "operator" ? {} : lastThreadDirectives(history);
   const sticky: ThreadDirectives = ctx.stickyAgent !== undefined ? { ...fromTurns, agent: ctx.stickyAgent } : fromTurns;
   const resolved = deps.config.resolve({
     channelId: msg.channelId,

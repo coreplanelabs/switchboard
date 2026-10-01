@@ -284,11 +284,13 @@ export function budgetClipLabel(
   agent: AgentDef,
   profile: RunProfile,
   budgetDirective?: number,
-  source: { coordinator?: boolean } = {},
+  source: { coordinator?: boolean; operator?: boolean } = {},
 ): string | undefined {
   const idle = budgetDirective !== undefined && profile.boundedBy !== "directive";
   if (profile.boundedBy === undefined) {
-    return idle ? `budget:${budgetDirective} narrowed nothing (preset asks ${agent.maxMinutes})` : undefined;
+    return idle
+      ? `${source.operator ? `requested budget ${budgetDirective}` : `budget:${budgetDirective}`} narrowed nothing (preset asks ${agent.maxMinutes})`
+      : undefined;
   }
   // A plan runner's child took its minutes from the runner's carve (agent-ship
   // item 8): the pipeline's remainder minus the reserve for the rounds after
@@ -296,9 +298,14 @@ export function budgetClipLabel(
   const clippedBy =
     profile.boundedBy === "directive" && source.coordinator
       ? "carved from the pipeline's remaining clock"
-      : clipSourceLabel(profile.boundedBy);
+      : profile.boundedBy === "directive" && source.operator
+        ? "request budget"
+        : clipSourceLabel(profile.boundedBy);
   const facts = [`${clippedBy}; preset asks ${agent.maxMinutes}`];
-  if (idle) facts.push(`budget:${budgetDirective} narrowed nothing`);
+  if (idle)
+    facts.push(
+      `${source.operator ? `requested budget ${budgetDirective}` : `budget:${budgetDirective}`} narrowed nothing`,
+    );
   return `budget ${profile.minutes} min (${facts.join("; ")})`;
 }
 
@@ -1389,6 +1396,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
       effort: directives.effort,
       budget: directives.budget,
     },
+    ...(directives.interpreter === "operator" ? { messageInterpreter: "operator" as const } : {}),
     threadDirective: { agent: sticky.agent, model: sticky.model, effort: sticky.effort },
     canEditChannelConfig: deps.config.canEditChannelConfig(chatActorOf(deps.config, msg)),
     // The boundary in force and the budget this run actually has — the same
