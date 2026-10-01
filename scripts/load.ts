@@ -152,6 +152,7 @@ import {
   presetBindOf,
   runOperator,
   type OperatorBind,
+  type OperatorInput,
 } from "../src/core/dispatch/operator.js";
 import { parseChatCommand } from "../src/core/commandChat.js";
 import { doorReport, renderDoor } from "../src/load/doorReport.js";
@@ -1273,7 +1274,12 @@ async function routeReplay(f: Flags): Promise<boolean> {
     const commandRegistry = new CommandRegistry<CoreCommandDeps>({ audit: () => {}, capabilities: ALL_CAPABILITIES });
     registerCoreCommands(commandRegistry);
     const projection = { presets: operatorPresets(), commands: routableCommands(commandRegistry) };
-    const probes = [
+    const probes: {
+      name: string;
+      text: string;
+      context?: Partial<OperatorInput>;
+      expected: (bind: OperatorBind) => boolean;
+    }[] = [
       {
         name: "ordinary read",
         text: "What is 2 + 2? Answer in one sentence.",
@@ -1339,12 +1345,49 @@ async function routeReplay(f: Flags): Promise<boolean> {
           bind.budget === 25 &&
           bind.verbosity === "debug",
       },
+      {
+        name: "same-thread fix with historical foreign PR",
+        text: "Fix it.",
+        context: {
+          requesterId: "slack:UPILOT",
+          requesterTarget: {
+            repo: "acme/api",
+            issue: "acme/api#42",
+            provenance: "Investigate https://github.com/acme/api/issues/42",
+          },
+          tail: [
+            {
+              actor: "slack:UPILOT",
+              text: "user: Investigate https://github.com/acme/api/issues/42 and explain the failure.",
+            },
+            {
+              actor: "slack:UBOT",
+              text: "assistant: Issue 42 is unresolved; https://github.com/acme/old/pull/7 is historical context.",
+            },
+          ],
+        },
+        expected: (bind: OperatorBind) =>
+          bind.shipEntry === "work_from_thread" &&
+          bind.repo === "acme/api" &&
+          bind.repoSource === "thread" &&
+          bind.prTarget === undefined,
+      },
     ];
     let passed = true;
     for (const probe of probes) {
-      const result = await runOperator({ text: probe.text, projection, tail: [], providers: [providerName] }, model, {
-        timeoutMs: OPERATOR_TIMEOUT_MS,
-      });
+      const result = await runOperator(
+        {
+          ...probe.context,
+          text: probe.text,
+          projection,
+          tail: probe.context?.tail ?? [],
+          providers: [providerName],
+        },
+        model,
+        {
+          timeoutMs: OPERATOR_TIMEOUT_MS,
+        },
+      );
       const bind =
         result.decision.kind === "binds" && result.decision.binds.length === 1 ? result.decision.binds[0] : undefined;
       const ok = bind !== undefined && probe.expected(bind);

@@ -1423,9 +1423,9 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     if (selectedPreset === "ship" && shipEntry === "work_from_thread" && repoSource !== "thread")
       return { kind: "violation", violation: "work_from_thread needs the requester's established thread repository" };
     const reviewsPr = selectedPreset === "review" || (selectedPreset === "ship" && shipEntry === "review");
-    const suppliedPrTarget = reviewsPr || selectedPreset === "ship" ? prTarget : undefined;
-    if (suppliedPrTarget !== undefined && !reviewsPr)
-      return { kind: "violation", violation: "a PR target belongs only to a review bind; omit it for other work" };
+    // The model's union-shaped tool can populate fields for another intent.
+    // Only a review may turn PR evidence into target authority.
+    const suppliedPrTarget = reviewsPr && prTarget !== null ? prTarget : undefined;
     if (reviewsPr && suppliedPrTarget === undefined)
       return { kind: "violation", violation: "a PR target is required for review; ask for the PR" };
     const verifiedPrTarget =

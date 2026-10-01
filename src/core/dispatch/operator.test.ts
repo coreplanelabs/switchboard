@@ -920,7 +920,7 @@ channels:
     });
   });
 
-  it("a non-review bind cannot turn a cited PR into its write target", () => {
+  it("a non-review bind projects away a cited PR instead of making it a write target", () => {
     const url = "https://github.com/acme/api/pull/7";
     const turn = parseOperatorTurn(
       {
@@ -936,7 +936,79 @@ channels:
       },
       ctxOf({ requestText: `In acme/api, fix the API; see ${url} for context`, presets: ["ship"] }),
     );
-    expect(turn).toMatchObject({ kind: "violation", violation: expect.stringContaining("review") });
+    expect(turn).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ repo: "acme/api", shipEntry: "work", workObjective: "fix the API" }] },
+    });
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0]).not.toHaveProperty("prTarget");
+  });
+
+  it("a thread-sourced work bind ignores a null or foreign historical PR target", () => {
+    for (const prTarget of [null, { number: 3779, source: "thread", quote: "https://github.com/acme/old/pull/3779" }]) {
+      const turn = parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "ship",
+            shipEntry: "work_from_thread",
+            workObjective: "fix the prior issue",
+            repo: "acme/api",
+            prTarget,
+            reason: "the requester asked for the earlier issue fix",
+          },
+        },
+        ctxOf({
+          requestText: "Fix it.",
+          presets: ["ship"],
+          requesterRepo: "acme/api",
+        }),
+      );
+      expect(turn).toMatchObject({
+        kind: "decision",
+        decision: { binds: [{ repo: "acme/api", repoSource: "thread", shipEntry: "work_from_thread" }] },
+      });
+      if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+      expect(turn.decision.binds[0]).not.toHaveProperty("prTarget");
+    }
+  });
+
+  it("a same-thread fix reaches Ship work with the requester's issue despite historical PR context", async () => {
+    const model = vi.fn(async () => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: {
+        preset: "ship",
+        shipEntry: "work_from_thread",
+        repo: "acme/api",
+        prTarget: null,
+        reason: "fix the requester's earlier issue",
+      },
+    }));
+    const answer = await runOperator(
+      input({
+        text: "Fix it.",
+        projection: projectionOf(["general", "ship"]),
+        requesterId: "slack:UOWNER",
+        requesterTarget: {
+          repo: "acme/api",
+          issue: "acme/api#42",
+          provenance: "Investigate https://github.com/acme/api/issues/42",
+        },
+        tail: [
+          { actor: "slack:UOWNER", text: "user: Investigate https://github.com/acme/api/issues/42." },
+          { actor: "slack:UBOT", text: "assistant: https://github.com/acme/old/pull/7 is old context." },
+        ],
+      }),
+      model,
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/api", repoSource: "thread", shipEntry: "work_from_thread" }],
+    });
+    if (answer.decision.kind !== "binds") throw new Error("not a bind");
+    expect(answer.decision.binds[0]).not.toHaveProperty("prTarget");
+    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
+    expect(model).toHaveBeenCalledTimes(1);
   });
 
   it("bind_preset marks a terse write as depending on the requester's thread target", () => {
