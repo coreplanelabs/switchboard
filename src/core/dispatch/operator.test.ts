@@ -59,6 +59,7 @@ import {
 import type { IncomingMessage } from "../types.js";
 import type { CommandDef } from "../commandRegistry.js";
 import { mcpToolName } from "../commandSurface.js";
+import { verifyPrTargetEvidence } from "./targetEvidence.js";
 
 const tool = (name: string): ToolDef => ({ name, description: name, inputSchema: { type: "object", properties: {} } });
 const command = (id: string): RoutableCommand => ({
@@ -366,11 +367,16 @@ channels:
         input: {
           preset: "review",
           severity: "major",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
           settingsEvidence: { severity: "major findings" },
           reason: "requested review bar",
         },
       },
-      ctxOf({ requestText: "Review this PR and address major findings.", presets: ["review"] }),
+      ctxOf({
+        requestText: "Review https://github.com/acme/api/pull/7 and address major findings.",
+        presets: ["review"],
+      }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
     expect(turn.decision.binds[0]).toMatchObject({ severity: "major" });
@@ -446,7 +452,16 @@ channels:
       violation: expect.stringContaining("shipEntry"),
     });
     const answer = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "review", repo: "acme/api", reason: "review" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "ship",
+          shipEntry: "review",
+          repo: "acme/api",
+          prTarget: { number: 3931, source: "request", quote: "https://github.com/acme/api/pull/3931" },
+          reason: "review",
+        },
+      },
       ctx,
     );
     expect(answer).toMatchObject({
@@ -518,6 +533,115 @@ channels:
     ).toMatchObject({ kind: "violation" });
   });
 
+  it("a PR review cannot fall back to raw chat target scans when the bind omits its target", () => {
+    for (const input of [
+      { preset: "ship", shipEntry: "review", repo: "acme/api", reason: "review" },
+      { preset: "review", repo: "acme/api", reason: "review" },
+    ]) {
+      const turn = parseOperatorTurn(
+        { tool: OPERATOR_BIND_TOOL, input },
+        ctxOf({
+          requestText: "review it",
+          presets: ["ship", "review"],
+          threadRepo: "acme/api",
+          requesterRepo: "acme/api",
+          requesterId: "slack:UOWNER",
+          tail: [{ actor: "slack:UOTHER", text: "user: https://github.com/acme/api/pull/8" }],
+        }),
+      );
+      expect(turn).toMatchObject({ kind: "violation", violation: expect.stringContaining("PR target") });
+    }
+  });
+
+  it("quoted examples, code and foreign URL tokens cannot evidence a PR target", () => {
+    const url = "https://github.com/acme/api/pull/8";
+    const bind = (requestText: string) =>
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "ship",
+            shipEntry: "review",
+            repo: "acme/api",
+            prTarget: { number: 8, source: "request", quote: url },
+            reason: "review",
+          },
+        },
+        ctxOf({ requestText, presets: ["ship"] }),
+      );
+    for (const requestText of [
+      `Review this.\n> Example ${url}`,
+      `Review this. Example \`${url}\``,
+      `Review this. Example \`\`${url}\`\``,
+      `Review this. Example \`\n${url}\n\``,
+      `Review this. Example \`\n> \` ${url}`,
+      `Review this. Example:\n\`\`\`\n${url}\n\`\`\``,
+      `Review this. Example:\n~~~\n${url}\n~~~`,
+      `Review this. Example:\n~~~\n> ~~~ ${url}`,
+      `Review this. Example:\n~~~\n~~~ ${url}`,
+      `Review this. Example:\n~~~\n    ~~~\n${url}`,
+      `Review this. Example:\n    ${url}`,
+      `Review this. Example \`${url}`,
+      `Review this. https://evil.test/|${url}`,
+      `Review this. https://evil.test/<${url}>`,
+    ])
+      expect(bind(requestText)).toMatchObject({ kind: "violation" });
+    expect(
+      verifyPrTargetEvidence(
+        { number: 8, source: "request", quote: url },
+        { requestText: `Review https://evil.test/<${url}>`, repo: "acme/api" },
+      ),
+    ).toBeUndefined();
+    expect(bind(`Review <${url}|PR #8>`)).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ prTarget: { number: 8, quote: url } }] },
+    });
+    expect(bind(`Review this. Example \`\n> \` ${url}\nReview ${url}`)).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ prTarget: { number: 8, quote: url } }] },
+    });
+    expect(bind(`Review this. Example:\n~~~\n> ~~~ ${url}\n~~~\nReview ${url}`)).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ prTarget: { number: 8, quote: url } }] },
+    });
+    expect(bind(`Review this. Example:\n~~~\n~~~ ${url}\n~~~\nReview ${url}`)).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ prTarget: { number: 8, quote: url } }] },
+    });
+    expect(bind(`Review this. Example:\n~~~\n    ~~~\n~~~\nReview ${url}`)).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ prTarget: { number: 8, quote: url } }] },
+    });
+    for (const requestText of [
+      "Review https://evil.test/|acme/api#7",
+      "Review https://evil.test/?next=acme/api#7",
+      "Review (https://evil.test/(acme/api#7)",
+      "Review <https://evil.test/|acme/api#7>",
+      "Review [acme/api#7](https://evil.test/)",
+    ]) {
+      expect(
+        verifyPrTargetEvidence(
+          { number: 7, source: "request", quote: "acme/api#7" },
+          { requestText, repo: "acme/api" },
+        ),
+        requestText,
+      ).toBeUndefined();
+      const turn = parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "review",
+            repo: "acme/api",
+            prTarget: { number: 7, source: "request", quote: "acme/api#7" },
+            reason: "review",
+          },
+        },
+        ctxOf({ requestText, presets: ["review"] }),
+      );
+      expect(turn).toMatchObject({ kind: "violation" });
+    }
+  });
+
   it("bind_preset carries a separate code-change objective when Ship work cites a PR", () => {
     const answer = parseOperatorTurn(
       {
@@ -540,6 +664,25 @@ channels:
     expect(operatorEventOf("on", { decision: answer.decision, latencyMs: 0, outputTokens: 0 })).toMatchObject({
       binds: [{ workObjective: "fix the failing check" }],
     });
+  });
+
+  it("a non-review bind cannot turn a cited PR into its write target", () => {
+    const url = "https://github.com/acme/api/pull/7";
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "ship",
+          shipEntry: "work",
+          workObjective: "fix the API",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: url },
+          reason: "the PR shows the bug",
+        },
+      },
+      ctxOf({ requestText: `In acme/api, fix the API; see ${url} for context`, presets: ["ship"] }),
+    );
+    expect(turn).toMatchObject({ kind: "violation", violation: expect.stringContaining("review") });
   });
 
   it("bind_preset marks a terse write as depending on the requester's thread target", () => {
@@ -633,15 +776,23 @@ channels:
   });
 
   it.each([
-    "review https://github.com/acme/api/pull/7",
-    "review <https://github.com/acme/api/pull/7|PR #7>",
-    "review acme/api#7",
-    "review PR #7 in Acme/Api",
-    "agent:review in acme/api: PR #7",
-    "review PR #7 on the acme/api repository",
-  ])("accepts explicit request targets: %s", (requestText) => {
+    ["review https://github.com/acme/api/pull/7", "https://github.com/acme/api/pull/7"],
+    ["review <https://github.com/acme/api/pull/7|PR #7>", "https://github.com/acme/api/pull/7"],
+    ["review acme/api#7", "acme/api#7"],
+    ["review PR #7 in Acme/Api", "PR #7"],
+    ["agent:review in acme/api: PR #7", "PR #7"],
+    ["review PR #7 on the acme/api repository", "PR #7"],
+  ])("accepts explicit request targets: %s", (requestText, quote) => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "explicit target" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote },
+          reason: "explicit target",
+        },
+      },
       ctxOf({ requestText, presets: ["review"] }),
     );
     expect(turn).toMatchObject({
@@ -658,7 +809,15 @@ channels:
     );
     expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("conflicts") });
     const target = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/web", reason: "addressed target" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/web",
+          prTarget: { number: 7, source: "request", quote: "PR #7" },
+          reason: "addressed target",
+        },
+      },
       ctxOf({ requestText, presets: ["review"] }),
     );
     expect(target).toMatchObject({
@@ -675,7 +834,15 @@ channels:
     );
     expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("conflicts") });
     const target = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/web", reason: "addressed target" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/web",
+          prTarget: { number: 7, source: "request", quote: "PR #7" },
+          reason: "addressed target",
+        },
+      },
       ctxOf({ requestText, presets: ["review"] }),
     );
     expect(target).toMatchObject({
@@ -692,7 +859,15 @@ channels:
     );
     expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("thread") });
     const target = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/web", reason: "thread target" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/web",
+          prTarget: { number: 7, source: "request", quote: "PR #7" },
+          reason: "thread target",
+        },
+      },
       ctxOf({ requestText, presets: ["review"], threadRepo: "acme/web", channelRepo: "acme/api" }),
     );
     expect(target).toMatchObject({
@@ -736,7 +911,15 @@ channels:
     );
     expect(wrong).toMatchObject({ kind: "violation", violation: expect.stringContaining("conflicts") });
     const target = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/web", reason: "explicit target" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/web",
+          prTarget: { number: 7, source: "request", quote: "PR #7" },
+          reason: "explicit target",
+        },
+      },
       ctxOf({ requestText, presets: ["review"], channelRepo: "acme/api" }),
     );
     expect(target).toMatchObject({
@@ -759,7 +942,15 @@ channels:
     { channelRepo: "acme/api", source: "channel" },
   ])("incidental request text keeps the inherited evidence source: $source", ({ source, ...facts }) => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "inherited target" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: "PR #7" },
+          reason: "inherited target",
+        },
+      },
       ctxOf({ requestText: "review PR #7; the example mentions `acme/api`", presets: ["review"], ...facts }),
     );
     expect(turn).toMatchObject({
@@ -769,16 +960,26 @@ channels:
   });
 
   it("records whether a repository came from the request or channel default", () => {
-    const bind = (requestText: string, repo: string, channelRepo?: string) =>
+    const bind = (requestText: string, repo: string, quote: string, channelRepo?: string) =>
       parseOperatorTurn(
-        { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo, reason: "review" } },
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "review",
+            repo,
+            prTarget: { number: 7, source: "request", quote },
+            reason: "review",
+          },
+        },
         ctxOf({ requestText, presets: ["review"], ...(channelRepo ? { channelRepo } : {}) }),
       );
-    expect(bind("review https://github.com/acme/api/pull/7", "acme/api")).toMatchObject({
+    expect(
+      bind("review https://github.com/acme/api/pull/7", "acme/api", "https://github.com/acme/api/pull/7"),
+    ).toMatchObject({
       kind: "decision",
       decision: { binds: [{ repo: "acme/api", repoSource: "request" }] },
     });
-    expect(bind("review PR #7", "acme/api", "acme/api")).toMatchObject({
+    expect(bind("review PR #7", "acme/api", "PR #7", "acme/api")).toMatchObject({
       kind: "decision",
       decision: { binds: [{ repo: "acme/api", repoSource: "channel" }] },
     });
@@ -1346,6 +1547,7 @@ describe("runOperator — the loop over a scripted model", () => {
           shipEntry: "work",
           workObjective: "change the linked PR",
           repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
           reason: "review the requested PR",
         },
       },
@@ -1737,13 +1939,23 @@ describe("runOperator — the loop over a scripted model", () => {
   it("a bare re-review reads the newest finished run and binds that pull request's repository", async () => {
     const answers: RouteToolCall[] = [
       { tool: OPERATOR_READ_TOOLS.threadState, input: {} },
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "re-review the thread PR" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "thread", quote: "https://github.com/acme/api/pull/7" },
+          reason: "re-review the thread PR",
+        },
+      },
     ];
     const prompts: { retries?: readonly { answer: string; violation: string }[] }[] = [];
     const answer = await runOperator(
       input({
         text: "review again",
         projection: projectionOf(["review"]),
+        requesterId: "slack:UOWNER",
+        tail: [{ actor: "slack:UOWNER", text: "user: Review https://github.com/acme/api/pull/7" }],
         newestFinishedRun: {
           agent: "review",
           repo: "acme/api",
@@ -3379,17 +3591,17 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
   it("an exact authored model ref binds without a separate model word", () => {
     const requestText = `Use model:${ASTRA} for this review.`;
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", model: ASTRA, reason: "requested model" } },
-      ctxOf({ requestText, providers: ["anthropic", "openrouter"], presets: ["review"] }),
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: ASTRA, reason: "requested model" } },
+      ctxOf({ requestText, providers: ["anthropic", "openrouter"], presets: ["general"] }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
-    expect(turn.decision.binds[0]).toMatchObject({ line: `agent:review ${requestText}`, model: ASTRA });
+    expect(turn.decision.binds[0]).toMatchObject({ line: `agent:general ${requestText}`, model: ASTRA });
   });
 
   it("a prefix of a longer authored model ref cannot select another model", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", model: "openai/o3", reason: "requested model" } },
-      ctxOf({ requestText: "Use model:openai/o3-pro for this review.", providers: ["openai"], presets: ["review"] }),
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: "openai/o3", reason: "requested model" } },
+      ctxOf({ requestText: "Use model:openai/o3-pro for this review.", providers: ["openai"], presets: ["general"] }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
     expect(turn.decision.binds[0].model).toBeUndefined();
@@ -3397,11 +3609,11 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
 
   it("a colon-suffixed model ref cannot authorize its shorter prefix", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", model: "openrouter/llama", reason: "requested model" } },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: "openrouter/llama", reason: "requested model" } },
       ctxOf({
         requestText: "Use model:openrouter/llama:free for this review.",
         providers: ["openrouter"],
-        presets: ["review"],
+        presets: ["general"],
       }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
@@ -3410,11 +3622,11 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
 
   it("an unrelated colon-prefixed token cannot authorize a model ref", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", model: "openrouter/llama", reason: "requested model" } },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: "openrouter/llama", reason: "requested model" } },
       ctxOf({
         requestText: "Inspect cache:openrouter/llama for this review.",
         providers: ["openrouter"],
-        presets: ["review"],
+        presets: ["general"],
       }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
@@ -3423,11 +3635,11 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
 
   it("a sentence period after a requested full ref keeps the model override", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", model: "openrouter/llama", reason: "requested model" } },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: "openrouter/llama", reason: "requested model" } },
       ctxOf({
         requestText: "Use model:openrouter/llama. Review this PR.",
         providers: ["openrouter"],
-        presets: ["review"],
+        presets: ["general"],
       }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
@@ -3471,16 +3683,16 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
   it("an empty optional model is omitted without a repair turn", async () => {
     const model = vi.fn(async () => ({
       tool: OPERATOR_BIND_TOOL,
-      input: { preset: "review", reason: "Review the pull request", model: "" },
+      input: { preset: "general", reason: "Review the pull request", model: "" },
     }));
     const answer = await runOperator(
-      input({ text: "review: https://github.com/example/repo/pull/1", projection: projectionOf(["review"]) }),
+      input({ text: "review: https://github.com/example/repo/pull/1", projection: projectionOf(["general"]) }),
       model,
     );
     expect(model).toHaveBeenCalledTimes(1);
     expect(answer.decision).toMatchObject({
       kind: "binds",
-      binds: [{ line: expect.stringContaining("agent:review") }],
+      binds: [{ line: expect.stringContaining("agent:general") }],
     });
     if (answer.decision.kind !== "binds") throw new Error("not a bind");
     expect(answer.decision.binds[0].model).toBeUndefined();
@@ -3491,11 +3703,11 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "review", reason: "Review the pull request", model: ASTRA },
+        input: { preset: "general", reason: "Review the pull request", model: ASTRA },
       },
       ctxOf({
         requestText: "review: https://github.com/example/repo/pull/1",
-        presets: ["review"],
+        presets: ["general"],
         providers: ["openrouter"],
       }),
     );
@@ -3507,11 +3719,11 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "review", reason: "Review the pull request", model: ASTRA, modelWord: "astra" },
+        input: { preset: "general", reason: "Review the pull request", model: ASTRA, modelWord: "astra" },
       },
       ctxOf({
         requestText: "review: https://github.com/example/repo/pull/1",
-        presets: ["review"],
+        presets: ["general"],
         providers: ["openrouter"],
       }),
     );
@@ -3523,9 +3735,9 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "review", reason: "Review the pull request", model: ASTRA, modelWord: "open" },
+        input: { preset: "general", reason: "Review the pull request", model: ASTRA, modelWord: "open" },
       },
-      ctxOf({ requestText: "open the PR for review", presets: ["review"], providers: ["openrouter"] }),
+      ctxOf({ requestText: "open the PR for review", presets: ["general"], providers: ["openrouter"] }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
     expect(turn.decision.binds[0].model).toBeUndefined();
@@ -3535,9 +3747,9 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "review", reason: "Review the pull request", model: "openai/o3", modelWord: "o3" },
+        input: { preset: "general", reason: "Review the pull request", model: "openai/o3", modelWord: "o3" },
       },
-      ctxOf({ requestText: "use o3 to review the PR", presets: ["review"], providers: ["openai"] }),
+      ctxOf({ requestText: "use o3 to review the PR", presets: ["general"], providers: ["openai"] }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
     expect(turn.decision.binds[0].model).toBe("openai/o3");
@@ -3547,9 +3759,9 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "review", reason: "Review the pull request", model: "openai/o3-pro", modelWord: "o3" },
+        input: { preset: "general", reason: "Review the pull request", model: "openai/o3-pro", modelWord: "o3" },
       },
-      ctxOf({ requestText: "use o3 to review the PR", presets: ["review"], providers: ["openai"] }),
+      ctxOf({ requestText: "use o3 to review the PR", presets: ["general"], providers: ["openai"] }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
     expect(turn.decision.binds[0].model).toBeUndefined();
@@ -3559,9 +3771,9 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "review", reason: "Review the pull request", model: ASTRA, modelWord: "openai" },
+        input: { preset: "general", reason: "Review the pull request", model: ASTRA, modelWord: "openai" },
       },
-      ctxOf({ requestText: "use openai to review the PR", presets: ["review"], providers: ["openrouter"] }),
+      ctxOf({ requestText: "use openai to review the PR", presets: ["general"], providers: ["openrouter"] }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
     expect(turn.decision.binds[0].model).toBeUndefined();

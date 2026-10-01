@@ -1505,11 +1505,9 @@ export async function dispatch(
         ? carriedOperationTarget(restart.row)
         : undefined;
     const operationTarget =
-      opts.operationTarget ??
-      carriedTarget ??
-      (operatorRepo !== undefined
-        ? { repo: operatorRepo, ...(operatorPrTarget !== undefined ? { prTarget: operatorPrTarget } : {}) }
-        : undefined);
+      operatorRepo !== undefined && operatorPrTarget !== undefined
+        ? { repo: operatorRepo, prTarget: operatorPrTarget }
+        : (opts.operationTarget ?? carriedTarget ?? (operatorRepo !== undefined ? { repo: operatorRepo } : undefined));
     const historicalRoutePreset = restart?.row.meta.route?.preset;
     const resolveCurrent = () =>
       resolveRun(deps, {
@@ -2101,6 +2099,7 @@ export async function dispatch(
               ? { operatorRepo: operatorRepo ?? inheritedRepo }
               : {}),
             reviewBarePr: true,
+            ...(operationTarget?.prTarget !== undefined ? { operationTarget } : {}),
           })
         : undefined;
     if (earlyRepoTarget !== undefined) {

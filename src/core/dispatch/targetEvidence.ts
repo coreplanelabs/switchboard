@@ -1,3 +1,5 @@
+import { requesterTargetText, requesterUrlText, requesterUrlWords } from "./requesterText.js";
+
 /** A PR identity selected by the operator, with the requester's own words
  *  retained as evidence for the deterministic target gate. */
 export interface PrTargetEvidence {
@@ -58,14 +60,26 @@ function tokenContinuation(char: string | undefined, next?: string): boolean {
 function completeSpan(text: string, quote: string): boolean {
   let at = text.indexOf(quote);
   while (at >= 0) {
+    let tokenStart = at;
+    while (tokenStart > 0 && text[tokenStart - 1]?.trim() !== "") tokenStart--;
+    let tokenEnd = at + quote.length;
+    while (tokenEnd < text.length && text[tokenEnd]?.trim() !== "") tokenEnd++;
     if (
       !tokenContinuation(text[at - 1], text[at]) &&
-      !tokenContinuation(text[at + quote.length], text[at + quote.length + 1])
+      !tokenContinuation(text[at + quote.length], text[at + quote.length + 1]) &&
+      !requesterUrlWords(text.slice(tokenStart, tokenEnd)).some((word) => requesterUrlText(word) !== undefined)
     )
       return true;
     at = text.indexOf(quote, at + 1);
   }
   return false;
+}
+
+function authoredSpan(text: string, quote: string): boolean {
+  const addressable = requesterTargetText(text);
+  if (quote.startsWith("https://") || quote.startsWith("http://"))
+    return requesterUrlWords(addressable).some((word) => requesterUrlText(word) === quote);
+  return completeSpan(addressable, quote);
 }
 
 /** A model's target is usable only when the same actor authored the complete
@@ -95,9 +109,9 @@ export function verifyPrTargetEvidence(
   const quote = value.quote;
   const authored =
     value.source === "request"
-      ? completeSpan(context.requestText, quote)
+      ? authoredSpan(context.requestText, quote)
       : context.requesterId !== undefined &&
-        context.tail?.some((turn) => turn.actor === context.requesterId && completeSpan(turn.text, quote)) === true;
+        context.tail?.some((turn) => turn.actor === context.requesterId && authoredSpan(turn.text, quote)) === true;
   if (!authored) return undefined;
   const target = quotedPr(quote);
   if (target === undefined || target.number !== value.number) return undefined;

@@ -69,11 +69,18 @@ describe("the door row owns every checked-in routed fixture", () => {
     })),
   ];
 
-  it("every existing preset fixture lands through bind_preset without the readers' router", async () => {
+  it("grounded preset fixtures bind, while an unevidenced review cannot use the readers' router", async () => {
     expect(cases.length).toBeGreaterThan(0);
     expect(new Set(cases.map((fixture) => fixture.id)).size).toBe(cases.length);
     for (const fixture of cases) {
       const answer = await runOperator(input(fixture.text), bindModel(fixture.preset));
+      if (fixture.preset === "review") {
+        expect(answer.decision.kind, fixture.id).toBe("non_decision");
+        expect(answer.attempts, fixture.id).toEqual(
+          expect.arrayContaining([expect.objectContaining({ violation: expect.stringContaining("PR target") })]),
+        );
+        continue;
+      }
       expect(boundPreset(answer.decision), fixture.id).toBe(fixture.preset);
       expect(answer.decision, fixture.id).toMatchObject({ reason: "fixture route" });
     }

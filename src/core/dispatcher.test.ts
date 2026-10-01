@@ -4597,6 +4597,8 @@ describe("review post-step", () => {
         input: {
           preset: "review",
           severity: "major",
+          repo: "acme/api",
+          prTarget: { number: 42, source: "request", quote: "https://github.com/acme/api/pull/42" },
           settingsEvidence: { severity: "major findings" },
           reason: "requested review bar",
         },
@@ -20030,7 +20032,12 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const originalRows = await Promise.all([INSTANCE, ...s.otherInstances].map((id) => s.instances.listUnits(id)));
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
-      input: { preset: "review", reason: "review the exact PR head" },
+      input: {
+        preset: "review",
+        repo: "acme/api",
+        prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+        reason: "review the exact PR head",
+      },
     }));
     s.deps.resolveRepoContext = vi.fn(() => ({
       repo: "acme/api",
@@ -20131,7 +20138,12 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     s.deps.runs!.listRuns = vi.fn(async () => ({ runs: [oldReview, s.shipParent] }));
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
-      input: { preset: "review", reason: "review the changed PR head" },
+      input: {
+        preset: "review",
+        repo: "acme/api",
+        prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+        reason: "review the changed PR head",
+      },
     }));
     s.deps.postReviewComment = vi.fn(async () => {});
     for (const head of ["2".repeat(40), "3".repeat(40)]) {
@@ -20239,7 +20251,12 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     await s.instances.putUnits([{ ...unit, ending: undefined }]);
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
-      input: { preset: "review", reason: "review PR" },
+      input: {
+        preset: "review",
+        repo: "acme/api",
+        prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+        reason: "review PR",
+      },
     }));
     s.deps.resolveRepoContext = vi.fn(() => ({ repo: "acme/api", ref: s.branch, pr: 7 }));
     s.deps.postReviewComment = vi.fn(async () => {});
@@ -20862,6 +20879,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
         preset: "review",
         request: "agent:review in acme/api: PR #8. Read only.",
         repo: "acme/api",
+        prTarget: { number: 8, source: "request", quote: "PR #8" },
         reason: "review the named PR",
       },
     }));
@@ -22705,6 +22723,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       line: string;
       reason?: string;
       repo?: string;
+      prTarget?: { number: number; source: "request" | "thread"; quote: string };
       shipEntry?: "work" | "work_from_thread" | "review" | "plan" | "continue";
     }[];
     question?: {
@@ -22737,6 +22756,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
               request: bind.line,
               reason: bind.reason ?? "why",
               ...(bind.repo ? { repo: bind.repo } : {}),
+              ...(bind.prTarget ? { prTarget: bind.prTarget } : {}),
               ...(bind.shipEntry ? { shipEntry: bind.shipEntry } : {}),
             },
           };
@@ -22820,7 +22840,12 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     deps.resolveRepoContext = () => ({ rejectedRepo: "acme/try-catch" });
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "review", repo: "acme/try-catch", reason: "review request" },
+      input: {
+        preset: "review",
+        repo: "acme/try-catch",
+        prTarget: { number: 7, source: "request", quote: "PR #7" },
+        reason: "review request",
+      },
     }));
     const { io } = fakeIO();
     await dispatch(deps, msg("review in acme/try-catch: check PR #7", "slack:UADMIN"), io);
@@ -22954,6 +22979,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
           line: "agent:review https://github.com/acme/web/pull/5",
           reason: "review the requested PR",
           repo: "acme/web",
+          prTarget: { number: 5, source: "request", quote: "acme/web#5" },
         },
       ],
     });
@@ -22979,9 +23005,14 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         writeFile: async () => "",
       },
     });
-    await dispatch(deps, msg("in acme/api: review acme/web#5", "slack:UADMIN"), fakeIO().io, {
-      operationTarget: { repo: "acme/api", ref: "operation" },
-    });
+    await dispatch(
+      deps,
+      msg("in acme/api: review acme/web#5; see https://github.com/acme/api/pull/9 for context", "slack:UADMIN"),
+      fakeIO().io,
+      {
+        operationTarget: { repo: "acme/api", ref: "operation" },
+      },
+    );
     expect(makeExecutor).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ repo: "acme/web" }),
@@ -22991,6 +23022,35 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       repo: "acme/web",
       pr: 5,
     });
+  });
+
+  it("the early review preflight receives the operator's verified PR target", async () => {
+    const { deps } = operatorDeps(ON_YAML);
+    const url = "https://github.com/acme/api/pull/7";
+    deps.operatorModel = decides({
+      binds: [
+        {
+          line: `agent:review review ${url}`,
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: url },
+        },
+      ],
+    });
+    deps.resolveRepoContext = vi.fn(() => ({ repo: "acme/api", pr: 7, closedPr: { number: 7, merged: true } }));
+    await dispatch(
+      deps,
+      msg(`review ${url}; see https://github.com/acme/api/pull/8 for context`, "slack:UADMIN"),
+      fakeIO().io,
+      { operationTarget: { repo: "acme/api" } },
+    );
+    expect(deps.resolveRepoContext).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      undefined,
+      expect.anything(),
+      true,
+      { repo: "acme/api", prTarget: { number: 7, source: "request", quote: url } },
+    );
   });
 
   it("`mcp list` is bound to the MCP registry command, never help", async () => {

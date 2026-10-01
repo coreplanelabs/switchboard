@@ -1,6 +1,48 @@
 /** One requester's addressable prose, excluding quoted examples and code. */
 export function requesterTargetText(text: string): string {
-  return text.replace(/^\s*>[^\n]*$/gm, " ").replace(/```[\s\S]*?```|`[^`\n]*`/g, " ");
+  let fence: { marker: "`" | "~"; width: number } | undefined;
+  let inlineWidth = 0;
+  return text
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trimStart();
+      if (trimmed.startsWith(">")) {
+        inlineWidth = 0;
+        return " ";
+      }
+      const indentation = line.slice(0, line.length - trimmed.length);
+      if (indentation.length >= 4 || indentation.includes("\t")) {
+        inlineWidth = 0;
+        return " ";
+      }
+      const first = trimmed[0];
+      const leadingMarker = first === "`" || first === "~" ? first : undefined;
+      let leadingWidth = 0;
+      if (leadingMarker !== undefined) while (trimmed[leadingWidth] === leadingMarker) leadingWidth++;
+      if (fence !== undefined) {
+        if (leadingMarker === fence.marker && leadingWidth >= fence.width && trimmed.slice(leadingWidth).trim() === "")
+          fence = undefined;
+        return " ";
+      }
+      if (inlineWidth === 0 && leadingMarker !== undefined && leadingWidth >= 3) {
+        fence = { marker: leadingMarker, width: leadingWidth };
+        return " ";
+      }
+      let addressable = "";
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === "`") {
+          let width = 0;
+          while (line[i + width] === "`") width++;
+          if (inlineWidth === 0) inlineWidth = width;
+          else if (inlineWidth === width) inlineWidth = 0;
+          addressable += " ";
+          i += width - 1;
+        } else addressable += inlineWidth > 0 ? " " : char;
+      }
+      return addressable;
+    })
+    .join("\n");
 }
 
 /** Preserve whole URL tokens; a GitHub-looking substring inside a foreign
@@ -16,12 +58,21 @@ export function requesterUrlWords(text: string): string[] {
   };
   for (const char of text) {
     if (char === "<") {
+      if (angleLabel) continue;
+      if (token || angleLink) {
+        token += char;
+        continue;
+      }
       finish();
       angleLink = true;
       angleLabel = false;
       continue;
     }
     if (char === ">") {
+      if (!angleLink) {
+        token += char;
+        continue;
+      }
       finish();
       angleLink = false;
       angleLabel = false;
