@@ -8,7 +8,11 @@ import {
 } from "../references/receipts.js";
 import type { Actor, ChannelVisibility } from "../authz/types.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
-import type { SlackContextCapability, VerifiedSlackContextCapability } from "../../tools/slackContext.js";
+import {
+  slackContextTool,
+  type SlackContextCapability,
+  type VerifiedSlackContextCapability,
+} from "../../tools/slackContext.js";
 import type { RunnableTool } from "../../tools/runnableTool.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
 import {
@@ -16,6 +20,12 @@ import {
   privateAudienceStillValid,
   revalidateSourcesWithinBudget,
 } from "./privateAudience.js";
+
+/** Declaring the source tool selects its receipt path even when binding fails.
+ * Never fall back to eager content reads when the requester has no capability. */
+export function sourceIntakeFor(toolset: string): "automatic" | "tool" {
+  return TOOLSETS[toolset]?.includes(slackContextTool) ? "tool" : "automatic";
+}
 
 export interface SlackContextBinding {
   capability: SlackContextCapability;

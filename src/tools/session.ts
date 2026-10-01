@@ -43,7 +43,7 @@ export interface SessionCapability {
   writeNotepad(text: string): Promise<FenceResult>;
   /** The thread's files (record 0033): the catalogue its runs' records name —
    *  received and produced, held by the store or not — read fresh on each call
-   *  so a file this run just received or attached is in it. Absent without a store. */
+   *  so a file this run just received or attached is in it. Absent without an admitted catalogue reader. */
   assets?: () => Promise<ThreadAsset[]>;
   /** Where a file sits in THIS run's workspace when this run staged it
    *  (`attachments/<index>-<basename>`); nothing for a file it did not pull. */
@@ -58,8 +58,8 @@ export interface SessionAssets {
 }
 
 /** The capability for a run with a session, over the write-through; nothing
- *  for a run without one. The thread's files join it when the deployment has
- *  an artifact store. */
+ *  for a run without one. The thread's files join it only when the caller supplies
+ *  an admitted catalogue reader. */
 export function sessionCapabilityFor(
   run: Pick<LedgerRun, "session" | "runId"> | undefined,
   ledger: Pick<LedgerWriteThrough, "readSession" | "searchSession" | "readNotepad" | "writeNotepad">,
@@ -165,7 +165,7 @@ export const recallTool: RunnableTool = {
       if (!ctx.session.assets) {
         return JSON.stringify({
           assets: [],
-          note: "this deployment has no artifact store: the thread's files are not catalogued",
+          note: "the thread's file catalogue is not available to this run",
         });
       }
       const assets = await ctx.session.assets();

@@ -1,5 +1,5 @@
 import { requiresFreshSourceTool } from "./runLedger/sessionLog.js";
-import { addSourceReceipt, referenceReceipt, sourceBinding, type SessionSources } from "./references/receipts.js";
+import { sourceBinding, type SessionSources } from "./references/receipts.js";
 import { getAgent } from "../agents/registry.js";
 import { MINUTE_MS, minutesToMs } from "./budgets.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
@@ -116,7 +116,7 @@ import {
 } from "./dispatch/provision.js";
 import type { FrictionDiagnosis } from "./runFriction.js";
 import { claimRun, githubCapabilityFor, type RunDeps } from "./dispatch/run.js";
-import { bindSlackContext, type SlackContextBinding } from "./dispatch/slackContextBinding.js";
+import { bindSlackContext, sourceIntakeFor, type SlackContextBinding } from "./dispatch/slackContextBinding.js";
 import {
   privateAudienceRequired,
   privateAudienceStillValid,
@@ -2211,8 +2211,12 @@ export async function dispatch(
     // of which this touches. A resume replays its plan's messages and a
     // restart re-dispatches a request already answered, so neither resolves
     // again. Off by default (`references.enabled`).
+    // A declared source tool owns all linked content and earlier files through
+    // its requester-bound, durable receipt path. URLs stay in the request; a
+    // missing private capability must never restore automatic preload.
+    const sourceIntake = sourceIntakeFor(agent.toolset);
     const references =
-      !resume && !restart && referencesOn(deps.config.config)
+      sourceIntake === "automatic" && !resume && !restart && referencesOn(deps.config.config)
         ? await root.span("dispatch.references", () =>
             readReferences(deps, { msg, actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)) }),
           )
@@ -2994,7 +2998,7 @@ export async function dispatch(
     // they are left out here — the attachments line names them, and `recall`
     // reads them fresh.
     const threadAssets: Promise<ThreadAsset[]> | undefined =
-      !resume && deps.artifacts && thread && thread.length > 0
+      sourceIntake === "automatic" && !resume && deps.artifacts && thread && thread.length > 0
         ? readThreadAssets(
             { runs: runsService, store: deps.artifacts, trustedCoordinatorChild: opts.coordinator !== undefined },
             msg.threadKey,
@@ -3613,7 +3617,6 @@ export async function dispatch(
             history: agent.name === "orchestrator" ? history.filter((item) => item.role === "user") : history,
             threadArtifacts: threadArtifacts?.block?.text,
             parentSeed: opts.seed !== undefined,
-            referencedContext: references.blocks.length > 0 || threadFiles.length > 0,
           })
         : undefined;
     if (mainAudience && !mainAudience.ok) {
@@ -3718,16 +3721,12 @@ export async function dispatch(
       ...(seedActors !== undefined ? { seedActors } : {}),
     });
     if (slackContext) {
-      let sources: SessionSources = sourceSession?.sources ?? {
+      const sources: SessionSources = sourceSession?.sources ?? {
         version: 1,
         status: "known",
         binding: sourceBinding(msg),
         receipts: [],
       };
-      for (const [i, conversation] of references.conversations.entries()) {
-        const receipt = referenceReceipt(conversation, references.visibilities[i], sourceBinding(msg));
-        sources = receipt ? addSourceReceipt(sources, receipt) : { version: 1, status: "unknown" };
-      }
       if (
         !(await slackContext.initialize(sources, (next) => ledgerRun?.writeSources(next) ?? Promise.resolve(false)))
       ) {
@@ -3763,7 +3762,7 @@ export async function dispatch(
         : sessionCapabilityFor(
             ledgerRun,
             deps.runLedger,
-            deps.artifacts
+            sourceIntake === "automatic" && deps.artifacts
               ? {
                   read: () =>
                     readThreadAssets(

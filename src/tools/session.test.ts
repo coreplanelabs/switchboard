@@ -297,7 +297,7 @@ describe("recall — the caller's own session log", () => {
     const { cap: storeless } = capability();
     expect(JSON.parse(String(await recallTool.run({ assets: true }, ctxWith(storeless))))).toEqual({
       assets: [],
-      note: "this deployment has no artifact store: the thread's files are not catalogued",
+      note: "the thread's file catalogue is not available to this run",
     });
     // A run in a private group the requester is not in: the list is empty, and the catalogue is never asked.
     const denied = ctxWith(cap, {
