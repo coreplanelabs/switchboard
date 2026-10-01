@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.274.0](https://github.com/coreplanelabs/switchboard/compare/v1.273.0...v1.274.0) (2026-10-01)
+
+
+### Features
+
+* **commands:** inspect live credentials without exposing values ([#2594](https://github.com/coreplanelabs/switchboard/issues/2594)) ([0b57b45](https://github.com/coreplanelabs/switchboard/commit/0b57b45d3d81ebfeea49343207e7e34da71eae21))
+
+
+### Bug fixes
+
+* **resident:** count temporary backup downloads during restore ([#2603](https://github.com/coreplanelabs/switchboard/issues/2603)) ([b2bdcd4](https://github.com/coreplanelabs/switchboard/commit/b2bdcd4be93278c965d1c8db9726d4f9fc0127f0))
+* **runs:** keep missing budget answers explicit through restart ([#2593](https://github.com/coreplanelabs/switchboard/issues/2593)) ([796b781](https://github.com/coreplanelabs/switchboard/commit/796b781e2d4cba77f976f576025f5519c9c3a2cc))
+* **ship:** retain worker outcomes through restarts ([#2591](https://github.com/coreplanelabs/switchboard/issues/2591)) ([86096ac](https://github.com/coreplanelabs/switchboard/commit/86096ac4e393732643bbfcc3db4032ed50baea38))
+* **ship:** verify private worker DM before coding ([#2599](https://github.com/coreplanelabs/switchboard/issues/2599)) ([efe1fe9](https://github.com/coreplanelabs/switchboard/commit/efe1fe98ad9794a8f6c47eb55eb145ad413e3c38))
+
+
+### Performance
+
+* **deploy:** cache sandbox image checks in Depot ([#2596](https://github.com/coreplanelabs/switchboard/issues/2596)) ([51ff071](https://github.com/coreplanelabs/switchboard/commit/51ff0712c63496230372321c01ed262b12a06dac))
+
 ## [1.273.0](https://github.com/coreplanelabs/switchboard/compare/v1.272.0...v1.273.0) (2026-10-01)
 
 
