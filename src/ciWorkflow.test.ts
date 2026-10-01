@@ -932,13 +932,13 @@ describe("the production deploy is one reusable workflow", () => {
     for (const l of uses) expect(l.trim(), `unpinned action: ${l.trim()}`).toMatch(/@[0-9a-f]{40} # v\d+\.\d+\.\d+$/);
   });
 
-  it("this repository's own call enables the live ingress smoke and inherits its secrets", () => {
+  it("this repository's release enables ingress smoke only after its credential is configured", () => {
     const release = parse(read(".github/workflows/release-please.yml")) as {
       jobs: Record<string, { uses?: string; with?: Record<string, unknown>; secrets?: string }>;
     };
     const call = release.jobs.deploy;
     expect(call.uses).toBe("./.github/workflows/deploy-production.yml");
-    expect(call.with).toEqual({ targets: "affected", smoke: true });
+    expect(call.with).toEqual({ targets: "affected", smoke: "${{ vars.SMOKE_INGRESS_ENABLED == 'true' }}" });
     expect(call.secrets).toBe("inherit");
   });
 
