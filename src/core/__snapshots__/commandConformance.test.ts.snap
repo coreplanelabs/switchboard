@@ -352,6 +352,51 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "credentials:exec",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "credentials.inspect",
+    "options": [
+      {
+        "name": "backend",
+        "required": true,
+        "type": "enum",
+        "values": [
+          "resident",
+          "sandbox",
+        ],
+      },
+      {
+        "name": "repo",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "ref",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "head",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "delivery:read",
     "args": [],
     "effect": "read",

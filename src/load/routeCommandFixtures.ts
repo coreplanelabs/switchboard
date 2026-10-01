@@ -46,6 +46,20 @@ const f = (
 ): RouteCommandFixture => ({ id, kind, text, command, input, ...(threadRepo ? { threadRepo } : {}) });
 
 export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
+  f(
+    "c44h",
+    "happy",
+    "inspect credentials for live-1 on resident acme/api branch canary/test at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "credentials.inspect",
+    { args: ["live-1"], options: { backend: "resident", repo: "acme/api", ref: "canary/test", head: "a".repeat(40) } },
+  ),
+  f(
+    "c44p",
+    "paraphrase",
+    "count credential exposure for live-2 on sandbox acme/api branch canary/test at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "credentials.inspect",
+    { args: ["live-2"], options: { backend: "sandbox", repo: "acme/api", ref: "canary/test", head: "a".repeat(40) } },
+  ),
   f("c01h", "happy", "what can you do", "help.show"),
   f("c01p", "paraphrase", "how do I talk to you — what are my options here?", "help.show"),
   f("c02h", "happy", "list every chat command", "help.commands"),
@@ -287,6 +301,7 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c10d", "should I stop the run that is taking forever?", "runs.stop"),
   d("c11d", "how is the plan's second unit going overall?", "runs.unit"),
   d("c12d", "did the conductor's children do a good job?", "runs.children"),
+  d("c44d", "how do run credentials stay isolated?", "credentials.inspect"),
   d("c13d", "was that review too long to be useful?", "review.abridge"),
   d("c14d", "this process feels slow, what should we change?", "friction.report"),
   d("c15d", "do we have too many open issues already?", "friction.propose"),

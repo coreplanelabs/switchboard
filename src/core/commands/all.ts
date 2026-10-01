@@ -1,3 +1,4 @@
+import { registerCredentialsCommands, type CredentialsCommandDeps } from "./credentials.js";
 import { CommandRegistry } from "../commandRegistry.js";
 import { registerArtifactsCommands, type ArtifactsCommandDeps } from "./artifacts.js";
 import { registerConfigCommands, type ConfigCommandDeps } from "./config.js";
@@ -33,6 +34,7 @@ import { registerStatusCommands, type StatusCommandDeps } from "./status.js";
 
 export type CoreCommandDeps = HelpCommandDeps &
   ConfigCommandDeps &
+  CredentialsCommandDeps &
   RunsCommandDeps &
   ReviewCommandDeps &
   FrictionCommandDeps &
@@ -59,6 +61,7 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerHelpCommands(registry);
   registerStatusCommands(registry);
   registerConfigCommands(registry);
+  registerCredentialsCommands(registry);
   registerRunsCommands(registry);
   registerSteerCommands(registry);
   registerReviewCommands(registry);

@@ -35,6 +35,8 @@ import { leasedPushCommand } from "../../publicationPush.js";
 /** One run driving a pi, as the routes see it. */
 export interface LiveHarness {
   runId: string;
+  /** Trusted live process identity for the operator-only diagnostic, never supplied by a caller. */
+  credentialInspectionProcess?: () => { pid: number; processBirth: string } | undefined;
   /** The tools pi relays to the bot — the native definitions, run here. */
   tools: RunnableTool[];
   toolContext: ToolContext;

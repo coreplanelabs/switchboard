@@ -632,6 +632,7 @@ export interface OpenCodeLaunchDeps {
  *  container made), and the version the info answered. */
 export interface OpenCodeStarted {
   pid: number;
+  processBirth?: string;
   port: number;
   tailerPid: number;
   password: string;
@@ -782,7 +783,7 @@ export async function launchOpenCode(
     await sleep(poll);
     if (clock() - startedAt >= 1000) poll = Math.min(OPENCODE_READY_POLL_MAX_MS, poll * 2);
   }
-  return { pid, port, tailerPid: tailer.pid, password, paths, version, feedOffset };
+  return { pid, processBirth: started.processBirth, port, tailerPid: tailer.pid, password, paths, version, feedOffset };
 }
 
 /** What a run's row remembers about its OpenCode (`OpenCodeHarnessFacts`): the
@@ -790,13 +791,14 @@ export async function launchOpenCode(
  *  feed byte the ledger's effect reaches, the bearer's hash (never the
  *  bearer), the container's word, and the loop's relaunch count. */
 export function openCodeFacts(
-  started: Pick<OpenCodeStarted, "pid" | "port" | "paths" | "tailerPid">,
+  started: Pick<OpenCodeStarted, "pid" | "processBirth" | "port" | "paths" | "tailerPid">,
   run: { sessionID: string; logOffset: number; bearer?: string; container?: string; relaunches: number },
 ): OpenCodeHarnessFacts {
   const bearerHash = run.bearer === undefined ? undefined : bearerHashOf(run.bearer);
   return {
     harness: "opencode",
     pid: started.pid,
+    ...(started.processBirth === undefined ? {} : { processBirth: started.processBirth }),
     port: started.port,
     tailerPid: started.tailerPid,
     logOffset: run.logOffset,

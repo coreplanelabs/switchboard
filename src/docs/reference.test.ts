@@ -254,10 +254,14 @@ describe("the real catalogue", () => {
     expect(out).toContain("deploy restart");
   });
 
-  it("renders every registered command into the catalogue table with its blast radius, the exec-class writes being exactly repo test and repo build", () => {
+  it("renders every registered command into the catalogue table with its declared blast radius", () => {
     const out = renderCatalogue(real);
     for (const cmd of real) expect(out).toContain(`| \`${cmd.id}\` | `);
-    expect(real.filter((c) => c.blastRadius === "exec").map((c) => c.id)).toEqual(["repo.test", "repo.build"]);
+    expect(real.filter((c) => c.blastRadius === "exec").map((c) => c.id)).toEqual([
+      "credentials.inspect",
+      "repo.test",
+      "repo.build",
+    ]);
     expect(
       real
         .filter((c) => c.blastRadius === "destructive")

@@ -289,6 +289,8 @@ export async function openOpenCodeRun(
 
   // What the run continues on: the fresh launch, or the re-attached server.
   let server: OpenCodeLive | undefined;
+  live.credentialInspectionProcess = () =>
+    facts?.processBirth === undefined ? undefined : { pid: facts.pid, processBirth: facts.processBirth };
   // The container was replaced under the run (the ceiling's verdict): the old
   // process is gone with the old container's disk, and a pid in the container
   // this run holds now is a stranger's, so `end` probes, ends and removes
@@ -506,7 +508,13 @@ export async function openOpenCodeRun(
       // count carried through (0 on a fresh run).
       saveFacts(
         openCodeFacts(
-          { pid: started.pid, port: started.port, paths: started.paths, tailerPid: started.tailerPid },
+          {
+            pid: started.pid,
+            processBirth: started.processBirth,
+            port: started.port,
+            paths: started.paths,
+            tailerPid: started.tailerPid,
+          },
           {
             sessionID: server.sessionID,
             logOffset: started.feedOffset,

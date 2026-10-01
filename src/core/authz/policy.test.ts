@@ -62,6 +62,18 @@ const commandRow = (action: string, commandId: string, allow: readonly Actor[], 
 });
 
 const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> = {
+  "credentials:exec command [has-grant(credentials:exec)] kinds=user|service": {
+    allow: [
+      [A.admin, command("credentials.inspect")],
+      [{ ...A.admin, kind: "service" }, command("credentials.inspect")],
+    ],
+    deny: [
+      [A.noGrants, command("credentials.inspect")],
+      [A.browser, command("credentials.inspect")],
+      [{ ...A.admin, kind: "agent", onBehalfOf: A.admin }, command("credentials.inspect")],
+      [{ ...A.admin, kind: "schedule" }, command("credentials.inspect")],
+    ],
+  },
   // Record 0037: who may point the bot at a channel's thread. Asked for a
   // pointing actor (one membership, the origin, no grants): public from
   // anywhere, private only from inside, denied elsewhere for an admin too;

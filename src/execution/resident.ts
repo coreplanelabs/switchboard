@@ -1,4 +1,10 @@
-import { DRAIN } from "../core/budgets.js";
+import {
+  emptyCredentialInspection,
+  parseCredentialInspection,
+  type CredentialInspection,
+  type CredentialInspectionInput,
+} from "./credentialInspection.js";
+import { CREDENTIAL_INSPECTION_MAX_MS, DRAIN } from "../core/budgets.js";
 import { refusalOf, residentErrorCause, RefusalError } from "../core/refusal.js";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { classifyError } from "../core/trace/classify.js";
@@ -1941,6 +1947,23 @@ export class ResidentExecutor implements Executor {
     } catch (err) {
       failWaitSpan(err);
       throw err;
+    }
+  }
+
+  async inspectCredentials(input: CredentialInspectionInput): Promise<CredentialInspection> {
+    try {
+      if (input.signal?.aborted) return emptyCredentialInspection();
+      const { signal, ...binding } = input;
+      const env = this.opts.resolveEnvs ? await this.opts.resolveEnvs() : {};
+      const { status, data } = await this.call(
+        "/inspect-credentials",
+        { input: binding, env },
+        CREDENTIAL_INSPECTION_MAX_MS,
+        signal,
+      );
+      return status === 200 && !signal?.aborted ? parseCredentialInspection(data) : emptyCredentialInspection();
+    } catch {
+      return emptyCredentialInspection();
     }
   }
 

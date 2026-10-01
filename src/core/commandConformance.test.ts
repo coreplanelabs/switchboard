@@ -265,7 +265,11 @@ describe("command conformance — catalogue fences", () => {
   it("blast radius: every chat-exposed write of class write or destructive declares `destructive` and a risk line; reads and exec-class writes are exempt", () => {
     expect(blastRadiusGaps(CATALOGUE)).toEqual([]);
     const fenced = CATALOGUE.filter((c) => c.surfaces?.chat !== false && c.effect === "write");
-    expect(fenced.filter((c) => c.action.endsWith(":exec")).map((c) => c.id)).toEqual(["repo.test", "repo.build"]);
+    expect(fenced.filter((c) => c.action.endsWith(":exec")).map((c) => c.id)).toEqual([
+      "credentials.inspect",
+      "repo.test",
+      "repo.build",
+    ]);
     expect(fenced.filter((c) => !c.action.endsWith(":exec"))).toHaveLength(22);
   });
 

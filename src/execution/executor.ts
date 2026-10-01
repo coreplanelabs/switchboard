@@ -1,3 +1,4 @@
+import type { CredentialInspection, CredentialInspectionInput } from "./credentialInspection.js";
 import type { ExecResult } from "./execResult.js";
 export type { ExecResult } from "./execResult.js";
 import { execFile } from "node:child_process";
@@ -47,6 +48,8 @@ export interface MoveOptions extends ExecTraceOptions {
 }
 
 export interface Executor {
+  /** Fixed operator diagnostic. Unsupported backends expose no shell fallback. */
+  inspectCredentials?(input: CredentialInspectionInput): Promise<CredentialInspection>;
   /** Run a shell command; returns combined output (never throws on non-zero
    *  exit). `opts.signal` is a hard run stop: an implementation that can
    *  cancel the underlying command does so and returns/throws promptly; one that

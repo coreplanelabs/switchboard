@@ -107,6 +107,7 @@ commands:
   config set           — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
   config clear         — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+  credentials inspect  — Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
   runs get             — One run's record and cost in dollars per model (or unpriced); \`--include messages\` adds events with free text wrapped as untrusted content; \`--include audience\` adds a structural refusal diagnostic when recorded.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
@@ -171,6 +172,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "config.show",
   "costs.by",
   "costs.snapshot",
+  "credentials.inspect",
   "delivery.report",
   "deploy.plan",
   "friction.propose",
@@ -225,6 +227,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "config_show",
   "costs_by",
   "costs_snapshot",
+  "credentials_inspect",
   "delivery_report",
   "deploy_plan",
   "dispatch",
@@ -287,6 +290,8 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`config set\` — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
 • \`config clear\` — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+*credentials*
+• \`credentials inspect\` — Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
 • \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
@@ -399,6 +404,7 @@ commands:
   config set           — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
   config clear         — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+  credentials inspect  — Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
   runs get             — One run's record and cost in dollars per model (or unpriced); \`--include messages\` adds events with free text wrapped as untrusted content; \`--include audience\` adds a structural refusal diagnostic when recorded.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
@@ -451,6 +457,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "config.overrides",
   "config.set",
   "config.show",
+  "credentials.inspect",
   "delivery.report",
   "deploy.plan",
   "friction.propose",
@@ -495,6 +502,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "config_overrides",
   "config_set",
   "config_show",
+  "credentials_inspect",
   "delivery_report",
   "deploy_plan",
   "dispatch",
@@ -549,6 +557,8 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 • \`config set\` — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
 • \`config clear\` — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+*credentials*
+• \`credentials inspect\` — Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
 • \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
@@ -647,6 +657,7 @@ commands:
   config set           — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
   config clear         — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+  credentials inspect  — Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
   runs get             — One run's record and cost in dollars per model (or unpriced); \`--include messages\` adds events with free text wrapped as untrusted content; \`--include audience\` adds a structural refusal diagnostic when recorded.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
@@ -684,6 +695,7 @@ exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes 
   "config.overrides",
   "config.set",
   "config.show",
+  "credentials.inspect",
   "deploy.plan",
   "help.commands",
   "help.show",
@@ -713,6 +725,7 @@ exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
   "config_overrides",
   "config_set",
   "config_show",
+  "credentials_inspect",
   "deploy_plan",
   "dispatch",
   "help_commands",
@@ -752,6 +765,8 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 • \`config set\` — Set the agent, model, effort, verbosity, harness, boundary or default repository (\`--repo owner/name\`) for a channel (gated), or agent settings for yourself; per-agent forms take --models.<agent>, --efforts.<agent> and --harness.<agent>. Set the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (\`config set user --user <id> --github <login>\`, identity admins — never your own: it is not yours to type), or the pull-request watch (\`config set org|repo --pulls.watch on|off\` with its caps, repo taking \`--repo <owner/name>\`).
 • \`config clear\` — Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); \`config clear user --user <id>\` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+*credentials*
+• \`credentials inspect\` — Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
 • \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.

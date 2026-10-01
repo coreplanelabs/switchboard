@@ -82,6 +82,8 @@ export interface HarnessStart {
  *  group the process runs in — and the port, when the start named one. */
 export interface HarnessStarted {
   pid: number;
+  /** Kernel boot ID and start ticks, captured before the program starts. */
+  processBirth?: string;
   port?: number;
 }
 
@@ -258,7 +260,8 @@ function portLine(port: number | "free"): string {
  *  the filter — when the start names one — into the log, its stderr into its
  *  own file. The arguments are quoted one by one; the bearer is in none of
  *  them. A start that names a port exports it first and says it on the first
- *  line of the output; the pid is the last line either way. The wrapper's own
+ *  line of the output; its kernel birth identity and pid follow through a
+ *  dedicated pipe closed before the program starts. The wrapper's own
  *  stdio is redirected to /dev/null: `setsid -f` forks it out of the exec's
  *  process group but not out of the exec's file descriptors, and a detached
  *  shell holding the exec's stdout and stderr keeps the sandbox runtime
@@ -281,6 +284,9 @@ export function startScript(start: HarnessStart): string {
   const inner = [
     `exec 3<>${shellQuote(paths.fifo)}`,
     `echo $$ > ${shellQuote(paths.pidFile)}`,
+    // The launch pipe, never a model-writable file, carries the birth receipt.
+    `if IFS= read -r procstat < /proc/$$/stat && IFS= read -r boot < /proc/sys/kernel/random/boot_id; then set -f; set -- \${procstat##*) }; shift 19; printf 'birth:%s:%s\\n%s\\n' "$boot" "$1" "$$" >&4; else printf '%s\\n' "$$" >&4; fi`,
+    `exec 4>&-`,
     `${command} ${argv.join(" ")} <&3 2>>${shellQuote(paths.errLog)}${filtered} >> ${shellQuote(paths.log)}`,
   ].join("; ");
   return [
@@ -290,9 +296,8 @@ export function startScript(start: HarnessStart): string {
     `mkfifo -m 600 ${shellQuote(paths.fifo)}`,
     keepLog ? `: >> ${shellQuote(paths.log)}` : `: > ${shellQuote(paths.log)}`,
     keepLog ? `: >> ${shellQuote(paths.errLog)}` : `: > ${shellQuote(paths.errLog)}`,
-    `setsid -f sh -c ${shellQuote(inner)} ${DETACHED_STDIO}`,
+    `setsid -f sh -c ${shellQuote(inner)} 4>&1 ${DETACHED_STDIO}`,
     `sleep 0.3`,
-    `cat ${shellQuote(paths.pidFile)}`,
   ].join(" && ");
 }
 
@@ -902,12 +907,16 @@ export class ExecHarnessContainer implements HarnessContainer {
     const pid = Number(lines[lines.length - 1]);
     if (!Number.isInteger(pid) || pid <= 0)
       throw new HarnessContainerError("start", `no pid came back (${out || "empty"})`);
-    if (start.port === undefined) return { pid };
+    const birthLine = lines.at(-2) ?? "";
+    const processBirth = /^birth:([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}:[0-9]{1,20})$/.exec(
+      birthLine,
+    )?.[1];
+    if (start.port === undefined) return { pid, ...(processBirth === undefined ? {} : { processBirth }) };
     // The port is the first line and the pid the last: one line is a pid alone.
     const port = lines.length >= 2 ? Number(lines[0]) : NaN;
     if (!Number.isInteger(port) || port <= 0 || port > 65535)
       throw new HarnessContainerError("start", `no port came back (${out || "empty"})`);
-    return { pid, port };
+    return { pid, port, ...(processBirth === undefined ? {} : { processBirth }) };
   }
 
   async writeLine(paths: HarnessPaths, line: string): Promise<void> {

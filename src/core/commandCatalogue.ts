@@ -1,3 +1,4 @@
+import type { CredentialsCommandDeps } from "./commands/credentials.js";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { AGENTS, presetDoor } from "../agents/registry.js";
@@ -95,6 +96,7 @@ import { channelVisibilityOf } from "./dispatch/record.js";
 
 /** How an in-process binding reaches the catalogue's deps. */
 export interface CoreCommandWiring {
+  credentialInspection?: CredentialsCommandDeps["credentials"]["inspect"];
   /** The live registry — `defaultRunRegistry` in every real process, so the
    *  commands see the runs the dispatcher creates. */
   registry: RunRegistry;
@@ -411,6 +413,7 @@ export function buildCoreCommands(
     ...(wiring.names?.() ? { names: wiring.names() } : {}),
     runs,
     review: { abridger, runs },
+    credentials: { runs, inspect: wiring.credentialInspection },
     friction: {
       ledger,
       tracker: wiring.tracker,

@@ -51,6 +51,8 @@ export const SAID_ONCE_SUFFIX = " (said once: later events of this kind are not 
 export interface PiHarnessFacts {
   harness: "pi";
   pid: number;
+  /** Launch-time kernel birth identity; older rows cannot attest credentials. */
+  processBirth?: string;
   /** The log byte the next generation reads from: the boundary after the last
    *  record whose effect the ledger holds — the assistant turn the mirror
    *  wrote as a step, the compaction it wrote as a row — and never where the
@@ -102,6 +104,8 @@ export interface PiHarnessFacts {
 export interface OpenCodeHarnessFacts {
   harness: "opencode";
   pid: number;
+  /** Launch-time kernel birth identity; older rows cannot attest credentials. */
+  processBirth?: string;
   port: number;
   /** The tailer beside the server (`tailer.js`, whose stdout is the feed): a
    *  second process that can die alone, so a generation that comes back probes
@@ -158,12 +162,25 @@ export function harnessFactsOf(value: unknown): HarnessFacts | undefined {
 }
 
 function piFactsOf(v: Record<string, unknown>): PiHarnessFacts | undefined {
-  const { harness: _harness, pid, logOffset, sessionFile, root, bearerHash, wire, container, relaunches, ...rest } = v;
+  const {
+    harness: _harness,
+    pid,
+    processBirth,
+    logOffset,
+    sessionFile,
+    root,
+    bearerHash,
+    wire,
+    container,
+    relaunches,
+    ...rest
+  } = v;
   if (typeof pid !== "number" || typeof logOffset !== "number") return undefined;
   return {
     ...rest,
     harness: "pi",
     pid,
+    ...(typeof processBirth === "string" ? { processBirth } : {}),
     logOffset,
     relaunches: relaunchesOf(relaunches),
     ...(typeof sessionFile === "string" ? { sessionFile } : {}),
@@ -178,6 +195,7 @@ function openCodeFactsOf(v: Record<string, unknown>): OpenCodeHarnessFacts | und
   const {
     harness: _harness,
     pid,
+    processBirth,
     port,
     tailerPid,
     logOffset,
@@ -194,6 +212,7 @@ function openCodeFactsOf(v: Record<string, unknown>): OpenCodeHarnessFacts | und
     ...rest,
     harness: "opencode",
     pid,
+    ...(typeof processBirth === "string" ? { processBirth } : {}),
     port,
     logOffset,
     sessionID,
