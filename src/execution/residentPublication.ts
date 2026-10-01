@@ -2,6 +2,8 @@
  * argv as its privileged container user, using its root-owned mirror as the
  * repository. The model's worktree contributes objects only: its config,
  * hooks and shell are never executed with the effect credential. */
+import { githubDoorRepositoryPath } from "../channels/githubDoorPaths.js";
+
 export interface ResidentPublicationInput {
   worktreePath: string;
   repo: string;
@@ -61,7 +63,7 @@ export function residentPublicationCommand(input: ResidentPublicationInput): {
     MIRROR_DIR,
     "push",
     ...(input.old ? [`--force-with-lease=${ref}:${input.old}`] : []),
-    `${door.origin}/git/${input.repo}`,
+    `${door.origin}${githubDoorRepositoryPath(input.repo)}`,
     `${input.next}:${ref}`,
   ];
   const env = {

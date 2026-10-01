@@ -2,6 +2,13 @@
 export const GIT_DOOR_PATH =
   /^\/(?:git\/)?([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/;
 
+/** Repository prefix for Git's discovery and upload endpoints. */
+export function githubDoorRepositoryPath(repo: string): string {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || repo.split("/").some((part) => part === "." || part === ".."))
+    throw new Error("Git door repository is invalid");
+  return `/git/${repo}.git`;
+}
+
 export function isGithubDoorPath(path: string): boolean {
   return path === "/api/graphql" || path.startsWith("/api/v3/") || GIT_DOOR_PATH.test(path);
 }

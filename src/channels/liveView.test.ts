@@ -35,7 +35,8 @@ import { RunRegistry, type RunRegistryOptions } from "../core/runRegistry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import { normalizeSpans, SPAN_SCHEMA } from "../core/normalizeSpans.js";
 import type { RunEvent } from "../core/runEvents.js";
-import type { RunRecord } from "../core/runRecord.js";
+import { isRunRecord, type RunRecord } from "../core/runRecord.js";
+import { reclaimedRunRecord } from "../core/dispatch/record.js";
 import { INDEX_PAGE_SIZE } from "./liveView.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
@@ -2427,6 +2428,115 @@ describe("artifact route (item 26)", () => {
   }
 
   describe("a finished run, tokenless", () => {
+    it.each(["event", "reclaimed"] as const)(
+      "serves a verified private checkpoint only through the run that recorded it: %s",
+      async (sourceOfReceipt) => {
+        const h = harness();
+        const base = "a".repeat(40),
+          source = "b".repeat(40);
+        const key = `runs/r1/out/0-checkpoint-${base}-${source}.bundle`;
+        const event: RunEvent = {
+          type: "publication_settlement",
+          settlement: {
+            version: 1,
+            binding: {
+              runId: "r1",
+              instanceId: "coord-p",
+              step: "coord-p:U12/0/coding",
+              repo: "acme/api",
+              branch: "plan/fixture/u1",
+              requester: "slack:UX",
+              threadKey: "slack:C1:1",
+              generation: "g1",
+              baseHeadSha: base,
+            },
+            checkpoint: { kind: "created", head: source },
+            publication: { kind: "unknown", reason: "acknowledgment lost" },
+            preservation: { kind: "saved", key, size: 3, sha256: "c".repeat(64) },
+            release: { kind: "released" },
+          },
+        };
+        h.artifacts.put(key, new Uint8Array([1, 2, 3]), "application/octet-stream");
+        const meta = {
+          agent: "coding",
+          repo: "acme/api",
+          ...PUBLIC,
+          userId: event.settlement.binding.requester,
+          threadKey: event.settlement.binding.threadKey,
+          parentInstanceId: event.settlement.binding.instanceId,
+          idempotencyKey: event.settlement.binding.step,
+        };
+        const reclaim = (canonical: unknown, olderEvent = false) =>
+          reclaimedRunRecord({
+            row: {
+              runId: "r1",
+              threadKey: meta.threadKey,
+              ownerGen: "new-generation",
+              leaseUntil: NOW,
+              startedAt: NOW - 70_000,
+              phase: "live",
+              stop: null,
+              meta,
+              card: null,
+              system: "",
+              tools: [],
+              state: { publicationSettlement: canonical },
+            },
+            events: olderEvent ? [{ ...event, seq: 1 }] : [],
+            status: "interrupted",
+            finishedAt: NOW - 60_000,
+          });
+        const saved = sourceOfReceipt === "event" ? record("r1", [event], meta) : reclaim(event.settlement);
+        expect(isRunRecord(saved)).toBe(true);
+        if (sourceOfReceipt === "reclaimed") expect(saved.events).toEqual([]);
+        await h.runs.put(saved);
+        // Even a copied valid receipt belongs only to its original run.
+        await h.runs.put(record("r2", [event], { publicationSettlement: event.settlement }));
+        await h.runs.put(record("r3", []));
+        await h.runs.put(
+          record("r1", [event], {
+            ...meta,
+            publicationSettlement: {
+              ...event.settlement,
+              preservation: {
+                ...event.settlement.preservation,
+                sha256: "invalid",
+              } as typeof event.settlement.preservation,
+            },
+          }),
+        );
+        expect((await get(h, `/runs/r1/artifacts/${key}`)).status).toBe(404);
+        for (const field of ["instanceId", "step", "repo", "requester", "threadKey"]) {
+          await h.runs.put(
+            record("r1", [event], {
+              ...meta,
+              publicationSettlement: {
+                ...event.settlement,
+                binding: { ...event.settlement.binding, [field]: "foreign" },
+              },
+            }),
+          );
+          expect((await get(h, `/runs/r1/artifacts/${key}`)).status).toBe(404);
+        }
+        for (const canonical of [
+          null,
+          {},
+          { ...event.settlement, binding: { ...event.settlement.binding, instanceId: "foreign" } },
+        ]) {
+          const recovered = JSON.parse(JSON.stringify(reclaim(canonical, true))) as RunRecord;
+          expect(recovered.publicationSettlement).toBeNull();
+          expect(isRunRecord(recovered)).toBe(true);
+          await h.runs.put(recovered);
+          expect((await get(h, `/runs/r1/artifacts/${key}`)).status).toBe(404);
+        }
+        await h.runs.put(saved);
+        expect((await get(h, `/runs/r1/artifacts/${key}`)).status).toBe(200);
+        const nobody: LiveViewContext = { actor: accessActor({ sub: "nobody" }, () => NO_GRANTS) };
+        expect((await get(h, `/runs/r1/artifacts/${key}`, nobody)).status).toBe(404);
+        expect((await get(h, `/runs/r2/artifacts/${key}`)).status).toBe(404);
+        expect((await get(h, `/runs/r3/artifacts/${key}`)).status).toBe(404);
+      },
+    );
     it("streams a named key with the event's type and length, `nosniff`, a sandbox CSP and no caching — inline for a raster image, an attachment under the recorded basename for SVG and HTML", async () => {
       const audit = vi.fn();
       const h = harness({ audit });

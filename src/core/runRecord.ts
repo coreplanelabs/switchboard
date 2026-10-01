@@ -1,4 +1,5 @@
 import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
+import { publicationSettlementForRun, type PublicationSettlement } from "./publicationSettlement.js";
 import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecision.js";
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../config/profile.js";
@@ -76,6 +77,8 @@ export interface RunReference {
 export interface RunRecord {
   /** Authored-output facts; absent on legacy records means unknown. */
   answerOutcome?: AnswerOutcome;
+  /** null preserves a present but invalid canonical receipt; absent is legacy unknown. */
+  publicationSettlement?: PublicationSettlement | null;
   /** Structural audience refusal; exposed only by authorized diagnostic reads. */
   audienceRefusal?: AudienceRefusalReceipt;
   /** The run registry id (unguessable; safe to print — it is not the view token). */
@@ -1205,6 +1208,12 @@ export function isRunRecord(v: unknown): v is RunRecord {
         );
       })
     )
+  )
+    return false;
+  if (
+    r.publicationSettlement !== undefined &&
+    r.publicationSettlement !== null &&
+    publicationSettlementForRun(r.publicationSettlement, r) === undefined
   )
     return false;
   if (r.doorPublicationPending !== undefined) {

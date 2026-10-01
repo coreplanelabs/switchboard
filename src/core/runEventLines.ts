@@ -1,3 +1,4 @@
+import { isPublicationSettlement } from "./publicationSettlement.js";
 import { RUN_NOTE_KINDS, type RunEvent, type RunNoteKind } from "./runEvents.js";
 import { RUN_LIVE_STATE_NAMES, type RunLiveStateName } from "./runLiveState.js";
 import { PLANE_ENDING_CAUSES, type PlaneEndingCause } from "./plane/decide.js";
@@ -128,6 +129,8 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.url === "string" && typeof o.number === "number" && typeof o.created === "boolean";
     case "pushed_head":
       return typeof o.ref === "string" && typeof o.sha === "string" && (o.by === "push" || o.by === "salvage");
+    case "publication_settlement":
+      return isPublicationSettlement(o.settlement);
     case "unfinished_patch":
       return (
         typeof o.runId === "string" &&

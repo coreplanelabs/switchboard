@@ -111,7 +111,7 @@ export interface RoundWorkspace {
      *  item 16a): handed to the workspace's owner so the thread remembers them
      *  past the tree. Absent when the run pushed nothing. */
     pushed?: ReleaseOptions["pushed"];
-  }): Promise<void>;
+  }): Promise<import("../execution/executor.js").ReleaseResult | void>;
 }
 
 /**
@@ -194,7 +194,7 @@ export async function attachRoundWorkspace(input: {
     gateBypassed?: boolean;
     span?: Span;
     pushed?: ReleaseOptions["pushed"];
-  }): Promise<void> => {
+  }): Promise<import("../execution/executor.js").ReleaseResult | void> => {
     const { executor } = selection;
     if (!executor.release) return;
     const mode = releaseModeFor(profile.identity, opts);
@@ -211,6 +211,7 @@ export async function attachRoundWorkspace(input: {
       console.log(
         `[release] ${input.logKey} ${r.released ? "released" : "kept"}${r.reason ? ` (${r.reason})` : ""}${left}`,
       );
+      return r;
     } catch (err) {
       console.warn(`[release] ${input.logKey} failed: ${err instanceof Error ? err.message : String(err)}`);
     }

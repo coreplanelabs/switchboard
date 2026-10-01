@@ -506,6 +506,7 @@ export function isHeadMaterial(event: RunEvent): boolean {
     case "reference":
     case "run_meta":
     case "run_state":
+    case "publication_settlement":
     case "route":
       return true;
     case "run_note":
@@ -958,6 +959,13 @@ export type RunEvent =
       /** No uncommitted or unpushed work at the push (record 0064): the fact
        *  the plane's soft stop reads. Absent where the measure was missing. */
       clean?: boolean;
+      seq?: number;
+      at?: number;
+    }
+  /** Independent checkpoint, publication, preservation and release facts. */
+  | {
+      type: "publication_settlement";
+      settlement: import("./publicationSettlement.js").PublicationSettlement;
       seq?: number;
       at?: number;
     }

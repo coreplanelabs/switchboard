@@ -2375,7 +2375,7 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     });
     expect(rejected).toMatchObject({
       pushed: false,
-      publicationBlocked: expect.stringContaining("atomic leased push was rejected"),
+      publicationBlocked: expect.stringContaining("atomic leased push did not return a confirmed result"),
     });
     expect(rejected.summary).toContain("commit remains unpublished in the bound workspace");
   });
@@ -2427,7 +2427,10 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
   });
 
   it("a failed push reports itself and never throws", async () => {
-    const w = fakeExecutor({ "git status": " M src/a.ts\n" }, { failOn: "git push" });
+    const w = fakeExecutor(
+      { "git status": " M src/a.ts\n", "git rev-list": "1", "git rev-parse HEAD": HEAD },
+      { failOn: "git push" },
+    );
     const out = await salvageBudgetPush(w.executor, { branch: "plan/p/u1" });
     expect(out.pushed).toBe(false);
     expect(out.summary).toContain("salvage push to `plan/p/u1` failed: remote hung up unexpectedly");

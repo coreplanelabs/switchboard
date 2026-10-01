@@ -204,6 +204,7 @@ export interface RunView {
   pushed?: RunRecord["pushed"];
   /** A Git write may have reached GitHub without a committed outcome. A
    * coordinator must reconcile it before advancing the original unit. */
+  publicationSettlement?: RunRecord["publicationSettlement"];
   doorPublicationPending?: RunRecord["doorPublicationPending"];
   lease?: RunRecord["lease"];
   /** What the run cost in tokens, per model (`RunRecord.usage`, run-history
@@ -880,6 +881,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       | "dispositions"
       | "handoff"
       | "pr"
+      | "publicationSettlement"
       | "doorPublicationPending"
       | "restarting"
       | "restartUntil"
@@ -907,6 +909,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       ...(row.handoff !== undefined ? { handoff: row.handoff } : {}),
       ...(row.pr !== undefined ? { pr: row.pr } : {}),
       ...(row.doorPublicationPending !== undefined ? { doorPublicationPending: row.doorPublicationPending } : {}),
+      ...(row.publicationSettlement !== undefined ? { publicationSettlement: row.publicationSettlement } : {}),
       ...(row.restarting !== undefined ? { restarting: row.restarting } : {}),
       ...(row.restartUntil !== undefined ? { restartUntil: row.restartUntil } : {}),
       ...(row.pushed !== undefined ? { pushed: row.pushed } : {}),

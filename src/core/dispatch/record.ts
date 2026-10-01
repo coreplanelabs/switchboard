@@ -1,4 +1,5 @@
 import { answerOutcomeOf, type AnswerOutcome } from "../answerOutcome.js";
+import { publicationSettlementForRun, publicationSettlementOf } from "../publicationSettlement.js";
 import { audienceRefusalOf, type AudienceRefusalReceipt, type AudienceTrace } from "../audienceDecision.js";
 // The record stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // what a run leaves behind. The channel-visibility stamp every run is created
@@ -217,6 +218,12 @@ export function reclaimedRunRecord(input: {
   return assembleRunRecord({
     audienceRefusal: audienceRefusalOf(row.state.audienceRefusal),
     answerOutcome: answerOutcomeOf(row.state.answerOutcome),
+    ...(row.state.publicationSettlement !== undefined
+      ? {
+          publicationSettlement:
+            publicationSettlementForRun(row.state.publicationSettlement, { ...row.meta, id: row.runId }) ?? null,
+        }
+      : {}),
     run: { id: row.runId },
     snap,
     agent: row.meta.agent,
@@ -336,6 +343,8 @@ export function assembleRunRecord(input: {
   /** The final workspace head the run loop observed independently of the
    *  model and push events. Omitted when this run had no readable Git head. */
   headSha?: string;
+  /** The checkpoint ending, including preservation and release acknowledgment. */
+  publicationSettlement?: RunRecord["publicationSettlement"];
   /** A Git-door write still uncertain when the live ledger row closes. */
   doorPublicationPending?: RunRecord["doorPublicationPending"];
   /** The typed handoff the run submitted (docs/reference/specs/agent-ship.md item 14),
@@ -401,6 +410,8 @@ export function assembleRunRecord(input: {
   const lease = leaseOfEvents(events);
   // The heads the run pushed (run-history item 2): its `pushed_head` events.
   const pushed = pushedHeadsOf(events);
+  const publicationSettlement =
+    input.publicationSettlement === undefined ? publicationSettlementOf(events) : input.publicationSettlement;
   // The route the run ran under: the caller's (a sticky-carried decision has
   // no `route` event), else what the events say.
   const route = privateMain ? undefined : (input.route ?? routeOfEvents(events));
@@ -476,6 +487,7 @@ export function assembleRunRecord(input: {
     ...(pr !== undefined ? { pr } : {}),
     ...(lease !== undefined ? { lease } : {}),
     ...(pushed !== undefined ? { pushed } : {}),
+    ...(publicationSettlement !== undefined ? { publicationSettlement } : {}),
     // What the run cost (cost by user): summed here, before the budget can cut
     // a middle event, from every model.turn span the run published.
     usage: usageOfEvents(events),
@@ -671,6 +683,7 @@ export interface FinishRecordContext {
   ledgerRun: LedgerRun | undefined;
   /** The final Git head the run loop observed after its tail settled. */
   headSha?: string;
+  publicationSettlement?: RunRecord["publicationSettlement"];
   doorPublicationPending?: RunRecord["doorPublicationPending"];
   /** The handoff the run loop captured from `submit_handoff`, when one was submitted. */
   handoff?: Handoff;
@@ -719,6 +732,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     ledgerRun,
     headSha,
     doorPublicationPending,
+    publicationSettlement,
     handoff,
     verdict,
     reviewHead,
@@ -755,6 +769,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           seal,
           ...(headSha !== undefined && !privateMain ? { headSha } : {}),
           ...(doorPublicationPending !== undefined ? { doorPublicationPending } : {}),
+          ...(publicationSettlement !== undefined ? { publicationSettlement } : {}),
           ...(handoff !== undefined ? { handoff } : {}),
           ...(verdict !== undefined ? { verdict } : {}),
           ...(reviewHead !== undefined ? { reviewHead } : {}),

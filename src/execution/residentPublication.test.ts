@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { residentPublicationCommand } from "./residentPublication.js";
+import { githubDoorEdgeRoute } from "../channels/githubDoorPaths.js";
 
 const next = "a".repeat(40);
 const old = "b".repeat(40);
@@ -14,6 +15,13 @@ const input = {
 };
 
 describe("resident runner-owned Git publication", () => {
+  it("constructs a repository URL accepted by the Git door for discovery and upload", () => {
+    const url = residentPublicationCommand(input).argv.at(-2)!;
+    expect(githubDoorEdgeRoute(new URL(`${url}/info/refs?service=git-receive-pack`), "GET", input.doorOrigin)).toBe(
+      "door",
+    );
+    expect(githubDoorEdgeRoute(new URL(`${url}/git-receive-pack`), "POST", input.doorOrigin)).toBe("door");
+  });
   it("uses the root-owned mirror and argv, never the model-owned shell or repository config", () => {
     const command = residentPublicationCommand(input);
     expect(command.argv).toEqual([
@@ -22,7 +30,7 @@ describe("resident runner-owned Git publication", () => {
       "/workspace/mirror",
       "push",
       `--force-with-lease=refs/heads/plan/fix/u1:${old}`,
-      "https://door.example/git/acme/api",
+      "https://door.example/git/acme/api.git",
       `${next}:refs/heads/plan/fix/u1`,
     ]);
     expect(command.env.GIT_ALTERNATE_OBJECT_DIRECTORIES).toBe("/workspace/threads/owned/.git/objects");

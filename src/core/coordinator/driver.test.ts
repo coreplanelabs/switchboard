@@ -1,3 +1,4 @@
+import type { PublicationSettlement } from "../publicationSettlement.js";
 import { describe, expect, it } from "vitest";
 import { SHIP_RECORD_VISIBILITY } from "../budgets.js";
 import { MERGE_WAIT_CHUNK_MS, PR_TRANSITION_GUARD_MS, WAIT_CHUNK_MS } from "../ship/coordinator.js";
@@ -30,6 +31,23 @@ const INSTANCE = "plan-fixture";
 const PR_URL = "https://github.com/acme/api/pull/7";
 const HEAD = "a".repeat(40);
 const MERGED = "9".repeat(40);
+const cleanCheckpoint = (runId: string): PublicationSettlement => ({
+  version: 1,
+  binding: {
+    runId,
+    instanceId: INSTANCE,
+    step: "U10/0/coding",
+    repo: "acme/api",
+    branch: row("U10").branch,
+    requester: "slack:UX",
+    threadKey: "slack:C1:1",
+    generation: "gen-1",
+  },
+  checkpoint: { kind: "clean", head: HEAD },
+  publication: { kind: "not_attempted" },
+  preservation: { kind: "pending" },
+  release: { kind: "released" },
+});
 
 const row = (unit: string, over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
   instanceId: INSTANCE,
@@ -1649,6 +1667,39 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(end.ending.report).not.toContain("wall-clock");
   });
 
+  it("holds an invalid canonical checkpoint through read-record without a new attempt", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [
+        record(
+          {
+            id: "run-c0",
+            finished: true,
+            status: "failed",
+            failure: { kind: "provider_transient" },
+            publicationSettlement: null,
+          },
+          T0 + 5 * MIN,
+        ),
+      ],
+      "pr-check": [prNone()],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 5 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 5 * MIN)],
+    });
+    expect((await runPlan(s.runner, b.client, INSTANCE)).units).toEqual({ U10: "aborted" });
+    expect(b.of("spawn")).toHaveLength(1);
+    expect(b.of("pr-check")).toHaveLength(1);
+    expect(s.names().some((name) => name.includes("/a2"))).toBe(false);
+    expect((b.of("unit-end") as Array<{ ending: { report: string } }>)[0].ending.report).toContain(
+      "Recovery is held on the original unit",
+    );
+  });
+
   // Feature: docs/reference/specs/agent-ship.md item 9 (issue 1932) — the
   // transient re-run through the whole driver: the failure by name off the
   // record, the re-run under fresh step names, the `transient` round boundary
@@ -1666,7 +1717,13 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       spawn: [spawned("run-c0"), spawned("run-c1", T0 + 6 * MIN), spawned("run-r1", T0 + 15 * MIN)],
       "read-record": [
         record(
-          { id: "run-c0", finished: true, status: "failed", failure: { kind: "provider_transient" } },
+          {
+            id: "run-c0",
+            finished: true,
+            status: "failed",
+            failure: { kind: "provider_transient" },
+            publicationSettlement: cleanCheckpoint("run-c0"),
+          },
           T0 + 5 * MIN,
         ),
         codingDone("run-c1", T0 + 12 * MIN),
@@ -1705,11 +1762,23 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       spawn: [spawned("run-c0"), spawned("run-c1", T0 + 6 * MIN)],
       "read-record": [
         record(
-          { id: "run-c0", finished: true, status: "failed", failure: { kind: "model_stream_incomplete" } },
+          {
+            id: "run-c0",
+            finished: true,
+            status: "failed",
+            failure: { kind: "model_stream_incomplete" },
+            publicationSettlement: cleanCheckpoint("run-c0"),
+          },
           T0 + 5 * MIN,
         ),
         record(
-          { id: "run-c1", finished: true, status: "failed", failure: { kind: "model_stream_incomplete" } },
+          {
+            id: "run-c1",
+            finished: true,
+            status: "failed",
+            failure: { kind: "model_stream_incomplete" },
+            publicationSettlement: cleanCheckpoint("run-c1"),
+          },
           T0 + 11 * MIN,
         ),
       ],
