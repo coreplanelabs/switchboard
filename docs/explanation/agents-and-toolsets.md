@@ -32,6 +32,8 @@ A toolset decides what the model can ask for. `review` has no write-file tool bu
 
 ## The clock is the budget
 
+A budget stop ends the run without proving the question was answered. The saved result keeps the stop reason and whether a write-up exists separately from delivery. Completed source steps stay on the card; a missing write-up is shown explicitly. A same-requester `continue` uses the saved budget result and original question under fresh access checks. If a restart interrupts final delivery, the recovered card reports that delivery is unconfirmed.
+
 The turn count is a backstop; the clock ends a long run, and at the deadline the agent is cut off to write up what it has. Effort rides the config layers because it decides how much of the clock goes to thinking; `review` ships with `medium`, `coding` leaves it to the request.
 
 ## Tools from outside

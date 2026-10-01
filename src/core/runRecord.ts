@@ -1,3 +1,4 @@
+import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecision.js";
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../config/profile.js";
@@ -73,6 +74,8 @@ export interface RunReference {
 }
 
 export interface RunRecord {
+  /** Authored-output facts; absent on legacy records means unknown. */
+  answerOutcome?: AnswerOutcome;
   /** Structural audience refusal; exposed only by authorized diagnostic reads. */
   audienceRefusal?: AudienceRefusalReceipt;
   /** The run registry id (unguessable; safe to print — it is not the view token). */
@@ -119,7 +122,7 @@ export interface RunRecord {
    *  falls back to `startedAt`). `sealedAt`: the stream closed, when the first
    *  reply attempt completed or the branch was abandoned; `replyOk` is
    *  tri-state — `true` a reply was attempted and delivered, `false` attempted
-   *  and threw, absent none was made. `stepCount`: content events only (span
+   *  and threw, absent no delivery receipt was recorded. `stepCount`: content events only (span
    *  records excluded). `schema`: the record's stream schema (`SPAN_SCHEMA`);
    *  a record absent it or below it carries no timing. All omitted when absent. */
   receivedAt?: number;
@@ -1281,6 +1284,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
   for (const key of ["receivedAt", "sealedAt"] as const) {
     if (r[key] !== undefined && !isFiniteNumber(r[key])) return false;
   }
+  if (r.answerOutcome !== undefined && !answerOutcomeOf(r.answerOutcome)) return false;
   if (r.replyOk !== undefined && typeof r.replyOk !== "boolean") return false;
   if (r.audienceRefusal !== undefined && !audienceRefusalOf(r.audienceRefusal)) return false;
   if (r.replyNote !== undefined && typeof r.replyNote !== "string") return false;

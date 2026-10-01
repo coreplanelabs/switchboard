@@ -1,3 +1,4 @@
+import { isBudgetAnswer } from "./answerOutcome.js";
 import {
   audienceRefusalOf,
   audienceRefusalText,
@@ -2595,8 +2596,12 @@ export async function dispatch(
     // request, not a session tail carrying source results whose grant or
     // revision may have changed. Only the original requester can reuse it.
     let sourceContinuation: string | undefined;
-    if (agent.name === "general" && requestText.trim().toLowerCase() === "continue" && thread) {
-      const previous = thread.find((view) => view.finished && view.agent === "general" && !view.parentInstanceId);
+    if (
+      (agent.name === "general" || agent.name === "research") &&
+      requestText.trim().toLowerCase() === "continue" &&
+      thread
+    ) {
+      const previous = thread.find((view) => view.finished && view.agent === agent.name && !view.parentInstanceId);
       if (previous) {
         const prior = await runsService.getRun(previous.id, { include: "messages" }).catch(() => undefined);
         if (!prior?.ok || !prior.value.events) {
@@ -2610,9 +2615,15 @@ export async function dispatch(
         }
         const events = prior.value.events;
         if (
-          events?.some((e) => e.type === "run_note" && e.kind === "time_budget_exhausted") &&
-          events.some((e) => e.type === "answer" && e.text.includes('Reply "continue" in this conversation'))
+          !isBudgetAnswer(prior.value.answerOutcome) &&
+          events.some((event) => event.type === "run_note" && event.kind === "time_budget_exhausted")
         ) {
+          await refuse(
+            refusalOf("setup_failed", "I couldn't verify the saved result of that source lookup; no source was read."),
+          );
+          return ended;
+        }
+        if (isBudgetAnswer(prior.value.answerOutcome)) {
           if (previous.userId !== msg.userId) {
             await refuse(refusalOf("setup_failed", "Only the original requester can continue that source lookup."));
             return ended;
@@ -2661,19 +2672,14 @@ export async function dispatch(
               before = page.nextBefore;
             }
             const ancestor = older.shift()!;
-            if (!ancestor.finished || ancestor.agent !== "general" || ancestor.parentInstanceId) continue;
+            if (!ancestor.finished || ancestor.agent !== agent.name || ancestor.parentInstanceId) continue;
             if (ancestor.userId !== msg.userId) {
               await refuse(refusalOf("setup_failed", "Only the original requester can continue that source lookup."));
               return ended;
             }
             const record = await runsService.getRun(ancestor.id, { include: "messages" }).catch(() => undefined);
             const ancestorEvents = record?.ok ? record.value.events : undefined;
-            if (
-              !ancestorEvents?.some((e) => e.type === "run_note" && e.kind === "time_budget_exhausted") ||
-              !ancestorEvents.some(
-                (e) => e.type === "answer" && e.text.includes('Reply "continue" in this conversation'),
-              )
-            ) {
+            if (!record?.ok || !isBudgetAnswer(record.value.answerOutcome) || !ancestorEvents) {
               await missingQuestion();
               return ended;
             }
@@ -3991,7 +3997,7 @@ export async function dispatch(
       runDiagnosis,
       checklistAsLeft,
       checklistCheckedOff,
-      budgetEnded,
+      answerOutcome,
       releaseWorkspace,
     } = ran;
 
@@ -4024,7 +4030,7 @@ export async function dispatch(
       shell,
       checklistAsLeft,
       checklistCheckedOff,
-      budgetEnded,
+      answerOutcome,
       doneLines: privateAudienceRequired(msg) || slackContext !== undefined ? () => ({}) : doneLines,
       runDiagnosis,
       releaseWorkspace,

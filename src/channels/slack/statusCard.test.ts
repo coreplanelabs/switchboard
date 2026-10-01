@@ -84,11 +84,34 @@ describe("live cards", () => {
     );
     expect(closed).toBe(3);
     expect(updates.map((u) => [u.ts, u.text])).toEqual([
-      ["a.1", "✅ review · completed"],
+      ["a.1", "⚠️ review · ended"],
       ["b.1", "⏹ coding · stopped soft"],
       ["c.1", "❌ ship · interrupted"],
     ]);
     expect(warnings).toEqual(["[slack] reclaimed card C1:fail.1 not closed: message_not_found"]);
+  });
+
+  it("a recovered budget card exposes the saved missing answer and unknown delivery", async () => {
+    const updates: { text: string; blocks: object[] }[] = [];
+    const client = guardOutbound({
+      chat: {
+        update: async (args: { channel: string; ts: string; text: string; blocks: object[] }) => {
+          updates.push(args);
+          return {};
+        },
+      },
+    });
+    await closeReclaimedCards(client, [
+      {
+        status: "completed",
+        agent: "research",
+        card: { channel: "C1", ts: "r.1" },
+        answerOutcome: { version: 1, ending: "time_budget", output: "absent" },
+      },
+    ]);
+    expect(updates[0].text).toBe("⚠️ research · ended");
+    expect(JSON.stringify(updates[0].blocks)).toContain("Answer not written.");
+    expect(JSON.stringify(updates[0].blocks)).toContain("before reply delivery was confirmed");
   });
 
   it("a reclaimed close — interrupted or replied — is its own sentence and nothing after it: no override footer on any card (routing-and-config item 21)", async () => {
@@ -106,7 +129,7 @@ describe("live cards", () => {
       { status: "completed", agent: "review", card: { channel: "C1", ts: "r.2" } },
     ]);
     expect(blocks["r.1"]).toContain('could not be resumed."');
-    expect(blocks["r.2"]).toContain('its record is complete."');
+    expect(blocks["r.2"]).toContain('before reply delivery was confirmed."');
     expect(blocks["r.1"]).not.toContain("wrong preset");
     expect(blocks["r.2"]).not.toContain("agent:<preset>");
   });

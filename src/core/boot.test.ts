@@ -240,11 +240,30 @@ describe("reclaimRuns", () => {
     expect(byId.done).toMatchObject({
       status: "stopped_soft",
       from: "finishing",
-      why: expect.stringMatching(/replied/),
+      why: expect.stringMatching(/reply delivery was not confirmed/),
     });
     expect(byId.done2).toMatchObject({ status: "completed", from: "finishing" });
     expect(ledger.finished.get("done")!.status).toBe("stopped_soft");
     expect(ledger.finished.get("done2")!.status).toBe("completed");
+  });
+
+  it("a restart before the final seal retains the missing write-up without claiming delivery", async () => {
+    const { ledger, run } = harness();
+    const answerOutcome = { version: 1 as const, ending: "time_budget" as const, output: "absent" as const };
+    await ledger.claim(claim("no-answer", "slack:C1:1.0"));
+    await ledger.setState("no-answer", "g1", {
+      finalStatus: "completed",
+      answerOutcome,
+      checklist: "✓ All sources read",
+    });
+    await ledger.finishing("no-answer", "g1");
+    const outcome = await run();
+    expect(outcome.resumable).toEqual([]);
+    expect(outcome.closed[0]).toMatchObject({ runId: "no-answer", status: "completed", answerOutcome });
+    const record = ledger.finished.get("no-answer")!;
+    expect(record.answerOutcome).toEqual(answerOutcome);
+    expect(record.replyOk).toBeUndefined();
+    expect(record.events.some((event) => event.type === "answer")).toBe(false);
   });
 
   it("a row with no step record was killed before its conversation was stored: interrupted, and the reason says so; a handed-off row with a whole transcript is resumable and names its phase", async () => {

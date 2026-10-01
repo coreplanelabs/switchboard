@@ -1,3 +1,4 @@
+import { answerOutcomeDetail, type AnswerOutcome } from "../answerOutcome.js";
 import {
   audienceRefusalText,
   noteAudienceRefusal,
@@ -702,8 +703,8 @@ export interface DeliveryContext {
   shell: CardShell;
   checklistAsLeft: () => string | undefined;
   checklistCheckedOff: () => string | undefined;
-  /** The model's lease ended, not the requested work; keep the progress as left. */
-  budgetEnded?: boolean;
+  /** Producer facts captured before rendering; independent of the delivery receipt. */
+  answerOutcome?: AnswerOutcome;
   /** The done card's shape and queued lines, from the finish-site diagnosis (the dispatch's `doneLines`). */
   doneLines: (diagnosis: FrictionDiagnosis | undefined) => { shape?: string; queued?: string };
   runDiagnosis: FrictionDiagnosis | undefined;
@@ -736,12 +737,13 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     shell,
     checklistAsLeft,
     checklistCheckedOff,
-    budgetEnded,
+    answerOutcome,
     doneLines,
     runDiagnosis,
     releaseWorkspace,
     root,
   } = ctx;
+  const budgetEnded = answerOutcome?.ending === "time_budget";
   const privateRun = privateAudienceRequired(msg) || ctx.slackContext !== undefined;
   const privateCard = privateRun;
   const latch = ctx.privateAudienceLatch ?? { revoked: false };
@@ -772,12 +774,27 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     // (item 35): the double-answer protection once runs resume — a
     // generation that lost the run is refused here and must not reply.
     // The status the record will carry rides on the row first, so a reclaim
-    // of a `finishing` row (replied, died before `finish`) closes it
+    // of a `finishing` row (delivery unconfirmed before `finish`) closes it
     // truthfully. A `fenced` answer means another generation reclaimed this
     // run while it ran (a handoff, or a lease that lapsed) and is driving it
     // now: nothing more reaches the thread from here — the record is theirs.
-    ledgerRun?.setState({ finalStatus: stopped ? `stopped_${stopped}` : "completed" });
-    if ((await root.span("post.ledger_finishing", () => ledgerRun?.finishing())) === "fenced") {
+    const finalState = {
+      finalStatus: stopped ? `stopped_${stopped}` : "completed",
+      ...(answerOutcome ? { answerOutcome } : {}),
+    };
+    // Commit the authored-output fact before taking the no-replay boundary.
+    // A crash in finishing must not reconstruct it from the rendered answer.
+    let settlementGate;
+    if (ledgerRun && answerOutcome) {
+      const required = ledgerRun.tracked();
+      settlementGate = await ledgerRun.commitState(finalState);
+      if (settlementGate === "unavailable" && required)
+        throw new Error("The run result could not be saved before delivery.");
+    } else ledgerRun?.setState(finalState);
+    if (
+      settlementGate === "fenced" ||
+      (await root.span("post.ledger_finishing", () => ledgerRun?.finishing())) === "fenced"
+    ) {
       // Nothing more from here: no reply, no card close, and no record — the
       // run is the other generation's now and its record is theirs to write
       // (a partial record from this process could race the real finish). The
@@ -836,7 +853,12 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
             shell.close({
               kind: "done",
               icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : budgetEnded ? "⚠️" : "✅",
-              detail: privateCard ? undefined : stopped || budgetEnded ? checklistAsLeft() : checklistCheckedOff(),
+              detail: privateCard
+                ? undefined
+                : answerOutcomeDetail(
+                    answerOutcome,
+                    stopped || budgetEnded ? checklistAsLeft() : checklistCheckedOff(),
+                  ),
               ...(privateCard ? {} : doneLines(runDiagnosis)),
             }),
           ),

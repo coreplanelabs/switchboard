@@ -848,6 +848,67 @@ describe("deliverAnswer — the answer reaches the thread", () => {
     return { ctx, replies, closes, releases, sealed, states };
   }
 
+  it.each(["ok", "fenced", "unavailable"] as const)(
+    "commits output facts before delivery and respects a %s settlement",
+    async (gate) => {
+      const order: string[] = [];
+      const answerOutcome = { version: 1 as const, ending: "time_budget" as const, output: "absent" as const };
+      const s = finishedRun(async () => {
+        order.push("finishing");
+        return "ok";
+      });
+      const ledgerRun = {
+        ...s.ctx.ledgerRun!,
+        tracked: () => true,
+        commitState: async (patch: unknown) => {
+          order.push("state");
+          expect(patch).toEqual({ finalStatus: "completed", answerOutcome });
+          return gate;
+        },
+      } as LedgerRun;
+      const deliver = deliverAnswer({
+        ...s.ctx,
+        ledgerRun,
+        answerOutcome,
+        card: {
+          ...s.ctx.card,
+          done: async (frame) => {
+            order.push("card");
+            await s.ctx.card.done(frame);
+          },
+        },
+      });
+      if (gate === "unavailable") await expect(deliver).rejects.toThrow("could not be saved");
+      else expect(await deliver).toEqual({ kind: gate === "fenced" ? "fenced" : "delivered" });
+      expect(order).toEqual(gate === "ok" ? ["state", "finishing", "card"] : ["state"]);
+      expect(s.replies).toHaveLength(gate === "ok" ? 1 : 0);
+    },
+  );
+
+  it.each(["failed", "withheld"] as const)("keeps authored output distinct from a %s delivery", async (result) => {
+    const s = finishedRun();
+    const answerOutcome = { version: 1 as const, ending: "time_budget" as const, output: "present" as const };
+    const deliver = deliverAnswer({
+      ...s.ctx,
+      answerOutcome,
+      ...(result === "failed"
+        ? {
+            io: {
+              ...s.ctx.io,
+              reply: async () => {
+                throw new Error("channel offline");
+              },
+            },
+          }
+        : { publicationCheck: async () => ({ ok: false as const, code: "github-access-lost" as const }) }),
+    });
+    if (result === "failed") await expect(deliver).rejects.toThrow("channel offline");
+    else await deliver;
+    expect(answerOutcome).toEqual({ version: 1, ending: "time_budget", output: "present" });
+    expect(s.sealed).toEqual([`replyOk=${result === "withheld"}`]);
+    if (result === "withheld") expect(s.replies.join(" ")).not.toContain("the findings");
+  });
+
   it("delivered: the card closes ✅ with the checked-off checklist, the reply carries the answer (a review's with its run link), the run is sealed replyOk, the workspace is released after", async () => {
     const s = finishedRun();
     expect(await deliverAnswer(s.ctx)).toEqual({ kind: "delivered" });

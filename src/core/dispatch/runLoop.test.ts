@@ -434,6 +434,116 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it.each(["general", "research"] as const)(
+    "an all-checked source lookup without a write-up retains its work and records the missing answer (%s)",
+    async (agent) => {
+      const observed = watched(piHarness);
+      observed.harness.open = async (_deps, run) => {
+        run.toolContext.reportProgress?.("✓ Read request\n✓ Read source\n✓ Report findings");
+        run.onEvent?.({ type: "run_note", kind: "resumed", summary: "resumed on the same run after a bot restart" });
+        run.onEvent?.({ type: "tool_call", tool: "mcp_source_read", summary: "read source", callId: "source-1" });
+        run.onEvent?.({
+          type: "tool_result",
+          tool: "mcp_source_read",
+          ok: false,
+          cut: true,
+          summary: "source call cut",
+          callId: "source-1",
+        });
+        run.onEvent?.({
+          type: "run_note",
+          kind: "time_budget_exhausted",
+          summary: "the source read was cut at the loop end",
+        });
+        const ending = { kind: "time" as const, text: "" };
+        return {
+          answer: windDownAnswer(ending, run.agent.maxMinutes),
+          ending,
+          followUp: async () => "",
+          remainingMs: () => 0,
+          end: async () => {},
+        };
+      };
+      const s = setup("unused", {
+        agent,
+        harness: {
+          harnesses: roster(observed.harness),
+          registry: new HarnessRegistry(),
+          loopbackUrl: "http://127.0.0.1:8080",
+        },
+      });
+      const out = answered(await runLoop(s.deps, { ...s.ctx, profile: { ...s.ctx.profile, minutes: 5 } }));
+      expect(out.answer).toContain("could not verify");
+      expect(out.answer).toContain("continue");
+      expect(out.answer).not.toContain("Partial work may exist");
+      await deliverAnswer({
+        msg: s.ctx.msg,
+        io: s.ctx.io,
+        agent: s.ctx.agent,
+        run: s.run,
+        answer: out.answer,
+        liveUrl: undefined,
+        prNote: out.prNote,
+        stopped: undefined,
+        ledgerRun: undefined,
+        ending: s.ending,
+        card: s.ctx.card,
+        shell: s.ctx.shell,
+        checklistAsLeft: out.checklistAsLeft,
+        checklistCheckedOff: out.checklistCheckedOff,
+        answerOutcome: out.answerOutcome,
+        doneLines: s.ctx.doneLines,
+        runDiagnosis: out.runDiagnosis,
+        releaseWorkspace: out.releaseWorkspace,
+        root: s.ctx.root,
+      });
+      expect(s.replies.at(-1)).toBe(out.answer);
+      expect(s.closes.at(-1)?.title).toContain("⚠");
+      expect(s.closes.at(-1)?.detail).toBe("Answer not written.\n\n✓ Read request\n✓ Read source\n✓ Report findings");
+      expect(out.answerOutcome).toEqual({ version: 1, ending: "time_budget", output: "absent" });
+      s.ending.drain(true);
+      await s.writer.settled();
+      const rec = (await s.store.get("run-l"))!;
+      expect(rec.answerOutcome).toEqual({ version: 1, ending: "time_budget", output: "absent" });
+      expect(rec.replyOk).toBe(true);
+      expect(rec.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "run_note", kind: "resumed" }),
+          expect.objectContaining({ type: "tool_result", callId: "source-1", cut: true }),
+          expect.objectContaining({ type: "answer", text: out.answer }),
+        ]),
+      );
+    },
+  );
+  it("an all-checked budget lookup keeps a partial write-up without claiming a complete answer", async () => {
+    const observed = watched(piHarness);
+    observed.harness.open = async (_deps, run) => {
+      run.toolContext.reportProgress?.("✓ Read sources");
+      const ending = { kind: "time" as const, text: "One record verified; remaining causes are unknown." };
+      return {
+        answer: windDownAnswer(ending, run.agent.maxMinutes),
+        ending,
+        followUp: async () => "",
+        remainingMs: () => 0,
+        end: async () => {},
+      };
+    };
+    const s = setup("unused", {
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    await deliverAnswer({ ...s.ctx, ...out, liveUrl: undefined, stopped: undefined });
+    expect(out.answerOutcome).toEqual({ version: 1, ending: "time_budget", output: "present" });
+    expect(out.answer).toContain("before finishing");
+    expect(s.replies.at(-1)).toContain("remaining causes are unknown");
+    expect(s.closes.at(-1)?.title).toContain("⚠");
+    expect(s.closes.at(-1)?.detail).toBe("✓ Read sources");
+  });
+
   it("a restarted source read cut at the budget answers without invented findings and leaves the unfinished checklist open", async () => {
     const observed = watched(piHarness);
     observed.harness.open = async (_deps, run) => {
@@ -488,7 +598,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       shell: s.ctx.shell,
       checklistAsLeft: out.checklistAsLeft,
       checklistCheckedOff: out.checklistCheckedOff,
-      budgetEnded: out.budgetEnded,
+      answerOutcome: out.answerOutcome,
       doneLines: s.ctx.doneLines,
       runDiagnosis: out.runDiagnosis,
       releaseWorkspace: out.releaseWorkspace,
@@ -496,7 +606,9 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
     expect(s.replies.at(-1)).toBe(out.answer);
     expect(s.closes.at(-1)?.title).toContain("⚠");
-    expect(s.closes.at(-1)?.detail).toBe("✓ Read request\n✱ Read source\n○ Deliver count and records");
+    expect(s.closes.at(-1)?.detail).toBe(
+      "Answer not written.\n\n✓ Read request\n✱ Read source\n○ Deliver count and records",
+    );
     s.ending.drain(true);
     await s.writer.settled();
     const rec = (await s.store.get("run-l"))!;
@@ -7069,7 +7181,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     );
     expect(budgetOut.answer).toMatch(/^⚠️ _Hit the \d+-minute budget before finishing/);
     expect(budgetOut.answer).toContain("What I found before the budget ran out.");
-    expect(budgetOut.budgetEnded).toBe(true);
+    expect(budgetOut.answerOutcome.ending).toBe("time_budget");
     expect(budget.run.control.requested).toBeUndefined();
     expect(budget.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
   });
@@ -7100,7 +7212,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       shell: s.ctx.shell,
       checklistAsLeft: out.checklistAsLeft,
       checklistCheckedOff: out.checklistCheckedOff,
-      budgetEnded: out.budgetEnded,
+      answerOutcome: out.answerOutcome,
       doneLines: s.ctx.doneLines,
       runDiagnosis: out.runDiagnosis,
       releaseWorkspace: out.releaseWorkspace,
@@ -7108,8 +7220,32 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     });
     expect(s.replies.at(-1)).toContain("One source record was verified");
     expect(s.closes.at(-1)?.title).toContain("⚠");
-    expect(s.closes.at(-1)?.detail).toBe("✓ Verify one record\n✱ Read remaining records\n○ Deliver the full answer");
+    expect(s.closes.at(-1)?.detail).toBe(
+      "Answer completion unverified.\n\n✓ Verify one record\n✱ Read remaining records\n○ Deliver the full answer",
+    );
   });
+
+  it.each(["absent", "present"] as const)(
+    "a recovered %s write-up uses its saved outcome rather than the nonempty answer text",
+    async (output) => {
+      const s = setup("", { provider: neverCalled() });
+      const answerOutcome = { version: 1 as const, ending: "time_budget" as const, output };
+      const resume = finishing("Rendered fallback or partial findings.", {
+        state: { answerOutcome, checklist: "✓ Read sources" },
+        events: [
+          { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
+          note("time_budget_exhausted", "time budget exhausted", 2),
+        ],
+      });
+      const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+      expect(out.answerOutcome).toEqual(answerOutcome);
+      if (output === "absent") expect(out.answer).toContain("could not verify");
+      else expect(out.answer).toContain("Rendered fallback or partial findings.");
+      s.ending.drain(true);
+      await s.writer.settled();
+      expect((await s.store.get("run-l"))?.answerOutcome).toEqual(answerOutcome);
+    },
+  );
 
   it("a review resumed with its answer in hand runs its post-steps: the verdict restored from the row is settled at the pinned head and posted, once", async () => {
     const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];

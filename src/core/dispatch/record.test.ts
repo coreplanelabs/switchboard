@@ -202,6 +202,16 @@ describe("assembleRunRecord — the handoff on the record", () => {
     diagnosis: analyzeRunFriction([], { finished: true, truncated: false }),
   });
 
+  it("validates producer outcome separately from fallback text and delivery", () => {
+    const answerOutcome = { version: 1 as const, ending: "time_budget" as const, output: "absent" as const };
+    const record = assembleRunRecord({ ...base(), answerOutcome });
+    expect(record.answerOutcome).toEqual(answerOutcome);
+    expect(record.replyOk).toBeUndefined();
+    expect(isRunRecord(record)).toBe(true);
+    expect(isRunRecord({ ...record, answerOutcome: { ...answerOutcome, output: "complete" } })).toBe(false);
+    expect(assembleRunRecord(base()).answerOutcome).toBeUndefined();
+  });
+
   it("carries the handoff with every string leaf redacted, and the record still validates", () => {
     const token = `ghp_${"a".repeat(24)}`;
     const record = assembleRunRecord({

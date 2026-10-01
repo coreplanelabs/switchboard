@@ -1905,6 +1905,7 @@ export async function runBot(): Promise<void> {
         status: c.status,
         agent: c.agent,
         card: c.card,
+        answerOutcome: c.answerOutcome,
         ...(c.note ? { note: c.note } : {}),
       })),
       (w) => console.warn(w),

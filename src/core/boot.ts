@@ -1,7 +1,8 @@
+import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 // The boot sequence's ledger step (docs/reference/specs/run-history.md item 36): before
 // the Slack socket opens, this generation takes over every run the previous
 // one left on the ledger — an expired lease (the owner died), a handoff (the
-// owner drained), or a `finishing` row (the owner replied and died before
+// owner drained), or a `finishing` row (the owner fenced replay and died before
 // `finish`) — and either hands it to the resume launcher (item 38: a row from
 // `live`/`handoff` whose transcript and last step record the completeness
 // rule accepts) or closes it with a proper record, so no run ever ends as a
@@ -36,12 +37,13 @@ import { shipInterruptedNote } from "./shipPipeline.js";
 import { endingCauseWords, type PlaneEndingCause, type PlaneReclaimWord } from "./plane/decide.js";
 
 export interface ReclaimedClosure {
+  answerOutcome?: AnswerOutcome;
   runId: string;
   threadKey: string;
   status: RunStatus;
   /** The phase the row was in when taken. */
   from: LivePhase;
-  /** One line: why this status — the completeness verdict, or "replied". */
+  /** One line: why this status — the completeness verdict or unconfirmed delivery. */
   why: string;
   card: CardHandle | null;
   events: number;
@@ -50,7 +52,7 @@ export interface ReclaimedClosure {
   /** The PR the run's events say it opened (a `pr_opened` event), if any. */
   prUrl?: string;
   /** What the closed card — and, for a pipeline, the thread — says next: an
-   *  interrupted run's guidance (`closureNote`); absent for a run that replied. */
+   *  interrupted run's guidance (`closureNote`); absent for a finishing close. */
   note?: string;
 }
 
@@ -287,12 +289,12 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
       let status: RunStatus;
       let why: string;
       if (run.reclaimedFrom === "finishing") {
-        // The old generation had taken `finishing` — its reply is in the
-        // thread — and died before `finish`. Close with the status it recorded
-        // on the way out; `completed` when it recorded none.
+        // Finishing fences replay before the reply. A crash here does not
+        // establish delivery; retain execution status and authored-output facts
+        // while leaving replyOk unknown.
         const recorded = row.state.finalStatus;
         status = typeof recorded === "string" && TERMINAL.has(recorded) ? (recorded as RunStatus) : "completed";
-        why = "replied before the previous generation died";
+        why = "reply delivery was not confirmed before the previous generation died";
       } else if (row.stop === "hard" && !row.meta.hosted && hostingOf(row.state) === undefined) {
         // A hard stop is durable intent. No owner remains to acknowledge it,
         // so restarting an ordinary run here would undo the operator's stop.
@@ -404,6 +406,7 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
       }
       const prUrl = prUrlOf(events);
       outcome.closed.push({
+        answerOutcome: answerOutcomeOf(row.state.answerOutcome),
         runId: row.runId,
         // The metadata's thread, never the ledger's key column (record 0060):
         // the interrupted-run notice files a hosted row's closure under its
