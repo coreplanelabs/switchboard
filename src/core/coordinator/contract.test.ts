@@ -16,6 +16,7 @@ import {
   STEP_NAME_PATTERN,
   isCoordinatorUnit,
   isWorkBrief,
+  validateWorkBrief,
   parseUnitKey,
   UNIT_KEY_PATTERN,
   unitKeyOf,
@@ -31,6 +32,35 @@ import {
 } from "./contract.js";
 
 describe("main-agent work brief", () => {
+  it("decodes legacy rows without promoting them to new admission", () => {
+    const legacy = { ...brief, findings: [] };
+    expect(isWorkBrief(legacy)).toBe(true);
+    expect(validateWorkBrief(legacy)).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([{ code: "schema_version", path: "schemaVersion" }]),
+    });
+    expect(isWorkBrief({ ...legacy, schemaVersion: 9 })).toBe(false);
+  });
+
+  it("requires explicit hypothesis uncertainty and projects only known proposal fields", () => {
+    const proposed = {
+      ...brief,
+      schemaVersion: 1,
+      acceptance: "Regression passes",
+      findings: [],
+      cause: { kind: "hypothesis", text: "A callback may fail" },
+      evidence: { availability: "unavailable", reason: "Code-only task" },
+      requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+      credential: "never-stored",
+    };
+    expect(validateWorkBrief(proposed)).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([{ code: "cause_required", path: "cause" }]),
+    });
+    const result = validateWorkBrief({ ...proposed, cause: { ...proposed.cause, uncertainty: "Not reproduced" } });
+    expect(result.ok).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("never-stored");
+  });
   const brief = {
     requesterId: "slack:UALICE",
     mainThreadKey: "slack:C1:1.0",

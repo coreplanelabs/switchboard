@@ -69,12 +69,31 @@ export interface UnitEventKey {
  *  the consumer a later step marks. */
 export type ThreadEventInput = Omit<ThreadEvent, "seq" | "consumedBy">;
 
+/** Requester status alone may classify an unreadable brief. The rest of the unit
+ * remains strictly decoded; this snapshot cannot serve as a coding contract. */
+export interface MainTaskUnitSnapshot {
+  unit: CoordinatorUnit;
+  brief: unknown;
+}
+function mainTaskUnitSnapshot(rows: unknown, key: UnitEventKey): MainTaskUnitSnapshot | null {
+  if (!Array.isArray(rows)) throw new Error("main task unit snapshot unavailable");
+  const matches = rows.filter((row) => typeof row === "object" && row !== null && row.unit === key.unit);
+  if (matches.length === 0) return null;
+  if (matches.length !== 1) throw new Error("main task unit snapshot is ambiguous");
+  const { workBrief: brief, ...unit } = matches[0];
+  if (unit.instanceId !== key.instanceId || unit.generatedTask !== undefined || !isCoordinatorUnit(unit))
+    throw new Error("main task unit snapshot has invalid ownership or state");
+  return { unit, brief };
+}
+
 export interface CoordinatorInstanceStore {
   /** The authenticated requester turn, outside model and session content. */
   recordRequesterTurn(input: RequesterTurnInput): Promise<RecordRequesterTurnResult>;
   latestRequesterTurn(key: RequesterKey): Promise<RequesterTurn | null>;
   /** An index from one main-agent decision to the existing Ship unit. */
   getMainTask(key: MainTaskKey): Promise<MainTaskLink | null>;
+  /** Narrow status read: unknown brief data never relaxes listUnits or mutation validation. */
+  readMainTaskUnit(key: UnitEventKey): Promise<MainTaskUnitSnapshot | null>;
   /** Atomically claim the index, instance and first unit. A replay returns the
    * original link; another key cannot take an existing instance id. */
   claimMainTask(
@@ -253,6 +272,10 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     this.units.set(key, JSON.stringify(preserveWorkBrief(expected, replacement)));
     return { ok: true };
   }
+  async readMainTaskUnit(key: UnitEventKey): Promise<MainTaskUnitSnapshot | null> {
+    const text = this.units.get(unitKey(key));
+    return mainTaskUnitSnapshot(text === undefined ? [] : [JSON.parse(text)], key);
+  }
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
     const out: CoordinatorUnit[] = [];
     for (const [key, text] of this.units)
@@ -402,6 +425,9 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
     _replacement: CoordinatorUnit,
   ): Promise<CompareAndReplaceUnitResult> {
     return { ok: false, reason: "unavailable" };
+  }
+  async readMainTaskUnit(_key: UnitEventKey): Promise<MainTaskUnitSnapshot | null> {
+    throw new Error("coordinator instance store unavailable");
   }
   async listUnits(_instanceId: string): Promise<CoordinatorUnit[]> {
     throw new Error("coordinator instance store unavailable");
@@ -583,6 +609,11 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     throw new Error(
       `coordinator store /runs/coordinator/units/claim-legacy-continuation: unexpected answer (HTTP ${r.status})`,
     );
+  }
+
+  async readMainTaskUnit(key: UnitEventKey): Promise<MainTaskUnitSnapshot | null> {
+    const r = await this.post("/runs/coordinator/units/list", { instanceId: key.instanceId });
+    return mainTaskUnitSnapshot((r.data as { units?: unknown }).units, key);
   }
 
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {

@@ -555,6 +555,11 @@ describe("dispatch", () => {
                   input: {
                     repo: "acme/api",
                     question: "Why did signup fail?",
+                    schemaVersion: 1,
+                    cause: { kind: "unknown", reason: "Not investigated" },
+                    evidence: { availability: "unavailable", reason: "Code-only change" },
+                    requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+                    acceptance: "Regression test passes",
                     findings: [],
                     requestedChange: "Fix signup",
                     sourceMessage: "fix it",
@@ -606,6 +611,11 @@ describe("dispatch", () => {
                   input: {
                     repo: "acme/api",
                     question: "Why did signup fail?",
+                    schemaVersion: 1,
+                    cause: { kind: "unknown", reason: "Not investigated" },
+                    evidence: { availability: "unavailable", reason: "Code-only change" },
+                    requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+                    acceptance: "Regression test passes",
                     findings: [],
                     requestedChange: "Fix signup",
                     sourceMessage: "fix it",

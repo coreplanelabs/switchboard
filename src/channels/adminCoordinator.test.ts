@@ -3441,6 +3441,11 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         repo: INSTANCE.repo,
       },
       brief: {
+        schemaVersion: 1,
+        cause: { kind: "unknown", reason: "Not investigated" },
+        evidence: { availability: "provided" },
+        requirements: { analysis: "not_required", evidence: "required" },
+        acceptance: "Regression test passes",
         question: "Why did signup fail?",
         findings: [
           { kind: "observation", text: "Five failures in the last hour", sourceUrl: "https://example.com/signups" },

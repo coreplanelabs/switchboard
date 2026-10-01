@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Actor } from "../authz/types.js";
 import { createPlaneService, type PlaneService } from "../planeService.js";
 import { unitNudgeEventType, type CoordinatorInstance, type CoordinatorUnit, type WorkflowSender } from "./contract.js";
-import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
+import { InMemoryCoordinatorInstanceStore, WorkerCoordinatorInstanceStore } from "./instanceStore.js";
 import { createMainTaskActions } from "./mainActions.js";
 
 const THREAD = "slack:CMAIN:1.0";
@@ -96,11 +96,163 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
     parent: { id: "run-parent", outcome: "aborted" },
     children: [{ id: "run-child", outcome: "aborted" }],
   }));
-  const actions = createMainTaskActions({ instances, workflow, plane: { stop }, clock: () => 2_000 });
+  const actions = createMainTaskActions({
+    instances,
+    workflow,
+    plane: { stop },
+    clock: () => 2_000,
+    liveAuthority: { verify: async () => true, active: () => true },
+  });
   return { instances, actions, sent, stop };
 }
 
 describe("main task actions", () => {
+  it("classifies a corrupt brief through the HTTP store without relaxing ordinary unit decoding", async () => {
+    const corrupt = { ...UNIT, workBrief: { ...UNIT.workBrief, findings: "corrupt" } };
+    let rows: unknown[] = [corrupt];
+    const instances = new WorkerCoordinatorInstanceStore({
+      baseUrl: "https://state.example.com",
+      token: "test-only",
+      storeKey: "test",
+      fetch: async (url) => {
+        const path = new URL(String(url)).pathname;
+        if (path.endsWith("main-task/get"))
+          return Response.json({
+            link: {
+              instanceId: INSTANCE.id,
+              unit: UNIT.unit,
+              authority: { requesterId: INSTANCE.userId, sourceMessageId: "1", revision: 1, repo: INSTANCE.repo },
+            },
+          });
+        if (path.endsWith("coordinator/get")) return Response.json({ instance: INSTANCE });
+        return Response.json({ units: rows });
+      },
+    });
+    const actions = createMainTaskActions({
+      instances,
+      plane: { stop: vi.fn() },
+      clock: () => 2_000,
+      liveAuthority: { verify: async () => true, active: () => true },
+    });
+    await expect(instances.listUnits(INSTANCE.id)).rejects.toThrow("not a list of unit rows");
+    expect(await actions.status(actor(), ACT)).toMatchObject({
+      kind: "found",
+      unit: {
+        briefProof: {
+          state: "invalid",
+          completeness: "unknown",
+          schemaVersion: null,
+        },
+      },
+    });
+    expect(await actions.steer(actor(), { actId: ACT, eventId: "event", words: "Continue" })).toEqual({
+      kind: "unavailable",
+    });
+    expect(await actions.stop(actor(), ACT)).toEqual({ kind: "unavailable" });
+    for (const invalid of [
+      { ...corrupt, instanceId: "another-instance" },
+      { ...corrupt, rounds: "broken" },
+    ]) {
+      rows = [invalid];
+      expect(await actions.status(actor(), ACT)).toEqual({ kind: "unavailable" });
+    }
+    rows = [corrupt, corrupt];
+    expect(await actions.status(actor(), ACT)).toEqual({ kind: "unavailable" });
+    rows = [{ ...UNIT, workBrief: undefined }];
+    expect(await actions.status(actor(), ACT)).toMatchObject({
+      kind: "found",
+      unit: { briefProof: { state: "missing" } },
+    });
+    rows = [UNIT];
+    expect(await actions.status(actor(), ACT)).toMatchObject({
+      kind: "found",
+      unit: { briefProof: { state: "legacy" } },
+    });
+  });
+  it("projects durable typed proof without source bodies or acceptance text", async () => {
+    const { instances, stop } = await fixture();
+    const typed = {
+      ...UNIT.workBrief!,
+      schemaVersion: 1,
+      suspectedCause: undefined,
+      cause: { kind: "unknown", reason: "private-cause-reason" },
+      evidence: { availability: "provided" },
+      requirements: { analysis: "required", evidence: "required" },
+      acceptance: "private-acceptance-text",
+    };
+    const actions = createMainTaskActions({
+      instances: {
+        ...instances,
+        getMainTask: instances.getMainTask.bind(instances),
+        get: instances.get.bind(instances),
+        listUnits: async () => [{ ...UNIT, workBrief: typed } as unknown as CoordinatorUnit],
+        appendEvent: instances.appendEvent.bind(instances),
+      },
+      plane: { stop },
+      clock: () => 2_000,
+      liveAuthority: { verify: async () => true, active: () => true },
+    });
+    const result = await actions.status(actor(), ACT);
+    expect(result).toMatchObject({
+      kind: "found",
+      unit: {
+        briefProof: {
+          state: "complete",
+          schemaVersion: 1,
+          actId: ACT,
+          briefId: "ship_signup_1:task",
+          cause: "unknown",
+          acceptancePresent: true,
+          evidence: { availability: "provided", analysis: 1, observation: 0 },
+          provenance: "unverified",
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/private-acceptance|private-cause|count failed|https:\/\/example/);
+  });
+
+  it("marks legacy missing and corrupt briefs unknown without regenerating evidence", async () => {
+    const { instances, stop } = await fixture();
+    for (const [brief, state] of [
+      [UNIT.workBrief, "legacy"],
+      [undefined, "missing"],
+      [{ ...UNIT.workBrief, findings: "corrupt" }, "invalid"],
+    ] as const) {
+      const actions = createMainTaskActions({
+        instances: {
+          getMainTask: instances.getMainTask.bind(instances),
+          get: instances.get.bind(instances),
+          listUnits: async () => [{ ...UNIT, workBrief: brief } as unknown as CoordinatorUnit],
+          appendEvent: instances.appendEvent.bind(instances),
+        },
+        plane: { stop },
+        clock: () => 2_000,
+        liveAuthority: { verify: async () => true, active: () => true },
+      });
+      expect(await actions.status(actor(), ACT)).toMatchObject({
+        kind: "found",
+        unit: { briefProof: { state, completeness: "unknown" } },
+      });
+    }
+  });
+
+  it("withholds proof when the fresh audience check is missing fails or is revoked", async () => {
+    const { instances, stop } = await fixture();
+    for (const liveAuthority of [
+      undefined,
+      { verify: async () => false, active: () => true },
+      {
+        verify: async () => {
+          throw new Error("offline");
+        },
+        active: () => true,
+      },
+      { verify: async () => true, active: () => false },
+    ]) {
+      const actions = createMainTaskActions({ instances, plane: { stop }, clock: () => 2_000, liveAuthority });
+      expect(await actions.status(actor(), ACT)).toEqual({ kind: "unavailable" });
+    }
+  });
   it("status projects only the requester's linked unit without private context", async () => {
     const { instances, actions } = await fixture({
       startedAt: 1_500,
@@ -113,6 +265,14 @@ describe("main task actions", () => {
       kind: "found",
       unit: {
         key: "ship_signup_1:task",
+        briefProof: {
+          briefId: "ship_signup_1:task",
+          actId: ACT,
+          schemaVersion: null,
+          state: "legacy",
+          completeness: "unknown",
+          provenance: "unverified",
+        },
         repo: "acme/api",
         branch: "ship/signup-1",
         state: "running",

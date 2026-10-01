@@ -16,11 +16,13 @@ import {
   type WorkflowSender,
 } from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
+import { isMainTaskAuthority } from "./requesterAuthority.js";
 
 /** The tool integration supplies only a resolved actor and a stable act id.
  * The actor's origin, never model text, selects the main conversation. */
 export interface MainTaskActionsDeps {
-  instances: Pick<CoordinatorInstanceStore, "getMainTask" | "get" | "listUnits" | "appendEvent">;
+  instances: Pick<CoordinatorInstanceStore, "getMainTask" | "get" | "listUnits" | "appendEvent"> &
+    Partial<Pick<CoordinatorInstanceStore, "readMainTaskUnit">>;
   workflow?: WorkflowSender;
   plane: Pick<PlaneService, "stop">;
   clock: () => number;
@@ -28,8 +30,46 @@ export interface MainTaskActionsDeps {
   liveAuthority?: { verify(): Promise<boolean>; active(): boolean };
 }
 
+/** No private values or source URLs cross this projection. Completeness is structural,
+ * not a claim that a source was read or an analysis was independently verified. */
+export type BriefProof = { briefId: string; actId: string; provenance: "unverified" } & (
+  | {
+      state: "complete";
+      schemaVersion: 1;
+      completeness: "structural";
+      cause: "unknown" | "hypothesis";
+      acceptancePresent: true;
+      evidence: { availability: "provided" | "unavailable"; analysis: number; observation: number };
+    }
+  | { state: "legacy" | "missing" | "invalid"; schemaVersion: null; completeness: "unknown" }
+);
+function briefProofOf(unit: CoordinatorUnit, actId: string, brief: unknown): BriefProof {
+  const identity = { briefId: unitKeyOf(unit), actId, provenance: "unverified" as const };
+  if (!isWorkBrief(brief) || brief.schemaVersion !== 1)
+    return {
+      ...identity,
+      state: brief === undefined ? "missing" : isWorkBrief(brief) ? "legacy" : "invalid",
+      schemaVersion: null,
+      completeness: "unknown",
+    };
+  return {
+    ...identity,
+    state: "complete",
+    schemaVersion: 1,
+    completeness: "structural",
+    cause: brief.cause.kind,
+    acceptancePresent: true,
+    evidence: {
+      availability: brief.evidence.availability,
+      analysis: brief.findings.filter((f) => f.kind === "analysis").length,
+      observation: brief.findings.filter((f) => f.kind === "observation").length,
+    },
+  };
+}
+
 export interface MainTaskStatus {
   key: string;
+  briefProof: BriefProof;
   repo: string;
   branch: string;
   state: "queued" | "running" | "idle" | "recovering" | "ended" | "stopped";
@@ -45,6 +85,7 @@ type StopResult =
   | { kind: "not_found" | "forbidden" | "unavailable" };
 
 interface BoundUnit {
+  brief: unknown;
   instance: CoordinatorInstance;
   unit: CoordinatorUnit;
 }
@@ -90,19 +131,42 @@ function runActorOf(actor: Actor): RunActor {
 
 export function createMainTaskActions(deps: MainTaskActionsDeps) {
   /** The index is an address, not authority: verify the joined records before every effect. */
-  async function bound(actor: Actor, actId: string): Promise<Binding> {
+  async function bound(actor: Actor, actId: string, readUnknownBrief = false): Promise<Binding> {
     const origin = actor.origin;
     if (!origin || !isMainTaskKey({ mainThreadKey: origin.threadKey, actId })) return { kind: "not_found" };
     try {
       const link = await deps.instances.getMainTask({ mainThreadKey: origin.threadKey, actId });
       if (!link) return { kind: "not_found" };
-      const [instance, units] = await Promise.all([
+      const [instance, snapshot] = await Promise.all([
         deps.instances.get(link.instanceId),
-        deps.instances.listUnits(link.instanceId),
+        readUnknownBrief && deps.instances.readMainTaskUnit
+          ? deps.instances.readMainTaskUnit(link)
+          : deps.instances.listUnits(link.instanceId).then((rows) => {
+              const unit = rows.find((row) => row.unit === link.unit);
+              return unit ? { unit, brief: unit.workBrief } : null;
+            }),
       ]);
-      const unit = units.find((row) => row.unit === link.unit);
-      if (!instance || !unit || !isWorkBrief(unit.workBrief)) return { kind: "not_found" };
-      const brief = unit.workBrief;
+      if (!instance || instance.id !== link.instanceId || !snapshot) return { kind: "not_found" };
+      const { unit, brief } = snapshot;
+      const identity = typeof brief === "object" && brief !== null ? (brief as Record<string, unknown>) : undefined;
+      if (
+        !isWorkBrief(brief) &&
+        (!readUnknownBrief ||
+          !isMainTaskAuthority(link.authority) ||
+          link.authority.requesterId !== instance.userId ||
+          link.authority.repo !== instance.repo)
+      )
+        return { kind: "not_found" };
+      if (
+        brief !== undefined &&
+        (!identity ||
+          identity.mainThreadKey !== origin.threadKey ||
+          identity.actId !== actId ||
+          identity.requesterId !== instance.userId ||
+          identity.repo !== instance.repo ||
+          identity.base !== instance.base)
+      )
+        return { kind: "not_found" };
       if (
         instance.kind !== "ship" ||
         instance.merge !== "person" ||
@@ -113,29 +177,32 @@ export function createMainTaskActions(deps: MainTaskActionsDeps) {
         !selfIdsOf(actor).includes(instance.userId) ||
         unit.instanceId !== instance.id ||
         unit.branch !== instance.branch ||
-        unit.dependsOn.length !== 0 ||
-        brief.mainThreadKey !== origin.threadKey ||
-        brief.actId !== actId ||
-        brief.requesterId !== instance.userId ||
-        brief.repo !== instance.repo ||
-        brief.base !== instance.base
+        unit.dependsOn.length !== 0
       )
         return { kind: "not_found" };
-      return { kind: "bound", value: { instance, unit } };
+      return { kind: "bound", value: { instance, unit, brief } };
     } catch {
       return { kind: "unavailable" };
     }
   }
 
   async function status(actor: Actor, actId: string): Promise<ReadResult> {
-    const found = await bound(actor, actId);
+    if (actor.viewingAs) return { kind: "not_found" };
+    const found = await bound(actor, actId, true);
     if (found.kind !== "bound") return found;
     const { instance, unit } = found.value;
     if (!authorize(actor, "runs:read", runResource(instance)).allow) return { kind: "forbidden" };
+    try {
+      if (!deps.liveAuthority || !(await deps.liveAuthority.verify()) || !deps.liveAuthority.active())
+        return { kind: "unavailable" };
+    } catch {
+      return { kind: "unavailable" };
+    }
     return {
       kind: "found",
       unit: {
         key: unitKeyOf(unit),
+        briefProof: briefProofOf(unit, actId, found.value.brief),
         repo: instance.repo,
         branch: unit.branch,
         state: stateOf(instance, unit),
