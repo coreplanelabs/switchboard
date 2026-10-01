@@ -104,6 +104,20 @@ it("a preset question keeps its typed settings through the event-to-record proje
   });
 });
 
+it("a verified single PR target survives the operator event and JSON storage", () => {
+  const target = { number: 7, source: "request" as const, quote: "https://github.com/acme/api/pull/7" };
+  const event: RunEvent = {
+    type: "operator",
+    mode: "on",
+    outcome: "binds",
+    reason: "review the named PR",
+    binds: [{ line: "agent:review review the PR", reason: "review the named PR", repo: "acme/api", prTarget: target }],
+  };
+  const stored = JSON.parse(JSON.stringify(record({ events: [event], operator: operatorOfEvents([event]) })));
+  expect(isRunRecord(stored)).toBe(true);
+  expect(stored.operator.binds[0].prTarget).toEqual(target);
+});
+
 it("a typed PR batch survives the operator event and JSON storage for a resumed conductor", () => {
   const event: RunEvent = {
     type: "operator",

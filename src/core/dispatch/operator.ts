@@ -61,6 +61,7 @@ import type { ShipEntryIntent } from "../ship/preflight.js";
 import { sessionKey, threadSessionKey } from "../runLedger/sessionLog.js";
 import { chatActorOf } from "../authz/actor.js";
 import { renderRepoFacts } from "./repoFacts.js";
+import { verifyPrTargetEvidence, type PrTargetEvidence } from "./targetEvidence.js";
 import { barePrNumberOf, explicitRepoOf, type ResidentSlugs } from "../repoContext.js";
 import { parseSlug } from "../residentAdmin.js";
 import { prBatchBindingOf, type PrBatchBinding } from "../prBatchBinding.js";
@@ -281,6 +282,8 @@ export interface OperatorBind {
   repo?: string;
   /** Evidence for the typed repository, never the onboarded-candidate list alone. */
   repoSource?: "request" | "attachment" | "thread" | "channel";
+  /** Authored PR identity selected by the operator and checked against its source. */
+  prTarget?: PrTargetEvidence;
   /** The Ship unit's first stage, selected by the operator rather than by
    * stripping links or tokens from the admitted message. */
   shipEntry?: ShipEntryIntent;
@@ -527,7 +530,7 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
       : []),
     "A write ask in a named or inherited repository binds the write preset even when a detail inside it is unresolved — the run it starts resolves the detail with the repository in front of it. For a terse fix, inherit only the same requester's actor-stamped explicit target in the thread; a prior general run's repository and other people's or assistant turns do not authorize a write. Conflicting requester targets require one question. Ask a question only for a fork the run itself could not resolve, and a question's proposal must be a line that would do the asked work: a write line for a write ask, never a read (an exploration, a listing, a summary) standing in for the work.",
     "An explicit positive request to review or ship several linked pull requests uses `bind_pr_batch`, even when links span repositories or Slack flattens their bullets. Choose the action and every PR link destination in order; omit context, negated and quoted links. Supply `actionQuote` as an exact authored action span and one exact destination URL in `targetQuotes` for each chosen URL. If the action or list is ambiguous, ask. That typed choice starts the conductor with no single repository target. Each child is held to one selected URL at its spawn boundary.",
-    "For one Ship request, choose `shipEntry` in `bind_preset`: `continue` only to resume this thread's unfinished Ship unit on its owned pull request; `review` when the person asks Ship to review an existing pull request without resuming its writer; `work` for a self-contained new change; `work_from_thread` when new work depends on earlier requester context; or `plan` for an explicit seeded plan. A review starts in the review round of that exact PR; never turn the word 'review' or its URL into a coding task. If work cites a PR as evidence for a separate change, give `workObjective` as an exact quote of the requester's distinct code-change ask, from this turn or an earlier requester turn. Omit it for review or continuation. A request naming `agent:ship` still passes through this door. The runner verifies the PR, head, repository, owner and permissions after the bind.",
+    "For one Ship request, choose `shipEntry` in `bind_preset`: `continue` only to resume this thread's unfinished Ship unit on its owned pull request; `review` when the person asks Ship to review an existing pull request without resuming its writer; `work` for a self-contained new change; `work_from_thread` when new work depends on earlier requester context; or `plan` for an explicit seeded plan. For a named PR, bind `prTarget` with its number and complete verbatim target span from this request or an actor-stamped turn by this requester; never invent or shorten a PR URL. A review starts in the review round of that exact PR; never turn the word 'review' or its URL into a coding task. If work cites a PR as evidence for a separate change, give `workObjective` as an exact quote of the requester's distinct code-change ask, from this turn or an earlier requester turn. Omit it for review or continuation. A request naming `agent:ship` still passes through this door. The runner verifies the PR, head, repository, owner and permissions after the bind.",
     "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a proposal that would do the write built from them — the person's yes runs it, and their next words refine it.",
     "A question about whether the person has config overrides uses `config show`: it describes their own scope, this channel's scope and the effective settings. `config overrides` lists channels with scopes; use it only when they ask which channels have settings.",
     "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run. Pass that ref as `bind_preset`'s `model` and one exact model-name word from the person's request as `modelWord` (such as 'astra', 'o3', or 'gpt-6'). When the person wrote the full `<provider>/<model>` ref, pass it as `model` and omit `modelWord`; the exact authored ref is its evidence. The run uses either at request precedence. The request still rides verbatim — never strip the model choice from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model omits both fields.",
@@ -718,6 +721,18 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
                   pattern: "^[\\w.-]+/[\\w.-]+$",
                   description:
                     "the target repository as owner/name from the explicit request, an evidenced attached file, the same requester's explicit thread target, or the channel default; the newest run alone authorizes a review, not a write",
+                },
+                prTarget: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["number", "source", "quote"],
+                  description:
+                    "the named PR number and its complete verbatim target span from this request or this requester's actor-stamped thread turn; omit when no PR was named",
+                  properties: {
+                    number: { type: "integer", minimum: 1 },
+                    source: { type: "string", enum: ["request", "thread"] },
+                    quote: { type: "string" },
+                  },
                 },
                 shipEntry: {
                   type: "string",
@@ -1047,6 +1062,8 @@ export type OperatorTurn =
  *  parse can never disagree. */
 export interface OperatorTurnContext {
   requestText: string;
+  requesterId?: string;
+  tail?: readonly OperatorTailTurn[];
   presets: readonly string[];
   commands: readonly RoutableCommand[];
   threadRepo?: string;
@@ -1261,7 +1278,7 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     };
   }
   if (answer.tool === OPERATOR_BIND_TOOL) {
-    const { preset, reason, repo, shipEntry, workObjective } = input;
+    const { preset, reason, repo, prTarget, shipEntry, workObjective } = input;
     if (typeof preset !== "string" || !ctx.presets.includes(preset))
       return {
         kind: "violation",
@@ -1378,6 +1395,22 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     }
     if (selectedPreset === "ship" && shipEntry === "work_from_thread" && repoSource !== "thread")
       return { kind: "violation", violation: "work_from_thread needs the requester's established thread repository" };
+    const verifiedPrTarget =
+      prTarget === undefined
+        ? undefined
+        : verifyPrTargetEvidence(prTarget, {
+            requestText: ctx.requestText,
+            ...(ctx.requesterId !== undefined ? { requesterId: ctx.requesterId } : {}),
+            ...(ctx.tail !== undefined ? { tail: ctx.tail } : {}),
+            ...(repository !== undefined ? { repo: repository } : {}),
+          });
+    if (prTarget !== undefined && verifiedPrTarget === undefined)
+      return {
+        kind: "violation",
+        violation: "the PR target needs a complete requester-authored span matching its number and repository",
+      };
+    if (verifiedPrTarget !== undefined && repository === undefined)
+      return { kind: "violation", violation: "bind the PR target's repository as a typed repo" };
     const words = stripDirectiveHead(ctx.requestText, selectedPreset);
     const line = operatorLine(redactSecrets(`agent:${selectedPreset} ${words}`));
     return {
@@ -1391,6 +1424,7 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
             ...requestSettings.settings,
             ...(repository !== undefined ? { repo: repository } : {}),
             ...(repoSource !== undefined ? { repoSource } : {}),
+            ...(verifiedPrTarget !== undefined ? { prTarget: verifiedPrTarget } : {}),
             ...(selectedPreset === "ship" ? { shipEntry: shipEntry as ShipEntryIntent } : {}),
             ...(selectedPreset === "ship" && typeof workObjective === "string" && workObjective.trim()
               ? { workObjective: tidy(workObjective.trim()) }
@@ -2094,6 +2128,8 @@ export async function runOperator(
       : {};
   const ctx: OperatorTurnContext = {
     requestText: input.text,
+    ...(input.requesterId !== undefined ? { requesterId: input.requesterId } : {}),
+    tail: input.tail,
     presets: input.projection.presets.map((p) => p.name),
     commands: input.projection.commands,
     ...(input.newestFinishedRun?.repo ? { threadRepo: input.newestFinishedRun.repo } : {}),
@@ -2319,6 +2355,7 @@ export function operatorEventOf(
     verbosity?: Verbosity;
     repo?: string;
     repoSource?: "request" | "attachment" | "thread" | "channel";
+    prTarget?: PrTargetEvidence;
     shipEntry?: ShipEntryIntent;
     workObjective?: string;
     prBatch?: PrBatchBinding;
@@ -2355,6 +2392,7 @@ export function operatorEventOf(
             ...(b.verbosity !== undefined ? { verbosity: b.verbosity } : {}),
             ...(b.repo !== undefined ? { repo: b.repo } : {}),
             ...(b.repoSource !== undefined ? { repoSource: b.repoSource } : {}),
+            ...(b.prTarget !== undefined ? { prTarget: b.prTarget } : {}),
             ...(b.shipEntry !== undefined ? { shipEntry: b.shipEntry } : {}),
             ...(b.workObjective !== undefined ? { workObjective: b.workObjective } : {}),
             ...(b.prBatch !== undefined ? { prBatch: b.prBatch } : {}),
@@ -2859,6 +2897,8 @@ export type OperatorExecution =
       repo?: string;
       /** How the repository was evidenced, for a thread-dependent Ship brief. */
       repoSource?: OperatorBind["repoSource"];
+      /** Verified requester-authored PR target, when the bind names one. */
+      prTarget?: PrTargetEvidence;
       /** The starting stage for a Ship unit, chosen by the operator. */
       shipEntry?: ShipEntryIntent;
       /** Exact PR targets for a coordinated Review or Ship batch. */
@@ -3043,6 +3083,7 @@ export async function executeOperatorDecision(
         ...(bind.verbosity !== undefined ? { verbosity: bind.verbosity } : {}),
         ...(bind.repo !== undefined ? { repo: bind.repo } : {}),
         ...(bind.repoSource !== undefined ? { repoSource: bind.repoSource } : {}),
+        ...(bind.prTarget !== undefined ? { prTarget: bind.prTarget } : {}),
         ...(bind.shipEntry !== undefined ? { shipEntry: bind.shipEntry } : {}),
         ...(bind.prBatch !== undefined ? { prBatch: bind.prBatch } : {}),
         carried,

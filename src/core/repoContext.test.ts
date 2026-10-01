@@ -5,6 +5,7 @@ import {
   explicitRepoOf,
   PR_BODY_CAP,
   ownPrOf,
+  operationTargetOf,
   prCommitsSince,
   recordPrOf,
   repoFromThread,
@@ -57,6 +58,47 @@ describe("currentPrHeadSha — the review post transition guard", () => {
 });
 
 describe("resolveRepoContext: accepted operation authority", () => {
+  it("keeps a verified PR identity in a persisted operation target", () => {
+    const target = {
+      repo: "acme/api",
+      prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+    };
+    expect(operationTargetOf(target)).toEqual(target);
+    expect(() => operationTargetOf({ ...target, prTarget: { ...target.prTarget, number: "7" } })).toThrow(
+      "invalid operation target",
+    );
+    expect(() => operationTargetOf({ ...target, prTarget: { ...target.prTarget, source: "assistant" } })).toThrow(
+      "invalid operation target",
+    );
+  });
+
+  it("a typed PR target resolves its verified identity without reading competing chat citations", async () => {
+    const head = "a".repeat(40);
+    const { calls } = stubFetch(
+      { body: { state: "open", head: { ref: "fix/pr", sha: head, repo: { full_name: "acme/api" } } } },
+      { body: { object: { sha: head } } },
+    );
+    const target = {
+      repo: "acme/api",
+      prTarget: { number: 7, source: "request" as const, quote: "https://github.com/acme/api/pull/7" },
+    };
+    const context = await resolveRepoContext(
+      msg("review https://github.com/acme/api/pull/7 and https://github.com/acme/api/pull/8"),
+      [{ role: "user", text: "Review https://github.com/acme/other/pull/12" }],
+      async () => true,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      target,
+    );
+    expect(context).toMatchObject({ repo: "acme/api", pr: 7, headSha: head, ref: "fix/pr" });
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://api.github.com/repos/acme/api/pulls/7",
+      "https://api.github.com/repos/acme/api/git/ref/heads/fix/pr",
+    ]);
+  });
+
   it("a contextual foreign PR cannot replace the operator's addressed repository", () => {
     expect(
       explicitRepoOf("In acme/switchboard: investigate the defect illustrated by https://github.com/acme/web/pull/7"),

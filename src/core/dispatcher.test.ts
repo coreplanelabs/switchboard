@@ -10648,17 +10648,23 @@ workspaceDir: __WORKDIR__
   it("an explicit Ship review request uses the operator's review entry and starts at review on the verified PR", async () => {
     for (const request of [`agent:ship review ${PR_URL}`, `agents:ship review ${PR_URL}`]) {
       const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
-      deps.resolveRepoContext = () => ({
-        repo: "acme/api",
-        pr: 7,
-        prFromMessage: true,
-        headSha: HEAD_A,
-        baseRef: "main",
+      deps.resolveRepoContext = vi.fn((_msg, _history, _records, _fallback, _reviewBarePr, target) => {
+        expect(target).toMatchObject({
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: PR_URL },
+        });
+        return { repo: "acme/api", pr: 7, prFromMessage: true, headSha: HEAD_A, baseRef: "main" };
       });
       deps.fetchPrFacts = vi.fn(async () => openBotPr());
       deps.operatorModel = vi.fn<RouteModel>(async () => ({
         tool: "bind_preset",
-        input: { preset: "ship", shipEntry: "review", repo: "acme/api", reason: "review the named PR" },
+        input: {
+          preset: "ship",
+          shipEntry: "review",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: PR_URL },
+          reason: "review the named PR",
+        },
       }));
       deps.runRegistry = new RunRegistry({ genId: () => "run-ship-review-entry", genToken: () => "tok" });
       const { io } = fakeIO();

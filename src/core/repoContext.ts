@@ -111,6 +111,24 @@ export interface RunRecordSignals {
 export interface OperationTarget {
   repo: string;
   ref?: string;
+  /** The operator checked this PR against requester-authored evidence before admission. */
+  prTarget?: { number: number; source: "request" | "thread"; quote: string };
+}
+
+function persistedPrTargetOf(raw: unknown): NonNullable<OperationTarget["prTarget"]> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid operation target");
+  const { number, source, quote } = raw as Record<string, unknown>;
+  if (
+    typeof number !== "number" ||
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
+    (source !== "request" && source !== "thread") ||
+    typeof quote !== "string" ||
+    quote.length === 0 ||
+    quote.length > 512
+  )
+    throw new Error("invalid operation target");
+  return { number, source, quote };
 }
 
 /** Validate a persisted operation target before it can regain authority. */
@@ -122,7 +140,12 @@ export function operationTargetOf(raw: unknown): OperationTarget | undefined {
   const ref = fields.ref;
   if (repo === undefined || (ref !== undefined && (typeof ref !== "string" || validRef(ref) === undefined)))
     throw new Error("invalid operation target");
-  return { repo, ...(ref !== undefined ? { ref: ref as string } : {}) };
+  const prTarget = fields.prTarget === undefined ? undefined : persistedPrTargetOf(fields.prTarget);
+  return {
+    repo,
+    ...(ref !== undefined ? { ref: ref as string } : {}),
+    ...(prTarget !== undefined ? { prTarget } : {}),
+  };
 }
 
 export interface RepoContext {
@@ -957,7 +980,39 @@ export async function resolveRepoContext(
   /** Accepted non-review operation; citations remain evidence. */
   operationTarget?: OperationTarget,
 ): Promise<RepoContext> {
-  const boundRepo = operationTargetOf(operationTarget)?.repo;
+  const acceptedTarget = operationTargetOf(operationTarget);
+  // The operator has already checked this exact PR against an actor-stamped
+  // authored span. Resolve that identity directly; old chat and history
+  // readers cannot override or veto the typed choice.
+  if (acceptedTarget?.prTarget !== undefined) {
+    const { repo, ref, prTarget } = acceptedTarget;
+    const admitted = await safeProbe(probe, repo);
+    if (admitted === "unreachable") return { unverifiedRepo: repo };
+    if (!admitted) return { rejectedRepo: repo };
+    const head = await prHead({ repo, number: prTarget.number }).catch(() => undefined);
+    const matchesRef = ref === undefined || (head?.state === "open" && head.ref === ref);
+    if (!matchesRef) return { repo, ...(ref !== undefined ? { ref } : {}) };
+    const out: RepoContext = { repo, pr: prTarget.number };
+    if (prTarget.source === "request") out.prFromMessage = true;
+    if (isThreadOwnPr(records, repo, prTarget.number)) out.prIsThreadOwn = true;
+    if (ref !== undefined) out.ref = ref;
+    else if (head?.state === "open" && head.ref !== undefined) {
+      out.ref = head.ref;
+      out.refFromPr = true;
+    }
+    if (head?.sha !== undefined) out.headSha = head.sha;
+    if (head?.base !== undefined) out.baseRef = head.base;
+    if (head?.size !== undefined) out.prSize = head.size;
+    if (head?.facts !== undefined) out.prDescription = head.facts;
+    if (head?.state === "closed")
+      out.closedPr = {
+        number: prTarget.number,
+        merged: head.merged,
+        ...(head.mergedAt !== undefined ? { mergedAt: head.mergedAt } : {}),
+      };
+    return out;
+  }
+  const boundRepo = acceptedTarget?.repo;
   const selected = reviewBarePr ? selectedSignalsOf(msg.text) : undefined;
   const s = selected?.signals ?? extractSignals(msg.text);
   const direct = selected?.direct;

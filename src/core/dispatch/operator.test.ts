@@ -464,6 +464,60 @@ channels:
     });
   });
 
+  it("a typed PR target must match requester-authored evidence and the bound repository", () => {
+    const url = "https://github.com/acme/api/pull/3931";
+    const bind = (prTarget: { number: number; source: "request" | "thread"; quote: string }, repo = "acme/api") =>
+      parseOperatorTurn(
+        { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "review", repo, prTarget, reason: "review" } },
+        ctxOf({
+          requestText: `Review ${url}`,
+          presets: ["ship"],
+          requesterId: "slack:UOWNER",
+          tail: [
+            { actor: "slack:UOTHER", text: "user: review https://github.com/acme/api/pull/123" },
+            { actor: "slack:UOWNER", text: "user: earlier https://github.com/acme/api/pull/44" },
+          ],
+        }),
+      );
+    const accepted = bind({ number: 3931, source: "request", quote: url });
+    expect(accepted).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ prTarget: { number: 3931, source: "request", quote: url } }] },
+    });
+    if (accepted.kind !== "decision") throw new Error("not a decision");
+    expect(operatorEventOf("on", { decision: accepted.decision, latencyMs: 0, outputTokens: 0 })).toMatchObject({
+      binds: [{ prTarget: { number: 3931, source: "request", quote: url } }],
+    });
+    expect(bind({ number: 44, source: "thread", quote: "https://github.com/acme/api/pull/44" })).toMatchObject({
+      kind: "decision",
+      decision: { binds: [{ prTarget: { number: 44, source: "thread" } }] },
+    });
+    for (const target of [
+      { number: 393, source: "request" as const, quote: url.slice(0, -1) },
+      { number: 7, source: "request" as const, quote: "https://github.com/acme/api/pull/7" },
+      { number: 123, source: "thread" as const, quote: "https://github.com/acme/api/pull/123" },
+    ])
+      expect(bind(target)).toMatchObject({ kind: "violation" });
+    expect(bind({ number: 3931, source: "request", quote: url }, "acme/other")).toMatchObject({
+      kind: "violation",
+    });
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "ship",
+            shipEntry: "review",
+            repo: "acme/api",
+            prTarget: { number: 3931, source: "request", quote: url },
+            reason: "review",
+          },
+        },
+        ctxOf({ requestText: `Review ${url}.evil`, presets: ["ship"] }),
+      ),
+    ).toMatchObject({ kind: "violation" });
+  });
+
   it("bind_preset carries a separate code-change objective when Ship work cites a PR", () => {
     const answer = parseOperatorTurn(
       {
