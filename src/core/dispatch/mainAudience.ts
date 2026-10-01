@@ -79,8 +79,6 @@ export interface ResumedAudienceEvidence {
 
 const RECHECK = "I can't safely use earlier source data in this conversation. Please ask me to check the source again.";
 const PRIVATE_SOURCE = "I can read this private source only in your one-person Slack DM. Please ask me there.";
-const LINKED_CONTEXT =
-  "I can't verify that linked conversation's sharing permissions yet. Please ask about the source directly in your DM.";
 
 function sourceOf(toolName: string): string | undefined {
   const match = /^mcp__([a-z0-9-]+)__/.exec(toolName);
@@ -149,16 +147,12 @@ export function mainAudienceAtPrompt(input: {
   threadArtifacts?: string;
   /** A spawned parent's text turns have no durable source provenance. */
   parentSeed?: boolean;
-  /** Linked threads/files have a separate source audience. The narrow pilot
-   *  does not claim their sharing proof. */
-  referencedContext?: boolean;
 }): AudienceDecision {
   const directSlack = /^slack:D[A-Z0-9_]+$/.test(input.channelId);
   if (directSlack && !input.verifiedDirectAudience) return { ok: false, reason: PRIVATE_SOURCE };
   if (input.resumed && !provenPublicResume(input.resumed, input.requester, input.channelId))
     return { ok: false, reason: RECHECK };
   if (input.parentSeed) return { ok: false, reason: RECHECK };
-  if (input.referencedContext) return { ok: false, reason: LINKED_CONTEXT };
   // Another agent's finished artifact has no durable source labels. Even in
   // the same DM, its sources cannot be rechecked before this model sees it.
   if (input.threadArtifacts) return { ok: false, reason: RECHECK };

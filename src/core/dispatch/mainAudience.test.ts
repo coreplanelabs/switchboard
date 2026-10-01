@@ -141,7 +141,6 @@ describe("main conversation source audience", () => {
       mainAudienceAtPrompt({ ...base, thread: [{ id: "r1", startedAt: 1, finished: true, eventCount: 0 }] }).ok,
     ).toBe(false);
     expect(mainAudienceAtPrompt({ ...base, servers: [{ server: "metrics", toolCount: 1 }] }).ok).toBe(false);
-    expect(mainAudienceAtPrompt({ ...base, referencedContext: true }).ok).toBe(false);
     expect(mainAudienceAtPrompt({ ...base, threadArtifacts: "earlier private source answer" }).ok).toBe(false);
   });
 

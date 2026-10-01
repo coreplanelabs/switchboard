@@ -1,5 +1,8 @@
 import { testSlackCapability, testSessionSources } from "./testing/slackSources.js";
-import type { SessionSources } from "./references/receipts.js";
+import { sourceHash, type SessionSources } from "./references/receipts.js";
+import { createSlackContextCapability, type SlackContextClient } from "../channels/slack/context.js";
+import { SlackConversationReader } from "../channels/slack/references.js";
+import type { SlackContextRequest } from "../tools/slackContext.js";
 import { ASKS, bearerExpiresAt, HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "./budgets.js";
 import { contractFromPlan, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./ship/contract.js";
 import { NO_VERDICT_LINE } from "./reviewVerdict.js";
@@ -71,7 +74,7 @@ import { createAlsContext, createTickingClock, timedFakes, type Tick } from "./t
 import { ThreadAdmission } from "./threadAdmission.js";
 import { isHeadMaterial, isSpanRecord, type RunEvent } from "./runEvents.js";
 import type { ConversationReader } from "./references/types.js";
-import { quotedBlock, REFERENCE_REFUSAL } from "./dispatch/references.js";
+import { quotedBlock, REFERENCE_REFUSAL, resetReferenceRate } from "./dispatch/references.js";
 import type { ContentPart } from "./chatMessage.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
@@ -662,6 +665,280 @@ describe("dispatch", () => {
     expect(requests).toHaveLength(2);
     expect(JSON.stringify(requests[1]?.messages)).not.toContain("session tools are not available");
     expect(replies).toContain("I can use this conversation's notes.");
+  });
+
+  async function mainSourceFixture(
+    options: {
+      enabled?: boolean;
+      mixed?: boolean;
+      file?: boolean;
+      failWrite?: "initialize" | "read";
+      denyOrigin?: boolean;
+      provider?: Provider;
+    } = {},
+  ) {
+    resetReferenceRate();
+    const timestamp = "1700000000.000100";
+    const publicUrl = `https://team.example/archives/C_PUBLIC/p${timestamp.replace(".", "")}`;
+    const foreignUrl = `https://team.example/archives/D_FOREIGN/p${timestamp.replace(".", "")}`;
+    const file = {
+      id: "F123",
+      name: "evidence.txt",
+      mimetype: "text/plain",
+      size: 17,
+      url_private: "https://files.slack.com/evidence.txt",
+    };
+    const fetches = vi.fn(async ({ channel }: { channel: string }) => ({
+      messages: [
+        {
+          ts: timestamp,
+          user: "UADMIN",
+          text: channel === "C_PUBLIC" ? "accepted source evidence" : "denied source secret",
+          files: [file],
+        },
+      ],
+    }));
+    const client: SlackContextClient = {
+      auth: { test: async () => ({ url: "https://team.example/", team_id: "TLOCAL" }) },
+      users: {
+        info: async () => ({
+          user: { name: "requester", team_id: "TLOCAL", is_restricted: false, is_ultra_restricted: false },
+        }),
+      },
+      conversations: {
+        info: async ({ channel }) => ({
+          channel: {
+            id: channel,
+            name: "source",
+            user: "UADMIN",
+            is_im: channel.startsWith("D"),
+            is_mpim: false,
+            is_private: channel.startsWith("D"),
+            is_member: true,
+            is_shared: false,
+            is_ext_shared: false,
+            is_org_shared: channel === "DALICE" && options.denyOrigin === true,
+            is_pending_ext_shared: false,
+          },
+        }),
+        replies: fetches,
+        history: async () => ({ messages: [] }),
+      },
+    };
+    const reader = new SlackConversationReader(client);
+    await reader.ready();
+    const ledger = new InMemoryRunLedger();
+    const committed: SessionSources[] = [];
+    const write = ledger.writeSessionSources.bind(ledger);
+    vi.spyOn(ledger, "writeSessionSources").mockImplementation(async (key, runId, gen, sources) => {
+      if (
+        sources.status === "known" &&
+        (options.failWrite === "initialize" || (options.failWrite === "read" && sources.receipts.length > 0))
+      )
+        return { ok: false, reason: "fenced" };
+      const result = await write(key, runId, gen, sources);
+      if (result.ok) committed.push(structuredClone(sources));
+      return result;
+    });
+    const reads: SlackContextRequest[] = [{ kind: "link", url: publicUrl }];
+    if (options.mixed) reads.push({ kind: "link", url: foreignUrl });
+    if (options.file) reads.push({ kind: "file", url: publicUrl, fileId: file.id });
+    const requests: CompletionRequest[] = [];
+    const answer = `Verified ${publicUrl}${options.mixed ? "; the other source is unavailable." : "."}`;
+    const provider: Provider = {
+      name: "fake",
+      async complete(request) {
+        requests.push(structuredClone(request));
+        const content = JSON.stringify(request.messages);
+        if (requests.length === 1) {
+          expect(fetches).not.toHaveBeenCalled();
+          expect(content).toContain(publicUrl);
+          expect(content).not.toContain("accepted source evidence");
+          expect(content).not.toContain("denied source secret");
+          expect(request.tools?.map((tool) => tool.name)).toContain("slack_context");
+          expect(committed).toHaveLength(1);
+          expect([...ledger.live.values()][0]?.tools.map((tool) => tool.name)).toContain("slack_context");
+        }
+        if (content.includes("accepted source evidence"))
+          expect(
+            committed.some(
+              (state) =>
+                state.status === "known" && state.receipts.some((r) => r.source.channelId === "slack:C_PUBLIC"),
+            ),
+          ).toBe(true);
+        if (content.includes("accepted file evidence"))
+          expect(
+            committed.some((state) => state.status === "known" && state.receipts.some((r) => r.file?.id === "F123")),
+          ).toBe(true);
+        expect(content).not.toContain("denied source secret");
+        const read = reads[requests.length - 1];
+        return read
+          ? {
+              content: [
+                { type: "tool_use" as const, id: `source-${requests.length}`, name: "slack_context", input: read },
+              ],
+              stopReason: "tool_use" as const,
+            }
+          : { content: [{ type: "text" as const, text: answer }], stopReason: "end_turn" as const };
+      },
+    };
+    const deps = makeDeps(
+      mainDmYaml + `references: { enabled: ${options.enabled ?? true} }\n`,
+      options.provider ?? provider,
+    );
+    deps.conversationReaders = [reader];
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-source",
+      fallback: new NullRunStore(),
+      warn: () => {},
+    });
+    deps.slackContextForRun = (actor, origin) =>
+      createSlackContextCapability({
+        client,
+        reader,
+        actor,
+        msg: origin,
+        loadFile: async () => ({
+          content: "accepted file evidence",
+          hash: await sourceHash("accepted file evidence"),
+          truncated: false,
+        }),
+      });
+    const question = mainDm(
+      `Compare these messages: ${publicUrl}${options.mixed ? ` ${foreignUrl}` : ""}${options.file ? " and its attachment" : ""}`,
+    );
+    return { deps, question, requests, fetches, committed, ledger, answer, publicUrl, foreignUrl };
+  }
+
+  it("defers configured main references to committed source reads", async () => {
+    for (const enabled of [true, false]) {
+      for (const mixed of [false, true]) {
+        const fixture = await mainSourceFixture({ enabled, mixed, file: true });
+        const { io, replies } = mainDmIO();
+        await dispatch(fixture.deps, fixture.question, io);
+        expect(fixture.requests).toHaveLength(mixed ? 4 : 3);
+        const final = JSON.stringify(fixture.requests.at(-1)?.messages);
+        expect(final).toContain("accepted source evidence");
+        expect(final).toContain("F123");
+        expect(final).toContain("accepted file evidence");
+        if (mixed) expect(final).toContain("I can't read that Slack source");
+        expect(fixture.fetches.mock.calls.every(([args]) => args.channel === "C_PUBLIC")).toBe(true);
+        expect(replies).toEqual([fixture.answer]);
+      }
+    }
+  });
+
+  it("does not fall back to automatic references without a bound source capability", async () => {
+    for (const binding of ["missing", "denied"] as const) {
+      const provider = capturingProvider("I cannot read that source here.");
+      const fixture = await mainSourceFixture({ provider, denyOrigin: binding === "denied" });
+      if (binding === "missing") fixture.deps.slackContextForRun = undefined;
+      const { io, replies } = mainDmIO();
+      await dispatch(fixture.deps, fixture.question, io);
+      expect(provider.requests).toHaveLength(1);
+      expect(fixture.fetches).not.toHaveBeenCalled();
+      expect(JSON.stringify(provider.requests[0])).not.toContain("accepted source evidence");
+      expect(provider.requests[0].tools?.map((tool) => tool.name)).not.toContain("slack_context");
+      expect(replies).toContain("I cannot read that source here.");
+    }
+  });
+
+  it("refuses source initialization failure before starting the main model", async () => {
+    const fixture = await mainSourceFixture({ failWrite: "initialize" });
+    const { io } = mainDmIO();
+    await dispatch(fixture.deps, fixture.question, io);
+    expect(fixture.requests).toHaveLength(0);
+    expect(fixture.fetches).not.toHaveBeenCalled();
+    expect(fixture.committed).toHaveLength(0);
+  });
+
+  it("withholds source content when the receipt write fails", async () => {
+    const fixture = await mainSourceFixture({ failWrite: "read" });
+    const { io, replies } = mainDmIO();
+    await dispatch(fixture.deps, fixture.question, io);
+    expect(fixture.requests).toHaveLength(2);
+    expect(JSON.stringify(fixture.requests)).not.toContain("accepted source evidence");
+    expect(JSON.stringify(fixture.requests[1].messages)).toContain("receipt could not be saved");
+    expect(replies).not.toContain(fixture.answer);
+  });
+
+  it("refuses unverified main destinations before any reference read", async () => {
+    const fixture = await mainSourceFixture({ mixed: true });
+    const { io } = mainDmIO();
+    io.verifyDirectAudience = async () => false;
+    await dispatch(fixture.deps, fixture.question, io);
+    expect(fixture.requests).toHaveLength(0);
+    expect(fixture.fetches).not.toHaveBeenCalled();
+  });
+
+  it("excludes prior-run file catalogues from main source intake", async () => {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(request): Promise<CompletionResult> {
+        requests.push(structuredClone(request));
+        return requests.length === 1
+          ? {
+              content: [{ type: "tool_use", id: "files", name: "recall", input: { assets: true } }],
+              stopReason: "tool_use",
+            }
+          : {
+              content: [{ type: "text", text: "Please point me to the Slack message with the file." }],
+              stopReason: "end_turn",
+            };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    wireChildLedger(deps);
+    deps.runRegistry = new RunRegistry();
+    deps.artifacts = new InMemoryArtifactStore();
+    const key = "threads/slack-DALICE-1.0/in/1/unproved.txt";
+    await threadWithFinishedRun(deps, "review", {
+      channelId: "slack:DALICE",
+      threadKey: "slack:DALICE:1.0",
+      channelVisibility: "dm",
+      events: [
+        {
+          type: "artifact",
+          direction: "in",
+          key,
+          name: "unproved-file-name.txt",
+          size: 17,
+          contentType: "text/plain",
+          messageId: "1",
+          at: 1,
+          seq: 1,
+        },
+      ],
+      eventCount: 1,
+      storedEventCount: 1,
+    });
+    // The catalogue may contain legacy records without current source receipts.
+    vi.spyOn(deps.runs!, "getRunEvents").mockResolvedValue({
+      ok: true,
+      value: {
+        events: [
+          {
+            type: "artifact",
+            direction: "in",
+            key,
+            name: "unproved-file-name.txt",
+            size: 17,
+            contentType: "text/plain",
+            messageId: "1",
+            at: 1,
+            seq: 1,
+          },
+        ],
+      },
+    });
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, mainDm("What does the file say?"), io);
+    expect(requests).toHaveLength(2);
+    expect(JSON.stringify(requests)).not.toContain("unproved-file-name.txt");
+    expect(JSON.stringify(requests[1].messages)).toContain("file catalogue is not available to this run");
+    expect(replies).toContain("Please point me to the Slack message with the file.");
   });
 
   it("reads a permalink and its file through the verified DM tool without seeding linked text", async () => {
