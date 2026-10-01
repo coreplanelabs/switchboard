@@ -1,4 +1,4 @@
-import { McpError, type McpCallResult, type McpClient, type McpToolInfo } from "./types.js";
+import { McpError, type McpCallOptions, type McpCallResult, type McpClient, type McpToolInfo } from "./types.js";
 
 // Streamable-HTTP MCP client (docs/reference/specs/mcp-tools.md items 2–4). JSON-RPC 2.0
 // over POST; the server answers with JSON or an SSE stream (we take the frame
@@ -82,8 +82,17 @@ export class StreamableHttpMcpClient implements McpClient {
     return tools;
   }
 
-  async callTool(name: string, args: Record<string, unknown>, opts?: { signal?: AbortSignal }): Promise<McpCallResult> {
-    const result = (await this.request("tools/call", { name, arguments: args }, opts?.signal)) as {
+  async sourceSession(opts?: { signal?: AbortSignal }): Promise<string | undefined> {
+    await this.ensureInitialized(opts?.signal);
+    return this.sessionId;
+  }
+
+  async callTool(name: string, args: Record<string, unknown>, opts?: McpCallOptions): Promise<McpCallResult> {
+    // An original session may outlive this client process. Address it explicitly;
+    // do not mutate the discovery client's session shared with other runs.
+    const result = (await (opts?.sourceSession
+      ? this.rpc("tools/call", { name, arguments: args }, opts.signal, { sourceSession: opts.sourceSession })
+      : this.request("tools/call", { name, arguments: args }, opts?.signal))) as {
       content?: unknown;
       isError?: unknown;
       structuredContent?: unknown;
@@ -157,11 +166,13 @@ export class StreamableHttpMcpClient implements McpClient {
     method: string,
     params: Record<string, unknown>,
     signal?: AbortSignal,
-    o?: { initializing?: boolean },
+    o?: { initializing?: boolean; sourceSession?: string },
   ): Promise<unknown> {
     const id = this.nextId++;
     const res = await this.post({ jsonrpc: "2.0", id, method, params }, signal, o);
     const session = res.headers.get("mcp-session-id");
+    if (o?.sourceSession && session && session !== o.sourceSession)
+      throw new McpError("protocol", "The source returned a different session");
     if (session && o?.initializing) this.sessionId = session;
     const message = await this.readResponse(res, id, signal);
     if (message.error) {
@@ -174,7 +185,7 @@ export class StreamableHttpMcpClient implements McpClient {
   private async post(
     body: Record<string, unknown>,
     signal?: AbortSignal,
-    o?: { initializing?: boolean },
+    o?: { initializing?: boolean; sourceSession?: string },
   ): Promise<Response> {
     const headers: Record<string, string> = {
       ...this.headers,
@@ -182,7 +193,8 @@ export class StreamableHttpMcpClient implements McpClient {
       accept: "application/json, text/event-stream",
       "mcp-protocol-version": MCP_PROTOCOL_VERSION,
     };
-    if (this.sessionId && !o?.initializing) headers["mcp-session-id"] = this.sessionId;
+    if (o?.sourceSession) headers["mcp-session-id"] = o.sourceSession;
+    else if (this.sessionId && !o?.initializing) headers["mcp-session-id"] = this.sessionId;
     let res: Response;
     try {
       res = await this.fetchImpl(this.url, {
@@ -251,11 +263,13 @@ function toToolInfo(raw: unknown): McpToolInfo | undefined {
       : {};
   const ann =
     r.annotations && typeof r.annotations === "object" ? (r.annotations as McpToolInfo["annotations"]) : undefined;
+  const meta = r._meta && typeof r._meta === "object" ? (r._meta as Record<string, unknown>) : undefined;
   return {
     name: r.name,
     ...(typeof r.description === "string" ? { description: r.description } : {}),
     inputSchema: schema,
     ...(ann ? { annotations: ann } : {}),
+    ...(meta && Object.hasOwn(meta, "sourceAction") ? { _meta: { sourceAction: meta.sourceAction } } : {}),
   };
 }
 

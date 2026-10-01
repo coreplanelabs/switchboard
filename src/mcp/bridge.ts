@@ -4,6 +4,7 @@ import type { RunnableTool } from "../tools/runnableTool.js";
 import { McpError, type McpCallResult, type McpClient, type McpServerSpec, type McpToolInfo } from "./types.js";
 import { classifyError } from "../core/trace/classify.js";
 import type { Span } from "../core/trace/types.js";
+import { sourceReadContract } from "./sourceReadProtocol.js";
 
 // The bridge (docs/reference/specs/mcp-tools.md items 5–7, 10): one remote tool → one
 // `RunnableTool` the runner can call like any built-in. Names are mechanical
@@ -40,6 +41,7 @@ export function untrustedDescriptionPrefix(server: string): string {
 export interface BridgeOptions {
   /** Shared across every bridged tool of ONE run: the per-run call budget. */
   budget: { calls: number };
+  currentSource?: () => Promise<boolean>;
 }
 
 /** A per-run budget object; hand the same one to every server's bridge. */
@@ -70,11 +72,55 @@ export function bridgeMcpTools(
     const description =
       `${untrustedDescriptionPrefix(server.name)} ${clip(t.description ?? "", MCP_MAX_DESCRIPTION_CHARS)}`.trimEnd();
     const inputSchema = isObjectSchema(t.inputSchema) ? t.inputSchema : { type: "object", properties: {} };
+    const contract = sourceReadContract(t);
+    if (contract && server.id && server.connectionRevision && client.sourceSession && opts.currentSource) {
+      return {
+        name,
+        description,
+        inputSchema: contract.querySchema,
+        sourceRead: {
+          toolName: name,
+          serverId: server.id,
+          connectionRevision: server.connectionRevision,
+          contract,
+          session: (signal) => client.sourceSession!({ signal }),
+          current: opts.currentSource,
+          call: (request, sessionId, signal, parent) => {
+            const call = async (span?: Span) => {
+              try {
+                const result = await client.callTool(t.name, request, { sourceSession: sessionId, signal });
+                const ok = result.isError !== true;
+                if (!ok) span?.fail(classifyError(new Error("The source refused the read"), { kind: "refused" }));
+                span?.end(ok ? "ok" : "error", {
+                  ok,
+                  bytes: Buffer.byteLength(JSON.stringify(result.structuredContent ?? null)),
+                });
+                return result;
+              } catch (err) {
+                span?.fail(
+                  classifyError(new Error("The source read did not return a receipt", { cause: err }), mcpClass(err)),
+                );
+                span?.end("error", { ok: false, bytes: 0 });
+                throw err;
+              }
+            };
+            return parent ? parent.span(`mcp.${server.name}.${t.name}`, call) : call();
+          },
+        },
+        async run(input, ctx) {
+          if (opts.budget.calls >= MCP_MAX_CALLS_PER_RUN || !ctx.sourceReads || !ctx.callId)
+            return "Source unavailable: durable read ownership is not available.";
+          opts.budget.calls++;
+          return ctx.sourceReads.run(name, input, ctx.callId, ctx.signal, ctx.span);
+        },
+      } satisfies RunnableTool;
+    }
     const tool: RunnableTool = {
       name,
       description,
       inputSchema,
-      ...(readOnly ? { sideEffectFree: true as const } : {}),
+      // An unsupported action descriptor must not fall back to a read hint.
+      ...(readOnly && t._meta?.sourceAction === undefined ? { sideEffectFree: true as const } : {}),
       async run(input, ctx) {
         if (opts.budget.calls >= MCP_MAX_CALLS_PER_RUN) {
           return `Refused: this run has reached its MCP call cap (${MCP_MAX_CALLS_PER_RUN} calls across all servers).`;

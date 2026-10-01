@@ -34,6 +34,9 @@ export interface McpServerOutcome {
   revision?: string;
   /** Tools bridged for this run; `undefined` when discovery failed. */
   toolCount?: number;
+  discoveredCount?: number;
+  eligibleCount?: number;
+  rejection?: "no_eligible_read";
   /** The server's own `initialize.instructions`, whitespace-collapsed and
    *  clipped at `MCP_INSTRUCTIONS_MAX`; absent when it sent none. */
   instructions?: string;
@@ -149,13 +152,29 @@ export abstract class DiscoveringMcpToolSource implements McpToolSource {
         // Filter after bridging: duplicate remote names keep their first
         // declaration, so a later read hint cannot relabel an unknown/write tool.
         // Do not alter discovery's cache — another agent has its own tool policy.
-        const bridged = bridgeMcpTools(server, client, tools, { budget });
-        const offered = agentName === "orchestrator" ? bridged.filter((t) => t.sideEffectFree === true) : bridged;
+        const bridged = bridgeMcpTools(server, client, tools, {
+          budget,
+          currentSource: async () =>
+            (await this.resolve(agentName, caller)).some(
+              (entry) =>
+                "spec" in entry &&
+                entry.spec.id === server.id &&
+                entry.spec.connectionRevision !== undefined &&
+                entry.spec.connectionRevision === server.connectionRevision,
+            ),
+        });
+        const offered =
+          agentName === "orchestrator"
+            ? bridged.filter((t) => t.sideEffectFree === true || t.sourceRead !== undefined)
+            : bridged;
         if (agentName === "orchestrator" && offered.length === 0)
           return {
             outcome: {
               server: server.name,
               unavailable: "no read-only tools advertised for orchestrator",
+              discoveredCount: tools.length,
+              eligibleCount: 0,
+              rejection: "no_eligible_read",
             } as McpServerOutcome,
             tools: [] as RunnableTool[],
           };
@@ -344,11 +363,18 @@ export function mcpGuidanceBlock(servers: McpServerOutcome[]): string | undefine
   }
   if (down.length > 0) {
     lines.push(
-      served.length > 0
-        ? "These configured servers did not answer for this run — say so if the user needs them:"
-        : "External MCP servers are configured for you but none answered for this run — tell the user which are unavailable rather than guessing:",
+      down.some((s) => s.rejection === "no_eligible_read")
+        ? "These configured sources have no usable tools for this run — use the stated reason:"
+        : served.length > 0
+          ? "These configured servers did not answer for this run — say so if the user needs them:"
+          : "External MCP servers are configured for you but none answered for this run — tell the user which are unavailable rather than guessing:",
     );
-    for (const s of down) lines.push(`- ${s.server}: unavailable (${s.unavailable})`);
+    for (const s of down)
+      lines.push(
+        s.rejection === "no_eligible_read"
+          ? `- ${s.server}: unavailable — ${s.discoveredCount} discovered, 0 eligible (${s.unavailable})`
+          : `- ${s.server}: unavailable (${s.unavailable})`,
+      );
   }
   return lines.join("\n");
 }

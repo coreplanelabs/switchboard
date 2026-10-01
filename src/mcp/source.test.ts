@@ -7,7 +7,8 @@ import {
   StaticMcpToolSource,
   mcpGuidanceBlock,
 } from "./source.js";
-import type { McpServerSpec } from "./types.js";
+import type { McpServerSpec, McpToolInfo } from "./types.js";
+import { readTool } from "./testing/sourceRead.js";
 
 const linear: McpServerSpec = { name: "linear", url: "https://mcp.linear.app/mcp", agents: ["general", "research"] };
 const github: McpServerSpec = {
@@ -28,6 +29,67 @@ function clients() {
 }
 
 describe("StaticMcpToolSource", () => {
+  it("admits a versioned resource read without granting parallel execution or replay", async () => {
+    const source = new StaticMcpToolSource(
+      [
+        {
+          ...linear,
+          id: "user:slack:UA/linear",
+          agents: ["orchestrator"],
+          connectionRevision: "credential-generation",
+        },
+      ],
+      { factory: () => new InMemoryMcpClient([readTool]) },
+    );
+    const result = await source.toolsFor("orchestrator", { userId: "slack:UA", channelId: "slack:DA" });
+    expect(result.tools).toHaveLength(1);
+    expect(result.tools[0].sideEffectFree).toBeUndefined();
+    expect(Object.keys(result.tools[0].inputSchema.properties as object)).toEqual(["resource", "input"]);
+  });
+
+  it("reports six discovered and zero eligible tools without relabeling generic wrappers", async () => {
+    const source = new StaticMcpToolSource([{ ...linear, agents: ["orchestrator"] }], {
+      factory: () =>
+        new InMemoryMcpClient(
+          Array.from({ length: 6 }, (_, i) => ({
+            name: `wrapper${i}`,
+            inputSchema: {},
+            annotations: { readOnlyHint: false },
+          })),
+        ),
+    });
+    expect((await source.toolsFor("orchestrator", { userId: "slack:UA" })).servers[0]).toMatchObject({
+      discoveredCount: 6,
+      eligibleCount: 0,
+      rejection: "no_eligible_read",
+    });
+  });
+
+  it.each(["version", "open-query", "hidden-reference", "missing-connection"])(
+    "an unsupported source contract cannot fall back to readOnlyHint (%s)",
+    async (change) => {
+      const tool: McpToolInfo = structuredClone(readTool);
+      tool.annotations = { readOnlyHint: true, destructiveHint: false };
+      if (change === "version") tool._meta = { sourceAction: { ...readTool._meta.sourceAction, version: 2 } };
+      const properties = tool.inputSchema.properties as Record<string, Record<string, unknown>>;
+      if (change === "open-query") properties.resource.additionalProperties = true;
+      if (change === "hidden-reference") properties.input.$ref = "#/$defs/authority";
+      const source = new StaticMcpToolSource(
+        [
+          {
+            ...linear,
+            id: "user:slack:UA/linear",
+            agents: ["orchestrator"],
+            ...(change === "missing-connection" ? {} : { connectionRevision: "original" }),
+          },
+        ],
+        {
+          factory: () => new InMemoryMcpClient([tool]),
+        },
+      );
+      expect((await source.toolsFor("orchestrator", { userId: "slack:UA" })).tools).toEqual([]);
+    },
+  );
   it("serves only the servers scoped to the agent; review gets none unless listed", async () => {
     const { factory } = clients();
     const src = new StaticMcpToolSource([linear, github], { factory });
@@ -113,7 +175,15 @@ describe("StaticMcpToolSource", () => {
     });
     const out = await src.toolsFor("orchestrator", { userId: "slack:UA" });
     expect(out.tools).toEqual([]);
-    expect(out.servers).toEqual([{ server: "linear", unavailable: "no read-only tools advertised for orchestrator" }]);
+    expect(out.servers).toEqual([
+      {
+        server: "linear",
+        unavailable: "no read-only tools advertised for orchestrator",
+        discoveredCount: 1,
+        eligibleCount: 0,
+        rejection: "no_eligible_read",
+      },
+    ]);
     expect(mcpGuidanceBlock(out.servers)).toContain("unavailable");
   });
 
@@ -188,6 +258,20 @@ describe("mcpGuidanceBlock", () => {
     const block = mcpGuidanceBlock([{ server: "linear", unavailable: "timeout" }])!;
     expect(block).toContain("none answered for this run");
     expect(block).not.toContain("You have tools");
+  });
+
+  it("distinguishes discovered but ineligible tools from a failed connection", () => {
+    const block = mcpGuidanceBlock([
+      {
+        server: "metrics",
+        unavailable: "no eligible reads",
+        discoveredCount: 6,
+        eligibleCount: 0,
+        rejection: "no_eligible_read",
+      },
+    ])!;
+    expect(block).toContain("6 discovered, 0 eligible");
+    expect(block).not.toContain("none answered");
   });
 });
 

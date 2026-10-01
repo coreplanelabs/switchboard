@@ -27,6 +27,8 @@ export const SOURCE_REVALIDATE_MAX_MS = 30 * SECOND_MS;
 export const secondsToMs = (seconds: number): number => seconds * SECOND_MS;
 
 export const MINUTE_MS = 60_000;
+/** The source-read protocol's maximum lifetime for a recorded result. */
+export const SOURCE_READ_ELIGIBILITY_MS = 60 * MINUTE_MS;
 /** Operator-selected baseline tests cannot consume an unbounded setup lease. */
 export const FIRST_TEST_MAX_MS = 2 * MINUTE_MS;
 export const FIRST_TEST_PREFLIGHT_MS = 10 * SECOND_MS;

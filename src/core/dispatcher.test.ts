@@ -1,6 +1,9 @@
 import { booleanAudienceVerifier } from "./testing/audienceVerifier.js";
 import { testSlackCapability, testSessionSources } from "./testing/slackSources.js";
 import { sourceHash, type SessionSources } from "./references/receipts.js";
+import { readQuery, readResponse, readTool } from "../mcp/testing/sourceRead.js";
+import { createSourceReads, type SourceReadState } from "../mcp/sourceRead.js";
+import { sourceReadContract } from "../mcp/sourceReadProtocol.js";
 import { createSlackContextCapability, type SlackContextClient } from "../channels/slack/context.js";
 import { SlackConversationReader } from "../channels/slack/references.js";
 import type { SlackContextRequest } from "../tools/slackContext.js";
@@ -12659,6 +12662,89 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.live.get("run-l")?.ownerGen).toBe("gen-next");
   });
 
+  it.each([false, true])(
+    "records an actual source read before dispatch and gates private delivery on fresh permission (revoked=%s)",
+    async (revoke) => {
+      const direct = {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:DREAD",
+        userId: "slack:UADMIN",
+        threadKey: "slack:DREAD:1",
+      };
+      let deliveredState: SourceReadState | undefined;
+      const observedAt = new Date(Date.now() - 1000).toISOString();
+      let calls = 0;
+      const provider: Provider = {
+        name: "fake",
+        complete: async (request) => {
+          if (calls++ === 0)
+            return {
+              content: [{ type: "tool_use", id: "source-call", name: "mcp__metrics__readFailures", input: readQuery }],
+              stopReason: "tool_use",
+            };
+          expect(JSON.stringify(request.messages)).toContain("failure-real-response");
+          expect(JSON.stringify(request.messages)).not.toContain("alternate untrusted answer");
+          return { content: [{ type: "text", text: "The source reports 17 failures." }], stopReason: "end_turn" };
+        },
+      };
+      const t = wired(provider, {
+        yaml: YAML_FIXTURE.replace(
+          "    coding: anthropic/coding-model",
+          "    coding: anthropic/coding-model\n    orchestrator: anthropic/orchestrator-model",
+        ),
+      });
+      const client = new InMemoryMcpClient([
+        {
+          ...readTool,
+          handler: async (request) => {
+            const state = t.ledger.live.get("run-l")?.state.sourceReads as SourceReadState;
+            expect(state.owner).toMatchObject({
+              runId: "run-l",
+              requester: direct.userId,
+              threadKey: direct.threadKey,
+            });
+            expect(state.records[0]).toMatchObject({ actionId: request.actionId, query: readQuery });
+            if (request.action === "execute") expect(state.records[0].phase).toBe("pending");
+            if (revoke && request.action === "inspect")
+              return { content: [], structuredContent: { version: 1, status: "refused", reason: "unauthorized" } };
+            const response = readResponse(request.actionId as string);
+            response.observedAt = observedAt;
+            response.binding.expiresAt = new Date(Date.parse(observedAt) + 3_600_000).toISOString();
+            return { content: [{ type: "text", text: "alternate untrusted answer" }], structuredContent: response };
+          },
+        },
+      ]);
+      t.deps.mcp = new StaticMcpToolSource(
+        [
+          {
+            name: "metrics",
+            id: `user:${direct.userId}/metrics`,
+            url: "https://source.example/mcp",
+            agents: ["orchestrator"],
+            connectionRevision: "sealed-generation",
+          },
+        ],
+        { factory: () => client },
+      );
+      const { io, replies } = ioWithCard(() => {
+        deliveredState = t.ledger.live.get("run-l")?.state.sourceReads as SourceReadState;
+      });
+      io.history = async () => [];
+      io.directAudience = () => direct;
+      io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
+      await dispatch(
+        t.deps,
+        { ...direct, text: "agent:orchestrator Read the checkout failures", directAudience: direct },
+        io,
+      );
+      await t.writer.settled();
+      expect(client.calls.filter((c) => c.args.action === "execute")).toHaveLength(1);
+      expect(client.calls.some((c) => c.args.action === "inspect")).toBe(true);
+      expect(replies.join(" ").includes("17 failures")).toBe(!revoke);
+      if (!revoke) expect(deliveredState?.records[0]).toMatchObject({ phase: "settled", exposed: true });
+    },
+  );
+
   it("carries a fresh accepted target from dispatch through reservation and claim", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     const target = { repo: "acme/api", ref: "unit/repair" };
@@ -12955,6 +13041,196 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       expect(replies.join(" ")).not.toContain("17 failed signups");
       expect(ledger.live.has("run-main")).toBe(false);
     }
+  });
+
+  it.each([
+    "unrecorded revocation",
+    "consumed follow-up",
+    "finish provenance unknown",
+    "changed connection",
+    "changed query",
+    "revoked actor",
+  ])("source receipts cannot reopen private transcript recovery (%s)", async (variant) => {
+    const direct = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DREAD",
+      userId: "slack:UADMIN",
+      threadKey: "slack:DREAD:1",
+    };
+    const toolName = "mcp__metrics__readFailures";
+    let stored: SourceReadState | undefined;
+    const first = createSourceReads({
+      owner: {
+        runId: "run-main",
+        requester: direct.userId,
+        agent: "orchestrator",
+        channelId: direct.channelId,
+        threadKey: direct.threadKey,
+      },
+      canRecover: true,
+      now: Date.now,
+      audience: async () => true,
+      save: async (state) => {
+        stored = state;
+        return true;
+      },
+      operations: [
+        {
+          toolName,
+          serverId: `user:${direct.userId}/metrics`,
+          connectionRevision: "original",
+          contract: sourceReadContract(readTool)!,
+          current: async () => true,
+          session: async () => "session-original",
+          call: async () => {
+            throw new Error("ack lost after provider dispatch");
+          },
+        },
+      ],
+    });
+    await first.run(toolName, readQuery, "read-call");
+    expect(stored?.records[0].phase).toBe("unknown");
+    const transcript: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "Read checkout failures" }] },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "read-call",
+            name: toolName,
+            input: variant === "changed query" ? { ...readQuery, input: { limit: 3 } } : readQuery,
+          },
+        ],
+      },
+    ];
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    await ledger.claim({
+      runId: "run-main",
+      threadKey: direct.threadKey,
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: direct.channelId,
+        userId: direct.userId,
+        threadKey: direct.threadKey,
+        agent: "orchestrator",
+        model: "anthropic/general-model",
+        mainAudienceChecked: true,
+        directAudience: direct,
+      },
+      card: { channel: "DREAD", ts: "1.2" },
+      system: "Original source request",
+      tools: [{ name: toolName, description: "Bound read", inputSchema: {} }],
+      state: { sourceReads: stored },
+    });
+    await ledger.seed("run-main", "gen-OLD", [{ idx: 0, message: transcript[0] }]);
+    await ledger.step(
+      "run-main",
+      "gen-OLD",
+      {
+        step: 0,
+        seq: 0,
+        turnIndex: 1,
+        inFlight: [],
+        inboxConsumedSeq: variant === "consumed follow-up" ? 1 : 0,
+        remainingMs: 300_000,
+        turn: 0,
+        iteration: 0,
+      },
+      [],
+    );
+    await ledger.step(
+      "run-main",
+      "gen-OLD",
+      {
+        step: 1,
+        seq: 0,
+        turnIndex: 2,
+        inFlight: [{ callId: "read-call", tool: toolName }],
+        inboxConsumedSeq: variant === "consumed follow-up" ? 1 : 0,
+        remainingMs: 240_000,
+        turn: 1,
+        iteration: 0,
+      },
+      [{ idx: 1, message: transcript[1] }],
+    );
+    ledger.live.get("run-main")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const provider = capturingProvider("The recovered source reports 17 failures.");
+    const t = wired(provider, { ledger });
+    const response = readResponse(stored!.records[0].actionId);
+    response.observedAt = new Date(Date.now() - 1000).toISOString();
+    response.binding.expiresAt = new Date(Date.parse(response.observedAt) + 3_600_000).toISOString();
+    const client = new InMemoryMcpClient([
+      {
+        ...readTool,
+        handler: async (input) => {
+          expect(input.action).toBe("inspect");
+          return {
+            content: [],
+            structuredContent:
+              variant === "revoked actor" ? { version: 1, status: "refused", reason: "unauthorized" } : response,
+          };
+        },
+      },
+    ]);
+    t.deps.mcp = new StaticMcpToolSource(
+      [
+        {
+          name: "metrics",
+          id: `user:${direct.userId}/metrics`,
+          url: "https://source.example/mcp",
+          agents: ["orchestrator"],
+          connectionRevision: variant === "changed connection" ? "replacement" : "original",
+        },
+      ],
+      { factory: () => client },
+    );
+    const { io, replies } = ioWithCard();
+    io.history = async () => [];
+    io.directAudience = () => direct;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
+    const toolUse = transcript[1].content[0] as Extract<ContentPart, { type: "tool_use" }>;
+    await dispatch(t.deps, resumeMessage(reclaimed.row, "Read checkout failures"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan:
+          variant === "finish provenance unknown"
+            ? {
+                kind: "finish",
+                messages: transcript,
+                answer: "The source reports 17 failures.",
+                inboxConsumedSeq: 0,
+                step: 1,
+                turn: 1,
+                remainingMs: 240_000,
+              }
+            : {
+                kind: "resume",
+                messages: transcript,
+                compactions: [],
+                settlements: [{ toolUse, action: "synthetic", text: "unknown" }],
+                stepRecorded: true,
+                inboxConsumedSeq: variant === "consumed follow-up" ? 1 : 0,
+                step: 1,
+                turn: 1,
+                iteration: 0,
+                remainingMs: 240_000,
+              },
+        events: [],
+        lastSeq: 0,
+        repoCtx: {},
+        inbox: [],
+      },
+    });
+    await t.writer.settled();
+    expect(client.calls).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(replies.join(" ")).not.toContain("17 failures");
+    expect(replies.join(" ")).toContain("restarted");
   });
 
   it("claims the run once its prompt exists (system, tools, card, meta, seed), records each step before its tools, appends events, takes finishing before the reply and finishes through the ledger", async () => {

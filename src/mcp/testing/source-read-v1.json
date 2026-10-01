@@ -1,0 +1,137 @@
+{
+  "tool": {
+    "name": "readWorkerDeployments",
+    "title": "Read Worker deployments",
+    "description": "Read recent deployments for one Cloudflare Worker, or inspect the saved result of the same action. Supply the canonical workspace and cloud account IDs, script name, and result limit. The source-read protocol binds each action to the authenticated session and rechecks access before returning its receipt.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "action": {
+          "type": "string",
+          "enum": ["execute", "inspect"]
+        },
+        "actionId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_.:-]{1,160}$"
+        },
+        "operationRevision": {
+          "type": "string",
+          "const": "1"
+        },
+        "resource": {
+          "type": "object",
+          "properties": {
+            "workspaceId": {
+              "type": "string",
+              "pattern": "^ws_[0-9a-z]{32}$"
+            },
+            "cloudAccountId": {
+              "type": "string",
+              "pattern": "^acc_[0-9a-z]{24}$"
+            },
+            "scriptName": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_-]{1,63}$"
+            }
+          },
+          "required": ["workspaceId", "cloudAccountId", "scriptName"],
+          "additionalProperties": false
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 25
+            }
+          },
+          "required": ["limit"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["version", "action", "actionId", "operationRevision", "resource", "input"],
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    },
+    "_meta": {
+      "sourceAction": {
+        "version": 1,
+        "operationId": "cloudflare.worker-deployments.list",
+        "operationRevision": "1",
+        "lifecycle": "execute_inspect",
+        "resourceEffect": "read",
+        "incidentalEffects": ["receipt_storage", "authorization_cache", "telemetry"],
+        "replayPolicy": "reconcile_only",
+        "revocationConsistency": "eventual"
+      }
+    }
+  },
+  "request": {
+    "version": 1,
+    "action": "execute",
+    "actionId": "fixture:run:tool",
+    "operationRevision": "1",
+    "resource": {
+      "workspaceId": "ws_rii32455qptezc7467usm3f3hq31qkwp",
+      "cloudAccountId": "acc_34gky74ibc92h8t2efn8csrh",
+      "scriptName": "api-production"
+    },
+    "input": {
+      "limit": 2
+    }
+  },
+  "response": {
+    "version": 1,
+    "actionId": "fixture:run:tool",
+    "operationId": "cloudflare.worker-deployments.list",
+    "operationRevision": "1",
+    "binding": {
+      "id": "e073c123-7a7d-4e33-8be6-c644e3aa147e",
+      "revision": "8c6bd8ca-d152-4175-940e-acd61a0dd314",
+      "subjectId": "usr_8y34bjuxip8jcz73r1ohaf346kbvuvg6",
+      "sessionId": "fixture-session",
+      "resource": {
+        "workspaceId": "ws_rii32455qptezc7467usm3f3hq31qkwp",
+        "cloudAccountId": "acc_34gky74ibc92h8t2efn8csrh",
+        "scriptName": "api-production"
+      },
+      "input": {
+        "limit": 2
+      },
+      "expiresAt": "2026-10-01T22:09:18.081Z"
+    },
+    "status": "succeeded",
+    "attempt": "completed",
+    "observedAt": "2026-10-01T21:09:18.081Z",
+    "truncation": "none",
+    "result": {
+      "deployments": [
+        {
+          "id": "deployment-from-http",
+          "createdOn": "2026-10-01T00:00:00.000Z",
+          "source": null,
+          "strategy": null,
+          "versions": [
+            {
+              "versionId": "version-from-http",
+              "percentage": 100
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

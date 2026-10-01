@@ -138,6 +138,7 @@ import { parsePrivateWorkerThreadKey } from "./privateWorkerLog.js";
 import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { mainAudienceAtPrompt, mainAudienceAtReply, planeRowIdentities } from "./dispatch/mainAudience.js";
+import { createSourceReads } from "../mcp/sourceRead.js";
 import { readThreadWorkEvidence } from "../tools/threadWork.js";
 import { predicateFor } from "./authz/predicate.js";
 import { channelVisibilityOf, finishChildSetup, writeTombstone } from "./dispatch/record.js";
@@ -2751,6 +2752,13 @@ export async function dispatch(
       ...(threadArtifacts?.notes ?? []),
     ];
     const recovered = resume !== undefined || restart !== undefined || opts.restartOf !== undefined;
+    const sourceReadOwnerOf = (runId: string) => ({
+      runId,
+      requester: msg.userId,
+      agent: agent.name,
+      channelId: msg.channelId,
+      threadKey: msg.threadKey,
+    });
     // Recovery cannot prove whether an indirect source was consumed before the
     // crash. Refuse before a saved plan or session can reach the model.
     if (recovered && privateAudienceRequired(msg)) {
@@ -3665,6 +3673,29 @@ export async function dispatch(
         : {}),
     });
     const { mcpForRun, system } = prompt;
+    const sourceReads =
+      agent.name === "orchestrator"
+        ? createSourceReads({
+            owner: sourceReadOwnerOf(run.id),
+            operations: mcpForRun.tools.flatMap((tool) => (tool.sourceRead ? [tool.sourceRead] : [])),
+            ...(resume ? { previous: resume.row.state.sourceReads } : {}),
+            canRecover:
+              !session &&
+              !threadArtifacts?.block &&
+              opts.seed === undefined &&
+              (!sourceSession ||
+                (sourceSession.sources?.status === "known" && sourceSession.sources.receipts.length === 0)) &&
+              !msg.images?.length &&
+              !msg.documents?.length,
+            now: clock,
+            audience: async () => {
+              const checked = await privateAudienceDecision(msg, io);
+              return audienceTrace.refusal === undefined && checked.ok;
+            },
+            save: async (state) =>
+              ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush({ sourceReads: state })),
+          })
+        : undefined;
     const mainAudience =
       agent.name === "orchestrator"
         ? mainAudienceAtPrompt({
@@ -3753,7 +3784,14 @@ export async function dispatch(
     const privateAudienceLatch = Object.assign(audienceTrace, recoveredPrivateAudienceLatch(msg, recovered));
     if (privateAudienceLatch.code === "recovered-provenance-unproved")
       noteAudienceRefusal(privateAudienceLatch, "recovered-provenance-unproved", "recovery");
-    if (slackContext) privateAudienceLatch.revalidateSources = () => slackContext.sourcesStillValid();
+    if (slackContext || sourceReads)
+      privateAudienceLatch.revalidateSources = async () => {
+        if (slackContext) {
+          const checked = await slackContext.sourcesStillValid();
+          if (!checked.ok) return checked;
+        }
+        return sourceReads ? sourceReads.revalidate() : { ok: true };
+      };
     ledgerRun = await claimRun(deps, {
       msg,
       verifyDirectAudience: io.verifyDirectAudience?.bind(io),
@@ -3914,6 +3952,7 @@ export async function dispatch(
     // the settle and the post-steps, the finish. A throw propagates to the
     // outer catch after the workspace is released.
     const ran = await runLoop(deps, {
+      ...(sourceReads ? { sourceReads } : {}),
       msg,
       io,
       addressSeverity,

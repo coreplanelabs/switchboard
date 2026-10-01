@@ -23,6 +23,8 @@ export interface McpServerSpec {
   headers?: Record<string, string>;
   /** Agents whose runs may see this server's tools (default general + research). */
   agents: string[];
+  /** Durable, opaque incarnation of the resolved connection, never a token hash. */
+  connectionRevision?: string;
 }
 
 /** One tool as the server describes it (`tools/list`). Everything here is
@@ -31,6 +33,7 @@ export interface McpToolInfo {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  _meta?: { sourceAction?: unknown };
   annotations?: {
     title?: string;
     readOnlyHint?: boolean;
@@ -53,11 +56,19 @@ export type McpContentPart = { type: "text"; text: string } | { type: string; [k
 
 export interface McpClient {
   listTools(opts?: { signal?: AbortSignal }): Promise<McpToolInfo[]>;
-  callTool(name: string, args: Record<string, unknown>, opts?: { signal?: AbortSignal }): Promise<McpCallResult>;
+  callTool(name: string, args: Record<string, unknown>, opts?: McpCallOptions): Promise<McpCallResult>;
+  /** Original session identity for durable operations. A stateless server cannot offer one. */
+  sourceSession?(opts?: { signal?: AbortSignal }): Promise<string | undefined>;
   /** The server's `initialize.instructions` — its own hint on what it is for
    *  and how to use it (MCP spec); `undefined` when it sent none. Untrusted
    *  text like a tool description: shown to the model as the server's words. */
   instructions(opts?: { signal?: AbortSignal }): Promise<string | undefined>;
+}
+
+export interface McpCallOptions {
+  signal?: AbortSignal;
+  /** Call only this original session. Never initialize, replace it, or retry the operation. */
+  sourceSession?: string;
 }
 
 /** Builds the client for one server. Production binds the SSRF-pinned fetch;

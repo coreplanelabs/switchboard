@@ -98,7 +98,7 @@
     "src/core/authz/resource.ts": "8bf899b1c2f8e8db5650042b2af0f0a2359871c12685fd7dc7eaec6e1769d931",
     "src/core/authz/types.ts": "58212afa0722cf062de5c2ef26fd356e9c3c707134e0718f0676159e680b8151",
     "src/core/authz/viewAs.ts": "4b162694a1a2c880df7f436027991d252f37318a44d8a5175685a3d81b0e63ec",
-    "src/core/budgets.ts": "cc145e5dd174a18889b660f5eba91dfdfdece72360639e5dfad452fa319b25d0",
+    "src/core/budgets.ts": "8ed4c0a098fd536e9c51b5daac1c37e0cec43f043b83f395ef18ac4212f03966",
     "src/core/capabilities.ts": "5d95cfcefc532d454d583b1e267d591d1f013193fa954391d9975bec176ec481",
     "src/core/commandRegistry.ts": "2a9c6232e6c50afb660f07307b244680a84beefcd83da02a314c864643d5a3bf",
     "src/core/commandSurface.ts": "17205c26a3b3c661802423e0707b1b8255ac7452f955e7d34b702bc9ed6eda54",
