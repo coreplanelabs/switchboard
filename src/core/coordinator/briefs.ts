@@ -42,8 +42,8 @@ export interface ChildRunFacts {
 export interface BriefReaders {
   /** A file of the target repository at the base ref (the plan, a spec, the
    *  rules file), or undefined when there is none: its text up to `opts.maxChars`
-   *  (the tool clip when unset) and whether it was cut there. The plan is asked
-   *  for up to `PLAN_MAX_CHARS` and a cut plan is refused, never parsed short. */
+   *  (the tool clip when unset) and whether it was cut there. Plans, specs and
+   *  rules are asked for up to `PLAN_MAX_CHARS`; a cut is refused, never parsed short. */
   readRepoFile(
     path: string,
     opts?: { maxChars?: number },
@@ -189,13 +189,24 @@ export async function contractFor(
   }
   const section = ("unit" in source ? source.unit : parsePlanUnit(source.planMarkdown, unit.unit))?.section ?? "";
   const specs = new Map<string, string | undefined>();
-  for (const spec of new Set(specItemRefs(section).map((r) => r.spec)))
-    specs.set(spec, (await readers.readRepoFile(`${SPECS_DIR}/${spec}`))?.content);
+  for (const spec of new Set(specItemRefs(section).map((r) => r.spec))) {
+    const path = `${SPECS_DIR}/${spec}`;
+    const read = await readers.readRepoFile(path, { maxChars: PLAN_MAX_CHARS });
+    if (read?.truncated)
+      throw new Error(
+        `the spec ${path} is longer than ${PLAN_MAX_CHARS.toLocaleString("en-US")} characters at ${rebase.onto} in ${instance.repo}; a cut spec could omit an item or proof row, so none is briefed`,
+      );
+    specs.set(spec, read?.content);
+  }
   let agentRules: AgentRules | undefined;
   for (const file of RULES_FILES) {
-    const text = (await readers.readRepoFile(file))?.content;
-    if (text !== undefined) {
-      agentRules = { file, text };
+    const read = await readers.readRepoFile(file, { maxChars: PLAN_MAX_CHARS });
+    if (read?.truncated)
+      throw new Error(
+        `the rules file ${file} is longer than ${PLAN_MAX_CHARS.toLocaleString("en-US")} characters at ${rebase.onto} in ${instance.repo}; a cut rules file could omit an instruction, so none is briefed`,
+      );
+    if (read !== undefined) {
+      agentRules = { file, text: read.content };
       break;
     }
   }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_FILE_CHARS } from "../../execution/githubApi.js";
 import { parseDirectives } from "../../directives.js";
 import { childRequestText } from "../dispatch/spawn.js";
 import { GUARDS, parsePlanUnit, PLAN_MAX_CHARS, renderContract } from "../ship/contract.js";
@@ -209,6 +210,8 @@ describe("contractFor — the unit's contract from the repository at the base re
     expect(withClaude.agentRules).toEqual({ file: "CLAUDE.md", text: "# Claude rules" });
     const none = await contractFor(instance, unit, over(specs));
     expect(none.agentRules).toBeUndefined();
+    const missingSpec = await contractFor(instance, unit, over({ "docs/plans/fixture.md": PLAN }));
+    expect(missingSpec.specRows[0]).toMatchObject({ specRead: false, text: undefined, validation: [] });
     await expect(contractFor(instance, unit, over({}))).rejects.toThrow(
       /docs\/plans\/fixture\.md is not readable at main in acme\/api/,
     );
@@ -228,6 +231,76 @@ describe("contractFor — the unit's contract from the repository at the base re
       /docs\/plans\/fixture\.md is longer than 2,000,000 characters at main in acme\/api; a unit read from a cut plan could be briefed short, so none is/,
     );
     expect(asked).toEqual([{ path: "docs/plans/fixture.md", maxChars: PLAN_MAX_CHARS }]);
+  });
+
+  it("reads past the default file clip to keep a late spec item and its proof row", async () => {
+    const lateSpec = SPEC.replace("3. **Three.**", `${"x".repeat(MAX_FILE_CHARS)}\n3. **Three.**`);
+    const files = {
+      "docs/plans/fixture.md": PLAN,
+      "docs/reference/specs/resident-repos.md": lateSpec,
+      "AGENTS.md": "# Rules",
+    } as Record<string, string>;
+    const { r } = readers({
+      readRepoFile: async (path, opts) => {
+        const text = files[path];
+        if (text === undefined) return undefined;
+        const maxChars = opts?.maxChars ?? MAX_FILE_CHARS;
+        return { content: text.slice(0, maxChars), truncated: text.length > maxChars };
+      },
+    });
+    const contract = await contractFor(instance, unit, r);
+    expect(contract.specRows[0]).toMatchObject({
+      specRead: true,
+      text: "3. **Three.** The wake restores.",
+      validation: [{ criterion: "3: a cold wake restores" }],
+    });
+  });
+
+  it("keeps rules at the end of AGENTS.md past the default file clip", async () => {
+    const rules = `# Rules\n${"x".repeat(MAX_FILE_CHARS)}\nNever skip a proof row.`;
+    const { r } = readers({
+      readRepoFile: async (path, opts) => {
+        const text = path === "AGENTS.md" ? rules : (await readers().r.readRepoFile(path, opts))?.content;
+        if (text === undefined) return undefined;
+        const maxChars = opts?.maxChars ?? MAX_FILE_CHARS;
+        return { content: text.slice(0, maxChars), truncated: text.length > maxChars };
+      },
+    });
+    expect((await contractFor(instance, unit, r)).agentRules?.text).toBe(rules);
+  });
+
+  it("refuses a cut spec with its path and bound instead of mistaking missing late content for a missing item", async () => {
+    const asked: Array<{ path: string; maxChars?: number }> = [];
+    const { r } = readers({
+      readRepoFile: async (path, opts) => {
+        asked.push({ path, maxChars: opts?.maxChars });
+        if (path === "docs/reference/specs/resident-repos.md") return { content: SPEC.slice(0, 40), truncated: true };
+        return readers().r.readRepoFile(path, opts);
+      },
+    });
+    await expect(contractFor(instance, unit, r)).rejects.toThrow(
+      `the spec docs/reference/specs/resident-repos.md is longer than ${PLAN_MAX_CHARS.toLocaleString("en-US")} characters at main in acme/api`,
+    );
+    expect(asked).toEqual([
+      { path: "docs/plans/fixture.md", maxChars: PLAN_MAX_CHARS },
+      { path: "docs/reference/specs/resident-repos.md", maxChars: PLAN_MAX_CHARS },
+    ]);
+  });
+
+  it.each(["AGENTS.md", "CLAUDE.md"])("refuses cut %s rules instead of silently using partial rules", async (file) => {
+    const asked: Array<{ path: string; maxChars?: number }> = [];
+    const { r } = readers({
+      readRepoFile: async (path, opts) => {
+        asked.push({ path, maxChars: opts?.maxChars });
+        if (path === "AGENTS.md" && file === "CLAUDE.md") return undefined;
+        if (path === file) return { content: "# Rules", truncated: true };
+        return readers().r.readRepoFile(path, opts);
+      },
+    });
+    await expect(contractFor(instance, unit, r)).rejects.toThrow(
+      `the rules file ${file} is longer than ${PLAN_MAX_CHARS.toLocaleString("en-US")} characters at main in acme/api`,
+    );
+    expect(asked.at(-1)).toEqual({ path: file, maxChars: PLAN_MAX_CHARS });
   });
 
   it("a generated instance uses its durable authenticated task even when the host run is unavailable", async () => {
