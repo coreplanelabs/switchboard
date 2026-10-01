@@ -204,6 +204,7 @@ import { createSteerSender, defaultAdmission, steerRun } from "./core/dispatch/a
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters ---
+import { inspectLiveCredentials } from "./core/credentialInspection.js";
 import { buildCoreCommands, deliveryFromConfig } from "./core/commandCatalogue.js";
 import {
   callerFor,
@@ -835,6 +836,7 @@ export async function runBot(): Promise<void> {
     };
   })();
   const commands = buildCoreCommands(config, runStore, {
+    credentialInspection: (runId, expected) => inspectLiveCredentials(harnesses, runId, expected),
     registry: defaultRunRegistry,
     secrets: processSecrets,
     dataDir: DATA_DIR,

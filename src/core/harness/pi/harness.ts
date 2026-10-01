@@ -720,6 +720,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   for (const s of run.resume?.settlements ?? []) calls?.settle(s.toolUse.id, settlementAnswer(s));
 
   let pid: number | undefined;
+  live.credentialInspectionProcess = () =>
+    facts?.processBirth === undefined ? undefined : { pid: facts.pid, processBirth: facts.processBirth };
   let transport: PiRpcTransport | undefined;
   let facts: PiHarnessFacts | undefined;
   /** The transcript the ledger held when this generation started — the seed
@@ -1097,13 +1099,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       const launch = sessionPath ? { ...spec, sessionPath } : spec;
       for (const file of piLaunchFiles(launch)) await container.writeFile(file.path, file.content);
-      ({ pid } = await container.start({
+      const started = await container.start({
         paths,
         command: PI_BIN,
         args: piLaunchArgs(launch),
         env: piLaunchEnv(launch, deps.bearer),
         stdoutFilter: PI_STDOUT_FILTER,
-      }));
+      });
+      pid = started.pid;
       // The root rides the first facts, so the build that comes back after a
       // restart looks for this pi where it is, not where it would file its own;
       // the bearer's hash rides beside it, so that build's proxy can honour
@@ -1114,6 +1117,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       facts = {
         harness: "pi",
         pid,
+        ...(started.processBirth === undefined ? {} : { processBirth: started.processBirth }),
         logOffset: 0,
         root: paths.dir,
         ...(bearerHash !== undefined ? { bearerHash } : {}),

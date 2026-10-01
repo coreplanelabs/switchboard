@@ -575,6 +575,10 @@ export const COMMAND_FIXTURES: Readonly<
     hints: { id: FIXTURE.ownMemoryRecord },
     why: "the record must exist in the CALLER's own scope — the generic `id` hint is a run id",
   },
+  "credentials.inspect": {
+    hints: { id: FIXTURE.liveRun, repo: FIXTURE.repo, ref: "canary/test", head: "a".repeat(40) },
+    why: "the diagnostic requires the live repository and an exact checkout commit; the fixture has no live inspector and truthfully reports incomplete",
+  },
   "review.abridge": {
     hints: { id: FIXTURE.reviewRun },
     why: "the run must be a finished PR review that recorded a git reading diff — the generic `id` hint is a live coding run",

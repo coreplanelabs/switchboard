@@ -130,3 +130,9 @@ verified exact head before review resumes.
 - [Deploy](deploy.md)
 - [Rotate a secret](rotate-a-secret.md)
 - [Release and deploy](../reference/specs/release-and-deploy.md), [Tracing](../reference/specs/tracing.md)
+
+## Inspect a live run's credential boundary
+
+An operator with `credentials:exec` and visibility of the run can use `credentials inspect <run-id> --backend resident --repo owner/repo --ref branch --head <40-character-sha>` through the service's existing command interface. Select the actual backend (`resident` or `sandbox`) and exact live checkout first. The command never starts a run, mints a credential, or publishes a branch. The resident Worker validates the count receipt before transport and compares the process against its recorded launch identity. Older live runs without that identity remain incomplete. A standalone CLI process has no live harness registry and returns an incomplete inspection.
+
+The result contains counts and booleans only. `completed: true` means the bounded observation finished with a stable process and checkout; check `appTokenMatches` separately. `completed: false` or `unknownCount > 0` leaves the evidence incomplete. The probe reads both process environments, known credential-file locations, and Git helper configuration. It never executes a helper. The current cold executor refuses in the trusted bot before any remote command because its root model could replace the inspector. Unknown helper configuration on a supported runtime also leaves the inspection incomplete. These counts do not prove whole-container absence, helper execution, revoked-bearer refusal, or publication. Keep those receipts separate.

@@ -57,6 +57,12 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 | `config clear <channel\|me\|thread\|user\|org\|repo> [--channel <string>] [--thread <string>] [--repo <string>] [--user <string>]` | Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); `config clear user --user <id>` removes one person's GitHub binding (identity admins). Static config.yaml values show through again. | anyone |
 | `config instructions <channel\|me> [text…] [--channel <string>]` | Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions. | anyone |
 
+### `credentials`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `credentials inspect <id> --backend <resident\|sandbox> --repo <string> --ref <string> --head <string>` | Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation. | admins |
+
 ### `runs`
 
 | Command | What it does | Who can run it |

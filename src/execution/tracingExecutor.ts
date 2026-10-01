@@ -1,3 +1,9 @@
+import {
+  emptyCredentialInspection,
+  parseCredentialInspection,
+  type CredentialInspection,
+  type CredentialInspectionInput,
+} from "./credentialInspection.js";
 import type { Backend } from "../core/trace/attrs.js";
 import type { Span } from "../core/trace/types.js";
 import type {
@@ -19,6 +25,7 @@ import type {
 // tracker in the runner) does the work; this one only times it.
 
 export class TracingExecutor implements Executor {
+  inspectCredentials?: (input: CredentialInspectionInput) => Promise<CredentialInspection>;
   release?: (mode: ReleaseMode) => Promise<ReleaseResult>;
   moveTo?: (sha: string, opts?: MoveOptions) => Promise<{ sha: string }>;
   readBytes?: (path: string) => Promise<Uint8Array>;
@@ -31,6 +38,14 @@ export class TracingExecutor implements Executor {
     private readonly span: Span,
     private readonly backend?: Backend,
   ) {
+    if (inner.inspectCredentials)
+      this.inspectCredentials = async (input) => {
+        try {
+          return parseCredentialInspection(await inner.inspectCredentials!(input));
+        } catch {
+          return emptyCredentialInspection();
+        }
+      };
     const innerRelease = inner.release?.bind(inner);
     if (innerRelease) this.release = (mode) => this.timed("exec.release", (s) => innerRelease(mode, { span: s }));
     const innerMoveTo = inner.moveTo?.bind(inner);

@@ -805,6 +805,7 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
         githubLogin: async () => "fixture-login",
       }),
     },
+    credentials: { runs },
     review: { abridger: async () => s.abridger, runs },
     friction: {
       ledger: async () => new RunStoreFrictionLedger(s.store),
@@ -999,6 +1000,7 @@ export async function fixture(
   let n = 0;
   const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
   const live = reg.create("coding · acme/live", {
+    repo: FIXTURE.repo,
     agent: "coding",
     model: "anthropic/claude",
     channelId: "slack:C1",

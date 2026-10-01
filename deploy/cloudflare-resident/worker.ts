@@ -68,6 +68,13 @@
 //      resident's own repo. Install/build executions
 //      (untrusted repo code) run unprivileged (worker1) and token-free
 //      (docs/decisions/0009-residents-second-credential-domain.md).
+import { inspectResidentCredentials } from "./credentialInspection.js";
+import {
+  emptyCredentialInspection,
+  parseCredentialInspection,
+  credentialInspectionInputSchema,
+  type CredentialInspection,
+} from "../../src/execution/credentialInspection.js";
 import {
   isDurableObjectCodeUpdateReset,
   isPlatformTransientError,
@@ -7646,6 +7653,62 @@ export class ResidentDO extends Sandbox<Env> {
     return res;
   }
 
+  /** A fixed diagnostic over the existing runtime; only counts leave this DO. */
+  async inspectThreadCredentials(
+    threadKey: string,
+    input: unknown,
+    env: Record<string, string>,
+  ): Promise<CredentialInspection> {
+    try {
+      return await this.withThreadBusy(threadKey, async () => {
+        if (await this.memoryGate("exec")) return emptyCredentialInspection();
+        // Inspection cannot hydrate, reattach or repair the selected runtime.
+        const parsed = credentialInspectionInputSchema.safeParse(input);
+        if (
+          !parsed.success ||
+          this.destroying ||
+          (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY)) ||
+          !(await this.isRuntimeActive())
+        )
+          return emptyCredentialInspection();
+        const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+        if (
+          !binding ||
+          binding.evicted ||
+          !THREAD_USERS.includes(binding.user) ||
+          binding.ref !== parsed.data.ref ||
+          !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
+        )
+          return emptyCredentialInspection();
+        return inspectResidentCredentials(input, env, binding.githubDoorHost, async (command, options) => {
+          validateEnvNames(env);
+          // A dedicated one-send transport: no generic exec logging, retries,
+          // output files, timeout recovery command or raw failure response.
+          const proc = await createExtensionProcessSandbox(this).exec(
+            [
+              "/usr/bin/su",
+              "-s",
+              "/bin/sh",
+              binding.user,
+              "-c",
+              `cd ${binding.worktreePath} && exec ${command}`,
+            ] as SandboxCommand,
+            { timeout: options.timeoutMs, env: { ...env, GIT_TERMINAL_PROMPT: "0" } },
+          );
+          try {
+            const raw = await proc.output({ encoding: "utf8", timeout: options.timeoutMs });
+            return { ...raw, truncated: raw.truncated === true };
+          } catch {
+            await proc.kill(9).catch(() => {});
+            return undefined;
+          }
+        });
+      });
+    } catch {
+      return emptyCredentialInspection();
+    }
+  }
+
   /** A typed Git transport never enters the thread user's shell. The root-owned
    * mirror supplies trusted config; the thread clone supplies object bytes only.
    * The Git Door's one-use tuple remains the write authorization. */
@@ -9578,6 +9641,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/run-deadline": { scope: "operator", method: "POST" },
   "/detach": { scope: "operator", method: "POST" },
   "/exec": { scope: "operator", method: "POST" },
+  "/inspect-credentials": { scope: "operator", method: "POST" },
   "/publish": { scope: "operator", method: "POST" },
   "/read": { scope: "operator", method: "POST" },
   "/write": { scope: "operator", method: "POST" },
@@ -9700,6 +9764,8 @@ export default {
             return await handleDetach(env, body);
           case "/exec":
             return await handleExec(env, body, traceparent);
+          case "/inspect-credentials":
+            return await handleInspectCredentials(env, body);
           case "/publish":
             return await handlePublish(env, body);
           case "/read":
@@ -10509,6 +10575,19 @@ async function handleExec(env: Env, body: Record<string, unknown>, traceparent?:
   return streamThreadExec(
     withLevels(ctx.stub, ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs, traceparent, execEnv)),
   );
+}
+
+async function handleInspectCredentials(env: Env, body: Record<string, unknown>): Promise<Response> {
+  try {
+    const input = credentialInspectionInputSchema.safeParse(body.input);
+    if (!input.success || body.resource !== `repo:${input.data.repo}`) return json(emptyCredentialInspection());
+    const ctx = await resolveThreadRoute(env, body);
+    if (ctx instanceof Response) return json(emptyCredentialInspection());
+    const result = await ctx.stub.inspectThreadCredentials(ctx.threadKey, input.data, envFromRequest({ body }) ?? {});
+    return json(parseCredentialInspection(result));
+  } catch {
+    return json(emptyCredentialInspection());
+  }
 }
 
 async function handlePublish(env: Env, body: Record<string, unknown>): Promise<Response> {

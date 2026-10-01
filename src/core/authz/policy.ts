@@ -197,6 +197,13 @@ export const POLICY: readonly Rule[] = [
   { action: "delivery:read", resource: "command", when: [grant("delivery:read")] },
   { action: "schedule:read", resource: "command", when: [grant("schedule:read")] },
   { action: "deploy:read", resource: "command", when: [grant("deploy:read")] },
+  // A workspace diagnostic is an explicit operator capability, never an agent tool.
+  {
+    action: "credentials:exec",
+    resource: "command",
+    actorKinds: ["user", "service"],
+    when: [grant("credentials:exec")],
+  },
   { action: "deploy:write", resource: "command", when: [grant("deploy:write")] },
   { action: "env:write", resource: "command", when: [grant("env:write")] },
   { action: "setup:write", resource: "command", when: [grant("setup:write")] },

@@ -151,7 +151,7 @@ describe("the direct operator on the Responses wire", () => {
       })),
     };
 
-    expect(tools).toHaveLength(53);
+    expect(tools).toHaveLength(54);
     expect(tools.map((tool) => tool.name)).toContain(OPERATOR_BATCH_TOOL);
     expect(tools.map((tool) => tool.name)).not.toContain(OPERATOR_ASK_REPO_TOOL);
     expect(lookaroundPatterns(unpatchedWire.tools)).toHaveLength(4);

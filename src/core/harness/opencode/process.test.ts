@@ -749,7 +749,13 @@ describe("launchOpenCode — the server started through the seam and found ready
   });
 
   it("the row's facts carry the port and the root the launch settled on, the bearer's hash and never the bearer", () => {
-    const started = { pid: 4242, port: 41000, tailerPid: 4243, paths: spec.paths };
+    const started = {
+      processBirth: "11111111-1111-1111-1111-111111111111:123",
+      pid: 4242,
+      port: 41000,
+      tailerPid: 4243,
+      paths: spec.paths,
+    };
     const facts = openCodeFacts(started, {
       sessionID: "ses_1",
       logOffset: 120,
@@ -760,6 +766,7 @@ describe("launchOpenCode — the server started through the seam and found ready
     expect(facts).toEqual({
       harness: "opencode",
       pid: 4242,
+      processBirth: started.processBirth,
       port: 41000,
       tailerPid: 4243,
       logOffset: 120,

@@ -1,3 +1,8 @@
+import {
+  emptyCredentialInspection,
+  type CredentialInspection,
+  type CredentialInspectionInput,
+} from "./credentialInspection.js";
 import { BASH_TIMEOUT_MS, EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
 import {
   ExecCapacityError,
@@ -472,6 +477,12 @@ export class CloudflareSandboxExecutor implements Executor {
     )
       throw new ExecInfraError("sandbox /exec: invalid command result", "worker-unavailable");
     return { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode as number, truncated: r.truncated };
+  }
+
+  async inspectCredentials(_input: CredentialInspectionInput): Promise<CredentialInspection> {
+    // The cold model owns root and can replace its interpreter or forge stdout.
+    // Refuse on the trusted side; an in-sandbox UID check cannot establish trust.
+    return emptyCredentialInspection();
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {

@@ -112,16 +112,6 @@ describe("the container scripts", () => {
     expect(writeFileScripts("/tmp/empty", "")).toHaveLength(1);
   });
 
-  // The golden is the script the seam wrote before the program, the filter
-  // and the layout became inputs, plus the one change since: the detached
-  // wrapper's stdio goes to /dev/null, so the exec that forked it owns none of
-  // its descriptors (execution.md item 24).
-  it("pi's start is the script the seam wrote before the program, the filter and the layout were inputs, with the wrapper's stdio redirected away from the exec's pipes", () => {
-    expect(startScript(piStart(["--mode", "rpc", "-e", paths.extension], { X: "1" }))).toBe(
-      "(umask 077 && mkdir -p '/var/tmp/switchboard-pi-run-7' '/var/tmp/switchboard-pi-run-7/agent/sessions' '/var/tmp/switchboard-pi-run-7/cmd') && rm -f '/var/tmp/switchboard-pi-run-7/rpc.in' && mkfifo -m 600 '/var/tmp/switchboard-pi-run-7/rpc.in' && : > '/var/tmp/switchboard-pi-run-7/rpc.log' && : > '/var/tmp/switchboard-pi-run-7/rpc.err' && setsid -f sh -c 'exec 3<>'\\''/var/tmp/switchboard-pi-run-7/rpc.in'\\''; echo $$ > '\\''/var/tmp/switchboard-pi-run-7/pi.pid'\\''; pi '\\''--mode'\\'' '\\''rpc'\\'' '\\''-e'\\'' '\\''/var/tmp/switchboard-pi-run-7/extension.js'\\'' <&3 2>>'\\''/var/tmp/switchboard-pi-run-7/rpc.err'\\'' | grep --line-buffered -v '\\''\"type\":\"message_update\"'\\'' >> '\\''/var/tmp/switchboard-pi-run-7/rpc.log'\\''' </dev/null >/dev/null 2>&1 && sleep 0.3 && cat '/var/tmp/switchboard-pi-run-7/pi.pid'",
-    );
-  });
-
   it("starts the process detached behind a FIFO held open for writing, its pid recorded, its stdout through the filter into the log; the environment is not in the script", () => {
     const script = startScript(piStart(["--mode", "rpc", "-e", paths.extension], { X: "1" }));
     // The directories at 700 in a subshell: the run's root is the caller's alone, and the process's own umask is untouched.
@@ -132,7 +122,7 @@ describe("the container scripts", () => {
     expect(script).toContain("setsid -f sh -c ");
     // The wrapper's stdio to /dev/null: the exec's own stdout and stderr close
     // when the exec's shell exits, whatever the detached process holds.
-    expect(script).toMatch(/setsid -f sh -c '(?:[^']|'\\'')*' <\/dev\/null >\/dev\/null 2>&1 && sleep 0\.3/);
+    expect(script).toMatch(/setsid -f sh -c '(?:[^']|'\\'')*' 4>&1 <\/dev\/null >\/dev\/null 2>&1 && sleep 0\.3/);
     expect(script).toContain(DETACHED_STDIO);
     expect(script).toContain("exec 3<>");
     expect(script).toContain("echo $$ > ");
@@ -141,7 +131,7 @@ describe("the container scripts", () => {
     expect(script).toContain("grep --line-buffered -v");
     expect(script).toContain(`"type":"message_update"`);
     expect(logFilter(PI_STDOUT_FILTER)).toBe(`grep --line-buffered -v '"type":"message_update"'`);
-    expect(script.endsWith(`cat '${paths.pidFile}'`)).toBe(true);
+    expect(script.endsWith("sleep 0.3")).toBe(true);
     // The environment is not in the script: the bearer rides the exec's env channel.
     expect(script).not.toContain("X=1");
     expect(script).not.toContain("SWITCHBOARD_RUN_BEARER");
@@ -1280,5 +1270,25 @@ describe("ExecHarnessContainer.cwd", () => {
       "/workspace/threads/t/main",
     );
     expect(calls).toEqual([]);
+  });
+});
+
+// The launch receipt comes directly from the wrapper before model code can run.
+describe("harness launch identity", () => {
+  it("retains a launch birth receipt but leaves older launches unattested", async () => {
+    const birth = "11111111-1111-1111-1111-111111111111:123";
+    const { executor } = recordingExecutor([`birth:${birth}\n4242`, "4242"]);
+    const container = new ExecHarnessContainer(executor);
+    expect(await container.start(piStart([]))).toEqual({ pid: 4242, processBirth: birth });
+    expect(await container.start(piStart([]))).toEqual({ pid: 4242 });
+  });
+  it("captures kernel birth identity before launching the program and never rereads the mutable pid file", () => {
+    const script = startScript(piStart([], {}));
+    expect(script).toContain("/proc/$$/stat");
+    expect(script).toContain("/proc/sys/kernel/random/boot_id");
+    expect(script).toContain("4>&1");
+    expect(script).toContain("exec 4>&-");
+    expect(script.indexOf("/proc/$$/stat")).toBeLessThan(script.indexOf("pi "));
+    expect(script).not.toContain(`cat ${shellQuote(paths.pidFile)}`);
   });
 });

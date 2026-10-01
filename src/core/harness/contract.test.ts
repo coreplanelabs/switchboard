@@ -233,6 +233,14 @@ describe("HarnessContainerReplacedError — the condition's tag and the words it
 });
 
 describe("harnessFactsOf — a row's facts, read by the harness that wrote them", () => {
+  it("preserves launch identity for both harnesses and leaves legacy rows unattested", () => {
+    const birth = "11111111-1111-1111-1111-111111111111:123";
+    for (const facts of [piFactsIn(), OPENCODE_FACTS]) {
+      expect(harnessFactsOf({ ...facts, processBirth: birth })).toMatchObject({ processBirth: birth });
+      expect(harnessFactsOf(facts)).not.toHaveProperty("processBirth");
+      expect(harnessFactsOf({ ...facts, processBirth: 123 })).not.toHaveProperty("processBirth");
+    }
+  });
   it("a row naming pi, and a row from before the discriminator, are pi's: the known fields read by type, relaunches 0 when absent or malformed, a field of the wrong type dropped, an unknown key kept", () => {
     const full = {
       harness: "pi",

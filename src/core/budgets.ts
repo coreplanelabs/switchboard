@@ -18,6 +18,9 @@
 
 export const SECOND_MS = 1_000;
 
+/** One fixed, count-only workspace inspection; never a provider call. */
+export const CREDENTIAL_INSPECTION_MAX_MS = 20 * SECOND_MS;
+
 /** One source revalidation pass, inside the existing three-minute write-up allowance. */
 export const SOURCE_REVALIDATE_MAX_MS = 30 * SECOND_MS;
 
