@@ -323,6 +323,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
 
   it("runs explicit recovery before ordinary preflight and hands the resolved requester and thread to the deterministic coordinator operation", async () => {
     const s = setup("slack:UADMIN", { text: "agent:ship recover unit plan-old:U12" });
+    const message = { ...s.msg, messageId: "slack:CX:2.0" };
     const calls: Array<{ key: { instanceId: string; unit: string }; caller: { userId: string; threadKey: string } }> =
       [];
     s.deps.recoverOriginalUnit = async (key, caller) => {
@@ -330,13 +331,13 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
       return { status: 200, body: { ok: true, outcome: "started", workflowId: "recovery-run-r1" } };
     };
 
-    const ending = await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    const ending = await runShipBranch(s.deps, message, s.io, s.ctx);
 
     expect(ending).toEqual({ hostedLive: false });
     expect(calls).toEqual([
       {
         key: { instanceId: "plan-old", unit: "U12" },
-        caller: { userId: "slack:UADMIN", threadKey: THREAD },
+        caller: { userId: "slack:UADMIN", threadKey: THREAD, messageId: message.messageId },
       },
     ]);
     expect(s.created).toEqual([]);

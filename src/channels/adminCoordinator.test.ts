@@ -2369,6 +2369,31 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
       deps,
     );
 
+  it("preserves an ordinary publication owner while its binding CAS crosses a durable rebuild", async () => {
+    const h = await bindingHarness(bindingFacts());
+    const fence = new RunnerOwnershipFence(false);
+    h.deps.runnerOwnership = fence;
+    const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+    vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (expected, replacement) => {
+      expect((await h.instances.listUnits(INSTANCE.id))[0]!.pr).toBeUndefined();
+      await fence.recover(
+        {
+          liveListingComplete: true,
+          liveHosted: [{ instanceId: INSTANCE.id, until: NOW + 1 }],
+          resumable: [],
+          liveElsewhere: [],
+        },
+        h.instances,
+      );
+      return replace(expected, replacement);
+    });
+
+    expect(await recoverBinding(h.deps)).toMatchObject({ status: 200 });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]!.pr?.number).toBe(77);
+    expect(fence.owner(INSTANCE.repo, 77)).toEqual({ instanceId: INSTANCE.id, unit: "U12" });
+    expect(fence.owns(INSTANCE.repo, 77)).toBe(true);
+  });
+
   it.each([
     [
       "foreign repository",
@@ -7907,11 +7932,245 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       pushed: [{ ref: INSTANCE.branch, sha: headSha, by: "push" }],
       ...over,
     });
-  const callRecovery = (h: ReturnType<typeof harness>) =>
+  const callRecovery = (h: ReturnType<typeof harness>, messageId = "slack:C1:recovery-request") =>
     recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
       userId: INSTANCE.userId,
       threadKey: INSTANCE.threadKey,
+      messageId,
     });
+
+  async function privateRecovery(h: ReturnType<typeof harness>) {
+    const key = `worker:${INSTANCE.id}:U12`;
+    const row: CoordinatorUnit = {
+      ...requestChangesRow(),
+      threadKey: key,
+      workBrief: {
+        requesterId: INSTANCE.userId,
+        mainThreadKey: INSTANCE.threadKey,
+        actId: "act-1",
+        repo: INSTANCE.repo,
+        base: "main",
+        question: "Why?",
+        findings: [],
+        requestedChange: "Fix it",
+      },
+    };
+    await h.instances.recordRequesterTurn({
+      threadKey: INSTANCE.threadKey,
+      requesterId: INSTANCE.userId,
+      messageId: "1",
+    });
+    expect(
+      await h.instances.claimMainTask({ mainThreadKey: INSTANCE.threadKey, actId: "act-1" }, recoveryInstance(), row, {
+        requesterId: INSTANCE.userId,
+        sourceMessageId: "1",
+        revision: 1,
+        repo: INSTANCE.repo,
+      }),
+    ).toMatchObject({ ok: true });
+    await h.store.put(reviewRecord({ threadKey: key }));
+    expect(
+      await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
+        userId: INSTANCE.userId,
+        threadKey: key,
+        messageId: "recovery-request",
+      }),
+    ).toMatchObject({ status: 200 });
+    return key;
+  }
+
+  it("preserves the predecessor and final receipt at the recovery owner", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    const original = requestChangesRow();
+    await h.instances.putUnits([original]);
+    await h.store.put(reviewRecord());
+    const result = await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      messageId: "slack:C1:10.0",
+    });
+    expect(result.status).toBe(200);
+    expect((await h.instances.listRecoveryHistory(original)).receipts).toMatchObject([{ ending: original.ending }]);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryWorkflowId: (result.body as Record<string, unknown>).workflowId,
+          ending: {
+            kind: "aborted",
+            report: "new outcome",
+            outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 2 },
+          },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200 });
+    const history = await h.instances.listRecoveryHistory(original);
+    expect(history.receipts.map((receipt) => receipt.ending.report)).toEqual([original.ending!.report, "new outcome"]);
+    expect(history.receipts[1]!.predecessorId).toBe(history.receipts[0]!.id);
+  });
+
+  it("returns a saved admission refusal for the same request and admits only a later request", async () => {
+    let creates = 0;
+    const h = harness({
+      prFacts: exactRecoveryFacts(HEAD),
+      startRecovery: async (id) => {
+        creates++;
+        return creates === 1 ? { kind: "failed", id, reason: "not admitted" } : { kind: "created", id };
+      },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const call = (messageId: string) =>
+      recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        messageId,
+      });
+    expect(await call("slack:C1:10.0")).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(await call("slack:C1:10.0")).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(creates).toBe(1);
+    expect(await call("slack:C1:11.0")).toMatchObject({ status: 200 });
+    expect(creates).toBe(2);
+  });
+
+  it("reconciles a committed refusal after a lost acknowledgment and releases the original owner", async () => {
+    const h = harness({
+      prFacts: exactRecoveryFacts(HEAD),
+      startRecovery: async (id) => ({ kind: "failed", id, reason: "not admitted" }),
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const transition = h.instances.transitionRecovery.bind(h.instances);
+    let loseReply = true;
+    vi.spyOn(h.instances, "transitionRecovery").mockImplementation(async (input) => {
+      const result = await transition(input);
+      if (input.kind === "refuse" && loseReply) {
+        loseReply = false;
+        throw new Error("lost refusal reply");
+      }
+      return result;
+    });
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(h.recoveries).toHaveLength(1);
+  });
+
+  it("refuses unsupported history storage before reserving or creating recovery", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    vi.spyOn(h.instances, "getRecoveryAction").mockRejectedValue(new Error("old Worker"));
+    expect(await callRecovery(h)).toMatchObject({ status: 503, body: { error: "recovery_history_unavailable" } });
+    expect(h.recoveries).toEqual([]);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+  });
+
+  it("refuses recovery while original admission remains unreconciled", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put({ ...recoveryInstance(), admission: "unreconciled" });
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_admission_unreconciled" } });
+    expect(h.recoveries).toEqual([]);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listRecoveryHistory(requestChangesRow())).receipts).toEqual([]);
+  });
+
+  it("reconciles repeated lost refusal replies without releasing a successor action", async () => {
+    let creates = 0;
+    const h = harness({
+      prFacts: exactRecoveryFacts(HEAD),
+      startRecovery: async (id) =>
+        ++creates === 1 ? { kind: "failed", id, reason: "not admitted" } : { kind: "created", id },
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const transition = h.instances.transitionRecovery.bind(h.instances);
+    let lostReplies = 2;
+    vi.spyOn(h.instances, "transitionRecovery").mockImplementation(async (input) => {
+      const result = await transition(input);
+      if (input.kind === "refuse" && lostReplies-- > 0) throw new Error("lost refusal reply");
+      return result;
+    });
+    expect(await callRecovery(h)).toMatchObject({ status: 500, body: { error: "recovery_rollback_failed" } });
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeDefined();
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect(await callRecovery(h, "later-request")).toMatchObject({ status: 200 });
+    const owner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeDefined();
+    expect(creates).toBe(2);
+  });
+
+  it("refuses an older private settlement while a successor recovery owns the same unit", async () => {
+    const log = new InMemoryPrivateWorkerLog();
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
+    const key = await privateRecovery(h);
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      unit: "U12",
+      recoveryWorkflowId: "recovery-run-original-review",
+      deliveryId: "U12/recovery/end",
+      ending: { kind: "aborted", report: "first result" },
+      pr: PR,
+    };
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+      status: 200,
+    });
+    const [ended] = await h.instances.listUnits(INSTANCE.id);
+    const first = await h.instances.getRecoveryAction(ended!, {
+      userId: INSTANCE.userId,
+      threadKey: key,
+      messageId: "recovery-request",
+    });
+    const { ending, ...rest } = ended!;
+    const claimed = await h.instances.transitionRecovery({
+      kind: "claim",
+      expected: ended!,
+      replacement: {
+        ...rest,
+        recovery: {
+          kind: "review",
+          round: 2,
+          expectedHeadSha: HEAD,
+          remainingMs: 60000,
+          claimedAt: NOW,
+          step: "U12/recovery/2/review",
+          reviewRunId: "later-review",
+          reviewKey: "later-key",
+          previousEnding: ending!,
+          workflowId: "recovery-later-review",
+          deadlineAt: NOW + 60000,
+        },
+      },
+      request: { userId: INSTANCE.userId, threadKey: key, messageId: "later-request" },
+    });
+    expect(claimed.ok).toBe(true);
+    if (!claimed.ok) throw new Error(claimed.reason);
+    const owner = { instanceId: INSTANCE.id, unit: "U12", recoveryActionId: claimed.unit.recovery!.actionId };
+    expect(first?.state).toBe("settled");
+    expect(h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner)).toBe(true);
+    for (const replay of [
+      body,
+      { ...body, deliveryId: "U12/recovery/changed", ending: { ...body.ending, report: "changed" } },
+    ])
+      expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, replay), h.deps)).toMatchObject(
+        { status: 409, body: { error: "recovery_claim_mismatch" } },
+      );
+    expect((await log.list(key)).filter((event) => event.kind === "reply")).toHaveLength(1);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([claimed.unit]);
+  });
 
   it("recovers a reviewed target advanced without crediting a push", async () => {
     const target = "b".repeat(40);
@@ -8161,7 +8420,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       },
     });
     expect(claimed!.recovery).not.toHaveProperty("findingsRunId");
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
+      ...owner,
+      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
+    });
     expect((await h.instances.get(INSTANCE.id))!.caps).toEqual(recoveryInstance().caps);
     expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "already_started" } });
     expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(claimed);
@@ -8446,7 +8708,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "rival owner")
       h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
     if (scenario === "stale CAS")
-      vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValueOnce({ ok: false, reason: "stale" });
+      vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason: "stale" });
     if (scenario === "partial listing") {
       const list = h.deps.runs.listRuns.bind(h.deps.runs);
       vi.spyOn(h.deps.runs, "listRuns").mockImplementation(async (opts) => ({
@@ -8488,10 +8750,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const before = await h.instances.listUnits(INSTANCE.id);
     h.deps.startRecovery = async (id) => ({ kind: "failed", id, reason: "not admitted" });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
-    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(
+      before.map((row) => ({ ...row, history: { version: 1, receiptId: "observed" } })),
+    );
     expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
     h.deps.startRecovery = async (id) => ({ kind: "created", id });
-    expect((await callRecovery(h)).status).toBe(200);
+    expect((await callRecovery(h, "slack:C1:later-request")).status).toBe(200);
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.kind).toBe("findings");
   });
 
@@ -8499,7 +8763,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     "salvage recovery keeps %s behind the findings and exact-head review gates",
     async (scenario) => {
       const h = await salvageHarness(124);
-      expect((await callRecovery(h)).status).toBe(200);
+      expect((await callRecovery(h, "slack:C1:later-request")).status).toBe(200);
       let head = SALVAGED;
       const fixed = "c".repeat(40);
       h.deps.fetchPrFacts = async () => exactRecoveryFacts(head);
@@ -8626,7 +8890,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           recoveryHold: { cause: "human", gate: { findings: [salvageFindings[1]] } },
         });
       expect(settled!.recoveryReceipt?.reviewRunId).toBe("run-original-review");
-      expect((await callRecovery(h)).status).toBe(409);
+      expect(await callRecovery(h, "slack:C1:later-request")).toMatchObject({
+        status: 200,
+        body: { outcome: "already_completed" },
+      });
       expect(routes).not.toContain("unit-start");
       expect(routes).not.toContain("branch");
       expect(h.opens).toEqual([]);
@@ -8734,10 +9001,152 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
     expect(claimed.recovery?.accounting?.children).toHaveLength(3);
     expect(claimed.recovery?.findings).toBeUndefined();
-    expect((await callRecovery(h)).status).toBe(409);
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "already_started" } });
     expect(h.recoveries).toHaveLength(1);
     expect(h.branches).toEqual([]);
     expect(h.opens).toEqual([]);
+  });
+
+  it.each([
+    ["running", "unavailable"],
+    ["unanswered", "unavailable"],
+    ["running", "changed"],
+    ["unanswered", "changed"],
+  ] as const)(
+    "reconciles an exact external-review retry after a lost create response (%s, %s)",
+    async (status, review) => {
+      const h = await approvedHarness();
+      const start = vi.fn(async () => ({ kind: "unanswered" as const, reason: "create response lost" }));
+      h.deps.startRecovery = start;
+      const workflowId = "recovery-review-5324414426";
+      expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate", workflowId } });
+      const claimed = await h.instances.listUnits(INSTANCE.id);
+      const savedInstance = await h.instances.get(INSTANCE.id);
+      const history = await h.instances.listRecoveryHistory({ instanceId: INSTANCE.id, unit: "U12" });
+      const readStatus = vi.fn(async () =>
+        status === "running"
+          ? { kind: "status" as const, status: "running" }
+          : { kind: "unanswered" as const, reason: "status response lost" },
+      );
+      h.deps.recoveryStatus = readStatus;
+      h.deps.runnerOwnership = new RunnerOwnershipFence(false);
+      const readReviews = vi.fn(async () => {
+        if (review === "unavailable") throw new Error("GitHub unavailable");
+        return [{ ...laterReview(), id: laterReview().id! + 1 }];
+      });
+      h.deps.fetchPrReviews = readReviews;
+
+      expect(await callRecovery(h)).toMatchObject({
+        status: 200,
+        body: { outcome: status === "running" ? "already_started" : "indeterminate", workflowId },
+      });
+      expect(readStatus).toHaveBeenCalledExactlyOnceWith(workflowId);
+      expect(readReviews).not.toHaveBeenCalled();
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual(claimed);
+      expect(await h.instances.get(INSTANCE.id)).toEqual(savedInstance);
+      expect(await h.instances.listRecoveryHistory({ instanceId: INSTANCE.id, unit: "U12" })).toEqual(history);
+      expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toEqual({
+        ...owner,
+        recoveryActionId: claimed[0]!.recovery!.actionId,
+      });
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it.each(["valid", "changed"] as const)(
+    "revalidates an absent external-review Workflow before retrying its original create (%s)",
+    async (review) => {
+      const h = await approvedHarness();
+      const workflowId = "recovery-review-5324414426";
+      const start = vi
+        .fn<NonNullable<AdminCoordinatorDeps["startRecovery"]>>()
+        .mockResolvedValueOnce({ kind: "unanswered", reason: "create response lost" })
+        .mockResolvedValue({ kind: "created", id: workflowId });
+      h.deps.startRecovery = start;
+      expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate" } });
+      h.deps.recoveryStatus = async () => ({ kind: "absent" });
+      if (review === "changed") h.deps.fetchPrReviews = async () => [{ ...laterReview(), id: laterReview().id! + 1 }];
+
+      expect(await callRecovery(h)).toMatchObject(
+        review === "valid"
+          ? { status: 200, body: { outcome: "started", workflowId } }
+          : { status: 409, body: { error: "recovery_later_review_invalid" } },
+      );
+      expect(start.mock.calls.map(([id]) => id)).toEqual(review === "valid" ? [workflowId, workflowId] : [workflowId]);
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it("keeps a pending external-review action bound to its requester, message and Workflow", async () => {
+    const h = await approvedHarness();
+    expect((await callRecovery(h)).status).toBe(200);
+    const claimed = await h.instances.listUnits(INSTANCE.id);
+    expect(await callRecovery(h, "slack:C1:different-message")).toMatchObject({
+      status: 409,
+      body: { error: "recovery_already_claimed" },
+    });
+    expect(
+      await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
+        userId: "slack:OTHER",
+        threadKey: INSTANCE.threadKey,
+        messageId: "slack:C1:recovery-request",
+      }),
+    ).toMatchObject({ status: 403, body: { error: "recovery_requester_mismatch" } });
+    expect(
+      await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", workflowId: "other-workflow" }, h.deps),
+    ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(
+      await recoverOriginalUnit(
+        { parentInstanceId: INSTANCE.id, unit: "U12", workflowId: "recovery-review-5324414426" },
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200, body: { workflowId: "recovery-review-5324414426" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(claimed);
+    expect(h.recoveries).toHaveLength(1);
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it("does not revoke a concurrent external-review retry after observing its Workflow absent", async () => {
+    const h = await approvedHarness();
+    const workflowId = "recovery-review-5324414426";
+    const start = vi
+      .fn<NonNullable<AdminCoordinatorDeps["startRecovery"]>>()
+      .mockResolvedValueOnce({ kind: "unanswered", reason: "create response lost" })
+      .mockResolvedValue({ kind: "created", id: workflowId });
+    h.deps.startRecovery = start;
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate" } });
+    const claimed = await h.instances.listUnits(INSTANCE.id);
+    const history = await h.instances.listRecoveryHistory({ instanceId: INSTANCE.id, unit: "U12" });
+    h.deps.recoveryStatus = async () => ({ kind: "absent" });
+    let signalRead!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      signalRead = resolve;
+    });
+    let failRead!: (error: Error) => void;
+    const failedRead = new Promise<PullRequestReview[]>((_resolve, reject) => {
+      failRead = reject;
+    });
+    const readReviews = vi
+      .fn(async () => [laterReview()])
+      .mockImplementationOnce(() => {
+        signalRead();
+        return failedRead;
+      });
+    h.deps.fetchPrReviews = readReviews;
+    const firstRetry = callRecovery(h);
+    await reading;
+
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "started", workflowId } });
+    failRead(new Error("GitHub unavailable"));
+    expect(await firstRetry).toMatchObject({ status: 409, body: { error: "recovery_later_review_invalid" } });
+    expect(start.mock.calls.map(([id]) => id)).toEqual([workflowId, workflowId]);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(claimed);
+    expect(await h.instances.listRecoveryHistory({ instanceId: INSTANCE.id, unit: "U12" })).toEqual(history);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
+      ...owner,
+      recoveryActionId: claimed[0]!.recovery!.actionId,
+    });
   });
 
   it("persists cost accounting that remains valid after children are sorted", async () => {
@@ -8820,13 +9229,18 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const before = await h.instances.listUnits(INSTANCE.id);
     h.deps.startRecovery = async (id) => ({ kind: "failed", id, reason: "unavailable" });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
-    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(
+      before.map((row) => ({ ...row, history: { version: 1, receiptId: "observed" } })),
+    );
     const admitted: string[] = [];
     h.deps.startRecovery = async (id) => {
       admitted.push(id);
       return { kind: "created", id };
     };
-    const responses = await Promise.all([callRecovery(h), callRecovery(h)]);
+    const responses = await Promise.all([
+      callRecovery(h, "slack:C1:later-request"),
+      callRecovery(h, "slack:C1:later-request"),
+    ]);
     expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
     expect(admitted).toEqual(["recovery-review-5324414426"]);
   });
@@ -8969,7 +9383,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "rival owner")
       h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
     if (scenario === "CAS loss")
-      vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValueOnce({ ok: false, reason: "stale" });
+      vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason: "stale" });
     await h.instances.replace(instance);
     await h.instances.putUnits([row]);
     expect((await callRecovery(h)).status).toBe(409);
@@ -9113,7 +9527,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         externalReview: { id: 5324414426, reviewer: { id: 101 }, headSha: POST_HEAD },
         accounting: { spendUsd: 15 },
       });
-      expect((await callRecovery(h)).status).toBe(409);
+      expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "already_completed" } });
     },
   );
 
@@ -9994,7 +10408,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           finishedAt: NOW - minutesToMs(17),
         }),
       );
-      const replace = vi.spyOn(h.instances, "compareAndReplaceUnit");
+      const replace = vi.spyOn(h.instances, "transitionRecovery");
 
       expect(await callRecovery(h)).toMatchObject({
         status: 409,
@@ -10067,7 +10481,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         }),
       );
       const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
-      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+      const cas = vi.spyOn(h.instances, "transitionRecovery");
       expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown", reason } });
       expect(reserve).not.toHaveBeenCalled();
       expect(cas).not.toHaveBeenCalled();
@@ -10089,7 +10503,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           }),
         );
         const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
-        const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+        const cas = vi.spyOn(h.instances, "transitionRecovery");
         expect(await callRecovery(h)).toMatchObject({
           status: 409,
           body: { error: "recovery_budget_unknown", reason: "child_identity_mismatch" },
@@ -10136,7 +10550,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           error = "recovery_budget_unknown";
         }
         const before = await h.instances.listUnits(INSTANCE.id);
-        const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+        const cas = vi.spyOn(h.instances, "transitionRecovery");
         expect(await callRecovery(h)).toMatchObject({
           status: 409,
           body: { error, ...(scenario === "missing review" ? { reason: "child_round_mismatch" } : {}) },
@@ -10178,7 +10592,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         tools: [],
       });
       const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
-      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+      const cas = vi.spyOn(h.instances, "transitionRecovery");
       expect(await callRecovery(h)).toMatchObject({ status: 409, body: { reason: "child_active" } });
       expect(reserve).not.toHaveBeenCalled();
       expect(cas).not.toHaveBeenCalled();
@@ -10199,7 +10613,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
             : [...rows, { ...rows[0]!, userId: "slack:UOTHER" }];
         });
         const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
-        const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+        const cas = vi.spyOn(h.instances, "transitionRecovery");
         expect(await callRecovery(h)).toMatchObject({
           status: 409,
           body:
@@ -10349,7 +10763,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         }
         const listLive = vi.spyOn(h.ledger, "listLive").mockRejectedValueOnce(new Error("HTTP 503"));
         const claim = vi.spyOn(h.deps.runnerOwnership!, "claim");
-        const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+        const cas = vi.spyOn(h.instances, "transitionRecovery");
         expect(await callRecovery(h)).toMatchObject({
           status: 409,
           body: { error: "recovery_evidence_incomplete" },
@@ -10449,8 +10863,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       await h.instances.putUnits([legacyRow()]);
       expect((await callRecovery(h)).status).toBe(200);
       const claimed = (await h.instances.listUnits(INSTANCE.id))[0]!;
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 6 } });
-      await h.instances.putUnits([claimed]);
+      vi.spyOn(h.instances, "get").mockResolvedValue({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 6 } });
+      expect(claimed.recovery).toBeDefined();
       expect(await callRecovery(h)).toMatchObject({
         status: 409,
         body: { error: "recovery_budget_unknown", reason: "grant_carry_mismatch" },
@@ -10647,7 +11061,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         publication: { owner: { instanceId: "rival" } },
       },
       h.deps,
-      { userId: INSTANCE.userId, threadKey: INSTANCE.threadKey },
+      { userId: INSTANCE.userId, threadKey: INSTANCE.threadKey, messageId: "slack:C1:recovery-request" },
     );
     expect(result).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
     expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
@@ -10655,7 +11069,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       lastPush: HEAD,
       recovery: { kind: "findings", round: 1 },
     });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
+      ...owner,
+      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
+    });
   });
 
   it("legacy binding repair admits a retained initial coding checkpoint and no-verdict review without requiring a PR-created event", async () => {
@@ -10736,7 +11153,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
     if (scenario === "active owner") h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner);
     if (scenario === "CAS loss")
-      vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValueOnce({ ok: false, reason: "stale" });
+      vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason: "stale" });
     if (scenario === "contradictory hint") await h.instances.putUnits([{ ...legacyRow(), lastPush: "b".repeat(40) }]);
     if (scenario === "partial binding")
       await h.instances.putUnits([{ ...legacyRow(), publication: { ...publication, baseRef: "wrong" } }]);
@@ -10771,7 +11188,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const h = await legacyHarness();
     h.deps.startRecovery = async (id) => ({ kind: "failed", id, reason: "not created" });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
-    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([
+      { ...legacyRow(), history: { version: 1, receiptId: "observed" } },
+    ]);
     expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
   });
 
@@ -10780,9 +11199,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     h.deps.startRecovery = async () => ({ kind: "unanswered", reason: "response lost" });
     expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate" } });
     h.deps.runnerOwnership = new RunnerOwnershipFence(false);
+    h.deps.recoveryStatus = async () => ({ kind: "absent" });
     h.deps.startRecovery = async (id) => ({ kind: "failed", id, reason: "confirmed absent" });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
-    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([
+      { ...legacyRow(), history: { version: 1, receiptId: "observed" } },
+    ]);
     expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toBeUndefined();
   });
 
@@ -10802,7 +11224,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         h.deps,
       ),
     ).toMatchObject({ status: 200 });
-    h.deps.startRecovery = async (id) => ({ kind: "duplicate", id, status: "errored" });
+    h.deps.recoveryStatus = async () => ({ kind: "status", status: "errored" });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_terminal" } });
     expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
       publication,
@@ -12158,7 +12580,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       publication,
     });
     expect(claimed).not.toHaveProperty("ending");
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
+      ...owner,
+      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
+    });
   });
 
   it.each([
@@ -12872,7 +13297,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       body: { outcome: "already_started", workflowId: "recovery-run-original-review" },
     });
     expect(h.dispatched).toHaveLength(0);
-    expect(h.recoveries).toHaveLength(2);
+    expect(h.recoveries).toHaveLength(1);
     expect(new Set(h.recoveries.map((entry) => entry.id))).toEqual(new Set(["recovery-run-original-review"]));
   });
 
@@ -12960,6 +13385,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const unitThread = await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
       userId: INSTANCE.userId,
       threadKey: "slack:C1:unit-12",
+      messageId: "slack:C1:recovery-request",
     });
 
     expect(parentThread).toMatchObject({ status: 403, body: { error: "recovery_requester_mismatch" } });
@@ -13094,7 +13520,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     );
 
     expect(response.status).toBe(200);
-    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toEqual({
+      ...owner,
+      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
+    });
   });
 
   it("reconstructs the durable recovery owner at a later findings spawn after the bot process restarts", async () => {
@@ -13302,9 +13731,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     const before = await h.instances.listUnits(INSTANCE.id);
-    const replace = vi
-      .spyOn(h.instances, "compareAndReplaceUnit")
-      .mockResolvedValueOnce({ ok: false, reason: "stale" });
+    const replace = vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason: "stale" });
 
     const response = await callRecovery(h);
 
@@ -13330,10 +13757,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.put(recoveryInstance());
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
-    const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+    const replace = h.instances.transitionRecovery.bind(h.instances);
     let loseResponse = true;
-    h.instances.compareAndReplaceUnit = async (expected, replacement) => {
-      const result = await replace(expected, replacement);
+    h.instances.transitionRecovery = async (input) => {
+      const result = await replace(input);
       if (loseResponse) {
         loseResponse = false;
         throw new Error("response lost after commit");
@@ -13344,7 +13771,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const response = await callRecovery(h);
 
     expect(response).toMatchObject({ status: 200, body: { outcome: "started" } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
+      ...owner,
+      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
+    });
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.workflowId).toBe("recovery-run-original-review");
   });
 
@@ -13370,7 +13800,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const response = await callRecovery(h);
 
     expect(response).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
-    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(
+      before.map((row) => ({ ...row, history: { version: 1, receiptId: "observed" } })),
+    );
     expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
   });
 
@@ -13391,11 +13823,11 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.put(recoveryInstance());
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
-    const realReplace = h.instances.compareAndReplaceUnit.bind(h.instances);
+    const realReplace = h.instances.transitionRecovery.bind(h.instances);
     let replaces = 0;
-    vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (expected, replacement) => {
+    vi.spyOn(h.instances, "transitionRecovery").mockImplementation(async (input) => {
       replaces++;
-      return replaces === 2 ? { ok: false, reason: "stale" } : realReplace(expected, replacement);
+      return replaces === 2 ? { ok: false, reason: "stale" } : realReplace(input);
     });
 
     const response = await callRecovery(h);
@@ -13405,7 +13837,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       body: { error: "recovery_rollback_failed", cause: "recovery_workflow_failed", reason: "stale" },
     });
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery).toBeDefined();
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
+      ...owner,
+      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
+    });
   });
 
   it("keeps an ambiguous Workflow admission claimed so retry can meet the same Workflow id without a second budget charge", async () => {
@@ -13437,10 +13872,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       body: { outcome: "indeterminate", workflowId: "recovery-run-original-review" },
     });
     expect(replay).toMatchObject({ status: 200, body: { outcome: "already_started" } });
-    expect(h.recoveries.map((entry) => entry.id)).toEqual([
-      "recovery-run-original-review",
-      "recovery-run-original-review",
-    ]);
+    expect(h.recoveries.map((entry) => entry.id)).toEqual(["recovery-run-original-review"]);
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery).toEqual(claimed!.recovery);
   });
 
@@ -13484,7 +13916,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     );
 
     expect(response).toMatchObject({ status: 409, body: { error: "recovery_head_moved" } });
-    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(
+      before.map((row) => ({ ...row, history: { version: 1, receiptId: "observed" } })),
+    );
     expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
   });
 
@@ -13548,28 +13982,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         },
       };
       const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
-      await h.instances.put(recoveryInstance());
-      const key = `worker:${INSTANCE.id}:U12`;
-      await h.instances.putUnits([requestChangesRow()]);
-      await h.store.put(reviewRecord());
-      expect((await callRecovery(h)).status).toBe(200);
-      const [claimed] = await h.instances.listUnits(INSTANCE.id);
-      await h.instances.putUnits([
-        {
-          ...claimed!,
-          threadKey: key,
-          workBrief: {
-            requesterId: INSTANCE.userId,
-            mainThreadKey: INSTANCE.threadKey,
-            actId: "act-1",
-            repo: INSTANCE.repo,
-            base: "main",
-            question: "Why?",
-            findings: [],
-            requestedChange: "Fix it",
-          },
-        },
-      ]);
+      const key = await privateRecovery(h);
       const body = {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
@@ -13643,28 +14056,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   it("refuses a legacy recovery replay that races a typed settlement before a lost CAS response", async () => {
     const log = new InMemoryPrivateWorkerLog();
     const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
-    await h.instances.put(recoveryInstance());
-    await h.instances.putUnits([requestChangesRow()]);
-    await h.store.put(reviewRecord());
-    expect((await callRecovery(h)).status).toBe(200);
-    const [claimed] = await h.instances.listUnits(INSTANCE.id);
-    const key = `worker:${INSTANCE.id}:U12`;
-    await h.instances.putUnits([
-      {
-        ...claimed!,
-        threadKey: key,
-        workBrief: {
-          requesterId: INSTANCE.userId,
-          mainThreadKey: INSTANCE.threadKey,
-          actId: "act-1",
-          repo: INSTANCE.repo,
-          base: "main",
-          question: "Why?",
-          findings: [],
-          requestedChange: "Fix it",
-        },
-      },
-    ]);
+    const key = await privateRecovery(h);
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
@@ -13674,7 +14066,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       pr: PR,
       headSha: HEAD,
     };
-    vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementationOnce(async () => {
+    vi.spyOn(h.instances, "transitionRecovery").mockImplementationOnce(async () => {
       expect(
         await handleCoordinatorRequest(
           post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
@@ -13733,9 +14125,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
-    const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
-    vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementationOnce(async (expected, replacement) => {
-      expect(await replace(expected, replacement)).toEqual({ ok: true });
+    const replace = h.instances.transitionRecovery.bind(h.instances);
+    vi.spyOn(h.instances, "transitionRecovery").mockImplementationOnce(async (input) => {
+      expect(await replace(input)).toMatchObject({ ok: true });
       throw new Error("response lost after commit");
     });
 
@@ -13880,7 +14272,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const second = await callRecovery(h);
 
     expect(first).toMatchObject({ status: 409, body: { error: "recovery_workflow_terminal" } });
-    expect(second).toMatchObject({ status: 409, body: { error: "recovery_already_completed" } });
+    expect(second).toMatchObject({ status: 409, body: { error: "recovery_workflow_terminal" } });
     const [settled] = await h.instances.listUnits(INSTANCE.id);
     expect(settled!.recovery).toBeUndefined();
     expect(settled!.recoveryReceipt?.reviewRunId).toBe("run-original-review");

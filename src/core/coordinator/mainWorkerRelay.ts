@@ -11,6 +11,7 @@ import {
 } from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
 import { shipSettlementOf, type ShipSettlement } from "./shipOutcome.js";
+import type { RecoveryReceipt } from "./recoveryHistory.js";
 
 const PAGE_SIZE = 8;
 const TITLE_LIMIT = 160;
@@ -31,6 +32,21 @@ export type MainWorkerRelayResult =
       cursor: number;
       more: boolean;
       progress: MainWorkerProgress[];
+      history?: {
+        cursor: number;
+        more: boolean;
+        /** Recording began with an observed predecessor; earlier attempts are unknown. */
+        priorHistory: "not_recorded";
+        receipts: Array<
+          Pick<RecoveryReceipt, "id" | "seq" | "provenance" | "predecessorId" | "actionId" | "workflowId"> & {
+            settlement: ShipSettlement;
+            kind: string;
+            report: string;
+            reportTruncated?: true;
+            at: number;
+          }
+        >;
+      };
       final?: {
         settlement: ShipSettlement;
         kind: string;
@@ -56,13 +72,18 @@ function resource(instance: CoordinatorInstance) {
  * The indexed act is only an address; the requester, thread and durable unit
  * are rechecked on every read. No input or freeform worker reply crosses. */
 export function createMainWorkerRelay(deps: {
-  instances: Pick<CoordinatorInstanceStore, "getMainTask" | "get" | "listUnits">;
+  instances: Pick<CoordinatorInstanceStore, "getMainTask" | "get" | "listUnits" | "listRecoveryHistory">;
   privateWorkerLog: Pick<PrivateWorkerLog, "listAfter">;
 }) {
   return {
-    async read(actor: Actor, input: { actId: string; afterSeq?: number }): Promise<MainWorkerRelayResult> {
+    async read(
+      actor: Actor,
+      input: { actId: string; afterSeq?: number; afterHistory?: number },
+    ): Promise<MainWorkerRelayResult> {
       const afterSeq = input.afterSeq ?? 0;
-      if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) return { kind: "invalid" };
+      const afterHistory = input.afterHistory ?? 0;
+      if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 || !Number.isSafeInteger(afterHistory) || afterHistory < 0)
+        return { kind: "invalid" };
       const origin = actor.origin;
       if (!origin || !isMainTaskKey({ mainThreadKey: origin.threadKey, actId: input.actId }))
         return { kind: "not_found" };
@@ -84,6 +105,29 @@ export function createMainWorkerRelay(deps: {
         )
           return { kind: "not_found" };
         if (!authorize(actor, "runs:read", resource(instance)).allow) return { kind: "forbidden" };
+        const historyPage = unit.history ? await deps.instances.listRecoveryHistory(unit, afterHistory) : undefined;
+        const history = historyPage
+          ? {
+              cursor: historyPage.cursor,
+              more: historyPage.more,
+              priorHistory: "not_recorded" as const,
+              receipts: historyPage.receipts.map(
+                ({ id, seq, provenance, predecessorId, actionId, workflowId, ending }) => ({
+                  id,
+                  seq,
+                  provenance,
+                  ...(predecessorId ? { predecessorId } : {}),
+                  ...(actionId ? { actionId } : {}),
+                  ...(workflowId ? { workflowId } : {}),
+                  settlement: shipSettlementOf(ending),
+                  kind: ending.kind,
+                  report: ending.report.slice(0, REPORT_LIMIT),
+                  ...(ending.report.length > REPORT_LIMIT ? { reportTruncated: true as const } : {}),
+                  at: ending.at,
+                }),
+              ),
+            }
+          : undefined;
         const page = await deps.privateWorkerLog.listAfter(
           privateWorkerThreadKey({ instanceId: instance.id, unit: unit.unit }),
           afterSeq,
@@ -114,7 +158,14 @@ export function createMainWorkerRelay(deps: {
               ...(unit.pr ? { pr: { number: unit.pr.number, url: unit.pr.url } } : {}),
             }
           : undefined;
-        return { kind: "found", cursor, more: page.more, progress, ...(final ? { final } : {}) };
+        return {
+          kind: "found",
+          cursor,
+          more: page.more,
+          progress,
+          ...(final ? { final } : {}),
+          ...(history ? { history } : {}),
+        };
       } catch {
         return { kind: "unavailable" };
       }

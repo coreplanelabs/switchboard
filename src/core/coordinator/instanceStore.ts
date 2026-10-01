@@ -21,6 +21,7 @@ import {
   mainTaskClaimMatches,
   preserveWorkBrief,
   prepareUnfencedUnitWrite,
+  permitsRecoveryMetadataWrite,
   CoordinatorUnitWriteConflict,
   isThreadEvent,
   type CoordinatorInstance,
@@ -40,6 +41,20 @@ import {
   type RequesterTurn,
   type RequesterTurnInput,
 } from "./requesterAuthority.js";
+import {
+  prepareRecoveryTransition,
+  planRecoveryTransition,
+  recoveryActionId,
+  recoveryHistoryPage,
+  isRecoveryAction,
+  isRecoveryReceipt,
+  type RecoveryTransition,
+  type RecoveryTransitionResult,
+  type RecoveryRequest,
+  type RecoveryAction,
+  type RecoveryReceipt,
+  type RecoveryHistoryPage,
+} from "./recoveryHistory.js";
 
 /** `exists`: a different record already holds the id (an identical put is
  *  idempotent); `unavailable`: no durable store in this process. */
@@ -90,6 +105,9 @@ function mainTaskUnitSnapshot(rows: unknown, key: UnitEventKey): MainTaskUnitSna
 }
 
 export interface CoordinatorInstanceStore {
+  transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult>;
+  getRecoveryAction(key: UnitEventKey, request: RecoveryRequest): Promise<RecoveryAction | null>;
+  listRecoveryHistory(key: UnitEventKey, after?: number): Promise<RecoveryHistoryPage>;
   /** The authenticated requester turn, outside model and session content. */
   recordRequesterTurn(input: RequesterTurnInput): Promise<RecordRequesterTurnResult>;
   latestRequesterTurn(key: RequesterKey): Promise<RequesterTurn | null>;
@@ -175,6 +193,45 @@ export interface CoordinatorInstanceStore {
 const unitKey = (u: Pick<CoordinatorUnit, "instanceId" | "unit">) => `${u.instanceId}\0${u.unit}`;
 
 export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  private readonly recoveryActions = new Map<string, string>();
+  private readonly recoveryReceipts = new Map<string, string>();
+  async transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult> {
+    const prepared = await prepareRecoveryTransition(input);
+    const key = unitKey(input.expected);
+    const read = <T>(map: Map<string, string>): T[] =>
+      [...map].filter(([id]) => id.startsWith(`${key}\0`)).map(([, value]) => JSON.parse(value) as T);
+    const current = this.units.get(key);
+    const instance = this.rows.get(input.expected.instanceId);
+    const result = planRecoveryTransition(
+      prepared,
+      instance ? JSON.parse(instance) : null,
+      current ? JSON.parse(current) : undefined,
+      {
+        actions: read<RecoveryAction>(this.recoveryActions),
+        receipts: read<RecoveryReceipt>(this.recoveryReceipts),
+        ...(input.expected.workBrief
+          ? { mainTask: this.mainTasks.get(this.mainTaskKey(input.expected.workBrief)) }
+          : {}),
+      },
+    );
+    if (!result.ok) return result;
+    if (result.receipt) this.recoveryReceipts.set(`${key}\0${result.receipt.id}`, JSON.stringify(result.receipt));
+    if (result.action) this.recoveryActions.set(`${key}\0${result.action.id}`, JSON.stringify(result.action));
+    this.units.set(key, JSON.stringify(result.unit));
+    return { ok: true, unit: result.unit, ...(result.replayed ? { replayed: true } : {}) };
+  }
+  async getRecoveryAction(key: UnitEventKey, request: RecoveryRequest): Promise<RecoveryAction | null> {
+    const value = this.recoveryActions.get(`${unitKey(key)}\0${await recoveryActionId(key, request)}`);
+    return value ? (JSON.parse(value) as RecoveryAction) : null;
+  }
+  async listRecoveryHistory(key: UnitEventKey, after = 0): Promise<RecoveryHistoryPage> {
+    return recoveryHistoryPage(
+      [...this.recoveryReceipts]
+        .filter(([id]) => id.startsWith(`${unitKey(key)}\0`))
+        .map(([, value]) => JSON.parse(value) as RecoveryReceipt),
+      after,
+    );
+  }
   private readonly rows = new Map<string, string>();
   /** Insertion-ordered, so a replace keeps a row's place. */
   private readonly units = new Map<string, string>();
@@ -258,7 +315,9 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     if (
       [...this.units].some(
         ([key, text]) =>
-          key.startsWith(`${instance.id}\0`) && (JSON.parse(text) as CoordinatorUnit).ending?.outcome !== undefined,
+          key.startsWith(`${instance.id}\0`) &&
+          ((JSON.parse(text) as CoordinatorUnit).ending?.outcome !== undefined ||
+            (JSON.parse(text) as CoordinatorUnit).history !== undefined),
       )
     )
       return { ok: false, reason: "exists" };
@@ -294,7 +353,11 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     replacement: CoordinatorUnit,
   ): Promise<CompareAndReplaceUnitResult> {
     const key = unitKey(expected);
-    if (unitKey(replacement) !== key || this.units.get(key) !== JSON.stringify(expected))
+    if (
+      unitKey(replacement) !== key ||
+      this.units.get(key) !== JSON.stringify(expected) ||
+      !permitsRecoveryMetadataWrite(expected, replacement, true)
+    )
       return { ok: false, reason: "stale" };
     this.units.set(key, JSON.stringify(preserveWorkBrief(expected, replacement)));
     return { ok: true };
@@ -418,6 +481,15 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
 /** Without a durable state Worker, writes refuse and unit-owner reads are
  *  unavailable rather than evidence that the instance has no units. */
 export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async transitionRecovery(): Promise<RecoveryTransitionResult> {
+    return { ok: false, reason: "unavailable" };
+  }
+  async getRecoveryAction(): Promise<RecoveryAction | null> {
+    throw new Error("recovery action store unavailable");
+  }
+  async listRecoveryHistory(): Promise<RecoveryHistoryPage> {
+    throw new Error("recovery history store unavailable");
+  }
   async recordRequesterTurn(_input: RequesterTurnInput): Promise<RecordRequesterTurnResult> {
     return { ok: false, reason: "unavailable" };
   }
@@ -515,6 +587,59 @@ export interface WorkerCoordinatorInstanceStoreOptions {
  *  the run store's client. An answer this client cannot read is thrown, never
  *  read as "no instance": a spawn on a guess would be a spawn nobody asked for. */
 export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult> {
+    const response = await this.post("/runs/coordinator/recovery/transition", { input });
+    const data = response.data as { ok?: unknown; reason?: unknown; unit?: unknown; replayed?: unknown };
+    if (
+      data.ok === true &&
+      isCoordinatorUnit(data.unit) &&
+      data.unit.instanceId === input.expected.instanceId &&
+      data.unit.unit === input.expected.unit
+    )
+      return { ok: true, unit: data.unit, ...(data.replayed === true ? { replayed: true } : {}) };
+    if (
+      data.ok === false &&
+      (data.reason === "stale" ||
+        data.reason === "conflict" ||
+        data.reason === "capacity" ||
+        data.reason === "unavailable")
+    )
+      return { ok: false, reason: data.reason };
+    throw new Error(`recovery transition unavailable (HTTP ${response.status})`);
+  }
+  async getRecoveryAction(key: UnitEventKey, request: RecoveryRequest): Promise<RecoveryAction | null> {
+    const response = await this.post("/runs/coordinator/recovery/action", { key, request });
+    const action = (response.data as { action?: unknown }).action;
+    if (action === null) return null;
+    if (
+      !isRecoveryAction(action) ||
+      action.instanceId !== key.instanceId ||
+      action.unit !== key.unit ||
+      action.id !== (await recoveryActionId(key, request))
+    )
+      throw new Error("invalid recovery action response");
+    return action;
+  }
+  async listRecoveryHistory(key: UnitEventKey, after = 0): Promise<RecoveryHistoryPage> {
+    const response = await this.post("/runs/coordinator/recovery/history", { key, after });
+    const page = response.data as RecoveryHistoryPage;
+    if (
+      !Array.isArray(page.receipts) ||
+      !page.receipts.every(
+        (row) => isRecoveryReceipt(row) && row.instanceId === key.instanceId && row.unit === key.unit,
+      ) ||
+      typeof page.more !== "boolean"
+    )
+      throw new Error("invalid recovery history response");
+    const checked = recoveryHistoryPage(page.receipts, after);
+    if (
+      checked.cursor !== page.cursor ||
+      checked.receipts.length !== page.receipts.length ||
+      page.receipts.some((row, i) => row.seq <= (i === 0 ? after : page.receipts[i - 1]!.seq))
+    )
+      throw new Error("invalid recovery history cursor");
+    return page;
+  }
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
 

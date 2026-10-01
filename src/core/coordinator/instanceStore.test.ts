@@ -704,3 +704,33 @@ describe("private requester revision before a main task claim", () => {
     expect((await store.latestRequesterTurn(key))?.priorQuestionTarget).toBeUndefined();
   });
 });
+
+describe("recovery history Worker client", () => {
+  it("refuses malformed history or an unsupported store without inventing an empty page", async () => {
+    const options = { baseUrl: "https://state.test", token: "test", storeKey: "runs:history" };
+    const key = { instanceId: instance.id, unit: "U12" };
+    for (const data of [
+      { error: "not_found" },
+      {
+        cursor: 1,
+        more: false,
+        receipts: [{ version: 1, id: "observed", seq: 1, ...key, provenance: "observed_predecessor" }],
+      },
+      { cursor: 2, more: false, receipts: [] },
+    ]) {
+      const client = new WorkerCoordinatorInstanceStore({ ...options, fetch: async () => Response.json(data) });
+      await expect(client.listRecoveryHistory(key)).rejects.toThrow(/history/);
+    }
+    const absent = new WorkerCoordinatorInstanceStore({
+      ...options,
+      fetch: async () => Response.json({ error: "not_found" }, { status: 404 }),
+    });
+    await expect(
+      absent.getRecoveryAction(key, {
+        userId: instance.userId,
+        threadKey: instance.threadKey,
+        messageId: "source-message",
+      }),
+    ).rejects.toThrow(/action/);
+  });
+});
