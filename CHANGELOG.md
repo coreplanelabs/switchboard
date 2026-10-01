@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.271.2](https://github.com/coreplanelabs/switchboard/compare/v1.271.1...v1.271.2) (2026-10-01)
+
+
+### Bug fixes
+
+* **deploy:** enable release smoke after credential setup ([#2540](https://github.com/coreplanelabs/switchboard/issues/2540)) ([a66dbd4](https://github.com/coreplanelabs/switchboard/commit/a66dbd40ff29d5309e053ba37cd87a01772a0142))
+* **deploy:** smoke ordinary requests after release ([#2538](https://github.com/coreplanelabs/switchboard/issues/2538)) ([76457f0](https://github.com/coreplanelabs/switchboard/commit/76457f074da20624d8e73f42269eb1cd763ca320))
+* **dispatcher:** keep ordinary requests through the Door ([#2541](https://github.com/coreplanelabs/switchboard/issues/2541)) ([e9874ee](https://github.com/coreplanelabs/switchboard/commit/e9874ee7a708d0d69cbdb8ec5afea2b6e89ec779))
+* **dispatcher:** preserve review target and requested settings ([#2542](https://github.com/coreplanelabs/switchboard/issues/2542)) ([889bbb6](https://github.com/coreplanelabs/switchboard/commit/889bbb60d850d32a089a52c87ceefcc6aed49f40))
+
 ## [1.271.1](https://github.com/coreplanelabs/switchboard/compare/v1.271.0...v1.271.1) (2026-10-01)
 
 
