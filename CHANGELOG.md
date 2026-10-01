@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.271.6](https://github.com/coreplanelabs/switchboard/compare/v1.271.5...v1.271.6) (2026-10-01)
+
+
+### Bug fixes
+
+* **review:** require pattern tables and bound continuation rounds ([#2565](https://github.com/coreplanelabs/switchboard/issues/2565)) ([71fa99a](https://github.com/coreplanelabs/switchboard/commit/71fa99a3799ac45867b7e5094d8bf15ca9fffd5f))
+
 ## [1.271.5](https://github.com/coreplanelabs/switchboard/compare/v1.271.4...v1.271.5) (2026-10-01)
 
 
