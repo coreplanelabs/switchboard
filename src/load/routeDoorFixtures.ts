@@ -77,7 +77,9 @@ export type DoorExpectation =
    *  never `forbids` (the read that stood in for it); when `names` is set the
    *  question's text carries it — the catalogue's candidate refs for a model
    *  word that matches several refs or none, never a guess. */
-  | { kind: "question"; proposes?: string; forbids?: string; names?: string };
+  | { kind: "question"; proposes?: string; forbids?: string; names?: string }
+  /** An exhausted operator turn stops at the door after repair attempts. */
+  | { kind: "non_decision"; reasonContains: string };
 
 /** One door fixture: the failure's message shape, the defect it replays
  *  (record 0069's table), the unit that turns it green and the amended
@@ -242,14 +244,13 @@ export const ROUTE_DOOR_FIXTURES: readonly RouteDoorFixture[] = [
     expected: { kind: "click", line: "config set channel --models.coding acme/fast-1" },
   },
   // D14 (issue 1993): a no-call turn once fell into the readers' router. The
-  // door now re-asks once; a second no-call binds general itself and records
-  // the typed reason on the run's operator field.
+  // door now re-asks once; a second no-call records failure and starts nothing.
   {
     id: "d14",
     defect: "D14",
     unit: "E2",
     text: "can you sort out the thing from before? same as last time.",
-    expected: { kind: "bind", preset: "general", carries: "same as last time", reason: "no_decision" },
+    expected: { kind: "non_decision", reasonContains: "no tool call" },
   },
   // N1 (issue 2043): a plain-words docs ask flipping a record's status was
   // refused as "privileged administrative updates to control plane records" —

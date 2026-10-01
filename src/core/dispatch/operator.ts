@@ -18,8 +18,8 @@
 // repository writer and fixed write-destination question) — and read tools (the thread's owner and
 // pending question, the repository's facts, the registry's help, the
 // providers catalogue) ground the decision. A turn that ends with no tool call is
-// re-asked once with the violation named; a second no-call turn binds
-// `general` through the same typed parser with reason `no_decision`. The model authors no
+// re-asked once with the violation named; a second no-call turn ends at the
+// door with `non_decision`. The model authors no
 // refusal — its "cannot" is an `ask` or a repaired no-call turn; refusal exists only
 // where the policy table made one (`decideExecution`'s `policy_refusal` row).
 // The prompt is ordered rules, projection, briefs,
@@ -32,8 +32,8 @@
 // (record 0067's re-ask narrows to the harness's own repair of a tool call
 // that fails to validate). A call whose input the schema refuses is re-asked
 // with the violation named, at most the bounded retries, every attempt on
-// the event; after them `non_decision` falls to the configured default with
-// no second model. A provider schema 400 against a locally incompatible tool
+// the event; after them `non_decision` ends the chat request without a second
+// interpretation. A provider schema 400 against a locally incompatible tool
 // is re-asked without that tool and recorded by tool and keyword; every other
 // failed model call renders its typed cause once and stops at the door, never
 // falling through to `general`.
@@ -114,7 +114,7 @@ export type { OperatorEventFields } from "./commandRun.js";
 /** The loop's action tools (record 0069, as amended): the model's only ways
  *  to act. `bind_preset` routes the person's own request through a preset;
  *  `ask` parks one question as the thread's pending question; each registry
- *  command the projection offers rides as its own typed tool. A no-call turn gets one named repair, then binds general as `no_decision`. */
+ *  command the projection offers rides as its own typed tool. A no-call turn gets one named repair, then ends. */
 export const OPERATOR_BIND_TOOL = "bind_preset";
 
 /** The presets the one door may bind. The conductor keeps its compound door:
@@ -231,10 +231,8 @@ function exactModelRefInRequest(request: string, ref: string): boolean {
  *  a registry command's typed call rendered by the registry's own grammar
  *  (`chatInvocation`) — so a malformed, doubled or re-spelled line is
  *  unrepresentable; `question` is an `ask` or typed target question, parked as the thread's pending
- *  question; `non_decision` is a turn that ended with no tool call — the one
- *  last-resort floor: under `on` the dispatcher falls back to the readers'
- *  route for that event, the decision (marked `floored`) recorded on the run
- *  that then runs, and nothing of it is rendered to the person. `refusal`
+ *  question; `non_decision` is an exhausted or failed operator turn: under
+ *  `on` it ends at the door with a recorded failure and starts no run. `refusal`
  *  is never the model's: it exists only where the policy table made one — a
  *  durable record from before the loop, or a deterministic gate downstream. */
 export type OperatorDecision =
@@ -513,7 +511,7 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
     .join("\n");
   const system = [
     // 1. Rules.
-    "You are the operator: the one door every chat request to Switchboard passes. You read one admitted chat event with the thread's tail and act with ONE typed tool call — never several in one answer: `bind_preset` (a preset on the person's request, which rides to the run by reference — never re-typed, plus the typed repository when the facts name one), one of the registry command tools (typed arguments, never a line), `ask` (one question when the request holds a fork only the person can decide, with a runnable best-guess proposal when possible), or `ask_repository_target` (select the requested repository writer and ask the fixed write-destination question when its target is missing). Ending the turn with no tool call is a violation: you will be asked once more to make one offered action call; a second no-call turn runs `general` with reason `no_decision`. You may first call the read tools (`thread_state`, `repo_facts`, `registry_help`, `provider_models`) to ground the decision. `thread_state` includes the newest finished run's agent, repository and pull request plus the channel's default repository, so a bare re-review inherits its target.",
+    "You are the operator: the one door every chat request to Switchboard passes. You read one admitted chat event with the thread's tail and act with ONE typed tool call — never several in one answer: `bind_preset` (a preset on the person's request, which rides to the run by reference — never re-typed, plus the typed repository when the facts name one), one of the registry command tools (typed arguments, never a line), `ask` (one question when the request holds a fork only the person can decide, with a runnable best-guess proposal when possible), or `ask_repository_target` (select the requested repository writer and ask the fixed write-destination question when its target is missing). Ending the turn with no tool call is a violation: you will be asked once more to make one offered action call; a second no-call turn ends without starting work. You may first call the read tools (`thread_state`, `repo_facts`, `registry_help`, `provider_models`) to ground the decision. `thread_state` includes the newest finished run's agent, repository and pull request plus the channel's default repository, so a bare re-review inherits its target.",
     "You never refuse: a refusal exists only where the authorization policy makes one, and that gate runs after you. There is no administrator, admin access or internal tooling beyond the presets and commands below. When you cannot act, ask one question or end the turn.",
     "The installation organization is context, not a target repository. An onboarded repository list gives candidates, not evidence that any one contains a PR. A bare PR number does not identify a repository; use an unquoted GitHub URL, PR shorthand or repository address, a durable thread target, or the channel default. A bare PR review with no grounded repository must ask for one. A later PR link offered as context does not replace a bare review PR's inherited target; a repository link offered only as context does not identify that PR's repository. Two different PR targets without a context cue require clarification, even when one has an addressed repository. Code examples, context paths and mere slug mentions are not request targets. When a requested change has no grounded repository, use `ask_repository_target` if offered; for a source or example repository, use ordinary `ask`. When requester targets already conflict, use ordinary `ask` and request an explicitly addressed target such as `in owner/name`; a bare answer cannot erase the conflict. Never guess a repo from the model provider, a source-tree fact, or the candidate list. An attached file that names an onboarded repository can ground its target.",
     "Decision records and plans are ordinary repository docs changes. Resolve their paths in the requested repository; a docs write is not a privileged administrative update. The `repo_facts` read describes Switchboard's own source tree only.",
@@ -1627,7 +1625,7 @@ export function pendingQuestionOf(
  * The person's free-text answer to a pending question, joined back onto the
  * original ask (issue 2046): `<request> — <question>: <answer>`, the question
  * taken without record 0054's marker block. The joined line is what binds —
- * the operator decides it, and a floor routes it — so the answer never reaches
+ * the operator decides it, and a failed turn ends there — so the answer never reaches
  * the router as a bare fragment. Undefined when the pending question kept no
  * request (a record from before the field): the answer then stands alone, as
  * it did before the join existed.
@@ -2017,8 +2015,8 @@ export function requesterThreadEvidence(
  * asked again with the answer as a turn, at most `OPERATOR_READS_MAX` reads;
  * an action tool call whose input fails to validate is re-asked with the
  * violation named (record 0067, narrowed to the harness's own repair), at
- * most the bounded retries. A no-call turn is re-asked once; a second is
- * parsed as `bind_preset` for general with reason `no_decision`. An answer
+ * most the bounded retries. A no-call turn is re-asked once; a second ends
+ * with `non_decision`. An answer
  * carrying several tool calls is re-asked within the same shared retry budget;
  * after exhaustion, its sole action call passes the ordinary post-parse and
  * catalogue guards before it may be accepted, while zero or several actions
@@ -2026,7 +2024,7 @@ export function requesterThreadEvidence(
  * the typed ProviderFailure seam is re-asked without its named tool, with the
  * tool and keyword on the attempts record and a repair budget separate from
  * structured violations. An output-cap cut retries once at a larger cap, then
- * takes the typed general floor. Every generic 400, other throw or timeout
+ * ends at the door. Every generic 400, other throw or timeout
  * becomes a typed refusal with the cause's one safe sentence. It never falls
  * through to the configured default.
  */
@@ -2090,13 +2088,6 @@ export async function runOperator(
   let noCallTurns = 0;
   let outputCapCuts = 0;
   let maxOutputTokens = opts.maxOutputTokens ?? operatorMaxOutputTokens();
-  const generalFloor = (reason = "no_decision"): OperatorDecision => {
-    // The floor goes through the exact parser used for a model-authored
-    // bind_preset call. That keeps its line, redaction and preset hold on the
-    // typed path instead of growing a second construction for the fallback.
-    const floor = parseOperatorTurn({ tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason } }, ctx);
-    return floor.kind === "decision" ? floor.decision : { kind: "non_decision", reason };
-  };
   const signal = AbortSignal.timeout(opts.timeoutMs ?? OPERATOR_TIMEOUT_MS);
   try {
     for (;;) {
@@ -2105,8 +2096,7 @@ export async function runOperator(
         answer = await model({ ...prompt, retries: turns }, { maxTokens: maxOutputTokens, signal });
       } catch (err) {
         // A cap cut is recoverable shape, not a provider refusal: retry once
-        // with a materially larger ceiling. If that is cut too, the typed
-        // general bind keeps an owned pipeline alive instead of ending it.
+        // with a materially larger ceiling. A second cut ends at the door.
         if (err instanceof OutputCapError) {
           const violation = err.message;
           attempts.push({ outcome: "violation", violation });
@@ -2115,7 +2105,7 @@ export async function runOperator(
             maxOutputTokens = outputCapRetry(maxOutputTokens);
             continue;
           }
-          return answered(generalFloor("output_cap"));
+          return answered({ kind: "non_decision", reason: "output_cap" });
         }
         // A multi-call answer (issue 2099) is a violation the loop re-asks,
         // never a failure the outer catch floors. Past the bounded retries,
@@ -2198,9 +2188,8 @@ export async function runOperator(
       if (turn.kind === "decision" && turn.decision.kind === "non_decision") {
         const violation = turn.decision.reason;
         if (noCallTurns > 0) {
-          const decision = generalFloor();
-          if (decision.kind === "binds") attempts.push({ outcome: "accepted" });
-          return answered(decision);
+          attempts.push({ outcome: "violation", violation });
+          return answered({ kind: "non_decision", reason: tidy(violation) });
         }
         attempts.push({ outcome: "violation", violation });
         noCallTurns++;
@@ -2247,8 +2236,8 @@ export async function runOperator(
       return answered(turn.decision);
     }
   } catch (err) {
-    // Failures after the provider turn (parse/catalogue/loop internals) retain
-    // the non-decision floor. The model call itself returns above as a typed
+    // Failures after the provider turn (parse/catalogue/loop internals) end
+    // at the door. The model call itself returns above as a typed
     // provider refusal and cannot reach this catch.
     const why = tidy(err instanceof Error ? err.message : String(err));
     const carried = attemptsOfThrow(err);
@@ -2261,7 +2250,7 @@ export async function runOperator(
  *  flattened onto the event's fields, every line already redacted and cut by
  *  the parse, with the intake gate's verdict when the gate was present. The
  *  optional `floored` field remains in the return shape only for old records;
- *  new decisions never emit it because the readers' floor is retired. */
+ *  new decisions never emit it. */
 export function operatorEventOf(
   mode: "shadow" | "on",
   answer: OperatorAnswer,
@@ -2422,8 +2411,8 @@ export async function operatorThreadTail(
  * deterministic live-thread and directive short-circuits. Answers the
  * `operator` event's fields for the dispatcher to write beside the routed
  * request — onto the live run a reply is folded into, the inline run a typed
- * line becomes, or the agent run the request starts — or undefined when the
- * operator cannot run here (no model), which is a log line and nothing else.
+ * line becomes, or the agent run the request starts. An unavailable operator
+ * under `on` records a failed door instead of handing the text to a reader.
  * Never throws: a model failure is a typed provider refusal rendered once.
  */
 export async function operatorStage(
@@ -2460,11 +2449,19 @@ export async function operatorStage(
   const cfg = deps.config.config;
   let model = deps.operatorModel;
   let maxOutputTokens: number | undefined;
+  const unavailable = () =>
+    mode === "on"
+      ? operatorEventOf(
+          mode,
+          { decision: { kind: "non_decision", reason: "operator_unavailable" }, latencyMs: 0, outputTokens: 0 },
+          ctx.intake,
+        )
+      : undefined;
   if (!model) {
     const modelRef = cfg.defaults.models["general"];
     if (!modelRef || !deps.completions) {
       console.log(`[operator] ${msg.threadKey} not run: no defaults.models.general to run on`);
-      return undefined;
+      return unavailable();
     }
     try {
       const ref = parseModelRef(modelRef);
@@ -2480,7 +2477,7 @@ export async function operatorStage(
       });
     } catch (err) {
       console.log(`[operator] ${msg.threadKey} not run: ${err instanceof Error ? err.message : String(err)}`);
-      return undefined;
+      return unavailable();
     }
   }
   const presets = operatorPresets();
@@ -2840,8 +2837,7 @@ export type OperatorExecution =
  * `steer` bind is admission's fold (the `steer_owned` row), not the paste
  * ladder's. There is no verifier and no hand-back on chat: the schema that
  * carries the preset and the arguments typed makes a malformed, doubled or
- * re-spelled line unrepresentable, and a second no-call turn has already
- * become the typed general bind before this executor is reached. Every decision leaves
+ * re-spelled line unrepresentable, and a second no-call turn ends here. Every decision leaves
  * its `operator` event on a record (run-history item 60): a bind that runs
  * carries it on its command run; a question, a refusal and a bind nothing ran
  * from write a door record of their own (`recordOperatorDecision`).
@@ -2888,6 +2884,12 @@ export async function executeOperatorDecision(
   );
   const verbose = shows(verbosity, "verbose");
   const answered: OperatorExecution = { kind: "answered" };
+  if (event.outcome === "non_decision") {
+    io.requestFailed?.();
+    await io.reply("I couldn't bind this request to an action, so nothing started.");
+    await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
+    return answered;
+  }
   // Ownership already resolved this event to one ended pipeline. The operator
   // may select a separately requested review only when that owner allowed it.
   // Reads, writes, questions and stale steers still fold to continuation.

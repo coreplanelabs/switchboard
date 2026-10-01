@@ -1187,7 +1187,7 @@ export async function dispatch(
       // are the question's answer — joined back onto the original ask
       // (`joinedAnswerRequest`) and decided and folded as the request would
       // have been — mention or not, never reduced to a bare answer. The joined
-      // line is what the operator's loop and its floor bind, so the fragment
+      // line is what the operator decides, so the fragment
       // never becomes a request by itself.
       const pendingQuestion = operatorMode === "on" ? pendingQuestionOf(operatorThread, msg.userId) : undefined;
       const joinedAnswer =
@@ -1266,17 +1266,13 @@ export async function dispatch(
       // the live run. Thread occupancy itself is untouched: one live run per
       // thread, and nothing here starts a rival in an occupied one.
       const live = operatorEvent ? admission.get(msg.threadKey) : undefined;
-      // A `non_decision` after the bounded malformed-call retries is never a
-      // model decision: the request resolves on the configured default with
-      // the attempts recorded and no second model. A provider failure is a
-      // typed refusal instead, rendered once without entering this floor.
-      // The no-call case does not reach this branch: runOperator repairs it
-      // once and turns a second no-call into the typed general bind.
-      const operatorFellBack = operatorEvent?.outcome === "non_decision";
-      if ((operatorMode === "shadow" || operatorFellBack) && operatorEvent && live?.runId !== undefined) {
+      // Shadow records its decision beside a live owner's run. Under `on`,
+      // even an exhausted operator turn ends at the door without a reader
+      // interpreting the same message a second time.
+      if (operatorMode === "shadow" && operatorEvent && live?.runId !== undefined) {
         registry.publish(live.runId, { type: "operator", ...operatorEvent, at: clock() });
         operatorEvent = undefined;
-      } else if (operatorMode === "on" && operatorEvent && !operatorFellBack) {
+      } else if (operatorMode === "on" && operatorEvent) {
         const execution = await root.span("dispatch.operator_decision", () =>
           executeOperatorDecision(deps, {
             msg: doorMsg,
@@ -1288,7 +1284,8 @@ export async function dispatch(
             ...(threadOwner ? { owner: threadOwner } : {}),
           }),
         );
-        if (execution.kind === "answered") return ended;
+        if (execution.kind === "answered")
+          return operatorEvent?.outcome === "non_decision" ? { status: "failed" } : ended;
         // A command bind that ran before the preset already carries the
         // decision's event on its record: the agent run does not repeat it.
         if (execution.kind !== "fold" && execution.carried) operatorEvent = undefined;
@@ -1318,8 +1315,8 @@ export async function dispatch(
         // word "yes", which tells the owner nothing.
         if (execution.kind === "fold" && execution.request !== undefined) operatorRequest = execution.request;
       }
-      // Whatever path the decision took past the door — a preset routed, the
-      // loop's `non_decision` floor, an owned thread's fold — the request
+      // Whatever path the decision took past the door — a preset routed or
+      // an owned thread's fold — the request
       // that runs is the joined ask, never the answer's bare words (issue 2046).
       if (joinedAnswer !== undefined && operatorRequest === undefined) operatorRequest = joinedAnswer;
     }
@@ -1336,7 +1333,7 @@ export async function dispatch(
     };
 
     // A typed Ship request now asks the operator for its starting stage. A
-    // repaired or floored bind to another preset must not fall through to the
+    // repaired bind to another preset must not fall through to the
     // legacy directive and silently start coding without that stage.
     if (
       typedAgent === "ship" &&

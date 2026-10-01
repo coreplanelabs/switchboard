@@ -227,8 +227,10 @@ async function recordDoorDecision(
       text: redactAndCap(refusalLine(decision.refusal), ROUTE_RECEIPT_CAP),
       at: clock(),
     });
-  // The door made a clean decision. A failed status belongs to work that ran.
-  const status: RunStatus = "completed";
+  // A bounded operator that could not decide is a failed door, even though no
+  // agent work started. Policy decisions and questions completed at the door.
+  const status: RunStatus =
+    decision.kind === "operator" && decision.operator.outcome === "non_decision" ? "failed" : "completed";
   registry.finish(run.id, status);
   ending.finished(run.id);
   const snap = registry.snapshot(run.id, run.token);
