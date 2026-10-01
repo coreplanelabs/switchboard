@@ -72,7 +72,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run check:deps-drift` | Installed node_modules match the lockfile: drift fails by name. | Part of `check:consistency`. |
 | `npm run docs:gen` | Writes the generated regions of the reference docs from the command registry. | After changing a command, flag, route, or config key; part of `fix`. |
 | `npm run docs:check` | The generated doc regions equal what the code would generate. | Part of `check:consistency`. |
-| `npm run specs:check` | Every `file::describe::it` proof in `docs/reference/specs/*.md` names a real test; header paths exist. | After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit. |
+| `npm run specs:check` | Validates spec proofs, headers and typed decision-boundary declarations. | After test/spec edits; `-- --fix` repairs titles. Schema/census flags: [spec coverage](docs/reference/specs/specs-coverage.md). |
 | `npm run specs:coverage` | Maps a change's paths to the specs whose headers cover them, then lists paths no spec covers. | `-- --changed origin/main...HEAD [--test-guard]` before review; `-- --require` fails on an uncovered path; `-- --json` for machines. |
 | `npm run decisions:check` | Every record under `docs/decisions/` and `docs/plans/` has a valid `status`, a superseded one names its successor, an accepted body only gains `## Amended`. | Part of `check:consistency`; a failing record is superseded or amended, never edited. |
 | `npm run hygiene:check` | The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks. | Part of `check:consistency`. New hit: rewrite the line or allow it by name. |

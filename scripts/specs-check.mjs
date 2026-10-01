@@ -24,6 +24,9 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
+import { z } from "zod";
+import { boundaryBlocks, candidateCensus, checkBoundaries, decisionBoundarySchema } from "./spec-boundaries.mjs";
+export { boundaryRequirements } from "./spec-boundaries.mjs";
 
 const TEST_FILE = /\.(?:test|spec)\.(?:[cm]?[jt]s)$/;
 
@@ -135,13 +138,17 @@ function testFn(expr) {
   // `it.each([...])(...)` — the callee is itself a call whose callee is `it.each`.
   if (ts.isCallExpression(e)) e = e.expression;
   let mode;
+  let conditional = false;
+  let parameterized = false;
   while (ts.isPropertyAccessExpression(e)) {
     if (MODES.has(e.name.text)) mode = e.name.text;
+    if (e.name.text === "skipIf" || e.name.text === "runIf") conditional = true;
+    if (e.name.text === "each" || e.name.text === "for") parameterized = true;
     e = e.expression;
   }
   if (!ts.isIdentifier(e)) return null;
-  if (TEST_FNS.has(e.text)) return { fn: e.text, mode };
-  if (e.text in X_FNS) return { fn: X_FNS[e.text], mode: "skip" };
+  if (TEST_FNS.has(e.text)) return { fn: e.text, mode, conditional, parameterized };
+  if (e.text in X_FNS) return { fn: X_FNS[e.text], mode: "skip", conditional, parameterized };
   return null;
 }
 
@@ -172,7 +179,7 @@ export function collectTestTitles(source, fileName = "x.test.ts") {
     if (ts.isCallExpression(node)) {
       const call = testFn(node.expression);
       if (call) {
-        const { fn, mode } = call;
+        const { fn, mode, conditional, parameterized } = call;
         const title = titlePattern(node.arguments[0]);
         if (title !== null) {
           const parts = [...ancestry, title];
@@ -183,6 +190,8 @@ export function collectTestTitles(source, fileName = "x.test.ts") {
             .replace(/\s+/g, " ");
           const entry = { parts, leaf: fn !== "describe" && fn !== "suite", body };
           if (mode) entry.mode = mode;
+          if (conditional) entry.conditional = true;
+          if (parameterized) entry.parameterized = true;
           nodes.push(entry);
           const next = fn === "describe" || fn === "suite" ? parts : ancestry;
           ts.forEachChild(node, (c) => visit(c, next));
@@ -340,6 +349,7 @@ export function checkSpec(specPath, { root, titlesFor, testFiles }) {
         reason: `path in the Code/Tests header does not exist: ${h.path}`,
       });
   }
+  problems.push(...checkBoundaries(markdown, { root, headers: headerPaths, proofRefs: refs, titlesFor }));
   return problems;
 }
 
@@ -484,6 +494,14 @@ function makeTitleLoader(root) {
 function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const args = process.argv.slice(2);
+  if (args.includes("--boundary-schema")) {
+    console.log(JSON.stringify(z.toJSONSchema(decisionBoundarySchema), null, 2));
+    return;
+  }
+  if (args.includes("--candidates")) {
+    console.log(JSON.stringify(candidateCensus(root), null, 2));
+    return;
+  }
   const updateBaseline = args.includes("--update-baseline");
   const noBaseline = args.includes("--no-baseline"); // list every stale reference, baseline or not
   const fix = args.includes("--fix"); // make unambiguous truncated titles explicit, then check
@@ -500,9 +518,38 @@ function main() {
 
   let refCount = 0;
   const problems = [];
+  const boundaryOwners = new Map();
   for (const spec of specs) {
-    refCount += parseProofRefs(readFileSync(join(root, spec), "utf8")).length;
+    const markdown = readFileSync(join(root, spec), "utf8");
+    refCount += parseProofRefs(markdown).length;
     problems.push(...checkSpec(spec, { root, titlesFor, testFiles }).map((p) => ({ spec, ...p })));
+    for (const block of boundaryBlocks(markdown)) {
+      let value;
+      try {
+        value = JSON.parse(block.raw);
+      } catch {
+        continue;
+      }
+      if (!decisionBoundarySchema.safeParse(value).success) continue;
+      if (boundaryOwners.has(value.id) && boundaryOwners.get(value.id) !== spec)
+        problems.push({
+          spec,
+          kind: "boundary",
+          line: block.line,
+          raw: value.id,
+          reason: `duplicate decision-boundary id ${value.id}; already owned by ${boundaryOwners.get(value.id)}`,
+        });
+      boundaryOwners.set(value.id, spec);
+    }
+  }
+
+  // A declaration is new enforcement, not a stale proof reference. Neither the
+  // existing baseline nor --update-baseline may suppress a boundary failure.
+  const boundaryProblems = problems.filter((p) => p.kind === "boundary");
+  if (boundaryProblems.length > 0) {
+    for (const p of boundaryProblems) console.error(`${p.spec}:${p.line} — ${p.reason}`);
+    console.error(`specs:check FAILED — ${boundaryProblems.length} invalid decision-boundary declaration(s)`);
+    process.exit(1);
   }
 
   if (updateBaseline) {
