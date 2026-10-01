@@ -86,10 +86,11 @@ export async function ensureFirstTest(input: FirstTestInput): Promise<FirstTestR
   const { requirement, checkout, owner, previous, executor } = input;
   readyEnvironmentCommand(checkout.workspace, requirement);
   const action = requirement.firstAction;
-  if (!action) throw new FirstTestHeld("binding_mismatch");
+  const command = requirement.testCommand;
+  if (!action || typeof command !== "string") throw new FirstTestHeld("binding_mismatch");
   const requirementHash = hash(
     JSON.stringify([
-      requirement.testCommand,
+      command,
       requirement.dependencyDir,
       [...requirement.requiredTools].sort(),
       action.kind,
@@ -97,7 +98,7 @@ export async function ensureFirstTest(input: FirstTestInput): Promise<FirstTestR
       action.timeoutMs,
     ]),
   );
-  const commandHash = hash(requirement.testCommand);
+  const commandHash = hash(command);
   let receipt: FirstTestReceipt = {
     version: 1,
     operationId: randomUUID(),
@@ -225,7 +226,7 @@ export async function ensureFirstTest(input: FirstTestInput): Promise<FirstTestR
           // Recheck in the SAME command invocation: a backend may reattach between calls.
           `first_test_workspace=$(bash -c ${shellQuote(preflight(input))}) || exit 200`,
           `test "$first_test_workspace" = ${shellQuote(probe.stdout.trim())} || exit 200`,
-          `cd ${shellQuote(checkout.workspace)} && bash -c ${shellQuote(requirement.testCommand)}`,
+          `cd ${shellQuote(checkout.workspace)} && bash -c ${shellQuote(command)}`,
         ].join("\n"),
         { timeoutMs, signal },
       ),

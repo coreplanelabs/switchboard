@@ -14,6 +14,7 @@
 // record 0032's series deletes it with the native loop.
 
 import type { DepotCi } from "../core/depotCi.js";
+import type { CheckExecutionCapability } from "../core/checkExecutionTypes.js";
 import type { ChatMessage, ToolResultContent } from "../core/chatMessage.js";
 import type { DigestReport } from "../core/diffDigest.js";
 import type { WaitCapability } from "../core/dispatch/awaitChildren.js";
@@ -39,6 +40,8 @@ import type { WebCapability } from "./web.js";
 
 export interface ToolContext {
   executor: Executor;
+  /** Run-bound command recording; the model supplies intent, never receipt facts. */
+  checkExecution?: CheckExecutionCapability;
   /** The tool call's id (the provider's `tool_use` id; pi's `toolCallId`),
    *  the same id the call's `tool_call`/`tool_result` events carry: what a tool
    *  records about its own work (`attach_file`'s `artifact` event) names it,

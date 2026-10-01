@@ -244,6 +244,10 @@ export const FENCED_CONTENT_RULE =
 const NOTEPAD = `YOUR NOTES AND YOUR REACH BACK. This thread's conversation outlives your context window and this run: every turn — yours, the person's, every tool call and its output, from this run and the runs before it in this thread — is kept in a log you can search with the \`recall\` tool (words → the matching turns with their numbers; a turn number → that turn whole). When something you need is no longer in front of you, recall it instead of redoing the work or guessing.
 Keep notes with the \`notes\` tool: one short document, replaced whole each time, at most 8 KiB — decisions and their reasons, the names of things you found (files, tests, commits, the head your tests were green at), what is not yet proven. They are the one thing sure to survive a compaction and to reach the next run in this thread: they ride your system prompt at its start and come back to you right after a compaction. A person reads them too, on the run's page, so write them as a document and never as one paragraph: Markdown, a \`##\` heading per section — \`Done\`, \`In progress\`, \`Next\`, \`Facts\` (names, ids, heads, the reasons behind decisions), leaving out a section with nothing in it — one bullet per item, one line per bullet, no prose walls. Write them when you decide something worth keeping, not only at the end.`;
 
+// Select checks with repository and task context; keep their execution evidence
+// distinct from the later validation of the changed tree in every coding path.
+export const BASELINE_BEFORE_EDITS = `BASELINE BEFORE EDITS. Before intended source edits, inspect the task, repository instructions, scripts and CI. Choose the cheapest relevant bounded check of the existing behavior; documentation-only tasks get documentation checks. Apply this workflow in every repository without requiring a configured test command. Call \`run_check\` with \`purpose: "baseline"\`, the selected \`command\` and an explicit \`timeoutMs\` that fits the remaining budget. Read the actual result before implementing. Do not default to a whole suite, build or dependency install, and never install dependencies in a prepared workspace. A completed nonzero check is a failing baseline: distinguish assertion failures from unavailable tooling using the output. If there is no applicable check, or \`run_check\` or the required environment is unavailable, record the exact gap and reason in your notes and final validation. If recorded execution is unavailable before dispatch, you may run an otherwise permitted shell check and label it unrecorded. Never use this fallback after uncertain execution or a persistence failure. Never claim typed evidence for an unrecorded check, or that assertions ran from an exit code alone. For an unknown or interrupted command, use authoritative reconciliation when available; otherwise preserve and report the unresolved outcome, and never blindly replay it or bypass it through another tool. An existing startup smoke is a task baseline only when relevant. A baseline is historical context, not proof of the current tree or a publication or review gate. After editing, use \`run_check\` with \`purpose: "verification"\` for the scoped checks of the changed tree, preserving the fast gates, rebase and publication rules below.`;
+
 // Every coding prompt carries this verbatim (docs/reference/specs/agent-coding.md
 // item 13): the order of checks and the push. Three plan children died at their
 // budget in one evening with finished work unpushed because each ran the
@@ -310,12 +314,14 @@ SCOPE FIRST — a hard rule, at most 5 tool calls: identify the target repositor
 Workflow for shipping a PR:
 1. Clone the repo into the workspace if it is not already there: \`gh repo clone <owner/name>\` or \`git clone "$GIT_DOOR_REMOTE"\` for the bound repository. A private \`github.com\` clone URL cannot use the run bearer. Orient with a few BATCHED commands (tree + the relevant files in one call), not file-by-file exploration.
 2. Create a branch with a descriptive name.
-3. Implement the change. Match the surrounding code's style and conventions.
+3. Establish the task baseline (BASELINE BEFORE EDITS below), then implement the change. Match the surrounding code's style and conventions.
 4. Prove the change with the cheapest checks that can (CHECKS BY COST below): the linter and the tests nearest the files you touched, the documentation checks for a documentation change.
 5. Commit with a clear message before any full suite, build or full verification. Use the runner-owned \`publish_branch\` tool to publish the checked-out owned branch. Without the tool or trusted publication authority, keep the commit local and report the block. Do not use a shell push or try another ref or route after a refusal.
 6. CI runs the full suite, the typecheck and the full verification on that push — you never run them yourself; read CI's result if it lands within your budget and fix forward with further commits and pushes.
 7. Call the submit_pr_description tool with the typed description object (content contract below) — every time, bringing forward the context you gained while implementing. Switchboard renders the PR body from your object at the pushed head and opens (or updates) the pull request itself: do NOT open a PR yourself, with \`gh\` or any API call.
 8. Report back with a short summary of what you did, including anything you skipped or couldn't verify; Switchboard adds the PR link when it opens the PR.
+
+${BASELINE_BEFORE_EDITS}
 
 ${CHECKS_BY_COST}
 
@@ -360,7 +366,7 @@ Environment notes:
 
 Workflow for shipping a change:
 1. If a trusted publication binding names an owned ref and the ready checkout matches it, stay on that branch. If the task targets an existing pull request without that binding, do not create another branch; keep changes local and report the block. Otherwise, create one new branch from the ready checkout with a descriptive name. Do not infer authority from the current branch name; a non-default ready ref can be protected.
-2. Implement the change. Match the surrounding code's style and conventions.
+2. Establish the task baseline (BASELINE BEFORE EDITS below), then implement the change. Match the surrounding code's style and conventions.
 3. Prove the change with the cheapest checks that can (CHECKS BY COST below): the linter and the tests nearest the files you touched, the documentation checks for a documentation change (dependencies are already present).
 4. Commit with a clear message and push the branch you stayed on or created through origin — before any full suite, build or full verification.
    Use the runner-owned \`publish_branch\` tool with the checked-out owned branch. It binds the source commit, destination, endpoint, expected old head and one-use Git Door credential before publishing and verifies the remote result; a model shell cannot publish, even with a literal push command. Without the tool or trusted publication authority, keep the commit local and report the block. Never try another ref or route after a refusal.
@@ -368,6 +374,8 @@ Workflow for shipping a change:
 6. Call the \`diff_digest\` tool to get a distilled summary of your change — per-file churn, totals, and risky-file flags. It is a distilled summary, not the raw diff: use it to shape the description you submit next — which files the Tour must walk, what belongs in risks.
 7. Call the submit_pr_description tool with the typed description object (content contract below) — every time. Switchboard renders the PR body from your object at the pushed head and opens (or updates) the pull request itself: do NOT open a PR yourself, with any API call.
 8. Report back with a short summary of what you did, including anything you skipped or couldn't verify; Switchboard adds the PR link when it opens the PR.
+
+${BASELINE_BEFORE_EDITS}
 
 ${CHECKS_BY_COST}
 
@@ -408,13 +416,15 @@ THE REPOSITORY IS ALREADY CLONED at \`/workspace/checkout\` — seeded from the 
 
 Workflow for shipping a change:
 1. Create a branch with a descriptive name off the current branch.
-2. Implement the change. Match the surrounding code's style and conventions.
+2. Establish the task baseline (BASELINE BEFORE EDITS below), then implement the change. Match the surrounding code's style and conventions.
 3. Prove the change with the cheapest checks that can (CHECKS BY COST below): the linter and the tests nearest the files you touched, the documentation checks for a documentation change (dependencies are already present).
 4. Commit with a clear message before any full suite, build or full verification. Use the runner-owned \`publish_branch\` tool to publish the checked-out owned branch. Without the tool or trusted publication authority, keep the commit local and report the block. Do not use a shell push or try another ref or route after a refusal.
 5. CI runs the full suite, the typecheck and the full verification on that push — you never run them yourself; read CI's result if it lands within your budget and fix forward with further commits and pushes.
 6. Call the \`diff_digest\` tool to get a distilled summary of your change — per-file churn, totals, and risky-file flags. It is a distilled summary, not the raw diff: use it to shape the description you submit next — which files the Tour must walk, what belongs in risks.
 7. Call the submit_pr_description tool with the typed description object (content contract below) — every time. Switchboard renders the PR body from your object at the pushed head and opens (or updates) the pull request itself: do NOT open a PR yourself, with \`gh\` or any API call.
 8. Report back with a short summary of what you did, including anything you skipped or couldn't verify; Switchboard adds the PR link when it opens the PR.
+
+${BASELINE_BEFORE_EDITS}
 
 ${CHECKS_BY_COST}
 

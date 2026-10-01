@@ -24,10 +24,10 @@ export const SEED_DEPS_STAGING_DIR = "/workspace/.seed-deps";
  *  head is a new seed. */
 export const SEED_MARKER = "/workspace/.switchboard-seed";
 
-/** A trusted pilot admission supplies the repository's declared test command
- * and the tools it needs. This is a check of availability, not a test run. */
+/** Preparation requirements are independent of the coding agent's chosen
+ * checks. A legacy startup smoke command may additionally be configured. */
 export interface ReadyEnvironmentRequirement {
-  testCommand: string;
+  testCommand?: string;
   requiredTools: readonly string[];
   dependencyDir: string;
   /** Explicit operator opt-in to executing this bounded baseline before coding. */
@@ -37,6 +37,8 @@ export interface ReadyEnvironmentRequirement {
 export function validateFirstAction(requirement: ReadyEnvironmentRequirement): void {
   const action = requirement.firstAction;
   if (action === undefined) return;
+  if (typeof requirement.testCommand !== "string" || !requirement.testCommand.trim())
+    throw new Error("ready environment: firstAction requires an explicit testCommand");
   if (
     typeof action !== "object" ||
     action === null ||
@@ -88,8 +90,14 @@ export function readyEnvironmentCommand(
 ): string {
   validateFirstAction(requirement);
   const command = requirement.testCommand;
-  const program = /^([A-Za-z_][A-Za-z0-9_.+-]*)(?:\s|$)/.exec(command)?.[1];
-  if (!program || command.length > 512 || [...command].some((ch) => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127))
+  const program = typeof command === "string" ? /^([A-Za-z_][A-Za-z0-9_.+-]*)(?:\s|$)/.exec(command)?.[1] : undefined;
+  if (
+    command !== undefined &&
+    (typeof command !== "string" ||
+      !program ||
+      command.length > 512 ||
+      [...command].some((ch) => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127))
+  )
     throw new Error("ready environment: declared test command is missing or unsupported");
   if (
     !READY_DEPENDENCY_DIR.test(requirement.dependencyDir) ||
@@ -105,7 +113,14 @@ export function readyEnvironmentCommand(
     throw new Error("ready environment: required tool is invalid");
   if (seededFromSha !== undefined && !/^[0-9a-f]{40}$/.test(seededFromSha))
     throw new Error("ready environment: snapshot head is invalid");
-  const tools = [...new Set(["bash", ...(seededFromSha ? ["git"] : []), program, ...requirement.requiredTools])];
+  const tools = [
+    ...new Set([
+      "bash",
+      ...(seededFromSha ? ["git"] : []),
+      ...(program ? [program] : []),
+      ...requirement.requiredTools,
+    ]),
+  ];
   return [
     "set -eu",
     `cd ${shellQuote(workspace)}`,
@@ -119,7 +134,9 @@ export function readyEnvironmentCommand(
           `if ! git diff --quiet ${shellQuote(seededFromSha)} HEAD -- ${READY_LOCKFILES.map(shellQuote).join(" ")}; then printf LOCKFILE_MISMATCH; exit 0; fi`,
         ]
       : []),
-    `if ! bash -n -c ${shellQuote(command)} >/dev/null 2>&1; then printf INVALID_TEST_COMMAND; exit 2; fi`,
+    ...(command !== undefined
+      ? [`if ! bash -n -c ${shellQuote(command)} >/dev/null 2>&1; then printf INVALID_TEST_COMMAND; exit 2; fi`]
+      : []),
     "printf READY",
   ].join("\n");
 }

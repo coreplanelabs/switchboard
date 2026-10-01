@@ -870,6 +870,20 @@ describe("restrict — closed unless granted (authorization.md item 11)", () => 
 describe("pilot ready environment config", () => {
   const ready = `\nexecution:\n  type: cloudflare\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]\n`;
 
+  it("prepares dependencies and tools without choosing the coding agent's test command", () => {
+    const preparation = ready.replace("      testCommand: npm test\n", "");
+    expect(store(YAML_FIXTURE + preparation).config.execution?.readyPilotRepos?.["acme/api"]).toEqual({
+      dependencyDir: "node_modules",
+      requiredTools: ["node", "npm"],
+    });
+    expect(() =>
+      store(
+        YAML_FIXTURE +
+          `${preparation}      firstAction:\n        kind: baseline_test\n        policyVersion: smoke-v1\n        timeoutMs: 30000\n`,
+      ),
+    ).toThrow(/firstAction.*testCommand/);
+  });
+
   it("requires explicit bounded first-action opt-in with a policy version", () => {
     const declaration = `${ready}      firstAction:\n        kind: baseline_test\n        policyVersion: smoke-v1\n        timeoutMs: 30000\n`;
     expect(store(YAML_FIXTURE + declaration).config.execution?.readyPilotRepos?.["acme/api"]?.firstAction).toEqual({

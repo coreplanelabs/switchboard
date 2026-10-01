@@ -8497,7 +8497,136 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
   });
 });
 
-// Feature: execution.md — required baseline precedes the harness, including tools.
+// Feature: coding-checks.md — model selection precedes typed execution.
+describe("runLoop adaptive coding checks", () => {
+  it.each(["missing", "untracked"] as const)(
+    "refuses recording before execution when the ledger is %s",
+    async (ledger) => {
+      const observed = watched(piHarness);
+      const execResult = vi.fn(async () => ({
+        stdout: `/workspace/threads/t/work\n${"a".repeat(40)}\n${"b".repeat(40)}\n`,
+        stderr: "",
+        exitCode: 0,
+        truncated: false,
+      }));
+      observed.harness.open = async (_deps, request) => {
+        request.onEvent?.({ type: "lease", startedAt: NOW, endsAt: NOW + 600_000, loopEndsAt: NOW + 600_000, at: NOW });
+        const check = request.tools.find((tool) => tool.name === "run_check")!;
+        const answer = await check.run(
+          { command: "npm test", purpose: "baseline" },
+          { ...request.toolContext, callId: "baseline-1" },
+        );
+        expect(answer).toContain("command did not start");
+        expect(answer).not.toContain("persistence_failed");
+        expect(execResult).not.toHaveBeenCalled();
+        return {
+          answer: "unrecorded fallback is available",
+          followUp: async () => "",
+          remainingMs: () => 60_000,
+          end: async () => {},
+        };
+      };
+      const s = setup("unused", {
+        agent: "coding",
+        executor: { execResult },
+        repoCtx: { repo: "acme/api", ref: "work" },
+        binding: {
+          ref: "work",
+          sha: "a".repeat(40),
+          workspace: "/workspace/threads/t/work",
+          user: "worker1",
+          container: "vm1",
+          depsKey: "deps1",
+        },
+        harness: {
+          harnesses: roster(observed.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example",
+          loopbackUrl: "http://127.0.0.1:8080",
+        },
+      });
+      const ledgerRun = ledger === "untracked" ? recordingLedgerRun().ledgerRun : undefined;
+      expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun })).answer).toBe("unrecorded fallback is available");
+    },
+  );
+  it.each(["pi", "opencode"] as const)(
+    "binds typed checks for %s coding without a configured test command",
+    async (name) => {
+      const observed = watched(name === "pi" ? piHarness : openCodeHarness);
+      const states: Record<string, unknown>[] = [];
+      const execResult = vi.fn(async (command: string) => {
+        const result = { stdout: "", stderr: "", exitCode: 0, truncated: false };
+        if (command.startsWith("set -eu"))
+          return { ...result, stdout: `/workspace/threads/t/work\n${"a".repeat(40)}\n${"b".repeat(40)}\n` };
+        expect(states.at(-1)).toMatchObject({ checkExecutions: { receipts: [{ outcome: { kind: "pending" } }] } });
+        expect(command).toContain("cd -- '/workspace/threads/t/work'");
+        return { ...result, stdout: "one assertion failed", exitCode: 1 };
+      });
+      observed.harness.open = async (_deps, request) => {
+        expect(execResult).not.toHaveBeenCalled();
+        expect(request.tools.some((tool) => tool.name === "run_check")).toBe(true);
+        expect(request.toolContext.checkExecution?.run).toBeTypeOf("function");
+        request.onEvent?.({ type: "lease", startedAt: NOW, endsAt: NOW + 600_000, loopEndsAt: NOW + 600_000, at: NOW });
+        const check = request.tools.find((tool) => tool.name === "run_check")!;
+        // The relayed tool must apply the same command restrictions as bash.
+        for (const command of ["env", "cat .git/github-credentials", "gh pr merge 1", "git push origin HEAD:work"])
+          expect(
+            await check.run({ command, purpose: "baseline" }, { ...request.toolContext, callId: command }),
+          ).toContain("command_refused");
+        expect(execResult).not.toHaveBeenCalled();
+        const input = { command: "npm exec -- vitest run src/one.test.ts", purpose: "baseline" };
+        const first = await check.run(input, { ...request.toolContext, callId: "baseline-1" });
+        expect(first).toContain("completed with exit 1");
+        expect(states.at(-1)).toMatchObject({
+          checkExecutions: {
+            receipts: [
+              {
+                owner: { runId: "run-l", requester: "slack:UX", repo: "acme/api" },
+                outcome: { kind: "completed", exitCode: 1 },
+              },
+            ],
+          },
+        });
+        expect(await check.run(input, { ...request.toolContext, callId: "baseline-1" })).toBe(first);
+        expect(execResult).toHaveBeenCalledTimes(2);
+        return {
+          answer: "choose a scoped check",
+          followUp: async () => "",
+          remainingMs: () => 60_000,
+          end: async () => {},
+        };
+      };
+      const s = setup("unused", {
+        agent: "coding",
+        yaml: `${YAML}harness:\n  coding: ${name}\n`,
+        executor: { execResult },
+        repoCtx: { repo: "acme/api", ref: "work" },
+        binding: {
+          ref: "work",
+          sha: "a".repeat(40),
+          workspace: "/workspace/threads/t/work",
+          user: "worker1",
+          container: "vm1",
+          depsKey: "deps1",
+        },
+        harness: {
+          harnesses: name === "pi" ? roster(observed.harness) : roster(piHarness, observed.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example",
+          loopbackUrl: "http://127.0.0.1:8080",
+        },
+      });
+      const { ledgerRun } = recordingLedgerRun();
+      ledgerRun.tracked = () => true;
+      ledgerRun.setStateAndFlush = async (state) => {
+        states.push(structuredClone(state));
+        return true;
+      };
+      expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun })).answer).toBe("choose a scoped check");
+    },
+  );
+});
+
 describe("runLoop first coding test", () => {
   const ready = {
     testCommand: "npm exec -- vitest run src/one.test.ts",

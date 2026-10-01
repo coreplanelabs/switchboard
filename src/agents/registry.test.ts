@@ -533,6 +533,69 @@ describe("coding prompts: push then submit_pr_description (opening the PR is the
   });
 });
 
+// A task baseline is an agent-selected observation before implementation, not
+// the startup smoke or a replacement for validation of the eventual change.
+describe("coding prompts: adaptive task baseline before edits", () => {
+  const prompts = [AGENTS.coding.system, AGENTS.coding.residentSystem!, AGENTS.coding.seededSystem!];
+  const policy = (prompt: string) => prompt.match(/^BASELINE BEFORE EDITS\..+$/m)?.[0] ?? "";
+
+  it("all three coding variants share one default policy, while other presets do not acquire it", () => {
+    const policies = prompts.map(policy);
+    expect(policies.every(Boolean)).toBe(true);
+    expect(new Set(policies).size).toBe(1);
+    for (const prompt of prompts) {
+      expect(prompt.split(policies[0])).toHaveLength(2);
+      expect(prompt).not.toMatch(/readyPilotRepos|first-test-v1/);
+    }
+    for (const [name, agent] of Object.entries(AGENTS)) {
+      if (name === "coding") continue;
+      for (const prompt of [agent.system, agent.residentSystem, agent.seededSystem]) {
+        expect(prompt ?? "", name).not.toContain("BASELINE BEFORE EDITS.");
+      }
+    }
+  });
+
+  it("orders repository-informed scoped baseline execution before implementation in each workflow", () => {
+    for (const prompt of prompts) {
+      const baseline = prompt.indexOf("Establish the task baseline");
+      const implementation = prompt.indexOf("then implement the change");
+      expect(baseline).toBeGreaterThan(-1);
+      expect(implementation).toBeGreaterThan(baseline);
+      expect(policy(prompt)).toMatch(/task.*repository instructions.*scripts.*CI/);
+      expect(policy(prompt)).toMatch(/cheapest relevant.*bounded check/);
+      expect(policy(prompt)).toMatch(/run_check.*purpose: "baseline".*command.*timeoutMs/);
+      expect(policy(prompt)).toMatch(/Read the actual result/);
+      expect(policy(prompt)).toMatch(/documentation-only.*documentation checks/);
+      expect(policy(prompt)).toMatch(/Do not default to.*whole suite.*install dependencies in a prepared workspace/);
+    }
+  });
+
+  it("records failures honestly and permits unrecorded checks only before dispatch, never after uncertain execution", () => {
+    const rule = policy(prompts[0]);
+    expect(rule).toMatch(/nonzero.*failing baseline.*assertion failures.*unavailable tooling/);
+    expect(rule).toMatch(/no applicable check.*run_check.*unavailable.*exact gap and reason.*notes.*validation/);
+    expect(rule).toMatch(/unavailable before dispatch.*otherwise permitted shell check.*unrecorded/);
+    expect(rule).toMatch(/Never use this fallback after uncertain execution or a persistence failure/);
+    expect(rule).toMatch(/Never claim.*typed evidence.*unrecorded check/);
+    expect(rule).toMatch(/Never claim.*assertions ran.*exit code alone/);
+    expect(rule).toMatch(/unknown or interrupted.*authoritative reconciliation when available/);
+    expect(rule).toMatch(/otherwise preserve.*report.*unresolved.*never blindly replay.*another tool/);
+  });
+
+  it("keeps startup smoke and historical baselines separate from changed-tree verification and publication gates", () => {
+    const rule = policy(prompts[0]);
+    expect(rule).toMatch(/startup smoke.*task baseline only when relevant/);
+    expect(rule).toMatch(/historical context.*not.*current tree.*publication.*review/);
+    expect(rule).toMatch(/After editing.*run_check.*purpose: "verification".*changed tree/);
+    for (const prompt of prompts) {
+      expect(prompt).toContain(CHECKS_BY_COST);
+      expect(prompt).toContain(FAST_GATES_BEFORE_PUSH);
+      expect(prompt).toContain(REBASE_BEFORE_PUSH);
+      expect(prompt).toContain("Without the tool or trusted publication authority, keep the commit local");
+    }
+  });
+});
+
 // Feature: docs/reference/specs/agent-coding.md item 13 — checks by cost. Three
 // plan children died at their budget in one evening with finished work unpushed
 // because each ran the project's most expensive checks before its first push.

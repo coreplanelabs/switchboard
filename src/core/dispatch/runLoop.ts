@@ -12,6 +12,7 @@ import { audienceRefusalText, noteAudienceRefusal, type AudienceRefusalCode } fr
 // (harness-pi item 14) and is ended here after them. The stage's claim and
 // the tools' capabilities are run.ts.
 import { randomUUID } from "node:crypto";
+import { createCheckExecution } from "../checkExecution.js";
 import { ensureFirstTest, firstTestContext, FirstTestHeld, type FirstTestReceipt } from "../firstTest.js";
 import { GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
 import type { ResolvedRequest } from "../../config.js";
@@ -58,7 +59,12 @@ import {
   ModelStreamIncompleteError,
   ModelTransientFailureError,
 } from "../harness/pi/harness.js";
-import type { ExistingPrPublicationAuthority, ExistingPrPublicationFence } from "../harness/pi/toolRules.js";
+import {
+  judgeToolCall,
+  publicationAttributionRefusal,
+  type ExistingPrPublicationAuthority,
+  type ExistingPrPublicationFence,
+} from "../harness/pi/toolRules.js";
 import {
   HARD_STOP_MESSAGE,
   windDownAnswer,
@@ -1502,8 +1508,44 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     io,
     () => !privateAudienceLatch.revoked && progressSourceTrusted(),
   );
+  const checkExecution =
+    agent.name === "coding" && profile.identity === "write"
+      ? createCheckExecution({
+          executor: () => executor,
+          workspace: () => currentCheckout,
+          recordingAvailable: ledgerRun?.tracked() === true,
+          authorizeCommand: (command) => {
+            const rules = {
+              identity: profile.identity,
+              checkout: currentCheckout ?? "/workspace",
+              // Checks never acquire shell publication authority, including
+              // installations still migrating to the typed publication tool.
+              noShellPush: true,
+              ...(existingPrPublicationFence ? { publication: existingPrPublicationFence } : {}),
+            };
+            return (
+              publicationAttributionRefusal(rules) === undefined &&
+              judgeToolCall("bash", { command }, rules).verdict === "allowed"
+            );
+          },
+          owner: {
+            runId: run.id,
+            requester: msg.userId,
+            threadKey: msg.threadKey,
+            unit: coordinator?.idempotencyKey ?? "",
+            repo: repoCtx.repo ?? "",
+          },
+          previous: ctx.resume?.row.state.checkExecutions,
+          save: async (state) =>
+            ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush({ checkExecutions: state })),
+          remainingMs: () => run.control.remainingMs() ?? 0,
+          signal: run.control.hardSignal,
+          clock,
+        })
+      : undefined;
   const toolContext = {
     executor,
+    ...(checkExecution ? { checkExecution } : {}),
     reportProgress,
     ...(attachFile ? { attach: attachFile } : {}),
     ...(artifacts ? { artifacts } : {}),

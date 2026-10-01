@@ -73,6 +73,16 @@ describe("parseSeed", () => {
 describe("pilot ready environment check", () => {
   const requirement = { testCommand: "npm test", requiredTools: ["npm", "node"], dependencyDir: "node_modules" };
 
+  it("checks preparation without requiring or inventing a test command", () => {
+    const { testCommand: _unused, ...preparation } = requirement;
+    const command = readyEnvironmentCommand("/workspace/checkout", preparation);
+    expect(command).toContain("test -d 'node_modules'");
+    expect(command).toContain("command -v 'node'");
+    expect(command).not.toContain("bash -n");
+    expect(command).not.toContain("npm test");
+    expect(command).toContain("printf READY");
+  });
+
   it("checks the declared command and dependencies without running the test suite", () => {
     const command = readyEnvironmentCommand("/workspace/checkout", requirement);
     expect(command).toContain("cd '/workspace/checkout'");
