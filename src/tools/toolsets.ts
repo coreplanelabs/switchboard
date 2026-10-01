@@ -14,6 +14,7 @@
 // relayed.
 
 import { DEPOT_CI_TOOLS } from "./depotCi.js";
+import { runCheckTool } from "./check.js";
 import { attachFileTool } from "./attach.js";
 import { planeShowTool } from "./plane.js";
 import { threadWorkTool } from "./threadWork.js";
@@ -55,6 +56,7 @@ import { webFetchTool, webSearchTool } from "./web.js";
 // so the read-only review agent keeps it too.
 export const TOOLSETS: Record<string, RunnableTool[]> = {
   full: [
+    runCheckTool,
     ...DEPOT_CI_TOOLS,
     attachFileTool,
     updateStatusTool,

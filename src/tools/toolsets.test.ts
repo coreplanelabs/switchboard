@@ -38,6 +38,12 @@ describe("filterUnavailableTools — run-bound private tools", () => {
 });
 
 describe("the toolset table", () => {
+  it("offers recorded checks only to coding and serializes them as potentially mutating commands", () => {
+    expect(TOOLSETS.full.find((tool) => tool.name === "run_check")?.sideEffectFree).toBeUndefined();
+    expect(TOOLSETS.full.some((tool) => tool.name === "run_check")).toBe(true);
+    for (const [name, tools] of Object.entries(TOOLSETS))
+      if (name !== "full") expect(tools.some((tool) => tool.name === "run_check")).toBe(false);
+  });
   // The main agent gets bounded reads and requester-bound linked-work tools;
   // it has no shell, public status, generic spawn or merge tool.
   it("orchestrator: source reads and private linked-work controls", () => {

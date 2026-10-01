@@ -666,7 +666,7 @@ function recordedReadyRequirement(value: unknown): ReadyEnvironmentRequirement |
     const requirement = value as ReadyEnvironmentRequirement;
     readyEnvironmentCommand("/workspace", requirement);
     return {
-      testCommand: requirement.testCommand,
+      ...(requirement.testCommand !== undefined ? { testCommand: requirement.testCommand } : {}),
       dependencyDir: requirement.dependencyDir,
       requiredTools: [...requirement.requiredTools],
       ...(requirement.firstAction ? { firstAction: { ...requirement.firstAction } } : {}),

@@ -324,16 +324,17 @@ execution:
   #   tokenEnv: RESIDENT_OPERATOR_TOKEN  # operator bearer secret (default)
   #   adminTokenEnv: RESIDENT_ADMIN_TOKEN # admin bearer for `repo ...` commands (default)
   #   probeTimeoutMs: 8000               # /status probe deadline; a miss = not warm for that dispatch, never an outage
-  # Pilot coding admission: an operator declares the test command and tools
-  # for each repository. The bot pins the current branch commit with its
-  # GitHub App before the worker gets a model turn; the executor then checks
-  # the dependency view and command availability on that checkout.
+  # Prepared coding admission: declare dependency and tool requirements.
+  # The bot pins the current branch commit before model work and checks the
+  # dependency view. Coding agents choose task-relevant checks with run_check;
+  # no test command is required here.
   # readyPilotRepos:
   #   acme/api:
-  #     testCommand: npm exec -- vitest run src/smoke.test.ts
   #     dependencyDir: node_modules
   #     requiredTools: [node, npm]
-  #     # Explicitly run this bounded command before coding; absent means readiness only.
+  #     # Optional legacy startup smoke; separate from the agent's task baseline.
+  #     # Keep both fields only when pre-model smoke execution is intended.
+  #     testCommand: npm exec -- vitest run src/smoke.test.ts
   #     firstAction:
   #       kind: baseline_test
   #       policyVersion: smoke-v1
