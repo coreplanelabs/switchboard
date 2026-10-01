@@ -39,7 +39,7 @@ import { bridgeMcpTools, newRunBudget } from "../../mcp/bridge.js";
 import { NullMcpToolSource, type McpRunCaller } from "../../mcp/source.js";
 import { processSecrets, Secret } from "../../secrets.js";
 import { COORDINATOR_ADMIN_PREFIX, handleCoordinatorRequest, type AdminCoordinatorDeps } from "../adminCoordinator.js";
-import { receiveSlackMessage, SlackIO } from "../slack.js";
+import { receiveSlackMessage, resumeSlackIO, SlackIO } from "../slack.js";
 import { SlackConversationReader } from "../slack/references.js";
 import { createSlackContextCapability } from "../slack/context.js";
 import { guardOutbound } from "./outboundGuard.js";
@@ -411,9 +411,10 @@ workspaceDir: ${join(world.dir, "workspaces")}
         pending.push(work);
         return work;
       },
-      ioFor: () => {
-        throw new Error("An admitted private worker requested Slack IO");
-      },
+      ioFor: ({ threadKey, userId }) =>
+        threadKey === `slack:${world.channel}:${world.root}` && userId === `slack:${REQUESTER}`
+          ? resumeSlackIO(world.client, { channel: world.channel, threadTs: world.root, user: REQUESTER })
+          : undefined,
       github: { readFile: unexpected, listIssues: unexpected, commentIssue: unexpected },
       findOpenPrByHead: unexpected,
       findMergedPrByHead: unexpected,

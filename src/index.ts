@@ -161,7 +161,7 @@ import {
 import { classifyRoundChecks } from "./core/ship/checkFindings.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
 import { buildPrivateWorkerLog } from "./core/privateWorkerLogWorker.js";
-import { parsePrivateWorkerThreadKey, privateWorkerIO } from "./channels/privateWorker.js";
+import { parsePrivateWorkerThreadKey, rehostPrivateWorkerIO } from "./channels/privateWorker.js";
 import {
   branchHasMergeQueue,
   branchHeadSubject,
@@ -950,9 +950,11 @@ export async function runBot(): Promise<void> {
     if (privateIdentity !== undefined)
       return privateWorkerLog === undefined
         ? undefined
-        : privateWorkerIO(privateWorkerLog, privateIdentity, {
+        : rehostPrivateWorkerIO(privateWorkerLog, privateIdentity, {
             clock: systemClock,
             ...(request?.messageId !== undefined ? { currentInputId: request.messageId } : {}),
+            instances: coordinatorInstances,
+            ioFor: (origin) => threadIoFor(origin),
           });
     const [platform, channel, threadTs] = thread.threadKey.split(":");
     if (platform === "slack" && channel && threadTs) {

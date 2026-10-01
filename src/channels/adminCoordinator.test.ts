@@ -129,6 +129,52 @@ const INSTANCE: CoordinatorInstance = {
 const KEY = "ship_acme_api_1:u12/0/coding";
 /** The tag the spawn stamps: the instance, the step's key and the plan's base (INSTANCE.base). */
 const TAG: CoordinatorTag = { parentInstanceId: INSTANCE.id, idempotencyKey: KEY, base: "main" };
+const PRIVATE_AUDIENCE = {
+  kind: "slack-unshared-im" as const,
+  channelId: "slack:DMAIN",
+  userId: INSTANCE.userId,
+  threadKey: "slack:DMAIN:1.0",
+};
+
+function privateOriginIO(): ChannelIO {
+  return {
+    reply: async () => {
+      throw new Error("worker posted to Slack");
+    },
+    status: async () => ({ update: () => {}, done: async () => {} }),
+    history: async () => [],
+    directAudience: () => PRIVATE_AUDIENCE,
+    verifyDirectAudience: booleanAudienceVerifier(
+      async (audience) =>
+        audience.channelId === PRIVATE_AUDIENCE.channelId &&
+        audience.userId === PRIVATE_AUDIENCE.userId &&
+        audience.threadKey === PRIVATE_AUDIENCE.threadKey,
+    ),
+  };
+}
+
+async function claimPrivateUnit(
+  instances: InMemoryCoordinatorInstanceStore,
+  instance: CoordinatorInstance,
+  unit: CoordinatorUnit,
+): Promise<void> {
+  const sourceMessageId = "1";
+  expect(
+    await instances.recordRequesterTurn({
+      threadKey: instance.threadKey,
+      requesterId: instance.userId,
+      messageId: sourceMessageId,
+    }),
+  ).toMatchObject({ ok: true });
+  expect(
+    await instances.claimMainTask(
+      { mainThreadKey: unit.workBrief!.mainThreadKey, actId: unit.workBrief!.actId },
+      instance,
+      unit,
+      { requesterId: instance.userId, sourceMessageId, revision: 1, repo: instance.repo },
+    ),
+  ).toMatchObject({ ok: true, created: true });
+}
 
 const answer = (text: string): RunEvent => ({ type: "answer", text });
 
@@ -3470,7 +3516,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     const log = new InMemoryPrivateWorkerLog();
     const brief = {
       requesterId: INSTANCE.userId,
-      mainThreadKey: INSTANCE.threadKey,
+      mainThreadKey: PRIVATE_AUDIENCE.threadKey,
       actId: "act-1",
       repo: INSTANCE.repo,
       base: "main",
@@ -3486,6 +3532,8 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     };
     const instance: CoordinatorInstance = {
       ...INSTANCE,
+      channelId: PRIVATE_AUDIENCE.channelId,
+      threadKey: PRIVATE_AUDIENCE.threadKey,
       plan: { id: "private-task" },
       branch: "plan/private-task/u12",
       merge: "person",
@@ -3493,27 +3541,22 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     const h = harness({
       privateWorkerLog: log,
       files: { "AGENTS.md": "# Rules" },
-      ioFor: () => {
-        throw new Error("worker tried to use Slack");
-      },
+      ioFor: () => privateOriginIO(),
       script: async (_msg, io) => {
         io.runStarted?.({ id: "run-private" });
         await io.reply("The failing path is fixed");
         return { status: "completed" };
       },
     });
-    await h.instances.put(instance);
-    await h.instances.putUnits([
-      {
-        instanceId: instance.id,
-        unit: "U12",
-        slug: "u12",
-        branch: instance.branch,
-        dependsOn: [],
-        rounds: [],
-        workBrief: brief,
-      },
-    ]);
+    await claimPrivateUnit(h.instances, instance, {
+      instanceId: instance.id,
+      unit: "U12",
+      slug: "u12",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      workBrief: brief,
+    });
     const started = await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" });
     expect(started).toMatchObject({ status: 200, body: { threadKey: `worker:${instance.id}:U12` } });
     expect(
@@ -3542,7 +3585,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
     expect(spawned).toMatchObject({ status: 200, body: { threadKey: `worker:${instance.id}:U12` } });
     expect(h.dispatched[0]?.msg.threadKey).toBe(`worker:${instance.id}:U12`);
-    expect(h.threadsAsked).toEqual([]);
+    expect(h.threadsAsked).toEqual([{ threadKey: instance.threadKey, userId: instance.userId }]);
     expect((await log.list(`worker:${instance.id}:U12`)).map((event) => event.kind)).toEqual(["input", "reply"]);
     const row = (await h.instances.listUnits(instance.id))[0]!;
     await h.instances.putUnits([{ ...row, threadKey: "slack:C1:2.0" }]);
@@ -3550,7 +3593,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       status: 409,
       body: { error: "private_worker_thread_conflict" },
     });
-    expect(h.threadsAsked).toEqual([]);
+    expect(h.threadsAsked).toEqual([{ threadKey: instance.threadKey, userId: instance.userId }]);
   });
 
   it("starts from the bounded work brief instead of a long main-run request", async () => {
@@ -3566,6 +3609,8 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     const longTask = `Fix signup ${"x".repeat(40_000)}`;
     const instance: CoordinatorInstance = {
       ...INSTANCE,
+      channelId: PRIVATE_AUDIENCE.channelId,
+      threadKey: PRIVATE_AUDIENCE.threadKey,
       plan: { id: "private-task" },
       branch: "plan/private-task/u12",
       merge: "person",
@@ -3574,15 +3619,12 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     const h = harness({
       privateWorkerLog: log,
       files: { "AGENTS.md": "# Rules" },
-      ioFor: () => {
-        throw new Error("worker tried to use Slack");
-      },
+      ioFor: () => privateOriginIO(),
       script: async (_msg, io) => {
         io.runStarted?.({ id: "run-private-long" });
         return { status: "completed" };
       },
     });
-    await h.instances.put(instance);
     await h.store.put(
       record(instance.runId!, {
         events: [{ type: "input", messageId: "long-task", text: longTask, seq: 1 }],
@@ -3590,26 +3632,24 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         storedEventCount: 1,
       }),
     );
-    await h.instances.putUnits([
-      {
-        instanceId: instance.id,
-        unit: "U12",
-        slug: "u12",
-        branch: instance.branch,
-        dependsOn: [],
-        rounds: [],
-        workBrief: {
-          requesterId: instance.userId,
-          mainThreadKey: instance.threadKey,
-          actId: "act-1",
-          repo: instance.repo,
-          base: "main",
-          question: "Why?",
-          findings: [],
-          requestedChange: "Fix it",
-        },
+    await claimPrivateUnit(h.instances, instance, {
+      instanceId: instance.id,
+      unit: "U12",
+      slug: "u12",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: instance.threadKey,
+        actId: "act-1",
+        repo: instance.repo,
+        base: "main",
+        question: "Why?",
+        findings: [],
+        requestedChange: "Fix it",
       },
-    ]);
+    });
     expect(await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" })).toMatchObject({ status: 200 });
     const spawned = await call(h, "spawn", {
       parentInstanceId: instance.id,
@@ -3625,6 +3665,92 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(input?.kind).toBe("input");
     expect(isPrivateWorkerEventInput(input)).toBe(true);
     expect(input?.kind === "input" ? input.text : "").toBe(h.dispatched[0]?.msg.text);
+  });
+
+  it("rechecks the original requester DM before dispatching a private child", async () => {
+    const log = new InMemoryPrivateWorkerLog();
+    const requester = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMAIN",
+      userId: "slack:UALICE",
+      threadKey: "slack:DMAIN:1.0",
+    };
+    const instance: CoordinatorInstance = {
+      ...INSTANCE,
+      channelId: requester.channelId,
+      userId: requester.userId,
+      threadKey: requester.threadKey,
+      plan: { id: "private-task" },
+      branch: "plan/private-task/u12",
+      merge: "person",
+    };
+    let live = true;
+    let worker: { msg: IncomingMessage; io: ChannelIO } | undefined;
+    const h = harness({
+      privateWorkerLog: log,
+      files: { "AGENTS.md": "# Rules" },
+      ioFor: () => ({
+        reply: async () => {
+          throw new Error("worker posted to Slack");
+        },
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => [],
+        directAudience: () => requester,
+        verifyDirectAudience: booleanAudienceVerifier(
+          async (audience) => live && audience.threadKey === requester.threadKey,
+        ),
+      }),
+      script: async (msg, io) => {
+        worker = { msg, io };
+        io.runStarted?.({ id: "run-private" });
+        return { status: "completed" };
+      },
+    });
+    await claimPrivateUnit(h.instances, instance, {
+      instanceId: instance.id,
+      unit: "U12",
+      slug: "u12",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: instance.threadKey,
+        actId: "m_original",
+        repo: instance.repo,
+        base: "main",
+        question: "What failed?",
+        findings: [],
+        requestedChange: "Fix it",
+      },
+    });
+    expect(await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" })).toMatchObject({ status: 200 });
+    live = false;
+    expect(
+      await call(h, "spawn", {
+        parentInstanceId: instance.id,
+        step: "U12/0/coding",
+        preset: "coding",
+        brief: { kind: "contract", unit: "U12", rebase: { branch: instance.branch, onto: "main" } },
+      }),
+    ).toMatchObject({ status: 409, body: { error: "private_worker_audience_unverified" } });
+    expect(await log.list(`worker:${instance.id}:U12`)).toEqual([]);
+    expect(h.dispatched).toEqual([]);
+    live = true;
+    expect(
+      await call(h, "spawn", {
+        parentInstanceId: instance.id,
+        step: "U12/0/coding",
+        preset: "coding",
+        brief: { kind: "contract", unit: "U12", rebase: { branch: instance.branch, onto: "main" } },
+      }),
+    ).toMatchObject({ status: 200 });
+    expect(worker?.msg.threadKey).toBe(`worker:${instance.id}:U12`);
+    expect(worker?.msg.directAudience).toBeUndefined();
+    expect(await worker?.io.verifyPrivateWorkerAudience?.(worker.msg)).toEqual({ ok: true });
+    live = false;
+    expect(await worker?.io.verifyPrivateWorkerAudience?.(worker.msg)).toMatchObject({ ok: false });
+    expect(h.replies).toEqual([]);
   });
 
   it("a main-agent worker refuses admission when its durable log is missing", async () => {

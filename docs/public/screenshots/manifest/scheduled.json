@@ -75,7 +75,7 @@
     "src/channels/liveView/sse.ts": "16367fd0f2a36e6e6a2f969b9f1644dc2dcfd7902801c311d16b9bc8c83938b1",
     "src/channels/localIso.ts": "687e1df62300d25412bcd540853b1cd66301bacb326b0ab169f63c3cf267ed19",
     "src/channels/pageFavicon.ts": "d89605850fbd135e1d729807be7375b6e66dbd6becae9d329001a40b040adeb0",
-    "src/channels/privateWorker.ts": "ba4afb5e8adb2de9e334a10d456682aead40e921cc2bf79200b2c243797bd933",
+    "src/channels/privateWorker.ts": "729e5d086fb79c3b7f3b1ebc149105c105d942d9f3beeda094f7a66cf199b99c",
     "src/channels/residentsModel.ts": "df0078bbac817894a114b70304d3360b5fb79373cd1c6ba21a287f85e1abc27d",
     "src/channels/scheduledPanel.ts": "c5cf039be768d1db2bae36c8b8ba409371aaac4b27e3a1aa634374c55ce112ba",
     "src/channels/slackCatchUp.ts": "8727c1c39e3a14dd32b974d50063908477c09a03bf6435e694358c78b0c550f3",

@@ -43,6 +43,8 @@ import { ExecInfraError, ExecSandboxRestartedError } from "../execution/executor
 import { classifyError } from "./trace/classify.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusUpdate } from "./types.js";
+import { privateWorkerIO } from "../channels/privateWorker.js";
+import { InMemoryPrivateWorkerLog } from "./privateWorkerLog.js";
 import { activeRunCount, dispatch, dispatchClick, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
 import { CONFIRMATION_TTL_MS, MINUTE_MS, QUESTION_TTL_MS } from "./budgets.js";
 import type { AuditEntry } from "./commandRegistry.js";
@@ -442,6 +444,103 @@ beforeEach(() => {
 });
 
 describe("dispatch", () => {
+  it("admits a bound internal worker only after fresh requester DM verification", async () => {
+    const provider = capturingProvider("The private work is ready.");
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    wireChildLedger(deps);
+    const log = new InMemoryPrivateWorkerLog();
+    const requester = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DALICE",
+      userId: "slack:UADMIN",
+      threadKey: "slack:DALICE:1.0",
+    };
+    const identity = { instanceId: "ship_private_1", unit: "U12" };
+    const spawnKey = `${identity.instanceId}:${identity.unit}/0/coding`;
+    const io = privateWorkerIO(log, identity, {
+      clock: () => Date.now(),
+      currentInputId: spawnKey,
+      audience: {
+        actId: "m_original",
+        requester,
+        spawnKey,
+        verify: async () => ({ ok: true }),
+      },
+    });
+    const request = {
+      channelId: requester.channelId,
+      userId: requester.userId,
+      threadKey: `worker:${identity.instanceId}:${identity.unit}`,
+      messageId: spawnKey,
+      text: "agent:coding Fix the linked issue in acme/api",
+    };
+    expect(await io.verifyPrivateWorkerAudience?.(request)).toEqual({ ok: true });
+    const outcome = await dispatch(deps, request, io, {
+      coordinator: {
+        parentInstanceId: identity.instanceId,
+        idempotencyKey: spawnKey,
+        base: "main",
+        branch: unitBranch("private-task", "u1"),
+      },
+    });
+    expect(outcome.status, JSON.stringify(outcome)).toBe("completed");
+    expect(provider.requests).toHaveLength(1);
+    expect(
+      (await log.list(`worker:${identity.instanceId}:${identity.unit}`)).some((event) => event.kind === "reply"),
+    ).toBe(true);
+  });
+
+  it("refuses a changed DM or foreign coordinator before a private worker model starts", async () => {
+    for (const failure of ["shared-dm", "foreign-coordinator", "public-channel"] as const) {
+      const provider = capturingProvider("should not run");
+      const deps = makeDeps(YAML_FIXTURE, provider);
+      wireChildLedger(deps);
+      const log = new InMemoryPrivateWorkerLog();
+      const identity = { instanceId: "ship_private_1", unit: "U12" };
+      const spawnKey = `${identity.instanceId}:${identity.unit}/0/coding`;
+      const requester = {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:DALICE",
+        userId: "slack:UADMIN",
+        threadKey: "slack:DALICE:1.0",
+      };
+      const io = privateWorkerIO(log, identity, {
+        clock: () => Date.now(),
+        currentInputId: spawnKey,
+        audience: {
+          actId: "m_original",
+          requester,
+          spawnKey,
+          verify: async () => (failure === "shared-dm" ? { ok: false, code: "direct-audience-denied" } : { ok: true }),
+        },
+      });
+      const outcome = await dispatch(
+        deps,
+        {
+          channelId: failure === "public-channel" ? "slack:CPUBLIC" : requester.channelId,
+          userId: requester.userId,
+          threadKey: `worker:${identity.instanceId}:${identity.unit}`,
+          messageId: spawnKey,
+          text: "agent:coding private findings",
+        },
+        io,
+        {
+          coordinator: {
+            parentInstanceId: failure === "foreign-coordinator" ? "plan_other" : identity.instanceId,
+            idempotencyKey: spawnKey,
+            base: "main",
+            branch: unitBranch("private-task", "u1"),
+          },
+        },
+      );
+      expect(outcome.refusal).toBe("slack_direct_audience_unverified");
+      expect(provider.requests).toEqual([]);
+      expect(
+        (await log.list(`worker:${identity.instanceId}:${identity.unit}`)).every((event) => event.kind !== "input"),
+      ).toBe(true);
+    }
+  });
+
   // orchestration-plane item 12 pilot: the channel opts in once. Subsequent
   // plain sentences stay in one main agent; commands still use stage A.
   const mainDmYaml =
@@ -12333,6 +12432,75 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     };
     return { io, replies };
   }
+
+  it("restarts an attaching private child from its durable coordinator row", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const provider = capturingProvider("private work resumed");
+    const { deps, writer } = wired(provider, { ledger });
+    const identity = { instanceId: "ship_private_1", unit: "U12" };
+    const threadKey = `worker:${identity.instanceId}:${identity.unit}`;
+    const spawnKey = `${identity.instanceId}:${identity.unit}/0/coding`;
+    const request = {
+      channelId: "slack:DALICE",
+      userId: "slack:UADMIN",
+      threadKey,
+      messageId: spawnKey,
+      text: "agent:coding Fix the linked issue in acme/api",
+    };
+    await ledger.claim({
+      runId: "run-old",
+      threadKey,
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      phase: "attaching",
+      meta: {
+        channelId: request.channelId,
+        userId: request.userId,
+        threadKey,
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+        ref: unitBranch("private-task", "u1"),
+        parentInstanceId: identity.instanceId,
+        idempotencyKey: spawnKey,
+        request: durableInboxMessage(request, request.text, 5_000),
+      },
+      system: "",
+      tools: [],
+    });
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    expect(reclaimed.reclaimedFrom).toBe("attaching");
+    const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
+    const log = new InMemoryPrivateWorkerLog();
+    const io = privateWorkerIO(log, identity, {
+      clock: () => 10_000,
+      currentInputId: spawnKey,
+      audience: {
+        actId: "m_original",
+        requester: {
+          kind: "slack-unshared-im",
+          channelId: request.channelId,
+          userId: request.userId,
+          threadKey: "slack:DALICE:1.0",
+        },
+        spawnKey,
+        verify: async () => ({ ok: true }),
+      },
+    });
+    const outcome = await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, inbox: [] } });
+    await writer.settled();
+    expect(outcome.status, JSON.stringify(outcome)).toBe("completed");
+    expect(provider.requests).toHaveLength(1);
+    expect(ledger.finished.get("run-old")).toMatchObject({
+      id: "run-old",
+      parentInstanceId: identity.instanceId,
+      idempotencyKey: spawnKey,
+    });
+    expect(ledger.live.has("run-old")).toBe(false);
+    expect((await log.list(threadKey)).some((event) => event.kind === "reply")).toBe(true);
+  });
 
   it("carries a fresh accepted target from dispatch through reservation and claim", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);

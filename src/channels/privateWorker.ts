@@ -5,11 +5,126 @@ import {
   type PrivateWorkerIdentity,
   type PrivateWorkerLog,
 } from "../core/privateWorkerLog.js";
-import type { ChannelIO, HistoryItem, StatusHandle, StatusUpdate } from "../core/types.js";
+import type { AudienceCheck } from "../core/audienceDecision.js";
+import { mainTaskClaimMatches, type CoordinatorInstance, type CoordinatorUnit } from "../core/coordinator/contract.js";
+import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import { directAudienceStampOf } from "../core/runLedger/inboxMessage.js";
+import type {
+  ChannelIO,
+  HistoryItem,
+  IncomingMessage,
+  SlackDirectAudience,
+  StatusHandle,
+  StatusUpdate,
+} from "../core/types.js";
 
 export { privateWorkerThreadKey, parsePrivateWorkerThreadKey } from "../core/privateWorkerLog.js";
 export type { PrivateWorkerIdentity } from "../core/privateWorkerLog.js";
 const SHORTENED_COPY = "\n\n[Private history copy shortened; original text may be longer.]";
+
+/** The stored work decision, its internal spawn and the original DM travel
+ * together. The verifier rechecks Slack each time; this is not a DM stamp for
+ * the worker's internal thread. */
+export interface PrivateWorkerAudienceBinding {
+  actId: string;
+  requester: SlackDirectAudience;
+  spawnKey: string;
+  verify(audience: SlackDirectAudience): Promise<AudienceCheck>;
+}
+
+export type PrivateWorkerAudienceSource =
+  PrivateWorkerAudienceBinding | (() => Promise<PrivateWorkerAudienceBinding | undefined>);
+
+/** Only the original stored main decision can supply a worker's requester. */
+export function privateWorkerAudienceFor(
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  spawnKey: string,
+  ioFor: (thread: { threadKey: string; userId: string }) => ChannelIO | undefined,
+  instances: Pick<CoordinatorInstanceStore, "getMainTask">,
+): PrivateWorkerAudienceBinding | undefined {
+  const brief = row.workBrief;
+  if (
+    !brief ||
+    !spawnKey ||
+    !mainTaskClaimMatches({ mainThreadKey: brief.mainThreadKey, actId: brief.actId }, instance, row)
+  )
+    return undefined;
+  const requester = directAudienceStampOf({
+    channelId: instance.channelId,
+    userId: instance.userId,
+    threadKey: instance.threadKey,
+    ...(instance.postedBy !== undefined ? { postedBy: instance.postedBy } : {}),
+    ...(instance.authenticatedAs !== undefined ? { authenticatedAs: instance.authenticatedAs } : {}),
+    directAudience: {
+      kind: "slack-unshared-im",
+      channelId: instance.channelId,
+      userId: instance.userId,
+      threadKey: instance.threadKey,
+    },
+  });
+  if (!requester) return undefined;
+  let originIO: ChannelIO | undefined;
+  try {
+    originIO = ioFor({ threadKey: brief.mainThreadKey, userId: brief.requesterId });
+  } catch {
+    return undefined;
+  }
+  if (!originIO) return undefined;
+  return {
+    actId: brief.actId,
+    requester,
+    spawnKey,
+    verify: async (audience) => {
+      const link = await instances.getMainTask({ mainThreadKey: brief.mainThreadKey, actId: brief.actId });
+      if (
+        link?.instanceId !== instance.id ||
+        link.unit !== row.unit ||
+        link.authority?.requesterId !== instance.userId ||
+        link.authority.repo.toLowerCase() !== instance.repo.toLowerCase()
+      )
+        return { ok: false, code: "direct-address-unproved" };
+      const address = originIO.directAudience?.();
+      if (!address) return { ok: false, code: "direct-address-unproved" };
+      if (
+        address.channelId !== audience.channelId ||
+        address.userId !== audience.userId ||
+        address.threadKey !== audience.threadKey
+      )
+        return { ok: false, code: "direct-address-mismatch" };
+      if (!originIO.verifyDirectAudience) return { ok: false, code: "direct-address-unproved" };
+      return originIO.verifyDirectAudience(audience);
+    },
+  };
+}
+
+/** A resumed child re-reads its original unit before every private access. */
+export function rehostPrivateWorkerIO(
+  log: PrivateWorkerLog,
+  identity: PrivateWorkerIdentity,
+  opts: {
+    clock: () => number;
+    currentInputId?: string;
+    instances: Pick<CoordinatorInstanceStore, "get" | "listUnits" | "getMainTask">;
+    ioFor: (thread: { threadKey: string; userId: string }) => ChannelIO | undefined;
+  },
+): ChannelIO {
+  return privateWorkerIO(log, identity, {
+    clock: opts.clock,
+    ...(opts.currentInputId !== undefined ? { currentInputId: opts.currentInputId } : {}),
+    audience: async () => {
+      try {
+        const instance = await opts.instances.get(identity.instanceId);
+        if (!instance) return undefined;
+        const rows = (await opts.instances.listUnits(identity.instanceId)).filter((row) => row.unit === identity.unit);
+        if (rows.length !== 1) return undefined;
+        return privateWorkerAudienceFor(instance, rows[0]!, opts.currentInputId ?? "", opts.ioFor, opts.instances);
+      } catch {
+        return undefined;
+      }
+    },
+  });
+}
 
 function boundedHistoryCopy<T extends { text: string }>(event: T, limit: number): T {
   // The state Worker adds a monotonic `seq` before storing the row. Leave
@@ -60,20 +175,71 @@ export async function appendPrivateWorkerReply(
 export function privateWorkerIO(
   log: PrivateWorkerLog,
   identity: PrivateWorkerIdentity,
-  opts: { clock: () => number; currentInputId?: string; runId?: string },
+  opts: { clock: () => number; currentInputId?: string; runId?: string; audience?: PrivateWorkerAudienceSource },
 ): ChannelIO {
   const threadKey = privateWorkerThreadKey(identity);
+  const resolveAudience = async () => (typeof opts.audience === "function" ? opts.audience() : opts.audience);
+  const verifyBinding = async (
+    request: IncomingMessage,
+    audience: PrivateWorkerAudienceBinding | undefined,
+  ): Promise<AudienceCheck> => {
+    if (
+      !audience ||
+      !audience.actId ||
+      !audience.spawnKey ||
+      audience.spawnKey !== opts.currentInputId ||
+      directAudienceStampOf({ ...audience.requester, directAudience: audience.requester }) === undefined
+    )
+      return { ok: false, code: "direct-address-unproved" };
+    if (
+      request.channelId !== audience.requester.channelId ||
+      request.userId !== audience.requester.userId ||
+      request.threadKey !== threadKey ||
+      request.messageId !== audience.spawnKey ||
+      request.directAudience !== undefined ||
+      request.relayedBy !== undefined ||
+      request.postedBy !== undefined ||
+      request.authenticatedAs !== undefined
+    )
+      return { ok: false, code: "direct-address-mismatch" };
+    try {
+      return await audience.verify(audience.requester);
+    } catch {
+      return { ok: false, code: "direct-audience-unavailable" };
+    }
+  };
+  const verifyPrivateWorkerAudience = async (request: IncomingMessage): Promise<AudienceCheck> =>
+    verifyBinding(request, await resolveAudience());
+  const currentRequest = (audience: PrivateWorkerAudienceBinding): IncomingMessage => ({
+    channelId: audience.requester.channelId,
+    userId: audience.requester.userId,
+    threadKey,
+    messageId: audience.spawnKey,
+    text: "",
+  });
+  const checkCurrentAudience = async () => {
+    if (!opts.audience) return;
+    const audience = await resolveAudience();
+    if (!audience || !(await verifyBinding(currentRequest(audience), audience)).ok)
+      throw new Error("private worker audience unavailable");
+  };
   let runId = opts.runId;
-  const history = async (): Promise<HistoryItem[]> =>
-    (await log.list(threadKey)).flatMap((event): HistoryItem[] => {
+  const history = async (): Promise<HistoryItem[]> => {
+    await checkCurrentAudience();
+    const events = await log.list(threadKey);
+    await checkCurrentAudience();
+    return events.flatMap((event): HistoryItem[] => {
       if (event.kind === "input" && event.id !== opts.currentInputId)
         return [{ role: "user", text: event.text, at: event.at, user: event.sender }];
       if (event.kind === "reply") return [{ role: "assistant", text: event.text, at: event.at }];
       return [];
     });
+  };
   return {
     history,
+    ...(opts.audience ? { verifyPrivateWorkerAudience } : {}),
     reply: async (text) => {
+      await checkCurrentAudience();
       await log.append(
         threadKey,
         boundedHistoryCopy(
@@ -83,13 +249,16 @@ export function privateWorkerIO(
       );
     },
     status: async (initial): Promise<StatusHandle> => {
+      await checkCurrentAudience();
       const opened = await log.append(threadKey, { kind: "status", phase: "start", frame: initial, at: opts.clock() });
       const statusSeq = opened.seq;
       let pending = Promise.resolve();
       let failure: unknown;
       let ending: Promise<void> | undefined;
-      const appendFrame = (phase: "update" | "done", frame: StatusUpdate): Promise<void> =>
-        log.append(threadKey, { kind: "status", phase, statusSeq, frame, at: opts.clock() }).then(() => {});
+      const appendFrame = async (phase: "update" | "done", frame: StatusUpdate): Promise<void> => {
+        await checkCurrentAudience();
+        await log.append(threadKey, { kind: "status", phase, statusSeq, frame, at: opts.clock() });
+      };
       return {
         update(frame) {
           if (ending !== undefined) return;
