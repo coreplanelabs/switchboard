@@ -93,6 +93,7 @@ import {
   type CoordinatorUnit,
   type UnitWakeAnswer,
 } from "./contract.js";
+import { shipOutcomeOf } from "./shipOutcome.js";
 
 const MIN = 60_000;
 
@@ -1236,6 +1237,7 @@ async function runUnit(
             continue pipeline;
           }
           const ending = state.ending ?? note.ending;
+          const outcome = shipOutcomeOf(ending);
           // The last coding child's run is named so the bot can put its handoff
           // — the deviations it recorded — on the unit's board issue beside the
           // ending (agent-ship item 14).
@@ -1251,6 +1253,7 @@ async function runUnit(
                   : ending.kind,
               ...(ending.kind === "held" && ending.cause !== undefined ? { holdCause: ending.cause } : {}),
               report: renderUnitReport(state, endFacts),
+              ...(outcome !== undefined ? { outcome } : {}),
               threadReport: renderUnitReport(state, endFacts, state.input.verbosity ?? DEFAULT_VERBOSITY),
               // An idle ending carries its continuation facts (record 0051): the
               // bot writes them on the row's `idle` in place of an ending, with

@@ -1529,6 +1529,12 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(end.ending.kind).toBe("merged");
     expect(end.ending.report).toContain(`✅ Already merged: ${PR_URL} (merge commit \`${MERGED.slice(0, 7)}\``);
     expect(end.ending.report).toContain("the pipeline merged nothing");
+    expect(end.ending).toHaveProperty("outcome", {
+      schemaVersion: 1,
+      kind: "merged",
+      reviewRounds: 1,
+      terminalPr: { state: "merged", number: 7, url: PR_URL, mergeSha: MERGED },
+    });
   });
 
   it("a merge door answering enqueued keeps the unit live — the boundary rides the round route, every later ask carries `queued: true`, and the queue's merge ends the unit merged (issue 2011)", async () => {
@@ -3413,6 +3419,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     // the machine's ending kind is unchanged and the auto-merge fact still rides.
     expect(end.ending.report).toContain(`⚠️ Approved but not merge-ready after 1 review round: ${PR_URL}`);
     expect(end.ending.report).toContain("CI is red at the approved head: ci / package");
+    expect(end.ending).not.toHaveProperty("outcome");
     expect(end.ending.report).not.toContain("✅ Merge-ready");
     expect(end.ending.report).toContain(
       "Auto-merge is on for this pull request: the approval merges it once checks pass.",
@@ -3465,6 +3472,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     expect(end.ending.kind).toBe("merge_ready");
     expect(end.ending.report).toContain(`⚠️ Approved but not merge-ready after 1 review round: ${PR_URL}`);
     expect(end.ending.report).toContain("1 unsquashed fix-up commit on the head (fixup! fix the login)");
+    expect(end.ending).not.toHaveProperty("outcome");
     expect(end.ending.report).not.toContain("✅ Merge-ready");
     expect(end.ending.report).not.toContain("checks green");
   });

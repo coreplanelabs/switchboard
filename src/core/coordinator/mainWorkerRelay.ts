@@ -10,6 +10,7 @@ import {
   type CoordinatorInstance,
 } from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
+import { shipSettlementOf, type ShipSettlement } from "./shipOutcome.js";
 
 const PAGE_SIZE = 8;
 const TITLE_LIMIT = 160;
@@ -31,6 +32,7 @@ export type MainWorkerRelayResult =
       more: boolean;
       progress: MainWorkerProgress[];
       final?: {
+        settlement: ShipSettlement;
         kind: string;
         report: string;
         reportTruncated?: true;
@@ -105,6 +107,7 @@ export function createMainWorkerRelay(deps: {
         const final = unit.ending
           ? {
               kind: unit.ending.kind,
+              settlement: shipSettlementOf(unit.ending),
               report: unit.ending.report.slice(0, REPORT_LIMIT),
               ...(unit.ending.report.length > REPORT_LIMIT ? { reportTruncated: true as const } : {}),
               at: unit.ending.at,

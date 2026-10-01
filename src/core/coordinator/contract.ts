@@ -18,6 +18,7 @@ import {
   type HumanGatePending,
 } from "../ship/coordinator.js";
 import { isHandoffShape, type Handoff } from "../ship/handoff.js";
+import { isShipOutcome, type ShipOutcome } from "./shipOutcome.js";
 
 // A coordinator is a Workflow instance in the shim Worker whose children are
 // ordinary `dispatch()` runs as the requesting user. It holds no credential of
@@ -1023,7 +1024,18 @@ export interface CoordinatorUnit {
    *  `step` and `round` locate that reason without parsing the report. For a
    *  `step_threw` failure the driver records all available fields before it
    *  rethrows (issue 2100); unit-start has no round yet. */
-  ending?: { kind: string; report: string; at: number; cause?: string; step?: string; round?: number };
+  ending?: {
+    kind: string;
+    report: string;
+    at: number;
+    cause?: string;
+    step?: string;
+    round?: number;
+    /** Producer facts; absence identifies a legacy or unprojected ending. */
+    outcome?: ShipOutcome;
+    /** Original private report delivery identity, committed with its outcome. */
+    deliveryId?: string;
+  };
   startedAt?: number;
 }
 
@@ -1034,6 +1046,25 @@ export function preserveWorkBrief(current: CoordinatorUnit | undefined, replacem
     ...(current?.workBrief !== undefined ? { workBrief: current.workBrief } : {}),
     ...(current?.threadEvidence !== undefined ? { threadEvidence: current.threadEvidence } : {}),
   };
+}
+
+export class CoordinatorUnitWriteConflict extends Error {
+  constructor() {
+    super("coordinator unit is settled; replacement requires compare-and-replace");
+    this.name = "CoordinatorUnitWriteConflict";
+  }
+}
+
+/** An ordinary whole-row write has no proof it read the current settlement.
+ * Only an exact CAS may replace a recorded ending, including for recovery. */
+export function prepareUnfencedUnitWrite(
+  current: CoordinatorUnit | undefined,
+  replacement: CoordinatorUnit,
+): CoordinatorUnit {
+  const updated = preserveWorkBrief(current, replacement);
+  if (current?.ending?.outcome !== undefined && JSON.stringify(current) !== JSON.stringify(updated))
+    throw new CoordinatorUnitWriteConflict();
+  return updated;
 }
 
 const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -1376,6 +1407,15 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
       isText(r.ending.kind) &&
       isText(r.ending.report, MAX_REPORT) &&
       isFinite(r.ending.at) &&
+      (r.ending.deliveryId === undefined ||
+        (typeof r.ending.deliveryId === "string" && STEP_NAME_PATTERN.test(r.ending.deliveryId))) &&
+      (r.ending.outcome === undefined ||
+        (isShipOutcome(r.ending.outcome) &&
+          r.ending.outcome.kind === r.ending.kind &&
+          (r.ending.outcome.terminalPr === undefined ||
+            (isObject(r.pr) &&
+              r.ending.outcome.terminalPr.number === r.pr.number &&
+              r.ending.outcome.terminalPr.url === r.pr.url)))) &&
       (r.ending.cause === undefined || isText(r.ending.cause, 64)) &&
       (r.ending.step === undefined || (typeof r.ending.step === "string" && STEP_NAME_PATTERN.test(r.ending.step))) &&
       (r.ending.round === undefined ||

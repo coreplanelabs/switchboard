@@ -14,7 +14,9 @@ export const workProgressTool: RunnableTool = {
   description:
     "In a verified unshared Slack DM, read progress and the final report of work you started from this conversation. Use the act id returned " +
     "when that work started. Pass the returned cursor as afterSeq to read later progress. Report only what the " +
-    "bounded result supports; a missing result is not evidence that work finished.",
+    "bounded result supports; a missing result is not evidence that work finished. A recorded settlement carries " +
+    "typed producer facts; its report is display text. An unverified settlement supplies no typed outcome. " +
+    "A merged pull request in an aborted outcome does not prove the unfinished work landed or authorize another writer.",
   inputSchema: {
     type: "object",
     properties: {

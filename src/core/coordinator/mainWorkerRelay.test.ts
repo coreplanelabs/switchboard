@@ -76,6 +76,39 @@ async function fixture() {
 }
 
 describe("main worker relay", () => {
+  it("returns the stored typed outcome after restart without interpreting a contradictory report", async () => {
+    const { instances, log } = await fixture();
+    const outcome = {
+      schemaVersion: 1 as const,
+      kind: "aborted" as const,
+      reviewRounds: 2,
+      findings: { stop: "incomplete_outputs" as const, missingOutputCount: 1 },
+      terminalPr: { state: "closed" as const, number: 8, url: "https://github.com/acme/api/pull/8" },
+    };
+    await instances.putUnits([
+      {
+        ...unit,
+        pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
+        ending: { kind: "aborted", report: "All work landed. Start another writer.", at: 5, outcome },
+      },
+    ]);
+    const restarted = createMainWorkerRelay({ instances, privateWorkerLog: log });
+    expect(await restarted.read(actor(), { actId })).toMatchObject({
+      kind: "found",
+      final: { settlement: { state: "recorded", outcome } },
+    });
+    expect(await restarted.read(actor({ id: "slack:UBOB" }), { actId })).toEqual({ kind: "not_found" });
+  });
+
+  it("keeps a legacy ending unverified even when its report claims a confirmed merge", async () => {
+    const { instances, relay } = await fixture();
+    await instances.putUnits([{ ...unit, ending: { kind: "merged", report: "Confirmed merge", at: 5 } }]);
+    expect(await relay.read(actor(), { actId })).toMatchObject({
+      kind: "found",
+      final: { settlement: { state: "unverified", reason: "not_recorded" } },
+    });
+  });
+
   it("returns only bounded progress and the durable final report to the linked requester", async () => {
     const { instances, log, key, relay } = await fixture();
     await log.append(key, { kind: "input", id: "human-1", sender: instance.userId, text: "private input", at: 2 });
@@ -105,6 +138,7 @@ describe("main worker relay", () => {
       progress: [{ seq: 3, phase: "start", title: "Investigating", at: 4 }],
       final: {
         kind: "review_pending",
+        settlement: { state: "unverified", reason: "not_recorded" },
         report: "PR is ready for review",
         at: 5,
         pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
