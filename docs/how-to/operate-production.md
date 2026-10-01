@@ -114,6 +114,17 @@ The project's own production, not Switchboard:
 - The profile and config live in a private repository named by the variable `SWITCHBOARD_DEPLOY_PROFILE`, read with an App token minted as `CONFIG_REPO_TOKEN`.
 - CI holds `CLOUDFLARE_DEPLOY_TOKEN`, `RESIDENT_READ_TOKEN`, `RESIDENT_DRAIN_TOKEN` (drain and undrain only; the resident step drains the fleet with it; without it the step waits for a quiet minute and says so) and `SANDBOX_TOKEN`; the docs deploy uses `CLOUDFLARE_API_TOKEN`.
 
+## Findings work after a pull request merges
+
+A findings run can finish after its pull request merges or closes. Switchboard
+names that terminal state in its short report; verbose output also lists the
+run's recorded commit, missing results and follow-up guidance. It does not
+restart findings on that pull request. A local commit or attempted push alone
+does not prove that the fixes reached the merge. Carry any
+remaining fixes into an authorized follow-up pull request from the current base.
+An open pull request still requires every findings result and an independently
+verified exact head before review resumes.
+
 ## Next
 
 - [Deploy](deploy.md)

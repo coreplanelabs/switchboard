@@ -324,6 +324,77 @@ describe("original-unit recovery accounting", () => {
     },
   );
 
+  it.each(["same", "older", "unreadable", "closed"] as const)(
+    "preserves missing outputs at a terminal %s source after a cost-capped findings push",
+    (source) => {
+      const d = new Driver(
+        openRecoveredUnitPipeline(
+          input({
+            merge: "person",
+            idleDays: 1,
+            grant: { renewals: 2, costCapUsd: 50 },
+            recovery: { remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
+          }),
+          T0,
+          {
+            kind: "findings",
+            round: 1,
+            pr: { number: 7, url: PR_URL },
+            expectedHeadSha: HEAD_A,
+            reviewRunId: "run-original-review",
+            findings: [FINDING],
+            spendUsd: 48,
+          },
+        ),
+      );
+      runChild(
+        d,
+        "run-findings",
+        finished({
+          status: "completed",
+          costUsd: 2,
+          dispositions: [],
+          description: false,
+          headSha: HEAD_B,
+          pushed: [{ ref: d.state.input.unit.branch, sha: HEAD_B, by: "push" }],
+        }),
+        T0 + MIN,
+      );
+      expect(d.action).toMatchObject({ type: "pr-check" });
+      const pr: PrCheck =
+        source === "closed"
+          ? { state: "closed", prNumber: 7, url: PR_URL, closedBy: "maintainer" }
+          : {
+              state: "merged",
+              prNumber: 7,
+              url: PR_URL,
+              sha: HEAD_C,
+              mergedAt: "2026-09-29T00:00:00Z",
+              headSha: source === "unreadable" ? undefined : source === "same" ? HEAD_B : HEAD_A,
+            };
+      d.answer({ type: "pr-check", pr, at: T0 + 2 * MIN });
+      expect(d.action).toMatchObject({
+        type: "end",
+        ending: {
+          kind: "aborted",
+          terminalPr: pr,
+          missingOutputs: ["missing disposition for F1", "missing updated pull request description"],
+        },
+      });
+      const report = renderUnitReport(d.state);
+      expect(report).toContain("missing disposition for F1");
+      expect(report).toContain("missing updated pull request description");
+      expect(report).toContain("authorized follow-up pull request");
+      if (source === "unreadable") expect(report).toContain("exact source head could not be verified");
+      if (source === "older") expect(report).toContain("does not hold the completed changes");
+      if (source === "same") expect(report).toContain("cost cap");
+      expect(renderUnitReport(d.state, undefined, "quiet")).toBe(
+        `⚠️ Review did not restart: pull request ${source === "closed" ? "closed without merging" : "already merged"} — ${PR_URL}`,
+      );
+      expect(renderUnitReport(d.state, undefined, "verbose")).toBe(report);
+    },
+  );
+
   it("carries admission spend and stops before a further child when the original cost cap is exhausted or unknown", () => {
     for (const costUsd of [2, null]) {
       const state = openRecoveredUnitPipeline(
@@ -1142,8 +1213,122 @@ describe("completed findings recovery — typed completion plus independently ve
         remoteHead: HEAD_A,
       },
     });
-    expect(renderUnitReport(d.state)).toContain(`the pull request is at \`${HEAD_A.slice(0, 7)}\``);
+    expect(renderUnitReport(d.state)).toContain(`already merged at source commit \`${HEAD_A.slice(0, 7)}\``);
+    expect(renderUnitReport(d.state)).toContain("authorized follow-up pull request");
+    expect(renderUnitReport(d.state)).not.toContain("reconcile the pull request to");
     expect(renderUnitReport(d.state)).not.toMatch(/Already merged|Merged:/);
+  });
+
+  it.each(["finished", "drained", "rechecked"] as const)(
+    "keeps a typed merge terminal when incomplete unpushed findings are %s",
+    (arrival) => {
+      for (const headSha of [HEAD_A, HEAD_B, undefined]) {
+        const d = fresh(input({ merge: "person", generated: true, idleDays: 1 }));
+        throughFindingsRequest(d);
+        const pullRequest: PrCheck = {
+          state: "merged",
+          prNumber: 7,
+          url: PR_URL,
+          headSha,
+          sha: HEAD_C,
+          mergedAt: "2026-09-29T00:00:00Z",
+        };
+        const run = completeFindings(d, { dispositions: [], description: false, pushed: [], costUsd: 1 });
+        d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+        d.answer({ type: "wait", outcome: "event" });
+        if (arrival === "drained") {
+          d.answer({ type: "read-record", run: { finished: false }, pullRequest, at: T0 + 29 * MIN });
+          expect(d.action).toMatchObject({ type: "steer", reason: "merged" });
+          d.answer({ type: "steer", outcome: "steered", at: T0 + 29 * MIN });
+          d.answer({ type: "wait", outcome: "event" });
+        }
+        d.answer({
+          type: "read-record",
+          run,
+          ...(arrival === "finished" ? { pullRequest } : {}),
+          ...(arrival === "rechecked"
+            ? {
+                pullRequest: {
+                  state: "open" as const,
+                  prNumber: 7,
+                  url: PR_URL,
+                  headSha: HEAD_C,
+                  headBranchExists: true,
+                },
+              }
+            : {}),
+          at: T0 + 30 * MIN,
+        });
+        if (arrival === "rechecked") d.answer({ type: "pr-check", pr: pullRequest, at: T0 + 31 * MIN });
+        expect(d.action).toMatchObject({
+          type: "end",
+          ending: {
+            kind: "aborted",
+            findingsStop: "incomplete_outputs",
+            terminalPr: pullRequest,
+            observedHead: HEAD_B,
+            missingOutputs: ["missing disposition for F1", "missing updated pull request description"],
+          },
+        });
+        expect(d.state.lastReviewHead).toBe(HEAD_A);
+        expect(d.state.dispositionsByRound[1]).toEqual([]);
+        const report = renderUnitReport(d.state);
+        expect(report).toContain("already merged");
+        expect(report).toContain(PR_URL);
+        expect(report).toContain(HEAD_B.slice(0, 7));
+        expect(report).toContain("missing disposition for F1");
+        expect(report).toContain("authorized follow-up pull request");
+        expect(renderUnitReport(d.state, undefined, "quiet")).toBe(
+          `⚠️ Review did not restart: pull request already merged — ${PR_URL}`,
+        );
+        expect(renderUnitReport(d.state, undefined, "verbose")).toBe(report);
+        expect(report).not.toMatch(/new findings run|reconcile the pull request to|next reply|Already merged|Merged:/);
+      }
+    },
+  );
+
+  it("does not substitute an earlier child commit when terminal findings lack a final commit", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughFindingsRequest(d);
+    d.state = { ...d.state, lastChildHead: HEAD_C };
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: completeFindings(d, { headSha: undefined, pushed: [] }),
+      pullRequest: {
+        state: "merged",
+        prNumber: 7,
+        url: PR_URL,
+        headSha: HEAD_A,
+        sha: HEAD_C,
+        mergedAt: "2026-09-29T00:00:00Z",
+      },
+      at: T0 + 30 * MIN,
+    });
+    expect(renderUnitReport(d.state)).toContain("run did not record a final commit");
+    expect(renderUnitReport(d.state)).not.toContain(HEAD_C.slice(0, 7));
+  });
+
+  it("keeps incomplete unpushed findings terminal when the pull request closed", () => {
+    const d = fresh(input({ merge: "person", generated: true, idleDays: 1 }));
+    throughFindingsRequest(d);
+    d.answer({ type: "spawn", outcome: "spawned", runId: "run-f1", at: T0 + 20 * MIN });
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({
+      type: "read-record",
+      run: completeFindings(d, { dispositions: [], description: false, pushed: [] }),
+      pullRequest: { state: "closed", prNumber: 7, url: PR_URL, closedBy: "maintainer" },
+      at: T0 + 30 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted", terminalPr: { state: "closed" } } });
+    expect(renderUnitReport(d.state)).toContain("closed without merging");
+    expect(renderUnitReport(d.state, undefined, "quiet")).toBe(
+      `⚠️ Review did not restart: pull request closed without merging — ${PR_URL}`,
+    );
+    expect(renderUnitReport(d.state, undefined, "verbose")).toBe(renderUnitReport(d.state));
+    expect(renderUnitReport(d.state)).toContain("authorized follow-up pull request");
+    expect(renderUnitReport(d.state)).not.toContain("new findings run");
   });
 
   it("keeps a completed findings run resumable when the open pull request's branch or exact head is unreadable", () => {
