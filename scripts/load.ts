@@ -217,8 +217,8 @@ commands
              classifier or second model is called
              --provider NAME  --model ID  [--key-env VAR  --base-url URL  --since DATE  --limit N  --default-agent NAME
              --concurrency N  --smoke  --profile-model]
-             --smoke: before deployment, use the candidate source and a real model on an ordinary read, an
-             existing-PR Ship review and an explicit-settings request; starts no agent or writer
+             --smoke: before deployment, use the candidate source and a real model on an ordinary read, a read with review/severity words, an
+             existing-PR Ship review, standalone Review with head context, review with renewals and explicit settings; starts no agent or writer
              --profile-model: with --smoke, read the deployment profile's config and test its default general model
              [--verify: one more call on every bind of a write- or destructive-class command in the checked-in command set,
              shown the sentence and the bound line and asked whether the line does what was asked; printed beside the command
@@ -1287,6 +1287,15 @@ async function routeReplay(f: Flags): Promise<boolean> {
           bind.verbosity === undefined,
       },
       {
+        name: "read about review severity",
+        text: "What does 'major findings' mean in a review report? Answer in one sentence.",
+        expected: (bind: OperatorBind) =>
+          presetBindOf(
+            bind.line,
+            projection.presets.map((preset) => preset.name),
+          ) === "general" && bind.severity === undefined,
+      },
+      {
         name: "existing PR review",
         text: "agents:ship please review https://github.com/acme/api/pull/7",
         expected: (bind: OperatorBind) =>
@@ -1295,6 +1304,28 @@ async function routeReplay(f: Flags): Promise<boolean> {
           bind.prTarget?.number === 7 &&
           bind.prTarget.quote === "https://github.com/acme/api/pull/7" &&
           bind.workObjective === undefined,
+      },
+      {
+        name: "standalone PR review",
+        text: "agent:review review https://github.com/acme/api/pull/7 at head 1111111111111111111111111111111111111111. Focus on the Door boundary.",
+        expected: (bind: OperatorBind) =>
+          presetBindOf(
+            bind.line,
+            projection.presets.map((preset) => preset.name),
+          ) === "review" &&
+          bind.repo === "acme/api" &&
+          bind.prTarget?.number === 7 &&
+          bind.prTarget.quote === "https://github.com/acme/api/pull/7",
+      },
+      {
+        name: "review with requested renewals",
+        text: "Review https://github.com/acme/api/pull/7 with two renewals.",
+        expected: (bind: OperatorBind) =>
+          bind.shipEntry === "review" &&
+          bind.repo === "acme/api" &&
+          bind.prTarget?.number === 7 &&
+          bind.prTarget.quote === "https://github.com/acme/api/pull/7" &&
+          bind.renewals === 2,
       },
       {
         name: "requested run settings",
