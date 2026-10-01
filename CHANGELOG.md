@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.275.1](https://github.com/coreplanelabs/switchboard/compare/v1.275.0...v1.275.1) (2026-10-01)
+
+
+### Bug fixes
+
+* **deploy:** verify release images by exact manifest digest ([#2614](https://github.com/coreplanelabs/switchboard/issues/2614)) ([b1e8409](https://github.com/coreplanelabs/switchboard/commit/b1e840945bb774728969e534940aaeeccad56c7b))
+* **tools:** explain private work source refusals ([#2611](https://github.com/coreplanelabs/switchboard/issues/2611)) ([44eec91](https://github.com/coreplanelabs/switchboard/commit/44eec91836be26f406bcc2c0507e7c03c0437202))
+
 ## [1.275.0](https://github.com/coreplanelabs/switchboard/compare/v1.274.0...v1.275.0) (2026-10-01)
 
 
