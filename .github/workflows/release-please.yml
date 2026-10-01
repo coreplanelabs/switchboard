@@ -189,6 +189,7 @@ jobs:
       contents: read
     with:
       targets: affected
+      smoke: true
     secrets: inherit # zizmor: ignore[secrets-inherit]
 
   # The same release publishes the three images (docs/reference/specs/release-and-deploy.md

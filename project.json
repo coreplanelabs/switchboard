@@ -240,8 +240,12 @@
       "when": "Part of `check:consistency`."
     },
     "load": {
-      "does": "Load harness: `-- history|resident|sandbox|e2e|cards|provider|pi|route|intake|door`.",
-      "when": "Capacity receipts (docs/reference/specs/load-harness.md)."
+      "does": "Load harness for infrastructure and route checks.",
+      "when": "Capacity receipts."
+    },
+    "smoke:ingress": {
+      "does": "Probes a live read through ingress.",
+      "when": "Release gate."
     }
   }
 }
