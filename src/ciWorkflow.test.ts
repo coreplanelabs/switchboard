@@ -671,6 +671,17 @@ describe("the image check builds every image the deploy builds", () => {
       .filter((line) => /check:image/.test(line));
     expect(elsewhere).toEqual([]);
   });
+
+  it("the sandbox leg uses the persistent Depot builder without changing the manual GitHub build", () => {
+    const steps = ci.jobs["image-each"].steps;
+    const depot = steps.filter((step) => step.uses?.startsWith("depot/use-action@"));
+    expect(depot).toHaveLength(1);
+    expect(depot[0].if).toBe(
+      "${{ matrix.worker == 'deploy/cloudflare-sandbox' && vars.DEPOT_PROJECT_ID != '' && github.event_name != 'workflow_dispatch' }}",
+    );
+    expect(depot[0].with).toEqual({ project: "${{ vars.DEPOT_PROJECT_ID }}", version: "2.102.7" });
+    expect(steps.indexOf(depot[0])).toBeLessThan(steps.findIndex((step) => step.run?.includes("check:image")));
+  });
 });
 
 describe("the production deploy is one reusable workflow", () => {

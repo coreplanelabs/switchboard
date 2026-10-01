@@ -215,6 +215,8 @@ jobs:
     # One leg per image the deploy builds — the same Dockerfiles, from the same
     # contexts, that wrangler builds on a release: the bot's (the root
     # Dockerfile, also docker-compose's), the resident's and the sandbox's.
+    # Depot CI sends the sandbox's docker build to a persistent BuildKit cache.
+    # Without a configured Depot project, the local Docker builder still runs.
     # Until this job existed a broken bot Dockerfile was found at deploy time;
     # until it covered every image, so was a broken resident one (a RUN whose
     # last command exits 1 on the base image).
@@ -230,6 +232,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: depot/use-action@9bda29f1fc3163c06fc15f375887a341096a5639 # v1
+        if: ${{ matrix.worker == 'deploy/cloudflare-sandbox' && vars.DEPOT_PROJECT_ID != '' && github.event_name != 'workflow_dispatch' }}
+        with:
+          project: ${{ vars.DEPOT_PROJECT_ID }}
+          version: 2.102.7
       - run: npm run check:image -w ${{ matrix.worker }}
 
   image:
