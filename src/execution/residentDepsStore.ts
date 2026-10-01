@@ -16,7 +16,8 @@
  *
  *  Shape: one entry per lockfile key (the hash of the committed
  *  lockfile — a pure function of the commit) under DEPS_STORE_DIR, holding
- *  the tree's top-level `node_modules` exactly as the install produced it.
+ *  the root and outermost workspace `node_modules` at their repository paths,
+ *  exactly as the install produced them.
  *  An entry is IMMUTABLE once complete (`.complete` written last, inside the
  *  entry so the atomic rename carries it) — Flyweight: every consumer shares
  *  one tree by identity through hardlink views, and nothing ever writes into
@@ -137,6 +138,82 @@ export const DEPS_ENTRY_BACKUP_EXCLUDES: readonly string[] = [".complete", ".use
  *  source of entries. */
 export function nestedNodeModulesListCmd(rootDir: string): string {
   return `(cd ${shellQuote(rootDir)} && find . \\( -path ./node_modules -o -name .git \\) -prune -o -name node_modules -type d -prune -print | sed 's|^\\./||')`;
+}
+
+/** Consume an extracted entry on the container's Node runtime. Discover and
+ * validate every destination before replacing any dependency directory. The
+ * final checkout may have removed a workspace or replaced it with a symlink;
+ * neither permits following an archive path outside the checkout. Renames
+ * retain package and executable symlinks exactly as the producer wrote them. */
+export function depsEntryMaterializeScript(entry: string, checkout: string): string {
+  return `node -e ${shellQuote(String.raw`
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+const [entry, checkout] = process.argv.slice(1).map(p => path.resolve(p));
+const stat = p => { try { return fs.lstatSync(p); } catch (e) { if (e.code === 'ENOENT') return undefined; throw e; } };
+const fail = () => { throw new Error('dependency entry layout is incompatible with checkout'); };
+const root = stat(path.join(entry, 'node_modules'));
+if (!root?.isDirectory() || root.isSymbolicLink() || stat(path.join(entry, 'node_modules/node_modules'))) fail();
+const tracked = new Set(execFileSync('git', ['-C', checkout, 'ls-files', '-z', '--', ':(glob)**/node_modules', ':(glob)**/node_modules/**'], { encoding: 'utf8' }).split('\0').filter(Boolean));
+const trackedParents = new Set();
+for (const file of tracked) {
+  for (let parent = path.dirname(file); parent !== '.'; parent = path.dirname(parent)) trackedParents.add(parent);
+}
+function modules(dir, rel = '') {
+  const found = [];
+  for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (item.name === '.git') continue;
+    const child = path.join(rel, item.name);
+    if (item.name === 'node_modules') found.push(child);
+    else if (item.isDirectory()) found.push(...modules(path.join(dir, item.name), child));
+  }
+  return found;
+}
+const source = modules(entry);
+const destinations = new Set();
+for (const rel of source) {
+  if (!stat(path.join(entry, rel))?.isDirectory()) fail();
+  let parent = checkout;
+  let absent = false;
+  for (const part of rel.split(path.sep).slice(0, -1)) {
+    parent = path.join(parent, part);
+    const info = stat(parent);
+    if (!info) { absent = true; break; }
+    if (info.isSymbolicLink() || !info.isDirectory()) fail();
+  }
+  if (!absent) destinations.add(rel);
+}
+// Preserve exact tracked leaves, including local edits, deletions and links.
+// Merge only their ancestors; whole untracked subtrees retain the rename path.
+// Validate the entire plan before replacing even the first dependency view.
+const actions = [];
+function plan(rel, incoming) {
+  if (tracked.has(rel)) return;
+  const from = path.join(entry, rel);
+  const to = path.join(checkout, rel);
+  if (!trackedParents.has(rel)) {
+    actions.push(() => {
+      fs.rmSync(to, { recursive: true, force: true });
+      if (incoming) fs.renameSync(from, to);
+    });
+    return;
+  }
+  const src = incoming ? stat(from) : undefined;
+  const dst = stat(to);
+  for (const info of [src, dst]) if (info && (!info.isDirectory() || info.isSymbolicLink())) fail();
+  if (!src && !dst) return;
+  if (!dst) actions.push(() => fs.mkdirSync(to));
+  const children = new Set(src ? fs.readdirSync(from) : []);
+  for (const child of new Set([...children, ...(dst ? fs.readdirSync(to) : [])])) {
+    plan(path.join(rel, child), children.has(child));
+  }
+}
+// A checkout snapshot can also contain obsolete nested views absent from the
+// entry. Discover them without traversing symlinked workspace parents.
+for (const rel of new Set([...modules(checkout), ...destinations])) plan(rel, destinations.has(rel));
+for (const action of actions) action();
+`)} ${shellQuote(entry)} ${shellQuote(checkout)}`;
 }
 
 /** One backup per lockfile key, taken ONCE right after the entry is committed

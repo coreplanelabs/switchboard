@@ -297,6 +297,7 @@ export type ReadyEnvironmentReason =
   | "backend_unavailable"
   | "snapshot_missing"
   | "dependencies_missing"
+  | "dependencies_invalid"
   | "dependencies_stale"
   | "binding_mismatch"
   | "seed_failed"
@@ -350,6 +351,11 @@ async function checkReadyEnvironment(
   const outcome = readyEnvironmentOutcome(output);
   if (outcome.ready) return;
   switch (outcome.reason) {
+    case "dependencies_invalid":
+      throw readyFailure(
+        "dependencies_invalid",
+        "Repair the original workspace's dependency view before retrying this task.",
+      );
     case "dependencies_missing":
       throw readyFailure(
         "dependencies_missing",
@@ -997,6 +1003,11 @@ async function seedSandbox(
       fresh: fresh?.kind === "status" ? fresh.seed : undefined,
       alreadyRetried: retried,
     });
+    if (decision.action === "refuse")
+      throw readyFailure(
+        "dependencies_invalid",
+        "Repair the original workspace's dependency view before retrying this task.",
+      );
     if (decision.action === "cold") return { why: oneLine(decision.why) };
     if (ctx.readyEnvironment !== undefined && !decision.seed.depsBackupId)
       return { why: "dependency snapshot missing on seed retry" };

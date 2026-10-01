@@ -98,6 +98,7 @@ import {
   seedDoorRemote,
   seedFixupScript,
   seedMarkerText,
+  dependencyLayoutCommand,
   type RestorePhases,
   type SandboxSeed,
   type SeedAnswer,
@@ -468,6 +469,18 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     // destroy the run's work; a seed naming another ref is a new seed.
     const marker = await this.runRoot(["cat", SEED_MARKER], 30_000);
     if (marker.exitCode === 0 && marker.stdout.trim() === seedMarkerText(seed)) {
+      if (seed.depsBackupId) {
+        const layout = await this.runRoot(["bash", "-c", dependencyLayoutCommand(SEED_CHECKOUT_DIR)], 30_000).catch(
+          () => null,
+        );
+        if (!layout || layout.exitCode !== 0)
+          return {
+            seeded: false,
+            reason: "seed-incompatible",
+            detail: "cached dependency layout is invalid",
+            step: "deps",
+          };
+      }
       const origin = await this.runRoot(
         ["git", "-C", SEED_CHECKOUT_DIR, "remote", "set-url", "origin", doorRemote],
         30_000,
