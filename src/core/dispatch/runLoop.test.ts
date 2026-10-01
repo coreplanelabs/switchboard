@@ -3018,25 +3018,39 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(rec.events.some((e) => e.type === "pushed_head" || e.type === "pr_opened")).toBe(false);
   });
 
-  it("serves the runner-owned publication effect only to a write run with a bound door and bearer store", async () => {
-    const bindings = new GitBindings();
-    bindings.register("run-l", { repo: "o/r", ref: "refs/heads/fix/owned" }, undefined, async () => true);
-    const bearers = new RunBearerStore({ clock: () => NOW });
-    const s = endingIn(
-      async (_deps, run) => {
-        expect(run.tools.find((tool) => tool.name === "publish_branch")).toBeDefined();
-        expect(run.rules.noShellPush).toBe(true);
-        return sessionAnswering("done");
-      },
-      { repoCtx: { repo: "o/r", baseRef: "main" }, executor: { publishBranch: async () => "" } },
-    );
-    s.deps.githubBindings = bindings;
-    s.deps.runBearers = bearers;
-    const bearer = mintFor(bearers, s);
-    answered(await runLoop(s.deps, { ...s.ctx, bearer }));
-    s.ending.drain(undefined);
-    await s.writer.settled();
-  });
+  it.each(["both", "inspection only", "publication only", "neither"])(
+    "serves the runner-owned publication effect only with both typed capabilities: %s",
+    async (capabilities) => {
+      const bindings = new GitBindings();
+      bindings.register("run-l", { repo: "o/r", ref: "refs/heads/fix/owned" }, undefined, async () => true);
+      const bearers = new RunBearerStore({ clock: () => NOW });
+      const s = endingIn(
+        async (_deps, run) => {
+          expect(!!run.tools.find((tool) => tool.name === "publish_branch")).toBe(capabilities === "both");
+          expect(run.rules.noShellPush).toBe(true);
+          return sessionAnswering("done");
+        },
+        {
+          repoCtx: { repo: "o/r", baseRef: "main" },
+          executor: {
+            publishBranch: async () => "",
+            ...(capabilities === "both" || capabilities === "inspection only"
+              ? { execResult: async () => ({ stdout: "", stderr: "", exitCode: 0, truncated: false }) }
+              : {}),
+            ...(capabilities === "both" || capabilities === "publication only"
+              ? { publishBranchResult: async () => ({ stdout: "", stderr: "", exitCode: 0, truncated: false }) }
+              : {}),
+          },
+        },
+      );
+      s.deps.githubBindings = bindings;
+      s.deps.runBearers = bearers;
+      const bearer = mintFor(bearers, s);
+      answered(await runLoop(s.deps, { ...s.ctx, bearer }));
+      s.ending.drain(undefined);
+      await s.writer.settled();
+    },
+  );
 
   it("refuses model-shell publication without opening a Door slot, including a literal owned push", async () => {
     const bindings = new GitBindings();

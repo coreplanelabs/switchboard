@@ -2,6 +2,7 @@ import type { Backend } from "../core/trace/attrs.js";
 import type { Span } from "../core/trace/types.js";
 import type {
   ExecOptions,
+  ExecResult,
   Executor,
   MoveOptions,
   PublicationTransport,
@@ -22,6 +23,8 @@ export class TracingExecutor implements Executor {
   moveTo?: (sha: string, opts?: MoveOptions) => Promise<{ sha: string }>;
   readBytes?: (path: string) => Promise<Uint8Array>;
   publishBranch?: (input: PublicationTransport) => Promise<string>;
+  execResult?: (command: string, opts?: ExecOptions) => Promise<ExecResult>;
+  publishBranchResult?: (input: PublicationTransport) => Promise<ExecResult>;
 
   constructor(
     private readonly inner: Executor,
@@ -41,6 +44,16 @@ export class TracingExecutor implements Executor {
     if (innerPublishBranch)
       this.publishBranch = (input) =>
         this.timed("exec.publish_branch", (s) => innerPublishBranch({ ...input, span: s }));
+    const innerExecResult = inner.execResult?.bind(inner);
+    if (innerExecResult)
+      this.execResult = (command, opts) =>
+        this.timed("exec.exec_result", (s) => innerExecResult(command, { ...opts, span: s }), {
+          timeoutMs: opts?.timeoutMs,
+        });
+    const innerPublishBranchResult = inner.publishBranchResult?.bind(inner);
+    if (innerPublishBranchResult)
+      this.publishBranchResult = (input) =>
+        this.timed("exec.publish_branch_result", (s) => innerPublishBranchResult({ ...input, span: s }));
   }
 
   /** Each op under its own `exec.*` span, handed to the inner executor as

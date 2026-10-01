@@ -50,10 +50,16 @@ export interface Executor {
    *  cancel the underlying command does so and returns/throws promptly; one that
    *  cannot simply ignores it — the runner stops waiting on it either way. */
   exec(command: string, opts?: ExecOptions): Promise<string>;
+  /** Structured command outcome for runner decisions. Human-readable `exec`
+   * output is presentation, never an authority or success signal. Backends
+   * without this result cannot perform effects that require it. */
+  execResult?(command: string, opts?: ExecOptions): Promise<ExecResult>;
   /** Optional trusted Git transport. Implementations must keep `bearer` out
    * of the model shell's UID, process environment and writable repository
    * config. Absence means publication is unavailable, never a shell fallback. */
   publishBranch?(input: PublicationTransport): Promise<string>;
+  /** Structured outcome of the isolated publication transport. */
+  publishBranchResult?(input: PublicationTransport): Promise<ExecResult>;
   /** Read a file, path relative to the execution workspace. */
   readFile(path: string, opts?: ExecTraceOptions): Promise<string>;
   /** Write a file (creating parent dirs), path relative to the workspace. */
@@ -81,6 +87,13 @@ export interface Executor {
    *  Absent on executors whose workspace the model manages itself (a sandbox
    *  clone): the dispatcher then tells the model to check the commit out. */
   moveTo?(sha: string, opts?: MoveOptions): Promise<{ sha: string }>;
+}
+
+export interface ExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  truncated: boolean;
 }
 
 export interface PublicationTransport extends ExecTraceOptions {

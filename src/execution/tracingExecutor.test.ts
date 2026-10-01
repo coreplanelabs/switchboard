@@ -15,6 +15,40 @@ function traced() {
 }
 
 describe("TracingExecutor", () => {
+  it("forwards typed command and publication outcomes without putting their data in spans", async () => {
+    const seen: string[] = [];
+    const base: Executor = {
+      exec: async () => "(no output)",
+      execResult: async (_command, opts) => {
+        seen.push(opts?.span?.name ?? "");
+        return { stdout: "", stderr: "", exitCode: 0, truncated: false };
+      },
+      publishBranchResult: async (input) => {
+        seen.push(input.span?.name ?? "");
+        return { stdout: "accepted", stderr: "", exitCode: 0, truncated: false };
+      },
+      readFile: async () => "",
+      writeFile: async () => "",
+    };
+    const { log, call } = traced();
+    const ex = new TracingExecutor(base, call, "resident");
+    expect(await ex.execResult?.("secret command")).toMatchObject({ stdout: "", exitCode: 0 });
+    expect(
+      await ex.publishBranchResult?.({
+        repo: "acme/api",
+        doorOrigin: "https://door.example",
+        branch: "fix/owned",
+        next: "a".repeat(40),
+        bearer: "secret bearer",
+      }),
+    ).toMatchObject({ stdout: "accepted", exitCode: 0 });
+    expect(seen).toEqual(["exec.exec_result", "exec.publish_branch_result"]);
+    expect(JSON.stringify(log.ends)).not.toMatch(/secret command|secret bearer|accepted/);
+    expect(
+      new TracingExecutor({ exec: base.exec, readFile: base.readFile, writeFile: base.writeFile }, call).execResult,
+    ).toBeUndefined();
+  });
+
   it("forwards isolated publication only when the inner executor supports it, without tracing the bearer", async () => {
     const seen: Array<{ bearer: string; spanName?: string }> = [];
     const base: Executor = {

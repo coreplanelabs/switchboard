@@ -6,7 +6,7 @@ import { shellQuote } from "../execution/shellQuote.js";
 import type { RunnableTool } from "../tools/runnableTool.js";
 import type { GitBindings } from "./modelProxy/gitBindings.js";
 import { bearerHashOf, type RunBearerStore } from "./modelProxy/runBearers.js";
-import { parseExitPrefix, redactSecrets } from "./runEvents.js";
+import { redactSecrets } from "./runEvents.js";
 
 export interface PublicationEffectBinding {
   runId: string;
@@ -58,10 +58,11 @@ export function publicationEffectTool(binding: PublicationEffectBinding): Runnab
       if (authority && ("blocked" in authority || authority.ref !== branch))
         return "error: existing-PR publication is blocked or belongs to another ref";
       const executor: Executor = ctx.executor;
-      if (!executor.publishBranch) return "error: this workspace has no isolated publication transport";
+      if (!executor.execResult || !executor.publishBranchResult)
+        return "error: this workspace has no structured publication transport";
       const inspect = async (command: string): Promise<string | undefined> => {
-        const output = await executor.exec(command, { signal: ctx.signal });
-        return parseExitPrefix(output).failed ? undefined : output.trim();
+        const result = await executor.execResult!(command, { signal: ctx.signal });
+        return result.exitCode === 0 && !result.truncated ? result.stdout.trim() : undefined;
       };
       const sourceRef = `refs/heads/${branch}`;
       const quotedRef = shellQuote(sourceRef);
@@ -95,7 +96,7 @@ export function publicationEffectTool(binding: PublicationEffectBinding): Runnab
           ctx.publish?.({ type: "publication_push_authorized", callId: ctx.callId, ref: branch, expectedHeadSha: old });
         // The immutable commit travels through a privileged, fixed-argv
         // transport; the model shell never shares its effect credential.
-        const output = await executor.publishBranch({
+        const result = await executor.publishBranchResult({
           repo: binding.repo,
           doorOrigin: new URL(binding.doorUrl).origin,
           branch,
@@ -104,7 +105,8 @@ export function publicationEffectTool(binding: PublicationEffectBinding): Runnab
           bearer: issued.token,
           signal: ctx.signal,
         });
-        if (parseExitPrefix(output).failed) return `error: publication refused: ${redactSecrets(output.trim())}`;
+        if (result.exitCode !== 0 || result.truncated)
+          return `error: publication refused: ${redactSecrets(result.stderr || result.stdout || "unverified result")}`;
         // A clean exit is not itself the durable receipt. The Door must have
         // committed the exact accepted transition, and the remote must agree.
         const after = binding.bindings.publicationOf(binding.runId);
@@ -115,7 +117,9 @@ export function publicationEffectTool(binding: PublicationEffectBinding): Runnab
           return "error: the Git Door did not commit an accepted publication outcome";
         const remoteHead = await inspect(`git ls-remote --exit-code origin ${quotedRef}`);
         if (remoteHead?.split("\t")[0] !== next) return "error: the remote head cannot be verified after publication";
-        return redactSecrets(output);
+        return redactSecrets(
+          [result.stdout, result.stderr].filter(Boolean).join("\n--- stderr ---\n") || "(no output)",
+        );
       } finally {
         binding.bindings.clearToolPush(binding.runId, ctx.callId);
       }
