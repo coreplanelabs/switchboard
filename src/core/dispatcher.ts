@@ -126,6 +126,7 @@ import { directAudienceStampOf } from "./runLedger/inboxMessage.js";
 import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { mainAudienceAtPrompt, mainAudienceAtReply, planeRowIdentities } from "./dispatch/mainAudience.js";
+import { readThreadWork } from "../tools/threadWork.js";
 import { predicateFor } from "./authz/predicate.js";
 import { channelVisibilityOf, finishChildSetup, writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipContext, type ShipDeps } from "./dispatch/ship.js";
@@ -2673,6 +2674,7 @@ export async function dispatch(
             part.type === "tool_use" &&
             (part.name.startsWith("github_") ||
               part.name === "plane_show" ||
+              part.name === "thread_work" ||
               part.name === "work_progress" ||
               part.name.startsWith("mcp__")),
         ),
@@ -3786,6 +3788,8 @@ export async function dispatch(
         inbox: admitted.inbox,
       },
     );
+    const threadWorkSnapshots: string[] = [];
+    const fencedRuns = { ...runs, recordThreadWorkRead: (result: string) => threadWorkSnapshots.push(result) };
     // The severity to address for this run (agent-review.md item 5a): the
     // request's `severity:` directive over the user's scope over the channel's
     // over the org's `review.addressSeverity` — the one level the verdict
@@ -3874,7 +3878,7 @@ export async function dispatch(
       publishText,
       ending,
       spawn,
-      runs,
+      runs: fencedRuns,
       steer,
       wait,
       ...(sessionTools ? { session: sessionTools } : {}),
@@ -4016,6 +4020,10 @@ export async function dispatch(
                       ).table(predicateFor(chatActorOf(deps.config, msg), "runs:read", "run")),
                     )
                   : undefined;
+                const currentThreadWork =
+                  threadWorkSnapshots.length > 0
+                    ? await readThreadWork({ ...fencedRuns, actor: chatActorOf(deps.config, msg) }, agent.name)
+                    : undefined;
                 const checked = mainAudienceAtReply(
                   mainAudience.audience,
                   fresh.servers,
@@ -4033,6 +4041,7 @@ export async function dispatch(
                     unknown: ran.planeReadUnknown || currentPlaneRows?.unknown === true,
                   },
                   directAudienceStillValid,
+                  { exposed: threadWorkSnapshots, current: currentThreadWork },
                 );
                 return checked.ok ? undefined : checked.reason;
               } catch {

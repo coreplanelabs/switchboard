@@ -45,6 +45,8 @@ export interface RunsReadCapability {
   service: RunsService;
   actor: Actor;
   runId?: string;
+  /** A successful exact-thread read must be revalidated before the main reply. */
+  recordThreadWorkRead?: (result: string) => void;
 }
 
 /** The steer behind `send_to_run` (agent-conductor item 8): `steerRun` with

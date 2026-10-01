@@ -312,6 +312,8 @@ export interface ListRunsOptions {
    *  on the first page), so they are omitted. */
   before?: number;
   beforeId?: string;
+  /** Ask for a positive receipt that this page came from the persisted store. */
+  includeDurableHistory?: true;
 }
 
 /** The store's list key for the last row of a full page: pass back as `before`/`beforeId`. */
@@ -322,6 +324,8 @@ export interface RunListCursor {
 
 export interface ListRunsResult {
   runs: RunView[];
+  /** This page came from a successful persisted-history read, not only live memory. */
+  durableHistory?: true;
   /** Present when the visible page or the underlying store fetch may have more persisted rows. */
   nextBefore?: RunListCursor;
   /** Set when persisted history could not be fully read, including a bounded
@@ -1190,7 +1194,10 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         });
       }
       const runs = [...byId.values()].sort(newestFinished).slice(0, limit);
-      const out: ListRunsResult = { runs };
+      const out: ListRunsResult = {
+        runs,
+        ...(opts.includeDurableHistory && store && !storeUnavailable ? { durableHistory: true as const } : {}),
+      };
       // A full visible page advances from its last returned persisted row.
       // A short visible page advances from the raw store boundary if filtering
       // hid rows, so callers do not mistake it for complete history.

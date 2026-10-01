@@ -43,6 +43,7 @@ describe("the toolset table", () => {
   it("orchestrator: source reads and private linked-work controls", () => {
     expect(TOOLSETS.orchestrator!.map((t) => t.name)).toEqual([
       "plane_show",
+      "thread_work",
       "slack_context",
       "work_status",
       "work_steer",
@@ -59,6 +60,7 @@ describe("the toolset table", () => {
   it("a shared conversation's model tool list omits linked-work calls while a private one retains them", () => {
     expect(toolsForRun("orchestrator", false, false).map((tool) => tool.name)).toEqual([
       "plane_show",
+      "thread_work",
       "slack_context",
       "work_progress",
       ...GITHUB_READ_TOOLS.map((t) => t.name),

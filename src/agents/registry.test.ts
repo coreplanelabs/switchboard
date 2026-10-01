@@ -1307,6 +1307,13 @@ describe("orchestrator agent (record 0070 — the plane's chat preset)", () => {
     expect(sys).toMatch(/an earlier turn is history, the table is now/);
   });
 
+  it("uses durable thread work facts across agents instead of mistaking its own recall log for the whole thread", () => {
+    const sys = AGENTS.orchestrator.system;
+    expect(sys).toContain("call `thread_work` first");
+    expect(sys).toContain("`recall` searches only your own agent's log");
+    expect(sys).toContain("an empty result never denies another agent's earlier answer or a Ship unit");
+  });
+
   it("offers Slack context only for the requester's direct conversation and treats it as source data", () => {
     const sys = AGENTS.orchestrator.system;
     expect(sys).toContain("`slack_context`");

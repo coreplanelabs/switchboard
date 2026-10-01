@@ -1010,6 +1010,18 @@ describe("RunsService.listRuns — read merge", () => {
     expect(await svc.listRuns({ visibleTo: ALL, status: "all" })).toEqual({
       runs: [expect.objectContaining({ id: live.id })],
     });
+    expect(
+      (await svc.listRuns({ visibleTo: ALL, status: "all", includeDurableHistory: true })).durableHistory,
+    ).toBeUndefined();
+  });
+
+  it("marks a complete persisted-history read only when a caller requests its receipt", async () => {
+    const { svc, store } = setup();
+    await store!.put(record("saved", NOW - DAY));
+    expect((await svc.listRuns({ visibleTo: ALL, status: "all" })).durableHistory).toBeUndefined();
+    expect((await svc.listRuns({ visibleTo: ALL, status: "all", includeDurableHistory: true })).durableHistory).toBe(
+      true,
+    );
   });
 
   it("`visibleTo` is pushed down to the store: live rows are filtered by the predicate, the store is asked with its wire form, `all` sends no filter, and `none` touches neither", async () => {
