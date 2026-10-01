@@ -44,6 +44,10 @@ const input = {
 const context = (mainStart?: ReturnType<typeof mainStartForRun>): ToolContext =>
   ({ executor: {} as ToolContext["executor"], ...(mainStart ? { mainStart } : {}) }) as ToolContext;
 const verifyDirectAudience = async () => true;
+const resolveSource = (sources: MainSourceTracker, quote: string, repo: string, configuredRepo = "acme/api") => {
+  const selected = sources.select(quote);
+  return selected.kind === "refused" ? selected : sources.bindRepository(selected.source, repo, configuredRepo);
+};
 
 describe("work_start — plain-language private worker handoff", () => {
   it("reports a reconciled existing worker without saying it started another", async () => {
@@ -57,7 +61,7 @@ describe("work_start — plain-language private worker handoff", () => {
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
-      source: () => ({ actor, msg, authorizedRepo: input.repo }),
+      source: () => ({ kind: "ready", actor, msg, authorizedRepo: input.repo }),
       live: () => true,
       runId: "main-run",
       verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
@@ -80,7 +84,7 @@ describe("work_start — plain-language private worker handoff", () => {
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg: question },
-      source: (quote, repo) => source.getWorkRequest(quote, repo, "acme/api"),
+      source: (quote, repo) => resolveSource(source, quote, repo),
       live: () => true,
       runId: "main-run",
       verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
@@ -120,7 +124,7 @@ describe("work_start — plain-language private worker handoff", () => {
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
-      source: () => ({ actor, msg, authorizedRepo: input.repo }),
+      source: () => ({ kind: "ready", actor, msg, authorizedRepo: input.repo }),
       live: () => true,
       runId: "main-run",
       verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
@@ -161,7 +165,7 @@ describe("work_start — plain-language private worker handoff", () => {
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
-      source: () => ({ actor, msg, authorizedRepo: input.repo }),
+      source: () => ({ kind: "ready", actor, msg, authorizedRepo: input.repo }),
       live: () => true,
       runId: "main-run",
       verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
@@ -178,7 +182,7 @@ describe("work_start — plain-language private worker handoff", () => {
         agentName: "coding",
         channelVisibility: "dm",
         initial: { actor, msg },
-        source: () => ({ actor, msg, authorizedRepo: input.repo }),
+        source: () => ({ kind: "ready", actor, msg, authorizedRepo: input.repo }),
         live: () => true,
         runId: "child",
         verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
@@ -195,7 +199,7 @@ describe("work_start — plain-language private worker handoff", () => {
           agentName: "orchestrator",
           channelVisibility,
           initial: { actor, msg },
-          source: () => ({ actor, msg, authorizedRepo: input.repo }),
+          source: () => ({ kind: "ready", actor, msg, authorizedRepo: input.repo }),
           live: () => true,
           runId: "r",
           verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
@@ -241,7 +245,7 @@ describe("work_start — plain-language private worker handoff", () => {
       instanceId: "plan-followup",
       reply: "started",
     });
-    let source = { actor, msg, authorizedRepo: input.repo };
+    let source = { kind: "ready" as const, actor, msg, authorizedRepo: input.repo };
     const capability = mainStartForRun({
       agentName: "orchestrator",
       channelVisibility: "dm",
@@ -273,16 +277,24 @@ describe("work_start — plain-language private worker handoff", () => {
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
-      source: (sourceMessage, repo) => sources.getWorkRequest(sourceMessage, repo, "acme/api"),
+      source: (sourceMessage, repo) => resolveSource(sources, sourceMessage, repo),
       live: () => true,
       runId: "main-run",
       verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
       start,
     });
-    expect(await workStartTool.run({ ...input, sourceMessage: "" }, context(capability))).toContain("quote");
+    const { sourceMessage: _sourceMessage, ...withoutQuote } = input;
+    for (const sourceInput of [withoutQuote, { ...input, sourceMessage: "" }, { ...input, sourceMessage: "  " }]) {
+      const missing = await workStartTool.run(sourceInput, context(capability));
+      expect(missing).toContain('"kind":"source_resolution"');
+      expect(missing).toContain('"code":"source_quote_missing"');
+    }
+    expect(await workStartTool.run({ ...input, sourceMessage: "x".repeat(1001) }, context(capability))).toContain(
+      "quote is too long",
+    );
     const unclear = await workStartTool.run({ ...input, sourceMessage: "other request" }, context(capability));
-    expect(unclear).toContain("latest private message");
-    expect(unclear).toContain("ask once");
+    expect(unclear).toContain('"kind":"source_resolution"');
+    expect(unclear).toContain('"code":"source_quote_mismatch"');
     expect(start).not.toHaveBeenCalled();
     expect(await workStartTool.run({ ...input, sourceMessage: "fix signup" }, context(capability))).toContain("error:");
     await workStartTool.run({ ...input, sourceMessage: "fix billing" }, context(capability));
@@ -295,7 +307,7 @@ describe("work_start — plain-language private worker handoff", () => {
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
-      source: () => ({ actor, msg, authorizedRepo: input.repo }),
+      source: () => ({ kind: "ready", actor, msg, authorizedRepo: input.repo }),
       live: () => false,
       runId: "main-run",
       verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
@@ -312,7 +324,7 @@ describe("work_start — plain-language private worker handoff", () => {
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
-      source: () => ({ actor, msg, authorizedRepo: input.repo }),
+      source: () => ({ kind: "ready", actor, msg, authorizedRepo: input.repo }),
       live: () => true,
       runId: "main-run",
       verifyDirectAudience: booleanAudienceVerifier(verify),

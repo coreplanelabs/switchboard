@@ -1535,6 +1535,83 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
   });
 
+  it("records the private start source predicate without exposing its message or target", async () => {
+    const runCase = async (
+      fault: "quote" | "quote_missing" | "store" | "read" | "missing" | "superseded" | "repo_missing" | "repo_mismatch",
+    ) => {
+      const channelId = "slack:DPRIVATE";
+      const threadKey = `${channelId}:1.0`;
+      const audience = { kind: "slack-unshared-im" as const, channelId, threadKey, userId: "slack:UADMIN" };
+      const instances = new InMemoryCoordinatorInstanceStore();
+      if (fault !== "missing" && fault !== "store")
+        await instances.recordRequesterTurn({
+          threadKey,
+          requesterId: audience.userId,
+          messageId: fault === "superseded" ? "2.0" : "1.0",
+        });
+      if (fault === "read")
+        vi.spyOn(instances, "latestRequesterTurn").mockRejectedValue(new Error("private store detail"));
+      const started = vi.fn(async () => ({ kind: "accepted" as const, actId: "a", instanceId: "i", reply: "ok" }));
+      let result: unknown;
+      const watchedPi = watched(piHarness);
+      const s = setup("Done.", {
+        agent: "orchestrator",
+        userId: audience.userId,
+        io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) } as Partial<ChannelIO>,
+        harness: {
+          harnesses: roster({
+            ...watchedPi.harness,
+            open: async (deps, run) => {
+              result = await run.toolContext.mainStart?.start(
+                "acme/api",
+                { question: "Why?", findings: [], requestedChange: "Fix it" },
+                fault === "quote" ? "Fix another thing" : fault === "quote_missing" ? "" : "Fix it.",
+              );
+              return watchedPi.harness.open(deps, run);
+            },
+          }),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      if (fault !== "store") s.deps.coordinatorInstances = instances;
+      s.deps.mainTaskStart = started;
+      await runLoop(s.deps, {
+        ...s.ctx,
+        ...(fault === "repo_missing" ? {} : { configuredRepo: fault === "repo_mismatch" ? "vendor/lib" : "acme/api" }),
+        msg: { ...s.ctx.msg, channelId, threadKey, directAudience: audience, messageId: "1.0", text: "Fix it." },
+        requestText: "Fix it.",
+        channelVisibility: "dm",
+      });
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      return { result, events: (await s.store.get("run-l"))!.events, started };
+    };
+    const reasons = {
+      quote: "source_quote_mismatch",
+      quote_missing: "source_quote_missing",
+      store: "authority_store_unavailable",
+      read: "requester_turn_read_failed",
+      missing: "requester_turn_missing",
+      superseded: "requester_turn_superseded",
+      repo_missing: "repository_unconfigured",
+      repo_mismatch: "repository_mismatch",
+    } as const;
+    for (const [fault, reason] of Object.entries(reasons) as Array<
+      [keyof typeof reasons, (typeof reasons)[keyof typeof reasons]]
+    >) {
+      const { result, events, started } = await runCase(fault);
+      expect(result).toMatchObject({ kind: "refused", sourceReason: reason });
+      const note = events.find((event) => event.type === "run_note" && event.kind === "work_source_refused");
+      expect(note).toMatchObject({ type: "run_note", kind: "work_source_refused", sourceReason: reason });
+      expect(Object.keys(note ?? {}).sort()).toEqual(["at", "kind", "seq", "sourceReason", "summary", "type"]);
+      expect(JSON.stringify(events)).not.toContain("private store detail");
+      expect(started).not.toHaveBeenCalled();
+    }
+  });
+
   it("does not authorize work from an operator-joined prompt when the delivered reply says no", async () => {
     const started = vi.fn(async () => ({
       kind: "accepted" as const,

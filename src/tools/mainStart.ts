@@ -3,10 +3,12 @@ import type { Actor, ChannelVisibility } from "../core/authz/types.js";
 import { validateWorkBriefDraft } from "../core/coordinator/contract.js";
 import type { MainStartInput, MainStartResult } from "../core/coordinator/mainStart.js";
 import type { MainTaskAuthority } from "../core/coordinator/requesterAuthority.js";
+import type { MainSourceRefusal, MainSourceResolution } from "../core/dispatch/mainSource.js";
 import type { IncomingMessage, SlackDirectAudience } from "../core/types.js";
 import type { RunnableTool } from "./runnableTool.js";
 
 type Brief = MainStartInput["brief"];
+type ReadySource = Extract<MainSourceResolution, { kind: "ready" }> & { authority?: MainTaskAuthority };
 
 /** The requester and source message come from dispatch, never tool input. */
 export interface MainStartCapability {
@@ -49,10 +51,7 @@ export function mainStartForRun(deps: {
   source: (
     sourceMessage: string,
     repo: string,
-  ) =>
-    | Promise<{ actor: Actor; msg: IncomingMessage; authorizedRepo: string; authority?: MainTaskAuthority } | undefined>
-    | { actor: Actor; msg: IncomingMessage; authorizedRepo: string; authority?: MainTaskAuthority }
-    | undefined;
+  ) => Promise<ReadySource | MainSourceRefusal> | ReadySource | MainSourceRefusal;
   live: () => boolean;
   runId: string;
   verifyDirectAudience?: (audience: SlackDirectAudience) => Promise<AudienceCheck>;
@@ -70,14 +69,14 @@ export function mainStartForRun(deps: {
     start: async (repo, brief, sourceMessage) => {
       if (!deps.live()) return Promise.resolve({ kind: "refused", reply: "The main run stopped, so no work started." });
       const source = await deps.source(sourceMessage, repo);
-      if (source && !canOfferMainStart(deps.agentName, deps.channelVisibility, source.msg, source.actor, !!deps.start))
-        return Promise.resolve({ kind: "refused", reply: "I can't start from that sender; nothing started." });
-      if (!source)
+      if (source.kind === "refused")
         return {
           kind: "refused",
-          reply:
-            "I couldn't bind this start to your latest private message and the pilot repository. Nothing started. I'll ask once if the request or target is unclear.",
+          sourceReason: source.reason,
+          reply: "I couldn't verify this call's request source, so it did not start new work.",
         };
+      if (!canOfferMainStart(deps.agentName, deps.channelVisibility, source.msg, source.actor, !!deps.start))
+        return Promise.resolve({ kind: "refused", reply: "I can't start from that sender; nothing started." });
       let privateNow = false;
       try {
         privateNow = (await verifyDirectAudience(source.msg.directAudience!)).ok;
@@ -112,7 +111,7 @@ const text = (v: unknown, cap: number): v is string => typeof v === "string" && 
 export const workStartTool: RunnableTool = {
   name: "work_start",
   description:
-    "When the latest person turn in a direct Slack DM asks you to fix or build something, start one private coding worker. Interpret the whole turn: later corrections or a request for explanation alone mean do not start work. If intent is unclear, ask once. Carry forward the question and evidence you found with explicit finding kinds, cause uncertainty, acceptance and evidence requirements. If evidence is unavailable, say why; never invent it. Typed field issues return to this turn for correction; keep the user here and report the work id. Set sourceMessage to a quote from that latest person turn.",
+    "When the latest person turn in a direct Slack DM asks you to fix or build something, start one private coding worker. Interpret the whole turn: later corrections or a request for explanation alone mean do not start work. If intent is unclear, ask once. Carry forward the question and evidence you found with explicit finding kinds, cause uncertainty, acceptance and evidence requirements. If evidence is unavailable, say why; never invent it. Typed field issues return to this turn for correction; keep the user here and report the work id. Set sourceMessage to an exact quote from that latest person turn. A source_quote_mismatch may be retried here with an exact quote; other source-resolution codes mean this call started no new work and do not justify another DM or target guess. Preserve any earlier pending work id and its uncertain status.",
   inputSchema: {
     type: "object",
     properties: {
@@ -214,7 +213,6 @@ export const workStartTool: RunnableTool = {
       "question",
       "findings",
       "requestedChange",
-      "sourceMessage",
       "cause",
       "evidence",
       "requirements",
@@ -230,8 +228,9 @@ export const workStartTool: RunnableTool = {
       return "error: I need a repository owner/name before starting the fix.";
     const checked = validateWorkBriefDraft(input);
     if (!checked.ok) return `error: ${JSON.stringify({ kind: "invalid_brief", issues: checked.issues })}`;
-    if (!text(input.sourceMessage, 1000)) return "error: I need a quote from the request message; nothing started.";
-    const result = await ctx.mainStart.start(input.repo, checked.brief, input.sourceMessage);
+    const sourceMessage = typeof input.sourceMessage === "string" ? input.sourceMessage : "";
+    if (sourceMessage.length > 1000) return "error: The request quote is too long; nothing started.";
+    const result = await ctx.mainStart.start(input.repo, checked.brief, sourceMessage);
     switch (result.kind) {
       case "accepted":
         return `Started one private worker. Work id: ${result.actId}. The main conversation stays here while it works.`;
@@ -240,7 +239,7 @@ export const workStartTool: RunnableTool = {
       case "pending":
         return `Work start is pending confirmation. Work id: ${result.actId}. ${result.reply}`;
       case "refused":
-        return `error: ${result.issues ? JSON.stringify({ kind: "invalid_brief", issues: result.issues }) : result.reply}`;
+        return `error: ${result.issues ? JSON.stringify({ kind: "invalid_brief", issues: result.issues }) : result.sourceReason ? JSON.stringify({ kind: "source_resolution", code: result.sourceReason }) : result.reply}`;
     }
   },
 };

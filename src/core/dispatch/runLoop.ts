@@ -157,7 +157,7 @@ import { registerFinishRecord } from "./record.js";
 import { artifactLink, cardActivity, compactActivity, replyAck, threadPageLink } from "./reply.js";
 import { shows } from "../verbosity.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
-import { MainSourceTracker } from "./mainSource.js";
+import { MainSourceTracker, type MainSourceFailureCode } from "./mainSource.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 import { mainWorkerCapabilityFor, privateProgressSourceTrusted } from "./mainWorkerCapability.js";
 import { buildDepotCi } from "../../execution/depotCi.js";
@@ -1567,27 +1567,41 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     channelVisibility,
     initial: { actor: chatActorOf(deps.config, msg), msg },
     source: async (sourceMessage, repo) => {
-      const selected = mainSources.get(sourceMessage);
-      if (!selected || !deps.coordinatorInstances) return undefined;
-      const turn = await deps.coordinatorInstances
-        .latestRequesterTurn({
-          threadKey: selected.msg.threadKey,
-          requesterId: selected.msg.userId,
-        })
-        .catch(() => null);
-      if (!turn || turn.messageId !== selected.msg.messageId) return undefined;
-      const work = mainSources.getWorkRequest(sourceMessage, repo, ctx.configuredRepo);
-      return work
-        ? {
-            ...work,
-            authority: {
-              requesterId: selected.msg.userId,
-              sourceMessageId: turn.messageId,
-              revision: turn.revision,
-              repo: work.authorizedRepo,
-            },
-          }
-        : undefined;
+      const refuse = (reason: MainSourceFailureCode) => {
+        events.publish({
+          type: "run_note",
+          kind: "work_source_refused",
+          summary: "Private work source refused.",
+          sourceReason: reason,
+          at: clock(),
+        });
+        return { kind: "refused" as const, reason };
+      };
+      const selected = mainSources.select(sourceMessage);
+      if (selected.kind === "refused") return refuse(selected.reason);
+      if (!deps.coordinatorInstances) return refuse("authority_store_unavailable");
+      let turn;
+      try {
+        turn = await deps.coordinatorInstances.latestRequesterTurn({
+          threadKey: selected.source.msg.threadKey,
+          requesterId: selected.source.msg.userId,
+        });
+      } catch {
+        return refuse("requester_turn_read_failed");
+      }
+      if (!turn) return refuse("requester_turn_missing");
+      if (turn.messageId !== selected.source.msg.messageId) return refuse("requester_turn_superseded");
+      const work = mainSources.bindRepository(selected.source, repo, ctx.configuredRepo);
+      if (work.kind === "refused") return refuse(work.reason);
+      return {
+        ...work,
+        authority: {
+          requesterId: selected.source.msg.userId,
+          sourceMessageId: turn.messageId,
+          revision: turn.revision,
+          repo: work.authorizedRepo,
+        },
+      };
     },
     live: () =>
       mainWorkTrusted &&
