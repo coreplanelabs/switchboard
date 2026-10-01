@@ -1,7 +1,7 @@
 // The operator (docs/decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat-input-and-deterministic-code-authorizes-fences-and-executes.md;
 // the one-door plan's operator unit; docs/reference/specs/routing-and-config.md item
-// 29): ONE model turn that binds an admitted chat event into typed registry
-// calls. Under `routing.operator: shadow` the dispatcher calls it once per
+// 29): one typed decision binds an admitted chat event into registry calls; a
+// single explicit PR directive can bind without a model turn. Under `routing.operator: shadow` the dispatcher calls it once per
 // admitted chat event ahead of stage A and outside the deterministic
 // live-thread and directive short-circuits, and its decision is written
 // beside the routed request in the run store — the bound line redacted and
@@ -63,7 +63,7 @@ import { chatActorOf } from "../authz/actor.js";
 import { renderRepoFacts } from "./repoFacts.js";
 import { verifyPrTargetEvidence, type PrTargetEvidence } from "./targetEvidence.js";
 import { requesterTargetText, requesterUrlText, requesterUrlWords } from "./requesterText.js";
-import { barePrNumberOf, explicitRepoOf, type ResidentSlugs } from "../repoContext.js";
+import { barePrNumberOf, explicitPrOf, explicitRepoOf, type ResidentSlugs } from "../repoContext.js";
 import { parseSlug } from "../residentAdmin.js";
 import { prBatchBindingOf, type PrBatchBinding } from "../prBatchBinding.js";
 import { residentSlugsLister } from "../../execution/factory.js";
@@ -71,7 +71,7 @@ import type { ProviderModelsReader } from "./providerModels.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
 import { effectiveConfirm } from "../../config/profile.js";
 import { boundBlastRadius, type CommandDef, type CommandInput } from "../commandRegistry.js";
-import { chatInvocation, cliWords, namedToInput } from "../commandSurface.js";
+import { chatInvocation, cliWords, namedToInput, tokenize } from "../commandSurface.js";
 import { GRANT_RENEWALS_MAX, MINUTE_MS, STRUCTURED_RETRIES_MAX } from "../budgets.js";
 import { chatCallerFor, parseChatCommand, type ChatCommands } from "../commandChat.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
@@ -2060,6 +2060,10 @@ export function requesterThreadEvidence(
 }
 
 /**
+ * The deterministic exception: a single explicit, current requester PR directive
+ * can be parsed and checked against the same typed evidence boundary before
+ * the model decides. Unclear intent or target still takes the model's door.
+ *
  * The operator's loop (record 0069, as amended): the prompt with the typed
  * tools, under ONE timeout covering the whole loop. A read tool call is
  * answered from the turn's own state (`answerOperatorRead`) and the model is
@@ -2079,6 +2083,113 @@ export function requesterThreadEvidence(
  * becomes a typed refusal with the cause's one safe sentence. It never falls
  * through to the configured default.
  */
+function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined {
+  const directives = parseDirectives(input.text);
+  const preset = directives.agent;
+  if (preset !== "review" && preset !== "ship") return undefined;
+  if (!input.projection.presets.some((offered) => offered.name === preset)) return undefined;
+  if (input.owner && input.owner.kind !== "pipeline") return undefined;
+  if (input.owner?.kind === "pipeline" && preset === "review" && !input.owner.allowReview) return undefined;
+  // A setting needs the operator's typed evidence and cannot be silently
+  // projected away by this narrow PR-only path.
+  if (Object.keys(directives).some((key) => key !== "agent" && key !== "text")) return undefined;
+  // Keep newlines and indentation: parseDirectives normalizes whitespace,
+  // which would erase the requesterTargetText quote/code boundary.
+  const words = stripDirectiveHead(input.text, preset);
+  const addressable = requesterTargetText(words);
+  const urlWords = requesterUrlWords(addressable)
+    .map(requesterUrlText)
+    .filter((url): url is string => url !== undefined);
+  if (urlWords.length !== 1) return undefined;
+  const quote = urlWords[0]!;
+  const index = words.indexOf(quote);
+  if (index < 0) return undefined;
+  let before = words.slice(0, index).trim();
+  let after = words.slice(index + quote.length).trim();
+  // An authored Slack label is task text too, not an ignorable URL decoration.
+  if (after.startsWith("|")) return undefined;
+  if (before.endsWith("<") && after.startsWith(">")) {
+    before = before.slice(0, -1).trim();
+    after = after.slice(1).trim();
+  }
+  const front = tokenize(before);
+  const tail = tokenize(after);
+  if (!front.ok || !tail.ok) return undefined;
+  const intent = front.tokens.map((token) => token.toLowerCase());
+  if (intent[0] === "please") intent.shift();
+  const action = intent.shift();
+  // These are the typed preset/Ship-entry verbs and PR target noun, not
+  // alternative phrasings of a task. Every other word stays with the model.
+  if (intent.length !== 0 && !(intent.length === 2 && intent[0] === "pull" && intent[1] === "request"))
+    return undefined;
+  if (action !== undefined && action !== "review" && action !== preset && !(preset === "ship" && action === "continue"))
+    return undefined;
+  if (preset === "ship" && action === "continue" && input.owner?.kind !== "pipeline") return undefined;
+  // On an ended unit a Ship bind folds into continuation, even when it says
+  // review. Let the operator choose an independent Review bind instead.
+  if (preset === "ship" && action === "review" && input.owner?.kind === "pipeline") return undefined;
+  // The sole supported qualifier is an exact head pin. Any other suffix,
+  // including a second task, belongs to the model's intent choice.
+  if (tail.tokens.length > 0) {
+    if (preset !== "review") return undefined;
+    const [preposition, ...qualifier] = tail.tokens.map((token) => token.toLowerCase());
+    if (preposition !== "with" && preposition !== "at") return undefined;
+    if (qualifier[0] === "the") qualifier.shift();
+    if (qualifier[0] === "exact") qualifier.shift();
+    if (qualifier.shift() !== "head" || qualifier.length !== 1) return undefined;
+    let sha = qualifier[0]!;
+    if (sha.endsWith(".") || sha.endsWith("!")) sha = sha.slice(0, -1);
+    if (sha.length < 7 || sha.length > 40 || [...sha].some((char) => !"0123456789abcdef".includes(char)))
+      return undefined;
+  }
+  let url: URL;
+  try {
+    url = new URL(quote);
+  } catch {
+    return undefined;
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== "github.com" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    url.search ||
+    url.hash
+  )
+    return undefined;
+  const direct = explicitPrOf(input.text);
+  const repo = explicitRepoOf(input.text);
+  if (!direct || !repo || repo !== direct.repo) return undefined;
+  const prTarget = verifyPrTargetEvidence(
+    { number: direct.number, source: "request", quote },
+    { requestText: input.text, repo },
+  );
+  if (!prTarget) return undefined;
+  const shipEntry = preset === "ship" ? (input.owner?.kind === "pipeline" ? "continue" : "review") : undefined;
+  const reason = "explicit requester PR target";
+  const turn = parseOperatorTurn(
+    {
+      tool: OPERATOR_BIND_TOOL,
+      input: {
+        preset,
+        repo,
+        ...(shipEntry ? { shipEntry } : {}),
+        ...(shipEntry !== "continue" ? { prTarget } : {}),
+        reason,
+      },
+    },
+    {
+      requestText: input.text,
+      requesterId: input.requesterId,
+      tail: input.tail,
+      presets: input.projection.presets.map((offered) => offered.name),
+      commands: input.projection.commands,
+    },
+  );
+  return turn.kind === "decision" && turn.decision.kind === "binds" ? turn.decision : undefined;
+}
+
 export async function runOperator(
   input: OperatorInput,
   model: RouteModel,
@@ -2086,6 +2197,15 @@ export async function runOperator(
 ): Promise<OperatorAnswer> {
   const now = opts.now ?? Date.now;
   const started = now();
+  // An unambiguous, current requester directive is already a typed target.
+  // Do not make the model reconstruct its repo and PR before the review door.
+  const direct = explicitPrDirective(input);
+  if (direct)
+    return {
+      decision: direct,
+      latencyMs: now() - started,
+      outputTokens: 0,
+    };
   let prompt = buildOperatorPrompt(input);
   // The turn parse reads the author's FULL projection even on an owned thread
   // (issue 2027): a call naming a tool the owned turn was not offered is a

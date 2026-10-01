@@ -60,6 +60,7 @@ import type { IncomingMessage } from "../types.js";
 import type { CommandDef } from "../commandRegistry.js";
 import { mcpToolName } from "../commandSurface.js";
 import { verifyPrTargetEvidence } from "./targetEvidence.js";
+import type { RequesterTarget } from "../runLedger/ledger.js";
 
 const tool = (name: string): ToolDef => ({ name, description: name, inputSchema: { type: "object", properties: {} } });
 const command = (id: string): RoutableCommand => ({
@@ -90,7 +91,271 @@ const ctxOf = (over: Partial<OperatorTurnContext> = {}): OperatorTurnContext => 
   ...over,
 });
 
+describe("explicit PR directives at the operator stage", () => {
+  it.each([
+    { surface: "fresh MCP review", channelId: "mcp:session", preset: "review", owner: undefined },
+    {
+      surface: "long private Ship continuation",
+      channelId: "slack:D1",
+      preset: "ship",
+      owner: { kind: "pipeline" as const, unit: "u1" },
+    },
+  ])(
+    "binds the original PR from a $surface despite a malformed model question",
+    async ({ channelId, preset, owner }) => {
+      const dir = mkdtempSync(join(tmpdir(), "swb-explicit-pr-"));
+      const path = join(dir, "config.yaml");
+      writeFileSync(
+        path,
+        `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
+      );
+      const model = vi.fn<RouteModel>(async () => ({
+        tool: OPERATOR_ASK_TOOL,
+        input: { text: "Which repository?", proposalSettings: {}, reason: "missing" },
+      }));
+      const url = "https://github.com/acme/api/pull/7";
+      const result = await operatorStage(
+        {
+          config: new ConfigStore(path, join(dir, "overrides.json")),
+          operatorModel: model,
+          runLedger: {
+            readSessionTail: async () => ({
+              transcript: {
+                complete: true,
+                turns: 2,
+                messages: [
+                  {
+                    role: "user",
+                    content: [{ type: "text", text: "Investigate https://github.com/acme/api/issues/3" }],
+                  },
+                  { role: "assistant", content: [{ type: "text", text: "Earlier answer ".repeat(8_000) }] },
+                ],
+                compactions: [],
+                actors: ["slack:UREQUESTER", undefined],
+              },
+            }),
+            readRequesterTarget: async () => ({
+              repo: "acme/api",
+              issue: "acme/api#3",
+              provenance: "Investigate https://github.com/acme/api/issues/3",
+            }),
+            checkpointRequesterTarget: async (_key: string, _actor: string, target: RequesterTarget) => target,
+          } as never,
+        },
+        {
+          msg: { channelId, userId: "slack:UREQUESTER", threadKey: `${channelId}:1`, text: `agent:${preset} ${url}` },
+          mode: "on",
+          ...(owner ? { owner } : {}),
+          thread: [{ finished: true, agent: "general", repo: "acme/api" }],
+        },
+      );
+      expect(model).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        outcome: "binds",
+        binds: [
+          {
+            repo: "acme/api",
+            repoSource: "request",
+            ...(preset === "ship" ? { shipEntry: "continue" } : { prTarget: { number: 7, quote: url } }),
+          },
+        ],
+      });
+    },
+  );
+});
+
 describe("the operator is one loop with typed tools", () => {
+  it.each(["review", "ship"])(
+    "binds an explicit %s PR URL before an invalid question can exhaust the door",
+    async (preset) => {
+      const url = "https://github.com/acme/api/pull/7";
+      const model = vi.fn<RouteModel>(async () => ({
+        tool: OPERATOR_ASK_TOOL,
+        input: { text: "Which repository?", proposalSettings: {}, reason: "missing repository" },
+      }));
+      const answer = await runOperator(
+        input({
+          text: `agent:${preset} ${url}`,
+          projection: projectionOf(["review", "ship"]),
+          requesterId: "slack:UREQUESTER",
+          tail: [{ actor: "slack:UREQUESTER", text: "user: investigate https://github.com/acme/api/issues/3" }],
+        }),
+        model,
+      );
+      expect(model).not.toHaveBeenCalled();
+      expect(answer.decision).toMatchObject({
+        kind: "binds",
+        binds: [
+          {
+            repo: "acme/api",
+            repoSource: "request",
+            ...(preset === "ship" ? { shipEntry: "review" } : {}),
+            prTarget: { source: "request", number: 7, quote: url },
+          },
+        ],
+      });
+    },
+  );
+
+  it.each([
+    { preset: "review", words: "Please review pull request", entry: undefined },
+    { preset: "ship", words: "review pull request", entry: "review" },
+  ])(
+    "binds a tokenized $preset PR request with a target noun before an invalid model question",
+    async ({ preset, words, entry }) => {
+      const url = "https://github.com/acme/api/pull/7";
+      const model = vi.fn<RouteModel>(async () => ({
+        tool: OPERATOR_ASK_TOOL,
+        input: { text: "Which repository?", proposalSettings: {}, reason: "missing repository" },
+      }));
+      const answer = await runOperator(
+        input({ text: `agent:${preset} ${words} ${url}`, projection: projectionOf([preset]) }),
+        model,
+      );
+      expect(model).not.toHaveBeenCalled();
+      expect(answer.decision).toMatchObject({
+        kind: "binds",
+        binds: [
+          {
+            repo: "acme/api",
+            repoSource: "request",
+            ...(entry ? { shipEntry: entry } : {}),
+            prTarget: { number: 7, source: "request", quote: url },
+          },
+        ],
+      });
+    },
+  );
+
+  it("binds an explicit review with a head constraint without changing the authored request", async () => {
+    const url = "https://github.com/acme/api/pull/7";
+    const text = `agent:review ${url} with exact head ${"a".repeat(40)}`;
+    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: {} }));
+    const answer = await runOperator(input({ text, projection: projectionOf(["review"]) }), model);
+    expect(model).not.toHaveBeenCalled();
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ line: text, repo: "acme/api", prTarget: { number: 7, quote: url } }],
+    });
+  });
+
+  it("binds an unlabeled Slack-formatted explicit review to its destination", async () => {
+    const url = "https://github.com/acme/api/pull/7";
+    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: {} }));
+    const answer = await runOperator(
+      input({ text: `agent:review <${url}>`, projection: projectionOf(["review"]) }),
+      model,
+    );
+    expect(model).not.toHaveBeenCalled();
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/api", prTarget: { number: 7, quote: url } }],
+    });
+  });
+
+  it("binds a typed continue verb on the original Ship PR without asking the model", async () => {
+    const url = "https://github.com/acme/api/pull/7";
+    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which repository?" } }));
+    const answer = await runOperator(
+      input({
+        text: `agent:ship continue ${url}`,
+        projection: projectionOf(["ship"]),
+        owner: { kind: "pipeline", unit: "u1" },
+      }),
+      model,
+    );
+    expect(model).not.toHaveBeenCalled();
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ repo: "acme/api", shipEntry: "continue" }] });
+    if (answer.decision.kind !== "binds") throw new Error("expected a Ship continuation bind");
+    expect(answer.decision.binds[0]).not.toHaveProperty("prTarget");
+  });
+
+  it("binds a Ship PR URL as continuation in its ended pipeline thread, not as a second writer", async () => {
+    const url = "https://github.com/acme/api/pull/7";
+    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: {} }));
+    const answer = await runOperator(
+      input({
+        text: `agent:ship ${url}`,
+        projection: projectionOf(["ship"]),
+        owner: { kind: "pipeline", unit: "u1" },
+        requesterId: "slack:UREQUESTER",
+        tail: [{ actor: "slack:UREQUESTER", text: "user: https://github.com/acme/api/issues/3" }],
+      }),
+      model,
+    );
+    expect(model).not.toHaveBeenCalled();
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/api", repoSource: "request", shipEntry: "continue" }],
+    });
+    if (answer.decision.kind !== "binds") throw new Error("expected a Ship continuation bind");
+    expect(answer.decision.binds[0]).not.toHaveProperty("prTarget");
+  });
+
+  it.each([
+    "agent:review https://github.com/acme/api/pull/7 https://github.com/acme/api/pull/8",
+    "agent:review https://evil.test/https://github.com/acme/api/pull/7",
+    "agent:review `https://github.com/acme/api/pull/7`",
+    "agent:review > https://github.com/acme/api/pull/7",
+    "agent:review\n> https://github.com/acme/api/pull/7",
+    "agent:review\n    https://github.com/acme/api/pull/7",
+    "agent:review\n```\nhttps://github.com/acme/api/pull/7\n```",
+    "agent:ship https://github.com/acme/api/pull/7 model:openai/o3",
+    "agent:review do not review https://github.com/acme/api/pull/7",
+    "agent:review ship https://github.com/acme/api/pull/7",
+    "agent:review https://github.com/acme/api/pull/7 is only background; fix the gate instead",
+    "agent:ship <https://github.com/acme/api/pull/7|fix the failing check>",
+    "agent:review <https://github.com/acme/api/pull/7|a different PR #8>",
+    "agent:ship continue https://github.com/acme/api/pull/7", // no owned unit: continuation cannot start fresh
+    "agent:ship review pull request https://github.com/acme/api/pull/7 and fix its gate",
+    "agent:ship review continue https://github.com/acme/api/pull/7",
+    "agent:review Please review pull request https://github.com/acme/api/pull/7 budget:30",
+  ])("does not auto-bind conflicting, foreign, quoted or setting-bearing requests: %s", async (text) => {
+    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which PR?" } }));
+    const answer = await runOperator(input({ text, projection: projectionOf(["review", "ship"]) }), model);
+    expect(model).toHaveBeenCalled();
+    expect(answer.decision.kind).not.toBe("binds");
+  });
+
+  it("leaves an ended owner's Ship review wording to the operator instead of folding it as continuation", async () => {
+    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Review or continue?" } }));
+    const answer = await runOperator(
+      input({
+        text: "agent:ship review pull request https://github.com/acme/api/pull/7",
+        owner: { kind: "pipeline", unit: "u1", allowReview: true },
+        projection: projectionOf(["ship", "review"]),
+      }),
+      model,
+    );
+    expect(model).toHaveBeenCalled();
+    expect(answer.decision.kind).not.toBe("binds");
+  });
+
+  it("keeps a genuine conflicting PR target at the typed gate even if the model tries to bind one", async () => {
+    const text = "agent:review https://github.com/acme/api/pull/7 https://github.com/acme/api/pull/8";
+    const model = vi.fn<RouteModel>(async () => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: {
+        preset: "review",
+        repo: "acme/api",
+        prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+        reason: "first PR",
+      },
+    }));
+    const answer = await runOperator(input({ text, projection: projectionOf(["review"]) }), model);
+    expect(model).toHaveBeenCalled();
+    expect(answer.decision.kind).toBe("non_decision");
+  });
+
+  it("does not bind a PR without the requester's permitted preset", async () => {
+    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "No permitted review" } }));
+    const answer = await runOperator(
+      input({ text: "agent:review https://github.com/acme/api/pull/7", projection: projectionOf(["general"]) }),
+      model,
+    );
+    expect(model).toHaveBeenCalled();
+    expect(answer.decision.kind).not.toBe("binds");
+  });
   it("an attached plan supplies routing evidence and an onboarded repository without rewriting the request", async () => {
     const plan = "Release atlas-v3.39.0 changed the health dashboard.";
     const escapedToken = `sk-\x1b[31m${"A".repeat(20)} `;

@@ -10726,7 +10726,7 @@ workspaceDir: __WORKDIR__
   });
 
   it("an explicit Ship review request uses the operator's review entry and starts at review on the verified PR", async () => {
-    for (const request of [`agent:ship review ${PR_URL}`, `agents:ship review ${PR_URL}`]) {
+    for (const request of [`agent:ship review pull request ${PR_URL}`, `agents:ship review ${PR_URL}`]) {
       const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
       deps.resolveRepoContext = vi.fn((_msg, _history, _records, _fallback, _reviewBarePr, target) => {
         expect(target).toMatchObject({
@@ -10736,20 +10736,24 @@ workspaceDir: __WORKDIR__
         return { repo: "acme/api", pr: 7, prFromMessage: true, headSha: HEAD_A, baseRef: "main" };
       });
       deps.fetchPrFacts = vi.fn(async () => openBotPr());
-      deps.operatorModel = vi.fn<RouteModel>(async () => ({
-        tool: "bind_preset",
-        input: {
-          preset: "ship",
-          shipEntry: "review",
-          repo: "acme/api",
-          prTarget: { number: 7, source: "request", quote: PR_URL },
-          reason: "review the named PR",
-        },
-      }));
+      deps.operatorModel = vi.fn<RouteModel>(async () =>
+        request.startsWith("agent:")
+          ? { tool: "ask", input: { text: "Which repository?", proposalSettings: {}, reason: "missing" } }
+          : {
+              tool: "bind_preset",
+              input: {
+                preset: "ship",
+                shipEntry: "review",
+                repo: "acme/api",
+                prTarget: { number: 7, source: "request", quote: PR_URL },
+                reason: "review the named PR",
+              },
+            },
+      );
       deps.runRegistry = new RunRegistry({ genId: () => "run-ship-review-entry", genToken: () => "tok" });
       const { io } = fakeIO();
       await dispatch(deps, msg(request, "slack:UADMIN"), io);
-      expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+      expect(deps.operatorModel).toHaveBeenCalledTimes(request.startsWith("agent:") ? 0 : 1);
       expect(created).toHaveLength(1);
       const { unit } = await handed(instances, "run-ship-review-entry");
       expect(unit).toMatchObject({ resume: { pr: 7, headSha: HEAD_A } });
@@ -10764,7 +10768,7 @@ workspaceDir: __WORKDIR__
     }));
     deps.runRegistry = new RunRegistry({ genId: () => "run-ship-no-stage", genToken: () => "tok" });
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg(`agent:ship review ${PR_URL}`, "slack:UADMIN"), io);
+    await dispatch(deps, msg(`agent:ship review ${PR_URL} and fix the failing check`, "slack:UADMIN"), io);
     expect(replies.join("\n")).toContain("nothing started");
     expect(created).toEqual([]);
     expect((await handed(instances, "run-ship-no-stage")).instance).toBeNull();
@@ -10783,7 +10787,7 @@ workspaceDir: __WORKDIR__
     deps.operatorModel = vi.fn<RouteModel>(async () => ({ tool: "refuse", input: { text: "invented refusal" } }));
     deps.runRegistry = new RunRegistry({ genId: () => "run-ship-no-decision", genToken: () => "tok" });
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg(`agent:ship review ${PR_URL}`, "slack:UADMIN"), io);
+    await dispatch(deps, msg(`agent:ship review ${PR_URL} and fix the failing check`, "slack:UADMIN"), io);
     expect(replies).toContain("I couldn't bind this request to an action, so nothing started.");
     expect(created).toEqual([]);
     expect((await handed(instances, "run-ship-no-decision")).instance).toBeNull();
@@ -10825,6 +10829,33 @@ workspaceDir: __WORKDIR__
     });
     expect(click).toEqual({ status: "completed" });
     expect(created).toHaveLength(1);
+  });
+
+  it("a Ship PR link label requesting different work goes to the operator's work-confirmation gate", async () => {
+    const { deps, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, prFromMessage: true });
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: {
+        preset: "ship",
+        shipEntry: "work",
+        workObjective: "fix the failing check",
+        repo: "acme/api",
+        reason: "separate work",
+      },
+    }));
+    const now = 1_000_000;
+    deps.clock = () => now;
+    deps.confirmations = new InMemoryConfirmationStore({ clock: () => now });
+    const request = `agent:ship <${PR_URL}|fix the failing check>`;
+    const f = fakeIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    f.io.offer = vi.fn(async (offer) => void offers.push(offer));
+    await dispatch(deps, msg(request, "slack:UADMIN"), f.io);
+    expect(deps.operatorModel).toHaveBeenCalledOnce();
+    expect(created).toEqual([]);
+    expect(offers).toHaveLength(1);
+    expect(offers[0]!.question?.text).toContain("fix the failing check");
   });
 
   it("a PR-work Yes cannot authorize a different objective chosen on redispatch", async () => {
@@ -20395,6 +20426,29 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.deps.invoked).toEqual([]);
   });
 
+  it("a tokenized Ship continue request checks the original PR and head instead of issuing a second writer", async () => {
+    const s = await endedPrContinuationSetup();
+    const movedHead = "2".repeat(40);
+    s.deps.fetchPrFacts = vi.fn(async () => ({
+      state: "open" as const,
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: s.branch,
+      headSha: movedHead,
+      verifiedHead: { repo: "acme/api", ref: s.branch, sha: movedHead },
+      baseRef: "main",
+      htmlUrl: "https://github.com/acme/api/pull/7",
+    }));
+    const { io, replies } = fakeIO();
+    await dispatch(s.deps, msg("agent:ship continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io, {
+      thread: [s.shipParent],
+    });
+    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.deps.fetchPrFacts).toHaveBeenCalledExactlyOnceWith({ repo: "acme/api", number: 7 });
+    expect(replies.join(" ")).toContain("moved from the pipeline's expected head");
+    expect(s.shipBranch).not.toHaveBeenCalled();
+  });
+
   it("a typed Ship continuation without a PR target resumes the verified owned unit", async () => {
     const s = await endedPrContinuationSetup();
     s.deps.fetchPrFacts = vi.fn(async () => ({
@@ -20439,7 +20493,11 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     }));
     const { io, replies } = fakeIO();
 
-    await dispatch(s.deps, msg("agent:review https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
+    await dispatch(
+      s.deps,
+      msg("agent:review https://github.com/acme/api/pull/7; instead fix the gate", "slack:UADMIN"),
+      io,
+    );
 
     expect(s.shipBranch).not.toHaveBeenCalled();
     expect(replies.join(" ")).toContain("Nothing started");
@@ -23108,6 +23166,26 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       repo: "acme/web",
       pr: 5,
     });
+  });
+
+  it("a requester-authored Review PR URL reaches preflight even when the model would ask for its repository", async () => {
+    const { deps } = operatorDeps(ON_YAML);
+    const url = "https://github.com/acme/api/pull/7";
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "ask",
+      input: { text: "Which repository?", proposalSettings: {}, reason: "missing" },
+    }));
+    deps.resolveRepoContext = vi.fn(() => ({ repo: "acme/api", pr: 7, closedPr: { number: 7, merged: true } }));
+    await dispatch(deps, msg(`agent:review Please review pull request ${url}`, "slack:UADMIN"), fakeIO().io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(deps.resolveRepoContext).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      undefined,
+      expect.anything(),
+      true,
+      { repo: "acme/api", prTarget: { number: 7, source: "request", quote: url } },
+    );
   });
 
   it("the early review preflight receives the operator's verified PR target", async () => {
