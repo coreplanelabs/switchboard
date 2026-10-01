@@ -10,6 +10,7 @@ import type { RunStateEvent } from "./runLiveState.js";
 import type { Effort } from "../effort.js";
 import type { AddressSeverity } from "./reviewVerdict.js";
 import type { Verbosity } from "./verbosity.js";
+import type { MainSourceFailureCode } from "./dispatch/mainSource.js";
 
 /** The `pr_description` review artifact minus the event envelope
  *  (docs/reference/specs/reading-diff.md item 7). */
@@ -270,6 +271,8 @@ export type RunNoteKind =
    *  item 7): the summary names the tool and the rule; the model read the same
    *  reason as the tool's result. Published by the bot's authorize route. */
   | "tool_refused"
+  /** The producer rejected a private work source before any worker claim. */
+  | "work_source_refused"
   /** OpenCode withdrew a pending ask before the gate's reply to it landed
    *  (harness.md item 2): the server answered the reply 404 and its pending
    *  asks no longer listed the ask — the gate refused a sibling call of the
@@ -376,6 +379,7 @@ export const RUN_NOTE_KINDS = [
   "harness_error",
   "policy_refusal",
   "tool_refused",
+  "work_source_refused",
   "ask_withdrawn",
   "settle_set_aside",
   "tool_unnamed",
@@ -656,6 +660,8 @@ export type RunEvent =
       type: "run_note";
       kind: RunNoteKind;
       summary: string;
+      /** A bounded private source decision; never includes a message, actor or repository. */
+      sourceReason?: MainSourceFailureCode;
       /** Runner-owned baseline receipt; model text cannot authorize execution. */
       firstTest?: FirstTestReceipt;
       mode?: StopMode;

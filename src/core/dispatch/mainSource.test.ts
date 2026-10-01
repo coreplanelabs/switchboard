@@ -26,6 +26,34 @@ const actor = (msg: IncomingMessage): Actor => ({
 });
 
 describe("private main work source — admitted conversation messages", () => {
+  it("reports a compromised source separately from a quote that is not in the latest turn", () => {
+    const sources = new MainSourceTracker(initial, actor);
+    expect(sources.select("fix it")).toEqual({ kind: "refused", reason: "source_quote_mismatch" });
+    expect(sources.select(" ")).toEqual({ kind: "refused", reason: "source_quote_missing" });
+    sources.accept([{ userId: "slack:UOTHER", directAudience, text: "fix it", messageId: "2", at: 2 }]);
+    expect(sources.select("fix it")).toEqual({ kind: "refused", reason: "source_compromised" });
+  });
+
+  it("keeps missing pilot configuration distinct from a mismatched target", () => {
+    const sources = new MainSourceTracker(initial, actor);
+    const selected = sources.select(initial.text);
+    expect(selected.kind).toBe("selected");
+    if (selected.kind !== "selected") return;
+    expect(sources.bindRepository(selected.source, "acme/api")).toEqual({
+      kind: "refused",
+      reason: "repository_unconfigured",
+    });
+    expect(sources.bindRepository(selected.source, "vendor/lib", "acme/api")).toEqual({
+      kind: "refused",
+      reason: "repository_mismatch",
+    });
+    expect(sources.bindRepository(selected.source, "ACME/API", "acme/api")).toMatchObject({
+      kind: "ready",
+      authorizedRepo: "acme/api",
+      msg: { messageId: "1" },
+    });
+  });
+
   it("binds only the latest delivered person turn to the configured pilot repository", () => {
     const sources = new MainSourceTracker(initial, actor);
     sources.accept([{ userId: initial.userId, directAudience, text: "fix it", messageId: "2", at: 2 }]);

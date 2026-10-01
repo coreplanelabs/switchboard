@@ -7,6 +7,7 @@ import type { IncomingMessage } from "../types.js";
 import { handOffToCoordinator, type HandOffDeps } from "./handOff.js";
 import { isMainTaskKey, type StoredWorkBriefDraft, type WorkBriefIssue } from "./contract.js";
 import { isMainTaskAuthority, type MainTaskAuthority } from "./requesterAuthority.js";
+import type { MainSourceFailureCode } from "../dispatch/mainSource.js";
 
 /** Trusted dispatch context supplies the actor, message, gates and runner seams.
  * The model supplies only a repository and bounded evidence for one change. */
@@ -41,7 +42,7 @@ export type MainStartResult =
   | { kind: "accepted"; actId: string; instanceId: string; reply: string }
   | { kind: "existing"; actId: string; instanceId: string; reply: string }
   | { kind: "pending"; actId: string; instanceId?: string; reply: string }
-  | { kind: "refused"; reply: string; issues?: WorkBriefIssue[] };
+  | { kind: "refused"; reply: string; issues?: WorkBriefIssue[]; sourceReason?: MainSourceFailureCode };
 
 const refuse = (reply: string): MainStartResult => ({ kind: "refused", reply });
 
