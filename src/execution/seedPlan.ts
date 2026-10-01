@@ -12,6 +12,7 @@
 // Worker like sandboxErrors.ts. The Worker runs it; the bot forwards it.
 
 import { shellQuote } from "./shellQuote.js";
+import { FIRST_TEST_MAX_MS, SECOND_MS } from "../core/budgets.js";
 
 /** Where the seeded checkout lands: the run's working tree. */
 export const SEED_CHECKOUT_DIR = "/workspace/checkout";
@@ -29,6 +30,26 @@ export interface ReadyEnvironmentRequirement {
   testCommand: string;
   requiredTools: readonly string[];
   dependencyDir: string;
+  /** Explicit operator opt-in to executing this bounded baseline before coding. */
+  firstAction?: { kind: "baseline_test"; policyVersion: string; timeoutMs: number };
+}
+
+export function validateFirstAction(requirement: ReadyEnvironmentRequirement): void {
+  const action = requirement.firstAction;
+  if (action === undefined) return;
+  if (
+    typeof action !== "object" ||
+    action === null ||
+    Array.isArray(action) ||
+    Object.keys(action).some((key) => !["kind", "policyVersion", "timeoutMs"].includes(key)) ||
+    action.kind !== "baseline_test" ||
+    typeof action.policyVersion !== "string" ||
+    !/^[A-Za-z0-9_.-]{1,64}$/.test(action.policyVersion) ||
+    !Number.isInteger(action.timeoutMs) ||
+    action.timeoutMs < SECOND_MS ||
+    action.timeoutMs > FIRST_TEST_MAX_MS
+  )
+    throw new Error("ready environment: firstAction must declare baseline_test, policyVersion and a bounded timeoutMs");
 }
 
 export type ReadyEnvironmentOutcome =
@@ -65,6 +86,7 @@ export function readyEnvironmentCommand(
   requirement: ReadyEnvironmentRequirement,
   seededFromSha?: string,
 ): string {
+  validateFirstAction(requirement);
   const command = requirement.testCommand;
   const program = /^([A-Za-z_][A-Za-z0-9_.+-]*)(?:\s|$)/.exec(command)?.[1];
   if (!program || command.length > 512 || [...command].some((ch) => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127))
@@ -342,6 +364,8 @@ export interface SeededSandbox {
   sha: string;
   /** The snapshot commit whose root lockfiles supplied the dependency view. */
   sourceSha?: string;
+  /** The actual restored dependency archive, vouched for by the seed response. */
+  depsBackupId?: string;
   /** The checkout's path inside the sandbox — the run's working tree. */
   workspace: string;
   /** The container already carried this seed: nothing was restored. */

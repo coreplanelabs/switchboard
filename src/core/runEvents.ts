@@ -1,3 +1,4 @@
+import type { FirstTestReceipt } from "./firstTestReceipt.js";
 // Types only, and from the zod-free module deliberately: this file is part of
 // the node-free contract the memory Worker and web app compile with their own
 // tsconfigs — importing prDescription.ts would drag zod into those graphs.
@@ -73,6 +74,7 @@ export interface PrDescriptionArtifactEvent extends PrDescriptionArtifact {
  *  `stop_requested` is published by the registry when an operator asks the run
  *  to stop from /runs; `stopped` by the harness when it honors it. */
 export type RunNoteKind =
+  | "first_test"
   | "wrap_up"
   | "time_budget_exhausted"
   | "turn_budget_exhausted"
@@ -336,6 +338,7 @@ export type RunNoteKind =
 /** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
  *  this; adding a kind to the union without adding it here is a type error). */
 export const RUN_NOTE_KINDS = [
+  "first_test",
   "wrap_up",
   "time_budget_exhausted",
   "tool_cut",
@@ -507,6 +510,7 @@ export function isHeadMaterial(event: RunEvent): boolean {
       return true;
     case "run_note":
       return (
+        event.kind === "first_test" ||
         event.kind === "mcp_unavailable" ||
         event.kind === "spans_dropped" ||
         event.kind === "cold_sandbox" ||
@@ -651,6 +655,8 @@ export type RunEvent =
       type: "run_note";
       kind: RunNoteKind;
       summary: string;
+      /** Runner-owned baseline receipt; model text cannot authorize execution. */
+      firstTest?: FirstTestReceipt;
       mode?: StopMode;
       actor?: RunActor;
       /** On a `control_degraded` note only (record 0052): which control,

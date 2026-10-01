@@ -1,4 +1,5 @@
 import { testSlackCapability } from "../testing/slackSources.js";
+import type { RunLoopContext } from "./runLoop.js";
 import { depotCiAuthorizations } from "../../execution/depotCiAuthorization.js";
 import { buildReviewPostBody, parseVerdictInput } from "../reviewVerdict.js";
 import type { Verbosity } from "../verbosity.js";
@@ -8445,5 +8446,129 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
     expect(rebuilt.messages[3]).toEqual({ role: "assistant", content: [{ type: "text", text: "continued" }] });
     expect(rebuilt.messages.slice(0, 3)).toEqual(req.slice(0, 3));
     await ledgerRun.close();
+  });
+});
+
+// Feature: execution.md — required baseline precedes the harness, including tools.
+describe("runLoop first coding test", () => {
+  const ready = {
+    testCommand: "npm exec -- vitest run src/one.test.ts",
+    dependencyDir: "node_modules",
+    requiredTools: ["node", "npm"],
+    firstAction: { kind: "baseline_test" as const, policyVersion: "v1", timeoutMs: 30_000 },
+  };
+  const raw = { stdout: "", stderr: "", exitCode: 0, truncated: false };
+  function baseline(result: typeof raw | Error = raw) {
+    const order: string[] = [];
+    let saved: unknown;
+    const observed = watched(piHarness);
+    observed.harness.open = async (_deps, request) => {
+      order.push("model");
+      expect(saved).toMatchObject({ outcome: { kind: "completed" } });
+      expect(request.system).toContain("first baseline command");
+      request.onEvent?.({ type: "tool_call", tool: "bash", summary: "model tool", callId: "m1" });
+      order.push("tool");
+      return { answer: "done", followUp: async () => "", remainingMs: () => 60_000, end: async () => {} };
+    };
+    const execResult = vi.fn(async (command: string) => {
+      if (command.startsWith("set -eu")) {
+        order.push("preflight");
+        return { ...raw, stdout: "workspace-hash" };
+      }
+      order.push("test");
+      expect(saved).toMatchObject({ outcome: { kind: "unknown", code: "execution_pending" } });
+      if (result instanceof Error) throw result;
+      return result;
+    });
+    const s = setup("unused", {
+      agent: "coding",
+      repoCtx: { repo: "acme/api", ref: "work" },
+      executor: { execResult },
+      binding: {
+        ref: "work",
+        sha: "a".repeat(40),
+        workspace: "/workspace/threads/t/work",
+        user: "worker1",
+        container: "vm1",
+        depsKey: "deps1",
+      },
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example",
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+    });
+    const { ledgerRun } = recordingLedgerRun();
+    ledgerRun.tracked = () => true;
+    ledgerRun.setStateAndFlush = async (state) => {
+      if (state.firstTest) {
+        saved = structuredClone(state.firstTest);
+        order.push(`persist:${(saved as { outcome: { kind: string } }).outcome.kind}`);
+      }
+      return true;
+    };
+    ledgerRun.pauseForRetry = vi.fn(async () => true);
+    const ctx: RunLoopContext = {
+      ...s.ctx,
+      ledgerRun,
+      readyRequirementOverride: ready,
+      admissionRemainingMs: () => 60_000,
+      round: { ...s.ctx.round, selection: { ...s.ctx.round.selection, backend: "resident" } },
+    };
+    return { ...s, ctx, order, observed, execResult, saved: () => saved, ledgerRun };
+  }
+  it.each([0, 1])("persists exit %s before the first provider or model tool event", async (exitCode) => {
+    const s = baseline({ ...raw, exitCode });
+    expect(answered(await runLoop(s.deps, s.ctx)).answer).toBe("done");
+    expect(s.order.slice(0, 6)).toEqual(["preflight", "persist:unknown", "test", "persist:completed", "model", "tool"]);
+  });
+  it.each([new Error("transport lost"), { ...raw, exitCode: 124 }])(
+    "holds unknown completion on the same run without a model or workspace release",
+    async (result) => {
+      const s = baseline(result);
+      const out = await runLoop(s.deps, s.ctx);
+      expect(out).toMatchObject({ kind: "paused", reason: "first_test_required", handedOff: true });
+      expect(s.order).not.toContain("model");
+      expect(s.releases).toEqual([]);
+      expect(s.ledgerRun.pauseForRetry).toHaveBeenCalledOnce();
+      expect(s.saved()).toMatchObject({ outcome: { kind: "unknown" } });
+    },
+  );
+  it("holds a cached initial seed before any baseline or model work", async () => {
+    const s = baseline();
+    s.ctx.round.selection = {
+      ...s.ctx.round.selection,
+      backend: "sandbox",
+      binding: undefined,
+      seeded: {
+        slug: "acme/api",
+        ref: "work",
+        sha: "a".repeat(40),
+        depsBackupId: "archive-a",
+        workspace: "/workspace/checkout",
+        cached: true,
+        ms: 0,
+      },
+    };
+    expect(await runLoop(s.deps, s.ctx)).toMatchObject({ kind: "paused", reason: "first_test_required" });
+    expect(s.order).not.toContain("model");
+    expect(s.execResult).not.toHaveBeenCalled();
+    expect(s.saved()).toMatchObject({ outcome: { kind: "refused", code: "seed_identity_unverifiable" } });
+  });
+  it("does not opt an absent first-action policy into a test", async () => {
+    const s = baseline();
+    s.observed.harness.open = async () => ({
+      answer: "ordinary",
+      followUp: async () => "",
+      remainingMs: () => 60_000,
+      end: async () => {},
+    });
+    const { firstAction: _unused, ...readinessOnly } = ready;
+    expect(answered(await runLoop(s.deps, { ...s.ctx, readyRequirementOverride: readinessOnly })).answer).toBe(
+      "ordinary",
+    );
+    expect(s.execResult).not.toHaveBeenCalled();
+    expect(s.saved()).toBeUndefined();
   });
 });

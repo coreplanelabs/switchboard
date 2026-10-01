@@ -1204,3 +1204,25 @@ describe("CloudflareSandboxExecutor runtime-busy wait", () => {
     expect(calls).toHaveLength(1);
   });
 });
+
+// Feature: execution.md — the first coding baseline consumes typed outcomes.
+describe("Cloudflare typed command outcome", () => {
+  it("preserves empty success and actual truncation without presentation parsing", async () => {
+    const raw = { stdout: "", stderr: "", exitCode: 0, truncated: false };
+    const { calls } = stubFetch(raw);
+    expect(
+      await new CloudflareSandboxExecutor(OPTS).execResult("npm exec -- vitest run one.test.ts", { timeoutMs: 12_000 }),
+    ).toEqual(raw);
+    expect(sentBody(calls[0]!)).toMatchObject({ timeoutMs: 12_000 });
+  });
+  it("refuses malformed or legacy result fields", async () => {
+    stubFetch({ stdout: "", stderr: "", exitCode: 0 });
+    await expect(new CloudflareSandboxExecutor(OPTS).execResult("test")).rejects.toThrow("invalid command result");
+  });
+  it("does not replay an uncertain HTTP failure", async () => {
+    const fetch = vi.fn(async () => new Response("lost response", { status: 502 }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(new CloudflareSandboxExecutor(OPTS).execResult("test")).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});

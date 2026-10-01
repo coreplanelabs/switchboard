@@ -1,3 +1,5 @@
+import type { ExecResult } from "./execResult.js";
+export type { ExecResult } from "./execResult.js";
 import { execFile } from "node:child_process";
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -87,13 +89,6 @@ export interface Executor {
    *  Absent on executors whose workspace the model manages itself (a sandbox
    *  clone): the dispatcher then tells the model to check the commit out. */
   moveTo?(sha: string, opts?: MoveOptions): Promise<{ sha: string }>;
-}
-
-export interface ExecResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  truncated: boolean;
 }
 
 export interface PublicationTransport extends ExecTraceOptions {

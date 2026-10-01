@@ -11,6 +11,7 @@
 // (harness-pi item 14) and is ended here after them. The stage's claim and
 // the tools' capabilities are run.ts.
 import { randomUUID } from "node:crypto";
+import { ensureFirstTest, firstTestContext, FirstTestHeld, type FirstTestReceipt } from "../firstTest.js";
 import { GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
@@ -219,7 +220,7 @@ export interface RunInterrupted {
  * not be reattached. The durable row and binding remain for the same run. */
 export interface RunPaused {
   kind: "paused";
-  reason: ReadyEnvironmentReason | "relaunch_ceiling";
+  reason: ReadyEnvironmentReason | "relaunch_ceiling" | "first_test_required";
   message: string;
   handedOff: boolean;
 }
@@ -273,6 +274,7 @@ export interface RunLoopContext {
   /** Recheck the fixed setup deadline after pre-harness awaits, before the
    *  first open. Relaunches continue the harness's lease instead. */
   assertAdmissionBudget: () => void;
+  admissionRemainingMs?: () => number;
   channelVisibility: ChannelVisibility;
   slackContext?: SlackContextBinding;
   privateAudienceLatch?: PrivateAudienceLatch;
@@ -396,6 +398,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // The round stays the dispatch's: its release gives the same workspace back.
   const { round } = ctx;
   let { executor } = round.selection;
+  let firstTestSelection = round.selection;
+  let firstTestSaved: unknown = ctx.resume?.row.state.firstTest;
+  let firstTestReceipt: FirstTestReceipt | undefined;
   const { binding } = round.selection;
   // A relaunch may attach the same run at a different checkout path. Every
   // later probe, checkpoint and harness rule must use the latest attachment.
@@ -1990,12 +1995,59 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               bearers: deps.runBearers,
             })
           : undefined;
-      const openRun = () =>
-        openThroughSeam(
+      const openRun = async () => {
+        const container =
+          harnessDeps.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine);
+        const requirement = ctx.readyRequirementOverride;
+        if (agent.name === "coding" && profile.identity === "write" && requirement?.firstAction) {
+          ctx.assertAdmissionBudget();
+          const selected = firstTestSelection.binding ?? firstTestSelection.seeded;
+          firstTestReceipt = await ensureFirstTest({
+            executor,
+            seedRestored: firstTestSelection.seeded?.cached === false,
+            owner: {
+              runId: run.id,
+              requester: msg.userId,
+              threadKey: msg.threadKey,
+              unit: coordinator?.idempotencyKey ?? "",
+            },
+            checkout: {
+              repo: repoCtx.repo ?? "",
+              ref: selected?.ref ?? "",
+              head: selected?.sha ?? "",
+              workspace: currentCheckout ?? "",
+              backend: firstTestSelection.backend ?? "",
+              container:
+                firstTestSelection.binding?.container ?? (await container.identity().catch(() => undefined)) ?? "",
+              dependencyKey: firstTestSelection.binding?.depsKey ?? firstTestSelection.seeded?.depsBackupId ?? "",
+            },
+            requirement,
+            previous: firstTestSaved,
+            remainingMs: ctx.admissionRemainingMs ?? (() => run.control.remainingMs() ?? 0),
+            signal: run.control.hardSignal,
+            clock,
+            save: async (receipt) => {
+              if (!ledgerRun?.tracked()) return false;
+              const committed = await ledgerRun.setStateAndFlush({ firstTest: receipt });
+              if (committed) {
+                firstTestSaved = structuredClone(receipt);
+                onEvent({
+                  type: "run_note",
+                  kind: "first_test",
+                  summary: `First baseline command: ${receipt.outcome.kind}.`,
+                  firstTest: structuredClone(receipt),
+                  at: clock(),
+                });
+              }
+              return committed;
+            },
+          });
+          ctx.assertAdmissionBudget();
+        }
+        return openThroughSeam(
           harness,
           {
-            container:
-              harnessDeps.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine),
+            container,
             bearer,
             harnessUrl,
             registry: harnessDeps.registry,
@@ -2011,7 +2063,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
             model: { id: modelId, provider: providerName, providerType: providerCfg.type },
             ...(ctx.modelCard ? { card: ctx.modelCard } : {}),
-            system: publicationSystem,
+            system: firstTestReceipt
+              ? `${publicationSystem}\n\n${firstTestContext(firstTestReceipt)}`
+              : publicationSystem,
             messages,
             tools: [
               ...filterUnavailableTools(
@@ -2102,6 +2156,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(harnessResume ? { resume: harnessResume } : {}),
           },
         );
+      };
       // The survival clause's ceiling (harness.md item 6; dispatch/relaunch.ts):
       // the harness's typed word that the run's container was replaced under
       // it — the bot lives, or this loop would not be running — relaunches the
@@ -2214,6 +2269,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             // here: the next relaunch re-attaches what this one bound, and the
             // row learns the binding complete, as a resumed row does.
             executor = decision.round.selection.executor;
+            firstTestSelection = decision.round.selection;
             toolContext.executor = executor;
             currentCheckout = checkoutOfSelection(decision.round.selection);
             const rebound = workspaceBindingFor(decision.round.selection, profile.machine);
@@ -2777,6 +2833,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         }),
       );
   } catch (err) {
+    if (err instanceof FirstTestHeld) {
+      if (ctx.githubDoor && deps.githubBindings) {
+        if (existingPrPublication !== undefined) blockExistingPrPublication("the first test is held");
+        else deps.githubBindings.blockBranch(run.id, "the first test is held");
+      }
+      cardNote("quiet", err.message);
+      await events.drain();
+      const handedOff = (await ledgerRun?.pauseForRetry().catch(() => false)) ?? false;
+      pausedForRetry = true;
+      registry.discard(run.id);
+      return { kind: "paused", reason: "first_test_required", message: err.message, handedOff };
+    }
     if (err instanceof HarnessInterruptedError) interrupted = err;
     else {
       runFailed = true;
