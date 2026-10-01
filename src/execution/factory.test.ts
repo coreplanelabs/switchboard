@@ -2949,6 +2949,19 @@ describe("makeExecutor seeded sandbox", () => {
     );
   });
 
+  it("an incompatible cached seed refuses without retry or cold fallback even without a pilot policy", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(degraded(C1), {
+      body: { seeded: false, reason: "seed-incompatible", detail: "cached dependency layout is invalid", step: "deps" },
+    });
+    await expect(makeExecutor(residentOpts(), repoCtx())).rejects.toMatchObject({
+      name: "ReadyEnvironmentError",
+      reason: "dependencies_invalid",
+      beforeModel: true,
+    });
+    expect(calls).toEqual(["/status", "/seed"]);
+  });
+
   it("a failed or unconfigured seed is never retried: the cold path, the refusal on the note", async () => {
     stubEnvs();
     const { calls } = stubFetch(degraded(C1), {

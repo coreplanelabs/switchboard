@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { depsEntryMaterializeScript, depsStoreCommitScript } from "./residentDepsStore.js";
 import {
   isBackupMissing,
   parseSeed,
@@ -138,6 +139,170 @@ describe("pilot ready environment check", () => {
     }
   });
 
+  it.each(["wrapper", "missing package", "missing bin", "broken bin"])(
+    "refuses %s without changing cached work",
+    (failure) => {
+      const checkout = mkdtempSync(join(tmpdir(), "switchboard-ready-layout-"));
+      try {
+        mkdirSync(join(checkout, "node_modules/example-cli"), { recursive: true });
+        mkdirSync(join(checkout, "node_modules/.bin"));
+        writeFileSync(join(checkout, "package.json"), JSON.stringify({ devDependencies: { "example-cli": "1.0.0" } }));
+        writeFileSync(
+          join(checkout, "node_modules/example-cli/package.json"),
+          JSON.stringify({ name: "example-cli", bin: { example: "run" } }),
+        );
+        writeFileSync(join(checkout, "node_modules/example-cli/run"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        symlinkSync("../example-cli/run", join(checkout, "node_modules/.bin/example"));
+        if (failure === "wrapper") {
+          const old = join(checkout, "old");
+          cpSync(join(checkout, "node_modules"), old, { recursive: true, verbatimSymlinks: true });
+          rmSync(join(checkout, "node_modules"), { recursive: true });
+          cpSync(old, join(checkout, "node_modules/node_modules"), { recursive: true, verbatimSymlinks: true });
+        } else if (failure === "missing package")
+          rmSync(join(checkout, "node_modules/example-cli"), { recursive: true });
+        else if (failure === "missing bin") rmSync(join(checkout, "node_modules/.bin/example"));
+        else rmSync(join(checkout, "node_modules/example-cli/run"));
+        writeFileSync(join(checkout, "source.ts"), "clean source");
+        for (const args of [
+          ["init", "-q"],
+          ["add", "source.ts"],
+          ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"],
+        ]) {
+          const git = spawnSync("git", args, { cwd: checkout, encoding: "utf8" });
+          expect(git.status, git.stderr).toBe(0);
+        }
+        writeFileSync(join(checkout, "source.ts"), "dirty source");
+        writeFileSync(join(checkout, "untracked"), "keep");
+        writeFileSync(join(checkout, ".switchboard-seed"), seedMarkerText(seed));
+        const result = spawnSync(
+          "bash",
+          ["-c", readyEnvironmentCommand(checkout, { requiredTools: ["node"], dependencyDir: "node_modules" })],
+          { encoding: "utf8" },
+        );
+        expect(readyEnvironmentOutcome(result.stdout)).toEqual({ ready: false, reason: "dependencies_invalid" });
+        expect(readFileSync(join(checkout, "source.ts"), "utf8")).toBe("dirty source");
+        expect(readFileSync(join(checkout, "untracked"), "utf8")).toBe("keep");
+        expect(readFileSync(join(checkout, ".switchboard-seed"), "utf8")).toBe(seedMarkerText(seed));
+      } finally {
+        rmSync(checkout, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("accepts a dependency-only symlink view and absent optional packages without requiring .bin", () => {
+    const checkout = mkdtempSync(join(tmpdir(), "switchboard-ready-valid-"));
+    try {
+      mkdirSync(join(checkout, "view/library"), { recursive: true });
+      symlinkSync("view", join(checkout, "node_modules"));
+      writeFileSync(join(checkout, "view/library/package.json"), '{"name":"library"}');
+      writeFileSync(
+        join(checkout, "package.json"),
+        JSON.stringify({ dependencies: { library: "1", optional: "1" }, optionalDependencies: { optional: "1" } }),
+      );
+      const result = spawnSync(
+        "bash",
+        ["-c", readyEnvironmentCommand(checkout, { requiredTools: ["node"], dependencyDir: "node_modules" })],
+        { encoding: "utf8" },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(readyEnvironmentOutcome(result.stdout)).toEqual({ ready: true });
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["alias", "collision", "wrapper"])(
+    "accepts a usable %s executable installed by the package manager",
+    (layout) => {
+      const checkout = mkdtempSync(join(tmpdir(), "switchboard-ready-bins-"));
+      try {
+        mkdirSync(join(checkout, "node_modules/alias"), { recursive: true });
+        mkdirSync(join(checkout, "node_modules/.bin"));
+        const dependencies: Record<string, string> = { alias: "npm:real-cli@1" };
+        writeFileSync(
+          join(checkout, "node_modules/alias/package.json"),
+          JSON.stringify({ name: "real-cli", bin: "run.js" }),
+        );
+        writeFileSync(join(checkout, "node_modules/alias/run.js"), "#!/usr/bin/env node\n", {
+          mode: layout === "wrapper" ? 0o644 : 0o755,
+        });
+        if (layout === "wrapper")
+          writeFileSync(
+            join(checkout, "node_modules/.bin/real-cli"),
+            '#!/bin/sh\nexec node "$(dirname "$0")/../alias/run.js"\n',
+            { mode: 0o755 },
+          );
+        else symlinkSync("../alias/run.js", join(checkout, "node_modules/.bin/real-cli"));
+        if (layout === "collision") {
+          dependencies.second = "1";
+          mkdirSync(join(checkout, "node_modules/second"));
+          writeFileSync(
+            join(checkout, "node_modules/second/package.json"),
+            JSON.stringify({ name: "second", bin: { "real-cli": "run.js" } }),
+          );
+          writeFileSync(join(checkout, "node_modules/second/run.js"), "#!/usr/bin/env node\n", { mode: 0o755 });
+        }
+        writeFileSync(join(checkout, "package.json"), JSON.stringify({ dependencies }));
+        const result = spawnSync(
+          "bash",
+          ["-c", readyEnvironmentCommand(checkout, { requiredTools: ["node"], dependencyDir: "node_modules" })],
+          { encoding: "utf8" },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(readyEnvironmentOutcome(result.stdout)).toEqual({ ready: true });
+      } finally {
+        rmSync(checkout, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("allows workspace source packages whose declared bins are build outputs", () => {
+    const checkout = mkdtempSync(join(tmpdir(), "switchboard-ready-workspace-bin-"));
+    try {
+      mkdirSync(join(checkout, "node_modules"));
+      mkdirSync(join(checkout, "packages/cli"), { recursive: true });
+      symlinkSync("../packages/cli", join(checkout, "node_modules/local-cli"));
+      writeFileSync(
+        join(checkout, "package.json"),
+        JSON.stringify({ dependencies: { "local-cli": "*" }, workspaces: ["packages/*"] }),
+      );
+      writeFileSync(
+        join(checkout, "packages/cli/package.json"),
+        JSON.stringify({ name: "local-cli", bin: "dist/cli.js" }),
+      );
+      const result = spawnSync(
+        "bash",
+        ["-c", readyEnvironmentCommand(checkout, { requiredTools: ["node"], dependencyDir: "node_modules" })],
+        { encoding: "utf8" },
+      );
+      expect(readyEnvironmentOutcome(result.stdout)).toEqual({ ready: true });
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("checks dependencies declared by package.json workspaces, including hoisted copies", () => {
+    const checkout = mkdtempSync(join(tmpdir(), "switchboard-ready-workspace-"));
+    try {
+      mkdirSync(join(checkout, "node_modules/library"), { recursive: true });
+      mkdirSync(join(checkout, "packages/widget"), { recursive: true });
+      writeFileSync(join(checkout, "package.json"), JSON.stringify({ workspaces: ["packages/*"] }));
+      writeFileSync(join(checkout, "packages/widget/package.json"), JSON.stringify({ dependencies: { library: "1" } }));
+      writeFileSync(join(checkout, "node_modules/library/package.json"), '{"name":"library"}');
+      const check = () =>
+        spawnSync(
+          "bash",
+          ["-c", readyEnvironmentCommand(checkout, { requiredTools: ["node"], dependencyDir: "node_modules" })],
+          { encoding: "utf8" },
+        );
+      expect(readyEnvironmentOutcome(check().stdout)).toEqual({ ready: true });
+      rmSync(join(checkout, "node_modules/library"), { recursive: true });
+      expect(readyEnvironmentOutcome(check().stdout)).toEqual({ ready: false, reason: "dependencies_invalid" });
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
   it("refuses malformed tool, dependency path and test command before shell construction", () => {
     expect(() =>
       readyEnvironmentCommand("/workspace/checkout", { ...requirement, requiredTools: ["npm; echo x"] }),
@@ -191,17 +356,12 @@ describe("seedFixupScript", () => {
       checkoutDir: SEED_CHECKOUT_DIR,
       depsDir: SEED_DEPS_STAGING_DIR,
     });
-    expect(script.split("\n")).toEqual([
-      "set -e",
-      "cd '/workspace/checkout'",
-      "chown -R 0:0 .",
-      "git remote set-url origin 'https://door.example/git/acme/widgets.git'",
-      "rm -rf node_modules",
-      "mv '/workspace/.seed-deps' node_modules",
-      "git fetch --no-tags origin '+refs/heads/feat/x:refs/remotes/origin/feat/x'",
-      "if git cat-file -e '89abcdef0123456789abcdef0123456789abcdef''^{commit}' 2>/dev/null; then git checkout -q -B 'feat/x' '89abcdef0123456789abcdef0123456789abcdef'; else git checkout -q -B 'feat/x' 'origin/feat/x'; fi",
-      "git rev-parse HEAD",
-    ]);
+    const checkout = "git checkout -q -B 'feat/x' '89abcdef0123456789abcdef0123456789abcdef'";
+    expect(script).toContain(checkout);
+    expect(script).toContain("git remote set-url origin 'https://door.example/git/acme/widgets.git'");
+    expect(script).toContain("git fetch --no-tags origin '+refs/heads/feat/x:refs/remotes/origin/feat/x'");
+    expect(script.indexOf("node -e")).toBeGreaterThan(script.indexOf(checkout));
+    expect(script.split("\n").at(-1)).toBe("git rev-parse HEAD");
   });
 
   it("without a thread ref the checkout stays on the snapshot's branch; without a deps entry nothing is moved", () => {
@@ -224,6 +384,234 @@ describe("seedFixupScript", () => {
   });
 });
 
+describe("resident dependency entry consumed by a seeded checkout", () => {
+  it("materializes the producer's root executable and workspace dependencies beside tracked fixtures", () => {
+    const root = mkdtempSync(join(tmpdir(), "switchboard-seed-entry-"));
+    const scratch = join(root, "scratch");
+    const entry = join(root, "entry");
+    const restored = join(root, "restored");
+    const checkout = join(root, "checkout");
+    const bin = join(root, "bin");
+    const run = (command: string, cwd = root) =>
+      spawnSync("bash", ["-c", command], {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      });
+    const git = (...args: string[]) => {
+      const result = spawnSync("git", args, { cwd: checkout, encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+    };
+    try {
+      mkdirSync(join(scratch, "node_modules/.bin"), { recursive: true });
+      mkdirSync(join(scratch, "node_modules/example-cli"));
+      writeFileSync(join(scratch, "node_modules/example-cli/run"), "#!/bin/sh\nprintf 'root executable works'\n", {
+        mode: 0o755,
+      });
+      symlinkSync("../example-cli/run", join(scratch, "node_modules/.bin/example-cli"));
+      mkdirSync(join(scratch, "packages/widget/node_modules/nested-dependency"), { recursive: true });
+      writeFileSync(
+        join(scratch, "packages/widget/node_modules/nested-dependency/index.js"),
+        "module.exports = 'workspace dependency';\n",
+      );
+      mkdirSync(join(scratch, "node_modules/nested-dependency"));
+      writeFileSync(join(scratch, "node_modules/nested-dependency/index.js"), "module.exports = 'root dependency';\n");
+      symlinkSync("../packages/widget", join(scratch, "node_modules/workspace-pkg"));
+      for (const modules of ["node_modules", "packages/widget/node_modules"]) {
+        mkdirSync(join(scratch, modules, "fixture"), { recursive: true });
+        writeFileSync(join(scratch, modules, "fixture/index.js"), "stale archived fixture");
+        mkdirSync(join(checkout, modules, "fixture"), { recursive: true });
+        writeFileSync(join(checkout, modules, "fixture/index.js"), "tracked fixture");
+      }
+      mkdirSync(join(checkout, "node_modules/.bin"));
+      symlinkSync("../fixture/index.js", join(checkout, "node_modules/.bin/fixture"));
+      mkdirSync(bin);
+      // Ownership is the container's concern; the actual producer and consumer
+      // scripts run unchanged on an unprivileged development machine.
+      writeFileSync(join(bin, "chown"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      const produced = run(
+        depsStoreCommitScript({
+          scratchDir: scratch,
+          stagingDir: join(root, "staging"),
+          entryDir: entry,
+          completePath: join(entry, ".complete"),
+        }),
+      );
+      expect(produced.status, produced.stderr).toBe(0);
+      cpSync(entry, restored, { recursive: true, verbatimSymlinks: true });
+      for (const marker of [".complete", ".used"]) rmSync(join(restored, marker));
+      mkdirSync(join(checkout, "packages/widget/node_modules/nested-dependency"), { recursive: true });
+      writeFileSync(
+        join(checkout, "packages/widget/node_modules/nested-dependency/value"),
+        "stale checkout dependency\n",
+      );
+      writeFileSync(join(checkout, "packages/widget/index.js"), "module.exports = require('nested-dependency');\n");
+      writeFileSync(join(checkout, "package.json"), '{"name":"fixture","workspaces":["packages/*"]}\n');
+      writeFileSync(join(checkout, ".gitignore"), "node_modules/\n");
+      git("init", "-q", "-b", "main");
+      git("add", "package.json", ".gitignore", "packages/widget/index.js");
+      git("add", "-f", "node_modules/fixture/index.js", "packages/widget/node_modules/fixture/index.js");
+      git("add", "-f", "node_modules/.bin/fixture");
+      git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture");
+      git("remote", "add", "origin", "https://example.com/acme/widgets.git");
+      const fixed = run(
+        seedFixupScript({
+          slug: "acme/widgets",
+          doorOrigin: "https://door.example",
+          ref: "main",
+          checkoutDir: checkout,
+          depsDir: restored,
+        }),
+      );
+      expect(fixed.status, fixed.stderr).toBe(0);
+      const executable = spawnSync(join(checkout, "node_modules/.bin/example-cli"), [], { encoding: "utf8" });
+      expect(executable.status, executable.error?.message ?? executable.stderr).toBe(0);
+      expect(executable.stdout).toBe("root executable works");
+      expect(readFileSync(join(checkout, "node_modules/.bin/fixture"), "utf8")).toBe("tracked fixture");
+      const resolved = spawnSync(process.execPath, ["-e", "process.stdout.write(require('workspace-pkg'))"], {
+        cwd: checkout,
+        encoding: "utf8",
+      });
+      expect(resolved.status, resolved.stderr).toBe(0);
+      expect(resolved.stdout).toBe("workspace dependency");
+      expect(existsSync(join(checkout, "packages/widget/node_modules/nested-dependency/value"))).toBe(false);
+      for (const modules of ["node_modules", "packages/widget/node_modules"]) {
+        expect(readFileSync(join(checkout, modules, "fixture/index.js"), "utf8")).toBe("tracked fixture");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("dependency entry materialization", () => {
+  it.each(["entry symlink", "checkout symlink", "entry file", "checkout file"])(
+    "refuses a tracked ancestor conflict (%s) before replacing any dependencies",
+    (conflict) => {
+      const root = mkdtempSync(join(tmpdir(), "switchboard-deps-source-conflict-"));
+      const entry = join(root, "entry");
+      const checkout = join(root, "checkout");
+      const outside = join(root, "outside");
+      try {
+        mkdirSync(join(entry, "node_modules"), { recursive: true });
+        mkdirSync(join(checkout, "node_modules"), { recursive: true });
+        writeFileSync(join(checkout, "node_modules/sentinel"), "original dependencies");
+        mkdirSync(join(checkout, "packages/widget/node_modules/fixture"), { recursive: true });
+        writeFileSync(join(checkout, "packages/widget/node_modules/fixture/index.js"), "tracked fixture");
+        expect(spawnSync("git", ["init", "-q", checkout]).status).toBe(0);
+        expect(spawnSync("git", ["-C", checkout, "add", "packages"]).status).toBe(0);
+        mkdirSync(join(entry, "packages/widget/node_modules/fixture"), { recursive: true });
+        mkdirSync(outside);
+        writeFileSync(join(outside, "index.js"), "outside");
+        const conflictPath = join(
+          conflict.startsWith("entry") ? entry : checkout,
+          "packages/widget/node_modules/fixture",
+        );
+        rmSync(conflictPath, { recursive: true });
+        if (conflict.endsWith("symlink")) symlinkSync(outside, conflictPath);
+        else writeFileSync(conflictPath, "not a directory");
+        const result = spawnSync("bash", ["-c", depsEntryMaterializeScript(entry, checkout)], { encoding: "utf8" });
+        expect(result.status).not.toBe(0);
+        expect(readFileSync(join(checkout, "node_modules/sentinel"), "utf8")).toBe("original dependencies");
+        expect(readFileSync(join(outside, "index.js"), "utf8")).toBe("outside");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("preserves dirty, deleted and symlinked tracked leaves while restoring siblings in their directories", () => {
+    const root = mkdtempSync(join(tmpdir(), "switchboard-deps-source-leaves-"));
+    const entry = join(root, "entry");
+    const checkout = join(root, "checkout");
+    try {
+      for (const base of [entry, checkout]) mkdirSync(join(base, "node_modules/fixture"), { recursive: true });
+      writeFileSync(join(checkout, "node_modules/fixture/dirty"), "original");
+      writeFileSync(join(checkout, "node_modules/fixture/deleted"), "original");
+      mkdirSync(join(checkout, "node_modules/fixture/absent"));
+      writeFileSync(join(checkout, "node_modules/fixture/absent/index.js"), "original");
+      symlinkSync("dirty", join(checkout, "node_modules/fixture/link"));
+      expect(spawnSync("git", ["init", "-q", checkout]).status).toBe(0);
+      expect(spawnSync("git", ["-C", checkout, "add", "node_modules"]).status).toBe(0);
+      writeFileSync(join(checkout, "node_modules/fixture/dirty"), "local edits");
+      rmSync(join(checkout, "node_modules/fixture/deleted"));
+      rmSync(join(checkout, "node_modules/fixture/absent"), { recursive: true });
+      writeFileSync(join(checkout, "node_modules/fixture/stale"), "stale dependency");
+      for (const name of ["dirty", "deleted", "link", "dependency"]) {
+        writeFileSync(join(entry, "node_modules/fixture", name), "archived content");
+      }
+      mkdirSync(join(entry, "node_modules/fixture/absent"));
+      writeFileSync(join(entry, "node_modules/fixture/absent/index.js"), "stale source");
+      writeFileSync(join(entry, "node_modules/fixture/absent/dependency"), "archived dependency");
+      const result = spawnSync("bash", ["-c", depsEntryMaterializeScript(entry, checkout)], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(join(checkout, "node_modules/fixture/dependency"), "utf8")).toBe("archived content");
+      expect(readFileSync(join(checkout, "node_modules/fixture/dirty"), "utf8")).toBe("local edits");
+      expect(readFileSync(join(checkout, "node_modules/fixture/link"), "utf8")).toBe("local edits");
+      expect(existsSync(join(checkout, "node_modules/fixture/deleted"))).toBe(false);
+      expect(existsSync(join(checkout, "node_modules/fixture/absent/index.js"))).toBe(false);
+      expect(readFileSync(join(checkout, "node_modules/fixture/absent/dependency"), "utf8")).toBe(
+        "archived dependency",
+      );
+      expect(existsSync(join(checkout, "node_modules/fixture/stale"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["missing root", "escaped workspace", "file parent"])(
+    "refuses %s before replacing dependencies",
+    (failure) => {
+      const root = mkdtempSync(join(tmpdir(), "switchboard-deps-invalid-"));
+      const entry = join(root, "entry");
+      const checkout = join(root, "checkout");
+      const outside = join(root, "outside");
+      try {
+        mkdirSync(join(entry, "packages/widget/node_modules"), { recursive: true });
+        mkdirSync(join(checkout, "node_modules"), { recursive: true });
+        expect(spawnSync("git", ["init", "-q", checkout]).status).toBe(0);
+        writeFileSync(join(checkout, "node_modules/sentinel"), "original dependencies");
+        mkdirSync(join(outside, "node_modules"), { recursive: true });
+        writeFileSync(join(outside, "node_modules/sentinel"), "outside");
+        if (failure !== "missing root") mkdirSync(join(entry, "node_modules"));
+        if (failure === "escaped workspace") symlinkSync(outside, join(checkout, "packages"));
+        else if (failure === "file parent") writeFileSync(join(checkout, "packages"), "file");
+        const result = spawnSync("bash", ["-c", depsEntryMaterializeScript(entry, checkout)], { encoding: "utf8" });
+        expect(result.status).not.toBe(0);
+        expect(readFileSync(join(checkout, "node_modules/sentinel"), "utf8")).toBe("original dependencies");
+        expect(readFileSync(join(outside, "node_modules/sentinel"), "utf8")).toBe("outside");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("accepts an empty entry, replaces only untracked dependency views, and omits absent workspaces", () => {
+    const root = mkdtempSync(join(tmpdir(), "switchboard-deps-empty-"));
+    const entry = join(root, "entry with spaces");
+    const checkout = join(root, "checkout");
+    try {
+      mkdirSync(join(entry, "node_modules"), { recursive: true });
+      mkdirSync(join(entry, "removed/node_modules"), { recursive: true });
+      mkdirSync(join(checkout, "stale/node_modules"), { recursive: true });
+      expect(spawnSync("git", ["init", "-q", checkout]).status).toBe(0);
+      mkdirSync(join(checkout, "fixtures/node_modules/example"), { recursive: true });
+      writeFileSync(join(checkout, "fixtures/node_modules/example/index.js"), "tracked fixture");
+      expect(spawnSync("git", ["-C", checkout, "add", "fixtures"]).status).toBe(0);
+      mkdirSync(join(entry, "fixtures/node_modules/example"), { recursive: true });
+      writeFileSync(join(entry, "fixtures/node_modules/example/index.js"), "stale fixture");
+      const result = spawnSync("bash", ["-c", depsEntryMaterializeScript(entry, checkout)], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(existsSync(join(checkout, "node_modules"))).toBe(true);
+      expect(existsSync(join(checkout, "removed"))).toBe(false);
+      expect(existsSync(join(checkout, "stale/node_modules"))).toBe(false);
+      expect(readFileSync(join(checkout, "fixtures/node_modules/example/index.js"), "utf8")).toBe("tracked fixture");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the seed's constants", () => {
   it("everything the seed writes lives under /workspace, where the SDK allows a restore's dir", () => {
     for (const p of [SEED_CHECKOUT_DIR, SEED_DEPS_STAGING_DIR, SEED_MARKER])
@@ -235,7 +623,7 @@ describe("the seed's constants", () => {
     expect(SEED_BUDGET_MS).toBeGreaterThan(SEED_RESTORE_MAX_MS + SEED_FIXUP_TIMEOUT_MS);
     // the wait for an abandoned restore fits inside the seed's own caps, so a failed seed still answers in budget
     expect(SEED_ABANDONED_RESTORE_WAIT_MS).toBeLessThan(SEED_RESTORE_MAX_MS);
-    expect(SEED_REASONS).toEqual(["seed-missing", "seed-failed", "seed-unconfigured"]);
+    expect(SEED_REASONS).toEqual(["seed-missing", "seed-failed", "seed-unconfigured", "seed-incompatible"]);
   });
 });
 
@@ -271,6 +659,19 @@ describe("the seeded sandbox wiring (static)", () => {
     const seedNow = worker.slice(worker.indexOf("private async seedNow("), worker.indexOf("private seedSweep("));
     expect(seedNow.indexOf("backupTransferMode(")).toBeLessThan(seedNow.indexOf("SEED_MARKER"));
     expect(seedNow).toContain('reason: "seed-unconfigured"');
+  });
+
+  it("an incompatible cached dependency view refuses before origin writes and cannot reach the destructive restore or cleanup", () => {
+    const cached = worker.slice(
+      worker.indexOf("if (marker.exitCode === 0"),
+      worker.indexOf("const deadline = t0 + SEED_RESTORE_MAX_MS"),
+    );
+    expect(cached).toContain("dependencyLayoutCommand(SEED_CHECKOUT_DIR)");
+    expect(cached).toMatch(
+      /if \(!layout \|\| layout.exitCode !== 0\)\s*return \{\s*seeded: false,\s*reason: "seed-incompatible"/,
+    );
+    expect(cached.indexOf('reason: "seed-incompatible"')).toBeLessThan(cached.indexOf("const origin"));
+    expect(cached).not.toMatch(/seedSweep|restoreSeedInto|rm -rf|printf %s/);
   });
 
   it("the marker is read before any restore and written after the fix-up; the same handle answers cached", () => {
