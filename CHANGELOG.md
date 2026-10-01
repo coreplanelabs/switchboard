@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.271.4](https://github.com/coreplanelabs/switchboard/compare/v1.271.3...v1.271.4) (2026-10-01)
+
+
+### Bug fixes
+
+* **ship:** require approval before failed-check publication ([#2562](https://github.com/coreplanelabs/switchboard/issues/2562)) ([3c25c75](https://github.com/coreplanelabs/switchboard/commit/3c25c756c78b44017d7ea5c96814c2a045f84e83))
+
 ## [1.271.3](https://github.com/coreplanelabs/switchboard/compare/v1.271.2...v1.271.3) (2026-10-01)
 
 
