@@ -728,6 +728,7 @@ describe("the production deploy is one reusable workflow", () => {
       cli: "checkout",
       version: "",
       "copy-images": "auto",
+      smoke: false,
     });
     // A dispatch keeps the two operator-facing choices it always had; the rest default as above.
     expect(Object.keys(workflow.on.workflow_dispatch.inputs)).toEqual(["targets", "force"]);
@@ -745,6 +746,7 @@ describe("the production deploy is one reusable workflow", () => {
       "RESIDENT_DRAIN_TOKEN",
       "RESIDENT_READ_TOKEN",
       "SANDBOX_TOKEN",
+      "SMOKE_INGRESS_TOKEN",
     ]);
     for (const [name, s] of Object.entries(secrets)) expect(s.required, `${name} must be optional`).toBe(false);
     // The drain (release-and-deploy item 31) is a write with its own bearer, drain and undrain only: it reaches the job's env
@@ -887,6 +889,8 @@ describe("the production deploy is one reusable workflow", () => {
       'npm run --silent cli -- deploy plan $ARGS --allow-branch | tee "$RUNNER_TEMP/plan.txt"',
       "git status --porcelain",
       "npm run --silent cli -- deploy all $ARGS --allow-branch",
+      'npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/smoke-fleet.json"',
+      'npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json"',
     ]);
     expect(checkoutSteps.filter((s) => s.run).map((s) => s.name)).toEqual([
       "only from main",
@@ -900,6 +904,7 @@ describe("the production deploy is one reusable workflow", () => {
       "the tree is the commit",
       "deploy",
       "what is live",
+      "ordinary request through the live Door",
     ]);
   });
 
@@ -927,14 +932,28 @@ describe("the production deploy is one reusable workflow", () => {
     for (const l of uses) expect(l.trim(), `unpinned action: ${l.trim()}`).toMatch(/@[0-9a-f]{40} # v\d+\.\d+\.\d+$/);
   });
 
-  it("this repository's own call passes `targets` alone and inherits its secrets — its rendered inputs are the defaults", () => {
+  it("this repository's own call enables the live ingress smoke and inherits its secrets", () => {
     const release = parse(read(".github/workflows/release-please.yml")) as {
       jobs: Record<string, { uses?: string; with?: Record<string, unknown>; secrets?: string }>;
     };
     const call = release.jobs.deploy;
     expect(call.uses).toBe("./.github/workflows/deploy-production.yml");
-    expect(call.with).toEqual({ targets: "affected" });
+    expect(call.with).toEqual({ targets: "affected", smoke: true });
     expect(call.secrets).toBe("inherit");
+  });
+
+  it("the release fails when an ordinary deployed request cannot start and finish an agent", () => {
+    const smoke = steps.find((s) => s.name === "ordinary request through the live Door")!;
+    const credentials = steps.find((s) => s.name === "the credentials this run has")!;
+    expect(credentials.env?.SMOKE).toBe("${{ inputs.smoke }}");
+    expect(credentials.run).toContain('if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_TOKEN" ]');
+    expect(credentials.run).toContain('if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_ORIGIN" ]');
+    expect(steps.indexOf(credentials)).toBeLessThan(steps.findIndex((s) => s.name === "deploy"));
+    expect(smoke.if).toBe("inputs.smoke && inputs.cli != 'package' && steps.deploy.outcome == 'success'");
+    expect(smoke.run).toContain('npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json"');
+    expect(job.env?.SMOKE_INGRESS_TOKEN).toBe("${{ secrets.SMOKE_INGRESS_TOKEN }}");
+    expect(job.env?.SMOKE_INGRESS_ORIGIN).toBe("${{ vars.SMOKE_INGRESS_ORIGIN }}");
+    expect(steps.indexOf(smoke)).toBeGreaterThan(steps.findIndex((s) => s.name === "what is live"));
   });
 });
 

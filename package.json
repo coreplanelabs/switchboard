@@ -83,7 +83,8 @@
     "web:preview": "tsx scripts/web-preview.ts",
     "screenshots:gen": "tsx scripts/screenshots.mts",
     "screenshots:check": "tsx scripts/screenshots.mts --check",
-    "load": "tsx scripts/load.ts"
+    "load": "tsx scripts/load.ts",
+    "smoke:ingress": "tsx scripts/smoke-ingress.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.87.0",
