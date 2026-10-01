@@ -371,3 +371,30 @@ recorded commit and missing results with guidance for an authorized follow-up
 pull request. The terminal cases in `src/core/ship/coordinator.test.ts` prove
 this distinction with idle enabled; the behavioral contract is
 [agent-ship items 8 and 12a](../reference/specs/agent-ship.md).
+
+## Amended 2026-10-01 — an uncertain create keeps the original owner
+
+**Re-evaluation.** The earlier hosted-owner rule assumed a successful create
+reply. A lost reply cannot prove that no runner exists, so releasing that owner
+would contradict the rule that the original task remains recoverable.
+
+The durable instance and unit are written before the external Workflow create.
+The instance starts with an unreconciled admission marker. Only a confirmed
+create for that exact saved record marks it created without touching its unit
+rows. A duplicate or lost reply leaves the marker unresolved; if that Workflow
+ends, a reissue cannot infer that it performed this plan's work or allocate a
+new attempt from empty history.
+When that request was sent but its reply is unreadable, the effect is pending:
+the original act, instance and unit remain the only recovery identity, and a
+reserved publication owner remains with them. A status read for the same
+Workflow id proves existence but cannot attribute an unreconciled create to
+the saved work. A duplicate or lost reply therefore remains pending until
+its own create is confirmed. Unavailable status cannot prove absence, and no
+new instance or owner is allocated from that uncertainty.
+
+The bot distinguishes local configuration and typed shim authorization refusals
+before Workflow create, an explicit create failure, a confirmed created or
+existing Workflow, and an unresolved attempt. The main agent receives its saved private work id with the pending
+observation only while the original requester and private audience still pass
+their gates. The boundary tests and current gaps are in
+[agent-ship item 16](../reference/specs/agent-ship.md).

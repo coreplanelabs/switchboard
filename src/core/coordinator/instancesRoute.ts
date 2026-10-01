@@ -96,13 +96,12 @@ export function createInstanceResponse(outcome: CreateInstanceOutcome): {
   }
 }
 
-/** The shim's answer as the bot reads it back (the reverse direction of
- *  `createInstanceResponse`): the three outcomes by their wire shape, and
- *  `unanswered` by reason for anything else — the door's 401/403, a shim
- *  without the route, a body that is not the route's. */
-export type CreateInstanceAnswer = CreateInstanceOutcome | { kind: "unanswered"; reason: string };
+/** A local pre-request refusal is distinct from an attempted create whose
+ * answer cannot establish whether the platform committed it. */
+export type CreateInstanceAnswer =
+  CreateInstanceOutcome | { kind: "not_attempted"; reason: string } | { kind: "unanswered"; reason: string };
 
-export function readCreateInstanceAnswer(status: number, text: string): CreateInstanceAnswer {
+export function readCreateInstanceAnswer(status: number, text: string, expectedId?: string): CreateInstanceAnswer {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -110,6 +109,17 @@ export function readCreateInstanceAnswer(status: number, text: string): CreateIn
     parsed = undefined;
   }
   const body = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+  if (expectedId !== undefined && body !== undefined && body.id !== undefined && body.id !== expectedId)
+    return { kind: "unanswered", reason: `HTTP ${status} — response named another instance` };
+  if (
+    body?.ok === false &&
+    typeof body.error === "string" &&
+    (status === 400 ||
+      status === 401 ||
+      status === 403 ||
+      (status === 503 && body.error.startsWith("coordinator disabled:")))
+  )
+    return { kind: "not_attempted", reason: `HTTP ${status} — ${body.error}` };
   if (body !== undefined && typeof body.id === "string") {
     if (status === 201 && body.ok === true && body.created === true) return { kind: "created", id: body.id };
     if (status === 409 && body.error === "duplicate_instance")
@@ -237,7 +247,7 @@ export function isInstanceNotFound(message: string): boolean {
 export type InstanceStatusAnswer =
   { kind: "status"; status: string } | { kind: "absent" } | { kind: "unanswered"; reason: string };
 
-export function readInstanceStatusAnswer(status: number, text: string): InstanceStatusAnswer {
+export function readInstanceStatusAnswer(status: number, text: string, expectedId?: string): InstanceStatusAnswer {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -245,6 +255,8 @@ export function readInstanceStatusAnswer(status: number, text: string): Instance
     parsed = undefined;
   }
   const body = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+  if (expectedId !== undefined && (status === 200 || status === 404) && body?.id !== expectedId)
+    return { kind: "unanswered", reason: `HTTP ${status} — response named another instance` };
   if (status === 200 && body?.ok === true && typeof body.status === "string" && body.status !== "")
     return { kind: "status", status: body.status };
   if (status === 404 && body?.error === "no_instance") return { kind: "absent" };

@@ -23406,7 +23406,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     vi.stubEnv("SWITCHBOARD_INGRESS_TOKENS", JSON.stringify({ "coord-bearer": { subject: "coordinator" } }));
     const fetchSpy = vi.fn(
       async (_url: string | URL | Request, _init?: RequestInit) =>
-        new Response(JSON.stringify({ ok: false, error: "no_instance" }), { status: 404 }),
+        new Response(JSON.stringify({ ok: false, error: "no_instance", id: INSTANCE }), { status: 404 }),
     );
     vi.stubGlobal("fetch", fetchSpy);
     const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);

@@ -317,7 +317,8 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
       } else if (hostingOf(row.state) !== undefined) {
         // A hosted parent has no transcript of its own: its Workflow and
         // children that remain live are the durable liveness facts. The old
-        // `until` is only a final bound when neither exists. Child classification
+        // `until` permits closure only after the instance is confirmed absent
+        // or terminal. Child classification
         // already removed finishing and non-resumable rows from this answer.
         const hosting = hostingOf(row.state)!;
         const children = childrenOf(hosting.instanceId);
@@ -327,11 +328,11 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
             instanceLive = await opts.hostedInstanceLive(hosting.instanceId);
           } catch (err) {
             warn(
-              `[reclaim] ${row.runId} ${row.threadKey}: instance status failed (${describe(err)}) — falling back to the ledger deadline`,
+              `[reclaim] ${row.runId} ${row.threadKey}: instance status failed (${describe(err)}) — retaining the hosted owner`,
             );
           }
         }
-        const shouldRehost = hosting.until > now() || children.length > 0 || instanceLive === true;
+        const shouldRehost = hosting.until > now() || children.length > 0 || instanceLive !== false;
         if (shouldRehost) {
           // With no child proving liveness, a terminal plain-store record says
           // finish landed there while the ledger write failed: abandon the
@@ -365,8 +366,8 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
           );
           continue;
         }
-        // Past its deadline with no live Workflow or child: the runner died
-        // without `finish`, and re-hosting again would hold the host key forever.
+        // Past its deadline with a confirmed absent or terminal Workflow and
+        // no live child: the runner died without `finish`.
         status = "interrupted";
         why = `hosted past its deadline (${new Date(hosting.until).toISOString()}): the pipeline's runner never finished it`;
       } else {

@@ -44,6 +44,7 @@ import {
 /** `exists`: a different record already holds the id (an identical put is
  *  idempotent); `unavailable`: no durable store in this process. */
 export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "unavailable" };
+export type ConfirmCreatedResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
 export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type CompareAndReplaceUnitResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
 export type AppendEventResult =
@@ -110,6 +111,9 @@ export interface CoordinatorInstanceStore {
    *  instance was never created, once the shim has said so. A private-task
    *  claim or typed settlement refuses replacement as `exists`. */
   replace(instance: CoordinatorInstance): Promise<PutInstanceResult>;
+  /** Mark only the exact saved pre-create record as created. Unit rows remain
+   * untouched; a duplicate or a replaced owner cannot cross this fence. */
+  confirmCreated(expected: CoordinatorInstance): Promise<ConfirmCreatedResult>;
   get(id: string): Promise<CoordinatorInstance | null>;
   /** The unit rows of an instance (run-history item 50), each replaced whole:
    *  written at the instance's creation and rewritten as the runner reaches the
@@ -260,6 +264,15 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       return { ok: false, reason: "exists" };
     this.rows.set(instance.id, JSON.stringify(instance));
     for (const key of [...this.units.keys()]) if (key.startsWith(`${instance.id}\0`)) this.units.delete(key);
+    return { ok: true };
+  }
+  async confirmCreated(expected: CoordinatorInstance): Promise<ConfirmCreatedResult> {
+    if (expected.admission !== "unreconciled") return { ok: false, reason: "stale" };
+    const confirmed = JSON.stringify({ ...expected, admission: "created" });
+    const current = this.rows.get(expected.id);
+    if (current === confirmed) return { ok: true };
+    if (current !== JSON.stringify(expected)) return { ok: false, reason: "stale" };
+    this.rows.set(expected.id, confirmed);
     return { ok: true };
   }
   async get(id: string): Promise<CoordinatorInstance | null> {
@@ -428,6 +441,9 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
   async replace(_instance: CoordinatorInstance): Promise<PutInstanceResult> {
     return { ok: false, reason: "unavailable" };
   }
+  async confirmCreated(_expected: CoordinatorInstance): Promise<ConfirmCreatedResult> {
+    return { ok: false, reason: "unavailable" };
+  }
   async get(_id: string): Promise<CoordinatorInstance | null> {
     return null;
   }
@@ -589,6 +605,14 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     if (r.status === 409 && d.reason === "exists") return { ok: false, reason: "exists" };
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/replace: unexpected answer (HTTP ${r.status})`);
+  }
+
+  async confirmCreated(expected: CoordinatorInstance): Promise<ConfirmCreatedResult> {
+    const r = await this.post("/runs/coordinator/admission/confirm", { expected });
+    const d = r.data as { ok?: unknown; reason?: unknown };
+    if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
+    if (d.ok === true) return { ok: true };
+    throw new Error(`coordinator store /runs/coordinator/admission/confirm: unexpected answer (HTTP ${r.status})`);
   }
 
   async get(id: string): Promise<CoordinatorInstance | null> {

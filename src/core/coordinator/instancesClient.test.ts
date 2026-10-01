@@ -6,8 +6,8 @@ import { createInstanceViaShim, fetchInstanceStatusViaShim } from "./instancesCl
 // own shim for a coordinator instance: `POST <PUBLIC_BASE_URL>/admin/coordinator/instances`
 // with the `coordinator` bearer of the token map it holds, `{ id, params: {} }`
 // as the body, the answer read by `readCreateInstanceAnswer`. A process without
-// the base URL or the bearer, or a shim that cannot be reached, is `unanswered`
-// by reason — never a throw into the ship branch.
+// the base URL or bearer is `not_attempted`; a request sent without a
+// readable reply is `unanswered` — never a throw into the ship branch.
 
 const TOKENS = new Secret(
   JSON.stringify({ "tok-coord": { subject: "coordinator" }, "tok-cron": { subject: "cron" } }),
@@ -52,7 +52,7 @@ describe("createInstanceViaShim — the bot's request for a coordinator instance
     expect(JSON.parse(String(f.calls[0]!.init.body))).toEqual({ id: "recovery-run-r1", params });
   });
 
-  it("a duplicate and a failure come back as the shim said; a shim that cannot be reached, no base URL and no coordinator bearer are unanswered by reason and nothing is sent", async () => {
+  it("a duplicate and a failure come back as the shim said; an unreachable shim is unanswered and missing local configuration is not attempted", async () => {
     const dup = fetchDouble(409, { ok: false, error: "duplicate_instance", id: "plan-fixture", status: "running" });
     expect(
       await createInstanceViaShim({ baseUrl: "https://bot.example", tokens: TOKENS, fetch: dup.impl }, "plan-fixture"),
@@ -74,7 +74,7 @@ describe("createInstanceViaShim — the bot's request for a coordinator instance
     expect(
       await createInstanceViaShim({ baseUrl: undefined, tokens: TOKENS, fetch: sent.impl }, "plan-fixture"),
     ).toEqual({
-      kind: "unanswered",
+      kind: "not_attempted",
       reason: "PUBLIC_BASE_URL is not set — the bot cannot address its own shim",
     });
     expect(
@@ -87,7 +87,7 @@ describe("createInstanceViaShim — the bot's request for a coordinator instance
         "plan-fixture",
       ),
     ).toEqual({
-      kind: "unanswered",
+      kind: "not_attempted",
       reason:
         "SWITCHBOARD_INGRESS_TOKENS has no single `coordinator` entry — the bot cannot present the coordinator bearer",
     });
@@ -97,11 +97,48 @@ describe("createInstanceViaShim — the bot's request for a coordinator instance
         "plan-fixture",
       ),
     ).toEqual({
-      kind: "unanswered",
+      kind: "not_attempted",
       reason:
         "SWITCHBOARD_INGRESS_TOKENS has no single `coordinator` entry — the bot cannot present the coordinator bearer",
     });
     expect(sent.calls).toEqual([]);
+  });
+
+  it("separates a pre-request configuration refusal from a sent request with an unreadable answer", async () => {
+    const neverSent = fetchDouble(201, { ok: true, id: "plan-fixture", created: true });
+    expect(
+      await createInstanceViaShim({ baseUrl: undefined, tokens: TOKENS, fetch: neverSent.impl }, "plan-fixture"),
+    ).toMatchObject({ kind: "not_attempted" });
+    expect(neverSent.calls).toHaveLength(0);
+
+    const wrongId = fetchDouble(201, { ok: true, id: "plan-other", created: true });
+    expect(
+      await createInstanceViaShim(
+        { baseUrl: "https://bot.example", tokens: TOKENS, fetch: wrongId.impl },
+        "plan-fixture",
+      ),
+    ).toMatchObject({ kind: "unanswered" });
+    expect(wrongId.calls).toHaveLength(1);
+  });
+
+  it("reads a typed authorization denial as not attempted but leaves an unknown 503 unresolved", async () => {
+    for (const status of [401, 403]) {
+      const denied = fetchDouble(status, { ok: false, error: "forbidden: no grant" });
+      expect(
+        await createInstanceViaShim(
+          { baseUrl: "https://bot.example", tokens: TOKENS, fetch: denied.impl },
+          "plan-fixture",
+        ),
+      ).toMatchObject({ kind: "not_attempted" });
+      expect(denied.calls).toHaveLength(1);
+    }
+    const uncertain = fetchDouble(503, { ok: false, error: "create_unanswered" });
+    expect(
+      await createInstanceViaShim(
+        { baseUrl: "https://bot.example", tokens: TOKENS, fetch: uncertain.impl },
+        "plan-fixture",
+      ),
+    ).toMatchObject({ kind: "unanswered" });
   });
 });
 
@@ -135,5 +172,22 @@ describe("fetchInstanceStatusViaShim — an earlier attempt's instance, as the p
       await fetchInstanceStatusViaShim({ baseUrl: undefined, tokens: TOKENS, fetch: sent.impl }, "plan-fixture"),
     ).toEqual({ kind: "unanswered", reason: "PUBLIC_BASE_URL is not set — the bot cannot address its own shim" });
     expect(sent.calls).toEqual([]);
+  });
+
+  it("rejects a status or absence for a different Workflow identity", async () => {
+    const wrongStatus = fetchDouble(200, { ok: true, id: "plan-other", status: "running" });
+    expect(
+      await fetchInstanceStatusViaShim(
+        { baseUrl: "https://bot.example", tokens: TOKENS, fetch: wrongStatus.impl },
+        "plan-fixture",
+      ),
+    ).toMatchObject({ kind: "unanswered" });
+    const wrongAbsence = fetchDouble(404, { ok: false, error: "no_instance", id: "plan-other" });
+    expect(
+      await fetchInstanceStatusViaShim(
+        { baseUrl: "https://bot.example", tokens: TOKENS, fetch: wrongAbsence.impl },
+        "plan-fixture",
+      ),
+    ).toMatchObject({ kind: "unanswered" });
   });
 });

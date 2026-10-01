@@ -4,8 +4,8 @@
 // holds to authenticate ingress callers — the shim relays that bearer back to
 // the bot's `authorize` question, so the same grant admits the create and the
 // steps. The answer is read by `readCreateInstanceAnswer`; a process without
-// the base URL or the bearer, and a shim that cannot be reached, are
-// `unanswered` by reason — the ship branch replies with the reason, never throws.
+// the base URL or the bearer is `not_attempted`; a request sent without a
+// readable reply is `unanswered`. The ship branch never infers effect from text.
 
 import { processSecrets, type Secret } from "../../secrets.js";
 import { parseIngressTokenMap, tokenForSubject } from "../ingressTokens.js";
@@ -41,7 +41,7 @@ export function processShimOptions(): ShimInstancesOptions {
   return { baseUrl: process.env.PUBLIC_BASE_URL, tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS") };
 }
 
-/** Where the shim is and what to present: unanswered by reason when the process has neither. */
+/** Where the shim is and what to present before a request can be attempted. */
 function shimAddress(opts: ShimInstancesOptions): { base: string; bearer: string } | { reason: string } {
   const base = opts.baseUrl?.trim().replace(/\/+$/, "");
   if (!base) return { reason: "PUBLIC_BASE_URL is not set — the bot cannot address its own shim" };
@@ -62,7 +62,7 @@ export async function createInstanceViaShim(
   params: object = {},
 ): Promise<CreateInstanceAnswer> {
   const at = shimAddress(opts);
-  if ("reason" in at) return { kind: "unanswered", reason: at.reason };
+  if ("reason" in at) return { kind: "not_attempted", reason: at.reason };
   const fetchImpl = opts.fetch ?? fetch;
   try {
     const res = await fetchImpl(`${at.base}${COORDINATOR_INSTANCES_PATH}`, {
@@ -71,7 +71,7 @@ export async function createInstanceViaShim(
       body: JSON.stringify({ id, params }),
       signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     });
-    return readCreateInstanceAnswer(res.status, await res.text().catch(() => ""));
+    return readCreateInstanceAnswer(res.status, await res.text().catch(() => ""), id);
   } catch (err) {
     return { kind: "unanswered", reason: unreachable(err) };
   }
@@ -94,7 +94,7 @@ export async function fetchInstanceStatusViaShim(
       headers: { authorization: `Bearer ${at.bearer}` },
       signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     });
-    return readInstanceStatusAnswer(res.status, await res.text().catch(() => ""));
+    return readInstanceStatusAnswer(res.status, await res.text().catch(() => ""), id);
   } catch (err) {
     return { kind: "unanswered", reason: unreachable(err) };
   }
