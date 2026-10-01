@@ -189,7 +189,8 @@ jobs:
       contents: read
     with:
       targets: affected
-      smoke: true
+      # Enable only after a dedicated production ingress bearer is configured.
+      smoke: ${{ vars.SMOKE_INGRESS_ENABLED == 'true' }}
     secrets: inherit # zizmor: ignore[secrets-inherit]
 
   # The same release publishes the three images (docs/reference/specs/release-and-deploy.md
