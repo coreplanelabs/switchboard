@@ -832,6 +832,31 @@ describe("dispatch", () => {
     }
   });
 
+  it("preserves public evidence and categorical source recovery through the model boundary", async () => {
+    const fixture = await mainSourceFixture({ mixed: true });
+    const { io, replies } = mainDmIO();
+    await dispatch(fixture.deps, fixture.question, io);
+    const result = fixture.requests
+      .at(-1)
+      ?.messages.flatMap((message) => message.content)
+      .find((part) => part.type === "tool_result" && part.toolUseId === "source-2");
+    expect(result?.type).toBe("tool_result");
+    if (result?.type !== "tool_result") throw new Error("missing source result");
+    const denied = JSON.parse(String(result.content));
+    expect(denied).toMatchObject({
+      kind: "refused",
+      reason: "cross_dm_forbidden",
+      recovery: { action: "provide_content_here" },
+    });
+    expect(denied.recovery.instruction).toContain("Changing permissions cannot enable");
+    expect(denied.recovery.instruction).toContain("paste");
+    expect(denied.recovery.instruction).not.toContain("grant");
+    expect(fixture.fetches.mock.calls.every(([args]) => args.channel === "C_PUBLIC")).toBe(true);
+    expect(JSON.stringify(fixture.requests.at(-1)?.messages)).toContain("accepted source evidence");
+    expect(JSON.stringify(fixture.requests)).not.toContain("denied source secret");
+    expect(replies).toEqual([fixture.answer]);
+  });
+
   it("does not fall back to automatic references without a bound source capability", async () => {
     for (const binding of ["missing", "denied"] as const) {
       const provider = capturingProvider("I cannot read that source here.");
