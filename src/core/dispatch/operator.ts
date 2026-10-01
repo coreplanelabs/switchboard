@@ -1189,27 +1189,31 @@ function requestSettingsOf(
   const {
     model,
     modelWord,
-    effort,
-    budget,
+    effort: suppliedEffort,
+    budget: suppliedBudget,
     severity: suppliedSeverity,
     renewals: suppliedRenewals,
-    verbosity,
+    verbosity: suppliedVerbosity,
     settingsEvidence,
   } = input;
   const evidence =
     settingsEvidence !== null && typeof settingsEvidence === "object" && !Array.isArray(settingsEvidence)
       ? (settingsEvidence as Record<string, unknown>)
       : {};
-  const quotesRequest = (setting: "severity" | "renewals"): boolean => {
+  const quotesRequest = (setting: "effort" | "budget" | "severity" | "renewals" | "verbosity"): boolean => {
     const quote = evidence[setting];
     return typeof quote === "string" && quote.trim() !== "" && requestText.includes(quote);
   };
-  // A preset cannot apply another preset's setting. Drop stray tool fields
-  // unless the requester actually named them, in which case the model
-  // must choose the right preset rather than silently losing the request.
+  // Only quoted requester settings have authority. Models sometimes populate
+  // optional tool fields from defaults, including fields for another preset.
+  const requestedSetting = <T>(setting: Parameters<typeof quotesRequest>[0], value: T): T | undefined =>
+    quotesRequest(setting) ? value : undefined;
+  const effort = requestedSetting("effort", suppliedEffort);
+  const budget = requestedSetting("budget", suppliedBudget);
   const severity =
-    preset !== "ship" && preset !== "review" && !quotesRequest("severity") ? undefined : suppliedSeverity;
-  const renewals = preset !== "ship" && !quotesRequest("renewals") ? undefined : suppliedRenewals;
+    preset === "ship" || preset === "review" ? requestedSetting("severity", suppliedSeverity) : undefined;
+  const renewals = preset === "ship" ? requestedSetting("renewals", suppliedRenewals) : undefined;
+  const verbosity = requestedSetting("verbosity", suppliedVerbosity);
   let ref: string | undefined;
   if (
     typeof model === "string" &&
@@ -1245,14 +1249,6 @@ function requestSettingsOf(
     return { violation: `bind_preset renewals must be a Ship count from 0 to ${GRANT_RENEWALS_MAX}` };
   if (verbosity !== undefined && !isVerbosity(verbosity))
     return { violation: "bind_preset verbosity must be quiet, verbose or debug" };
-  for (const [setting, value] of Object.entries({ effort, budget, severity, renewals, verbosity })) {
-    if (value === undefined) continue;
-    const quote = evidence[setting];
-    if (typeof quote !== "string" || quote.trim() === "" || !requestText.includes(quote))
-      return {
-        violation: `bind_preset ${setting} needs an exact quote from this request in settingsEvidence.${setting}`,
-      };
-  }
   return {
     settings: {
       ...(ref !== undefined ? { model: ref } : {}),
@@ -1317,11 +1313,8 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         kind: "violation",
         violation: "bind_preset for ship needs shipEntry: work, work_from_thread, review, plan or continue",
       };
-    if (
-      selectedPreset === "ship" &&
-      workObjective !== undefined &&
-      ((shipEntry !== "work" && shipEntry !== "work_from_thread") || typeof workObjective !== "string")
-    )
+    const shipWork = selectedPreset === "ship" && (shipEntry === "work" || shipEntry === "work_from_thread");
+    if (shipWork && workObjective !== undefined && typeof workObjective !== "string")
       return { kind: "violation", violation: "workObjective is only for a Ship work bind" };
     const requestSettings = requestSettingsOf(input, selectedPreset, ctx.requestText, ctx.providers);
     if ("violation" in requestSettings) return { kind: "violation", violation: requestSettings.violation };
@@ -1331,13 +1324,22 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     const needsRepo = AGENTS[selectedPreset] !== undefined && machineNeedsRepo(AGENTS[selectedPreset].machine);
     if (needsRepo && selectedPreset !== "review" && ctx.targetStoreUnavailable && requestRepo === undefined)
       return { kind: "violation", violation: "requester thread target store is unavailable; ask for the repository" };
-    const suppliedRepo = repo;
     const threadRepo =
       selectedPreset === "review"
         ? ctx.threadRepo
         : needsRepo
           ? ctx.requesterRepo
           : (ctx.requesterRepo ?? ctx.threadRepo);
+    const attachmentRepo = ctx.attachmentRepos?.length === 1 ? ctx.attachmentRepos[0] : undefined;
+    // A read that needs no repository cannot acquire one from a model's
+    // placeholder, even when the channel happens to have a default target.
+    const repoWord = typeof repo === "string" ? repo.trim().toLowerCase() : undefined;
+    const repoMatchesSource =
+      repoWord !== undefined &&
+      (threadRepo?.toLowerCase() === repoWord ||
+        ctx.channelRepo?.toLowerCase() === repoWord ||
+        ctx.attachmentRepos?.some((candidate) => candidate.toLowerCase() === repoWord) === true);
+    const suppliedRepo = needsRepo || requestRepo !== undefined || repoMatchesSource ? repo : undefined;
     if (needsRepo && selectedPreset !== "review" && ctx.requesterRepoConflict && requestRepo === undefined)
       return {
         kind: "violation",
@@ -1348,7 +1350,6 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         kind: "violation",
         violation: "the attachment has conflicting repository evidence; ask which repository is the target",
       };
-    const attachmentRepo = ctx.attachmentRepos?.length === 1 ? ctx.attachmentRepos[0] : undefined;
     if (
       needsRepo &&
       selectedPreset !== "review" &&
@@ -1416,20 +1417,21 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     if (selectedPreset === "ship" && shipEntry === "work_from_thread" && repoSource !== "thread")
       return { kind: "violation", violation: "work_from_thread needs the requester's established thread repository" };
     const reviewsPr = selectedPreset === "review" || (selectedPreset === "ship" && shipEntry === "review");
-    if (prTarget !== undefined && !reviewsPr)
+    const suppliedPrTarget = reviewsPr || selectedPreset === "ship" ? prTarget : undefined;
+    if (suppliedPrTarget !== undefined && !reviewsPr)
       return { kind: "violation", violation: "a PR target belongs only to a review bind; omit it for other work" };
-    if (reviewsPr && prTarget === undefined)
+    if (reviewsPr && suppliedPrTarget === undefined)
       return { kind: "violation", violation: "a PR target is required for review; ask for the PR" };
     const verifiedPrTarget =
-      prTarget === undefined
+      suppliedPrTarget === undefined
         ? undefined
-        : verifyPrTargetEvidence(prTarget, {
+        : verifyPrTargetEvidence(suppliedPrTarget, {
             requestText: ctx.requestText,
             ...(ctx.requesterId !== undefined ? { requesterId: ctx.requesterId } : {}),
             ...(ctx.tail !== undefined ? { tail: ctx.tail } : {}),
             ...(repository !== undefined ? { repo: repository } : {}),
           });
-    if (prTarget !== undefined && verifiedPrTarget === undefined)
+    if (suppliedPrTarget !== undefined && verifiedPrTarget === undefined)
       return {
         kind: "violation",
         violation: "the PR target needs a complete requester-authored span matching its number and repository",
@@ -1451,7 +1453,7 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
             ...(repoSource !== undefined ? { repoSource } : {}),
             ...(verifiedPrTarget !== undefined ? { prTarget: verifiedPrTarget } : {}),
             ...(selectedPreset === "ship" ? { shipEntry: shipEntry as ShipEntryIntent } : {}),
-            ...(selectedPreset === "ship" && typeof workObjective === "string" && workObjective.trim()
+            ...(shipWork && typeof workObjective === "string" && workObjective.trim()
               ? { workObjective: tidy(workObjective.trim()) }
               : {}),
           },
