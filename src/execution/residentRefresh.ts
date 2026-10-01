@@ -642,16 +642,34 @@ export function planWakeDepsBudget(input: {
   };
 }
 
-/** Where the Sandbox SDK stages a backup archive inside the container while it
- *  downloads (`BACKUP_CONTAINER_DIR` in @cloudflare/sandbox): the restore
- *  writes `<dir>/<backupId>.sqsh` in full FIRST and extracts into the target
- *  only afterwards, so a restore's progress lives here during the download and
- *  in the target during the extraction. Pinned by a test that reads the
- *  installed SDK's constant, so an SDK bump that moves it fails the build. */
+/** The SDK's backup work directory. Presigned downloads write part files under
+ *  `download.*` here, then move the assembled archive to `<backupId>.sqsh`.
+ *  Pinned by a test against the installed SDK's constant. */
 export const SDK_BACKUP_ARCHIVE_DIR = "/var/backups";
 
 export function restoreArchivePath(backupId: string): string {
   return `${SDK_BACKUP_ARCHIVE_DIR}/${backupId}.sqsh`;
+}
+
+/** Probe the whole SDK work directory so downloads count before the final
+ *  archive exists. The target starts growing only during extraction. */
+export function restoreProgressPaths(targetDir: string): [string, string] {
+  return [SDK_BACKUP_ARCHIVE_DIR, targetDir];
+}
+
+/** Count positive changes in occupied disk space. A completed download can
+ *  drop temporary files as it moves the archive, and older archives may already
+ *  occupy the work directory; neither should hide later progress or count as
+ *  bytes written by this restore. */
+export function accumulateRestoreProgress(
+  previous: { previousKiB: number; observedKiB: number },
+  currentKiB: number | null,
+): { previousKiB: number; observedKiB: number } {
+  if (currentKiB === null) return previous;
+  return {
+    previousKiB: currentKiB,
+    observedKiB: previous.observedKiB + Math.max(0, currentKiB - previous.previousKiB),
+  };
 }
 
 export interface RestoreSample {
@@ -668,7 +686,7 @@ export type RestoreVerdict = { verdict: "wait" } | { verdict: "stalled" | "cappe
  *  outlives a fixed 300 s budget has already sent the resident
  *  `down(r2-restore-failed)`, and the next hydrate runs `rm -rf` over the tree
  *  the first one is still filling). So the wake path polls the
- *  target directory: while bytes keep arriving it waits — a slow transfer is
+ *  backup work and target directories: while bytes keep arriving it waits — a slow transfer is
  *  a slow transfer — and it gives up only when nothing has been written for
  *  RESTORE_STALL_MS (the clock runs from the start until the first byte) or
  *  the whole thing exceeds RESTORE_MAX_MS. A sample du could not take is no

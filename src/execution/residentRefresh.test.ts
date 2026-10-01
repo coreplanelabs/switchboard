@@ -24,6 +24,8 @@ import {
   judgeRestoreProgress,
   planRefresh,
   restoreArchivePath,
+  restoreProgressPaths,
+  accumulateRestoreProgress,
   withTimeout,
   isRuntimeUnreachableReason,
   isRuntimeUnreachableSignal,
@@ -776,10 +778,7 @@ describe("judgeRestoreProgress (an R2 restore is judged by the bytes still arriv
   });
 });
 
-describe("restoreArchivePath (a restore's bytes land in the SDK's staging archive first, not the target)", () => {
-  // Judged on the target alone, every `du` sample of /workspace/checkout reads
-  // 0 while the archive is still downloading to /var/backups/<id>.sqsh, and the
-  // judge calls a healthy restore stalled.
+describe("restoreArchivePath (the SDK's final archive path)", () => {
   it("names the SDK's staging archive for a backup id", () => {
     expect(restoreArchivePath("21fe85c3-826f-47f1-932a-a4a9b8bb2e04")).toBe(
       "/var/backups/21fe85c3-826f-47f1-932a-a4a9b8bb2e04.sqsh",
@@ -797,6 +796,30 @@ describe("restoreArchivePath (a restore's bytes land in the SDK's staging archiv
     expect(m?.[1]).toBe(SDK_BACKUP_ARCHIVE_DIR);
     expect(source).toContain('const BACKUP_ARCHIVE_OBJECT_NAME = "data.sqsh"');
     expect(source).toMatch(/const archivePath = `\$\{BACKUP_CONTAINER_DIR\}\/\$\{id\}\.sqsh`/);
+    // The container half of this version stages download.* under the same
+    // directory. Recheck that behavior before changing the pinned SDK.
+    const pkg = JSON.parse(readFileSync(path.join(dist, "..", "package.json"), "utf8")) as { version: string };
+    expect(pkg.version).toBe("0.13.0-next.751.1");
+  });
+});
+
+describe("restore progress across the SDK's temporary download", () => {
+  it("probes the work directory where parts arrive before the final archive exists", () => {
+    expect(restoreProgressPaths("/workspace/checkout.restore-abc")).toEqual([
+      "/var/backups",
+      "/workspace/checkout.restore-abc",
+    ]);
+  });
+
+  it("counts new disk allocation across download, rename, and extraction without counting old archives", () => {
+    let progress = { previousKiB: 1_000_000, observedKiB: 0 };
+    progress = accumulateRestoreProgress(progress, 1_040_000);
+    expect(progress.observedKiB).toBe(40_000);
+    progress = accumulateRestoreProgress(progress, 1_010_000);
+    expect(progress.observedKiB).toBe(40_000);
+    progress = accumulateRestoreProgress(progress, 1_030_000);
+    expect(progress.observedKiB).toBe(60_000);
+    expect(accumulateRestoreProgress(progress, null)).toEqual(progress);
   });
 });
 
