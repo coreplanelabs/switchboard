@@ -2238,16 +2238,29 @@ async function reconcileMissingFindingsPush(
   );
 }
 
-/** The machine can start findings after a changes request, a failed check,
- * a gated approval or a removal from the merge queue. A bare approval cannot
- * authorize a coding child to advance the durable publication head. */
+/** The machine can start findings after a changes request, failed checks
+ * following a same-round approval, a gated approval or a merge-queue removal.
+ * A bare approval or an orphan checks note cannot authorize a publication. */
 function findingsRoundAuthorized(
   row: CoordinatorUnit,
   review: CoordinatorUnit["rounds"][number],
   childStartedAt: number,
 ): boolean {
   if (childStartedAt < review.at) return false;
-  if (review.outcome === "request_changes" || review.outcome === "checks_failed") return true;
+  if (review.outcome === "request_changes") return true;
+  if (review.outcome === "checks_failed") {
+    const preceding = row.rounds
+      .slice(0, row.rounds.lastIndexOf(review))
+      .reverse()
+      // Ordinary round writes can replay after a lost response. Ignore only
+      // same-round check notes; a different review boundary must still block.
+      .find(
+        (note) =>
+          note.agent === "review" &&
+          !(note.index === review.index && (note.outcome === "checks_restarted" || note.outcome === "checks_failed")),
+      );
+    return preceding?.index === review.index && preceding.outcome === "approve" && preceding.at <= review.at;
+  }
   return (
     review.outcome === "approve" &&
     ((review.gate?.findings.length ?? 0) > 0 ||
