@@ -33,7 +33,7 @@ export interface SteerCommandDeps {
         id: string;
         actor: Actor;
         name?: string;
-        origin?: { channelId: string; threadKey: string };
+        origin?: { channelId: string; threadKey: string; directAudience?: import("../types.js").SlackDirectAudience };
       },
     ): Promise<string>;
   };
@@ -67,7 +67,13 @@ export const steerRun = defineCommand({
       actor: caller.actor,
       ...(caller.name !== undefined ? { name: caller.name } : {}),
       ...(caller.origin !== undefined
-        ? { origin: { channelId: caller.origin.channelId, threadKey: caller.origin.threadKey } }
+        ? {
+            origin: {
+              channelId: caller.origin.channelId,
+              threadKey: caller.origin.threadKey,
+              ...(caller.origin.directAudience ? { directAudience: caller.origin.directAudience } : {}),
+            },
+          }
         : {}),
     });
     return { runId: args.id, text };

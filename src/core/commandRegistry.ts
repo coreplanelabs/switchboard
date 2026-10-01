@@ -128,6 +128,8 @@ export interface Caller {
   origin?: {
     channelId: string;
     threadKey: string;
+    /** Adapter-stamped direct DM provenance, never a replacement for fresh Slack verification. */
+    directAudience?: import("./types.js").SlackDirectAudience;
     /** Display-only channel name resolved by the adapter; never authority. */
     channelName?: string;
     repo?: () => Promise<string | undefined>;
