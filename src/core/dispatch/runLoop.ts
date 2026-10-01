@@ -85,6 +85,7 @@ import {
 } from "../../execution/githubPulls.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
+import type { SourceReads } from "../../mcp/sourceRead.js";
 import { currentPrHeadSha, prCommitsSince, recordPrOf, type RepoContext } from "../repoContext.js";
 import { verifyExistingPrPublication } from "../existingPrPublication.js";
 import { pairedPublicationPush, restoredPublicationHead, publicationReceiptsFromState } from "../publicationPush.js";
@@ -235,6 +236,7 @@ export type RunLoopOutcome = RunOutcome | RunInterrupted | RunPaused;
 
 /** What `runLoop` reads off the dispatch. */
 export interface RunLoopContext {
+  sourceReads?: SourceReads;
   msg: IncomingMessage;
   io: ChannelIO;
   agent: AgentDef;
@@ -1547,6 +1549,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       : undefined;
   const toolContext = {
     executor,
+    ...(ctx.sourceReads ? { sourceReads: ctx.sourceReads } : {}),
     ...(checkExecution ? { checkExecution } : {}),
     reportProgress,
     ...(attachFile ? { attach: attachFile } : {}),

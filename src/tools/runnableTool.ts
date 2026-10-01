@@ -37,8 +37,11 @@ import type { RunsReadCapability, SteerCapability } from "./runs.js";
 import type { SessionCapability } from "./session.js";
 import type { SlackContextCapability } from "./slackContext.js";
 import type { WebCapability } from "./web.js";
+import type { SourceReadOperation, SourceReads } from "../mcp/sourceRead.js";
 
 export interface ToolContext {
+  /** Durable read actions bound by dispatch, never authority supplied by tool arguments. */
+  sourceReads?: SourceReads;
   executor: Executor;
   /** Run-bound command recording; the model supplies intent, never receipt facts. */
   checkExecution?: CheckExecutionCapability;
@@ -194,6 +197,8 @@ export interface ToolContext {
 }
 
 export interface RunnableTool extends ToolDef {
+  /** Explicit resource-read contract; deliberately independent of concurrency/replay. */
+  sourceRead?: SourceReadOperation;
   /** Text for most tools; a parts list when the result should reach the model
    *  as something it can see (image/PDF) — see `ToolResultContent`. */
   run(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResultContent>;

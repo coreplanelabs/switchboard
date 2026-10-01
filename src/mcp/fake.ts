@@ -1,6 +1,6 @@
 import type { FetchLike } from "./client.js";
 import { MCP_PROTOCOL_VERSION } from "./client.js";
-import type { McpCallResult, McpClient, McpToolInfo } from "./types.js";
+import { McpError, type McpCallOptions, type McpCallResult, type McpClient, type McpToolInfo } from "./types.js";
 
 // The second McpClient implementation (AGENTS.md invariant 2) and the test
 // doubles: `InMemoryMcpClient` serves a fixed tool table with handlers, and
@@ -19,7 +19,7 @@ export class InMemoryMcpClient implements McpClient {
 
   constructor(
     private readonly tools: InMemoryTool[],
-    private readonly opts: { instructions?: string } = {},
+    private readonly opts: { instructions?: string; sessionId?: string } = {},
   ) {}
 
   async instructions(): Promise<string | undefined> {
@@ -32,7 +32,13 @@ export class InMemoryMcpClient implements McpClient {
     return this.tools.map(({ handler: _h, ...meta }) => meta);
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<McpCallResult> {
+  async sourceSession(): Promise<string> {
+    return this.opts.sessionId ?? "session-original";
+  }
+
+  async callTool(name: string, args: Record<string, unknown>, opts?: McpCallOptions): Promise<McpCallResult> {
+    if (opts?.sourceSession && opts.sourceSession !== (await this.sourceSession()))
+      throw new McpError("protocol", "Unknown source session");
     this.calls.push({ name, args });
     const tool = this.tools.find((t) => t.name === name);
     if (!tool) return { content: [{ type: "text", text: `unknown tool ${name}` }], isError: true };

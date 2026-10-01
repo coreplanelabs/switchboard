@@ -6,9 +6,9 @@ import { secretsFrom } from "../secrets.js";
 import { ConfigStore, InMemoryOverridesBacking } from "../config.js";
 import { fakeAuthorizationServer, InMemoryMcpClient, type FakeAuthorizationServerOptions } from "./fake.js";
 import { MCP_TICKET_TTL_MS, type McpTicket } from "./registry.js";
-import { importCredentialKey, openCredential } from "./sealed.js";
+import { importCredentialKey, openCredential, sealCredential } from "./sealed.js";
 import { InMemoryMcpSecretStore } from "./secretStore.js";
-import { McpService, McpServiceError, type McpActor, type McpTarget } from "./service.js";
+import { McpService, McpServiceError, type McpActor, type McpTarget, type McpServiceOptions } from "./service.js";
 import type { McpServerSpec } from "./types.js";
 
 // docs/reference/specs/mcp-tools.md items 13–17: the MCP rules over the CONFIG layers.
@@ -71,7 +71,7 @@ function harness(
   // The fake authorization server (item 18) doubles as the auth-detection
   // target; without `oauth`, every server answers 401 with no metadata → bearer.
   const as = fakeAuthorizationServer(opts.oauth ?? { server: "https://mcp.vanta.com/mcp", metadata: false });
-  const service = new McpService({
+  const serviceOptions: McpServiceOptions = {
     config,
     secrets,
     key: opts.key === false ? undefined : KEY,
@@ -94,8 +94,19 @@ function harness(
       clients.push({ spec, client });
       return client;
     },
-  });
-  return { config, backing, secrets, service, clients, as, tick: (ms: number) => (t += ms), now: () => t };
+  };
+  const service = new McpService(serviceOptions);
+  return {
+    config,
+    backing,
+    secrets,
+    service,
+    clients,
+    as,
+    recreate: () => new McpService(serviceOptions),
+    tick: (ms: number) => (t += ms),
+    now: () => t,
+  };
 }
 
 const code = async (p: Promise<unknown> | (() => unknown)) => {
@@ -445,6 +456,25 @@ describe("McpService — the connect flow (items 15–16)", () => {
 });
 
 describe("McpService — the run-time view (item 17)", () => {
+  it("preserves the sealed connection revision across restart and invalidates it on credential replacement", async () => {
+    const h = harness();
+    await h.service.add(alice, ME(alice), { name: "metrics", url: "https://metrics.example/mcp", auth: "bearer" });
+    await h.service.completeTicket("nonce-00000000000000000001", ada, "same-secret");
+    const revision = async (service: McpService) => {
+      const entries = await service.resolveForRun("general", { userId: alice.id });
+      const entry = entries.find((row) => "spec" in row && row.spec.name === "metrics");
+      return entry && "spec" in entry ? entry.spec.connectionRevision : undefined;
+    };
+    const original = await revision(h.service);
+    expect(original).toMatch(/^[a-f0-9]{64}$/);
+    expect(await revision(h.recreate())).toBe(original);
+    await h.service.connect(alice, ME(alice), "metrics");
+    await h.service.completeTicket("nonce-00000000000000000002", ada, "same-secret");
+    expect(await revision(h.recreate())).not.toBe(original);
+    await h.service.remove(alice, ME(alice), "metrics");
+    expect(await revision(h.recreate())).toBeUndefined();
+  });
+
   it("orchestrator opens only its requester's user-scoped source in a one-person Slack DM", async () => {
     const h = harness();
     await h.service.add(alice, ME(alice), { name: "default-user", url: "https://u.example/mcp", auth: "none" });
@@ -861,6 +891,30 @@ describe("McpService — OAuth (item 18)", () => {
     expect(await tokenFor(h)).toMatchObject({ name: "vanta", unavailable: expect.stringMatching(/invalid_grant/) });
   });
 
+  it("refuses a refreshed token whose sealed generation was replaced before resolution", async () => {
+    const h = harness({ oauth: { server: VANTA } });
+    await h.service.add(alice, ME(alice), { name: "vanta", url: VANTA });
+    const { state, code: c } = await startFlow(h);
+    expect((await h.service.completeOAuth(ada, { state, code: c })).ok).toBe(true);
+    const put = h.secrets.putCredential.bind(h.secrets);
+    h.secrets.putCredential = async (sealed) => {
+      const value = JSON.parse(await openCredential(KEY, sealed));
+      await put(
+        await sealCredential(
+          KEY,
+          sealed.serverId,
+          JSON.stringify({ ...value, accessToken: "replacement-token" }),
+          h.now(),
+        ),
+      );
+    };
+    h.tick(3600_000);
+    expect(await tokenFor(h)).toEqual({
+      name: "vanta",
+      unavailable: "the source credential changed during resolution",
+    });
+  });
+
   // Forces the raced interleaving: a run reads the still-sealed stale credential, then reaches
   // the refresh path only after the first refresh has stored its result — where an entry dropped
   // on settle would leave nothing to join, so the raced run would present the old refresh token
@@ -879,7 +933,14 @@ describe("McpService — OAuth (item 18)", () => {
     // A concurrent run read the sealed set before the store write but reaches the
     // refresh path only now — hand it the stale set to force that interleaving.
     const real = h.secrets.getCredential.bind(h.secrets);
-    h.secrets.getCredential = async (id) => (id === "user:slack:UALICE/vanta" ? stale : real(id));
+    let handedStale = false;
+    h.secrets.getCredential = async (id) => {
+      if (id === "user:slack:UALICE/vanta" && !handedStale) {
+        handedStale = true;
+        return stale;
+      }
+      return real(id);
+    };
     expect(await tokenFor(h)).toBe("at-2");
     expect(h.as.tokenRequests.filter((r) => r.grant_type === "refresh_token")).toHaveLength(1);
   });

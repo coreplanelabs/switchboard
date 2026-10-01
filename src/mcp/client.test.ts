@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MCP_PROTOCOL_VERSION, sseDataFrames, StreamableHttpMcpClient } from "./client.js";
 import { fakeMcpServerFetch } from "./fake.js";
 import { McpError } from "./types.js";
+import { readTool } from "./testing/sourceRead.js";
 
 const TOOLS = [
   {
@@ -25,6 +26,57 @@ function client(
 }
 
 describe("StreamableHttpMcpClient", () => {
+  it("preserves the versioned source descriptor as data during discovery", async () => {
+    const server = fakeMcpServerFetch({ tools: [readTool] });
+    expect((await client(server).listTools())[0]).toMatchObject({ _meta: readTool._meta });
+  });
+
+  it("never reinitializes or replays a bound source action after session loss", async () => {
+    const server = fakeMcpServerFetch({ tools: TOOLS, sessionId: "session-original", forgetSessionAfter: 1 });
+    const c = client(server);
+    await c.listTools();
+    await expect(
+      c.callTool(
+        "read",
+        { action: "execute" },
+        {
+          sourceSession: "session-original",
+        },
+      ),
+    ).rejects.toThrow();
+    expect(server.requests.filter((r) => r.body.method === "initialize")).toHaveLength(1);
+    expect(server.requests.filter((r) => r.body.method === "tools/call")).toHaveLength(1);
+  });
+
+  it("inspects an original durable session from a new client without initializing another one", async () => {
+    const server = fakeMcpServerFetch({ sessionId: "session-original" });
+    const original = client(server);
+    expect(await original.sourceSession()).toBe("session-original");
+    const recovered = client(server);
+    await recovered.callTool("read", { action: "inspect" }, { sourceSession: "session-original" });
+    expect(server.requests.map((r) => r.body.method)).toEqual([
+      "initialize",
+      "notifications/initialized",
+      "tools/call",
+    ]);
+    expect(server.requests.at(-1)?.headers["mcp-session-id"]).toBe("session-original");
+  });
+
+  it("refuses a response which replaces the bound source session", async () => {
+    const c = new StreamableHttpMcpClient({
+      url: "https://source.example/mcp",
+      fetch: async (_url, init) => {
+        const request = JSON.parse(String(init?.body));
+        return Response.json(
+          { jsonrpc: "2.0", id: request.id, result: { content: [] } },
+          { headers: { "mcp-session-id": "different-session" } },
+        );
+      },
+    });
+    await expect(c.callTool("read", { action: "inspect" }, { sourceSession: "original" })).rejects.toThrow(
+      "different session",
+    );
+  });
   it("initializes once, keeps the session id, and sends it on later requests", async () => {
     const server = fakeMcpServerFetch({ tools: TOOLS, sessionId: "sess-1" });
     const c = client(server);

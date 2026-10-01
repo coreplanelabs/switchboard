@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import type { RefusalCause } from "../core/refusal.js";
 import { AGENTS } from "../agents/registry.js";
 import type { ConfigStore, ResolvedMcpServer, Scope } from "../config.js";
@@ -1065,9 +1066,29 @@ export class McpService {
     if (!sealed) return { name: r.name, unavailable: "no credential is stored, so this server is unavailable" };
     try {
       const stored = parseStoredCredential(await openCredential(this.opts.key, sealed));
-      if (stored.kind === "bearer") return { spec: { ...base, auth: { type: "bearer", token: stored.token } } };
-      const fresh = await this.freshOAuth(id, stored);
-      return { spec: { ...base, auth: { type: "bearer", token: fresh.accessToken } } };
+      const fresh = stored.kind === "oauth" ? await this.freshOAuth(id, stored) : stored;
+      const token = fresh.kind === "bearer" ? fresh.token : fresh.accessToken;
+      const generation = fresh === stored ? sealed : await this.opts.secrets.getCredential(id);
+      if (!generation) return { name: r.name, unavailable: "the source credential changed during resolution" };
+      if (fresh !== stored) {
+        const current = parseStoredCredential(await openCredential(this.opts.key, generation));
+        if (current.kind !== "oauth" || current.accessToken !== token)
+          return { name: r.name, unavailable: "the source credential changed during resolution" };
+      }
+      // The sealed generation is high-entropy durable key material. This stamp
+      // survives a bot restart without exposing an offline hash of a credential.
+      const connectionRevision = createHmac("sha256", generation.sealed)
+        .update(
+          JSON.stringify([
+            id,
+            base.url,
+            base.addedAt,
+            base.agents,
+            Object.entries(base.headers ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+          ]),
+        )
+        .digest("hex");
+      return { spec: { ...base, auth: { type: "bearer", token }, connectionRevision } };
     } catch (err) {
       return { name: r.name, unavailable: err instanceof Error ? err.message : String(err) };
     }
