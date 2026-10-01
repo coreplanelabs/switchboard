@@ -1344,17 +1344,10 @@ export class ConfigStore {
     return [...this.grants.grants.keys()].filter(isViewablePerson);
   }
 
-  /** Who to ask when denied — for actionable error messages: the Slack users
-   *  who hold everything, in the table's order, as plain namespaced ids
-   *  (`slack:U…`). Slack only because a credential granted everything
-   *  (`access:`, `http:`) is not someone to ask. The Slack adapter renders each
-   *  id as a live mention (`mdToMrkdwn`, slack-channel.md item 16); every other
-   *  surface shows the plain id. */
+  /** Shared permission guidance names a role, never a roster: listing actor
+   *  ids here would notify every admin when Slack renders the message. */
   adminsHint(): string {
-    const admins = [...this.grants.grants]
-      .filter(([id, g]) => id.startsWith("slack:") && holdsEverything(g))
-      .map(([id]) => id);
-    return admins.length > 0 ? admins.join(", ") : "an admin";
+    return "an admin";
   }
 
   /** The restricted agents this actor holds no grant for (what `config show` lists as unavailable). */
@@ -1758,11 +1751,6 @@ function fmtModels(m: Record<string, string>): string {
   return Object.entries(m)
     .map(([k, v]) => `\`${k}=${v}\``)
     .join(" ");
-}
-
-/** `all` on every axis — an admin (`ALL_GRANTS`). */
-function holdsEverything(g: Grants): boolean {
-  return g.actions === "all" && g.channels === "all" && g.repos === "all";
 }
 
 export interface TracingConfig {

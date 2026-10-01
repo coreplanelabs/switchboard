@@ -2441,7 +2441,7 @@ describe("resident repo dispatch", () => {
     await dispatch(deps, msg("agent:coding in acme/try-catch: say hi", "slack:UDEV"), io);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("not onboarded");
-    expect(replies[0]).toContain("Ask slack:UADMIN to onboard it (`repo onboard acme/try-catch`)");
+    expect(replies[0]).toContain("Ask an admin to onboard it (`repo onboard acme/try-catch`)");
     expect(replies[0]).toContain("name the repository by URL"); // the self-serve path stays
     expect(provider.requests).toHaveLength(0);
   });
@@ -2629,7 +2629,8 @@ describe("repo management commands", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("repo onboard acme/api", "slack:UX"), io);
     expect(replies[0]).toContain("🚫");
-    expect(replies[0]).toContain("slack:UADMIN");
+    expect(replies[0]).toContain("Ask an admin.");
+    expect(replies[0]).not.toContain("slack:UADMIN");
     expect(provider.requests).toHaveLength(0);
     expect(admin.onboard).not.toHaveBeenCalled();
   });
@@ -8561,7 +8562,7 @@ describe("self-improvement wiring", () => {
     wireCommands(deps);
     const denied = fakeIO();
     await dispatch(deps, msg("friction propose"), denied.io);
-    expect(denied.replies).toEqual(["🚫 `friction propose` is restricted. Ask slack:UADMIN."]);
+    expect(denied.replies).toEqual(["🚫 `friction propose` is restricted. Ask an admin."]);
     const allowed = fakeIO();
     await dispatch(deps, msg("friction propose", "slack:UADMIN"), allowed.io);
     expect(allowed.replies[0]).toContain("0 runs analyzed");
@@ -8638,7 +8639,7 @@ describe("custom instructions in the system prompt", () => {
     const deps = makeDeps(gatedYaml, provider);
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("config instructions channel Be French."), io);
-    expect(replies[0]).toBe("🚫 `config instructions`: Channel config changes are restricted. Ask slack:UADMIN.");
+    expect(replies[0]).toBe("🚫 `config instructions`: Channel config changes are restricted. Ask an admin.");
     await dispatch(deps, msg("hi"), fakeIO().io);
     expect(provider.requests[0].system ?? "").not.toMatch(INSTRUCTIONS_BLOCK);
   });

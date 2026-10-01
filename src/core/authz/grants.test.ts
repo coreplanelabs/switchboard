@@ -318,7 +318,7 @@ describe("surface entries — what every actor authenticated on a surface holds"
     expect(mayRunAgent(table, grantsIn(table, "access:anyone"), "coding")).toBe(false);
   });
 
-  it("the table keeps surface entries apart from actors: `grants` never lists a `*` key (an admin hint names people, never a surface)", () => {
+  it("the table keeps surface entries apart from actors: `grants` never lists a `*` key (a surface is not an actor)", () => {
     const table = grantsTable({
       grants: parsed({ "slack:*": { actions: "all" }, "slack:UADMIN": { actions: "all" } }),
     });

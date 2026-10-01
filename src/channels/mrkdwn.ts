@@ -93,7 +93,7 @@ function convert(text: string): string {
   // invariant 4) or a stray pre-wrapped `<@slack:U…>` — becomes the mention
   // Slack resolves: `<@U…>`. This is the ONE renderer of actor ids into Slack
   // syntax (docs/reference/specs/slack-channel.md item 16): the core prints the
-  // plain namespaced id everywhere (refusals, admin hints, thread leads) and
+  // plain namespaced id when naming someone (such as a thread lead) and
   // only this adapter turns it into platform syntax, so every other surface
   // keeps the plain id. Stashed so the prose escape below leaves the produced
   // mention live. Word-bounded: an id inside a longer token (`user:slack:U…`,
