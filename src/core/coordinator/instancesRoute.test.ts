@@ -104,7 +104,7 @@ describe("createInstanceResponse — the wire shape of each outcome", () => {
 });
 
 describe("readCreateInstanceAnswer — the shim's answer as the bot reads it", () => {
-  it("201 created, 409 duplicate with the existing instance's status, 502 failed with the reason; anything else — the door's 401/403, non-JSON, a shim without the route — is unanswered by reason", () => {
+  it("typed pre-create denials are not attempted; created, duplicate, failed and unreadable replies keep their distinct outcomes", () => {
     expect(readCreateInstanceAnswer(201, JSON.stringify({ ok: true, id: "plan-x", created: true }))).toEqual({
       kind: "created",
       id: "plan-x",
@@ -127,12 +127,25 @@ describe("readCreateInstanceAnswer — the shim's answer as the bot reads it", (
         JSON.stringify({ ok: false, error: "create_failed", id: "plan-x", message: "engine down" }),
       ),
     ).toEqual({ kind: "failed", id: "plan-x", reason: "engine down" });
-    expect(readCreateInstanceAnswer(403, JSON.stringify({ ok: false, error: "forbidden: no grant" }))).toEqual({
+    for (const denied of [401, 403])
+      expect(readCreateInstanceAnswer(denied, JSON.stringify({ ok: false, error: "forbidden: no grant" }))).toEqual({
+        kind: "not_attempted",
+        reason: `HTTP ${denied} — forbidden: no grant`,
+      });
+    expect(readCreateInstanceAnswer(503, JSON.stringify({ ok: false, error: "create_unanswered" }))).toMatchObject({
       kind: "unanswered",
-      reason: "HTTP 403 — forbidden: no grant",
     });
     expect(readCreateInstanceAnswer(404, "not found")).toEqual({ kind: "unanswered", reason: "HTTP 404 — not found" });
     expect(readCreateInstanceAnswer(201, "<html>")).toEqual({ kind: "unanswered", reason: "HTTP 201 — <html>" });
+  });
+  it("does not accept a created, duplicate or failed answer for another requested id", () => {
+    for (const [status, body] of [
+      [201, { ok: true, id: "plan-other", created: true }],
+      [409, { ok: false, error: "duplicate_instance", id: "plan-other" }],
+      [502, { ok: false, error: "create_failed", id: "plan-other", message: "down" }],
+    ] as const) {
+      expect(readCreateInstanceAnswer(status, JSON.stringify(body), "plan-x")).toMatchObject({ kind: "unanswered" });
+    }
   });
 });
 
@@ -193,6 +206,14 @@ describe("the instance status route — the pure halves both ways", () => {
     expect(readInstanceStatusAnswer(200, JSON.stringify({ ok: true, id: "plan-x", status: "" }))).toMatchObject({
       kind: "unanswered",
     });
+  });
+  it("does not read another instance's status or absence as its own", () => {
+    expect(
+      readInstanceStatusAnswer(200, JSON.stringify({ ok: true, id: "plan-other", status: "running" }), "plan-x"),
+    ).toMatchObject({ kind: "unanswered" });
+    expect(
+      readInstanceStatusAnswer(404, JSON.stringify({ ok: false, error: "no_instance", id: "plan-other" }), "plan-x"),
+    ).toMatchObject({ kind: "unanswered" });
   });
 });
 

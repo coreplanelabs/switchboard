@@ -3011,6 +3011,27 @@ export class RunHistoryDO extends DurableObject<Env> {
     return out;
   }
 
+  /** Confirm only the exact record whose create returned success. Keep its unit
+   * rows; a replaced owner or a duplicate that predated the record stays
+   * unreconciled across bot restarts. */
+  async confirmInstanceCreated(expected: CoordinatorInstance): Promise<{ ok: true } | { ok: false; reason: "stale" }> {
+    let out: { ok: true } | { ok: false; reason: "stale" } = { ok: false, reason: "stale" };
+    this.ctx.storage.transactionSync(() => {
+      const current = this.sql
+        .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, expected.id)
+        .toArray()[0]?.json;
+      const confirmed = JSON.stringify({ ...expected, admission: "created" });
+      if (current === confirmed) {
+        out = { ok: true };
+        return;
+      }
+      if (expected.admission !== "unreconciled" || current !== JSON.stringify(expected)) return;
+      this.sql.exec(`UPDATE coordinator_instances SET json = ? WHERE instance_id = ?`, confirmed, expected.id);
+      out = { ok: true };
+    });
+    return out;
+  }
+
   async getInstance(id: string): Promise<CoordinatorInstance | null> {
     const row = this.sql
       .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, id)
@@ -5969,6 +5990,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/private-worker/list-after",
   "/runs/coordinator/put",
   "/runs/coordinator/replace",
+  "/runs/coordinator/admission/confirm",
   "/runs/coordinator/main-task/get",
   "/runs/coordinator/main-task/claim",
   "/runs/coordinator/requester-turn/record",
@@ -6715,6 +6737,12 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       return json({ error: "instance must be a coordinator instance record" }, 400);
     const r = await stub.replaceInstance(b.instance);
     console.log(`[runs/coordinator/replace] ${key.value} ${b.instance.id} → ${r.ok ? "replaced" : r.reason}`);
+    return r.ok ? json(r) : json(r, 409);
+  }
+  if (pathname === "/runs/coordinator/admission/confirm") {
+    if (!isCoordinatorInstance(b.expected) || b.expected.admission !== "unreconciled")
+      return json({ error: "expected must be an unreconciled coordinator instance" }, 400);
+    const r = await stub.confirmInstanceCreated(b.expected);
     return r.ok ? json(r) : json(r, 409);
   }
   if (pathname === "/runs/coordinator/main-task/get") {

@@ -46,6 +46,29 @@ const context = (mainStart?: ReturnType<typeof mainStartForRun>): ToolContext =>
 const verifyDirectAudience = async () => true;
 
 describe("work_start — plain-language private worker handoff", () => {
+  it("reports a reconciled existing worker without saying it started another", async () => {
+    const start = vi.fn<(input: MainStartInput) => Promise<MainStartResult>>().mockResolvedValue({
+      kind: "existing",
+      actId: "m_saved",
+      instanceId: "plan-saved",
+      reply: "The saved Workflow exists under the same id.",
+    });
+    const capability = mainStartForRun({
+      agentName: "orchestrator",
+      channelVisibility: "dm",
+      initial: { actor, msg },
+      source: () => ({ actor, msg, authorizedRepo: input.repo }),
+      live: () => true,
+      runId: "main-run",
+      verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
+      start,
+    });
+    const result = await workStartTool.run(input, context(capability));
+    expect(result).toContain("already has a private worker");
+    expect(result).toContain("m_saved");
+    expect(result).not.toContain("Started one private worker");
+  });
+
   it("a quoted incident and contextual repository cannot cross the trusted start gate", async () => {
     const question = { ...msg, text: "Why did signup fail? The log quotes vendor/lib" };
     const source = new MainSourceTracker(question, () => actor);

@@ -868,6 +868,28 @@ describe("runShipBranch — the host key and the hosted marker (record 0060)", (
     expect(JSON.stringify(s.closes[0])).toContain("✅");
   });
 
+  it("a lost create reply keeps the same hosted parent live with its saved instance while admission is pending", async () => {
+    const s = ledgerSetup();
+    s.deps.createCoordinatorInstance = async (id) => {
+      s.created.push(id);
+      return { kind: "unanswered", reason: "create reply lost" };
+    };
+    s.deps.fetchCoordinatorInstanceStatus = async () => ({ kind: "unanswered", reason: "status unavailable" });
+
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    await new Promise((r) => setImmediate(r));
+
+    expect(s.created).toEqual(["plan-fix-the-login-redirect-6435ec"]);
+    expect(s.registry.getById("run-s")).toMatchObject({ hosted: true, finished: false });
+    expect(s.inner.live.get("run-s")).toMatchObject({
+      phase: "live",
+      state: { hosting: { instanceId: s.created[0] } },
+    });
+    expect(s.replies).toHaveLength(1);
+    expect(s.replies[0]).toContain("not yet confirmed");
+    expect(JSON.stringify(s.closes[0])).toContain("⚠️");
+  });
+
   it("one pipeline per thread: a live host-key row refuses a second ship by name — nothing handed to the runner, the card closes ⚠️, the run still ends completed", async () => {
     const s = ledgerSetup();
     await s.inner.claim({

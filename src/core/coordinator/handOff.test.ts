@@ -72,7 +72,7 @@ function input(over: Partial<HandOffInput> = {}): HandOffInput {
 function harness(
   over: {
     files?: Record<string, string>;
-    create?: CreateInstanceAnswer | Error;
+    create?: CreateInstanceAnswer | Error | ((id: string) => CreateInstanceAnswer | Error);
     /** The shim's status of an earlier attempt's instance, by id; `absent` when unscripted. */
     status?: Record<string, InstanceStatusAnswer>;
     store?: HandOffDeps["instances"];
@@ -103,7 +103,7 @@ function harness(
     privateWorkerLog: over.privateWorkerLog ?? new InMemoryPrivateWorkerLog(),
     create: async (id) => {
       created.push(id);
-      const answer = over.create ?? { kind: "created", id };
+      const answer = typeof over.create === "function" ? over.create(id) : (over.create ?? { kind: "created", id });
       if (answer instanceof Error) throw answer;
       return answer;
     },
@@ -173,7 +173,7 @@ describe("main-agent work hand-off", () => {
       stillPrivate: async () => true,
     });
     const first = await handOffToCoordinator(h.deps, request);
-    expect(first).toMatchObject({ status: "aborted", refusal: { code: "plan_start_failed" } });
+    expect(first).toMatchObject({ status: "pending", instanceId: expect.any(String) });
     expect(h.created).toHaveLength(1);
     expect(await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-private" })).not.toBeNull();
 
@@ -196,7 +196,7 @@ describe("main-agent work hand-off", () => {
       },
       stillLive: () => true,
     });
-    expect((await handOffToCoordinator(h.deps, request)).status).toBe("aborted");
+    expect((await handOffToCoordinator(h.deps, request)).status).toBe("pending");
     expect(h.created).toHaveLength(1);
     await h.instances.recordRequesterTurn({
       threadKey: "slack:C1:1.0",
@@ -252,7 +252,7 @@ describe("main-agent work hand-off", () => {
       },
       stillLive: () => true,
     });
-    expect((await handOffToCoordinator(h.deps, request)).status).toBe("aborted");
+    expect((await handOffToCoordinator(h.deps, request)).status).toBe("pending");
     expect(h.created).toHaveLength(1);
     let checks = 0;
     const retried = await handOffToCoordinator(h.deps, {
@@ -267,7 +267,7 @@ describe("main-agent work hand-off", () => {
         return true;
       },
     });
-    expect(checks).toBe(2);
+    expect(checks).toBe(3);
     expect(retried.status).toBe("aborted");
     expect(retried.reply).toContain("newer request");
     expect(h.created).toHaveLength(1);
@@ -534,6 +534,79 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     });
   });
 
+  it("initial Workflow admission keeps its identity and owner when the reply is lost", async () => {
+    const h = harness({
+      create: { kind: "unanswered", reason: "reply lost" },
+      status: { "plan-fixture": { kind: "unanswered", reason: "status unavailable" } },
+    });
+    let owner: { instanceId: string; unit: string } | undefined;
+    let completed = 0;
+    let aborted = 0;
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        beforeStart: async () => ({
+          ok: true,
+          commit: async (next) => {
+            owner = next;
+          },
+          complete: () => {
+            completed += 1;
+          },
+          abort: async () => {
+            aborted += 1;
+            owner = undefined;
+          },
+        }),
+      }),
+    );
+
+    expect(out).toMatchObject({ status: "pending", instanceId: "plan-fixture" });
+    expect(out.reply).not.toContain("nothing ran");
+    expect(owner).toEqual({ instanceId: "plan-fixture", unit: "U10" });
+    expect({ completed, aborted }).toEqual({ completed: 1, aborted: 0 });
+    expect(h.created).toEqual(["plan-fixture"]);
+    expect(h.statusAsked).toEqual(["plan-fixture"]);
+    expect(await h.instances.get("plan-fixture")).not.toBeNull();
+  });
+
+  it("a lost reply with visible same-id Workflow status stays pending until its create is attributable", async () => {
+    const h = harness({
+      create: new Error("reply lost"),
+      status: { "plan-fixture": { kind: "status", status: "running" } },
+    });
+    const out = await handOffToCoordinator(h.deps, input());
+    expect(out).toMatchObject({ status: "pending", instanceId: "plan-fixture" });
+    expect(out.reply).toContain("reports running");
+    expect((await h.instances.get("plan-fixture"))?.admission).toBe("unreconciled");
+    expect(h.created).toEqual(["plan-fixture"]);
+    expect(h.statusAsked).toEqual(["plan-fixture"]);
+  });
+
+  it("an answer naming another Workflow retains the pending owner instead of claiming this one started", async () => {
+    const h = harness({ create: { kind: "created", id: "plan-other" } });
+    let completed = 0;
+    let aborted = 0;
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        beforeStart: async () => ({
+          ok: true,
+          commit: async () => {},
+          complete: () => {
+            completed += 1;
+          },
+          abort: async () => {
+            aborted += 1;
+          },
+        }),
+      }),
+    );
+    expect(out).toMatchObject({ status: "pending", instanceId: "plan-fixture" });
+    expect(out.reply).not.toContain("Handed to the plan runner");
+    expect({ completed, aborted }).toEqual({ completed: 1, aborted: 0 });
+  });
+
   it("a refused ownership transfer aborts before the Workflow can start", async () => {
     const h = harness();
     let completed = 0;
@@ -587,6 +660,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       branch: "plan/fixture/u10-warm-the-cache-on-wake",
       base: "main",
       createdAt: NOW,
+      admission: "created",
       plan: { id: "fixture", path: "docs/plans/fixture.md" },
       merge: "runner",
       addressSeverity: "minor",
@@ -1553,7 +1627,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       status: { "plan-fixture": { kind: "unanswered", reason: "the shim could not be reached: ECONNREFUSED" } },
     });
     expect((await handOffToCoordinator(mute.deps, input({ runId: "run-s4" }))).reply).toBe(
-      "⚠️ This is a bug: the plan runner could not tell whether `plan-fixture` still runs (the shim could not be reached: ECONNREFUSED), so nothing ran and no automatic state retry was scheduled.",
+      "⚠️ The plan runner could not tell whether `plan-fixture` still runs (the shim could not be reached: ECONNREFUSED); its saved instance must be checked before another attempt.",
     );
     expect(odd.created).toEqual([]);
     expect(mute.created).toEqual([]);
@@ -1683,21 +1757,46 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect((await store.get("plan-fixture-2"))?.runId).toBe("run-s3");
   });
 
-  it("the shim's other answers: a duplicate instance the state Worker knew nothing of is a refusal a person decides; an unanswered shim and a create that threw are refusals by reason", async () => {
+  it("a duplicate or lost reply keeps its saved instance pending; a local refusal never attempted create", async () => {
     const dup = harness({ create: { kind: "duplicate", id: "plan-fixture", status: "complete" } });
     const out = await handOffToCoordinator(dup.deps, input());
-    expect(out.status).toBe("aborted");
-    expect(out.reply).toBe(
-      "🚫 A Workflow instance `plan-fixture` already exists on the platform, status: complete but the state Worker knew nothing of it — a person decides; re-issuing will not resume it.",
-    );
+    expect(out).toMatchObject({ status: "pending", instanceId: "plan-fixture" });
+    expect(out.reply).toContain("ownership needs reconciliation");
     const silent = harness({
-      create: { kind: "unanswered", reason: "PUBLIC_BASE_URL is not set — the bot cannot address its own shim" },
+      create: { kind: "not_attempted", reason: "PUBLIC_BASE_URL is not set — the bot cannot address its own shim" },
     });
     expect((await handOffToCoordinator(silent.deps, input())).reply).toBe(
       "⚠️ This is a bug: the plan runner could not be started (PUBLIC_BASE_URL is not set — the bot cannot address its own shim), nothing ran, and no automatic start retry was scheduled.",
     );
     const threw = harness({ create: new Error("boom") });
-    expect((await handOffToCoordinator(threw.deps, input())).reply).toContain("could not be started (boom)");
+    expect(await handOffToCoordinator(threw.deps, input())).toMatchObject({
+      status: "pending",
+      instanceId: "plan-fixture",
+    });
+  });
+
+  it("an unreconciled duplicate cannot become a new plan attempt after its Workflow ends", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    const first = harness({ store, create: { kind: "duplicate", id: "plan-fixture", status: "complete" } });
+    expect(await handOffToCoordinator(first.deps, input())).toMatchObject({ status: "pending" });
+    expect((await store.get("plan-fixture"))?.admission).toBe("unreconciled");
+
+    for (const status of [
+      { kind: "status", status: "running" },
+      { kind: "unanswered", reason: "offline" },
+    ] as const) {
+      const uncertain = harness({ store, status: { "plan-fixture": status } });
+      expect((await handOffToCoordinator(uncertain.deps, input({ runId: "run-s2" }))).status).toBe("aborted");
+      expect(uncertain.created).toEqual([]);
+      expect(await store.get("plan-fixture-2")).toBeNull();
+    }
+
+    const ended = harness({ store, status: { "plan-fixture": { kind: "status", status: "complete" } } });
+    const replay = await handOffToCoordinator(ended.deps, input({ runId: "run-s2", now: NOW + 1 }));
+    expect(replay).toMatchObject({ status: "aborted", refusal: { code: "plan_instance_orphaned" } });
+    expect(ended.created).toEqual([]);
+    expect(await store.get("plan-fixture-2")).toBeNull();
+    expect((await store.get("plan-fixture"))?.admission).toBe("unreconciled");
   });
 });
 
@@ -1806,6 +1905,57 @@ describe("main-agent work hand-off", () => {
     });
   });
 
+  it("an unreconciled private duplicate stays pending on same-id retry and later status reads", async () => {
+    const status: Record<string, InstanceStatusAnswer> = {};
+    const h = harness({ create: (id) => ({ kind: "duplicate", id, status: "running" }), status });
+    const request = mainInput({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "fix failed signups",
+      mainTask: mainTask("act-duplicate"),
+    });
+    const first = await handOffToCoordinator(h.deps, request);
+    expect(first).toMatchObject({ status: "pending", instanceId: expect.any(String) });
+    expect((await h.instances.get(first.instanceId!))?.admission).toBe("unreconciled");
+
+    const retried = await handOffToCoordinator(h.deps, request);
+    expect(retried).toMatchObject({ status: "pending", instanceId: first.instanceId });
+    expect(retried.reply).not.toContain("already owns");
+    expect(h.created).toEqual([first.instanceId, first.instanceId]);
+
+    for (const runnerStatus of ["running", "complete"]) {
+      status[first.instanceId!] = { kind: "status", status: runnerStatus };
+      const observed = await handOffToCoordinator(h.deps, request);
+      expect(observed).toMatchObject({ status: "pending", instanceId: first.instanceId });
+      expect(observed.reply).not.toContain("already owns");
+      expect((await h.instances.get(first.instanceId!))?.admission).toBe("unreconciled");
+      expect(h.created).toEqual([first.instanceId, first.instanceId]);
+    }
+  });
+
+  it("a saved act is not disclosed after private-audience or requester-revision revocation", async () => {
+    const h = harness({ create: new Error("reply lost") });
+    const request = mainInput({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "fix failed signups",
+      mainTask: mainTask("act-revoked"),
+    });
+    const first = await handOffToCoordinator(h.deps, request);
+    expect(first).toMatchObject({ status: "pending", instanceId: expect.any(String) });
+    h.deps.status = async () => ({ kind: "status", status: "running" });
+    const shared = await handOffToCoordinator(h.deps, { ...request, stillPrivate: async () => false });
+    expect(shared).toMatchObject({ status: "aborted", refusal: { code: "setup_failed" } });
+    expect(shared.instanceId).toBeUndefined();
+    await h.instances.recordRequesterTurn({
+      threadKey: request.msg.threadKey,
+      requesterId: request.msg.userId,
+      messageId: "2",
+    });
+    const superseded = await handOffToCoordinator(h.deps, request);
+    expect(superseded).toMatchObject({ status: "aborted", refusal: { code: "setup_failed" } });
+    expect(superseded.instanceId).toBeUndefined();
+    expect(h.created).toEqual([first.instanceId]);
+  });
+
   it("refuses an act claimed or replayed from a different conversation", async () => {
     const h = harness();
     const otherThread = "slack:COTHER:2.0";
@@ -1858,7 +2008,7 @@ describe("main-agent work hand-off", () => {
       mainTask: mainTask("act-retry"),
     });
     const failed = await handOffToCoordinator(h.deps, request);
-    expect(failed.status).toBe("aborted");
+    expect(failed.status).toBe("pending");
     const link = await h.instances.getMainTask({ mainThreadKey: "slack:C1:1.0", actId: "act-retry" });
     expect(link?.unit).toBe(["U", "1"].join(""));
     h.deps.create = async (id) => {

@@ -973,6 +973,39 @@ describe("run ledger — the coordinator instance record (item 49)", () => {
     expect((await post("/runs/coordinator/get", { storeKey: key, id: "ship_none" })).data).toEqual({ instance: null });
   });
 
+  it("confirms only the exact unreconciled create and leaves its unit rows intact", async () => {
+    const key = storeKey();
+    const pending: CoordinatorInstance = { ...instance, admission: "unreconciled" };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "U12",
+      slug: "u12",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+    };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance: pending })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] })).status).toBe(200);
+    expect(
+      await post("/runs/coordinator/admission/confirm", { storeKey: key, expected: { ...pending, runId: "other" } }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "stale" } });
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data).toEqual({
+      instance: pending,
+    });
+    expect(await post("/runs/coordinator/admission/confirm", { storeKey: key, expected: pending })).toEqual({
+      status: 200,
+      data: { ok: true },
+    });
+    expect((await post("/runs/coordinator/admission/confirm", { storeKey: key, expected: pending })).status).toBe(200);
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data).toEqual({
+      instance: { ...pending, admission: "created" },
+    });
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data).toEqual({
+      units: [unit],
+    });
+    expect((await post("/runs/coordinator/admission/confirm", { storeKey: key, expected: instance })).status).toBe(400);
+  });
+
   // Record 0060 / issue 1924: the hard stop's mark on the instance row —
   // written when the hosted parent is sealed, read back by the runner's routes.
   it("stop marks the instance row and get reads the mark back; a second mark keeps the first `at`; an unknown id is 409 unknown_instance; a malformed body is 400", async () => {

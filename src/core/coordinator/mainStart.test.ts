@@ -95,6 +95,51 @@ function harness(over: Partial<MainStartDeps> = {}) {
 }
 
 describe("main-agent private worker start", () => {
+  it("a lost create reply leaves one saved act and stays pending when same-id status alone cannot attribute private work", async () => {
+    const created: string[] = [];
+    let status: "unanswered" | "running" = "unanswered";
+    const h = harness({
+      create: async (id) => {
+        created.push(id);
+        return { kind: "unanswered", reason: "create reply lost" };
+      },
+      status: async () =>
+        status === "running"
+          ? { kind: "status", status: "running" }
+          : { kind: "unanswered", reason: "status unavailable" },
+    });
+    const first = await h.start(h.input);
+    expect(first).toMatchObject({
+      kind: "pending",
+      actId: expect.stringMatching(/^m_/),
+      instanceId: expect.any(String),
+    });
+    if (first.kind !== "pending") throw new Error("pending admission expected");
+    expect(await h.instances.getMainTask({ mainThreadKey: msg.threadKey, actId: first.actId })).toMatchObject({
+      instanceId: first.instanceId,
+      unit: expect.any(String),
+    });
+
+    const replay = await workStartTool.run(
+      { repo: h.input.repo, sourceMessage: "fix it", ...brief, requestedChange: "Different wording" },
+      {
+        mainStart: {
+          start: async () => h.start({ ...h.input, brief: { ...brief, requestedChange: "Different wording" } }),
+        },
+      } as unknown as ToolContext,
+    );
+    expect(replay).toContain(first.actId);
+    expect(replay).toContain("pending");
+    expect(replay).not.toContain("nothing ran");
+    expect(created).toEqual([first.instanceId]);
+
+    status = "running";
+    const observed = await h.start({ ...h.input, brief: { ...brief, requestedChange: "More changed wording" } });
+    expect(observed).toMatchObject({ kind: "pending", actId: first.actId, instanceId: first.instanceId });
+    expect(observed.reply).not.toContain("already owns");
+    expect(created).toEqual([first.instanceId]);
+  });
+
   it("preserves typed tool evidence through resolved admission storage and child rendering", async () => {
     const h = harness();
     let instanceId = "";
@@ -204,8 +249,8 @@ describe("main-agent private worker start", () => {
     const first = await h.start(h.input);
     const second = await h.start({ ...h.input, brief: { ...brief, requestedChange: "Different task" } });
     expect(first.kind).toBe("accepted");
-    expect(second.kind).toBe("accepted");
-    if (first.kind !== "accepted" || second.kind !== "accepted") return;
+    expect(second.kind).toBe("existing");
+    if (first.kind !== "accepted" || second.kind !== "existing") return;
     expect(second.instanceId).toBe(first.instanceId);
     expect(second.actId).toBe(first.actId);
     expect(h.created).toEqual([first.instanceId]);

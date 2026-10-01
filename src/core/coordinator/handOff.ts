@@ -186,11 +186,12 @@ export interface HandOffDeps {
 /** The ship outcome's shape, as the ship branch closes its card and replies from it. */
 export interface HandOffOutcome {
   issues?: WorkBriefIssue[];
-  status: "completed" | "aborted";
+  status: "completed" | "pending" | "aborted";
   reply: string;
-  /** The instance the hand-off created — a completed outcome's alone (record
-   *  0051 R2): what the ship branch publishes as the run's `ship_handoff`. */
+  /** The saved instance, including an unresolved admission, for same-id reads. */
   instanceId?: string;
+  /** Whether this attempt created the runner or read back the existing one. */
+  admission?: "created" | "existing";
   /** An aborted hand-off's refusal (record 0054): the reply's own sentence
    *  with its code and cause; the ship branch renders it through the seam. */
   refusal?: Refusal;
@@ -237,7 +238,73 @@ const refused = (code: RefusalCode, reply: string): HandOffOutcome => ({
   reply,
   refusal: refusalOf(code, reply),
 });
+const pending = (instanceId: string, reason: string): HandOffOutcome => ({
+  status: "pending",
+  instanceId,
+  reply: `⚠️ Work \`${instanceId}\` is saved, but its Workflow admission is not yet confirmed in the saved record (${reason}). Check this same work id before starting anything else.`,
+});
 const describe = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+async function confirmCreated(deps: HandOffDeps, instance: CoordinatorInstance): Promise<boolean> {
+  try {
+    return (await deps.instances.confirmCreated(instance)).ok;
+  } catch {
+    return false;
+  }
+}
+
+async function observeCreateUncertainty(
+  deps: HandOffDeps,
+  instance: CoordinatorInstance,
+  reason: string,
+): Promise<HandOffOutcome> {
+  let status: InstanceStatusAnswer;
+  try {
+    status = await deps.status(instance.id);
+  } catch (err) {
+    status = { kind: "unanswered", reason: describe(err) };
+  }
+  if (
+    instance.admission !== "unreconciled" &&
+    status.kind === "status" &&
+    (RUNNING.has(status.status) || ENDED.has(status.status))
+  )
+    return {
+      status: "completed",
+      admission: "existing",
+      instanceId: instance.id,
+      reply: `🧭 The saved Workflow \`${instance.id}\` exists (runner: ${status.status}); no second Workflow was created.`,
+    };
+  const detail =
+    status.kind === "unanswered"
+      ? `${reason}; status unavailable: ${status.reason}`
+      : status.kind === "status"
+        ? `${reason}; the Workflow reports ${status.status}, but its saved create is unreconciled`
+        : reason;
+  return pending(instance.id, detail);
+}
+
+async function privateAdmissionObservation(
+  deps: HandOffDeps,
+  input: HandOffInput,
+  outcome: HandOffOutcome,
+): Promise<HandOffOutcome> {
+  if (input.mainTask === undefined) return outcome;
+  if (!(await privateAtGate(input)))
+    return refused(
+      "setup_failed",
+      "This is no longer a private conversation; saved work details cannot be shown here.",
+    );
+  const revision = await requesterRevisionCurrent(deps, input.mainTask.mainThreadKey, input.mainTask.authority!);
+  if (revision === "unavailable")
+    return refused(
+      "plan_history_unavailable",
+      "I couldn't verify the original request; saved work details cannot be shown here.",
+    );
+  if (revision === "newer")
+    return refused("setup_failed", "A newer request arrived; saved work details cannot be shown from this turn.");
+  return outcome;
+}
 
 async function privateAtGate(input: HandOffInput): Promise<boolean> {
   if (!input.stillPrivate) return true;
@@ -743,7 +810,7 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
   if (status.kind === "unanswered")
     return refused(
       "plan_runner_state_unknown",
-      `⚠️ This is a bug: the plan runner could not tell whether \`${latest.id}\` still runs (${status.reason}), so nothing ran and no automatic state retry was scheduled.`,
+      `⚠️ The plan runner could not tell whether \`${latest.id}\` still runs (${status.reason}); its saved instance must be checked before another attempt.`,
     );
   if (status.kind === "status" && RUNNING.has(status.status))
     return refused(
@@ -754,6 +821,11 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
     return refused(
       "plan_runner_state_unread",
       `🚫 A runner for ${where} (\`${latest.id}\`) is in a state the bot does not read as ended (${status.status}) — a person decides.`,
+    );
+  if (status.kind === "status" && latest.admission === "unreconciled")
+    return refused(
+      "plan_instance_orphaned",
+      `🚫 Workflow \`${latest.id}\` ended, but its create was never attributed to this saved plan. Its original unit needs reconciliation before another attempt.`,
     );
   // What the earlier attempts merged is done for good, whichever attempt runs
   // next — a leftover's replacement included, so a resume whose create failed
@@ -1031,6 +1103,19 @@ async function linkedTask(deps: HandOffDeps, input: HandOffInput, link: MainTask
       "plan_runner_conflict",
       "🚫 The main task link does not match its original unit, requester or target; no worker started.",
     );
+  if (!(await privateAtGate(input)))
+    return refused(
+      "setup_failed",
+      "This is no longer a private conversation; the saved worker cannot be checked here.",
+    );
+  const revision = await requesterRevisionCurrent(deps, key.mainThreadKey, key.authority);
+  if (revision === "unavailable")
+    return refused("plan_history_unavailable", "I couldn't verify the original request for this saved worker.");
+  if (revision === "newer")
+    return refused(
+      "setup_failed",
+      "A newer request replaced this saved worker request; its state was not disclosed here.",
+    );
   let answer: InstanceStatusAnswer;
   try {
     answer = await deps.status(instance.id);
@@ -1038,9 +1123,10 @@ async function linkedTask(deps: HandOffDeps, input: HandOffInput, link: MainTask
     answer = { kind: "unanswered", reason: describe(err) };
   }
   if (answer.kind === "unanswered")
-    return refused(
-      "plan_runner_state_unknown",
-      `⚠️ The linked worker's state could not be read (${answer.reason}); no new worker started.`,
+    return privateAdmissionObservation(
+      deps,
+      input,
+      pending(instance.id, `the linked worker's status could not be read: ${answer.reason}`),
     );
   if (answer.kind === "absent") {
     const revision = await requesterRevisionCurrent(deps, key.mainThreadKey, key.authority!);
@@ -1077,27 +1163,65 @@ async function linkedTask(deps: HandOffDeps, input: HandOffInput, link: MainTask
     } catch (err) {
       created = { kind: "unanswered", reason: describe(err) };
     }
-    if (created.kind === "created" || created.kind === "duplicate")
-      return {
+    if ((created.kind === "created" || created.kind === "duplicate") && created.id === instance.id) {
+      if (created.kind === "duplicate" && instance.admission === "unreconciled")
+        return privateAdmissionObservation(
+          deps,
+          input,
+          pending(instance.id, "a Workflow exists under the saved id, but its private work is not attributable"),
+        );
+      if (
+        created.kind === "created" &&
+        instance.admission === "unreconciled" &&
+        !(await confirmCreated(deps, instance))
+      )
+        return privateAdmissionObservation(
+          deps,
+          input,
+          pending(instance.id, "the confirmed create could not be marked on the saved worker"),
+        );
+      return privateAdmissionObservation(deps, input, {
         status: "completed",
+        admission: created.kind === "created" ? "created" : "existing",
         instanceId: instance.id,
-        reply: `🧭 This main-agent act keeps its original unit ${instance.id}:${unit.unit}; the runner was retried under the same id.`,
-      };
-    return refused(
-      "plan_start_failed",
-      `⚠️ The linked worker could not be started (${created.reason}); its original unit is preserved for recovery.`,
-    );
+        reply:
+          created.kind === "created"
+            ? `🧭 This main-agent act keeps its original unit ${instance.id}:${unit.unit}; the runner was retried under the same id.`
+            : `🧭 This main-agent act already owns unit ${instance.id}:${unit.unit}; the Workflow exists under the same id.`,
+      });
+    }
+    if (created.kind === "unanswered" || ("id" in created && created.id !== instance.id)) {
+      const observed = await observeCreateUncertainty(
+        deps,
+        instance,
+        created.kind === "unanswered" ? created.reason : "the create response named another instance",
+      );
+      return privateAdmissionObservation(deps, input, observed);
+    }
+    if (created.kind === "failed" || created.kind === "not_attempted")
+      return refused(
+        "plan_start_failed",
+        `⚠️ The linked worker was not started (${created.reason}); its original unit is preserved for recovery.`,
+      );
+    return pending(instance.id, "the create answer could not be bound to this saved worker");
   }
   if (!RUNNING.has(answer.status) && !ENDED.has(answer.status))
     return refused(
       "plan_runner_state_unread",
       `🚫 The linked runner is in an unread state (${answer.status}); no worker started.`,
     );
-  return {
+  if (instance.admission === "unreconciled")
+    return privateAdmissionObservation(
+      deps,
+      input,
+      pending(instance.id, `the Workflow reports ${answer.status}, but its private work is not attributable`),
+    );
+  return privateAdmissionObservation(deps, input, {
     status: "completed",
+    admission: "existing",
     instanceId: instance.id,
     reply: `🧭 This main-agent act already owns unit ${instance.id}:${unit.unit} (runner: ${answer.status}).`,
-  };
+  });
 }
 
 /** The records, then the instance, then the reply. */
@@ -1113,8 +1237,9 @@ async function start(
   const reservation = await input.beforeStart?.();
   if (reservation?.ok === false)
     return { status: "aborted", reply: reservation.refusal.text, refusal: reservation.refusal };
-  let started = false;
+  let retainedOwner = false;
   try {
+    const pendingInstance: CoordinatorInstance = { ...instance, admission: "unreconciled" };
     let mainClaim;
     if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
     if (!(await privateAtGate(input)))
@@ -1131,7 +1256,7 @@ async function start(
     try {
       mainClaim =
         input.mainTask !== undefined
-          ? await deps.instances.claimMainTask(input.mainTask, instance, units[0]!, input.mainTask.authority!)
+          ? await deps.instances.claimMainTask(input.mainTask, pendingInstance, units[0]!, input.mainTask.authority!)
           : undefined;
     } catch (err) {
       return refused(
@@ -1151,8 +1276,8 @@ async function start(
       mainClaim !== undefined
         ? { ok: true as const }
         : write === "replace"
-          ? await deps.instances.replace(instance)
-          : await deps.instances.put(instance);
+          ? await deps.instances.replace(pendingInstance)
+          : await deps.instances.put(pendingInstance);
     if (!put.ok) {
       if (put.reason === "unavailable")
         return refused(
@@ -1247,40 +1372,68 @@ async function start(
     }
     switch (answer.kind) {
       case "created": {
+        if (answer.id !== instance.id) {
+          if (reservation?.ok === true) reservation.complete();
+          retainedOwner = true;
+          return privateAdmissionObservation(
+            deps,
+            input,
+            pending(instance.id, "the create response named another instance"),
+          );
+        }
         // The Workflow and its durable attempt now agree on the same owner.
         // Cleanup must retain that owner across any later reply/card failure.
         if (reservation?.ok === true) reservation.complete();
-        started = true;
+        retainedOwner = true;
+        if (!(await confirmCreated(deps, pendingInstance)))
+          return privateAdmissionObservation(
+            deps,
+            input,
+            pending(instance.id, "the confirmed create could not be marked on the saved instance"),
+          );
         log(`[ship] ${input.msg.threadKey}: handed to the plan runner ${instance.id} (${units.length} unit(s))`);
         const replaced =
           write === "replace" ? ["the records of an earlier attempt that never started were replaced"] : [];
-        return {
+        return privateAdmissionObservation(deps, input, {
           status: "completed",
+          admission: "created",
           reply: handedOff([...where, ...replaced]),
           instanceId: instance.id,
-        };
+        });
       }
       case "duplicate": {
-        // The platform holds an instance the state Worker has no record of — a
-        // store wiped or restored — so neither side can be trusted to resume.
+        // The platform reports a duplicate for the saved id. Its ownership
+        // needs reconciliation before this answer can claim a new start.
         const status = answer.status !== undefined ? `, status: ${answer.status}` : "";
-        return refused(
-          "plan_instance_orphaned",
-          `🚫 A Workflow instance \`${instance.id}\` already exists on the platform${status} but the state Worker knew nothing of it — a person decides; re-issuing will not resume it.`,
+        if (reservation?.ok === true) reservation.complete();
+        retainedOwner = true;
+        return privateAdmissionObservation(
+          deps,
+          input,
+          pending(
+            instance.id,
+            `a Workflow instance already exists on the platform${status}; its ownership needs reconciliation`,
+          ),
         );
       }
+      case "not_attempted":
       case "failed":
-      case "unanswered":
         log(`[ship] ${input.msg.threadKey}: the plan runner ${instance.id} could not be started — ${answer.reason}`);
         return refused(
           "plan_start_failed",
           `⚠️ This is a bug: the plan runner could not be started (${answer.reason}), nothing ran, and no automatic start retry was scheduled.`,
         );
+      case "unanswered": {
+        const observed = await observeCreateUncertainty(deps, pendingInstance, answer.reason);
+        if (reservation?.ok === true) reservation.complete();
+        retainedOwner = true;
+        return privateAdmissionObservation(deps, input, observed);
+      }
     }
     const unreachable: never = answer;
     return unreachable;
   } finally {
-    if (!started && reservation?.ok === true) await reservation.abort();
+    if (!retainedOwner && reservation?.ok === true) await reservation.abort();
   }
 }
 

@@ -127,6 +127,16 @@ function workerDouble() {
       for (const key of [...units.keys()]) if (key.startsWith(`${inst.id}/`)) units.delete(key);
       return Response.json({ ok: true });
     }
+    if (path === "/runs/coordinator/admission/confirm") {
+      const expected = body.expected as CoordinatorInstance;
+      const current = rows.get(expected.id);
+      const confirmed = JSON.stringify({ ...expected, admission: "created" });
+      if (current === confirmed) return Response.json({ ok: true });
+      if (expected.admission !== "unreconciled" || current !== JSON.stringify(expected))
+        return Response.json({ ok: false, reason: "stale" }, { status: 409 });
+      rows.set(expected.id, confirmed);
+      return Response.json({ ok: true });
+    }
     if (path === "/runs/coordinator/get") {
       const text = rows.get(body.id as string);
       return Response.json({ instance: text ? JSON.parse(text) : null });
@@ -232,6 +242,19 @@ const unitRow = (unit: string, over: Partial<CoordinatorUnit> = {}): Coordinator
 
 const contract = (name: string, make: () => CoordinatorInstanceStore) => {
   describe(name, () => {
+    it("confirms only the exact saved create and preserves its unit rows", async () => {
+      const store = make();
+      const pending: CoordinatorInstance = { ...instance, admission: "unreconciled" };
+      await store.put(pending);
+      await store.putUnits([unitRow("U12")]);
+      expect(await store.confirmCreated({ ...pending, runId: "other" })).toEqual({ ok: false, reason: "stale" });
+      expect(await store.get(instance.id)).toEqual(pending);
+      expect(await store.confirmCreated(pending)).toEqual({ ok: true });
+      expect(await store.confirmCreated(pending)).toEqual({ ok: true });
+      expect(await store.get(instance.id)).toEqual({ ...pending, admission: "created" });
+      expect((await store.listUnits(instance.id)).map((row) => row.unit)).toEqual(["U12"]);
+    });
+
     it("refuses unfenced writes over a typed ending atomically while allowing an exact checked replacement", async () => {
       const store = make();
       const stale = unitRow("U12");

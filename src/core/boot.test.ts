@@ -805,8 +805,27 @@ describe("reclaimRuns — the hosted parent's classification (record 0060)", () 
     expect(outcome.resumable.map((r) => [r.kind, r.row.runId])).toEqual([["rehost", "r-ship"]]);
   });
 
+  it("a hosted parent past its deadline keeps its owner when Workflow status is unreadable after restart", async () => {
+    const { ledger, run } = harness(undefined, {
+      storedStatus: async () => "interrupted",
+      hostedInstanceLive: async () => undefined,
+    });
+    await ledger.claim(hostedClaim("r-ship", "web:s:c9"));
+    await ledger.setState("r-ship", "g1", { hosting: hosting(50_000) });
+    await ledger.handoff("g1", ["r-ship"]);
+
+    const outcome = await run();
+
+    expect(outcome.closed).toEqual([]);
+    expect(outcome.resumable.map((r) => [r.kind, r.row.runId])).toEqual([["rehost", "r-ship"]]);
+    expect(ledger.live.get("r-ship")).toMatchObject({ ownerGen: "g2" });
+  });
+
   it("the same row past its deadline closes interrupted under the metadata's thread, the live row goes, and a later agent:ship in the thread claims the host key", async () => {
-    const { ledger, run } = harness(undefined, { storedStatus: async () => "interrupted" });
+    const { ledger, run } = harness(undefined, {
+      storedStatus: async () => "interrupted",
+      hostedInstanceLive: async () => false,
+    });
     await ledger.claim(hostedClaim("r-ship", "web:s:c9"));
     await ledger.setState("r-ship", "g1", { hosting: hosting(50_000) }); // the reclaim runs at 100 000
     const outcome = await run();

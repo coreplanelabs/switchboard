@@ -743,6 +743,10 @@ export interface CoordinatorInstance {
   base?: string;
   /** Epoch ms. */
   createdAt: number;
+  /** A create is unreconciled until this same record observes its own successful
+   * Workflow create. A duplicate or lost reply cannot authorize a later plan
+   * attempt merely because that external instance eventually ended. */
+  admission?: "unreconciled" | "created";
   /** The plan the instance runs: its id and, for a seeded plan, its path in
    *  the repository. A `plan` without a `path` is the generated one-unit plan a
    *  task request becomes — the mark that keeps its unit in the requesting
@@ -1150,6 +1154,7 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
   if (typeof r.repo !== "string" || !REPO_SLUG.test(r.repo)) return false;
   if (!isText(r.branch) || !isOptionalText(r.base)) return false;
   if (!isFinite(r.createdAt)) return false;
+  if (r.admission !== undefined && r.admission !== "unreconciled" && r.admission !== "created") return false;
   if (
     r.plan !== undefined &&
     !(isObject(r.plan) && isText(r.plan.id) && (r.plan.path === undefined || isText(r.plan.path, 1024)))

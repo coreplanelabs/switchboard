@@ -232,8 +232,15 @@ export const workStartTool: RunnableTool = {
     if (!checked.ok) return `error: ${JSON.stringify({ kind: "invalid_brief", issues: checked.issues })}`;
     if (!text(input.sourceMessage, 1000)) return "error: I need a quote from the request message; nothing started.";
     const result = await ctx.mainStart.start(input.repo, checked.brief, input.sourceMessage);
-    return result.kind === "accepted"
-      ? `Started one private worker. Work id: ${result.actId}. The main conversation stays here while it works.`
-      : `error: ${result.issues ? JSON.stringify({ kind: "invalid_brief", issues: result.issues }) : result.reply}`;
+    switch (result.kind) {
+      case "accepted":
+        return `Started one private worker. Work id: ${result.actId}. The main conversation stays here while it works.`;
+      case "existing":
+        return `This work already has a private worker. Work id: ${result.actId}. ${result.reply}`;
+      case "pending":
+        return `Work start is pending confirmation. Work id: ${result.actId}. ${result.reply}`;
+      case "refused":
+        return `error: ${result.issues ? JSON.stringify({ kind: "invalid_brief", issues: result.issues }) : result.reply}`;
+    }
   },
 };

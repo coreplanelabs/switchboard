@@ -39,6 +39,8 @@ export interface MainStartInput {
 
 export type MainStartResult =
   | { kind: "accepted"; actId: string; instanceId: string; reply: string }
+  | { kind: "existing"; actId: string; instanceId: string; reply: string }
+  | { kind: "pending"; actId: string; instanceId?: string; reply: string }
   | { kind: "refused"; reply: string; issues?: WorkBriefIssue[] };
 
 const refuse = (reply: string): MainStartResult => ({ kind: "refused", reply });
@@ -128,11 +130,26 @@ export function createMainTaskStarter(deps: MainStartDeps) {
         stillLive,
         stillPrivate: input.stillPrivate,
       });
-      return out.status === "completed" && out.instanceId
-        ? { kind: "accepted", actId, instanceId: out.instanceId, reply: out.reply }
-        : { ...refuse(out.reply), ...(out.issues ? { issues: out.issues } : {}) };
+      if (!(await input.stillPrivate().catch(() => false)))
+        return refuse("This is no longer a private conversation; I can't show private work here.");
+      if (out.status === "pending")
+        return { kind: "pending", actId, ...(out.instanceId ? { instanceId: out.instanceId } : {}), reply: out.reply };
+      if (out.status === "completed" && out.instanceId)
+        return {
+          kind: out.admission === "existing" ? "existing" : "accepted",
+          actId,
+          instanceId: out.instanceId,
+          reply: out.reply,
+        };
+      return { ...refuse(out.reply), ...(out.issues ? { issues: out.issues } : {}) };
     } catch {
-      return refuse("I couldn't confirm whether the worker started. I kept its task identity for a safe retry.");
+      if (!(await input.stillPrivate().catch(() => false)))
+        return refuse("This is no longer a private conversation; I can't show private work here.");
+      return {
+        kind: "pending",
+        actId,
+        reply: "I couldn't confirm whether the worker started. This work id stays stable for a safe retry.",
+      };
     }
   };
 }

@@ -715,14 +715,14 @@ export async function runShipBranch(
             },
           ),
         );
-    // The instance the hand-off created enters the stream first (record 0051
-    // R2): projected onto `RunRecord.instanceId`, it is how the thread's owner
-    // rule finds the plan runner from the page's ship run. None after a refusal.
+    // The instance reserved for the hand-off enters the stream first (record
+    // 0051 R2), including when the create reply is lost. The thread's owner
+    // rule finds this same runner identity from the ship run.
     if (outcome.instanceId !== undefined) {
       registry.publish(run.id, { type: "ship_handoff", instanceId: outcome.instanceId, at: clock() });
-      if (outcome.status === "completed" && ledgerRun?.tracked() === true) {
-        // The runner took it and the ledger mirrors this run: the parent stays
-        // live, hosting the instance. The row's state carries the instance and
+      if ((outcome.status === "completed" || outcome.status === "pending") && ledgerRun?.tracked() === true) {
+        // Admission succeeded or remains unresolved, and the ledger mirrors
+        // this run: the parent stays live, hosting the saved instance. Its state carries the instance and
         // the deadline a reclaim judges it by — the pipeline's wall clock plus
         // an hour of the runner's own scheduling slack — and the stream gets a
         // second `run_meta` naming the instance, the fact every reader of a
