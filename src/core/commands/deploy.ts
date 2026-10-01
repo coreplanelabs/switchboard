@@ -260,7 +260,10 @@ async function imagesInput(loaded: LoadedProfile, deps: DeployCommandDeps, readO
   if (loaded.profile.images !== "registry") return { mode: "build" };
   const published = await publishedImages(deps);
   if (loaded.origin === "example") return { mode: "registry", published, unprobed: "the example profile" };
-  const registry = await deps.deploy.images.registry(loaded.profile.account);
+  const registry = await deps.deploy.images.registry(
+    loaded.profile.account,
+    planImageCopies(published, loaded.profile.account, []).copy,
+  );
   if ("error" in registry) {
     if (readOnly) return { mode: "registry", published, unprobed: registry.error };
     throw new CommandError("unavailable", `cannot read the account registry — ${registry.error}`);
@@ -344,11 +347,14 @@ export const deployAll = defineCommand({
     if (dryRun) return output([], [], copies);
     if (plan.steps.length === 0) return output([], [], []);
     if (copies.length > 0) {
-      // The images first, before the live gate and before any Worker rolls: a step whose container
-      // cannot start is never deployed. The listing read back as the proof is the listing the plan
-      // is rebuilt on — from the first plan's own answers, so the runner gets a plan whose images are
-      // all present and whose selection is the one the copies were planned for.
-      const after = await copyImages(copies, loaded.profile.account, deps);
+      // The images first, before the live gate and before any Worker rolls. Replan from exact
+      // manifest readbacks so a catalog page cannot hide an image that landed.
+      const after = await copyImages(
+        copies,
+        loaded.profile.account,
+        images.mode === "registry" ? (images.registry ?? []) : [],
+        deps,
+      );
       plan = replan(options, planned, after, deps);
     }
     const result = await deps.deploy.run(plan);
@@ -712,17 +718,16 @@ function imagesOutput(plan: ImagesPlan, copied: ImageStatus): ImagesOutput {
   };
 }
 
-/** Copy the images the account registry lacks, in order: the credential first — the one thing the copy needs that
- *  the rest of the deploy does not, refused by name before anything moves — then each transfer, stopping at the
- *  first failure naming the image and what was not attempted. A transfer that reported success is not the proof:
- *  the registry is listed again and every copy must appear; that listing is returned for the caller to plan on. */
+/** Copy missing images in order, then read back their digests and recheck every initially present tag. */
 async function copyImages(
   copies: readonly ImageCopy[],
   account: string,
+  before: readonly RegistryImage[],
   deps: DeployCommandDeps,
 ): Promise<RegistryImage[]> {
   const credential = await deps.deploy.images.credential(account);
   if (!credential.ok) throw new CommandError("unavailable", credential.problem);
+  const digests = new Map<string, string>();
   for (const [i, copy] of copies.entries()) {
     const r = await deps.deploy.images.copy(copy, account);
     if (!r.ok) {
@@ -732,15 +737,26 @@ async function copyImages(
         `copying the ${copy.kind} image (${copy.source} → ${copy.target}) failed — ${r.problem}; stopping — ${rest.length > 0 ? rest.join(", ") : "nothing"} not attempted`,
       );
     }
+    digests.set(copy.target, r.report.digest);
   }
-  const after = await deps.deploy.images.registry(account);
+  const priorRefs = before.flatMap((image) => image.tags.map((version) => ({ name: image.name, version })));
+  const after = await deps.deploy.images.registry(account, [...priorRefs, ...copies]);
   if ("error" in after)
     throw new CommandError("unavailable", `copied, but cannot read the account registry back — ${after.error}`);
-  const unlisted = copies.filter((c) => !registryHas(after.value, c.name, c.version));
-  if (unlisted.length > 0)
+  const vanished = priorRefs.filter((ref) => !registryHas(after.value, ref.name, ref.version));
+  if (vanished.length > 0)
     throw new CommandError(
       "unavailable",
-      `copied ${copies.map((c) => c.target).join(", ")}, but the account registry does not list ${unlisted.map((c) => c.target).join(", ")} afterwards`,
+      `the account registry no longer has ${vanished.map((ref) => `${ref.name}:${ref.version}`).join(", ")} after copying; no Worker deployed`,
+    );
+  const mismatch = copies.filter((c) => {
+    const observed = after.value.find((i) => i.name === c.name && i.tags.includes(c.version));
+    return observed?.digest !== digests.get(c.target);
+  });
+  if (mismatch.length > 0)
+    throw new CommandError(
+      "unavailable",
+      `copied ${copies.map((c) => c.target).join(", ")}, but the account registry did not read back the expected manifest digest for ${mismatch.map((c) => c.target).join(", ")}`,
     );
   return after.value;
 }
@@ -779,12 +795,12 @@ export const deployImages = defineCommand({
     // (the reusable deploy workflow) runs this before every deploy and the profile decides.
     if (loaded.profile.images !== "registry") return { mode: "build", account, images: [] } as unknown as JsonValue;
     const published = await publishedImages(deps);
-    const before = await deps.deploy.images.registry(account);
+    const before = await deps.deploy.images.registry(account, planImageCopies(published, account, []).copy);
     if ("error" in before) throw new CommandError("unavailable", `cannot read the account registry — ${before.error}`);
     const plan = planImageCopies(published, account, before.value);
     if (options.dryRun) return imagesOutput(plan, "would copy") as unknown as JsonValue;
     if (plan.copy.length === 0) return imagesOutput(plan, "copied") as unknown as JsonValue;
-    await copyImages(plan.copy, account, deps);
+    await copyImages(plan.copy, account, before.value, deps);
     return imagesOutput(plan, "copied") as unknown as JsonValue;
   },
 });

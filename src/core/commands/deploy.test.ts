@@ -1170,10 +1170,16 @@ describe("deploy.images", () => {
     const accounts: string[] = [];
     let listed = 0;
     const io: ImagesHostIO = {
-      registry: async (account) => {
+      registry: async (account, refs) => {
         accounts.push(account);
         listed++;
-        return { value: [...registry.entries()].map(([name, tags]) => ({ name, tags: [...tags] })) };
+        return {
+          value: refs
+            ? refs
+                .filter((ref) => registry.get(ref.name)?.has(ref.version))
+                .map((ref) => ({ name: ref.name, tags: [ref.version], digest: `sha256:${ref.name}` }))
+            : [...registry.entries()].map(([name, tags]) => ({ name, tags: [...tags] })),
+        };
       },
       credential: async () => credential,
       copy: async (copy, account) => {
@@ -1371,8 +1377,24 @@ describe("deploy.images", () => {
     const unlisted = await withImages(silent).commands.invoke("deploy.images", {}, cli);
     expect(unlisted).toMatchObject({ ok: false, error: "unavailable" });
     expect(unlisted.ok ? "" : unlisted.message).toBe(
-      `copied ${target("switchboard-sandbox")}, but the account registry does not list ${target("switchboard-sandbox")} afterwards`,
+      `copied ${target("switchboard-sandbox")}, but the account registry did not read back the expected manifest digest for ${target("switchboard-sandbox")}`,
     );
+  });
+
+  it("proves copied images by exact tag and digest, refusing a changed readback", async () => {
+    const h = imagesHost({ switchboard: ["1.2.3"], "switchboard-resident": ["1.2.3"] });
+    const read = h.io.registry;
+    let calls = 0;
+    h.io.registry = async (account, refs) => {
+      const result = await read(account, refs);
+      if (++calls === 2 && "value" in result)
+        return { value: result.value.map((image) => ({ ...image, digest: `sha256:${"0".repeat(64)}` })) };
+      return result;
+    };
+    const result = await withImages(h).commands.invoke("deploy.images", {}, cli);
+    expect(result).toMatchObject({ ok: false, error: "unavailable" });
+    expect(result.ok ? "" : result.message).toContain("did not read back the expected manifest digest");
+    expect(h.copies).toEqual([`ghcr.io/example/switchboard-sandbox:1.2.3 → ${target("switchboard-sandbox")}`]);
   });
 
   it("without `images` in project.json the command (and every render) is `unavailable` naming the file", async () => {
@@ -1533,9 +1555,15 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     let listings = 0;
     let minted = 0;
     const io: ImagesHostIO = {
-      registry: async () => {
+      registry: async (_account, refs) => {
         listings++;
-        return { value: [...tags.entries()].map(([name, t]) => ({ name, tags: [...t] })) };
+        return {
+          value: refs
+            ? refs
+                .filter((ref) => tags.get(ref.name)?.has(ref.version))
+                .map((ref) => ({ name: ref.name, tags: [ref.version], digest: `sha256:${ref.name}` }))
+            : [...tags.entries()].map(([name, t]) => ({ name, tags: [...t] })),
+        };
       },
       credential: async () => {
         minted++;
@@ -1547,7 +1575,7 @@ describe("deploy.plan / deploy.all in registry mode", () => {
         return { ok: true, report: { digest: `sha256:${copy.name}`, blobs: 3, uploaded: 3, bytes: 30 } };
       },
     };
-    return { io, copies, listings: () => listings, minted: () => minted };
+    return { io, copies, listings: () => listings, minted: () => minted, forget: (name: string) => tags.delete(name) };
   }
   const ran = async (plan: DeployPlan): Promise<DeployRunResult> => ({
     kind: "ran",
@@ -1626,6 +1654,21 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     expect(narrow.minted()).toBe(0);
     expect(narrow.listings()).toBe(1);
     expect(only.ok && (only.value as { copied: unknown[] }).copied).toEqual([]);
+  });
+
+  it("stops when an initially present image disappears during another image's copy", async () => {
+    const h = copying(["switchboard"]);
+    const copy = h.io.copy;
+    h.io.copy = async (image, account) => {
+      const result = await copy(image, account);
+      h.forget("switchboard");
+      return result;
+    };
+    const { commands, plans } = planWith(h.io, REGISTRY, ran);
+    const result = await commands.invoke("deploy.all", {}, cli);
+    expect(result).toMatchObject({ ok: false, error: "unavailable" });
+    expect(result.ok ? "" : result.message).toContain("switchboard:1.2.3");
+    expect(plans).toEqual([]);
   });
 
   it("with --affected, the copies are planned for the report's selection and the plan is rebuilt on the read-back listing from that same report — the probe is asked once", async () => {
