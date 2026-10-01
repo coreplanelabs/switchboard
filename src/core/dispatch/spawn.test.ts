@@ -454,22 +454,30 @@ describe("spawnChild — the one path a child run is born through", () => {
 
   // docs/reference/specs/agent-conductor.md items 3 and 12: outside the exact
   // Ship batch exception, a writer is refused before a thread opens.
-  it("a writer outside a typed Ship batch is refused `spawn_identity` before anything opens, while readers pass", async () => {
+  it("an untyped conductor cannot start PR children or writers, while other readers pass", async () => {
     const { dispatch } = fakeDispatch(registers("run-child"));
     const ch = channel();
     const writers = Object.values(AGENTS).filter((a) => a.identity === "write");
     expect(writers.map((a) => a.name)).toEqual(["coding", "ship"]);
     for (const { name } of writers) {
       const out = await spawnChild(deps(dispatch), parent(ch.io), { preset: name, prompt: "fix it", repo: "acme/api" });
-      expect(out, name).toEqual({
-        kind: "refused",
-        reason: "spawn_identity",
-        message: `\`${name}\` runs as a \`write\` identity, so this run was not started: only an exact PR in a typed Ship batch may spawn a write child`,
-      });
+      expect(out, name).toEqual(
+        name === "ship"
+          ? {
+              kind: "refused",
+              reason: "spawn_batch_binding",
+              message: "select the exact Review or Ship targets at the operator door first",
+            }
+          : {
+              kind: "refused",
+              reason: "spawn_identity",
+              message: `\`${name}\` runs as a \`write\` identity, so this run was not started: only an exact PR in a typed Ship batch may spawn a write child`,
+            },
+      );
     }
     expect(ch.leads).toEqual([]);
     expect(dispatch).not.toHaveBeenCalled();
-    for (const { name } of Object.values(AGENTS).filter((a) => a.identity !== "write")) {
+    for (const { name } of Object.values(AGENTS).filter((a) => a.identity !== "write" && a.name !== "review")) {
       expect(await spawnChild(deps(dispatch), parent(ch.io), { preset: name, prompt: "q" }), name).toMatchObject({
         kind: "spawned",
       });

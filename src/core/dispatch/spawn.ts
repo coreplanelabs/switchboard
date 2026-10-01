@@ -45,7 +45,7 @@ import { waitCapabilityFor, type WaitCapability } from "./awaitChildren.js";
 import { textTurnsOf, type TextTurn } from "./textTurns.js";
 import type { DispatchOutcome } from "./outcome.js";
 import type { OperationTarget } from "../repoContext.js";
-import { linkedPullRequestsOf, type PrBatchBinding } from "../prBatchBinding.js";
+import type { PrBatchBinding } from "../prBatchBinding.js";
 
 /** The `spawn` block of `config.yaml` (docs/reference/specs/agent-conductor.md item 5). */
 export interface SpawnConfig {
@@ -296,14 +296,13 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   // coding, ship or review child never runs on the fast tier.
   const tierProblem = spawnTierRefusal(request, deps.core.config.config);
   if (tierProblem !== undefined) return refused("spawn_tier", tierProblem);
-  // A typed batch authorizes only its exact PR URLs. Without the typed bind,
-  // multiple linked PRs cannot grant Review or Ship child authority.
+  // A typed batch authorizes the conductor to start Review or Ship PR children.
+  // Child launch checks the canonical target, not the parent's chat prose.
   const typedBatch = parent.agentName === "conductor" ? parent.prBatch : undefined;
   if (
     parent.agentName === "conductor" &&
     typedBatch === undefined &&
-    (request.preset === "review" || request.preset === "ship") &&
-    linkedPullRequestsOf(parent.msg.text).length >= 2
+    (request.preset === "review" || request.preset === "ship")
   )
     return refused("spawn_batch_binding", "select the exact Review or Ship targets at the operator door first");
   const selectedTarget =

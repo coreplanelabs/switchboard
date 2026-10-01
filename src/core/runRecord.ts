@@ -500,9 +500,13 @@ export interface RunOperatorDecision {
     verbosity?: Verbosity;
     repo?: string;
     repoSource?: "request" | "attachment" | "thread" | "channel";
-    shipEntry?: "work" | "work_from_thread" | "review" | "plan";
+    shipEntry?: "work" | "work_from_thread" | "review" | "plan" | "continue";
     workObjective?: string;
-    prBatch?: { kind: "review" | "ship"; targets: { repo: string; number: number; url: string }[] };
+    prBatch?: {
+      kind: "review" | "ship";
+      targets: { repo: string; number: number; url: string }[];
+      evidence?: { action: string; targets: string[] };
+    };
     confirmed?: true;
   }[];
   question?: string;
@@ -566,7 +570,15 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
             ...(b.repoSource !== undefined ? { repoSource: b.repoSource } : {}),
             ...(b.shipEntry !== undefined ? { shipEntry: b.shipEntry } : {}),
             ...(b.prBatch !== undefined
-              ? { prBatch: { kind: b.prBatch.kind, targets: b.prBatch.targets.map((target) => ({ ...target })) } }
+              ? {
+                  prBatch: {
+                    kind: b.prBatch.kind,
+                    targets: b.prBatch.targets.map((target) => ({ ...target })),
+                    ...(b.prBatch.evidence !== undefined
+                      ? { evidence: { action: b.prBatch.evidence.action, targets: [...b.prBatch.evidence.targets] } }
+                      : {}),
+                  },
+                }
               : {}),
             ...(b.confirmed ? { confirmed: true as const } : {}),
           })),

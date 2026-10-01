@@ -964,8 +964,7 @@ export async function dispatch(
         // private authority record cannot be read.
       }
     }
-    // An explicit human turn can bypass the operator (a typed agent, a main
-    // DM, or stage A). Keep its target before the model transcript can grow.
+    // Keep the requester's target before the model transcript can grow.
     // Child requests and replay are not requester-authored evidence.
     if (!resume && !restart && !opts.parent && !opts.coordinator) {
       try {
@@ -976,9 +975,8 @@ export async function dispatch(
     }
     // The operator (record 0057; routing-and-config item 29): under
     // `routing.operator: shadow` or `on`, ONE operator turn per admitted chat
-    // event — here, ahead of stage A and outside the deterministic live-thread
-    // and directive short-circuits, or the shadow week would never see the
-    // replies and typed lines the readers answer. The deterministic exception
+    // event — here, ahead of the legacy stage A reader, so shadow observes
+    // the replies and typed lines that reader answers. The deterministic exception
     // under `on` is an ended pipeline's continuation-shaped reply: owner
     // resolution bypasses the operator before any model or command can run.
     // Under `shadow` the decision
@@ -992,19 +990,9 @@ export async function dispatch(
     // request: the operator never re-reads those.
     const configuredOperator =
       !resume && !restart && !opts.parent && !opts.coordinator ? operatorModeOf(deps.config.config) : "off";
-    // Until the one-door plan's directive unit lands, a message that opens with
-    // `agent:<preset>` is the person's typed decision and stays stage A's
-    // under `on`: the operator's re-reading of a seed bound a
-    // line no registry parses and handed the seed back, on its first day on.
-    // The same gate covers a message the registry's chat grammar parses, until
-    // the typed-line unit (plan 002 U13) lands: the operator's re-reading of a
-    // typed `runs stop <id> --mode hard` re-bound it into a tool spelling the
-    // grammar does not parse and handed it back, so a runaway run could not be
-    // stopped from chat. ANY non-null parse is typed — a recognized form with
-    // a malformed tail (an unknown flag, a stray positional) is stage A's
-    // immediate usage reply (routing-and-config item 10), never a model turn
-    // that could re-bind the typo. Shadow still records its decision beside
-    // either.
+    // Legacy readers still supply owner and target hints during the typed
+    // target migration. Under `on` they do not execute a typed chat line;
+    // the operator binds the action and the registry executes its typed call.
     const typed = parseDirectives(msg.text);
     const typedAgent = typed.agent;
     const explicitPr = explicitPrOf(msg.text);
@@ -1016,13 +1004,14 @@ export async function dispatch(
       );
     const exactPrReply =
       explicitPr !== undefined &&
-      (typedAgent === undefined || typedAgent === "ship") &&
+      (typedAgent === undefined || typedAgent === "ship" || typedAgent === "review") &&
       !opts.parent &&
       !opts.coordinator &&
       !resume &&
       !restart;
     const typedDecision =
-      typedAgent !== undefined || (deps.commands !== undefined && parseChatCommand(msg.text, deps.commands) !== null);
+      directDm &&
+      (typedAgent !== undefined || (deps.commands !== undefined && parseChatCommand(msg.text, deps.commands) !== null));
     // An explicitly opted-in one-person DM is the main conversation. Plain
     // questions stay with its configured agent; typed commands still use the
     // registry, and other channels keep the operator's normal routing.
@@ -1030,8 +1019,7 @@ export async function dispatch(
     const mainDm =
       msg.channelId.startsWith("slack:D") &&
       (mainScopes.user.agent ?? mainScopes.channel.agent ?? deps.config.config.defaults.agent) === "orchestrator";
-    let operatorMode =
-      configuredOperator === "on" && (typedDecision || mainDm) && typedAgent !== "ship" ? "off" : configuredOperator;
+    let operatorMode = configuredOperator === "on" && mainDm && typedAgent !== "ship" ? "off" : configuredOperator;
     // The preset an `on` decision binds on the person's own words, with the
     // decision's event on the run.
     let operatorPreset: string | undefined;
@@ -1133,13 +1121,13 @@ export async function dispatch(
             return ended;
           }
         }
-        // Without an exact owned PR to review, an ended pipeline is a
-        // deterministic continuation door. No inferred read command may
-        // substitute for that task. When a concurrent continuation has
+        // An ended pipeline retains its durable owner while the operator
+        // decides whether this reply is a continuation, review, or new work.
+        // No read command may substitute for a continuation. When one has
         // already claimed the local slot, ignore that new live row only for
         // this historical-owner check; ordinary admission below folds the
         // duplicate into the winner without another operator turn.
-        if (operatorMode === "on" && parseDirectives(msg.text).agent === undefined) {
+        if (operatorMode === "on" && (typedAgent === undefined || typedAgent === "review")) {
           const continuationOwner =
             pageOwner.kind === "pipeline" || pageOwner.kind === "pipeline_ambiguous"
               ? pageOwner
@@ -1156,18 +1144,35 @@ export async function dispatch(
             const endedPrOwner =
               pageOwner.kind === "pipeline" || pageOwner.kind === "pipeline_ambiguous" ? pageOwner : undefined;
             const ownedUnits = endedPrOwner?.kind === "pipeline" ? [endedPrOwner.unit] : (endedPrOwner?.units ?? []);
+            const releasedReviewTarget =
+              explicitPr !== undefined
+                ? await releasedPrOf(operatorThread, unitsOf, msg.threadKey, explicitPr.number).catch(() => undefined)
+                : undefined;
             canReviewEndedPr =
-              endedPrOwner !== undefined &&
               !unfinishedOwner &&
               explicitPr !== undefined &&
-              ownedUnits.length > 0 &&
-              ownedUnits.every((unit) => unit.pr?.number === explicitPr.number) &&
-              endedPrOwner.run.repo?.toLowerCase() === explicitPr.repo &&
               operatorThread.every((run) => run.finished) &&
               admission.get(msg.threadKey) === undefined &&
-              deps.threadsElsewhere.get(msg.threadKey) === undefined;
+              deps.threadsElsewhere.get(msg.threadKey) === undefined &&
+              ((endedPrOwner !== undefined &&
+                ownedUnits.length > 0 &&
+                ownedUnits.every((unit) => unit.pr?.number === explicitPr.number) &&
+                endedPrOwner.run.repo?.toLowerCase() === explicitPr.repo) ||
+                releasedReviewTarget?.repo.toLowerCase() === explicitPr.repo);
             pageOwner = continuationOwner;
-            if (!canReviewEndedPr) operatorMode = "off";
+            if (!canReviewEndedPr) {
+              const actor = chatActorOf(deps.config, msg);
+              if (
+                continuationOwner.run.userId === undefined ||
+                authorizeSteerOwner({
+                  caller: { ids: actorIdsOf(actor), grants: effectiveGrants(actor) },
+                  target: { runId: continuationOwner.run.id, requesterId: continuationOwner.run.userId },
+                }).kind === "refused"
+              ) {
+                await io.reply(STEER_OWNER_REFUSED);
+                return ended;
+              }
+            }
           }
         }
       }
@@ -1177,10 +1182,9 @@ export async function dispatch(
       // owner order; thread-admission item 9): a live run — the local slot, one
       // live on another generation, or a non-hosted live run on the page —
       // else the page's idle unit, then a hosted runner guarding its seed
-      // thread. Under an owner the turn's
-      // projection narrows to steers and reads, and the prompt says the reply
-      // is the owner's follow-up. Ended pipelines bypassed this turn unless
-      // their exact PR can be reviewed.
+      // thread. Under a live owner the projection narrows to steers and reads;
+      // an ended pipeline asks the operator to classify continuation, review,
+      // or new work before any durable reissue.
       const slot = admission.get(msg.threadKey);
       const liveElsewhere = deps.threadsElsewhere.get(msg.threadKey) !== undefined;
       // A pending question's free-text answer (issue 2046; routing-and-config
@@ -1312,7 +1316,8 @@ export async function dispatch(
         // words are the owner's follow-up — the dispatch runs on to admission's
         // fold (a live run) or the unit's one thread event (an idle unit), the
         // decision's event riding the fold or a door record, no prose posted.
-        // An ended pipeline's non-review decision still reaches continuation below.
+        // An ended pipeline accepts a Ship continuation bind below; an
+        // unrelated fold stops at its owner gate.
         // A confirmed "yes" to a question minted before the thread became
         // owned folds the proposal's own words: the person's message is the
         // word "yes", which tells the owner nothing.
@@ -1361,23 +1366,22 @@ export async function dispatch(
       return ended;
     }
 
-    // Stage A (dispatch/fastPath.ts): a message that names a registered chat
-    // command is answered inline — never a model turn, and before the history
-    // fetch, so a command costs none. A decision that routes a preset has
-    // already read the message as a request, not a command.
+    // Stage A remains for off and shadow. Under on, the operator's decision
+    // is final even when it folds into an existing owner.
     if (
+      operatorMode !== "on" &&
       operatorPreset === undefined &&
       (await answerChatCommand(deps, { msg, io, ending, trace, ...(operatorEvent ? { operator: operatorEvent } : {}) }))
     )
       return ended;
 
-    // A bound chat request has already been interpreted. Keep the author's
-    // whole message and the operator's typed settings through resolution.
+    // Every operator-on request has already been interpreted, including a
+    // fold. Keep the author's whole message and typed settings through resolution.
     const { directives, history } = await readRequest({
       msg,
       io,
       root,
-      ...(operatorPreset !== undefined
+      ...(operatorMode === "on"
         ? { request: { text: operatorRequest ?? msg.text, ...operatorSettings, interpreter: "operator" as const } }
         : {}),
     });
@@ -1433,7 +1437,7 @@ export async function dispatch(
       !resume &&
       !restart &&
       !originalUnitRecovery &&
-      (directives.agent === undefined || directives.agent === "ship") &&
+      ((operatorPreset ?? directives.agent) === undefined || (operatorPreset ?? directives.agent) === "ship") &&
       explicitPr !== undefined
     ) {
       await io.reply("This thread's earlier Ship runs could not be verified, so no new plan started.");
@@ -1604,6 +1608,25 @@ export async function dispatch(
         return ended;
       }
       if (
+        operatorMode === "on" &&
+        operatorEvent !== undefined &&
+        (owner.kind === "pipeline" || owner.kind === "pipeline_ambiguous") &&
+        !(canReviewEndedPr && operatorPreset === "review")
+      ) {
+        const bind =
+          operatorEvent.outcome === "binds" && operatorEvent.binds?.length === 1 ? operatorEvent.binds[0] : undefined;
+        if (typedAgent === "review" || bind?.shipEntry === undefined) {
+          await io.reply("A read-only or unrelated action cannot continue the ended Ship writer. Nothing started.");
+          await recordPendingOperator();
+          return ended;
+        }
+        if (bind.shipEntry !== "continue") {
+          await io.reply("A separate Ship task cannot reuse this ended unit. Nothing started.");
+          await recordPendingOperator();
+          return ended;
+        }
+      }
+      if (
         owner.kind === "pipeline_ambiguous" &&
         !(canReviewEndedPr && operatorPreset === "review") &&
         (directives.agent === undefined || (directives.agent === "ship" && explicitPr !== undefined))
@@ -1617,8 +1640,12 @@ export async function dispatch(
       if (
         owner.kind === "pipeline" &&
         !(canReviewEndedPr && operatorPreset === "review") &&
-        !freshShipTask &&
-        (directives.agent === undefined ||
+        (!freshShipTask || operatorMode === "on") &&
+        ((operatorMode === "on" &&
+          operatorEvent?.outcome === "binds" &&
+          operatorEvent.binds?.length === 1 &&
+          operatorEvent.binds[0]?.shipEntry === "continue") ||
+          directives.agent === undefined ||
           (directives.agent === "ship" &&
             !originalUnitRecovery &&
             currentPrNumber !== undefined &&

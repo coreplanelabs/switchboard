@@ -1103,6 +1103,8 @@ describe("runOperator — the loop over a scripted model", () => {
           input: {
             kind: "review",
             targets: ["https://github.com/acme/cli/pull/120", "https://github.com/acme/api/pull/3927"],
+            actionQuote: "review",
+            targetQuotes: ["https://github.com/acme/cli/pull/120", "https://github.com/acme/api/pull/3927"],
             reason: "coordinate both reviews",
           },
         };
@@ -1140,6 +1142,8 @@ describe("runOperator — the loop over a scripted model", () => {
         input: {
           kind: "ship",
           targets: ["https://github.com/acme/api/pull/1", "https://github.com/acme/web/pull/9"],
+          actionQuote: "ship",
+          targetQuotes: ["https://github.com/acme/api/pull/1", "https://github.com/acme/web/pull/9"],
           reason: "ship both",
         },
       },
@@ -1148,7 +1152,10 @@ describe("runOperator — the loop over a scripted model", () => {
         presets: ["conductor", "ship"],
       }),
     );
-    expect(answer).toEqual({ kind: "violation", violation: "a PR batch target must be an exact link in this request" });
+    expect(answer).toEqual({
+      kind: "violation",
+      violation: "a PR batch target must have its complete exact link in this request",
+    });
   });
 
   it("a cross-repository PR review batch binds the conductor without choosing one PR's repository", async () => {
@@ -1162,6 +1169,12 @@ describe("runOperator — the loop over a scripted model", () => {
       input: {
         kind: "review",
         targets: [
+          "https://github.com/acme/api/pull/7",
+          "https://github.com/acme/web/pull/9",
+          "https://github.com/acme/api/pull/11",
+        ],
+        actionQuote: "review",
+        targetQuotes: [
           "https://github.com/acme/api/pull/7",
           "https://github.com/acme/web/pull/9",
           "https://github.com/acme/api/pull/11",
@@ -1203,6 +1216,8 @@ describe("runOperator — the loop over a scripted model", () => {
         input: {
           kind: "ship",
           targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
+          actionQuote: "ship",
+          targetQuotes: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
           reason: "ship the linked PRs",
         },
       }),
@@ -1223,6 +1238,8 @@ describe("runOperator — the loop over a scripted model", () => {
           input: {
             kind: "ship",
             targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
+            actionQuote: "ship",
+            targetQuotes: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
             reason: "ship both",
           },
         },
@@ -1286,19 +1303,18 @@ describe("runOperator — the loop over a scripted model", () => {
     expect(answer.decision.binds[0]?.workObjective).toBeUndefined();
   });
 
-  it("a multi-PR preset bind without typed targets is re-asked before starting work", () => {
+  it("an untyped conductor bind carries no PR child authority", () => {
     const text = "review these: • https://github.com/acme/cli/pull/120 • https://github.com/acme/api/pull/3927";
-    for (const preset of ["conductor", "review", "ship", "general"]) {
-      expect(
-        parseOperatorTurn(
-          { tool: OPERATOR_BIND_TOOL, input: { preset, reason: "handle the reviews" } },
-          ctxOf({ requestText: text, presets: ["conductor", "review", "ship", "general"] }),
-        ),
-      ).toEqual({ kind: "violation", violation: "a multi-PR Review or Ship request needs bind_pr_batch" });
-    }
+    const answer = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "conductor", reason: "handle the reviews" } },
+      ctxOf({ requestText: text, presets: ["conductor", "review", "ship", "general"] }),
+    );
+    expect(answer).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
+    if (answer.kind !== "decision" || answer.decision.kind !== "binds") return;
+    expect(answer.decision.binds[0]?.prBatch).toBeUndefined();
   });
 
-  it("an unscoped third PR still rejects an untyped multi-PR preset bind", () => {
+  it("an unscoped third PR confers no typed batch authority", () => {
     const requestText =
       "ship these: https://github.com/acme/api/pull/7 https://github.com/acme/web/pull/9; https://github.com/acme/cli/pull/10";
     expect(
@@ -1306,18 +1322,27 @@ describe("runOperator — the loop over a scripted model", () => {
         { tool: OPERATOR_BIND_TOOL, input: { preset: "conductor", reason: "ship the listed PRs" } },
         ctxOf({ requestText, presets: ["conductor", "ship"] }),
       ),
-    ).toEqual({ kind: "violation", violation: "a multi-PR Review or Ship request needs bind_pr_batch" });
+    ).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
   });
 
-  it("re-asks an untyped conductor bind and accepts the corrected exact batch", async () => {
+  it("re-asks a batch missing authored evidence and accepts the corrected exact batch", async () => {
     const text = "ship these: https://github.com/acme/api/pull/7 https://github.com/acme/web/pull/9";
     const answers: RouteToolCall[] = [
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "conductor", reason: "coordinate Ship" } },
       {
         tool: OPERATOR_BATCH_TOOL,
         input: {
           kind: "ship",
           targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
+          reason: "coordinate Ship",
+        },
+      },
+      {
+        tool: OPERATOR_BATCH_TOOL,
+        input: {
+          kind: "ship",
+          targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
+          actionQuote: "ship",
+          targetQuotes: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
           reason: "ship both requested PRs",
         },
       },
@@ -1334,7 +1359,7 @@ describe("runOperator — the loop over a scripted model", () => {
       async () => answers.shift()!,
     );
     expect(answer.attempts).toEqual([
-      { outcome: "violation", violation: "a multi-PR Review or Ship request needs bind_pr_batch" },
+      { outcome: "violation", violation: "a PR batch action needs a complete authored span" },
       { outcome: "accepted" },
     ]);
     expect(answer.decision).toMatchObject({
@@ -1350,6 +1375,8 @@ describe("runOperator — the loop over a scripted model", () => {
         input: {
           kind: "ship",
           targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
+          actionQuote: "ship",
+          targetQuotes: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
           reason: "ship both PRs",
         },
       },

@@ -38,6 +38,12 @@ function input(over: Partial<ShipPreflightInput> = {}): ShipPreflightInput {
 }
 
 describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-merge fact (item 9)", () => {
+  it("a typed continuation with no owned unit cannot enter as fresh Ship work", async () => {
+    const res = await shipPreflight(input({ intent: "continue" }));
+    expect(res).toMatchObject({ ok: false, refusal: { code: "ship_preflight_no_task" } });
+    if (!res.ok) expect(res.reply).toContain("no unfinished Ship unit");
+  });
+
   it("an operator review entry starts at review on the named foreign PR even though the request contains the word review", async () => {
     const res = await shipPreflight(
       input({
