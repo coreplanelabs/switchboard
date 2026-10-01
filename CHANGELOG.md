@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.272.0](https://github.com/coreplanelabs/switchboard/compare/v1.271.9...v1.272.0) (2026-10-01)
+
+
+### Features
+
+* **docs:** validate typed decision boundary proofs ([#2585](https://github.com/coreplanelabs/switchboard/issues/2585)) ([2c8a6ad](https://github.com/coreplanelabs/switchboard/commit/2c8a6ad2d702a625f43234993daa3edd71be643f))
+
+
+### Bug fixes
+
+* **slack:** read linked sources through bound receipts ([#2586](https://github.com/coreplanelabs/switchboard/issues/2586)) ([28448cb](https://github.com/coreplanelabs/switchboard/commit/28448cb1be3a2635643d171b46d379a60800a3b4))
+
 ## [1.271.9](https://github.com/coreplanelabs/switchboard/compare/v1.271.8...v1.271.9) (2026-10-01)
 
 
