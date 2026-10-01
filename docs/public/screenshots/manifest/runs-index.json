@@ -122,7 +122,7 @@
     "src/core/diffDigest.ts": "c46b844d3d1a2a05c9a57b7e5c469bb199d4389a7668c7c218addc7ebd3c0d4c",
     "src/core/digestCoverage.ts": "9c11fb3c27bee29767c3ee41d1a62f250ac4ab745aa7131b65738ab0eb6f2d26",
     "src/core/dispatch/admission.ts": "2b7f40d12d3146c52cfe4a8377dd95cd0ba10323c52fe7ba19c03e2a2289c34b",
-    "src/core/dispatch/authorize.ts": "ac9e8a6dd64ef4ae2cc134566327fdf91563f71acd29e4fca2efafc777de5f69",
+    "src/core/dispatch/authorize.ts": "fbedc7dbf8c18aa9c48d85b0adaa1249a3089a266835203b1879ce57abaa5833",
     "src/core/dispatch/awaitChildren.ts": "d8edb81479093e8252358d094f7e647e8ba735907640c58844aae4d39ff6a04e",
     "src/core/dispatch/handBack.ts": "c9e558a2a95acd726e34dbe2f0ce72c02e3c5133d4d5c7c4410fe074b9de9bc7",
     "src/core/dispatch/mainWorkerCapability.ts": "175645bc633b8b4b69651e0e1813b0b887d5d2b517125a8a5dd1c3934d848001",

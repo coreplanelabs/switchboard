@@ -17,7 +17,8 @@ import type { ExecutorSelection } from "../../execution/factory.js";
 import { currentPrHeadSha, type RepoContext, type ResidentSlugs } from "../repoContext.js";
 import { nearMatch } from "../nearMatch.js";
 import { residentSlugsLister } from "../../execution/factory.js";
-import { BASH_TIMEOUT_MAX_MS } from "../../execution/bashTimeout.js";
+import { BASH_TIMEOUT_MS } from "../../execution/bashTimeout.js";
+import { isRunStopError } from "../../execution/executor.js";
 import { shellQuote } from "../../execution/shellQuote.js";
 import { seedDoorRemote } from "../../execution/seedPlan.js";
 import { parseRevParseOutput } from "../reviewedHead.js";
@@ -403,6 +404,7 @@ export async function authorizePrHead(
  *  the attach verified the worktree is at that head — or it was refused. */
 export type AttachedHeadGate =
   | { kind: "allowed"; repoCtx: RepoContext; verifiedAtAttach: boolean; headAdopted: boolean }
+  | { kind: "stopped" }
   | { kind: "refused"; reason: "workspace_head_mismatch" };
 
 /**
@@ -477,10 +479,12 @@ export async function authorizeAttachedHead(
       selection: ExecutorSelection;
       repoCtx: RepoContext;
       githubDoor?: { baseUrl: string };
+      stopSignal: AbortSignal;
       root: Span;
     },
 ): Promise<AttachedHeadGate> {
-  const { msg, refuse, card, shell, closeLines, clock, agent, resume, selection, root } = ctx;
+  const { msg, refuse, card, shell, closeLines, clock, agent, resume, selection, stopSignal, root } = ctx;
+  if (stopSignal.aborted) return { kind: "stopped" };
   const { executor, resident, binding } = selection;
   let repoCtx = ctx.repoCtx;
   // Attach-head check (docs/reference/specs/agent-review.md item 10): every PR
@@ -493,70 +497,88 @@ export async function authorizeAttachedHead(
   if (!resume && agent.name === "review" && repoCtx.pr !== undefined && repoCtx.repo) {
     const pr = { repo: repoCtx.repo, number: repoCtx.pr };
     const expectedHeadSha = repoCtx.headSha;
-    const guard = await root.span("dispatch.gate.attached_head", async (span) => {
-      const command = selection.seeded?.workspace
-        ? `git -C ${shellQuote(selection.seeded.workspace)} rev-parse HEAD`
-        : "git rev-parse HEAD";
-      if (!resident && selection.seeded === undefined && expectedHeadSha !== undefined) {
-        await executor.exec(
-          coldReviewCheckoutCommand(
-            { ...repoCtx, repo: pr.repo, pr: pr.number, headSha: expectedHeadSha },
-            ctx.githubDoor?.baseUrl,
-          ),
-          { timeoutMs: BASH_TIMEOUT_MAX_MS },
-        );
-      }
-      const observeHead = () =>
-        executor
-          .exec(command, { timeoutMs: 30_000, span })
-          .then(parseRevParseOutput)
-          .catch(() => undefined);
-      const sha = await observeHead();
-      const g = await guardAttachedHead({
-        pr,
-        expectedHeadSha,
-        attached: { sha, ref: binding?.ref ?? repoCtx.ref, source: "workspace-observed" },
-        fallbackRef: repoCtx.ref,
-        fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
-        reprovision: async (headSha) => {
-          if (executor.moveTo) {
-            await executor.moveTo(headSha, { span });
-            const observedSha = await observeHead();
-            if (selection.binding && observedSha !== undefined) {
-              selection.binding = {
-                ...selection.binding,
-                ref: repoCtx.ref ?? selection.binding.ref,
+    const guard = await root
+      .span("dispatch.gate.attached_head", async (span) => {
+        const command = selection.seeded?.workspace
+          ? `git -C ${shellQuote(selection.seeded.workspace)} rev-parse HEAD`
+          : "git rev-parse HEAD";
+        if (!resident && selection.seeded === undefined && expectedHeadSha !== undefined) {
+          await executor.exec(
+            coldReviewCheckoutCommand(
+              { ...repoCtx, repo: pr.repo, pr: pr.number, headSha: expectedHeadSha },
+              ctx.githubDoor?.baseUrl,
+            ),
+            { timeoutMs: BASH_TIMEOUT_MS, signal: stopSignal, span },
+          );
+        }
+        if (stopSignal.aborted) return { outcome: "stopped" as const };
+        const observeHead = () =>
+          executor
+            .exec(command, { timeoutMs: 30_000, signal: stopSignal, span })
+            .then(parseRevParseOutput)
+            .catch(() => undefined);
+        const sha = await observeHead();
+        if (stopSignal.aborted) return { outcome: "stopped" as const };
+        const g = await guardAttachedHead({
+          pr,
+          expectedHeadSha,
+          attached: { sha, ref: binding?.ref ?? repoCtx.ref, source: "workspace-observed" },
+          fallbackRef: repoCtx.ref,
+          fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+          reprovision: async (headSha) => {
+            if (stopSignal.aborted) return { sha: undefined };
+            if (executor.moveTo) {
+              await executor.moveTo(headSha, { signal: stopSignal, span });
+              if (stopSignal.aborted) return { sha: undefined };
+              const observedSha = await observeHead();
+              if (selection.binding && observedSha !== undefined) {
+                selection.binding = {
+                  ...selection.binding,
+                  ref: repoCtx.ref ?? selection.binding.ref,
+                  sha: observedSha,
+                };
+              }
+              return {
                 sha: observedSha,
+                ref: repoCtx.ref,
+                source: "workspace-observed" as const,
               };
             }
-            return {
-              sha: observedSha,
-              ref: repoCtx.ref,
-              source: "workspace-observed" as const,
-            };
-          }
-          if (selection.seeded?.workspace) {
-            await executor.exec(
-              seededReviewCheckoutCommand(
-                { ...repoCtx, repo: pr.repo, pr: pr.number, headSha },
-                selection.seeded.workspace,
-              ),
-              { timeoutMs: BASH_TIMEOUT_MAX_MS, span },
-            );
-          } else {
-            await executor.exec(
-              coldReviewCheckoutCommand({ ...repoCtx, repo: pr.repo, pr: pr.number, headSha }, ctx.githubDoor?.baseUrl),
-              { timeoutMs: BASH_TIMEOUT_MAX_MS, span },
-            );
-          }
-          const retried = await observeHead();
-          return { sha: retried, ref: repoCtx.ref, source: "workspace-observed" as const };
-        },
-        logKey: msg.threadKey,
+            if (selection.seeded?.workspace) {
+              await executor.exec(
+                seededReviewCheckoutCommand(
+                  { ...repoCtx, repo: pr.repo, pr: pr.number, headSha },
+                  selection.seeded.workspace,
+                ),
+                { timeoutMs: BASH_TIMEOUT_MS, signal: stopSignal, span },
+              );
+            } else {
+              await executor.exec(
+                coldReviewCheckoutCommand(
+                  { ...repoCtx, repo: pr.repo, pr: pr.number, headSha },
+                  ctx.githubDoor?.baseUrl,
+                ),
+                { timeoutMs: BASH_TIMEOUT_MS, signal: stopSignal, span },
+              );
+            }
+            if (stopSignal.aborted) return { sha: undefined };
+            const retried = await observeHead();
+            return { sha: retried, ref: repoCtx.ref, source: "workspace-observed" as const };
+          },
+          logKey: msg.threadKey,
+        });
+        if (stopSignal.aborted) {
+          span.setAttrs({ outcome: "stopped" });
+          return { outcome: "stopped" as const };
+        }
+        span.setAttrs({ outcome: g.outcome });
+        return g;
+      })
+      .catch((err: unknown) => {
+        if (isRunStopError(err)) return { outcome: "stopped" as const };
+        throw err;
       });
-      span.setAttrs({ outcome: g.outcome });
-      return g;
-    });
+    if (stopSignal.aborted || guard.outcome === "stopped") return { kind: "stopped" };
     if (guard.outcome === "verified") {
       verifiedAtAttach = true;
     } else if (guard.outcome === "adopted") {

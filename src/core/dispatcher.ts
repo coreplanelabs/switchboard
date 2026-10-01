@@ -2199,7 +2199,7 @@ export async function dispatch(
         reservation: reservationHooks,
         adopt: {
           onStop: relayStop,
-          onFenced: () => relayStop("hard"),
+          onFenced: reservationHooks.onFenced,
         },
       },
     };
@@ -3558,8 +3558,29 @@ export async function dispatch(
       selection: round.selection,
       repoCtx,
       ...(githubDoor ? { githubDoor } : {}),
+      stopSignal: run.control.hardSignal,
       root,
     });
+    // A fence also aborts the hard signal. The replacement generation owns the
+    // card and row, so only a still-owned stop may close them.
+    if (fencedWhileAttaching) return ended;
+    if (headGate.kind === "stopped") {
+      stoppedWhileAttaching = run.control.requested ?? "hard";
+      await root.span(
+        "dispatch.stop",
+        () =>
+          card.done(
+            shell.close({
+              kind: "not_started",
+              icon: "⛔",
+              reason: "stopped before the run started",
+              ...closeLines(clock(), false),
+            }),
+          ),
+        { attrs: { outcome: "stopped_during_head_check" } },
+      );
+      return ended;
+    }
     if (headGate.kind === "refused") return ended;
     repoCtx = headGate.repoCtx;
     if (
@@ -4257,7 +4278,7 @@ export async function dispatch(
     // provider, a refusal, a gate — has adopted a row it will never finish
     // (item 38). Close it `interrupted` here, or the sweep would relaunch it
     // every lease interval forever.
-    if (resume && ledgerRun && !runLoopStarted && !resumeRowClosed && !resumeRowRetained) {
+    if (resume && ledgerRun && !runLoopStarted && !resumeRowClosed && !resumeRowRetained && !fencedWhileAttaching) {
       const adopted = ledgerRun;
       // The row says what the request says: a stop that ended the re-attach's
       // wait closes it with the stop's status, not `interrupted` with a note
@@ -4314,7 +4335,7 @@ export async function dispatch(
     // survivor is the hosted parent of a completed hand-off (record 0060): the
     // branch names it (`ShipBranchEnd.hostedLive`) and the plan runner's
     // `finish` ends it, so the net leaves it live.
-    if (!shipHostedLive) {
+    if (!shipHostedLive && !fencedWhileAttaching) {
       for (const boundId of new Set([trace.runId, admitted?.runId])) {
         if (boundId === undefined || registry.snapshotById?.(boundId)?.finished !== false) continue;
         console.warn(
@@ -4324,12 +4345,19 @@ export async function dispatch(
         io.runFinished?.({ id: boundId, status: "failed" });
       }
     }
+    // The successor owns durable inbox entries. A local follow-up without a
+    // durable sequence cannot follow it, so tell that sender it was not saved.
+    const fencedPending = fencedWhileAttaching && admitted ? admission.release(msg.threadKey, admitted) : [];
+    for (const pending of fencedPending) {
+      if (pending.ledgerSeq === undefined)
+        await pending.io?.reply("This reply was not saved with the run and will not be processed.").catch(() => {});
+    }
     const settled = settleThread(deps, {
       msg,
-      admitted,
+      admitted: fencedWhileAttaching ? undefined : admitted,
       // A stop that ended the attach counts as the loop's stop would: the
       // request ends `stopped`, and a follow-up queued during the wait is told.
-      stopCounts: runLoopStarted || stoppedWhileAttaching !== undefined,
+      stopCounts: !fencedWhileAttaching && (runLoopStarted || stoppedWhileAttaching !== undefined),
       control: registered?.control,
     });
     if (settled.kind === "dropped") await tellDropped(root, settled.pending);
