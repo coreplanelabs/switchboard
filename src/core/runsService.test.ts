@@ -441,6 +441,7 @@ describe("RunsService.getRun", () => {
     const verdict = { verdict: "approve" as const, summary: "clean", findings: [] };
     const dispositions = [{ findingId: "F1", disposition: "fixed" as const, note: "done" }];
     const handoff = { deviations: [], followUps: [], unproven: [] };
+    const answerOutcome = { version: 1 as const, ending: "time_budget" as const, output: "absent" as const };
     const reviewPost = {
       posted: true as const,
       target: { repo: "acme/api", number: 7 },
@@ -450,7 +451,15 @@ describe("RunsService.getRun", () => {
     // The finish record lands (and the writer tells the registry) while the row
     // is inside its 60 s TTL: the next read is the coordinator's, a second later.
     await store.put(
-      record(run.id, NOW + 40_000, { agent: "review", verdict, reviewHead: HEAD, reviewPost, dispositions, handoff }),
+      record(run.id, NOW + 40_000, {
+        answerOutcome,
+        agent: "review",
+        verdict,
+        reviewHead: HEAD,
+        reviewPost,
+        dispositions,
+        handoff,
+      }),
     );
     reg.markPersisted(run.id);
     expect(reg.getById(run.id)?.finished).toBe(true);
@@ -466,6 +475,7 @@ describe("RunsService.getRun", () => {
       verdict,
       reviewHead: HEAD,
       reviewPost,
+      answerOutcome,
       dispositions,
       handoff,
     });

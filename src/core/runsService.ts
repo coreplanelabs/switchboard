@@ -1,3 +1,4 @@
+import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecision.js";
 import { matchesPredicate } from "./authz/predicate.js";
 import type { ChannelVisibility, Predicate, Resource } from "./authz/types.js";
@@ -81,6 +82,7 @@ export type Result<T> = { ok: true; value: T } | { ok: false; error: "not_found"
  * expresses the outcome as `status`).
  */
 export interface RunView {
+  answerOutcome?: AnswerOutcome;
   id: string;
   label?: string;
   agent?: string;
@@ -100,7 +102,7 @@ export interface RunView {
    *  falls back to `startedAt`). `sealedAt`: the stream closed, when the first
    *  reply attempt completed or the branch was abandoned; `replyOk` is
    *  tri-state — `true` a reply was attempted and delivered, `false` attempted
-   *  and threw, absent none was made. `stepCount`: content events only (span
+   *  and threw, absent no delivery receipt was recorded. `stepCount`: content events only (span
    *  records excluded). `schema`: the stream schema — `SPAN_SCHEMA` on every
    *  registry and ledger view (a current runner emitted it); a STORED record
    *  absent it or below it carries no timing. All omitted when absent. */
@@ -548,8 +550,10 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
   // The pipeline's standing (record 0065): the same fold the registry and the
   // record run, over the mirrored events, so the three sources agree.
   const pipeline = pipelineOfEvents(events);
+  const answerOutcome = answerOutcomeOf(row.state.answerOutcome);
   return {
     id: row.runId,
+    ...(answerOutcome ? { answerOutcome } : {}),
     ...(m.label !== undefined ? { label: m.label } : {}),
     ...(m.agent !== undefined ? { agent: m.agent } : {}),
     ...(m.model !== undefined ? { model: m.model } : {}),
@@ -868,6 +872,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   ): Promise<
     Pick<
       RunView,
+      | "answerOutcome"
       | "headSha"
       | "verdict"
       | "reviewHead"
@@ -893,6 +898,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     }
     if (!row) return {};
     return {
+      ...(row.answerOutcome !== undefined ? { answerOutcome: row.answerOutcome } : {}),
       ...(row.headSha !== undefined ? { headSha: row.headSha } : {}),
       ...(row.verdict !== undefined ? { verdict: row.verdict } : {}),
       ...(row.reviewHead !== undefined ? { reviewHead: row.reviewHead } : {}),

@@ -1,3 +1,4 @@
+import { answerOutcomeOf, captureAnswerOutcome, type AnswerOutcome } from "../answerOutcome.js";
 import { audienceRefusalText, noteAudienceRefusal, type AudienceRefusalCode } from "../audienceDecision.js";
 // The run stage's loop (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the model turn and everything that rides on it. The card frame the loop
@@ -193,7 +194,7 @@ export interface RunOutcome {
   /** The same checklist with every open item ticked ✓ — what a completed card shows. */
   checklistCheckedOff: () => string | undefined;
   /** A time-budget ending is not proof that the requested checklist was completed. */
-  budgetEnded: boolean;
+  answerOutcome: AnswerOutcome;
   releaseWorkspace: (span?: Span) => Promise<void>;
 }
 
@@ -1051,6 +1052,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  spent in a relaunch — so the thread's answer is composed again once the
    *  tail has established the facts (harness-pi item 6, `endingFacts`). */
   let windDownEnding: WindDownEnding | undefined;
+  let answerOutcome: AnswerOutcome = { version: 1, ending: "unknown", output: "unknown" };
   /** Where the ending salvage pushed what the tree held, when it did: the
    *  fact the answer names over the observation that preceded the push. */
   let salvagedTo: { branch: string; head?: string } | undefined;
@@ -2800,6 +2802,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (baseline) await root.span("run.reading_diff_join", () => baseline);
     const description = descriptionArtifact;
     if (description) await root.span("run.pr_description_join", () => description);
+    // Preserve the producer's fact before any fallback can make an absent
+    // write-up look present. Replayed prose never upgrades legacy uncertainty.
+    answerOutcome =
+      resume?.plan.kind === "finish"
+        ? (answerOutcomeOf(resume.row.state.answerOutcome) ?? {
+            version: 1,
+            ending: captureAnswerOutcome(windDownEnding, budgetEnded, run.control.requested).ending,
+            output: "unknown",
+          })
+        : captureAnswerOutcome(windDownEnding, budgetEnded, run.control.requested);
+    ledgerRun?.setState({ answerOutcome });
     // The finale answer reads what the ending established (harness-pi item 6):
     // the harness composed its answer when its loop ended, before the salvage,
     // the description turn and the PR post-step above ran, so it is composed
@@ -2813,7 +2826,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // A source lookup without a write-up cannot turn a budget sentence into
     // claimed findings. The next reply in this thread starts a new, authorized
     // run from the session's question; never reuse a cut tool's result.
-    if (agent.name === "general" && windDownEnding?.kind === "time" && !windDownEnding.text.trim())
+    if (
+      (agent.name === "general" || agent.name === "research") &&
+      answerOutcome.ending === "time_budget" &&
+      answerOutcome.output === "absent"
+    )
       answer = `⚠️ I could not verify the answer before this run's ${agent.maxMinutes}-minute budget ended. The requested source findings remain unconfirmed. Reply "continue" in this conversation to continue the lookup under your access without repeating the question.`;
     // A soft stop may have landed during any awaited tail step above. Latch it
     // immediately before the synchronous publication boundary and discard
@@ -3067,6 +3084,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ending.finished(run.id);
       shell.freeze(finishedAt);
       registerFinishRecord(deps, {
+        answerOutcome,
         audience: privateAudienceLatch,
         ending,
         run,
@@ -3166,7 +3184,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     runDiagnosis,
     checklistAsLeft,
     checklistCheckedOff,
-    budgetEnded: budgetEnded || windDownEnding?.kind === "time",
+    answerOutcome,
     releaseWorkspace,
   };
 }

@@ -19180,8 +19180,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
 
   it("a budget-ended source answer continues in the same conversation for its requester without replaying the cut source or another sender's access", async () => {
     const question = "What caused the source job to fail?";
-    const unverified =
-      '⚠️ I could not verify the answer. The requested source findings remain unconfirmed. Reply "continue" in this conversation.';
+    const unverified = "No source findings were written.";
     const leaked = "stale source result from a revoked grant";
     const t = await threadWithSession(PI_YAML, {
       agent: "general",
@@ -19195,6 +19194,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const previous = (await t.store.get("run-prev"))!;
     await t.store.put({
       ...previous,
+      answerOutcome: { version: 1, ending: "time_budget", output: "absent" },
       eventCount: 3,
       storedEventCount: 3,
       events: [
@@ -19225,6 +19225,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const another = await threadWithSession(PI_YAML, { agent: "general" });
     await another.store.put({
       ...previous,
+      answerOutcome: { version: 1, ending: "time_budget", output: "absent" },
       events: [
         { type: "input", messageId: "q", text: question, seq: 1 },
         { type: "run_note", kind: "time_budget_exhausted", summary: "source tool cut", seq: 2 },
@@ -19239,10 +19240,28 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     expect(another.provider.requests).toHaveLength(0);
   });
 
+  it("a legacy fallback cannot authorize continuation through its wording", async () => {
+    const t = await threadWithSession(PI_YAML, { agent: "general" });
+    const previous = (await t.store.get("run-prev"))!;
+    await t.store.put({
+      ...previous,
+      eventCount: 3,
+      storedEventCount: 3,
+      events: [
+        { type: "input", messageId: "q", text: "Read the source", seq: 1 },
+        { type: "run_note", kind: "time_budget_exhausted", summary: "budget", seq: 2 },
+        { type: "answer", text: 'Reply "continue" in this conversation', seq: 3 },
+      ],
+    });
+    const { io, replies } = fakeIO([{ role: "user", text: "Read the source", at: NOW - 20_000, user: "slack:UADMIN" }]);
+    await dispatch(t.deps, { ...followUp, text: "continue" }, io);
+    expect(replies.join(" ")).toContain("couldn't verify the saved result");
+    expect(t.provider.requests).toHaveLength(0);
+  });
+
   it("a second budget-ended continuation keeps the original question instead of seeding continue twice", async () => {
     const question = "What caused the source job to fail?";
-    const unverified =
-      '⚠️ I could not verify the answer. The requested source findings remain unconfirmed. Reply "continue" in this conversation.';
+    const unverified = "No source findings were written.";
     const t = await threadWithSession(PI_YAML, {
       agent: "general",
       tail: [
@@ -19256,6 +19275,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const previous = (await t.store.get("run-prev"))!;
     await t.store.put({
       ...previous,
+      answerOutcome: { version: 1, ending: "time_budget", output: "absent" },
       events: [
         { type: "input", messageId: "follow-up", text: "continue", seq: 1 },
         { type: "run_note", kind: "time_budget_exhausted", summary: "source tool cut again", seq: 2 },
@@ -19266,6 +19286,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     });
     await t.store.put({
       ...previous,
+      answerOutcome: { version: 1, ending: "time_budget", output: "absent" },
       id: "run-original",
       finishedAt: PREVIOUS_END - 20_000,
       startedAt: PREVIOUS_END - 30_000,
@@ -19305,10 +19326,17 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       { type: "run_note" as const, kind: "time_budget_exhausted" as const, summary: "source tool cut", seq: 2 },
       { type: "answer" as const, text: unverified, seq: 3 },
     ];
-    await t.store.put({ ...previous, events: continuingEvents, eventCount: 3, storedEventCount: 3 });
+    await t.store.put({
+      ...previous,
+      answerOutcome: { version: 1, ending: "time_budget", output: "absent" },
+      events: continuingEvents,
+      eventCount: 3,
+      storedEventCount: 3,
+    });
     for (let i = 1; i <= 9; i++) {
       await t.store.put({
         ...previous,
+        answerOutcome: { version: 1, ending: "time_budget", output: "absent" },
         id: `run-earlier-${i}`,
         startedAt: previous.startedAt - i * 20_000,
         finishedAt: PREVIOUS_END - i * 20_000,
@@ -19319,6 +19347,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     }
     await t.store.put({
       ...previous,
+      answerOutcome: { version: 1, ending: "time_budget", output: "absent" },
       id: "run-original",
       startedAt: previous.startedAt - 220_000,
       finishedAt: PREVIOUS_END - 220_000,
@@ -19348,6 +19377,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const previous = (await t.store.get("run-prev"))!;
     await t.store.put({
       ...previous,
+      answerOutcome: { version: 1, ending: "time_budget", output: "absent" },
       events: [
         { type: "input", messageId: "follow-up", text: "continue", seq: 1 },
         { type: "run_note", kind: "time_budget_exhausted", summary: "source tool cut", seq: 2 },
@@ -19364,6 +19394,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     // An older budget close belonging to another sender is not the ask to recover.
     await t.store.put({
       ...previous,
+      answerOutcome: { version: 1, ending: "time_budget", output: "absent" },
       id: "run-other-requester",
       userId: "slack:UOTHER",
       startedAt: previous.startedAt - 20_000,

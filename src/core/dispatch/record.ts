@@ -1,3 +1,4 @@
+import { answerOutcomeOf, type AnswerOutcome } from "../answerOutcome.js";
 import { audienceRefusalOf, type AudienceRefusalReceipt, type AudienceTrace } from "../audienceDecision.js";
 // The record stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // what a run leaves behind. The channel-visibility stamp every run is created
@@ -215,6 +216,7 @@ export function reclaimedRunRecord(input: {
   };
   return assembleRunRecord({
     audienceRefusal: audienceRefusalOf(row.state.audienceRefusal),
+    answerOutcome: answerOutcomeOf(row.state.answerOutcome),
     run: { id: row.runId },
     snap,
     agent: row.meta.agent,
@@ -312,6 +314,7 @@ export function writeAbandonedRunRecords(
  */
 export function assembleRunRecord(input: {
   audienceRefusal?: AudienceRefusalReceipt;
+  answerOutcome?: AnswerOutcome;
   run: Pick<RunHandle, "id" | "label">;
   snap: RunSnapshot | null;
   agent?: string;
@@ -415,6 +418,7 @@ export function assembleRunRecord(input: {
   const pipeline = input.pipeline ?? pipelineOfEvents(events);
   const fitted = fitRecordToBudget({
     id: run.id,
+    ...(input.answerOutcome ? { answerOutcome: input.answerOutcome } : {}),
     ...(input.audienceRefusal ? { audienceRefusal: input.audienceRefusal } : {}),
     ...(run.label !== undefined ? { label: run.label } : {}),
     ...(input.agent !== undefined ? { agent: input.agent } : {}),
@@ -648,6 +652,7 @@ export function finishChildSetup(
 
 /** What `registerFinishRecord` reads off the dispatch. */
 export interface FinishRecordContext {
+  answerOutcome?: AnswerOutcome;
   audience?: AudienceTrace;
   ending: RunEnding;
   run: RunHandle;
@@ -735,6 +740,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
       deps.runHistoryWriter.write(
         assembleRunRecord({
           audienceRefusal: ctx.audience?.refusal,
+          answerOutcome: ctx.answerOutcome,
           run,
           snap,
           agent: agent.name,

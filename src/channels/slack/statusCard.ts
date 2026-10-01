@@ -1,3 +1,4 @@
+import { answerOutcomeDetail, type AnswerOutcome } from "../../core/answerOutcome.js";
 // The status card's frame and the record of which cards are live: `render`
 // (a StatusUpdate as Block Kit), the live-card sets the reconnect sweep asks
 // before closing a card as orphaned, and the closes a boot reclaim paints.
@@ -55,9 +56,8 @@ export async function refreshForeignLiveCards(warn: (line: string) => void = con
 }
 /** Close the cards of the runs a boot reclaim finished on the ledger with a
  *  terminal status other than `interrupted` (docs/reference/specs/run-history.md item 36):
- *  their reply is in the thread, so the card says how the run ended rather
- *  than being swept as interrupted. Interrupted runs' cards are left for the
- *  sweep. Best-effort per card; a failure is logged and the rest go on. */
+ *  execution and authored output survive, but delivery was not sealed. The
+ *  card must not claim a completed answer. Best-effort per card. */
 export async function closeReclaimedCards(
   client: { chat: { update(args: { channel: string; ts: string; text: string; blocks: object[] }): Promise<unknown> } },
   closures: Iterable<{
@@ -65,11 +65,12 @@ export async function closeReclaimedCards(
     agent?: string;
     card: { channel: string; ts: string } | null;
     note?: string;
+    answerOutcome?: AnswerOutcome;
   }>,
   warn: (line: string) => void = console.warn,
 ): Promise<number> {
   const glyph: Record<string, string> = {
-    completed: "✅",
+    completed: "⚠️",
     stopped_soft: "⏹",
     stopped_hard: "⛔",
     failed: "❌",
@@ -78,14 +79,14 @@ export async function closeReclaimedCards(
   let closed = 0;
   for (const c of closures) {
     if (!c.card || !(c.status in glyph)) continue;
-    // A run that replied: its record is complete. An interrupted run: the
-    // closure's note says what to do next (run-history item 36).
+    // Taking finishing happens before channel delivery, so the absent final
+    // seal leaves delivery unknown even when the loop ended normally.
     const detail =
       c.status === "interrupted"
         ? (c.note ?? "The bot restarted while this run was in flight and it could not be resumed.")
-        : "The bot restarted after this run replied; its record is complete.";
+        : answerOutcomeDetail(c.answerOutcome, "The bot restarted before reply delivery was confirmed.");
     const frame: StatusUpdate = {
-      title: `${glyph[c.status]} ${c.agent ?? "run"} · ${c.status.replace("_", " ")}`,
+      title: `${glyph[c.status]} ${c.agent ?? "run"} · ${c.status === "completed" ? "ended" : c.status.replace("_", " ")}`,
       detail,
     };
     try {
